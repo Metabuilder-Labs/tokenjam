@@ -3,34 +3,36 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Token Juice</title>
+<title>TokenJam</title>
+<link rel="icon" type="image/svg+xml" href="https://tokenjam.dev/icon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap" rel="stylesheet">
 <style>
 :root {
-  --bg: #070d1a;
-  --surface: #0f1729;
-  --surface2: #1a2840;
-  --border: #1e2d4a;
-  --text: #e2e8f0;
-  --text-dim: #64748b;
+  --bg: #000;
+  --surface: #0a0a0a;
+  --surface2: #111;
+  --border: #1f1f1f;
+  --text: #ededed;
+  --text-dim: #a1a1a1;
+  --text-faint: rgba(237,237,237,0.4);
   --accent: #3d8eff;
-  --warn: #f59e0b;
-  --error: #ef4444;
-  --success: #22c55e;
+  --warn: #f5a623;
+  --error: #ee0000;
+  --success: #0ce490;
   --info: #3d8eff;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-family: 'Geist', -apple-system, BlinkMacSystemFont, sans-serif;
   background: var(--bg);
   color: var(--text);
   display: flex;
   min-height: 100vh;
 }
 code, .mono {
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
 }
 
 /* Sidebar */
@@ -49,7 +51,7 @@ code, .mono {
   z-index: 10;
 }
 .sidebar-brand {
-  font-family: 'Bricolage Grotesque', sans-serif;
+  font-family: 'Geist', sans-serif;
   font-weight: 700;
   font-size: 14px;
   color: var(--text);
@@ -68,7 +70,7 @@ code, .mono {
   padding: 8px 16px;
   color: var(--text-dim);
   text-decoration: none;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 13px;
   transition: background 0.15s, color 0.15s;
 }
@@ -87,7 +89,7 @@ code, .mono {
   padding: 8px 16px;
   color: var(--text-dim);
   text-decoration: none;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 13px;
   transition: background 0.15s, color 0.15s;
 }
@@ -96,7 +98,7 @@ code, .mono {
   padding: 4px 16px 8px;
   font-size: 10px;
   color: var(--text-dim);
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
 }
 
 /* Main */
@@ -107,7 +109,7 @@ code, .mono {
   min-width: 0;
 }
 .page-title {
-  font-family: 'Bricolage Grotesque', sans-serif;
+  font-family: 'Geist', sans-serif;
   font-size: 20px;
   font-weight: 700;
   margin-bottom: 20px;
@@ -129,7 +131,7 @@ code, .mono {
   align-items: center;
   gap: 8px;
   margin-bottom: 12px;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-weight: 600;
   font-size: 14px;
 }
@@ -147,7 +149,7 @@ code, .mono {
   justify-content: space-between;
   padding: 3px 0;
   font-size: 13px;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
 }
 .card-row .label { color: var(--text-dim); }
 .card-row .value { color: var(--text); }
@@ -187,12 +189,12 @@ code, .mono {
   transform: translateX(-50%);
   background: var(--surface2);
   color: var(--text);
-  border: 1px solid #2e4a70;
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 7px 10px;
   font-size: 11px;
   line-height: 1.5;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   white-space: normal;
   max-width: 260px;
   z-index: 100;
@@ -206,7 +208,7 @@ code, .mono {
 table {
   width: 100%;
   border-collapse: collapse;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 13px;
 }
 th {
@@ -238,14 +240,14 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   border-radius: 10px;
   font-size: 11px;
   font-weight: 600;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
 }
-.badge-ok, .badge-completed { background: rgba(34,197,94,0.15); color: var(--success); }
-.badge-error { background: rgba(239,68,68,0.15); color: var(--error); }
-.badge-active { background: rgba(34,197,94,0.15); color: var(--success); }
-.badge-stale { background: rgba(245,158,11,0.15); color: var(--warn); }
-.badge-critical { background: rgba(239,68,68,0.15); color: var(--error); }
-.badge-warning { background: rgba(245,158,11,0.15); color: var(--warn); }
+.badge-ok, .badge-completed { background: rgba(12,228,144,0.15); color: var(--success); }
+.badge-error { background: rgba(238,0,0,0.15); color: var(--error); }
+.badge-active { background: rgba(12,228,144,0.15); color: var(--success); }
+.badge-stale { background: rgba(245,166,35,0.15); color: var(--warn); }
+.badge-critical { background: rgba(238,0,0,0.15); color: var(--error); }
+.badge-warning { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge-info { background: rgba(61,142,255,0.15); color: var(--info); }
 
 /* Filters */
@@ -262,7 +264,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   color: var(--text);
   padding: 6px 10px;
   border-radius: 6px;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 12px;
 }
 .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
@@ -273,7 +275,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   padding: 6px 12px;
   border-radius: 6px;
   cursor: pointer;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 12px;
 }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
@@ -296,7 +298,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .wf-row.selected .wf-label { color: var(--accent); }
 .wf-label {
   flex-shrink: 0;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 12px;
   color: var(--text-dim);
   overflow: hidden;
@@ -312,11 +314,11 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   top: calc(100% + 6px);
   left: 0;
   right: auto;
-  background: #1a2236;
+  background: var(--surface2);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 10px;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 11px;
   color: var(--text);
   white-space: pre;
@@ -335,15 +337,15 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   display: flex;
   align-items: center;
   padding: 0 6px;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 10px;
   color: #fff;
   overflow: hidden;
   white-space: nowrap;
 }
-.wf-bar.agent { background: var(--success); color: #070d1a; }
+.wf-bar.agent { background: var(--success); color: var(--bg); }
 .wf-bar.llm { background: var(--accent); }
-.wf-bar.tool { background: var(--warn); color: #070d1a; }
+.wf-bar.tool { background: var(--warn); color: var(--bg); }
 .wf-bar.other { background: var(--text-dim); }
 
 /* Span detail */
@@ -353,7 +355,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   border-radius: 8px;
   padding: 16px;
   margin-top: 16px;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 12px;
 }
 .span-detail h3 {
@@ -384,14 +386,14 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   min-width: 140px;
 }
 .summary-label {
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 11px;
   color: var(--text-dim);
   text-transform: uppercase;
   margin-bottom: 4px;
 }
 .summary-value {
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 20px;
   font-weight: 600;
 }
@@ -405,7 +407,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   margin-bottom: 16px;
 }
 .drift-section h3 {
-  font-family: 'Bricolage Grotesque', sans-serif;
+  font-family: 'Geist', sans-serif;
   font-size: 15px;
   font-weight: 700;
   margin-bottom: 12px;
@@ -430,7 +432,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .expand-toggle.open { transform: rotate(90deg); }
 
 /* Waterfall hint */
-.wf-hint { font-size: 11px; color: var(--text-dim); margin-top: 8px; font-family: 'IBM Plex Mono', monospace; }
+.wf-hint { font-size: 11px; color: var(--text-dim); margin-top: 8px; font-family: 'Geist Mono', monospace; }
 
 /* Alert detail expand */
 .alert-detail {
@@ -439,7 +441,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   border-radius: 6px;
   padding: 12px;
   margin: 8px 12px;
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'Geist Mono', monospace;
   font-size: 11px;
   white-space: pre-wrap;
   word-break: break-all;
@@ -450,7 +452,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 <body>
 
 <nav class="sidebar">
-  <div class="sidebar-brand"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="24" height="24" style="flex-shrink:0"><circle cx="16" cy="16" r="5" fill="var(--accent)"/><path d="M16 4v5M16 23v5M4 16h5M23 16h5" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/><path d="M8.2 8.2l3.5 3.5M20.3 20.3l3.5 3.5M20.3 11.7l3.5-3.5M8.2 23.8l3.5-3.5" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" opacity="0.6"/></svg><span>Open<span class="brand-claw">Claw</span>Watch</span></div>
+  <div class="sidebar-brand"><svg xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="22" height="22" style="flex-shrink:0" fill="none" stroke="var(--accent)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/></svg><span>Token<span class="brand-claw">Jam</span></span></div>
   <a href="#/status" class="nav-link" data-view="status"><span class="icon">&bull;</span> Status</a>
   <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Cost</a>
@@ -459,7 +461,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   <a href="#/budget" class="nav-link" data-view="budget"><span class="icon">$</span> Budget</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
-    <a href="https://github.com/Metabuilder-Labs/tokenjuice" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
+    <a href="https://github.com/Metabuilder-Labs/tokenjam" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
     <div class="version">v0.1.4</div>
   </div>
 </nav>
@@ -593,11 +595,11 @@ function StatusView() {
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
   if (!data) return html`<div class="empty">Loading...</div>`;
-  if (!data.agents.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjuice && tj onboard</code></div>`;
+  if (!data.agents.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
   return html`
     <div class="page-title">Status</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'IBM Plex Mono',monospace">Click on an agent tile for details</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on an agent tile for details</div>
     <div class="cards">
       ${data.agents.map(a => html`
         <div class="card clickable" onClick=${() => { location.hash = '#/traces'; }}>
@@ -657,7 +659,7 @@ function TracesListView() {
 
   return html`
     <div class="page-title">Traces</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'IBM Plex Mono',monospace">Click on a trace row for details</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on a trace row for details</div>
     <div class="filters">
       <select value=${since} onChange=${e => setSince(e.target.value)}>
         <option value="1h">Last 1h</option>
@@ -758,7 +760,7 @@ function TraceDetailView({ traceId }) {
   return html`
     <button class="btn btn-back" onClick=${() => location.hash = '#/traces'}>\u2190 Back to traces</button>
     <div class="page-title">Trace details for ${agentName}</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'IBM Plex Mono',monospace">Click a span for details</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
     <div class="waterfall">
       ${rows.map(({ span: s, depth }) => {
         const st = new Date(s.start_time).getTime() - traceStart;
@@ -798,7 +800,7 @@ function TraceDetailView({ traceId }) {
     ${sel ? html`
       <div class="span-detail">
         <h3>${friendlySpanName(sel.name)}</h3>
-        <div style="color:var(--text-dim);font-size:11px;margin:-8px 0 12px;font-family:'IBM Plex Mono',monospace">${sel.name}</div>
+        <div style="color:var(--text-dim);font-size:11px;margin:-8px 0 12px;font-family:'Geist Mono',monospace">${sel.name}</div>
         <div class="detail-grid">
           <span class="dk">Duration</span><span class="dv">${fmtDur(sel.duration_ms)}</span>
           <span class="dk">Status</span><span class="dv">${sel.status_code}</span>
@@ -973,7 +975,7 @@ function DriftView() {
       <div class="drift-section">
         <h3>${a.agent_id}</h3>
         ${!a.baseline ? html`<div style="color:var(--text-dim);font-size:13px">No baseline yet.</div>` : html`
-          <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;font-family:'IBM Plex Mono',monospace">
+          <div style="font-size:12px;color:var(--text-dim);margin-bottom:12px;font-family:'Geist Mono',monospace">
             Baseline: ${a.baseline.sessions_sampled} sessions sampled${a.baseline.computed_at ? ', computed ' + fmtAgo(a.baseline.computed_at) : ''}
           </div>
           <table>
