@@ -6,15 +6,15 @@ from datetime import datetime
 
 import pytest
 
-from ocw.core.config import OcwConfig, SecurityConfig, CaptureConfig
-from ocw.core.ingest import (
+from tj.core.config import TjConfig, SecurityConfig, CaptureConfig
+from tj.core.ingest import (
     IngestPipeline,
     SpanRejectedError,
     SpanSanitizer,
     strip_captured_content,
 )
-from ocw.core.models import NormalizedSpan, SessionRecord, SpanStatus
-from ocw.otel.semconv import GenAIAttributes
+from tj.core.models import NormalizedSpan, SessionRecord, SpanStatus
+from tj.otel.semconv import GenAIAttributes
 from tests.factories import make_llm_span, make_session, make_tool_span
 
 
@@ -76,7 +76,7 @@ def _make_pipeline(
 ) -> tuple[IngestPipeline, InMemoryBackend]:
     """Create an IngestPipeline with sensible defaults for testing."""
     db = db or InMemoryBackend()
-    config = OcwConfig(
+    config = TjConfig(
         version="1",
         security=security or SecurityConfig(),
         capture=capture or CaptureConfig(),
@@ -331,7 +331,7 @@ class TestErrorHandling:
     def test_hook_failure_does_not_crash_pipeline(self):
         """Post-ingest hook errors are logged, not propagated."""
         db = InMemoryBackend()
-        config = OcwConfig(version="1")
+        config = TjConfig(version="1")
 
         class FailingCostEngine:
             def process_span(self, span: NormalizedSpan) -> None:

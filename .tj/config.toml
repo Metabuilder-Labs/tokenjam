@@ -1,0 +1,27 @@
+# TokenJam configuration
+# Docs: https://github.com/Metabuilder-Labs/openclawwatch#configuration
+
+[defaults.budget]
+daily_usd = 5.0
+
+[security]
+ingest_secret = "d64e34bb9e4d8a4d4507f4517cb6f51f0ad18c48676eb82d5fb69e48547df0d3"
+
+[capture]
+prompts = false
+completions = false
+tool_outputs = false
+
+[storage]
+path = "~/.tj/telemetry.duckdb"
+retention_days = 90
+
+# Per-agent overrides (optional):
+# [agents.my-agent]
+# description = "My email agent"
+#   [agents.my-agent.budget]
+#   daily_usd = 5.00
+#   session_usd = 1.00
+#   [[agents.my-agent.sensitive_actions]]
+#   name = "send_email"
+#   severity = "critical"

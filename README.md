@@ -1,29 +1,29 @@
 <div align="center">
 
-<img src="https://opencla.watch/icon.svg" alt="OpenClawWatch" width="72" height="72">
+<img src="https://opencla.watch/icon.svg" alt="TokenJam" width="72" height="72">
 
-# OpenClawWatch
+# TokenJam
 
 The open-source LLM observability tool for autonomous agents.
 
 No cloud. No signup. No surprises.
 
-[![CI](https://github.com/Metabuilder-Labs/openclawwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/openclawwatch/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/openclawwatch?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/openclawwatch/)
-[![Python](https://img.shields.io/badge/python-3.10%2B-3d8eff?labelColor=0d1117)](https://pypi.org/project/openclawwatch/)
-[![npm](https://img.shields.io/npm/v/@openclawwatch/sdk?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/@openclawwatch/sdk)
+[![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3d8eff?labelColor=0d1117)](https://pypi.org/project/tokenjam/)
+[![npm](https://img.shields.io/npm/v/@tokenjam/sdk?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/@tokenjam/sdk)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3d8eff?labelColor=0d1117)](LICENSE)
 [![OTel](https://img.shields.io/badge/OTel-GenAI%20SemConv-3d8eff?labelColor=0d1117)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ```
-pip install openclawwatch
+pip install tokenjam
 ```
 
 </div>
 
 ---
 
-Your agent sends emails, writes files, calls APIs, and spends your money — all while you're away. Most observability tools were built for LLM developers building chat products. `ocw` was built for **agents with real-world consequences**: real-time cost tracking, safety alerts, behavioral drift detection, all running locally on your machine.
+Your agent sends emails, writes files, calls APIs, and spends your money — all while you're away. Most observability tools were built for LLM developers building chat products. `tj` was built for **agents with real-world consequences**: real-time cost tracking, safety alerts, behavioral drift detection, all running locally on your machine.
 
 ---
 
@@ -33,25 +33,25 @@ Your agent sends emails, writes files, calls APIs, and spends your money — all
 
 **Safety alerts.** Configure any tool call as a sensitive action (`send_email`, `delete_file`, `submit_form`) and get notified instantly via ntfy, Discord, Telegram, webhook, or stdout.
 
-**Behavioral drift detection.** `ocw` builds a statistical baseline from your agent's real behavior and alerts when something deviates — a prompt tweak, a model update, a dependency bump. No LLM required.
+**Behavioral drift detection.** `tj` builds a statistical baseline from your agent's real behavior and alerts when something deviates — a prompt tweak, a model update, a dependency bump. No LLM required.
 
-**Tool output validation.** Declare a JSON Schema for your tools or let `ocw` infer one automatically. Schema violations are caught the moment they occur.
+**Tool output validation.** Declare a JSON Schema for your tools or let `tj` infer one automatically. Schema violations are caught the moment they occur.
 
-**100% local.** DuckDB. Local REST API. No cloud backend. No API key for `ocw` itself. Your telemetry never leaves your machine unless you explicitly export it.
+**100% local.** DuckDB. Local REST API. No cloud backend. No API key for `tj` itself. Your telemetry never leaves your machine unless you explicitly export it.
 
 ---
 
 ## Get started
 
-`ocw` works four ways. Pick the one that fits.
+`tj` works four ways. Pick the one that fits.
 
 ### Coding agents — zero code
 
 For **Claude Code**, **Codex**, and any agent that already emits OpenTelemetry. No SDK, no code changes.
 
 ```bash
-pip install "openclawwatch[mcp]"
-ocw onboard --claude-code    # or: ocw onboard --codex
+pip install "tokenjam[mcp]"
+tj onboard --claude-code    # or: tj onboard --codex
 # Restart your coding agent
 ```
 
@@ -64,14 +64,14 @@ Every session, API call, tool use, and error is now a tracked span with cost and
 For any Python agent — Anthropic, OpenAI, Gemini, Bedrock, LangChain, CrewAI, and [10+ more](#supported-frameworks).
 
 ```bash
-pip install openclawwatch
-ocw onboard    # creates config, generates ingest secret
+pip install tokenjam
+tj onboard    # creates config, generates ingest secret
 ocw doctor     # verify your setup
 ```
 
 ```python
-from ocw.sdk import watch
-from ocw.sdk.integrations.anthropic import patch_anthropic
+from tj.sdk import watch
+from tj.sdk.integrations.anthropic import patch_anthropic
 
 patch_anthropic()    # auto-intercepts all Anthropic API calls
 
@@ -85,18 +85,18 @@ One-line patches exist for every major provider and framework. [See all integrat
 
 ### TypeScript SDK
 
-For any Node.js / TypeScript agent. Sends spans to `ocw serve` over HTTP.
+For any Node.js / TypeScript agent. Sends spans to `tj serve` over HTTP.
 
 ```bash
-npm install @openclawwatch/sdk
+npm install @tokenjam/sdk
 ```
 
 ```typescript
-import { OcwClient, SpanBuilder } from "@openclawwatch/sdk";
+import { TjClient, SpanBuilder } from "@tokenjam/sdk";
 
-const client = new OcwClient({
+const client = new TjClient({
   baseUrl:      "http://127.0.0.1:7391",
-  ingestSecret: process.env.OCW_INGEST_SECRET ?? "",
+  ingestSecret: process.env.TJ_INGEST_SECRET ?? "",
 });
 
 const span = new SpanBuilder("invoke_agent")
@@ -112,17 +112,17 @@ await client.send([span]);
 
 ### Any OTel-compatible agent
 
-Already emitting OpenTelemetry? Point your OTLP exporter at `ocw serve` — no SDK needed:
+Already emitting OpenTelemetry? Point your OTLP exporter at `tj serve` — no SDK needed:
 
 ```bash
-ocw serve &
+tj serve &
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7391
 # run your agent as usual
 ```
 
 | Framework | OTel support |
 |---|---|
-| **Claude Code** | Built-in — `ocw onboard --claude-code` |
+| **Claude Code** | Built-in — `tj onboard --claude-code` |
 | **OpenClaw** | Built-in (`diagnostics-otel` plugin) — [setup guide](docs/openclaw.md) |
 | LlamaIndex | `opentelemetry-instrumentation-llama-index` |
 | OpenAI Agents SDK | Built-in |
@@ -137,7 +137,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7391
 ## CLI
 
 ```
-ocw status
+tj status
 ```
 
 ```
@@ -154,21 +154,21 @@ ocw status
 https://github.com/user-attachments/assets/b94d13f6-1432-40d4-b093-6958d74f0e65
 
 ```bash
-ocw status           # current state, cost, active alerts
+tj status           # current state, cost, active alerts
 ocw traces           # full span history with waterfall view
 ocw cost --since 7d  # cost breakdown by agent, model, day
 ocw alerts           # everything that fired while you were away
 ocw budget           # view and set daily/session cost limits
 ocw drift            # behavioral drift Z-scores vs baseline
 ocw tools            # tool call history with error rates
-ocw serve            # start the web UI + REST API
+tj serve            # start the web UI + REST API
 ```
 
 ---
 
 ## Web UI
 
-`ocw serve` starts a local dashboard at `http://127.0.0.1:7391/`.
+`tj serve` starts a local dashboard at `http://127.0.0.1:7391/`.
 
 https://github.com/user-attachments/assets/ff09caec-3487-4542-8628-d62b7d92591f
 
@@ -185,9 +185,9 @@ No signup, no cloud — runs entirely on your machine.
 
 ## ocw vs LangSmith vs Langfuse
 
-LangSmith and Langfuse are excellent for tracing LLM API calls and running evals on chat outputs. `ocw` solves a different problem: **autonomous agents running unsupervised with real-world consequences**.
+LangSmith and Langfuse are excellent for tracing LLM API calls and running evals on chat outputs. `tj` solves a different problem: **autonomous agents running unsupervised with real-world consequences**.
 
-| | `ocw` | LangSmith | Langfuse | Datadog LLM Obs |
+| | `tj` | LangSmith | Langfuse | Datadog LLM Obs |
 |---|---|---|---|---|
 | Signup required | ❌ | ✅ | ✅ | ✅ |
 | Data leaves your machine | ❌ | ✅ | cloud only | ✅ |
@@ -208,27 +208,27 @@ LangSmith and Langfuse are excellent for tracing LLM API calls and running evals
 Monitor every Claude Code session — costs, tool calls, API requests, errors — with two commands:
 
 ```bash
-pip install "openclawwatch[mcp]"
-ocw onboard --claude-code
+pip install "tokenjam[mcp]"
+tj onboard --claude-code
 # Restart Claude Code, then:
-ocw status --agent claude-code-<project>
+tj status --agent claude-code-<project>
 ```
 
-`ocw onboard --claude-code` does everything in one shot:
-- Creates a shared config at `~/.config/ocw/config.toml` (one config for all projects)
+`tj onboard --claude-code` does everything in one shot:
+- Creates a shared config at `~/.config/tj/config.toml` (one config for all projects)
 - Writes OTLP exporter vars to `~/.claude/settings.json`
 - Tags this project by writing `OTEL_RESOURCE_ATTRIBUTES` to `.claude/settings.json`
-- Registers the MCP server globally (`claude mcp add --scope user ocw -- ocw mcp`)
+- Registers the MCP server globally (`claude mcp add --scope user tj -- tj mcp`)
 - Installs a background daemon (launchd on macOS, systemd on Linux)
 - Adds Docker harness-compatible OTLP env vars to `~/.zshrc`
 
-**Claude Code must be restarted** after running `ocw onboard --claude-code`.
+**Claude Code must be restarted** after running `tj onboard --claude-code`.
 
 **Adding more projects** — run once per project directory:
 
 ```bash
 cd /path/to/other-project
-ocw onboard --claude-code   # tags this project, no reinstall needed
+tj onboard --claude-code   # tags this project, no reinstall needed
 # Restart Claude Code
 ```
 
@@ -252,9 +252,9 @@ The MCP server gives Claude Code direct access to your observability data inside
 | `get_drift_report` | Drift baseline vs latest session |
 | `acknowledge_alert` | Mark an alert as acknowledged |
 | `setup_project` | Configure a project for OCW telemetry |
-| `open_dashboard` | Open the web UI (starts `ocw serve` if needed) |
+| `open_dashboard` | Open the web UI (starts `tj serve` if needed) |
 
-The MCP server opens DuckDB read-only — no lock conflicts with `ocw serve`.
+The MCP server opens DuckDB read-only — no lock conflicts with `tj serve`.
 
 **Per-project tagging** — after installing globally, ask Claude Code:
 
@@ -267,21 +267,21 @@ Claude calls `setup_project`, which writes `.claude/settings.json` with the righ
 Monitor every Codex session — run once, globally:
 
 ```bash
-pip install "openclawwatch[mcp]"
-ocw onboard --codex
+pip install "tokenjam[mcp]"
+tj onboard --codex
 ```
 
-`ocw onboard --codex` is project-agnostic. It writes to `~/.codex/config.toml` (Codex's single global config), so you only run it once — not once per project. Codex hardcodes `service.name="codex_exec"` in its binary, so all sessions appear under the same agent ID regardless of which repo you're working in.
+`tj onboard --codex` is project-agnostic. It writes to `~/.codex/config.toml` (Codex's single global config), so you only run it once — not once per project. Codex hardcodes `service.name="codex_exec"` in its binary, so all sessions appear under the same agent ID regardless of which repo you're working in.
 
-`ocw onboard --codex`:
+`tj onboard --codex`:
 - Writes an `[otel]` block and `[mcp_servers.ocw]` to `~/.codex/config.toml`
 - Registers the MCP server so Codex can call OCW tools directly
 - Installs the background daemon (launchd / systemd)
 
-**Codex must be restarted** after running `ocw onboard --codex`.
+**Codex must be restarted** after running `tj onboard --codex`.
 
 ```bash
-ocw status --agent codex_exec   # check it's working
+tj status --agent codex_exec   # check it's working
 ```
 
 The same 13 MCP tools available to Claude Code are available to Codex after restart.
@@ -293,10 +293,10 @@ The same 13 MCP tools available to Claude Code are available to Codex after rest
 ocw uninstall --yes
 
 # Then remove the package:
-pip uninstall openclawwatch -y
+pip uninstall tokenjam -y
 ```
 
-`ocw uninstall` cleans up everything set by `ocw onboard --claude-code`: daemon, MCP server, `~/.ocw/`, `~/.config/ocw/`, OTLP env vars in `~/.claude/settings.json`, `OTEL_RESOURCE_ATTRIBUTES` in every onboarded project's `.claude/settings.json`, and the harness env block in `~/.zshrc`.
+`tj uninstall` cleans up everything set by `tj onboard --claude-code`: daemon, MCP server, `~/.ocw/`, `~/.config/ocw/`, OTLP env vars in `~/.claude/settings.json`, `OTEL_RESOURCE_ATTRIBUTES` in every onboarded project's `.claude/settings.json`, and the harness env block in `~/.zshrc`.
 
 ---
 
@@ -307,11 +307,11 @@ pip uninstall openclawwatch -y
 Intercept at the API level. Framework-agnostic.
 
 ```python
-from ocw.sdk.integrations.anthropic import patch_anthropic   # Anthropic
-from ocw.sdk.integrations.openai    import patch_openai      # OpenAI
-from ocw.sdk.integrations.gemini    import patch_gemini      # Google Gemini
-from ocw.sdk.integrations.bedrock   import patch_bedrock     # AWS Bedrock
-from ocw.sdk.integrations.litellm   import patch_litellm     # LiteLLM (100+ providers)
+from tj.sdk.integrations.anthropic import patch_anthropic   # Anthropic
+from tj.sdk.integrations.openai    import patch_openai      # OpenAI
+from tj.sdk.integrations.gemini    import patch_gemini      # Google Gemini
+from tj.sdk.integrations.bedrock   import patch_bedrock     # AWS Bedrock
+from tj.sdk.integrations.litellm   import patch_litellm     # LiteLLM (100+ providers)
 ```
 
 `patch_litellm()` covers all providers LiteLLM routes to (OpenAI, Anthropic, Bedrock, Vertex, Cohere, Mistral, Ollama, etc.). If you use LiteLLM, you don't need individual patches.
@@ -323,13 +323,13 @@ OpenAI-compatible providers (Groq, Together, Fireworks, xAI, Azure OpenAI) work 
 Instrument the framework's own abstractions:
 
 ```python
-from ocw.sdk.integrations.langchain         import patch_langchain        # BaseLLM + BaseTool
-from ocw.sdk.integrations.langgraph         import patch_langgraph        # CompiledGraph
-from ocw.sdk.integrations.crewai            import patch_crewai           # Task + Agent
-from ocw.sdk.integrations.autogen           import patch_autogen          # ConversableAgent
-from ocw.sdk.integrations.llamaindex        import patch_llamaindex       # Native OTel
-from ocw.sdk.integrations.openai_agents_sdk import patch_openai_agents    # Native OTel
-from ocw.sdk.integrations.nemoclaw          import watch_nemoclaw         # NemoClaw Gateway
+from tj.sdk.integrations.langchain         import patch_langchain        # BaseLLM + BaseTool
+from tj.sdk.integrations.langgraph         import patch_langgraph        # CompiledGraph
+from tj.sdk.integrations.crewai            import patch_crewai           # Task + Agent
+from tj.sdk.integrations.autogen           import patch_autogen          # ConversableAgent
+from tj.sdk.integrations.llamaindex        import patch_llamaindex       # Native OTel
+from tj.sdk.integrations.openai_agents_sdk import patch_openai_agents    # Native OTel
+from tj.sdk.integrations.nemoclaw          import watch_nemoclaw         # NemoClaw Gateway
 ```
 
 Full framework support guide: [docs/framework-support.md](docs/framework-support.md)
@@ -364,10 +364,10 @@ Full alert reference — trigger conditions, cooldown config, content stripping,
 
 ## NemoClaw support
 
-Running OpenClaw inside [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw)? `ocw` connects to the OpenShell Gateway WebSocket and turns sandbox events — blocked network requests, filesystem denials, inference reroutes — into alerts.
+Running OpenClaw inside [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw)? `tj` connects to the OpenShell Gateway WebSocket and turns sandbox events — blocked network requests, filesystem denials, inference reroutes — into alerts.
 
 ```python
-from ocw.sdk.integrations.nemoclaw import watch_nemoclaw
+from tj.sdk.integrations.nemoclaw import watch_nemoclaw
 
 observer = watch_nemoclaw()
 asyncio.create_task(observer.connect())
@@ -388,7 +388,7 @@ ocw export --format json       # NDJSON
 ocw export --format csv
 ```
 
-Prometheus metrics at `http://127.0.0.1:7391/metrics` when `ocw serve` is running.
+Prometheus metrics at `http://127.0.0.1:7391/metrics` when `tj serve` is running.
 
 Export filtering flags, REST API endpoints, and API docs: [docs/export.md](docs/export.md)
 
@@ -402,10 +402,10 @@ flowchart TD
 
     Agent --> Terminal["Coding agents\nClaude Code · Codex"]
     Agent --> PythonSDK["Python SDK\n@watch + patch_*"]
-    Agent --> TypeScriptSDK["TypeScript SDK\n@openclawwatch/sdk"]
+    Agent --> TypeScriptSDK["TypeScript SDK\n@tokenjam/sdk"]
 
     Terminal --> OTLP["OTLP export"]
-    PythonSDK --> Exporter["OcwSpanExporter"]
+    PythonSDK --> Exporter["TjSpanExporter"]
     TypeScriptSDK --> HTTP["POST /api/v1/spans"]
     OTLP --> HTTP
 
@@ -435,7 +435,7 @@ Full architecture deep-dive — design principles, SDK internals, alert system, 
 ## Configuration
 
 ```toml
-# .ocw/config.toml — generated by ocw onboard
+# .ocw/config.toml — generated by tj onboard
 
 [defaults.budget]
 daily_usd = 10.00
@@ -466,7 +466,7 @@ path           = "~/.ocw/telemetry.duckdb"
 retention_days = 90
 ```
 
-Budget limits merge per-field: each agent inherits defaults unless overridden. Set via CLI (`ocw budget --daily 10`), API, or web UI. Run `ocw doctor` to verify.
+Budget limits merge per-field: each agent inherits defaults unless overridden. Set via CLI (`tj budget --daily 10`), API, or web UI. Run `tj doctor` to verify.
 
 Config file discovery order, full config schema, API auth, capture settings: [docs/configuration.md](docs/configuration.md)
 
@@ -530,24 +530,24 @@ PRs welcome. If you're adding a framework integration, open an issue first.
 
 **Shipped:**
 
-- [x] `ocw serve` background daemon (launchd / systemd)
+- [x] `tj serve` background daemon (launchd / systemd)
 - [x] Web UI with auto-polling (status, traces, cost, alerts, budget, drift)
 - [x] LiteLLM provider patch (100+ providers)
-- [x] `ocw stop` and `ocw uninstall`
-- [x] Claude Code integration (`ocw onboard --claude-code`)
-- [x] Codex integration (`ocw onboard --codex`)
+- [x] `tj stop` and `tj uninstall`
+- [x] Claude Code integration (`tj onboard --claude-code`)
+- [x] Codex integration (`tj onboard --codex`)
 - [x] OpenClaw integration (zero-code via `diagnostics-otel` plugin)
 - [x] NemoClaw sandbox observer (WebSocket gateway events)
 - [x] OTLP log-to-span pipeline (Claude Code log events)
-- [x] `ocw budget` CLI, API, and web UI
-- [x] `ocw drift` with Z-score reporting
-- [x] Full pipeline wiring (alerts, schema, drift in `ocw serve`)
+- [x] `tj budget` CLI, API, and web UI
+- [x] `tj drift` with Z-score reporting
+- [x] Full pipeline wiring (alerts, schema, drift in `tj serve`)
 - [x] MCP server — 13 tools for Claude Code
 
 **Up next:**
 
-- [ ] `ocw watch` — live tail mode for spans
-- [ ] `ocw replay` — replay captured sessions against new model versions
+- [ ] `tj watch` — live tail mode for spans
+- [ ] `tj replay` — replay captured sessions against new model versions
 - [ ] TypeScript framework patches (LangChain JS, OpenAI Agents SDK)
 - [ ] Vercel AI SDK integration (TypeScript)
 - [ ] Mastra integration (TypeScript)
@@ -559,7 +559,7 @@ PRs welcome. If you're adding a framework integration, open an issue first.
 
 <div align="center">
 
-**[opencla.watch](https://opencla.watch)** · [PyPI](https://pypi.org/project/openclawwatch/) · [npm](https://www.npmjs.com/package/@openclawwatch/sdk)
+**[opencla.watch](https://opencla.watch)** · [PyPI](https://pypi.org/project/tokenjam/) · [npm](https://www.npmjs.com/package/@tokenjam/sdk)
 
 MIT License · Built by [Metabuilder Labs](https://github.com/Metabuilder-Labs)
 

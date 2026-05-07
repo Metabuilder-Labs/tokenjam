@@ -22,7 +22,7 @@ from typing import TypedDict  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 from langgraph.graph import StateGraph, START, END  # noqa: E402
 
-from ocw.sdk import watch, patch_langgraph, patch_langchain  # noqa: E402
+from tj.sdk import watch, patch_langgraph, patch_langchain  # noqa: E402
 
 # Patch both LangGraph and LangChain (LangGraph uses LangChain LLMs)
 patch_langgraph()

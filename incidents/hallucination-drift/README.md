@@ -1,6 +1,6 @@
 # My agent worked yesterday. Today it's possessed.
 
-**Run it:** `pip install openclawwatch && ocw demo hallucination-drift`
+**Run it:** `pip install tokenjam && tj demo hallucination-drift`
 
 ---
 
@@ -60,13 +60,13 @@ The demo uses `baseline_sessions = 5` for speed. In production, 10–50 sessions
 ## Try it yourself
 
 ```bash
-pip install openclawwatch
-ocw demo hallucination-drift
+pip install tokenjam
+tj demo hallucination-drift
 ```
 
 Runs entirely in-process. No API keys, no real model calls, no network traffic.
 
-To track drift on your real agent, wire up the OCW SDK, enable drift in `ocw.toml`, and run `ocw serve`. Then `ocw drift` shows Z-scores; `ocw alerts` shows the events.
+To track drift on your real agent, wire up the OCW SDK, enable drift in `ocw.toml`, and run `tj serve`. Then `tj drift` shows Z-scores; `tj alerts` shows the events.
 
 ## Next in the incident library
 
@@ -75,4 +75,4 @@ To track drift on your real agent, wire up the OCW SDK, enable drift in `ocw.tom
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/openclawwatch) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install openclawwatch` and start seeing what your agent actually does.
+[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.

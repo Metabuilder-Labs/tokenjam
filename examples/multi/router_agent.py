@@ -16,11 +16,11 @@ from __future__ import annotations
 import os
 import sys
 
-from ocw.sdk import watch
-from ocw.sdk.agent import record_tool_call
-from ocw.sdk.integrations.anthropic import patch_anthropic
-from ocw.sdk.integrations.gemini import patch_gemini
-from ocw.sdk.integrations.openai import patch_openai
+from tj.sdk import watch
+from tj.sdk.agent import record_tool_call
+from tj.sdk.integrations.anthropic import patch_anthropic
+from tj.sdk.integrations.gemini import patch_gemini
+from tj.sdk.integrations.openai import patch_openai
 
 # ---------------------------------------------------------------------------
 # Env-var gate

@@ -6,7 +6,7 @@ LiteLLM's unified interface. Each call is automatically attributed to the
 correct provider in ocw spans.
 
 Requirements:
-    pip install litellm openclawwatch
+    pip install litellm tokenjam
 
 Environment:
     OPENAI_API_KEY     — required (for OpenAI calls)
@@ -30,8 +30,8 @@ if missing:
 
 import litellm  # noqa: E402
 
-from ocw.sdk import watch  # noqa: E402
-from ocw.sdk.integrations.litellm import patch_litellm  # noqa: E402
+from tj.sdk import watch  # noqa: E402
+from tj.sdk.integrations.litellm import patch_litellm  # noqa: E402
 
 # Patch litellm BEFORE making any calls.
 # This single patch covers all providers that litellm routes to.

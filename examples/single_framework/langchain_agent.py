@@ -19,7 +19,7 @@ if not os.environ.get("OPENAI_API_KEY"):
 from langchain_core.tools import BaseTool  # noqa: E402
 from langchain_openai import ChatOpenAI  # noqa: E402
 
-from ocw.sdk import watch, patch_langchain  # noqa: E402
+from tj.sdk import watch, patch_langchain  # noqa: E402
 
 # Patch LangChain BEFORE creating any LangChain objects
 patch_langchain()

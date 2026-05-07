@@ -5,7 +5,7 @@ import json
 
 from click.testing import CliRunner
 
-from ocw.cli.main import cli
+from tj.cli.main import cli
 
 
 def test_demo_list_shows_all_scenarios():

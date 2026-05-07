@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from ocw.core.config import (
-    find_config_file, load_config, _parse, _serialise, OcwConfig, AgentConfig,
+from tj.core.config import (
+    find_config_file, load_config, _parse, _serialise, TjConfig, AgentConfig,
     BudgetConfig, DefaultsConfig, SensitiveAction, SecurityConfig, CaptureConfig,
     StorageConfig, resolve_effective_budget, validate_budget_value,
 )
@@ -12,16 +12,16 @@ from ocw.core.config import (
 
 class TestFindConfigFile:
     def test_global_fallback_found(self, tmp_path, monkeypatch):
-        """find_config_file() discovers ~/.config/ocw/config.toml when no local config exists."""
+        """find_config_file() discovers ~/.config/tj/config.toml when no local config exists."""
         monkeypatch.chdir(tmp_path)
-        global_config = tmp_path / ".config" / "ocw" / "config.toml"
+        global_config = tmp_path / ".config" / "tj" / "config.toml"
         global_config.parent.mkdir(parents=True)
         global_config.write_bytes(b'version = "1"\n\n[security]\ningest_secret = "global-secret"\n')
-        import ocw.core.config as cfg_mod
-        from ocw.core.config import find_config_file
+        import tj.core.config as cfg_mod
+        from tj.core.config import find_config_file
         monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
-            Path("ocw.toml"),
-            Path(".ocw/config.toml"),
+            Path("tj.toml"),
+            Path(".tj/config.toml"),
             global_config,
         ])
         result = find_config_file()
@@ -29,32 +29,32 @@ class TestFindConfigFile:
         assert result == global_config
 
     def test_local_config_takes_priority_over_global(self, tmp_path, monkeypatch):
-        """Local .ocw/config.toml is preferred over the global config."""
+        """Local .tj/config.toml is preferred over the global config."""
         monkeypatch.chdir(tmp_path)
-        local_config = tmp_path / ".ocw" / "config.toml"
+        local_config = tmp_path / ".tj" / "config.toml"
         local_config.parent.mkdir(parents=True)
         local_config.write_bytes(b'version = "1"\n\n[security]\ningest_secret = "local"\n')
-        global_config = tmp_path / ".config" / "ocw" / "config.toml"
+        global_config = tmp_path / ".config" / "tj" / "config.toml"
         global_config.parent.mkdir(parents=True)
         global_config.write_bytes(b'version = "1"\n\n[security]\ningest_secret = "global"\n')
-        import ocw.core.config as cfg_mod
+        import tj.core.config as cfg_mod
         monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
-            Path("ocw.toml"),
-            Path(".ocw/config.toml"),
+            Path("tj.toml"),
+            Path(".tj/config.toml"),
             global_config,
         ])
         result = find_config_file()
         assert result is not None
-        # .ocw/config.toml is a relative path so resolve to compare
-        assert result == Path(".ocw/config.toml")
+        # .tj/config.toml is a relative path so resolve to compare
+        assert result == Path(".tj/config.toml")
 
     def test_returns_none_when_no_config_anywhere(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        import ocw.core.config as cfg_mod
+        import tj.core.config as cfg_mod
         monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
-            Path("ocw.toml"),
-            Path(".ocw/config.toml"),
-            tmp_path / ".config" / "ocw" / "config.toml",
+            Path("tj.toml"),
+            Path(".tj/config.toml"),
+            tmp_path / ".config" / "tj" / "config.toml",
         ])
         assert find_config_file() is None
 
@@ -63,32 +63,32 @@ class TestLoadConfig:
     def test_returns_defaults_when_no_file(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         # SEARCH_PATHS is a module-level constant built at import time; patch it
-        # directly so the real ~/.config/ocw/config.toml is never found.
-        import ocw.core.config as cfg_mod
+        # directly so the real ~/.config/tj/config.toml is never found.
+        import tj.core.config as cfg_mod
         monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
-            Path("ocw.toml"),
-            Path(".ocw/config.toml"),
-            tmp_path / ".config" / "ocw" / "config.toml",
+            Path("tj.toml"),
+            Path(".tj/config.toml"),
+            tmp_path / ".config" / "tj" / "config.toml",
         ])
         config = load_config()
         assert config.version == "1"
-        assert config.storage.path == "~/.ocw/telemetry.duckdb"
+        assert config.storage.path == "~/.tj/telemetry.duckdb"
         assert config.security.ingest_secret == ""
 
     def test_loads_from_file(self, tmp_path):
         toml_content = b'version = "1"\n\n[storage]\npath = "/tmp/test.duckdb"\n'
-        config_file = tmp_path / "ocw.toml"
+        config_file = tmp_path / "tj.toml"
         config_file.write_bytes(toml_content)
         config = load_config(str(config_file))
         assert config.storage.path == "/tmp/test.duckdb"
 
     def test_raises_on_missing_override(self):
         with pytest.raises(FileNotFoundError, match="Config file not found"):
-            load_config("/nonexistent/path/ocw.toml")
+            load_config("/nonexistent/path/tj.toml")
 
     def test_binary_mode_required(self, tmp_path):
         # Verify the file is opened in binary mode by testing a valid TOML
-        config_file = tmp_path / "ocw.toml"
+        config_file = tmp_path / "tj.toml"
         config_file.write_bytes(b'version = "2"\n')
         config = load_config(str(config_file))
         assert config.version == "2"
@@ -177,7 +177,7 @@ class TestParse:
 
 class TestSerialise:
     def test_roundtrip(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             agents={
                 "test": AgentConfig(
@@ -202,10 +202,10 @@ class TestSerialise:
     def test_serialise_excludes_config_path(self):
         """Regression: config_path is a Path object which is not TOML
         serializable. _serialise() must exclude it. See v0.1.7 fix."""
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             security=SecurityConfig(ingest_secret="s"),
-            config_path=Path("/some/path/ocw.toml"),
+            config_path=Path("/some/path/tj.toml"),
         )
         serialised = _serialise(config)
         assert "config_path" not in serialised
@@ -214,10 +214,10 @@ class TestSerialise:
         """Regression: load_config sets config_path (a Path). Writing that
         config back must not crash with 'PosixPath is not TOML serializable'.
         See v0.1.7 fix."""
-        from ocw.core.config import write_config
+        from tj.core.config import write_config
 
         toml_content = b'version = "1"\n\n[security]\ningest_secret = "abc"\n'
-        config_file = tmp_path / "ocw.toml"
+        config_file = tmp_path / "tj.toml"
         config_file.write_bytes(toml_content)
 
         config = load_config(str(config_file))
@@ -232,7 +232,7 @@ class TestSerialise:
 
 class TestResolveEffectiveBudget:
     def test_agent_with_both_fields_uses_agent_values(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=10.0, session_usd=2.0)),
             agents={"a": AgentConfig(budget=BudgetConfig(daily_usd=5.0, session_usd=1.0))},
@@ -242,7 +242,7 @@ class TestResolveEffectiveBudget:
         assert eff.session_usd == 1.0
 
     def test_agent_with_partial_fields_merges_from_defaults(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=10.0)),
             agents={"a": AgentConfig(budget=BudgetConfig(session_usd=1.0))},
@@ -252,7 +252,7 @@ class TestResolveEffectiveBudget:
         assert eff.session_usd == 1.0
 
     def test_unknown_agent_uses_defaults(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=10.0, session_usd=2.0)),
         )
@@ -261,13 +261,13 @@ class TestResolveEffectiveBudget:
         assert eff.session_usd == 2.0
 
     def test_no_defaults_no_agent_returns_none_both(self):
-        config = OcwConfig(version="1")
+        config = TjConfig(version="1")
         eff = resolve_effective_budget("any", config)
         assert eff.daily_usd is None
         assert eff.session_usd is None
 
     def test_agent_explicit_none_falls_through_to_defaults(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=10.0)),
             agents={"a": AgentConfig(budget=BudgetConfig(daily_usd=None, session_usd=5.0))},

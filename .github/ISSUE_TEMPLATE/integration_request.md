@@ -18,4 +18,4 @@ Does it have built-in OTel support? What spans/events does it emit?
 - [ ] OTLP bridge (thin wrapper around built-in OTel support)
 
 **Are you willing to implement this?**
-Yes / No — if yes, please read `ocw/sdk/integrations/anthropic.py` as the reference implementation before starting.
+Yes / No — if yes, please read `tj/sdk/integrations/anthropic.py` as the reference implementation before starting.

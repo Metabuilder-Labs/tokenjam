@@ -1,5 +1,5 @@
 """Agent with 10x normal token usage — simulates drift."""
-from ocw.sdk import watch, record_llm_call
+from tj.sdk import watch, record_llm_call
 from tests.agents.mock_llm import MockLLMClient
 
 

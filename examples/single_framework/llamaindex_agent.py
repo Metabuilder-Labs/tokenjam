@@ -34,7 +34,7 @@ from pathlib import Path  # noqa: E402
 
 from llama_index.core import Document, VectorStoreIndex  # noqa: E402
 
-from ocw.sdk import watch, patch_llamaindex  # noqa: E402
+from tj.sdk import watch, patch_llamaindex  # noqa: E402
 
 # Configure LlamaIndex's native OTel to export to ocw serve
 patch_llamaindex()

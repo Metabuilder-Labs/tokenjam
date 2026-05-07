@@ -8,17 +8,17 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from ocw.cli.main import cli
-from ocw.core.config import AgentConfig, BudgetConfig, OcwConfig
-from ocw.core.db import InMemoryBackend
-from ocw.core.models import (
+from tj.cli.main import cli
+from tj.core.config import AgentConfig, BudgetConfig, TjConfig
+from tj.core.db import InMemoryBackend
+from tj.core.models import (
     AgentRecord,
     Alert,
     AlertType,
     Severity,
 )
-from ocw.utils.ids import new_uuid
-from ocw.utils.time_parse import utcnow
+from tj.utils.ids import new_uuid
+from tj.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session
 
 
@@ -31,7 +31,7 @@ def db():
 
 @pytest.fixture
 def config():
-    return OcwConfig(
+    return TjConfig(
         version="1",
         agents={"test-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
     )
@@ -44,8 +44,8 @@ def runner():
 
 def _invoke(runner, db, config, args):
     """Invoke CLI with patched db and config."""
-    with patch("ocw.cli.main.load_config", return_value=config), \
-         patch("ocw.cli.main.open_db", return_value=db):
+    with patch("tj.cli.main.load_config", return_value=config), \
+         patch("tj.cli.main.open_db", return_value=db):
         return runner.invoke(cli, args)
 
 
@@ -158,7 +158,7 @@ def test_export_openevals_format_is_message_list(runner, db, config):
 # -- doctor tests --
 
 def test_doctor_exits_0_when_config_is_clean(runner, db, config, tmp_path):
-    config_file = tmp_path / "ocw.toml"
+    config_file = tmp_path / "tj.toml"
     config_file.write_text('version = "1"\n')
     # Set DB path to a writable temp location
     config.storage.path = str(tmp_path / "test.duckdb")
@@ -166,7 +166,7 @@ def test_doctor_exits_0_when_config_is_clean(runner, db, config, tmp_path):
     config.security.ingest_secret = "test-secret"
     # Disable drift so no "insufficient sessions" warning fires
     config.agents["test-agent"].drift.enabled = False
-    with patch("ocw.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tj.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 0
 
@@ -176,9 +176,9 @@ def test_doctor_exits_1_when_warnings_present(runner, db, config, tmp_path):
     config.security.ingest_secret = ""
     config.storage.path = str(tmp_path / "test.duckdb")
     config.agents["test-agent"].drift.enabled = False
-    config_file = tmp_path / "ocw.toml"
+    config_file = tmp_path / "tj.toml"
     config_file.write_text('version = "1"\n')
-    with patch("ocw.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tj.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 1
     checks = json.loads(result.output)
@@ -188,7 +188,7 @@ def test_doctor_exits_1_when_warnings_present(runner, db, config, tmp_path):
 
 def test_doctor_exits_2_when_errors_present(runner, db, config):
     # No config file found => error
-    with patch("ocw.cli.cmd_doctor.find_config_file", return_value=None):
+    with patch("tj.cli.cmd_doctor.find_config_file", return_value=None):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 2
 
@@ -196,9 +196,9 @@ def test_doctor_exits_2_when_errors_present(runner, db, config):
 def test_doctor_warns_on_schema_without_capture(runner, db, config, tmp_path):
     config.agents["test-agent"] = AgentConfig(output_schema="schema.json")
     config.capture.tool_outputs = False
-    config_file = tmp_path / "ocw.toml"
+    config_file = tmp_path / "tj.toml"
     config_file.write_text('version = "1"\n')
-    with patch("ocw.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tj.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     checks = json.loads(result.output)
     schema_checks = [c for c in checks if c["name"] == "Schema vs capture"]
@@ -218,7 +218,7 @@ def test_since_flag_parses_all_formats(runner, db, config):
 
 def _seed_baseline(db, agent_id="test-agent"):
     """Insert a DriftBaseline into the DB."""
-    from ocw.core.models import DriftBaseline
+    from tj.core.models import DriftBaseline
     baseline = DriftBaseline(
         agent_id=agent_id,
         sessions_sampled=15,
@@ -248,7 +248,7 @@ def test_drift_no_baselines_exits_0(runner, db, config):
 def test_drift_with_baseline_no_violations(runner, db, config):
     """Normal session (tokens within threshold) -> exit 0."""
     # Use a baseline without tool sequences so Jaccard doesn't fire
-    from ocw.core.models import DriftBaseline
+    from tj.core.models import DriftBaseline
     baseline = DriftBaseline(
         agent_id="test-agent",
         sessions_sampled=15,
@@ -344,9 +344,9 @@ def test_onboard_claude_code_writes_settings(runner, tmp_path):
     fake_home.mkdir()
     settings_path = fake_home / ".claude" / "settings.json"
 
-    with patch("ocw.cli.cmd_onboard.find_config_file", return_value=None), \
-         patch("ocw.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("ocw.cli.cmd_onboard.click.confirm", return_value=False):
+    with patch("tj.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tj.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tj.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
 
     assert result.exit_code == 0
@@ -368,9 +368,9 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
         json.dumps({"theme": "dark", "env": {"MY_VAR": "preserved"}}) + "\n"
     )
 
-    with patch("ocw.cli.cmd_onboard.find_config_file", return_value=None), \
-         patch("ocw.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("ocw.cli.cmd_onboard.click.confirm", return_value=False):
+    with patch("tj.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tj.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tj.cli.cmd_onboard.click.confirm", return_value=False):
         runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
 
     data = json.loads(settings_path.read_text())
@@ -382,18 +382,18 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
     assert data["env"].get("CLAUDE_CODE_ENABLE_TELEMETRY") == "1"
 
 
-def test_onboard_claude_code_creates_ocw_config(runner, tmp_path):
+def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
     """ocw config is created when none exists."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    with patch("ocw.cli.cmd_onboard.find_config_file", return_value=None), \
-         patch("ocw.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("ocw.cli.cmd_onboard.click.confirm", return_value=False), \
-         patch("ocw.core.config.write_config") as mock_write:
+    with patch("tj.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tj.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tj.cli.cmd_onboard.click.confirm", return_value=False), \
+         patch("tj.core.config.write_config") as mock_write:
         runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
 
-    # write_config should have been called with an OcwConfig containing a claude-code-* agent
+    # write_config should have been called with an TjConfig containing a claude-code-* agent
     assert mock_write.called
     saved_config = mock_write.call_args[0][0]
     assert any(k.startswith("claude-code-") for k in saved_config.agents)
@@ -404,10 +404,10 @@ def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    with patch("ocw.cli.cmd_onboard.find_config_file", return_value=None), \
-         patch("ocw.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("ocw.cli.cmd_onboard.click.confirm", return_value=False), \
-         patch("ocw.core.config.write_config") as mock_write:
+    with patch("tj.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tj.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tj.cli.cmd_onboard.click.confirm", return_value=False), \
+         patch("tj.core.config.write_config") as mock_write:
         result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon"], input="7.0\n")
 
     assert result.exit_code == 0
@@ -442,22 +442,22 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
         }
     }) + "\n")
 
-    # Global config path — --claude-code always uses ~/.config/ocw/config.toml
-    fake_config_path = fake_home / ".config" / "ocw" / "config.toml"
+    # Global config path — --claude-code always uses ~/.config/tj/config.toml
+    fake_config_path = fake_home / ".config" / "tj" / "config.toml"
     fake_config_path.parent.mkdir(parents=True)
     fake_config_path.touch()  # must exist so the "existing and not force" branch runs
 
-    from ocw.core.config import AgentConfig, OcwConfig, SecurityConfig
-    fake_config = OcwConfig(
+    from tj.core.config import AgentConfig, TjConfig, SecurityConfig
+    fake_config = TjConfig(
         version="1",
-        agents={"claude-code-openclawwatch": AgentConfig()},
+        agents={"claude-code-tokenjam": AgentConfig()},
         security=SecurityConfig(ingest_secret=new_secret),
     )
 
-    with patch("ocw.core.config.load_config", return_value=fake_config), \
-         patch("ocw.core.config.write_config"), \
-         patch("ocw.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("ocw.cli.cmd_onboard.click.confirm", return_value=False):
+    with patch("tj.core.config.load_config", return_value=fake_config), \
+         patch("tj.core.config.write_config"), \
+         patch("tj.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tj.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
 
     assert result.exit_code == 0
@@ -488,22 +488,22 @@ def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
         }
     }) + "\n")
 
-    # Global config path — --claude-code always uses ~/.config/ocw/config.toml
-    fake_config_path = fake_home / ".config" / "ocw" / "config.toml"
+    # Global config path — --claude-code always uses ~/.config/tj/config.toml
+    fake_config_path = fake_home / ".config" / "tj" / "config.toml"
     fake_config_path.parent.mkdir(parents=True)
     fake_config_path.touch()  # must exist so the "existing and not force" branch runs
 
-    from ocw.core.config import AgentConfig, OcwConfig, SecurityConfig
-    fake_config = OcwConfig(
+    from tj.core.config import AgentConfig, TjConfig, SecurityConfig
+    fake_config = TjConfig(
         version="1",
-        agents={"claude-code-openclawwatch": AgentConfig()},
+        agents={"claude-code-tokenjam": AgentConfig()},
         security=SecurityConfig(ingest_secret="newsecret" * 4),
     )
 
-    with patch("ocw.core.config.load_config", return_value=fake_config), \
-         patch("ocw.core.config.write_config"), \
-         patch("ocw.cli.cmd_onboard.Path.home", return_value=fake_home), \
-         patch("ocw.cli.cmd_onboard.click.confirm", return_value=False):
+    with patch("tj.core.config.load_config", return_value=fake_config), \
+         patch("tj.core.config.write_config"), \
+         patch("tj.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tj.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
 
     assert result.exit_code == 0
@@ -516,8 +516,8 @@ def test_onboard_does_not_prompt_for_daemon(runner, tmp_path):
     """Regression: ocw onboard should auto-install the daemon without
     prompting. The prompt was removed in v0.1.6 but reappeared.
     See v0.1.7 fix."""
-    with patch("ocw.cli.cmd_onboard.find_config_file", return_value=None), \
-         patch("ocw.cli.cmd_onboard._install_daemon", return_value="Daemon installed") as mock_daemon:
+    with patch("tj.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tj.cli.cmd_onboard._install_daemon", return_value="Daemon installed") as mock_daemon:
         result = runner.invoke(cli, ["onboard", "--budget", "5.0"], input="")
     assert result.exit_code == 0
     # Daemon should be auto-installed (not prompted)
@@ -528,8 +528,8 @@ def test_onboard_does_not_prompt_for_daemon(runner, tmp_path):
 
 def test_onboard_no_daemon_skips_install(runner, tmp_path):
     """--no-daemon flag should skip daemon installation entirely."""
-    with patch("ocw.cli.cmd_onboard.find_config_file", return_value=None), \
-         patch("ocw.cli.cmd_onboard._install_daemon") as mock_daemon:
+    with patch("tj.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tj.cli.cmd_onboard._install_daemon") as mock_daemon:
         result = runner.invoke(cli, ["onboard", "--budget", "5.0", "--no-daemon"])
     assert result.exit_code == 0
     mock_daemon.assert_not_called()
@@ -547,10 +547,10 @@ def test_budget_set_global_writes_config(runner, db, config, tmp_path):
     config_file = tmp_path / "config.toml"
     config_file.write_text("")
 
-    with patch("ocw.cli.main.load_config", return_value=config), \
-         patch("ocw.cli.main.open_db", return_value=db), \
-         patch("ocw.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
-         patch("ocw.cli.cmd_budget.write_config") as mock_write:
+    with patch("tj.cli.main.load_config", return_value=config), \
+         patch("tj.cli.main.open_db", return_value=db), \
+         patch("tj.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tj.cli.cmd_budget.write_config") as mock_write:
         result = runner.invoke(cli, ["budget", "--daily", "8.0"])
 
     assert result.exit_code == 0
@@ -564,10 +564,10 @@ def test_budget_set_agent_writes_config(runner, db, config, tmp_path):
     config_file = tmp_path / "config.toml"
     config_file.write_text("")
 
-    with patch("ocw.cli.main.load_config", return_value=config), \
-         patch("ocw.cli.main.open_db", return_value=db), \
-         patch("ocw.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
-         patch("ocw.cli.cmd_budget.write_config") as mock_write:
+    with patch("tj.cli.main.load_config", return_value=config), \
+         patch("tj.cli.main.open_db", return_value=db), \
+         patch("tj.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tj.cli.cmd_budget.write_config") as mock_write:
         result = runner.invoke(
             cli, ["budget", "--agent", "test-agent", "--daily", "3.0", "--session", "0.25"]
         )
@@ -584,10 +584,10 @@ def test_budget_set_negative_daily_rejected(runner, db, config, tmp_path):
     config_file = tmp_path / "config.toml"
     config_file.write_text("")
 
-    with patch("ocw.cli.main.load_config", return_value=config), \
-         patch("ocw.cli.main.open_db", return_value=db), \
-         patch("ocw.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
-         patch("ocw.cli.cmd_budget.write_config") as mock_write:
+    with patch("tj.cli.main.load_config", return_value=config), \
+         patch("tj.cli.main.open_db", return_value=db), \
+         patch("tj.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tj.cli.cmd_budget.write_config") as mock_write:
         result = runner.invoke(cli, ["budget", "--daily", "-5"])
 
     assert result.exit_code != 0

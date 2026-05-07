@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 
-from ocw.sdk.agent import watch, record_llm_call, record_tool_call
+from tj.sdk.agent import watch, record_llm_call, record_tool_call
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ if __name__ == "__main__":
         {"budget": {"daily_usd": 0.05, "session_usd": 0.02}},
     )
 
-    from ocw.sdk.bootstrap import ensure_initialised
+    from tj.sdk.bootstrap import ensure_initialised
     ensure_initialised()
 
     print("=" * 60)

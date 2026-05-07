@@ -22,8 +22,8 @@ from pathlib import Path
 
 import httpx
 
-from ocw.sdk import watch, patch_llamaindex, patch_openai, patch_anthropic
-from ocw.sdk.agent import record_tool_call
+from tj.sdk import watch, patch_llamaindex, patch_openai, patch_anthropic
+from tj.sdk.agent import record_tool_call
 
 # ---------------------------------------------------------------------------
 # Env-var gate

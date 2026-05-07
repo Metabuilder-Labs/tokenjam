@@ -18,7 +18,7 @@ SETUP NOTES:
     The region must have Bedrock model access enabled for the model used below.
 
 Requirements:
-    pip install boto3 openclawwatch
+    pip install boto3 tokenjam
 
 Environment:
     AWS_DEFAULT_REGION or AWS_REGION  — required (must have Bedrock access)
@@ -43,8 +43,8 @@ if not region:
 
 import boto3  # noqa: E402
 
-from ocw.sdk import watch  # noqa: E402
-from ocw.sdk.integrations.bedrock import patch_bedrock  # noqa: E402
+from tj.sdk import watch  # noqa: E402
+from tj.sdk.integrations.bedrock import patch_bedrock  # noqa: E402
 
 # Monkey-patch the boto3 Bedrock client BEFORE creating any instances.
 patch_bedrock()

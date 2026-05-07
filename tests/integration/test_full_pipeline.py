@@ -2,7 +2,7 @@
 Full pipeline integration tests.
 
 Wires the complete path: SDK (@watch + record_*) -> OTel SimpleSpanProcessor ->
-OcwSpanExporter -> IngestPipeline -> DuckDB (InMemoryBackend) with cost, alert,
+TjSpanExporter -> IngestPipeline -> DuckDB (InMemoryBackend) with cost, alert,
 and schema validation hooks.
 
 No real LLM calls — uses manual record_llm_call / record_tool_call.
@@ -21,24 +21,24 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from ocw.core.alerts import AlertEngine
-from ocw.core.config import (
+from tj.core.alerts import AlertEngine
+from tj.core.config import (
     AgentConfig,
     BudgetConfig,
     CaptureConfig,
-    OcwConfig,
+    TjConfig,
     SecurityConfig,
 )
-from ocw.core.cost import CostEngine
-from ocw.core.db import InMemoryBackend
-from ocw.core.ingest import IngestPipeline
-from ocw.core.models import AgentRecord, NormalizedSpan, SpanKind, SpanStatus
-from ocw.core.schema_validator import SchemaValidator
-from ocw.otel.provider import OcwSpanExporter
-from ocw.otel.semconv import GenAIAttributes
-from ocw.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
-from ocw.utils.time_parse import utcnow
-import ocw.sdk.agent as agent_mod
+from tj.core.cost import CostEngine
+from tj.core.db import InMemoryBackend
+from tj.core.ingest import IngestPipeline
+from tj.core.models import AgentRecord, NormalizedSpan, SpanKind, SpanStatus
+from tj.core.schema_validator import SchemaValidator
+from tj.otel.provider import TjSpanExporter
+from tj.otel.semconv import GenAIAttributes
+from tj.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
+from tj.utils.time_parse import utcnow
+import tj.sdk.agent as agent_mod
 
 
 
@@ -96,11 +96,11 @@ def _all_sessions(db: InMemoryBackend) -> list[dict]:
 @pytest.fixture
 def full_stack():
     """
-    Wire up the full stack: DB -> engines -> pipeline -> OcwSpanExporter.
+    Wire up the full stack: DB -> engines -> pipeline -> TjSpanExporter.
     Swaps the delegating exporter's target for this test.
     """
     db = InMemoryBackend()
-    config = OcwConfig(
+    config = TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret="test"),
         capture=CaptureConfig(
@@ -131,12 +131,12 @@ def full_stack():
         schema_validator=schema_validator,
     )
 
-    ocw_exporter = OcwSpanExporter(pipeline)
+    ocw_exporter = TjSpanExporter(pipeline)
 
     # Create a local TracerProvider (not global) and bind the SDK tracer to it
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(ocw_exporter))
-    agent_mod._tracer = provider.get_tracer("ocw.sdk")
+    agent_mod._tracer = provider.get_tracer("tj.sdk")
 
     # Seed agent records
     now = utcnow()

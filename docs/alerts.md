@@ -98,10 +98,10 @@ Stdout and file channels always include the full payload regardless of this sett
 ## CLI
 
 ```bash
-ocw alerts                    # all alert history
-ocw alerts --severity critical   # filter by severity
-ocw alerts --type sensitive_action   # filter by type
-ocw alerts --since 1h         # recent alerts only
+tj alerts                    # all alert history
+tj alerts --severity critical   # filter by severity
+tj alerts --type sensitive_action   # filter by type
+tj alerts --since 1h         # recent alerts only
 ```
 
 ## REST API

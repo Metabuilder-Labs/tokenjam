@@ -1,6 +1,6 @@
 # Framework Support
 
-`ocw` is OTel-native. Any framework that emits OpenTelemetry spans works automatically — point its OTLP exporter at `ocw serve` and you're done. For everything else, one-line patches exist.
+`ocw` is OTel-native. Any framework that emits OpenTelemetry spans works automatically — point its OTLP exporter at `tj serve` and you're done. For everything else, one-line patches exist.
 
 ## Python provider patches
 
@@ -34,7 +34,7 @@ from ocw.sdk.integrations.nemoclaw          import watch_nemoclaw         # Nemo
 
 ## Zero-code via OTLP
 
-Point any of these frameworks' built-in OTel exporter at `ocw serve`, no integration code required:
+Point any of these frameworks' built-in OTel exporter at `tj serve`, no integration code required:
 
 | Framework | OTel support |
 |---|---|
@@ -50,14 +50,14 @@ Point any of these frameworks' built-in OTel exporter at `ocw serve`, no integra
 
 ## TypeScript / Node.js
 
-`@openclawwatch/sdk` provides `OcwClient` and `SpanBuilder` for sending spans to `ocw serve` from any TypeScript agent:
+`@tokenjam/sdk` provides `TjClient` and `SpanBuilder` for sending spans to `tj serve` from any TypeScript agent:
 
 ```typescript
-import { OcwClient, SpanBuilder } from "@openclawwatch/sdk";
+import { TjClient, SpanBuilder } from "@tokenjam/sdk";
 
-const client = new OcwClient({
+const client = new TjClient({
   baseUrl:      "http://127.0.0.1:7391",
-  ingestSecret: process.env.OCW_INGEST_SECRET ?? "",
+  ingestSecret: process.env.TJ_INGEST_SECRET ?? "",
 });
 
 const span = new SpanBuilder("invoke_agent")

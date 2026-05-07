@@ -10,7 +10,7 @@ Agents SDK's native OTel support to export traces to `ocw serve` via OTLP.
 You must have `ocw serve` running before executing this script.
 
 Requirements:
-    pip install openai-agents httpx openclawwatch
+    pip install openai-agents httpx tokenjam
 
 Environment:
     OPENAI_API_KEY  — required
@@ -51,8 +51,8 @@ except Exception:
 
 from agents import Agent, Runner  # noqa: E402
 
-from ocw.sdk import watch  # noqa: E402
-from ocw.sdk.integrations.openai_agents_sdk import patch_openai_agents  # noqa: E402
+from tj.sdk import watch  # noqa: E402
+from tj.sdk.integrations.openai_agents_sdk import patch_openai_agents  # noqa: E402
 
 # Configure the Agents SDK's native OTel to export to ocw serve.
 # NOTE: patch_openai_agents() does NOT call ensure_initialised() — it sets up

@@ -1,5 +1,5 @@
 """Agent that calls the same tool 5 times in a row — simulates retry loop."""
-from ocw.sdk import watch, record_llm_call, record_tool_call
+from tj.sdk import watch, record_llm_call, record_tool_call
 from tests.agents.mock_llm import MockLLMClient
 
 

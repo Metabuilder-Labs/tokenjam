@@ -27,7 +27,7 @@ import json
 import os
 import tempfile
 
-from ocw.sdk.agent import watch, record_llm_call, record_tool_call
+from tj.sdk.agent import watch, record_llm_call, record_tool_call
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ if __name__ == "__main__":
         },
     )
 
-    from ocw.sdk.bootstrap import ensure_initialised
+    from tj.sdk.bootstrap import ensure_initialised
     ensure_initialised()
 
     print("=" * 60)

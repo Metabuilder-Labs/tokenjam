@@ -1,7 +1,7 @@
 """
 End-to-end tests that make real LLM API calls.
 
-Requires: OCW_ANTHROPIC_API_KEY environment variable.
+Requires: TJ_ANTHROPIC_API_KEY environment variable.
 Auto-skipped without it (see conftest.py).
 
 These tests verify the full path: real API call -> provider patch ->
@@ -18,16 +18,16 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from ocw.core.config import CaptureConfig, OcwConfig, SecurityConfig
-from ocw.core.db import InMemoryBackend
-from ocw.core.ingest import IngestPipeline
-from ocw.core.cost import CostEngine
-from ocw.otel.provider import convert_otel_span
-from ocw.otel.semconv import GenAIAttributes
+from tj.core.config import CaptureConfig, TjConfig, SecurityConfig
+from tj.core.db import InMemoryBackend
+from tj.core.ingest import IngestPipeline
+from tj.core.cost import CostEngine
+from tj.otel.provider import convert_otel_span
+from tj.otel.semconv import GenAIAttributes
 
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("OCW_ANTHROPIC_API_KEY"),
-    reason="OCW_ANTHROPIC_API_KEY not set",
+    not os.environ.get("TJ_ANTHROPIC_API_KEY"),
+    reason="TJ_ANTHROPIC_API_KEY not set",
 )
 
 
@@ -75,17 +75,17 @@ def test_real_anthropic_call_produces_spans(otel_setup):
     except ImportError:
         pytest.skip("anthropic package not installed")
 
-    from ocw.sdk import watch, patch_anthropic
-    import ocw.sdk.agent as agent_mod
+    from tj.sdk import watch, patch_anthropic
+    import tj.sdk.agent as agent_mod
 
     # Re-bind tracer to use our test provider
-    agent_mod._tracer = trace.get_tracer("ocw.sdk")
+    agent_mod._tracer = trace.get_tracer("tj.sdk")
 
     patch_anthropic()
 
     @watch(agent_id="e2e-test-agent")
     def call_claude():
-        client = anthropic.Anthropic(api_key=os.environ["OCW_ANTHROPIC_API_KEY"])
+        client = anthropic.Anthropic(api_key=os.environ["TJ_ANTHROPIC_API_KEY"])
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=50,
@@ -116,10 +116,10 @@ def test_real_anthropic_call_produces_spans(otel_setup):
 
 def test_real_span_converts_to_normalized_span(otel_setup):
     """Verify convert_otel_span works on real OTel spans."""
-    from ocw.sdk import watch, record_llm_call
-    import ocw.sdk.agent as agent_mod
+    from tj.sdk import watch, record_llm_call
+    import tj.sdk.agent as agent_mod
 
-    agent_mod._tracer = trace.get_tracer("ocw.sdk")
+    agent_mod._tracer = trace.get_tracer("tj.sdk")
 
     @watch(agent_id="e2e-convert-agent")
     def my_agent():
@@ -139,10 +139,10 @@ def test_real_span_converts_to_normalized_span(otel_setup):
 
 def test_real_span_flows_through_pipeline(otel_setup):
     """Verify a real OTel span can be ingested through the full pipeline."""
-    from ocw.sdk import watch, record_llm_call
-    import ocw.sdk.agent as agent_mod
+    from tj.sdk import watch, record_llm_call
+    import tj.sdk.agent as agent_mod
 
-    agent_mod._tracer = trace.get_tracer("ocw.sdk")
+    agent_mod._tracer = trace.get_tracer("tj.sdk")
 
     @watch(agent_id="e2e-pipeline-agent")
     def my_agent():
@@ -151,7 +151,7 @@ def test_real_span_flows_through_pipeline(otel_setup):
     my_agent()
 
     db = InMemoryBackend()
-    config = OcwConfig(
+    config = TjConfig(
         version="1",
         capture=CaptureConfig(prompts=True, completions=True),
     )

@@ -1,14 +1,14 @@
-# Using OpenClawWatch with OpenClaw
+# Using TokenJam with OpenClaw
 
-OpenClaw has built-in OpenTelemetry support via its `diagnostics-otel` plugin. Point it at `ocw serve` and all your agent telemetry flows in automatically — no SDK code required.
+OpenClaw has built-in OpenTelemetry support via its `diagnostics-otel` plugin. Point it at `tj serve` and all your agent telemetry flows in automatically — no SDK code required.
 
 ## Setup
 
-1. Start ocw serve:
+1. Start tj serve:
 
    ```bash
-   ocw onboard
-   ocw serve &
+   tj onboard
+   tj serve &
    ```
 
 2. Add to your `openclaw.json`:
@@ -40,9 +40,9 @@ OpenClaw has built-in OpenTelemetry support via its `diagnostics-otel` plugin. P
 3. Restart your OpenClaw gateway. Traces appear immediately:
 
    ```bash
-   ocw status
-   ocw traces
-   ocw cost --since 1h
+   tj status
+   tj traces
+   tj cost --since 1h
    ```
 
 ## What gets captured
@@ -93,10 +93,10 @@ session_usd = 2.00
 ## Troubleshooting
 
 **No spans appearing?**
-- Verify `ocw serve` is running: `curl http://127.0.0.1:7391/api/v1/status`
+- Verify `tj serve` is running: `curl http://127.0.0.1:7391/api/v1/status`
 - Check that `diagnostics-otel` plugin is enabled and allowed in `openclaw.json`
 - If using an ingest secret, add it to the OpenClaw OTLP headers config
 
 **Model costs showing default rates?**
 - Ensure the model name in OpenClaw matches an entry in `pricing/models.toml`
-- Run `ocw cost` to see which models are being used
+- Run `tj cost` to see which models are being used

@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import time
 
-from ocw.sdk.agent import AgentSession, record_llm_call, record_tool_call
-from ocw.utils.ids import new_uuid
+from tj.sdk.agent import AgentSession, record_llm_call, record_tool_call
+from tj.utils.ids import new_uuid
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ def run_anomalous_session() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from ocw.sdk.bootstrap import ensure_initialised
+    from tj.sdk.bootstrap import ensure_initialised
     ensure_initialised()
 
     print("=" * 60)

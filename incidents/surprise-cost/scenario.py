@@ -63,7 +63,7 @@ def run() -> None:
             "model_breakdown": model_breakdown,
         }, indent=2))
     else:
-        from ocw.utils.formatting import console
+        from tj.utils.formatting import console
         _render(console, result, model_breakdown)
 
 
@@ -71,10 +71,10 @@ def _execute():
     """Run the scenario logic, return (env, result, model_breakdown)."""
     from datetime import timedelta
 
-    from ocw.core.models import NormalizedSpan, SpanKind, SpanStatus
-    from ocw.demo.env import DemoEnvironment
-    from ocw.utils.ids import new_span_id, new_trace_id, new_uuid
-    from ocw.utils.time_parse import utcnow
+    from tj.core.models import NormalizedSpan, SpanKind, SpanStatus
+    from tj.demo.env import DemoEnvironment
+    from tj.utils.ids import new_span_id, new_trace_id, new_uuid
+    from tj.utils.time_parse import utcnow
 
     env = DemoEnvironment()
     now = utcnow()

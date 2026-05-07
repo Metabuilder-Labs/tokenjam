@@ -1,4 +1,4 @@
-from ocw.utils.formatting import format_cost, format_tokens, severity_colour
+from tj.utils.formatting import format_cost, format_tokens, severity_colour
 
 
 class TestFormatCost:

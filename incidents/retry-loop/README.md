@@ -1,6 +1,6 @@
 # Your agent isn't flaky. You're blind.
 
-**Run it:** `pip install openclawwatch && ocw demo retry-loop`
+**Run it:** `pip install tokenjam && tj demo retry-loop`
 
 ---
 
@@ -57,13 +57,13 @@ The loop was visible from span #4. Your logs didn't surface it until a user comp
 ## Try it yourself
 
 ```bash
-pip install openclawwatch
-ocw demo retry-loop
+pip install tokenjam
+tj demo retry-loop
 ```
 
 30 seconds, no API keys, no config file. The demo runs against an in-memory backend so nothing persists to disk.
 
-To catch this in your real agent, wire up the OCW SDK (`@watch()` + `patch_anthropic()` or `patch_openai()`) and run `ocw serve` in the background. After that, `ocw alerts` and `ocw traces` work against your live data.
+To catch this in your real agent, wire up the OCW SDK (`@watch()` + `patch_anthropic()` or `patch_openai()`) and run `tj serve` in the background. After that, `tj alerts` and `tj traces` work against your live data.
 
 ## Next in the incident library
 
@@ -72,4 +72,4 @@ To catch this in your real agent, wire up the OCW SDK (`@watch()` + `patch_anthr
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/openclawwatch) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install openclawwatch` and start seeing what your agent actually does.
+[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.

@@ -1,6 +1,6 @@
 # OCW Examples
 
-Example agents demonstrating [ocw](https://github.com/Metabuilder-Labs/openclawwatch) integrations, from single-provider basics to complex multi-agent workflows.
+Example agents demonstrating [ocw](https://github.com/Metabuilder-Labs/TokenJam) integrations, from single-provider basics to complex multi-agent workflows.
 
 ## Quick Start
 
@@ -34,7 +34,7 @@ One integration per file. Simplest way to see ocw in action with your provider o
 | [`openai_agents_sdk_agent.py`](single_provider/openai_agents_sdk_agent.py) | `OPENAI_API_KEY` | `openai-agents httpx` | Multi-agent handoff via OpenAI Agents SDK |
 | [`litellm_agent.py`](single_provider/litellm_agent.py) | `OPENAI_API_KEY` `ANTHROPIC_API_KEY` | `litellm` | Multi-provider routing via LiteLLM |
 
-> **Note:** `openai_agents_sdk_agent.py` requires `ocw serve` running (`ocw serve &`).
+> **Note:** `openai_agents_sdk_agent.py` requires `tj serve` running (`tj serve &`).
 
 ---
 
@@ -50,7 +50,7 @@ One framework integration per file. Shows how ocw captures framework-level spans
 | [`autogen_agent.py`](single_framework/autogen_agent.py) | `OPENAI_API_KEY` | `pyautogen` | Two-agent debate with back-and-forth |
 | [`llamaindex_agent.py`](single_framework/llamaindex_agent.py) | `OPENAI_API_KEY` | `llama-index` | RAG query engine over sample documents |
 
-> **Note:** `llamaindex_agent.py` requires `ocw serve` running (`ocw serve &`).
+> **Note:** `llamaindex_agent.py` requires `tj serve` running (`tj serve &`).
 
 ---
 
@@ -64,7 +64,7 @@ Complex real-world patterns combining multiple providers and frameworks. These s
 | [`research_team.py`](multi/research_team.py) | `ANTHROPIC_API_KEY` `OPENAI_API_KEY` | `anthropic crewai langchain-core` | CrewAI agents with LangChain tools |
 | [`rag_pipeline.py`](multi/rag_pipeline.py) | `OPENAI_API_KEY` `ANTHROPIC_API_KEY` | `llama-index openai anthropic` | RAG with OpenAI-to-Anthropic fallback |
 
-> **Note:** `rag_pipeline.py` requires `ocw serve` running (`ocw serve &`).
+> **Note:** `rag_pipeline.py` requires `tj serve` running (`tj serve &`).
 
 ---
 
@@ -91,7 +91,7 @@ ocw cost --since 1h   # see cost tracking
 
 ---
 
-## Which examples need `ocw serve`?
+## Which examples need `tj serve`?
 
 Most examples use in-process telemetry (spans go directly to the local DuckDB). These two integrations export via OTLP HTTP and require the server:
 

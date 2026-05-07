@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in OpenClawWatch, please report it responsibly.
+If you discover a security vulnerability in TokenJam, please report it responsibly.
 
 **Email:** [security@metabuilder.dev](mailto:security@metabuilder.dev)
 
@@ -16,7 +16,7 @@ We will acknowledge receipt within 48 hours and aim to provide a fix within 7 da
 
 ## Scope
 
-OpenClawWatch handles sensitive data including:
+TokenJam handles sensitive data including:
 - API keys (ingest secrets, provider API keys in config)
 - Agent telemetry (prompts, completions, tool inputs/outputs when capture is enabled)
 - Cost and usage data

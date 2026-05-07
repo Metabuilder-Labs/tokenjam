@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in OpenClawWatch
+about: Report a bug in TokenJam
 title: ''
 labels: bug
 assignees: ''
@@ -25,5 +25,5 @@ What you expected to happen.
 **Environment**
 - OS:
 - Python version (`python3 --version`):
-- ocw version (`pip show openclawwatch`):
-- Output of `ocw doctor` (if relevant):
+- tj version (`pip show tokenjam`):
+- Output of `tj doctor` (if relevant):

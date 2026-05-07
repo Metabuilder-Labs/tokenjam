@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { OcwClient } from "./client.js";
+import { TjClient } from "./client.js";
 import { SpanBuilder } from "./span-builder.js";
 import { SpanKind, SpanStatus } from "./types.js";
 
@@ -68,7 +68,7 @@ function createMockServer(): {
   };
 }
 
-describe("OcwClient", () => {
+describe("TjClient", () => {
   let mock: ReturnType<typeof createMockServer>;
 
   beforeEach(async () => {
@@ -81,7 +81,7 @@ describe("OcwClient", () => {
   });
 
   it("sends a span with correct auth header", async () => {
-    const client = new OcwClient({
+    const client = new TjClient({
       baseUrl: `http://127.0.0.1:${mock.port()}`,
       ingestSecret: "test-secret-123",
       batchSize: 1,
@@ -106,7 +106,7 @@ describe("OcwClient", () => {
   });
 
   it("sends OTLP JSON format", async () => {
-    const client = new OcwClient({
+    const client = new TjClient({
       baseUrl: `http://127.0.0.1:${mock.port()}`,
       ingestSecret: "secret",
       batchSize: 1,
@@ -139,7 +139,7 @@ describe("OcwClient", () => {
   it("batches spans and flushes at batchSize", async () => {
     mock.setResponse(200, { ingested: 3, rejected: 0, rejections: [] });
 
-    const client = new OcwClient({
+    const client = new TjClient({
       baseUrl: `http://127.0.0.1:${mock.port()}`,
       ingestSecret: "secret",
       batchSize: 3,
@@ -160,7 +160,7 @@ describe("OcwClient", () => {
   });
 
   it("flush sends remaining spans", async () => {
-    const client = new OcwClient({
+    const client = new TjClient({
       baseUrl: `http://127.0.0.1:${mock.port()}`,
       ingestSecret: "secret",
       batchSize: 100, // won't auto-flush
@@ -177,7 +177,7 @@ describe("OcwClient", () => {
   });
 
   it("flush on empty buffer returns null", async () => {
-    const client = new OcwClient({
+    const client = new TjClient({
       baseUrl: `http://127.0.0.1:${mock.port()}`,
       ingestSecret: "secret",
     });
@@ -188,7 +188,7 @@ describe("OcwClient", () => {
   });
 
   it("shutdown flushes and stops timer", async () => {
-    const client = new OcwClient({
+    const client = new TjClient({
       baseUrl: `http://127.0.0.1:${mock.port()}`,
       ingestSecret: "secret",
       batchSize: 100,
@@ -205,7 +205,7 @@ describe("OcwClient", () => {
   it("throws on server error", async () => {
     mock.setResponse(401, { detail: "Invalid ingest secret" });
 
-    const client = new OcwClient({
+    const client = new TjClient({
       baseUrl: `http://127.0.0.1:${mock.port()}`,
       ingestSecret: "wrong-secret",
       batchSize: 1,
@@ -221,7 +221,7 @@ describe("OcwClient", () => {
   });
 
   it("converts span attributes to OTLP format", async () => {
-    const client = new OcwClient({
+    const client = new TjClient({
       baseUrl: `http://127.0.0.1:${mock.port()}`,
       ingestSecret: "secret",
       batchSize: 1,

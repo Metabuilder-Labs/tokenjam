@@ -16,7 +16,7 @@ import os
 import sys
 from pathlib import Path
 
-from ocw.sdk import watch, patch_anthropic, patch_crewai, patch_langchain
+from tj.sdk import watch, patch_anthropic, patch_crewai, patch_langchain
 
 # ---------------------------------------------------------------------------
 # Env-var gate

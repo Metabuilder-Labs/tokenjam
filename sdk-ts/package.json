@@ -1,7 +1,7 @@
 {
-  "name": "@openclawwatch/sdk",
+  "name": "@tokenjam/sdk",
   "version": "0.1.9",
-  "description": "TypeScript SDK for OpenClawWatch — local-first observability for AI agents",
+  "description": "TypeScript SDK for TokenJam — local-first observability for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {

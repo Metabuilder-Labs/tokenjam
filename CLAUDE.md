@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`ocw` (OpenClawWatch) is a local-first, OTel-native observability CLI for AI agents. No cloud backend, no signup. It captures telemetry from agent runtimes, stores it in a local DuckDB database, and exposes a CLI + local REST API for querying. Install via `pip install openclawwatch`, run via `ocw <subcommand>`. Requires Python >=3.10.
+`tj` (TokenJam) is a local-first, OTel-native observability CLI for AI agents. No cloud backend, no signup. It captures telemetry from agent runtimes, stores it in a local DuckDB database, and exposes a CLI + local REST API for querying. Install via `pip install tokenjam`, run via `tj <subcommand>`. Requires Python >=3.10.
 
 ## Build & Development
 
@@ -13,8 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -e ".[dev]"
 
 # Linting and type checking
-ruff check ocw/                  # line-length=100, target py310
-mypy ocw/                        # strict mode
+ruff check tj/                  # line-length=100, target py310
+mypy tj/                        # strict mode
 
 # Tests (CI runs all except e2e)
 pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
@@ -29,7 +29,7 @@ pytest tests/integration/        # CLI + API integration
 pytest tests/unit/test_config.py
 pytest tests/unit/test_config.py::test_function_name -v
 
-# Real LLM tests (requires OCW_ANTHROPIC_API_KEY — auto-skipped otherwise)
+# Real LLM tests (requires TJ_ANTHROPIC_API_KEY — auto-skipped otherwise)
 pytest tests/e2e/
 
 # TypeScript SDK (independent package)
@@ -40,8 +40,8 @@ cd sdk-ts && npm install && npm test
 ## Repo Layout
 
 ```
-openclawwatch/
-├── ocw/                    Python package
+tokenjam/
+├── tj/                    Python package
 │   ├── cli/                Click CLI commands (one file per command)
 │   ├── core/               Domain logic — NO CLI or HTTP imports allowed here
 │   ├── otel/               OTel SDK wiring + semantic conventions
@@ -54,7 +54,7 @@ openclawwatch/
 │   ├── single_framework/   One file per framework integration
 │   ├── multi/              Multi-provider/framework examples + sample_docs/
 │   └── alerts_and_drift/   Alert and drift demos (no API keys needed)
-├── sdk-ts/                 TypeScript SDK (@openclawwatch/sdk)
+├── sdk-ts/                 TypeScript SDK (@tokenjam/sdk)
 ├── pricing/                models.toml — community-maintained model pricing (USD per million tokens)
 └── tests/
     ├── factories.py        Span factory — use this in ALL tests
@@ -70,7 +70,7 @@ openclawwatch/
 ### Data Flow
 
 Spans enter from two paths, both converging at `IngestPipeline.process()`:
-1. **In-process**: Python SDK `@watch()` + provider patches -> `OcwSpanExporter` -> `IngestPipeline`
+1. **In-process**: Python SDK `@watch()` + provider patches -> `TjSpanExporter` -> `IngestPipeline`
 2. **HTTP**: TypeScript SDK (or any OTLP client) -> `POST /api/v1/spans` (auth required) -> `IngestPipeline`
 
 Post-ingest hooks run synchronously after each span is written to DB:
@@ -80,59 +80,59 @@ Post-ingest hooks run synchronously after each span is written to DB:
 
 ### Package Dependency Rules
 
-- `ocw/core/` is pure domain logic. **Must never import from `ocw.cli` or `ocw.api`**. CLI and API import from core, not the reverse.
-- `ocw/otel/semconv.py` is pure constants with no internal imports.
+- `tj/core/` is pure domain logic. **Must never import from `tj.cli` or `tj.api`**. CLI and API import from core, not the reverse.
+- `tj/otel/semconv.py` is pure constants with no internal imports.
 - `sdk-ts/` is fully independent from Python — communicates only via HTTP.
 
 ### Key Modules
 
-- **`ocw/core/db.py`**: `StorageBackend` protocol + `DuckDBBackend` + `InMemoryBackend` (for tests) + migration runner. Migrations are `(version, sql)` tuples in a `MIGRATIONS` list — never modify existing ones, only append. **Note:** `StorageBackend` doesn't cover every query. Some callers (e.g. `CostEngine`, `cmd_status`) access `db.conn` directly for queries not in the protocol (cost updates, active session lookups). Helper `_row_to_session()` is used to convert raw DuckDB rows.
-- **`ocw/core/ingest.py`**: `IngestPipeline` (central hub), `SpanSanitizer` (rejects oversized/malformed spans), `strip_captured_content()`. Post-ingest hooks (cost, alerts, schema) are optional and error-tolerant — hook failures are logged, never propagated.
-- **`ocw/core/pricing.py`**: `ModelRates` (frozen dataclass), `load_pricing_table()` (LRU-cached), `get_rates(provider, model)`. Falls back to default rates for unknown models.
-- **`ocw/core/cost.py`**: `calculate_cost()` (pure function, rounds to 8dp) + `CostEngine` (post-ingest hook that updates `spans.cost_usd` and `sessions.total_cost_usd` via `db.conn` — see db.py note). Pricing loaded from `pricing/models.toml`.
-- **`ocw/core/alerts.py`**: `AlertEngine` with 13 alert types, `CooldownTracker` (in-memory, per agent+type, resets on restart), `AlertDispatcher` routing to 6 channel types (stdout, file, ntfy, webhook, Discord, Telegram). `AlertEngine.fire()` is the external entry point for other modules (SchemaValidator, DriftDetector) to fire alerts. Suppressed alerts are still persisted to DB but not dispatched to channels. Hardcoded thresholds: retry loop fires at 4+ identical tool calls in last 6 spans; failure rate fires at >20% errors in last 20 spans (checked every 5th error); session duration default 3600s. Stdout and file channels always include full detail regardless of `include_captured_content` config.
-- **`ocw/core/drift.py`**: `DriftDetector` — Z-score based behavioral drift detection, fires at session end.
-- **`ocw/core/schema_validator.py`**: Validates tool outputs against declared or genson-inferred JSON Schema. Only fires on `gen_ai.tool.call` spans with `gen_ai.tool.output` in attributes. Schema priority: 1) declared file from agent config `output_schema`, 2) inferred schema from `DriftBaseline.output_schema_inferred`. Caches schemas in-memory per agent.
-- **`ocw/core/models.py`**: All domain dataclasses — `NormalizedSpan`, `SessionRecord`, `Alert`, `DriftBaseline`, filter types, etc.
-- **`ocw/core/config.py`**: `OcwConfig` dataclass tree, TOML loading/writing, config file discovery.
-- **`ocw/sdk/agent.py`**: `@watch()` decorator creates session spans only. `record_llm_call()` and `record_tool_call()` create child spans for manual instrumentation. LLM call spans from provider clients require `patch_anthropic()`, `patch_openai()`, etc.
-- **`ocw/sdk/transport.py`**: `HttpTransport` — buffers up to 1000 spans, retries with exponential backoff (3 attempts, 2s base). Used when `ocw serve` runs as a separate process.
-- **`ocw/sdk/bootstrap.py`**: `ensure_initialised()` — lazy, thread-safe, idempotent bootstrap of config -> DB -> IngestPipeline -> TracerProvider. Called automatically by `@watch()` and all `patch_*()` functions. Registers atexit flush.
-- **`ocw/sdk/integrations/`**: `Integration` protocol in `base.py`. Provider patches (anthropic, openai, gemini, bedrock, litellm) monkey-patch client methods to create OTel spans with token usage. `litellm.py` covers 100+ providers via LiteLLM's unified interface and uses a `contextvars.ContextVar` (`_ocw_litellm_active`) to suppress inner provider patches (openai, anthropic) when active — prevents double-counted spans. Framework patches (langchain, langgraph, crewai, autogen) wrap LLM/tool methods. `llamaindex.py` and `openai_agents_sdk.py` are thin wrappers around those SDKs' native OTel support. `nemoclaw.py` is a WebSocket observer for OpenShell Gateway sandbox events.
-- **`ocw/otel/provider.py`**: `OcwSpanExporter` (custom `SpanExporter` that feeds spans into `IngestPipeline`), `convert_otel_span()` (OTel `ReadableSpan` → `NormalizedSpan`), `build_tracer_provider()` (sets up global `TracerProvider` with local + optional OTLP exporters).
-- **`ocw/otel/exporters.py`**: Prometheus metric reader setup via `build_prometheus_exporter()`.
-- **`ocw/otel/semconv.py`**: `GenAIAttributes` and `OcwAttributes` — OTel GenAI semantic convention constants.
-- **`ocw/api/app.py`**: FastAPI app factory. `ocw serve` starts it with uvicorn. Accepts `db`, `config`, `ingest_pipeline` for testability. Registers all routers under `/api/v1` plus `/metrics`.
-- **`ocw/api/middleware.py`**: `IngestAuthMiddleware` — protects `POST /api/v1/spans` with Bearer token. Returns `JSONResponse(401)` directly (not `HTTPException`, which doesn't propagate from `BaseHTTPMiddleware.dispatch`).
-- **`ocw/api/deps.py`**: `require_api_key` — FastAPI dependency for optional API key auth on GET endpoints. Only enforced when `api.auth.enabled = true` in config.
-- **`ocw/api/routes/`**: One file per resource — `spans.py` (OTLP JSON ingest), `traces.py`, `cost.py`, `tools.py`, `alerts.py`, `drift.py`, `metrics.py` (Prometheus text format from DB queries).
-- **`ocw/mcp/server.py`**: FastMCP stdio server exposing observability data to Claude Code. Uses either a read-only DuckDB connection or HTTP proxy to `ocw serve`. Initialized via `init()` from `cmd_mcp.py`.
-- **`ocw/cli/main.py`**: Root Click group with global options (`--config`, `--json`, `--no-color`, `--db`, `--agent`, `-v`). Registers all subcommands.
+- **`tj/core/db.py`**: `StorageBackend` protocol + `DuckDBBackend` + `InMemoryBackend` (for tests) + migration runner. Migrations are `(version, sql)` tuples in a `MIGRATIONS` list — never modify existing ones, only append. **Note:** `StorageBackend` doesn't cover every query. Some callers (e.g. `CostEngine`, `cmd_status`) access `db.conn` directly for queries not in the protocol (cost updates, active session lookups). Helper `_row_to_session()` is used to convert raw DuckDB rows.
+- **`tj/core/ingest.py`**: `IngestPipeline` (central hub), `SpanSanitizer` (rejects oversized/malformed spans), `strip_captured_content()`. Post-ingest hooks (cost, alerts, schema) are optional and error-tolerant — hook failures are logged, never propagated.
+- **`tj/core/pricing.py`**: `ModelRates` (frozen dataclass), `load_pricing_table()` (LRU-cached), `get_rates(provider, model)`. Falls back to default rates for unknown models.
+- **`tj/core/cost.py`**: `calculate_cost()` (pure function, rounds to 8dp) + `CostEngine` (post-ingest hook that updates `spans.cost_usd` and `sessions.total_cost_usd` via `db.conn` — see db.py note). Pricing loaded from `pricing/models.toml`.
+- **`tj/core/alerts.py`**: `AlertEngine` with 13 alert types, `CooldownTracker` (in-memory, per agent+type, resets on restart), `AlertDispatcher` routing to 6 channel types (stdout, file, ntfy, webhook, Discord, Telegram). `AlertEngine.fire()` is the external entry point for other modules (SchemaValidator, DriftDetector) to fire alerts. Suppressed alerts are still persisted to DB but not dispatched to channels. Hardcoded thresholds: retry loop fires at 4+ identical tool calls in last 6 spans; failure rate fires at >20% errors in last 20 spans (checked every 5th error); session duration default 3600s. Stdout and file channels always include full detail regardless of `include_captured_content` config.
+- **`tj/core/drift.py`**: `DriftDetector` — Z-score based behavioral drift detection, fires at session end.
+- **`tj/core/schema_validator.py`**: Validates tool outputs against declared or genson-inferred JSON Schema. Only fires on `gen_ai.tool.call` spans with `gen_ai.tool.output` in attributes. Schema priority: 1) declared file from agent config `output_schema`, 2) inferred schema from `DriftBaseline.output_schema_inferred`. Caches schemas in-memory per agent.
+- **`tj/core/models.py`**: All domain dataclasses — `NormalizedSpan`, `SessionRecord`, `Alert`, `DriftBaseline`, filter types, etc.
+- **`tj/core/config.py`**: `TjConfig` dataclass tree, TOML loading/writing, config file discovery.
+- **`tj/sdk/agent.py`**: `@watch()` decorator creates session spans only. `record_llm_call()` and `record_tool_call()` create child spans for manual instrumentation. LLM call spans from provider clients require `patch_anthropic()`, `patch_openai()`, etc.
+- **`tj/sdk/transport.py`**: `HttpTransport` — buffers up to 1000 spans, retries with exponential backoff (3 attempts, 2s base). Used when `tj serve` runs as a separate process.
+- **`tj/sdk/bootstrap.py`**: `ensure_initialised()` — lazy, thread-safe, idempotent bootstrap of config -> DB -> IngestPipeline -> TracerProvider. Called automatically by `@watch()` and all `patch_*()` functions. Registers atexit flush.
+- **`tj/sdk/integrations/`**: `Integration` protocol in `base.py`. Provider patches (anthropic, openai, gemini, bedrock, litellm) monkey-patch client methods to create OTel spans with token usage. `litellm.py` covers 100+ providers via LiteLLM's unified interface and uses a `contextvars.ContextVar` (`_tj_litellm_active`) to suppress inner provider patches (openai, anthropic) when active — prevents double-counted spans. Framework patches (langchain, langgraph, crewai, autogen) wrap LLM/tool methods. `llamaindex.py` and `openai_agents_sdk.py` are thin wrappers around those SDKs' native OTel support. `nemoclaw.py` is a WebSocket observer for OpenShell Gateway sandbox events.
+- **`tj/otel/provider.py`**: `TjSpanExporter` (custom `SpanExporter` that feeds spans into `IngestPipeline`), `convert_otel_span()` (OTel `ReadableSpan` → `NormalizedSpan`), `build_tracer_provider()` (sets up global `TracerProvider` with local + optional OTLP exporters).
+- **`tj/otel/exporters.py`**: Prometheus metric reader setup via `build_prometheus_exporter()`.
+- **`tj/otel/semconv.py`**: `GenAIAttributes` and `TjAttributes` — OTel GenAI semantic convention constants.
+- **`tj/api/app.py`**: FastAPI app factory. `tj serve` starts it with uvicorn. Accepts `db`, `config`, `ingest_pipeline` for testability. Registers all routers under `/api/v1` plus `/metrics`.
+- **`tj/api/middleware.py`**: `IngestAuthMiddleware` — protects `POST /api/v1/spans` with Bearer token. Returns `JSONResponse(401)` directly (not `HTTPException`, which doesn't propagate from `BaseHTTPMiddleware.dispatch`).
+- **`tj/api/deps.py`**: `require_api_key` — FastAPI dependency for optional API key auth on GET endpoints. Only enforced when `api.auth.enabled = true` in config.
+- **`tj/api/routes/`**: One file per resource — `spans.py` (OTLP JSON ingest), `traces.py`, `cost.py`, `tools.py`, `alerts.py`, `drift.py`, `metrics.py` (Prometheus text format from DB queries).
+- **`tj/mcp/server.py`**: FastMCP stdio server exposing observability data to Claude Code. Uses either a read-only DuckDB connection or HTTP proxy to `tj serve`. Initialized via `init()` from `cmd_mcp.py`.
+- **`tj/cli/main.py`**: Root Click group with global options (`--config`, `--json`, `--no-color`, `--db`, `--agent`, `-v`). Registers all subcommands.
 
 ### CLI Commands
 
 | Command | File | Description |
 |---|---|---|
-| `ocw onboard` | `cmd_onboard.py` | Setup wizard: agent ID, budget, ingest secret, optional daemon install (launchd/systemd) |
-| `ocw status` | `cmd_status.py` | Agent overview: session, cost, tokens, alerts. Exit 1 if active alerts |
-| `ocw traces` | `cmd_traces.py` | List recent traces in table format |
-| `ocw trace <id>` | `cmd_traces.py` | Span waterfall tree for a single trace |
-| `ocw cost` | `cmd_cost.py` | Cost breakdown by day/agent/model/tool with `--json` support |
-| `ocw alerts` | `cmd_alerts.py` | Alert history with severity/type filtering |
-| `ocw tools` | `cmd_tools.py` | Tool call summary: call counts, avg duration |
-| `ocw export` | `cmd_export.py` | Export spans as json (NDJSON), csv, otlp, or openevals format |
-| `ocw serve` | `cmd_serve.py` | Start FastAPI + uvicorn server with retention cleanup cron |
-| `ocw stop` | `cmd_stop.py` | Stop background daemon or ocw serve process |
-| `ocw budget` | `cmd_budget.py` | Get/set daily and session budget limits per agent or globally |
-| `ocw drift` | `cmd_drift.py` | Show drift baselines and Z-scores for recent sessions |
-| `ocw demo [scenario]` | `cmd_demo.py` | Run Agent Incident Library scenarios (zero-config, no API keys). `ocw demo` lists all; `ocw demo retry-loop` runs one |
-| `ocw mcp` | `cmd_mcp.py` | Start the stdio MCP server for Claude Code integration |
-| `ocw uninstall` | `cmd_uninstall.py` | Remove all OCW data, config, and daemon |
-| `ocw doctor` | `cmd_doctor.py` | Health checks (config, DB, secrets, webhooks, drift readiness, schema-vs-capture consistency). Exit 0 = ok, 1 = warnings, 2 = errors |
+| `tj onboard` | `cmd_onboard.py` | Setup wizard: agent ID, budget, ingest secret, optional daemon install (launchd/systemd) |
+| `tj status` | `cmd_status.py` | Agent overview: session, cost, tokens, alerts. Exit 1 if active alerts |
+| `tj traces` | `cmd_traces.py` | List recent traces in table format |
+| `tj trace <id>` | `cmd_traces.py` | Span waterfall tree for a single trace |
+| `tj cost` | `cmd_cost.py` | Cost breakdown by day/agent/model/tool with `--json` support |
+| `tj alerts` | `cmd_alerts.py` | Alert history with severity/type filtering |
+| `tj tools` | `cmd_tools.py` | Tool call summary: call counts, avg duration |
+| `tj export` | `cmd_export.py` | Export spans as json (NDJSON), csv, otlp, or openevals format |
+| `tj serve` | `cmd_serve.py` | Start FastAPI + uvicorn server with retention cleanup cron |
+| `tj stop` | `cmd_stop.py` | Stop background daemon or tj serve process |
+| `tj budget` | `cmd_budget.py` | Get/set daily and session budget limits per agent or globally |
+| `tj drift` | `cmd_drift.py` | Show drift baselines and Z-scores for recent sessions |
+| `tj demo [scenario]` | `cmd_demo.py` | Run Agent Incident Library scenarios (zero-config, no API keys). `tj demo` lists all; `tj demo retry-loop` runs one |
+| `tj mcp` | `cmd_mcp.py` | Start the stdio MCP server for Claude Code integration |
+| `tj uninstall` | `cmd_uninstall.py` | Remove all OCW data, config, and daemon |
+| `tj doctor` | `cmd_doctor.py` | Health checks (config, DB, secrets, webhooks, drift readiness, schema-vs-capture consistency). Exit 0 = ok, 1 = warnings, 2 = errors |
 
 All commands support `--json` for machine-readable output. Commands that query alerts use exit code 1 if active (unacknowledged, unsuppressed) alerts exist.
 
-**CLI testing pattern:** Tests use `click.testing.CliRunner` with `unittest.mock.patch` on `ocw.cli.main.load_config` and `ocw.cli.main.open_db` to inject an `InMemoryBackend` and test config. See `tests/integration/test_cli.py`. Note: `cmd_doctor` opens its own DuckDB connection via `config.storage.path` to verify writability — in tests you must set this to a real temp path (e.g. `tmp_path / "test.duckdb"`).
+**CLI testing pattern:** Tests use `click.testing.CliRunner` with `unittest.mock.patch` on `tj.cli.main.load_config` and `tj.cli.main.open_db` to inject an `InMemoryBackend` and test config. See `tests/integration/test_cli.py`. Note: `cmd_doctor` opens its own DuckDB connection via `config.storage.path` to verify writability — in tests you must set this to a real temp path (e.g. `tmp_path / "test.duckdb"`).
 
 ### REST API
 
@@ -157,57 +157,57 @@ When a span has a `conversation_id` matching an existing session, it's attribute
 1. **DuckDB only** — never import `sqlite3` or write SQLite-style queries. Use `TIMESTAMPTZ` not `TEXT` for timestamps, `JSON` not `TEXT` for JSON. When extracting dates from `TIMESTAMPTZ` columns, always use `CAST(col AT TIME ZONE 'UTC' AS DATE)` — bare `CAST(col AS DATE)` converts to the local timezone first, causing mismatches with Python's `utcnow().date()`.
 2. **TOML binary mode** — `tomllib.load()` requires `open(path, "rb")` not `"r"`. Text mode raises `TypeError` at runtime. Use the conditional import: `tomllib` (3.11+) or `tomli` (3.10). Writing config uses `tomli_w`.
 3. **`@watch()` alone does NOT create LLM spans** — only session start/end. Provider patches (`patch_anthropic()`, `patch_openai()`, etc.) are needed for individual LLM call spans.
-4. **Ingest auth** — `POST /api/v1/spans` requires `Authorization: Bearer <ingest_secret>` from `security.ingest_secret` in `ocw.toml`.
+4. **Ingest auth** — `POST /api/v1/spans` requires `Authorization: Bearer <ingest_secret>` from `security.ingest_secret` in `tj.toml`.
 5. **Alert content stripping** — remove `prompt_content`, `completion_content`, `tool_input`, `tool_output` from alert payloads sent to external channels unless `alerts.include_captured_content = true`. Stdout and file channels always get full payload.
 6. **No unicode bullets** — never hardcode `•` or `\u2022`; Rich handles bullet formatting.
 7. **Parameterised SQL only** — never use f-string SQL.
 8. **All test spans via factory** — never construct `NormalizedSpan` directly in tests; use `tests/factories.py` (`make_llm_span`, `make_session`, `make_tool_span`, `make_session_with_spans`).
-9. **Use `utcnow()` for timestamps** — always use `ocw.utils.time_parse.utcnow()` instead of `datetime.now()` or `datetime.utcnow()`. It returns timezone-aware UTC datetimes.
-10. **Use semconv constants** — reference `GenAIAttributes` and `OcwAttributes` from `ocw/otel/semconv.py` instead of hardcoding OTel attribute name strings.
+9. **Use `utcnow()` for timestamps** — always use `tj.utils.time_parse.utcnow()` instead of `datetime.now()` or `datetime.utcnow()`. It returns timezone-aware UTC datetimes.
+10. **Use semconv constants** — reference `GenAIAttributes` and `TjAttributes` from `tj/otel/semconv.py` instead of hardcoding OTel attribute name strings.
 11. **OTel TracerProvider is global and set-once** — `trace.set_tracer_provider()` only works once per process. In tests, set the provider once at module level (not per-test in a fixture) and clear spans between tests. Use a custom `_CollectingExporter(SpanExporter)` since `InMemorySpanExporter` is not available in the installed OTel version. See `tests/agents/test_mock_scenarios.py` for the SDK test pattern and `tests/integration/test_full_pipeline.py` for the pipeline pattern.
-12. **New SDK integrations must call `ensure_initialised()`** — every `patch_*()` convenience function must call `from ocw.sdk.bootstrap import ensure_initialised; ensure_initialised()` before installing hooks. This lazily bootstraps the TracerProvider + IngestPipeline on first use.
-13. **PyPI package name is `openclawwatch`, not `ocw`** — `pip install openclawwatch` is the correct install command. The CLI command is `ocw` and the Python package directory is `ocw/`, but the published package name on PyPI is `openclawwatch`. Never write `pip install ocw` in docs, examples, or comments.
+12. **New SDK integrations must call `ensure_initialised()`** — every `patch_*()` convenience function must call `from tj.sdk.bootstrap import ensure_initialised; ensure_initialised()` before installing hooks. This lazily bootstraps the TracerProvider + IngestPipeline on first use.
+13. **PyPI package name is `tokenjam`, not `ocw`** — `pip install tokenjam` is the correct install command. The CLI command is `tj` and the Python package directory is `tj/`. The published package name on PyPI is `tokenjam`. Never write `pip install ocw` in docs, examples, or comments.
 14. **Version bump on release** — both `pyproject.toml` (`version = "X.Y.Z"`) and `sdk-ts/package.json` (`"version": "X.Y.Z"`) must be bumped to the new version before creating a GitHub release. The publish workflows (`publish-pypi.yml`, `publish-npm.yml`) trigger on `release published` events and will fail with 403 if the version already exists on PyPI/npm.
 
 ## Config
 
-Config is TOML, discovered at: `ocw.toml` -> `.ocw/config.toml` -> `~/.config/ocw/config.toml`. Override with `--config` or `OCW_CONFIG` env var. Full config hierarchy is in `ocw/core/config.py` (`OcwConfig` dataclass).
+Config is TOML, discovered at: `tj.toml` -> `.tj/config.toml` -> `~/.config/tj/config.toml`. Override with `--config` or `TJ_CONFIG` env var. Full config hierarchy is in `tj/core/config.py` (`TjConfig` dataclass).
 
-`ocw onboard --claude-code` and `ocw onboard --codex` always write to the **global** config (`~/.config/ocw/config.toml`) regardless of cwd. This is intentional: each coding-agent integration reads one ingest secret from a single global location (`~/.claude/settings.json` or `~/.codex/config.toml`), and per-project configs would rotate that secret on every onboard, breaking auth for previously onboarded projects. Onboarded Claude Code project paths are tracked in `~/.config/ocw/projects.json` for clean uninstall. Codex onboarding is fully project-agnostic — Codex hardcodes `service.name=codex_exec` in its binary, so there is one Codex agent ID for all projects.
+`tj onboard --claude-code` and `tj onboard --codex` always write to the **global** config (`~/.config/tj/config.toml`) regardless of cwd. This is intentional: each coding-agent integration reads one ingest secret from a single global location (`~/.claude/settings.json` or `~/.codex/config.toml`), and per-project configs would rotate that secret on every onboard, breaking auth for previously onboarded projects. Onboarded Claude Code project paths are tracked in `~/.config/tj/projects.json` for clean uninstall. Codex onboarding is fully project-agnostic — Codex hardcodes `service.name=codex_exec` in its binary, so there is one Codex agent ID for all projects.
 
 ## Daemon (launchd / systemd)
 
-`ocw onboard` (and `ocw onboard --claude-code` / `--codex`) installs a background daemon that runs `ocw serve` on login:
-- **macOS**: `~/Library/LaunchAgents/com.openclawwatch.serve.plist` — loaded via `launchctl load`. Logs at `/tmp/ocw-serve.{out,err}`.
-- **Linux**: `~/.config/systemd/user/openclawwatch.service` — enabled via `systemctl --user enable --now openclawwatch`.
-- **Other**: skipped with a notice; user runs `ocw serve` manually.
+`tj onboard` (and `tj onboard --claude-code` / `--codex`) installs a background daemon that runs `tj serve` on login:
+- **macOS**: `~/Library/LaunchAgents/com.tokenjam.serve.plist` — loaded via `launchctl load`. Logs at `/tmp/tj-serve.{out,err}`.
+- **Linux**: `~/.config/systemd/user/tokenjam.service` — enabled via `systemctl --user enable --now tokenjam`.
+- **Other**: skipped with a notice; user runs `tj serve` manually.
 
-Reinstall behavior: `--claude-code` and `--codex` onboard check `_daemon_already_running()` (launchctl list / systemctl is-active) and skip reinstall when the daemon is up unless `--force` is passed. This avoids spurious "Background Items Added" prompts on macOS during second-project onboards. The launchd path always uses `launchctl unload -w` then `launchctl load -w` — the `-w` flag clears any Disabled=true entry from the launchd database (`ocw stop` writes Disabled=true via `launchctl unload -w`), without which a subsequent plain `launchctl load` is a silent no-op. Use `ocw stop` to halt the daemon, `ocw uninstall` to remove unit files. `ocw stop` also sweeps for any orphan foreground `ocw serve` processes (e.g. from a manual `ocw serve &`) so it reliably frees port 7391.
+Reinstall behavior: `--claude-code` and `--codex` onboard check `_daemon_already_running()` (launchctl list / systemctl is-active) and skip reinstall when the daemon is up unless `--force` is passed. This avoids spurious "Background Items Added" prompts on macOS during second-project onboards. The launchd path always uses `launchctl unload -w` then `launchctl load -w` — the `-w` flag clears any Disabled=true entry from the launchd database (`tj stop` writes Disabled=true via `launchctl unload -w`), without which a subsequent plain `launchctl load` is a silent no-op. Use `tj stop` to halt the daemon, `tj uninstall` to remove unit files. `tj stop` also sweeps for any orphan foreground `tj serve` processes (e.g. from a manual `tj serve &`) so it reliably frees port 7391.
 
-`ocw serve` writes its resolved config path to `~/.local/share/ocw/server.state` at startup. This is informational — onboarding flows (`--claude-code` and `--codex`) always write to the global config, so server.state is not used for secret-sync.
+`tj serve` writes its resolved config path to `~/.local/share/tj/server.state` at startup. This is informational — onboarding flows (`--claude-code` and `--codex`) always write to the global config, so server.state is not used for secret-sync.
 
 ## MCP Server
 
-`ocw mcp` starts a FastMCP stdio server for Claude Code integration. The connection mode is chosen at startup by `cmd_mcp.py`:
-1. If `ocw serve` is reachable on `config.api.{host,port}`, MCP proxies to it via HTTP (live ingest visible).
-2. Otherwise it tries to spawn `ocw serve` in the background and waits up to 10s for the port.
+`tj mcp` starts a FastMCP stdio server for Claude Code integration. The connection mode is chosen at startup by `cmd_mcp.py`:
+1. If `tj serve` is reachable on `config.api.{host,port}`, MCP proxies to it via HTTP (live ingest visible).
+2. Otherwise it tries to spawn `tj serve` in the background and waits up to 10s for the port.
 3. If neither works, it falls back to a **read-only DuckDB connection** — read tools still work, but newly ingested spans won't appear until restart.
 4. If no config file is found, `init()` is skipped and tools return a no-config sentinel.
 
-To wire into Claude Code locally: `claude mcp add ocw --scope user -- ocw mcp` (the `--claude-code` and `--codex` onboard flows do this automatically when the `claude` CLI is on PATH; `--codex` also writes `[mcp_servers.ocw]` to `~/.codex/config.toml`).
+To wire into Claude Code locally: `claude mcp add tj --scope user -- tj mcp` (the `--claude-code` and `--codex` onboard flows do this automatically when the `claude` CLI is on PATH; `--codex` also writes `[mcp_servers.tj]` to `~/.codex/config.toml`).
 
 ## Codex CLI Integration
 
-`ocw onboard --codex` writes `[otel]` and `[mcp_servers.ocw]` blocks to `~/.codex/config.toml`. Notes:
+`tj onboard --codex` writes `[otel]` and `[mcp_servers.tj]` blocks to `~/.codex/config.toml`. Notes:
 - Codex hardcodes `service.name=codex_exec` in its binary and silently ignores `[otel.resource]`, so onboarding does **not** write that block — all Codex traces land under the `codex_exec` agent ID regardless of project. Onboarding is one-time global, not per-project.
-- Codex emits OTLP **logs** (not spans) to `/v1/logs`. `ocw/api/routes/logs.py` converts Codex events (`sse_event`, `user_prompt`, `tool_decision`, `tool_result`, `api_request`) into normalized spans for cost/drift/alerting. Event name is read from `attrs["event.name"]` when the OTLP body is empty (Codex schema quirk); epoch `timeUnixNano=0` falls back to `attrs["event.timestamp"]` ISO-8601. The `/v1/logs` endpoint also silently accepts `resourceSpans`/`resourceMetrics` because Codex's exporter reuses one endpoint for all signal types.
-- Re-running `ocw onboard --codex` is a no-op only when both `[otel]` and `[mcp_servers.ocw]` are present in `~/.codex/config.toml`. Re-onboarding either Codex or Claude Code cross-syncs the ingest secret into the other's config if it's already configured.
+- Codex emits OTLP **logs** (not spans) to `/v1/logs`. `tj/api/routes/logs.py` converts Codex events (`sse_event`, `user_prompt`, `tool_decision`, `tool_result`, `api_request`) into normalized spans for cost/drift/alerting. Event name is read from `attrs["event.name"]` when the OTLP body is empty (Codex schema quirk); epoch `timeUnixNano=0` falls back to `attrs["event.timestamp"]` ISO-8601. The `/v1/logs` endpoint also silently accepts `resourceSpans`/`resourceMetrics` because Codex's exporter reuses one endpoint for all signal types.
+- Re-running `tj onboard --codex` is a no-op only when both `[otel]` and `[mcp_servers.tj]` are present in `~/.codex/config.toml`. Re-onboarding either Codex or Claude Code cross-syncs the ingest secret into the other's config if it's already configured.
 
 ## Examples Convention
 
 Each provider integration in `examples/single_provider/` and each framework in `examples/single_framework/` lives in **its own file** — when adding a new SDK integration, mirror this layout (one demo file per integration) so the examples directory stays a 1:1 map of supported integrations. Multi-provider/framework demos go in `examples/multi/`; alert and drift demos that need no API keys go in `examples/alerts_and_drift/`.
 
-The Agent Incident Library at `incidents/` is separate: each scenario is a `scenario.py` + `README.md` pair, invoked via `ocw demo <scenario>`. Scenarios inject synthetic spans through `ocw/demo/env.py` to simulate real failures (retry-loop, surprise-cost, hallucination-drift) without API keys or a live server.
+The Agent Incident Library at `incidents/` is separate: each scenario is a `scenario.py` + `README.md` pair, invoked via `tj demo <scenario>`. Scenarios inject synthetic spans through `tj/demo/env.py` to simulate real failures (retry-loop, surprise-cost, hallucination-drift) without API keys or a live server.
 
 ## Pricing
 
@@ -223,7 +223,7 @@ All steps are blocking — lint, typecheck, and tests must pass for CI to go gre
 
 ## Packaging
 
-Build system is hatchling. The `pyproject.toml` requires `[tool.hatch.build.targets.wheel] packages = ["ocw"]` because the package name (`openclawwatch`) differs from the directory name (`ocw`). Without this, `pip install -e .` fails.
+Build system is hatchling. The `pyproject.toml` requires `[tool.hatch.build.targets.wheel] packages = ["tj"]` because the package name (`tokenjam`) differs from the directory name (`tj`). Without this, `pip install -e .` fails.
 
 Key runtime dependency: `pytz` is required by DuckDB for `TIMESTAMPTZ` column handling — it's listed explicitly in `dependencies` because DuckDB doesn't declare it on all platforms.
 

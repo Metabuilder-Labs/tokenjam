@@ -1,11 +1,11 @@
 # OpenClaw + OCW Example
 
-This is a config-only integration — no Python code needed. OpenClaw's built-in OTel exporter sends traces directly to `ocw serve`.
+This is a config-only integration — no Python code needed. OpenClaw's built-in OTel exporter sends traces directly to `tj serve`.
 
 ## Step 1: Start OCW
 
 ```bash
-pip install openclawwatch
+pip install tokenjam
 ocw onboard
 ocw serve &
 ```
@@ -86,7 +86,7 @@ ocw tools
 ocw alerts
 ```
 
-## Expected output from `ocw traces`
+## Expected output from `tj traces`
 
 ```
 TRACE ID         AGENT                  SPANS  DURATION  STATUS

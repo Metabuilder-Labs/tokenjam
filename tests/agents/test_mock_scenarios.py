@@ -16,8 +16,8 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from ocw.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
-from ocw.otel.semconv import GenAIAttributes
+from tj.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
+from tj.otel.semconv import GenAIAttributes
 
 
 class _CollectingExporter(SpanExporter):
@@ -51,8 +51,8 @@ _provider.add_span_processor(SimpleSpanProcessor(_exporter))
 trace.set_tracer_provider(_provider)
 
 # Re-bind the SDK's _tracer to use the new provider
-import ocw.sdk.agent as _agent_mod
-_agent_mod._tracer = trace.get_tracer("ocw.sdk")
+import tj.sdk.agent as _agent_mod
+_agent_mod._tracer = trace.get_tracer("tj.sdk")
 
 
 @pytest.fixture(autouse=True)
@@ -60,7 +60,7 @@ def otel_exporter():
     """Clear collected spans before each test."""
     _exporter.clear()
     # Re-bind in case it was overwritten
-    _agent_mod._tracer = trace.get_tracer("ocw.sdk")
+    _agent_mod._tracer = trace.get_tracer("tj.sdk")
     yield _exporter
 
 

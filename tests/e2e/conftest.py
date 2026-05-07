@@ -7,6 +7,6 @@ import pytest
 
 # Auto-skip every test in e2e/ if the key is absent
 pytestmark = pytest.mark.skipif(
-    not os.environ.get("OCW_ANTHROPIC_API_KEY"),
-    reason="OCW_ANTHROPIC_API_KEY not set — skipping e2e tests",
+    not os.environ.get("TJ_ANTHROPIC_API_KEY"),
+    reason="TJ_ANTHROPIC_API_KEY not set — skipping e2e tests",
 )

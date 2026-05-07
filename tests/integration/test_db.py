@@ -5,8 +5,8 @@ from datetime import date, timedelta
 
 import pytest
 
-from ocw.core.db import InMemoryBackend, run_migrations
-from ocw.core.models import (
+from tj.core.db import InMemoryBackend, run_migrations
+from tj.core.models import (
     AgentRecord,
     Alert,
     AlertFilters,
@@ -17,8 +17,8 @@ from ocw.core.models import (
     Severity,
     TraceFilters,
 )
-from ocw.utils.ids import new_uuid, new_span_id, new_trace_id
-from ocw.utils.time_parse import utcnow
+from tj.utils.ids import new_uuid, new_span_id, new_trace_id
+from tj.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session, make_tool_span
 
 

@@ -6,18 +6,18 @@ import httpx
 
 from unittest.mock import patch
 
-from ocw.api.app import create_app
-from ocw.core.config import (
+from tj.api.app import create_app
+from tj.core.config import (
     AgentConfig,
     AlertsConfig,
     ApiAuthConfig,
     ApiConfig,
     BudgetConfig,
-    OcwConfig,
+    TjConfig,
     SecurityConfig,
 )
-from ocw.core.db import InMemoryBackend
-from ocw.core.ingest import IngestPipeline
+from tj.core.db import InMemoryBackend
+from tj.core.ingest import IngestPipeline
 from tests.factories import make_llm_span, make_tool_span
 
 
@@ -33,7 +33,7 @@ def db():
 
 @pytest.fixture
 def config():
-    return OcwConfig(
+    return TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret=INGEST_SECRET),
         api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
@@ -42,7 +42,7 @@ def config():
 
 @pytest.fixture
 def config_with_api_auth():
-    return OcwConfig(
+    return TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret=INGEST_SECRET),
         api=ApiConfig(auth=ApiAuthConfig(enabled=True, api_key="my-api-key")),
@@ -344,7 +344,7 @@ async def test_status_and_traces_agree_on_agent_ids(client):
 
 async def test_post_budget_zero_clears_limit(db):
     """Posting daily_usd=0 (empty field from UI) should set limit to None (no limit)."""
-    cfg = OcwConfig(
+    cfg = TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret=INGEST_SECRET),
         api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
@@ -354,8 +354,8 @@ async def test_post_budget_zero_clears_limit(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("ocw.api.routes.budget.find_config_file", return_value="/fake/ocw.toml"), \
-         patch("ocw.api.routes.budget.write_config"):
+    with patch("tj.api.routes.budget.find_config_file", return_value="/fake/ocw.toml"), \
+         patch("tj.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post("/api/v1/budget", json={"scope": "my-agent", "daily_usd": 0})
 

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { GenAIAttributes, OcwAttributes } from "./semconv.js";
+import { GenAIAttributes, TjAttributes } from "./semconv.js";
 
 describe("GenAIAttributes", () => {
   it("has standard GenAI attribute keys", () => {
@@ -20,10 +20,10 @@ describe("GenAIAttributes", () => {
   });
 });
 
-describe("OcwAttributes", () => {
+describe("TjAttributes", () => {
   it("has ocw-specific attribute keys", () => {
-    assert.equal(OcwAttributes.COST_USD, "ocw.cost_usd");
-    assert.equal(OcwAttributes.ALERT_TYPE, "ocw.alert.type");
-    assert.equal(OcwAttributes.SANDBOX_EVENT, "ocw.sandbox.event");
+    assert.equal(TjAttributes.COST_USD, "ocw.cost_usd");
+    assert.equal(TjAttributes.ALERT_TYPE, "ocw.alert.type");
+    assert.equal(TjAttributes.SANDBOX_EVENT, "ocw.sandbox.event");
   });
 });

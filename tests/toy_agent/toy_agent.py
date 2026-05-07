@@ -1,6 +1,6 @@
 import anthropic
-from ocw.sdk import watch
-from ocw.sdk.integrations.anthropic import patch_anthropic
+from tj.sdk import watch
+from tj.sdk.integrations.anthropic import patch_anthropic
 
 # Intercept all Anthropic API calls
 patch_anthropic()

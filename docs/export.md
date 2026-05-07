@@ -9,7 +9,7 @@
 Forward spans to Grafana, Datadog, Honeycomb, or any OTel-compatible backend:
 
 ```bash
-ocw export --format otlp
+tj export --format otlp
 ```
 
 ### OpenEvals / AgentEvals
@@ -17,7 +17,7 @@ ocw export --format otlp
 Export traces in the format expected by trajectory evaluation tools:
 
 ```bash
-ocw export --format openevals --output traces.json
+tj export --format openevals --output traces.json
 ```
 
 ### JSON (NDJSON)
@@ -25,8 +25,8 @@ ocw export --format openevals --output traces.json
 One span per line, newline-delimited JSON:
 
 ```bash
-ocw export --format json
-ocw export --format json --output spans.jsonl
+tj export --format json
+tj export --format json --output spans.jsonl
 ```
 
 ### CSV
@@ -34,8 +34,8 @@ ocw export --format json --output spans.jsonl
 Flat tabular format for spreadsheets or pandas:
 
 ```bash
-ocw export --format csv
-ocw export --format csv --output spans.csv
+tj export --format csv
+tj export --format csv --output spans.csv
 ```
 
 ## Filtering exports
@@ -43,14 +43,14 @@ ocw export --format csv --output spans.csv
 All formats support filtering by time range, agent, and more:
 
 ```bash
-ocw export --format json --since 7d           # last 7 days
-ocw export --format csv --agent my-agent      # specific agent
-ocw export --format otlp --since 1h           # last hour
+tj export --format json --since 7d           # last 7 days
+tj export --format csv --agent my-agent      # specific agent
+tj export --format otlp --since 1h           # last hour
 ```
 
 ## Prometheus metrics
 
-When `ocw serve` is running, Prometheus metrics are available at:
+When `tj serve` is running, Prometheus metrics are available at:
 
 ```
 http://127.0.0.1:7391/metrics

@@ -2,8 +2,8 @@
 from __future__ import annotations
 import logging
 
-from ocw.core.cost import calculate_cost
-from ocw.core.pricing import load_pricing_table, get_rates
+from tj.core.cost import calculate_cost
+from tj.core.pricing import load_pricing_table, get_rates
 
 
 def test_calculate_cost_known_model():
@@ -42,7 +42,7 @@ def test_calculate_cost_with_cache_write_tokens():
 
 
 def test_calculate_cost_unknown_model_uses_default(caplog):
-    with caplog.at_level(logging.WARNING, logger="ocw.core.cost"):
+    with caplog.at_level(logging.WARNING, logger="tj.core.cost"):
         cost = calculate_cost("unknown_provider", "unknown_model", 1_000_000, 1_000_000)
     # Default rates: 0.50 input, 2.00 output per MTok
     # (1M/1M * 0.50) + (1M/1M * 2.00) = 2.50
@@ -51,7 +51,7 @@ def test_calculate_cost_unknown_model_uses_default(caplog):
 
 
 def test_calculate_cost_zero_tokens_returns_zero_no_warning(caplog):
-    with caplog.at_level(logging.WARNING, logger="ocw.core.cost"):
+    with caplog.at_level(logging.WARNING, logger="tj.core.cost"):
         cost = calculate_cost("anthropic", "claude-haiku-4-5", 0, 0)
     assert cost == 0.0
     assert caplog.text == ""
@@ -109,8 +109,8 @@ def test_pricing_file_exists_at_expected_path():
     """Regression: PRICING_FILE must resolve to ocw/pricing/models.toml,
     not a path outside the package. A broken path causes $0.00 costs
     when installed via pip (non-editable). See v0.1.7 fix."""
-    from ocw.core.pricing import PRICING_FILE
+    from tj.core.pricing import PRICING_FILE
     assert PRICING_FILE.exists(), f"Pricing file not found at {PRICING_FILE}"
-    assert "ocw" in PRICING_FILE.parts, (
-        f"PRICING_FILE should be inside the ocw package, got {PRICING_FILE}"
+    assert "tj" in PRICING_FILE.parts, (
+        f"PRICING_FILE should be inside the tj package, got {PRICING_FILE}"
     )

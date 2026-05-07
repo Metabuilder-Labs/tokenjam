@@ -4,7 +4,7 @@ from __future__ import annotations
 import duckdb
 import pytest
 
-from ocw.core.cost import CostEngine
+from tj.core.cost import CostEngine
 from tests.factories import make_llm_span, make_session
 
 

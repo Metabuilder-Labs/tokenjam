@@ -42,7 +42,7 @@ webhook_url = "https://discord.com/api/webhooks/..."
 
 NemoClaw wraps OpenClaw, so you can use both integrations together:
 
-1. Point OpenClaw's `diagnostics-otel` plugin at `ocw serve` for trace/cost/drift observability (see [OpenClaw integration](openclaw.md))
+1. Point OpenClaw's `diagnostics-otel` plugin at `tj serve` for trace/cost/drift observability (see [OpenClaw integration](openclaw.md))
 2. Add `watch_nemoclaw()` for sandbox enforcement alerts
 
 This gives you full coverage: LLM costs, tool call traces, behavioral drift detection, and real-time sandbox violation alerts.

@@ -18,7 +18,7 @@ if not os.environ.get("OPENAI_API_KEY"):
 
 from crewai import Agent, Task, Crew  # noqa: E402
 
-from ocw.sdk import watch, patch_crewai  # noqa: E402
+from tj.sdk import watch, patch_crewai  # noqa: E402
 
 # Patch CrewAI BEFORE creating agents and tasks
 patch_crewai()

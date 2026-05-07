@@ -5,14 +5,14 @@ import json
 from pathlib import Path
 
 import pytest
-from ocw.core.db import InMemoryBackend
-from ocw.core.config import OcwConfig, AgentConfig, BudgetConfig, DefaultsConfig
-from ocw.core.models import AlertType, Severity, Alert, DriftBaseline, AgentRecord
-from ocw.utils.time_parse import utcnow
-from ocw.utils.ids import new_uuid
+from tj.core.db import InMemoryBackend
+from tj.core.config import TjConfig, AgentConfig, BudgetConfig, DefaultsConfig
+from tj.core.models import AlertType, Severity, Alert, DriftBaseline, AgentRecord
+from tj.utils.time_parse import utcnow
+from tj.utils.ids import new_uuid
 from tests.factories import make_session, make_llm_span, make_tool_span
 
-from ocw.mcp.server import (
+from tj.mcp.server import (
     _tool_get_status,
     _tool_get_budget_headroom,
     _tool_list_agents,
@@ -28,8 +28,8 @@ from ocw.mcp.server import (
 )
 
 
-def _make_config(agent_id: str = "test-agent", daily_usd: float | None = 5.0) -> OcwConfig:
-    return OcwConfig(
+def _make_config(agent_id: str = "test-agent", daily_usd: float | None = 5.0) -> TjConfig:
+    return TjConfig(
         version="1",
         defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=daily_usd)),
         agents={agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))},
@@ -337,7 +337,7 @@ def test_acknowledge_alert_unknown_id():
 
 def test_setup_project_writes_settings(tmp_path):
     config = _make_config()
-    config_path = tmp_path / "ocw.toml"
+    config_path = tmp_path / "tj.toml"
     config_path.write_text("")  # dummy
 
     result = _tool_setup_project(
@@ -358,7 +358,7 @@ def test_setup_project_warns_no_global_otlp(tmp_path, monkeypatch):
     # Simulate no global ~/.claude/settings.json by pointing home() to a fresh tmp dir
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake_home")
     config = _make_config()
-    config_path = tmp_path / "ocw.toml"
+    config_path = tmp_path / "tj.toml"
     config_path.write_text("")
 
     result = _tool_setup_project(
@@ -384,7 +384,7 @@ def test_setup_project_no_config():
 # --- open_dashboard ---
 
 from unittest.mock import patch, MagicMock
-from ocw.mcp.server import _tool_open_dashboard
+from tj.mcp.server import _tool_open_dashboard
 
 
 def test_open_dashboard_already_running():
@@ -441,8 +441,8 @@ def test_open_dashboard_no_config():
 # HTTP mode tests (_HttpDB and HTTP-path handlers)
 # ---------------------------------------------------------------------------
 
-import ocw.mcp.server as _srv
-from ocw.mcp.server import (
+import tj.mcp.server as _srv
+from tj.mcp.server import (
     _tool_list_traces,
     _tool_list_alerts,
     _tool_list_active_sessions,
@@ -477,7 +477,7 @@ def test_get_status_http_mode():
     config = _make_config("alpha")
     _set_serve_url("http://127.0.0.1:7391")
     try:
-        with patch("ocw.mcp.server._http_get", return_value=fake_response):
+        with patch("tj.mcp.server._http_get", return_value=fake_response):
             result = _tool_get_status(None, config, "alpha")
         assert result["status"] == "active"
         # cost_today from API must be renamed to cost_today_usd in the single-agent path
@@ -508,7 +508,7 @@ def test_list_traces_http_mode():
     }
     _set_serve_url("http://127.0.0.1:7391")
     try:
-        with patch("ocw.mcp.server._http_get", return_value=fake_response):
+        with patch("tj.mcp.server._http_get", return_value=fake_response):
             db = _srv._HttpDB()
             result = _tool_list_traces(db, "a", None, 20)
         assert result["count"] == 1
@@ -537,7 +537,7 @@ def test_list_alerts_http_mode():
     }
     _set_serve_url("http://127.0.0.1:7391")
     try:
-        with patch("ocw.mcp.server._http_get", return_value=fake_response):
+        with patch("tj.mcp.server._http_get", return_value=fake_response):
             db = _srv._HttpDB()
             result = _tool_list_alerts(db, "alpha", None, False)
         assert result["count"] == 1
@@ -568,7 +568,7 @@ def test_list_active_sessions_http_mode():
     }
     _set_serve_url("http://127.0.0.1:7391")
     try:
-        with patch("ocw.mcp.server._http_get", return_value=fake_response):
+        with patch("tj.mcp.server._http_get", return_value=fake_response):
             result = _tool_list_active_sessions(None)
         assert result["count"] == 1
     finally:
@@ -634,7 +634,7 @@ def test_get_budget_headroom_http_mode_reads_live_limits():
     config = _make_config("alpha", daily_usd=5.0)  # stale config still has old $5
     _set_serve_url("http://127.0.0.1:7391")
     try:
-        with patch("ocw.mcp.server._http_get", side_effect=fake_http_get):
+        with patch("tj.mcp.server._http_get", side_effect=fake_http_get):
             result = _tool_get_budget_headroom(None, config, "alpha")
         # Must use the live 20.0 limit, not the stale 5.0 from config
         assert result["daily_limit_usd"] == 20.0

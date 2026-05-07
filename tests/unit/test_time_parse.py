@@ -2,40 +2,40 @@ from datetime import datetime, timezone, timedelta
 from unittest.mock import patch
 import pytest
 
-from ocw.utils.time_parse import parse_since, utcnow
+from tj.utils.time_parse import parse_since, utcnow
 
 
 class TestParseSinceRelative:
     def test_minutes(self):
-        with patch("ocw.utils.time_parse.utcnow") as mock_now:
+        with patch("tj.utils.time_parse.utcnow") as mock_now:
             now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
             mock_now.return_value = now
             result = parse_since("30m")
             assert result == now - timedelta(minutes=30)
 
     def test_hours(self):
-        with patch("ocw.utils.time_parse.utcnow") as mock_now:
+        with patch("tj.utils.time_parse.utcnow") as mock_now:
             now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
             mock_now.return_value = now
             result = parse_since("1h")
             assert result == now - timedelta(hours=1)
 
     def test_hours_large(self):
-        with patch("ocw.utils.time_parse.utcnow") as mock_now:
+        with patch("tj.utils.time_parse.utcnow") as mock_now:
             now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
             mock_now.return_value = now
             result = parse_since("12h")
             assert result == now - timedelta(hours=12)
 
     def test_days(self):
-        with patch("ocw.utils.time_parse.utcnow") as mock_now:
+        with patch("tj.utils.time_parse.utcnow") as mock_now:
             now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
             mock_now.return_value = now
             result = parse_since("7d")
             assert result == now - timedelta(days=7)
 
     def test_single_day(self):
-        with patch("ocw.utils.time_parse.utcnow") as mock_now:
+        with patch("tj.utils.time_parse.utcnow") as mock_now:
             now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
             mock_now.return_value = now
             result = parse_since("1d")
@@ -80,7 +80,7 @@ class TestParseSinceInvalid:
             parse_since("0m")
 
     def test_whitespace_handled(self):
-        with patch("ocw.utils.time_parse.utcnow") as mock_now:
+        with patch("tj.utils.time_parse.utcnow") as mock_now:
             now = datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc)
             mock_now.return_value = now
             result = parse_since("  30m  ")

@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "openclawwatch"
+name = "tokenjam"
 version = "0.1.9"
-description = "Local-first OTel-native observability for Autonomous AI agents"
+description = "TokenJam — local-first OTel-native observability for Autonomous AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -57,14 +57,14 @@ dev       = ["pytest", "pytest-asyncio", "httpx", "ruff", "mypy"]
 mcp       = ["fastmcp"]
 
 [project.scripts]
-ocw = "ocw.cli.main:cli"
+tj = "tj.cli.main:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/synthetic", "tests/agents", "tests/integration"]
 asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
-packages = ["ocw"]
+packages = ["tj"]
 artifacts = ["incidents"]
 
 [tool.ruff]

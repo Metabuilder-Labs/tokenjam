@@ -26,7 +26,7 @@ export const GenAIAttributes = {
   SPAN_LLM_CALL: "gen_ai.llm.call",
 } as const;
 
-export const OcwAttributes = {
+export const TjAttributes = {
   COST_USD: "ocw.cost_usd",
   ALERT_TYPE: "ocw.alert.type",
   ALERT_SEVERITY: "ocw.alert.severity",

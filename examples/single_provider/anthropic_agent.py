@@ -5,7 +5,7 @@ Demonstrates the full Anthropic tool-use loop: message -> tool_use -> tool_resul
 response, with each tool invocation recorded via ocw's record_tool_call().
 
 Requirements:
-    pip install anthropic openclawwatch
+    pip install anthropic tokenjam
 
 Environment:
     ANTHROPIC_API_KEY  — required
@@ -21,9 +21,9 @@ import sys
 
 import anthropic
 
-from ocw.sdk import watch
-from ocw.sdk.agent import record_tool_call
-from ocw.sdk.integrations.anthropic import patch_anthropic
+from tj.sdk import watch
+from tj.sdk.agent import record_tool_call
+from tj.sdk.integrations.anthropic import patch_anthropic
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     print("ERROR: ANTHROPIC_API_KEY environment variable is required.")

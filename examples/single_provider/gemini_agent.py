@@ -6,7 +6,7 @@ gemini-2.0-flash and asks for a concise summary. All LLM calls are captured
 by ocw via the Gemini integration patch.
 
 Requirements:
-    pip install google-generativeai openclawwatch
+    pip install google-generativeai tokenjam
 
 Environment:
     GOOGLE_API_KEY or GEMINI_API_KEY  — required (either one works)
@@ -31,8 +31,8 @@ os.environ.setdefault("GOOGLE_API_KEY", api_key)
 
 import google.generativeai as genai  # noqa: E402
 
-from ocw.sdk import watch  # noqa: E402
-from ocw.sdk.integrations.gemini import patch_gemini  # noqa: E402
+from tj.sdk import watch  # noqa: E402
+from tj.sdk.integrations.gemini import patch_gemini  # noqa: E402
 
 # Monkey-patch the Gemini client BEFORE creating any model instances.
 patch_gemini()

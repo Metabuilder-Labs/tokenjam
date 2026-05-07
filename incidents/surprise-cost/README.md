@@ -1,6 +1,6 @@
 # Why did my agent just spend $47 on a hello world?
 
-**Run it:** `pip install openclawwatch && ocw demo surprise-cost`
+**Run it:** `pip install tokenjam && tj demo surprise-cost`
 
 ---
 
@@ -75,13 +75,13 @@ OCW fires `cost_budget_session` and `cost_budget_daily` alerts when limits are c
 ## Try it yourself
 
 ```bash
-pip install openclawwatch
-ocw demo surprise-cost
+pip install tokenjam
+tj demo surprise-cost
 ```
 
 Emits 8 synthetic LLM spans with real pricing math. No API keys, no model calls, no network traffic.
 
-To track real spend, instrument your agent with the OCW SDK and run `ocw serve`. Then `ocw cost --by model` shows live per-model attribution.
+To track real spend, instrument your agent with the OCW SDK and run `tj serve`. Then `tj cost --by model` shows live per-model attribution.
 
 ## Next in the incident library
 
@@ -90,4 +90,4 @@ To track real spend, instrument your agent with the OCW SDK and run `ocw serve`.
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/openclawwatch) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install openclawwatch` and start seeing what your agent actually does.
+[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.

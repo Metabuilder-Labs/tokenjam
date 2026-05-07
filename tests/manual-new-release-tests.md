@@ -6,7 +6,7 @@ Run through this sequence after a new release is published to PyPI to verify the
 
 - `ANTHROPIC_API_KEY` set (for Anthropic examples)
 - `OPENAI_API_KEY` set (for LiteLLM/OpenAI examples)
-- Both should be in `~/openclawwatch/.env.local` and sourced before running
+- Both should be in `~/tokenjam/.env.local` and sourced before running
 
 ## Test sequence
 
@@ -16,7 +16,7 @@ ocw uninstall --yes 2>/dev/null
 rm -rf ~/.ocw ~/.config/ocw .ocw
 
 # 2. Install latest
-pip3 install --upgrade openclawwatch
+pip3 install --upgrade tokenjam
 ocw --version
 
 # 3. Onboard
@@ -28,7 +28,7 @@ ocw onboard
 ocw stop
 
 # 5. Run an example (no server — tests direct DuckDB write)
-cd ~/openclawwatch
+cd ~/tokenjam
 source .env.local
 python3 examples/single_provider/anthropic_agent.py
 
@@ -91,10 +91,10 @@ git init -q
 ocw onboard --claude-code
 NEW_SECRET=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.claude/settings.json')))['env']['OTEL_EXPORTER_OTLP_HEADERS'])")
 [ "$ORIG_SECRET" = "$NEW_SECRET" ] && echo "ok: secret unchanged" || echo "FAIL: secret rotated"
-cd ~/openclawwatch
+cd ~/tokenjam
 
 # Verify global config fallback: CLI works from a dir with no local config
-cd /tmp && ocw status && cd ~/openclawwatch
+cd /tmp && tj status && cd ~/tokenjam
 ```
 
 ## Codex CLI integration (if applicable)
@@ -102,7 +102,7 @@ cd /tmp && ocw status && cd ~/openclawwatch
 Codex onboarding is **one-time global** (Codex hardcodes `service.name=codex_exec`); all Codex traces land under the `codex_exec` agent ID.
 
 ```bash
-# Prereq: ocw serve running — onboard reads ~/.local/share/ocw/server.state
+# Prereq: tj serve running — onboard reads ~/.local/share/ocw/server.state
 # to find the running server's config and sync the ingest secret.
 ocw serve &
 sleep 2

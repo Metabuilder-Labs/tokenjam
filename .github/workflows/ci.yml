@@ -25,10 +25,10 @@ jobs:
         run: pip install -e ".[dev,mcp]"
 
       - name: Lint
-        run: ruff check ocw/
+        run: ruff check tj/
 
       - name: Type check
-        run: mypy ocw/
+        run: mypy tj/
 
       - name: Run tests
         run: pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/

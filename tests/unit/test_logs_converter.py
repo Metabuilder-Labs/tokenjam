@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ocw.api.routes.logs import (
+from tj.api.routes.logs import (
     _api_error_to_span,
     _api_request_to_span,
     _codex_api_request_to_span,
@@ -21,8 +21,8 @@ from ocw.api.routes.logs import (
     _user_prompt_to_span,
     parse_log_records,
 )
-from ocw.core.models import SpanKind, SpanStatus
-from ocw.otel.semconv import GenAIAttributes
+from tj.core.models import SpanKind, SpanStatus
+from tj.otel.semconv import GenAIAttributes
 from tests.factories import (
     make_claude_code_api_error_log,
     make_claude_code_api_request_log,
@@ -281,7 +281,7 @@ def test_api_error_missing_error_raises():
 # ── Codex converter tests ────────────────────────────────────────────────
 
 CODEX_CONV_ID = "conv-codex-abc"
-CODEX_RESOURCE = {"service.name": "codex-openclawwatch"}
+CODEX_RESOURCE = {"service.name": "codex-tokenjam"}
 
 
 def _codex_sse_attrs(**overrides) -> dict:
@@ -310,7 +310,7 @@ def test_codex_sse_completion_produces_llm_span():
     assert span.output_tokens == 150
     assert span.cache_tokens == 200
     assert span.session_id == CODEX_CONV_ID
-    assert span.agent_id == "codex-openclawwatch"
+    assert span.agent_id == "codex-tokenjam"
 
 
 def test_codex_sse_non_completion_returns_none():

@@ -6,17 +6,17 @@ from typing import Any
 
 import pytest
 
-from ocw.core.config import OcwConfig, AgentConfig
-from ocw.core.models import (
+from tj.core.config import TjConfig, AgentConfig
+from tj.core.models import (
     AlertType,
     DriftBaseline,
     NormalizedSpan,
     SchemaValidationResult,
     Severity,
 )
-from ocw.core.schema_validator import SchemaValidator
-from ocw.otel.semconv import GenAIAttributes
-from ocw.utils.time_parse import utcnow
+from tj.core.schema_validator import SchemaValidator
+from tj.otel.semconv import GenAIAttributes
+from tj.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_tool_span
 
 
@@ -89,7 +89,7 @@ def _make_validator(
     if schema_file:
         agents[agent_id] = AgentConfig(output_schema=schema_file)
 
-    config = OcwConfig(version="1", agents=agents)
+    config = TjConfig(version="1", agents=agents)
 
     if baseline_schema:
         db.baselines[agent_id] = DriftBaseline(

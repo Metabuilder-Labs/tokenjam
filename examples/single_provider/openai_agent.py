@@ -6,7 +6,7 @@ the final response token by token. All LLM calls and tool invocations are
 captured by ocw.
 
 Requirements:
-    pip install openai openclawwatch
+    pip install openai tokenjam
 
 Environment:
     OPENAI_API_KEY  — required
@@ -22,9 +22,9 @@ import sys
 
 import openai
 
-from ocw.sdk import watch
-from ocw.sdk.agent import record_tool_call
-from ocw.sdk.integrations.openai import patch_openai
+from tj.sdk import watch
+from tj.sdk.agent import record_tool_call
+from tj.sdk.integrations.openai import patch_openai
 
 if not os.environ.get("OPENAI_API_KEY"):
     print("ERROR: OPENAI_API_KEY environment variable is required.")
