@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="https://opencla.watch/icon.svg" alt="TokenJam" width="72" height="72">
+<img src="https://tokenjam.dev/icon.svg" alt="TokenJam" width="72" height="72">
 
 # TokenJam
 
