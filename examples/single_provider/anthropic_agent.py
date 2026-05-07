@@ -21,9 +21,9 @@ import sys
 
 import anthropic
 
-from tj.sdk import watch
-from tj.sdk.agent import record_tool_call
-from tj.sdk.integrations.anthropic import patch_anthropic
+from tokenjam.sdk import watch
+from tokenjam.sdk.agent import record_tool_call
+from tokenjam.sdk.integrations.anthropic import patch_anthropic
 
 if not os.environ.get("ANTHROPIC_API_KEY"):
     print("ERROR: ANTHROPIC_API_KEY environment variable is required.")

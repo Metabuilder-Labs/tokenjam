@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`tj drift` CLI** — behavioral drift report with Rich table output showing baseline vs latest session Z-scores per dimension (input tokens, output tokens, duration, tool call count, tool sequence similarity). Color-coded thresholds, `--json` support, exit code 1 if drift detected.
 - **`tj budget` CLI + API** — view and set per-agent daily/session cost limits. `GET/POST /api/v1/budget` endpoints. `resolve_effective_budget()` with per-field fallback so each budget dimension independently falls back to defaults.
 - **Architecture documentation** (`docs/architecture.md`) — comprehensive architecture doc covering design principles, data flow, SDK internals, alert system, drift detection, MCP server, Claude Code pipeline, and testing architecture.
-- `ClaudeCodeEvents` semantic conventions in `tj/otel/semconv.py` for Claude Code log event attributes
+- `ClaudeCodeEvents` semantic conventions in `tokenjam/otel/semconv.py` for Claude Code log event attributes
 
 ### Fixed
 - Budget resolution inconsistency between AlertEngine enforcement and CLI display — both now use `resolve_effective_budget()` with field-level merge
@@ -49,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.1.5] - 2026-04-08
 
 ### Fixed
-- **Pricing file missing from pip wheel** — `pricing/models.toml` was at the repo root, outside the `tj/` package. Moved to `tj/pricing/models.toml` so it's included in the wheel. All costs showed `$0.000000` in v0.1.4.
+- **Pricing file missing from pip wheel** — `pricing/models.toml` was at the repo root, outside the `tokenjam/` package. Moved to `tokenjam/pricing/models.toml` so it's included in the wheel. All costs showed `$0.000000` in v0.1.4.
 
 ### Improved
 - **Web UI polish** — custom hover tooltips on waterfall bars (cost, duration, model), back arrow on trace detail, agent name heading, tighter layout, hint text on Status and Traces views

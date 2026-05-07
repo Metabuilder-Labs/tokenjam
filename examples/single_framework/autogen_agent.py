@@ -18,7 +18,7 @@ if not os.environ.get("OPENAI_API_KEY"):
 
 from autogen import ConversableAgent  # noqa: E402
 
-from tj.sdk import watch, patch_autogen  # noqa: E402
+from tokenjam.sdk import watch, patch_autogen  # noqa: E402
 
 # Patch AutoGen BEFORE creating agents
 patch_autogen()

@@ -51,8 +51,8 @@ except Exception:
 
 from agents import Agent, Runner  # noqa: E402
 
-from tj.sdk import watch  # noqa: E402
-from tj.sdk.integrations.openai_agents_sdk import patch_openai_agents  # noqa: E402
+from tokenjam.sdk import watch  # noqa: E402
+from tokenjam.sdk.integrations.openai_agents_sdk import patch_openai_agents  # noqa: E402
 
 # Configure the Agents SDK's native OTel to export to ocw serve.
 # NOTE: patch_openai_agents() does NOT call ensure_initialised() — it sets up

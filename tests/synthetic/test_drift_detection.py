@@ -6,17 +6,17 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tj.core.config import AgentConfig, DriftConfig, TjConfig
-from tj.core.db import InMemoryBackend
-from tj.core.drift import DriftDetector, build_baseline, evaluate_drift
-from tj.core.models import (
+from tokenjam.core.config import AgentConfig, DriftConfig, TjConfig
+from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.drift import DriftDetector, build_baseline, evaluate_drift
+from tokenjam.core.models import (
     AgentRecord,
     AlertType,
     DriftBaseline,
     Severity,
 )
-from tj.utils.ids import new_uuid
-from tj.utils.time_parse import utcnow
+from tokenjam.utils.ids import new_uuid
+from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_session, make_session_with_spans, make_tool_span
 
 

@@ -57,14 +57,14 @@ dev       = ["pytest", "pytest-asyncio", "httpx", "ruff", "mypy"]
 mcp       = ["fastmcp"]
 
 [project.scripts]
-tj = "tj.cli.main:cli"
+tj = "tokenjam.cli.main:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/synthetic", "tests/agents", "tests/integration"]
 asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
-packages = ["tj"]
+packages = ["tokenjam"]
 artifacts = ["incidents"]
 
 [tool.ruff]

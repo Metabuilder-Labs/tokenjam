@@ -22,9 +22,9 @@ import sys
 
 import openai
 
-from tj.sdk import watch
-from tj.sdk.agent import record_tool_call
-from tj.sdk.integrations.openai import patch_openai
+from tokenjam.sdk import watch
+from tokenjam.sdk.agent import record_tool_call
+from tokenjam.sdk.integrations.openai import patch_openai
 
 if not os.environ.get("OPENAI_API_KEY"):
     print("ERROR: OPENAI_API_KEY environment variable is required.")

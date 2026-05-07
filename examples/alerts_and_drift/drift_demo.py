@@ -16,8 +16,8 @@ from __future__ import annotations
 
 import time
 
-from tj.sdk.agent import AgentSession, record_llm_call, record_tool_call
-from tj.utils.ids import new_uuid
+from tokenjam.sdk.agent import AgentSession, record_llm_call, record_tool_call
+from tokenjam.utils.ids import new_uuid
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ def run_anomalous_session() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from tj.sdk.bootstrap import ensure_initialised
+    from tokenjam.sdk.bootstrap import ensure_initialised
     ensure_initialised()
 
     print("=" * 60)

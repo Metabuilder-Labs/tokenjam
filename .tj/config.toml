@@ -5,7 +5,7 @@
 daily_usd = 5.0
 
 [security]
-ingest_secret = "d64e34bb9e4d8a4d4507f4517cb6f51f0ad18c48676eb82d5fb69e48547df0d3"
+ingest_secret = "0e6c9410b23e9be9dd86170f36e59a162c5d508d7302be3f24393baafcf3dfc8"
 
 [capture]
 prompts = false

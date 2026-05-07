@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date
 from unittest.mock import MagicMock
 
-from tj.core.alerts import (
+from tokenjam.core.alerts import (
     AlertDispatcher,
     AlertEngine,
     FileChannel,
@@ -14,7 +14,7 @@ from tj.core.alerts import (
     _strip_sensitive,
     SENSITIVE_DETAIL_KEYS,
 )
-from tj.core.config import (
+from tokenjam.core.config import (
     AgentConfig,
     AlertChannelConfig,
     AlertsConfig,
@@ -23,10 +23,10 @@ from tj.core.config import (
     TjConfig,
     SensitiveAction,
 )
-from tj.core.models import Alert, AlertType, Severity, SpanStatus
-from tj.otel.semconv import TjAttributes
-from tj.utils.ids import new_uuid
-from tj.utils.time_parse import utcnow
+from tokenjam.core.models import Alert, AlertType, Severity, SpanStatus
+from tokenjam.otel.semconv import TjAttributes
+from tokenjam.utils.ids import new_uuid
+from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session, make_tool_span
 
 

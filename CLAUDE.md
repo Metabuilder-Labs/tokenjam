@@ -13,8 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pip install -e ".[dev]"
 
 # Linting and type checking
-ruff check tj/                  # line-length=100, target py310
-mypy tj/                        # strict mode
+ruff check tokenjam/                  # line-length=100, target py310
+mypy tokenjam/                        # strict mode
 
 # Tests (CI runs all except e2e)
 pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
@@ -41,7 +41,7 @@ cd sdk-ts && npm install && npm test
 
 ```
 tokenjam/
-├── tj/                    Python package
+├── tokenjam/                    Python package
 │   ├── cli/                Click CLI commands (one file per command)
 │   ├── core/               Domain logic — NO CLI or HTTP imports allowed here
 │   ├── otel/               OTel SDK wiring + semantic conventions
@@ -80,34 +80,34 @@ Post-ingest hooks run synchronously after each span is written to DB:
 
 ### Package Dependency Rules
 
-- `tj/core/` is pure domain logic. **Must never import from `tj.cli` or `tj.api`**. CLI and API import from core, not the reverse.
-- `tj/otel/semconv.py` is pure constants with no internal imports.
+- `tokenjam/core/` is pure domain logic. **Must never import from `tokenjam.cli` or `tokenjam.api`**. CLI and API import from core, not the reverse.
+- `tokenjam/otel/semconv.py` is pure constants with no internal imports.
 - `sdk-ts/` is fully independent from Python — communicates only via HTTP.
 
 ### Key Modules
 
-- **`tj/core/db.py`**: `StorageBackend` protocol + `DuckDBBackend` + `InMemoryBackend` (for tests) + migration runner. Migrations are `(version, sql)` tuples in a `MIGRATIONS` list — never modify existing ones, only append. **Note:** `StorageBackend` doesn't cover every query. Some callers (e.g. `CostEngine`, `cmd_status`) access `db.conn` directly for queries not in the protocol (cost updates, active session lookups). Helper `_row_to_session()` is used to convert raw DuckDB rows.
-- **`tj/core/ingest.py`**: `IngestPipeline` (central hub), `SpanSanitizer` (rejects oversized/malformed spans), `strip_captured_content()`. Post-ingest hooks (cost, alerts, schema) are optional and error-tolerant — hook failures are logged, never propagated.
-- **`tj/core/pricing.py`**: `ModelRates` (frozen dataclass), `load_pricing_table()` (LRU-cached), `get_rates(provider, model)`. Falls back to default rates for unknown models.
-- **`tj/core/cost.py`**: `calculate_cost()` (pure function, rounds to 8dp) + `CostEngine` (post-ingest hook that updates `spans.cost_usd` and `sessions.total_cost_usd` via `db.conn` — see db.py note). Pricing loaded from `pricing/models.toml`.
-- **`tj/core/alerts.py`**: `AlertEngine` with 13 alert types, `CooldownTracker` (in-memory, per agent+type, resets on restart), `AlertDispatcher` routing to 6 channel types (stdout, file, ntfy, webhook, Discord, Telegram). `AlertEngine.fire()` is the external entry point for other modules (SchemaValidator, DriftDetector) to fire alerts. Suppressed alerts are still persisted to DB but not dispatched to channels. Hardcoded thresholds: retry loop fires at 4+ identical tool calls in last 6 spans; failure rate fires at >20% errors in last 20 spans (checked every 5th error); session duration default 3600s. Stdout and file channels always include full detail regardless of `include_captured_content` config.
-- **`tj/core/drift.py`**: `DriftDetector` — Z-score based behavioral drift detection, fires at session end.
-- **`tj/core/schema_validator.py`**: Validates tool outputs against declared or genson-inferred JSON Schema. Only fires on `gen_ai.tool.call` spans with `gen_ai.tool.output` in attributes. Schema priority: 1) declared file from agent config `output_schema`, 2) inferred schema from `DriftBaseline.output_schema_inferred`. Caches schemas in-memory per agent.
-- **`tj/core/models.py`**: All domain dataclasses — `NormalizedSpan`, `SessionRecord`, `Alert`, `DriftBaseline`, filter types, etc.
-- **`tj/core/config.py`**: `TjConfig` dataclass tree, TOML loading/writing, config file discovery.
-- **`tj/sdk/agent.py`**: `@watch()` decorator creates session spans only. `record_llm_call()` and `record_tool_call()` create child spans for manual instrumentation. LLM call spans from provider clients require `patch_anthropic()`, `patch_openai()`, etc.
-- **`tj/sdk/transport.py`**: `HttpTransport` — buffers up to 1000 spans, retries with exponential backoff (3 attempts, 2s base). Used when `tj serve` runs as a separate process.
-- **`tj/sdk/bootstrap.py`**: `ensure_initialised()` — lazy, thread-safe, idempotent bootstrap of config -> DB -> IngestPipeline -> TracerProvider. Called automatically by `@watch()` and all `patch_*()` functions. Registers atexit flush.
-- **`tj/sdk/integrations/`**: `Integration` protocol in `base.py`. Provider patches (anthropic, openai, gemini, bedrock, litellm) monkey-patch client methods to create OTel spans with token usage. `litellm.py` covers 100+ providers via LiteLLM's unified interface and uses a `contextvars.ContextVar` (`_tj_litellm_active`) to suppress inner provider patches (openai, anthropic) when active — prevents double-counted spans. Framework patches (langchain, langgraph, crewai, autogen) wrap LLM/tool methods. `llamaindex.py` and `openai_agents_sdk.py` are thin wrappers around those SDKs' native OTel support. `nemoclaw.py` is a WebSocket observer for OpenShell Gateway sandbox events.
-- **`tj/otel/provider.py`**: `TjSpanExporter` (custom `SpanExporter` that feeds spans into `IngestPipeline`), `convert_otel_span()` (OTel `ReadableSpan` → `NormalizedSpan`), `build_tracer_provider()` (sets up global `TracerProvider` with local + optional OTLP exporters).
-- **`tj/otel/exporters.py`**: Prometheus metric reader setup via `build_prometheus_exporter()`.
-- **`tj/otel/semconv.py`**: `GenAIAttributes` and `TjAttributes` — OTel GenAI semantic convention constants.
-- **`tj/api/app.py`**: FastAPI app factory. `tj serve` starts it with uvicorn. Accepts `db`, `config`, `ingest_pipeline` for testability. Registers all routers under `/api/v1` plus `/metrics`.
-- **`tj/api/middleware.py`**: `IngestAuthMiddleware` — protects `POST /api/v1/spans` with Bearer token. Returns `JSONResponse(401)` directly (not `HTTPException`, which doesn't propagate from `BaseHTTPMiddleware.dispatch`).
-- **`tj/api/deps.py`**: `require_api_key` — FastAPI dependency for optional API key auth on GET endpoints. Only enforced when `api.auth.enabled = true` in config.
-- **`tj/api/routes/`**: One file per resource — `spans.py` (OTLP JSON ingest), `traces.py`, `cost.py`, `tools.py`, `alerts.py`, `drift.py`, `metrics.py` (Prometheus text format from DB queries).
-- **`tj/mcp/server.py`**: FastMCP stdio server exposing observability data to Claude Code. Uses either a read-only DuckDB connection or HTTP proxy to `tj serve`. Initialized via `init()` from `cmd_mcp.py`.
-- **`tj/cli/main.py`**: Root Click group with global options (`--config`, `--json`, `--no-color`, `--db`, `--agent`, `-v`). Registers all subcommands.
+- **`tokenjam/core/db.py`**: `StorageBackend` protocol + `DuckDBBackend` + `InMemoryBackend` (for tests) + migration runner. Migrations are `(version, sql)` tuples in a `MIGRATIONS` list — never modify existing ones, only append. **Note:** `StorageBackend` doesn't cover every query. Some callers (e.g. `CostEngine`, `cmd_status`) access `db.conn` directly for queries not in the protocol (cost updates, active session lookups). Helper `_row_to_session()` is used to convert raw DuckDB rows.
+- **`tokenjam/core/ingest.py`**: `IngestPipeline` (central hub), `SpanSanitizer` (rejects oversized/malformed spans), `strip_captured_content()`. Post-ingest hooks (cost, alerts, schema) are optional and error-tolerant — hook failures are logged, never propagated.
+- **`tokenjam/core/pricing.py`**: `ModelRates` (frozen dataclass), `load_pricing_table()` (LRU-cached), `get_rates(provider, model)`. Falls back to default rates for unknown models.
+- **`tokenjam/core/cost.py`**: `calculate_cost()` (pure function, rounds to 8dp) + `CostEngine` (post-ingest hook that updates `spans.cost_usd` and `sessions.total_cost_usd` via `db.conn` — see db.py note). Pricing loaded from `pricing/models.toml`.
+- **`tokenjam/core/alerts.py`**: `AlertEngine` with 13 alert types, `CooldownTracker` (in-memory, per agent+type, resets on restart), `AlertDispatcher` routing to 6 channel types (stdout, file, ntfy, webhook, Discord, Telegram). `AlertEngine.fire()` is the external entry point for other modules (SchemaValidator, DriftDetector) to fire alerts. Suppressed alerts are still persisted to DB but not dispatched to channels. Hardcoded thresholds: retry loop fires at 4+ identical tool calls in last 6 spans; failure rate fires at >20% errors in last 20 spans (checked every 5th error); session duration default 3600s. Stdout and file channels always include full detail regardless of `include_captured_content` config.
+- **`tokenjam/core/drift.py`**: `DriftDetector` — Z-score based behavioral drift detection, fires at session end.
+- **`tokenjam/core/schema_validator.py`**: Validates tool outputs against declared or genson-inferred JSON Schema. Only fires on `gen_ai.tool.call` spans with `gen_ai.tool.output` in attributes. Schema priority: 1) declared file from agent config `output_schema`, 2) inferred schema from `DriftBaseline.output_schema_inferred`. Caches schemas in-memory per agent.
+- **`tokenjam/core/models.py`**: All domain dataclasses — `NormalizedSpan`, `SessionRecord`, `Alert`, `DriftBaseline`, filter types, etc.
+- **`tokenjam/core/config.py`**: `TjConfig` dataclass tree, TOML loading/writing, config file discovery.
+- **`tokenjam/sdk/agent.py`**: `@watch()` decorator creates session spans only. `record_llm_call()` and `record_tool_call()` create child spans for manual instrumentation. LLM call spans from provider clients require `patch_anthropic()`, `patch_openai()`, etc.
+- **`tokenjam/sdk/transport.py`**: `HttpTransport` — buffers up to 1000 spans, retries with exponential backoff (3 attempts, 2s base). Used when `tj serve` runs as a separate process.
+- **`tokenjam/sdk/bootstrap.py`**: `ensure_initialised()` — lazy, thread-safe, idempotent bootstrap of config -> DB -> IngestPipeline -> TracerProvider. Called automatically by `@watch()` and all `patch_*()` functions. Registers atexit flush.
+- **`tokenjam/sdk/integrations/`**: `Integration` protocol in `base.py`. Provider patches (anthropic, openai, gemini, bedrock, litellm) monkey-patch client methods to create OTel spans with token usage. `litellm.py` covers 100+ providers via LiteLLM's unified interface and uses a `contextvars.ContextVar` (`_tj_litellm_active`) to suppress inner provider patches (openai, anthropic) when active — prevents double-counted spans. Framework patches (langchain, langgraph, crewai, autogen) wrap LLM/tool methods. `llamaindex.py` and `openai_agents_sdk.py` are thin wrappers around those SDKs' native OTel support. `nemoclaw.py` is a WebSocket observer for OpenShell Gateway sandbox events.
+- **`tokenjam/otel/provider.py`**: `TjSpanExporter` (custom `SpanExporter` that feeds spans into `IngestPipeline`), `convert_otel_span()` (OTel `ReadableSpan` → `NormalizedSpan`), `build_tracer_provider()` (sets up global `TracerProvider` with local + optional OTLP exporters).
+- **`tokenjam/otel/exporters.py`**: Prometheus metric reader setup via `build_prometheus_exporter()`.
+- **`tokenjam/otel/semconv.py`**: `GenAIAttributes` and `TjAttributes` — OTel GenAI semantic convention constants.
+- **`tokenjam/api/app.py`**: FastAPI app factory. `tj serve` starts it with uvicorn. Accepts `db`, `config`, `ingest_pipeline` for testability. Registers all routers under `/api/v1` plus `/metrics`.
+- **`tokenjam/api/middleware.py`**: `IngestAuthMiddleware` — protects `POST /api/v1/spans` with Bearer token. Returns `JSONResponse(401)` directly (not `HTTPException`, which doesn't propagate from `BaseHTTPMiddleware.dispatch`).
+- **`tokenjam/api/deps.py`**: `require_api_key` — FastAPI dependency for optional API key auth on GET endpoints. Only enforced when `api.auth.enabled = true` in config.
+- **`tokenjam/api/routes/`**: One file per resource — `spans.py` (OTLP JSON ingest), `traces.py`, `cost.py`, `tools.py`, `alerts.py`, `drift.py`, `metrics.py` (Prometheus text format from DB queries).
+- **`tokenjam/mcp/server.py`**: FastMCP stdio server exposing observability data to Claude Code. Uses either a read-only DuckDB connection or HTTP proxy to `tj serve`. Initialized via `init()` from `cmd_mcp.py`.
+- **`tokenjam/cli/main.py`**: Root Click group with global options (`--config`, `--json`, `--no-color`, `--db`, `--agent`, `-v`). Registers all subcommands.
 
 ### CLI Commands
 
@@ -132,7 +132,7 @@ Post-ingest hooks run synchronously after each span is written to DB:
 
 All commands support `--json` for machine-readable output. Commands that query alerts use exit code 1 if active (unacknowledged, unsuppressed) alerts exist.
 
-**CLI testing pattern:** Tests use `click.testing.CliRunner` with `unittest.mock.patch` on `tj.cli.main.load_config` and `tj.cli.main.open_db` to inject an `InMemoryBackend` and test config. See `tests/integration/test_cli.py`. Note: `cmd_doctor` opens its own DuckDB connection via `config.storage.path` to verify writability — in tests you must set this to a real temp path (e.g. `tmp_path / "test.duckdb"`).
+**CLI testing pattern:** Tests use `click.testing.CliRunner` with `unittest.mock.patch` on `tokenjam.cli.main.load_config` and `tokenjam.cli.main.open_db` to inject an `InMemoryBackend` and test config. See `tests/integration/test_cli.py`. Note: `cmd_doctor` opens its own DuckDB connection via `config.storage.path` to verify writability — in tests you must set this to a real temp path (e.g. `tmp_path / "test.duckdb"`).
 
 ### REST API
 
@@ -162,16 +162,16 @@ When a span has a `conversation_id` matching an existing session, it's attribute
 6. **No unicode bullets** — never hardcode `•` or `\u2022`; Rich handles bullet formatting.
 7. **Parameterised SQL only** — never use f-string SQL.
 8. **All test spans via factory** — never construct `NormalizedSpan` directly in tests; use `tests/factories.py` (`make_llm_span`, `make_session`, `make_tool_span`, `make_session_with_spans`).
-9. **Use `utcnow()` for timestamps** — always use `tj.utils.time_parse.utcnow()` instead of `datetime.now()` or `datetime.utcnow()`. It returns timezone-aware UTC datetimes.
-10. **Use semconv constants** — reference `GenAIAttributes` and `TjAttributes` from `tj/otel/semconv.py` instead of hardcoding OTel attribute name strings.
+9. **Use `utcnow()` for timestamps** — always use `tokenjam.utils.time_parse.utcnow()` instead of `datetime.now()` or `datetime.utcnow()`. It returns timezone-aware UTC datetimes.
+10. **Use semconv constants** — reference `GenAIAttributes` and `TjAttributes` from `tokenjam/otel/semconv.py` instead of hardcoding OTel attribute name strings.
 11. **OTel TracerProvider is global and set-once** — `trace.set_tracer_provider()` only works once per process. In tests, set the provider once at module level (not per-test in a fixture) and clear spans between tests. Use a custom `_CollectingExporter(SpanExporter)` since `InMemorySpanExporter` is not available in the installed OTel version. See `tests/agents/test_mock_scenarios.py` for the SDK test pattern and `tests/integration/test_full_pipeline.py` for the pipeline pattern.
-12. **New SDK integrations must call `ensure_initialised()`** — every `patch_*()` convenience function must call `from tj.sdk.bootstrap import ensure_initialised; ensure_initialised()` before installing hooks. This lazily bootstraps the TracerProvider + IngestPipeline on first use.
-13. **PyPI package name is `tokenjam`, not `ocw`** — `pip install tokenjam` is the correct install command. The CLI command is `tj` and the Python package directory is `tj/`. The published package name on PyPI is `tokenjam`. Never write `pip install ocw` in docs, examples, or comments.
+12. **New SDK integrations must call `ensure_initialised()`** — every `patch_*()` convenience function must call `from tokenjam.sdk.bootstrap import ensure_initialised; ensure_initialised()` before installing hooks. This lazily bootstraps the TracerProvider + IngestPipeline on first use.
+13. **PyPI package name is `tokenjam`, not `ocw`** — `pip install tokenjam` is the correct install command. The CLI command is `tj` and the Python package directory is `tokenjam/`. The published package name on PyPI is `tokenjam`. Never write `pip install ocw` in docs, examples, or comments.
 14. **Version bump on release** — both `pyproject.toml` (`version = "X.Y.Z"`) and `sdk-ts/package.json` (`"version": "X.Y.Z"`) must be bumped to the new version before creating a GitHub release. The publish workflows (`publish-pypi.yml`, `publish-npm.yml`) trigger on `release published` events and will fail with 403 if the version already exists on PyPI/npm.
 
 ## Config
 
-Config is TOML, discovered at: `tj.toml` -> `.tj/config.toml` -> `~/.config/tj/config.toml`. Override with `--config` or `TJ_CONFIG` env var. Full config hierarchy is in `tj/core/config.py` (`TjConfig` dataclass).
+Config is TOML, discovered at: `tj.toml` -> `.tj/config.toml` -> `~/.config/tj/config.toml`. Override with `--config` or `TJ_CONFIG` env var. Full config hierarchy is in `tokenjam/core/config.py` (`TjConfig` dataclass).
 
 `tj onboard --claude-code` and `tj onboard --codex` always write to the **global** config (`~/.config/tj/config.toml`) regardless of cwd. This is intentional: each coding-agent integration reads one ingest secret from a single global location (`~/.claude/settings.json` or `~/.codex/config.toml`), and per-project configs would rotate that secret on every onboard, breaking auth for previously onboarded projects. Onboarded Claude Code project paths are tracked in `~/.config/tj/projects.json` for clean uninstall. Codex onboarding is fully project-agnostic — Codex hardcodes `service.name=codex_exec` in its binary, so there is one Codex agent ID for all projects.
 
@@ -200,14 +200,14 @@ To wire into Claude Code locally: `claude mcp add tj --scope user -- tj mcp` (th
 
 `tj onboard --codex` writes `[otel]` and `[mcp_servers.tj]` blocks to `~/.codex/config.toml`. Notes:
 - Codex hardcodes `service.name=codex_exec` in its binary and silently ignores `[otel.resource]`, so onboarding does **not** write that block — all Codex traces land under the `codex_exec` agent ID regardless of project. Onboarding is one-time global, not per-project.
-- Codex emits OTLP **logs** (not spans) to `/v1/logs`. `tj/api/routes/logs.py` converts Codex events (`sse_event`, `user_prompt`, `tool_decision`, `tool_result`, `api_request`) into normalized spans for cost/drift/alerting. Event name is read from `attrs["event.name"]` when the OTLP body is empty (Codex schema quirk); epoch `timeUnixNano=0` falls back to `attrs["event.timestamp"]` ISO-8601. The `/v1/logs` endpoint also silently accepts `resourceSpans`/`resourceMetrics` because Codex's exporter reuses one endpoint for all signal types.
+- Codex emits OTLP **logs** (not spans) to `/v1/logs`. `tokenjam/api/routes/logs.py` converts Codex events (`sse_event`, `user_prompt`, `tool_decision`, `tool_result`, `api_request`) into normalized spans for cost/drift/alerting. Event name is read from `attrs["event.name"]` when the OTLP body is empty (Codex schema quirk); epoch `timeUnixNano=0` falls back to `attrs["event.timestamp"]` ISO-8601. The `/v1/logs` endpoint also silently accepts `resourceSpans`/`resourceMetrics` because Codex's exporter reuses one endpoint for all signal types.
 - Re-running `tj onboard --codex` is a no-op only when both `[otel]` and `[mcp_servers.tj]` are present in `~/.codex/config.toml`. Re-onboarding either Codex or Claude Code cross-syncs the ingest secret into the other's config if it's already configured.
 
 ## Examples Convention
 
 Each provider integration in `examples/single_provider/` and each framework in `examples/single_framework/` lives in **its own file** — when adding a new SDK integration, mirror this layout (one demo file per integration) so the examples directory stays a 1:1 map of supported integrations. Multi-provider/framework demos go in `examples/multi/`; alert and drift demos that need no API keys go in `examples/alerts_and_drift/`.
 
-The Agent Incident Library at `incidents/` is separate: each scenario is a `scenario.py` + `README.md` pair, invoked via `tj demo <scenario>`. Scenarios inject synthetic spans through `tj/demo/env.py` to simulate real failures (retry-loop, surprise-cost, hallucination-drift) without API keys or a live server.
+The Agent Incident Library at `incidents/` is separate: each scenario is a `scenario.py` + `README.md` pair, invoked via `tj demo <scenario>`. Scenarios inject synthetic spans through `tokenjam/demo/env.py` to simulate real failures (retry-loop, surprise-cost, hallucination-drift) without API keys or a live server.
 
 ## Pricing
 

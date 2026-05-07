@@ -18,7 +18,7 @@ else:
 
 import tomli_w
 
-from tj.core.config import find_config_file
+from tokenjam.core.config import find_config_file
 
 
 def ensure_demo_agent_config(agent_id: str, agent_block: dict[str, Any]) -> Path:

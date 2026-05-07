@@ -9,7 +9,7 @@
 
 1. Storage is **DuckDB** — never `import sqlite3`, never write SQLite queries
 2. Config is **TOML** — `tomllib.load()` requires `open(path, "rb")` binary mode
-3. `tj/core/` has **no CLI or HTTP imports** — pure domain logic only
+3. `tokenjam/core/` has **no CLI or HTTP imports** — pure domain logic only
 4. `@watch()` alone does **not** create LLM spans — requires `patch_anthropic()` etc.
 5. Never use unicode bullet characters in output — Rich handles formatting
 6. Tests use `InMemoryBackend` and `tests/factories.py` — never construct `NormalizedSpan` directly

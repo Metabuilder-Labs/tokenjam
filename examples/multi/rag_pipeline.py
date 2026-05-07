@@ -22,8 +22,8 @@ from pathlib import Path
 
 import httpx
 
-from tj.sdk import watch, patch_llamaindex, patch_openai, patch_anthropic
-from tj.sdk.agent import record_tool_call
+from tokenjam.sdk import watch, patch_llamaindex, patch_openai, patch_anthropic
+from tokenjam.sdk.agent import record_tool_call
 
 # ---------------------------------------------------------------------------
 # Env-var gate

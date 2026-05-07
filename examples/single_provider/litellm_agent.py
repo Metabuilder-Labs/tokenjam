@@ -30,8 +30,8 @@ if missing:
 
 import litellm  # noqa: E402
 
-from tj.sdk import watch  # noqa: E402
-from tj.sdk.integrations.litellm import patch_litellm  # noqa: E402
+from tokenjam.sdk import watch  # noqa: E402
+from tokenjam.sdk.integrations.litellm import patch_litellm  # noqa: E402
 
 # Patch litellm BEFORE making any calls.
 # This single patch covers all providers that litellm routes to.

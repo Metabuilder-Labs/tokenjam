@@ -1,4 +1,4 @@
-from tj.utils.formatting import format_cost, format_tokens, severity_colour
+from tokenjam.utils.formatting import format_cost, format_tokens, severity_colour
 
 
 class TestFormatCost:
