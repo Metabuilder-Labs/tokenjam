@@ -48,7 +48,7 @@ You find out in seconds. Not after a week of "huh, that seemed weird."
 ---
 
 ```bash
-pip install tokenjuice
+pip install tokenjam
 tj demo hallucination-drift
 ```
 
@@ -79,4 +79,4 @@ Testing asks "is this correct?" Drift detection asks "is this different from how
 
 ---
 
-*Part of the [Agent Incident Library](https://github.com/Metabuilder-Labs/Token Juice)*
+*Part of the [Agent Incident Library](https://github.com/Metabuilder-Labs/TokenJam)*

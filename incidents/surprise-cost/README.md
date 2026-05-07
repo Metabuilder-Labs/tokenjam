@@ -1,6 +1,6 @@
 # Why did my agent just spend $47 on a hello world?
 
-**Run it:** `pip install tokenjuice && tj demo surprise-cost`
+**Run it:** `pip install tokenjam && tj demo surprise-cost`
 
 ---
 
@@ -75,7 +75,7 @@ OCW fires `cost_budget_session` and `cost_budget_daily` alerts when limits are c
 ## Try it yourself
 
 ```bash
-pip install tokenjuice
+pip install tokenjam
 tj demo surprise-cost
 ```
 
@@ -90,4 +90,4 @@ To track real spend, instrument your agent with the OCW SDK and run `tj serve`. 
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/Token Juice) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjuice` and start seeing what your agent actually does.
+[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.

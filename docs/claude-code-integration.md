@@ -3,7 +3,7 @@
 Monitor every Claude Code session — costs, tool calls, API requests, errors — with two commands:
 
 ```bash
-pip install "tokenjuice[mcp]"
+pip install "tokenjam[mcp]"
 tj onboard --claude-code
 # Restart Claude Code, then:
 tj status --agent claude-code-<project>
@@ -68,7 +68,7 @@ Claude calls `setup_project`, which writes `.claude/settings.json` with `OTEL_RE
 tj uninstall --yes
 
 # Then remove the package itself (ocw uninstall intentionally skips this):
-pip uninstall tokenjuice -y
+pip uninstall tokenjam -y
 ```
 
 `tj uninstall` cleans up everything set by `tj onboard --claude-code`:

@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Report a bug in Token Juice
+about: Report a bug in TokenJam
 title: ''
 labels: bug
 assignees: ''
@@ -25,5 +25,5 @@ What you expected to happen.
 **Environment**
 - OS:
 - Python version (`python3 --version`):
-- tj version (`pip show tokenjuice`):
+- tj version (`pip show tokenjam`):
 - Output of `tj doctor` (if relevant):

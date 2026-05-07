@@ -1,6 +1,6 @@
 # Your agent isn't flaky. You're blind.
 
-**Run it:** `pip install tokenjuice && tj demo retry-loop`
+**Run it:** `pip install tokenjam && tj demo retry-loop`
 
 ---
 
@@ -57,7 +57,7 @@ The loop was visible from span #4. Your logs didn't surface it until a user comp
 ## Try it yourself
 
 ```bash
-pip install tokenjuice
+pip install tokenjam
 tj demo retry-loop
 ```
 
@@ -72,4 +72,4 @@ To catch this in your real agent, wire up the OCW SDK (`@watch()` + `patch_anthr
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/Token Juice) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjuice` and start seeing what your agent actually does.
+[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.

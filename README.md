@@ -1,22 +1,22 @@
 <div align="center">
 
-<img src="https://opencla.watch/icon.svg" alt="Token Juice" width="72" height="72">
+<img src="https://opencla.watch/icon.svg" alt="TokenJam" width="72" height="72">
 
-# Token Juice
+# TokenJam
 
 The open-source LLM observability tool for autonomous agents.
 
 No cloud. No signup. No surprises.
 
-[![CI](https://github.com/Metabuilder-Labs/tokenjuice/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjuice/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/tokenjuice?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjuice/)
-[![Python](https://img.shields.io/badge/python-3.10%2B-3d8eff?labelColor=0d1117)](https://pypi.org/project/tokenjuice/)
-[![npm](https://img.shields.io/npm/v/@tokenjuice/sdk?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/@tokenjuice/sdk)
+[![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
+[![Python](https://img.shields.io/badge/python-3.10%2B-3d8eff?labelColor=0d1117)](https://pypi.org/project/tokenjam/)
+[![npm](https://img.shields.io/npm/v/@tokenjam/sdk?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/@tokenjam/sdk)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3d8eff?labelColor=0d1117)](LICENSE)
 [![OTel](https://img.shields.io/badge/OTel-GenAI%20SemConv-3d8eff?labelColor=0d1117)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ```
-pip install tokenjuice
+pip install tokenjam
 ```
 
 </div>
@@ -50,7 +50,7 @@ Your agent sends emails, writes files, calls APIs, and spends your money — all
 For **Claude Code**, **Codex**, and any agent that already emits OpenTelemetry. No SDK, no code changes.
 
 ```bash
-pip install "tokenjuice[mcp]"
+pip install "tokenjam[mcp]"
 tj onboard --claude-code    # or: tj onboard --codex
 # Restart your coding agent
 ```
@@ -64,7 +64,7 @@ Every session, API call, tool use, and error is now a tracked span with cost and
 For any Python agent — Anthropic, OpenAI, Gemini, Bedrock, LangChain, CrewAI, and [10+ more](#supported-frameworks).
 
 ```bash
-pip install tokenjuice
+pip install tokenjam
 tj onboard    # creates config, generates ingest secret
 ocw doctor     # verify your setup
 ```
@@ -88,13 +88,13 @@ One-line patches exist for every major provider and framework. [See all integrat
 For any Node.js / TypeScript agent. Sends spans to `tj serve` over HTTP.
 
 ```bash
-npm install @tokenjuice/sdk
+npm install @tokenjam/sdk
 ```
 
 ```typescript
-import { OcwClient, SpanBuilder } from "@tokenjuice/sdk";
+import { TjClient, SpanBuilder } from "@tokenjam/sdk";
 
-const client = new OcwClient({
+const client = new TjClient({
   baseUrl:      "http://127.0.0.1:7391",
   ingestSecret: process.env.TJ_INGEST_SECRET ?? "",
 });
@@ -208,7 +208,7 @@ LangSmith and Langfuse are excellent for tracing LLM API calls and running evals
 Monitor every Claude Code session — costs, tool calls, API requests, errors — with two commands:
 
 ```bash
-pip install "tokenjuice[mcp]"
+pip install "tokenjam[mcp]"
 tj onboard --claude-code
 # Restart Claude Code, then:
 tj status --agent claude-code-<project>
@@ -267,7 +267,7 @@ Claude calls `setup_project`, which writes `.claude/settings.json` with the righ
 Monitor every Codex session — run once, globally:
 
 ```bash
-pip install "tokenjuice[mcp]"
+pip install "tokenjam[mcp]"
 tj onboard --codex
 ```
 
@@ -293,7 +293,7 @@ The same 13 MCP tools available to Claude Code are available to Codex after rest
 ocw uninstall --yes
 
 # Then remove the package:
-pip uninstall tokenjuice -y
+pip uninstall tokenjam -y
 ```
 
 `tj uninstall` cleans up everything set by `tj onboard --claude-code`: daemon, MCP server, `~/.ocw/`, `~/.config/ocw/`, OTLP env vars in `~/.claude/settings.json`, `OTEL_RESOURCE_ATTRIBUTES` in every onboarded project's `.claude/settings.json`, and the harness env block in `~/.zshrc`.
@@ -402,10 +402,10 @@ flowchart TD
 
     Agent --> Terminal["Coding agents\nClaude Code · Codex"]
     Agent --> PythonSDK["Python SDK\n@watch + patch_*"]
-    Agent --> TypeScriptSDK["TypeScript SDK\n@tokenjuice/sdk"]
+    Agent --> TypeScriptSDK["TypeScript SDK\n@tokenjam/sdk"]
 
     Terminal --> OTLP["OTLP export"]
-    PythonSDK --> Exporter["OcwSpanExporter"]
+    PythonSDK --> Exporter["TjSpanExporter"]
     TypeScriptSDK --> HTTP["POST /api/v1/spans"]
     OTLP --> HTTP
 
@@ -559,7 +559,7 @@ PRs welcome. If you're adding a framework integration, open an issue first.
 
 <div align="center">
 
-**[opencla.watch](https://opencla.watch)** · [PyPI](https://pypi.org/project/tokenjuice/) · [npm](https://www.npmjs.com/package/@tokenjuice/sdk)
+**[opencla.watch](https://opencla.watch)** · [PyPI](https://pypi.org/project/tokenjam/) · [npm](https://www.npmjs.com/package/@tokenjam/sdk)
 
 MIT License · Built by [Metabuilder Labs](https://github.com/Metabuilder-Labs)
 

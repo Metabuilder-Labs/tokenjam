@@ -6,7 +6,7 @@ gemini-2.0-flash and asks for a concise summary. All LLM calls are captured
 by ocw via the Gemini integration patch.
 
 Requirements:
-    pip install google-generativeai tokenjuice
+    pip install google-generativeai tokenjam
 
 Environment:
     GOOGLE_API_KEY or GEMINI_API_KEY  — required (either one works)

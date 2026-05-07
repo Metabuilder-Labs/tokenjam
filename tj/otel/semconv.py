@@ -130,7 +130,7 @@ class CodexEvents:
     OUTPUT    = "output"
 
 
-class OcwAttributes:
+class TjAttributes:
     """tj-specific span attributes (non-standard extensions)."""
     COST_USD         = "tj.cost_usd"
     SESSION_ID       = "session.id"

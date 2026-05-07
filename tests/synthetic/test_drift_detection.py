@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tj.core.config import AgentConfig, DriftConfig, OcwConfig
+from tj.core.config import AgentConfig, DriftConfig, TjConfig
 from tj.core.db import InMemoryBackend
 from tj.core.drift import DriftDetector, build_baseline, evaluate_drift
 from tj.core.models import (
@@ -34,7 +34,7 @@ def _setup_agent(db, agent_id="test-agent"):
 
 def _make_config(agent_id="test-agent", baseline_sessions=10, threshold=2.0,
                  tool_seq_diff=0.4, drift_enabled=True):
-    return OcwConfig(
+    return TjConfig(
         version="1",
         agents={
             agent_id: AgentConfig(

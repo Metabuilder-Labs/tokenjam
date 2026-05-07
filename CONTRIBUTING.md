@@ -1,12 +1,12 @@
-# Contributing to Token Juice
+# Contributing to TokenJam
 
-Token Juice is MIT licensed and welcomes contributions. The codebase was built using parallel Claude Code agents — the `.claude/` task files are intentionally committed so contributors can use the same workflow.
+TokenJam is MIT licensed and welcomes contributions. The codebase was built using parallel Claude Code agents — the `.claude/` task files are intentionally committed so contributors can use the same workflow.
 
 ## Getting started
 
 ```bash
-git clone https://github.com/Metabuilder-Labs/tokenjuice
-cd tokenjuice
+git clone https://github.com/Metabuilder-Labs/tokenjam
+cd tokenjam
 pip install -e ".[dev,mcp]"   # editable install with dev tools + MCP support
 pip install anthropic          # for running the toy agent
 ```
@@ -42,7 +42,7 @@ tj/api/               FastAPI routes
 tj/sdk/               @watch() decorator and provider/framework patches
 tj/otel/              OTel TracerProvider and span exporter wiring
 tj/utils/             Formatting, time parsing, ID generation
-sdk-ts/src/            TypeScript SDK (@tokenjuice/sdk)
+sdk-ts/src/            TypeScript SDK (@tokenjam/sdk)
 pricing/models.toml    Community-maintained model pricing — PRs welcome here
 tests/factories.py     Span factory — use this in all synthetic tests, never
                        construct NormalizedSpan directly

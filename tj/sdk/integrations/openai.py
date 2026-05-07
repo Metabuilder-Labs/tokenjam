@@ -45,8 +45,8 @@ class OpenAIIntegration:
         @functools.wraps(self._original_create)
         def patched_create(self_comp, *args, **kwargs):
             # Skip span if call originates from litellm (avoids double-counting)
-            from tj.sdk.integrations.litellm import _ocw_litellm_active
-            if _ocw_litellm_active.get(False):
+            from tj.sdk.integrations.litellm import _tj_litellm_active
+            if _tj_litellm_active.get(False):
                 return integration._original_create(self_comp, *args, **kwargs)
             span = integration._tracer.start_span(GenAIAttributes.SPAN_LLM_CALL)
             span.set_attribute(GenAIAttributes.PROVIDER_NAME, integration._provider_name)

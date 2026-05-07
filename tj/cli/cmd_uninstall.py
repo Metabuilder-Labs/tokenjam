@@ -38,7 +38,7 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
         console.print("  Removed tj MCP server from Claude Code.")
 
     # 3. Unload and delete launchd plist
-    plist_path = Path.home() / "Library/LaunchAgents/com.tokenjuice.serve.plist"
+    plist_path = Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
     if plist_path.exists():
         subprocess.run(
             ["launchctl", "unload", str(plist_path)],
@@ -48,10 +48,10 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
         console.print(f"  Removed {plist_path}")
 
     # 4. Delete systemd service if present
-    systemd_path = Path.home() / ".config/systemd/user/tokenjuice.service"
+    systemd_path = Path.home() / ".config/systemd/user/tokenjam.service"
     if systemd_path.exists():
         subprocess.run(
-            ["systemctl", "--user", "disable", "--now", "tokenjuice"],
+            ["systemctl", "--user", "disable", "--now", "tokenjam"],
             capture_output=True, text=True,
         )
         systemd_path.unlink()
@@ -155,5 +155,5 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
             console.print(f"  [yellow]Could not clean {zshrc}: {exc}[/yellow]")
 
     console.print()
-    console.print("[green]Token Juice data and config removed.[/green]")
-    console.print("To remove the package itself, run: [bold]pip uninstall tokenjuice[/bold]")
+    console.print("[green]TokenJam data and config removed.[/green]")
+    console.print("To remove the package itself, run: [bold]pip uninstall tokenjam[/bold]")

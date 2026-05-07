@@ -19,7 +19,7 @@ from tj.utils.time_parse import utcnow
 
 if TYPE_CHECKING:
     from tj.core.alerts import AlertEngine
-    from tj.core.config import OcwConfig
+    from tj.core.config import TjConfig
     from tj.core.db import StorageBackend
     from tj.core.models import SessionRecord
 
@@ -208,7 +208,7 @@ class DriftDetector:
     Called by IngestPipeline (or a session-end hook) when a session completes.
     """
 
-    def __init__(self, db: StorageBackend, alert_engine: AlertEngine, config: OcwConfig) -> None:
+    def __init__(self, db: StorageBackend, alert_engine: AlertEngine, config: TjConfig) -> None:
         self.db = db
         self.alert_engine = alert_engine
         self.config = config

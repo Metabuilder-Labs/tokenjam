@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
-from tj.core.config import AlertChannelConfig, OcwConfig, resolve_effective_budget
+from tj.core.config import AlertChannelConfig, TjConfig, resolve_effective_budget
 from tj.core.models import Alert, AlertType, Severity
-from tj.otel.semconv import OcwAttributes
+from tj.otel.semconv import TjAttributes
 from tj.utils.formatting import console, severity_colour
 from tj.utils.ids import new_uuid
 from tj.utils.time_parse import utcnow
@@ -79,7 +79,7 @@ class AlertEngine:
     Called by IngestPipeline.process() after the span is in the DB.
     """
 
-    def __init__(self, db: StorageBackend, config: OcwConfig) -> None:
+    def __init__(self, db: StorageBackend, config: TjConfig) -> None:
         self.db = db
         self.config = config
         self.cooldown = CooldownTracker(config.alerts.cooldown_seconds)
@@ -243,7 +243,7 @@ class AlertEngine:
 
     def _check_sandbox_events(self, span: NormalizedSpan) -> None:
         """Check for NemoClaw/OpenShell sandbox event attributes."""
-        event = span.attributes.get(OcwAttributes.SANDBOX_EVENT)
+        event = span.attributes.get(TjAttributes.SANDBOX_EVENT)
         if not event:
             return
         alert_type = _SANDBOX_EVENT_MAP.get(event)
@@ -251,14 +251,14 @@ class AlertEngine:
             return
         detail: dict[str, Any] = {"sandbox_event": event}
         if event == "network_blocked":
-            detail["host"] = span.attributes.get(OcwAttributes.EGRESS_HOST, "unknown")
-            detail["port"] = span.attributes.get(OcwAttributes.EGRESS_PORT)
+            detail["host"] = span.attributes.get(TjAttributes.EGRESS_HOST, "unknown")
+            detail["port"] = span.attributes.get(TjAttributes.EGRESS_PORT)
             detail["message"] = f"Network egress blocked to {detail['host']}"
         elif event == "fs_denied":
-            detail["path"] = span.attributes.get(OcwAttributes.FILESYSTEM_PATH, "unknown")
+            detail["path"] = span.attributes.get(TjAttributes.FILESYSTEM_PATH, "unknown")
             detail["message"] = f"Filesystem access denied: {detail['path']}"
         elif event == "syscall_denied":
-            detail["syscall"] = span.attributes.get(OcwAttributes.SYSCALL_NAME, "unknown")
+            detail["syscall"] = span.attributes.get(TjAttributes.SYSCALL_NAME, "unknown")
             detail["message"] = f"Syscall denied: {detail['syscall']}"
         elif event == "inference_rerouted":
             detail["message"] = "Inference endpoint changed from expected"
@@ -365,7 +365,7 @@ class AlertEngine:
 class AlertDispatcher:
     """Routes a fired alert to all configured output channels."""
 
-    def __init__(self, config: OcwConfig) -> None:
+    def __init__(self, config: TjConfig) -> None:
         self.channels: list[AlertChannel] = [
             _build_channel(ch_config, config.alerts.include_captured_content)
             for ch_config in config.alerts.channels

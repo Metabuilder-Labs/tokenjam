@@ -6,7 +6,7 @@ the final response token by token. All LLM calls and tool invocations are
 captured by ocw.
 
 Requirements:
-    pip install openai tokenjuice
+    pip install openai tokenjam
 
 Environment:
     OPENAI_API_KEY  — required

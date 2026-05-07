@@ -275,16 +275,16 @@ class TestLiteLLMIntegration:
 
     def test_context_var_suppresses_openai_patch(self, tracer_and_spans):
         """When litellm patch is active, the openai patch skips span creation."""
-        from tj.sdk.integrations.litellm import _ocw_litellm_active
+        from tj.sdk.integrations.litellm import _tj_litellm_active
 
         # Verify the context var is False by default
-        assert _ocw_litellm_active.get(False) is False
+        assert _tj_litellm_active.get(False) is False
 
         # Simulate being inside a litellm wrapper
-        token = _ocw_litellm_active.set(True)
+        token = _tj_litellm_active.set(True)
         try:
-            assert _ocw_litellm_active.get(False) is True
+            assert _tj_litellm_active.get(False) is True
         finally:
-            _ocw_litellm_active.reset(token)
+            _tj_litellm_active.reset(token)
 
-        assert _ocw_litellm_active.get(False) is False
+        assert _tj_litellm_active.get(False) is False

@@ -12,7 +12,7 @@ import time
 
 import httpx
 
-from tj.core.config import OcwConfig
+from tj.core.config import TjConfig
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class HttpTransport:
     Drops buffered spans on process exit with a log warning.
     """
 
-    def __init__(self, config: OcwConfig):
+    def __init__(self, config: TjConfig):
         self.endpoint = (
             f"http://{config.api.host}:{config.api.port}/api/v1/spans"
         )

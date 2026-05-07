@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from tj.api.middleware import IngestAuthMiddleware
-from tj.core.config import OcwConfig
+from tj.core.config import TjConfig
 
 if TYPE_CHECKING:
     from tj.core.db import StorageBackend
@@ -20,7 +20,7 @@ _UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 
 
 def create_app(
-    config: OcwConfig,
+    config: TjConfig,
     db: StorageBackend,
     ingest_pipeline: IngestPipeline,
 ) -> FastAPI:
@@ -31,7 +31,7 @@ def create_app(
     can inject mocks easily.
     """
     app = FastAPI(
-        title="Token Juice",
+        title="TokenJam",
         version="0.1.0",
         docs_url="/docs",
         redoc_url=None,

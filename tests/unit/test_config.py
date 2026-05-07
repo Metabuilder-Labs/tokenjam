@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from tj.core.config import (
-    find_config_file, load_config, _parse, _serialise, OcwConfig, AgentConfig,
+    find_config_file, load_config, _parse, _serialise, TjConfig, AgentConfig,
     BudgetConfig, DefaultsConfig, SensitiveAction, SecurityConfig, CaptureConfig,
     StorageConfig, resolve_effective_budget, validate_budget_value,
 )
@@ -177,7 +177,7 @@ class TestParse:
 
 class TestSerialise:
     def test_roundtrip(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             agents={
                 "test": AgentConfig(
@@ -202,7 +202,7 @@ class TestSerialise:
     def test_serialise_excludes_config_path(self):
         """Regression: config_path is a Path object which is not TOML
         serializable. _serialise() must exclude it. See v0.1.7 fix."""
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             security=SecurityConfig(ingest_secret="s"),
             config_path=Path("/some/path/tj.toml"),
@@ -232,7 +232,7 @@ class TestSerialise:
 
 class TestResolveEffectiveBudget:
     def test_agent_with_both_fields_uses_agent_values(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=10.0, session_usd=2.0)),
             agents={"a": AgentConfig(budget=BudgetConfig(daily_usd=5.0, session_usd=1.0))},
@@ -242,7 +242,7 @@ class TestResolveEffectiveBudget:
         assert eff.session_usd == 1.0
 
     def test_agent_with_partial_fields_merges_from_defaults(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=10.0)),
             agents={"a": AgentConfig(budget=BudgetConfig(session_usd=1.0))},
@@ -252,7 +252,7 @@ class TestResolveEffectiveBudget:
         assert eff.session_usd == 1.0
 
     def test_unknown_agent_uses_defaults(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=10.0, session_usd=2.0)),
         )
@@ -261,13 +261,13 @@ class TestResolveEffectiveBudget:
         assert eff.session_usd == 2.0
 
     def test_no_defaults_no_agent_returns_none_both(self):
-        config = OcwConfig(version="1")
+        config = TjConfig(version="1")
         eff = resolve_effective_budget("any", config)
         assert eff.daily_usd is None
         assert eff.session_usd is None
 
     def test_agent_explicit_none_falls_through_to_defaults(self):
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=10.0)),
             agents={"a": AgentConfig(budget=BudgetConfig(daily_usd=None, session_usd=5.0))},

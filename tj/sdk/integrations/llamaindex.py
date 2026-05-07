@@ -16,12 +16,12 @@ from typing import TYPE_CHECKING
 from tj.core.config import load_config
 
 if TYPE_CHECKING:
-    from tj.core.config import OcwConfig
+    from tj.core.config import TjConfig
 
 logger = logging.getLogger(__name__)
 
 
-def patch_llamaindex(config: OcwConfig | None = None) -> None:
+def patch_llamaindex(config: TjConfig | None = None) -> None:
     """
     Configure LlamaIndex's built-in OTel support to export to tj serve.
     """

@@ -22,7 +22,7 @@ _pipeline = None
 def ensure_initialised() -> None:
     """
     Idempotent bootstrap. Safe to call multiple times / from multiple threads.
-    Sets up: config -> DuckDB -> IngestPipeline -> OcwSpanExporter -> TracerProvider.
+    Sets up: config -> DuckDB -> IngestPipeline -> TjSpanExporter -> TracerProvider.
     """
     global _initialised, _provider, _pipeline
     if _initialised:
@@ -87,7 +87,7 @@ def _try_http_mode(config) -> bool:
     except (httpx.ConnectError, httpx.TimeoutException):
         return False
 
-    from tj.sdk.http_exporter import OcwHttpExporter
+    from tj.sdk.http_exporter import TjHttpExporter
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.sdk.resources import Resource
@@ -95,10 +95,10 @@ def _try_http_mode(config) -> bool:
     import tj
 
     endpoint = f"{base_url}/api/v1/spans"
-    exporter = OcwHttpExporter(endpoint, config.security.ingest_secret)
+    exporter = TjHttpExporter(endpoint, config.security.ingest_secret)
 
     resource = Resource.create({
-        "service.name": "tokenjuice",
+        "service.name": "tokenjam",
         "service.version": tj.__version__,
     })
     provider = TracerProvider(resource=resource)

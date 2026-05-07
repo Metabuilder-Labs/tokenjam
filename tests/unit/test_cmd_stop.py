@@ -15,7 +15,7 @@ class TestStopSweepsForegroundProcesses:
 
     def test_kills_foreground_after_launchd_unload(self, tmp_path, monkeypatch):
         # Pretend a plist exists so the launchd branch runs.
-        plist = tmp_path / "Library" / "LaunchAgents" / "com.tokenjuice.serve.plist"
+        plist = tmp_path / "Library" / "LaunchAgents" / "com.tokenjam.serve.plist"
         plist.parent.mkdir(parents=True)
         plist.write_text("<plist/>")
         monkeypatch.setattr("tj.cli.cmd_stop.Path.home", lambda: tmp_path)

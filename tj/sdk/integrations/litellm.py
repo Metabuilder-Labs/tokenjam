@@ -25,8 +25,8 @@ logger = logging.getLogger(__name__)
 
 # Context variable used to suppress inner provider patches (openai, anthropic)
 # when a call originates from litellm.completion/acompletion.
-_ocw_litellm_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
-    "_ocw_litellm_active", default=False,
+_tj_litellm_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_tj_litellm_active", default=False,
 )
 
 
@@ -101,7 +101,7 @@ class LiteLLMIntegration:
                         GenAIAttributes.CONVERSATION_ID, conv_id,
                     )
 
-            token = _ocw_litellm_active.set(True)
+            token = _tj_litellm_active.set(True)
             try:
                 response = integration._original_completion(*args, **kwargs)
                 if is_stream:
@@ -117,7 +117,7 @@ class LiteLLMIntegration:
             finally:
                 if not is_stream:
                     span.end()
-                    _ocw_litellm_active.reset(token)
+                    _tj_litellm_active.reset(token)
 
         litellm.completion = patched_completion
 
@@ -143,7 +143,7 @@ class LiteLLMIntegration:
                         GenAIAttributes.CONVERSATION_ID, conv_id,
                     )
 
-            token = _ocw_litellm_active.set(True)
+            token = _tj_litellm_active.set(True)
             try:
                 response = await integration._original_acompletion(
                     *args, **kwargs,
@@ -161,7 +161,7 @@ class LiteLLMIntegration:
             finally:
                 if not is_stream:
                     span.end()
-                    _ocw_litellm_active.reset(token)
+                    _tj_litellm_active.reset(token)
 
         litellm.acompletion = patched_acompletion
 
@@ -252,7 +252,7 @@ class _SyncStreamWrapper:
             if _ok:
                 self._span.set_status(trace.Status(trace.StatusCode.OK))
             self._span.end()
-            _ocw_litellm_active.reset(self._token)
+            _tj_litellm_active.reset(self._token)
 
     def __next__(self):
         return self._stream.__next__()
@@ -312,7 +312,7 @@ class _AsyncStreamWrapper:
             if _ok:
                 self._span.set_status(trace.Status(trace.StatusCode.OK))
             self._span.end()
-            _ocw_litellm_active.reset(self._token)
+            _tj_litellm_active.reset(self._token)
 
 
 def patch_litellm() -> None:

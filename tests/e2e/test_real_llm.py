@@ -18,7 +18,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from tj.core.config import CaptureConfig, OcwConfig, SecurityConfig
+from tj.core.config import CaptureConfig, TjConfig, SecurityConfig
 from tj.core.db import InMemoryBackend
 from tj.core.ingest import IngestPipeline
 from tj.core.cost import CostEngine
@@ -151,7 +151,7 @@ def test_real_span_flows_through_pipeline(otel_setup):
     my_agent()
 
     db = InMemoryBackend()
-    config = OcwConfig(
+    config = TjConfig(
         version="1",
         capture=CaptureConfig(prompts=True, completions=True),
     )

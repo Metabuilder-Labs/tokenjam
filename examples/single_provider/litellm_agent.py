@@ -6,7 +6,7 @@ LiteLLM's unified interface. Each call is automatically attributed to the
 correct provider in ocw spans.
 
 Requirements:
-    pip install litellm tokenjuice
+    pip install litellm tokenjam
 
 Environment:
     OPENAI_API_KEY     — required (for OpenAI calls)

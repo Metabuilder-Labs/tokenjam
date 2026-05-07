@@ -13,8 +13,8 @@ from opentelemetry.trace import StatusCode as OtelStatusCode
 from opentelemetry.trace import SpanKind as OtelSpanKind
 
 from tj.core.models import NormalizedSpan, SpanStatus, SpanKind
-from tj.core.config import OcwConfig
-from tj.otel.semconv import GenAIAttributes, OcwAttributes
+from tj.core.config import TjConfig
+from tj.otel.semconv import GenAIAttributes, TjAttributes
 
 if TYPE_CHECKING:
     from tj.core.ingest import IngestPipeline
@@ -37,7 +37,7 @@ _OTEL_STATUS_MAP = {
 }
 
 
-class OcwSpanExporter(SpanExporter):
+class TjSpanExporter(SpanExporter):
     """
     Custom OTel SpanExporter that feeds spans into the IngestPipeline.
     Used when the Python SDK instruments code in-process.
@@ -82,8 +82,8 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
     conversation_id = attrs.pop(GenAIAttributes.CONVERSATION_ID, None)
     request_type = attrs.pop(GenAIAttributes.REQUEST_TYPE, None)
     agent_id = attrs.pop(GenAIAttributes.AGENT_ID, None)
-    cost_usd = attrs.pop(OcwAttributes.COST_USD, None)
-    session_id = attrs.pop(OcwAttributes.SESSION_ID, None)
+    cost_usd = attrs.pop(TjAttributes.COST_USD, None)
+    session_id = attrs.pop(TjAttributes.SESSION_ID, None)
 
     # Convert int tokens to int (OTel may store as strings)
     if input_tokens is not None:
@@ -161,23 +161,23 @@ def _ns_to_datetime(ns: int) -> datetime:
     return datetime.fromtimestamp(ns / 1e9, tz=timezone.utc)
 
 
-def build_tracer_provider(config: OcwConfig, ingest_pipeline: IngestPipeline) -> TracerProvider:
+def build_tracer_provider(config: TjConfig, ingest_pipeline: IngestPipeline) -> TracerProvider:
     """
     Build and configure the global TracerProvider.
-    Attaches OcwSpanExporter (always) and OTLP exporters (if configured).
+    Attaches TjSpanExporter (always) and OTLP exporters (if configured).
     Sets as the global tracer provider.
     """
     import tj
 
     resource = Resource.create({
-        "service.name": "tokenjuice",
+        "service.name": "tokenjam",
         "service.version": tj.__version__,
     })
     provider = TracerProvider(resource=resource)
 
     # Always attach the local exporter
     provider.add_span_processor(
-        BatchSpanProcessor(OcwSpanExporter(ingest_pipeline))
+        BatchSpanProcessor(TjSpanExporter(ingest_pipeline))
     )
 
     # Optionally attach OTLP exporter
@@ -189,7 +189,7 @@ def build_tracer_provider(config: OcwConfig, ingest_pipeline: IngestPipeline) ->
     return provider
 
 
-def _build_otlp_exporter(config: OcwConfig) -> SpanExporter:
+def _build_otlp_exporter(config: TjConfig) -> SpanExporter:
     """Build OTLP/HTTP or OTLP/gRPC exporter based on config.protocol."""
     otlp = config.export.otlp
     if otlp.protocol == "grpc":

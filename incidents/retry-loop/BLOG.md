@@ -5,7 +5,7 @@ tags: ai, python, devops, productivity
 series: Agent Incident Library
 ---
 
-I work on [Token Juice](https://github.com/Metabuilder-Labs/Token Juice), an open-source observability tool for AI agents. A lot of what I do is stare at other people's agent traces — the ones their print logs say are fine and their users say are slow.
+I work on [TokenJam](https://github.com/Metabuilder-Labs/TokenJam), an open-source observability tool for AI agents. A lot of what I do is stare at other people's agent traces — the ones their print logs say are fine and their users say are slow.
 
 The single most common pattern I see is the silent retry loop. It looks like this:
 
@@ -51,7 +51,7 @@ But you can't fix what you can't see, and the reason I built this detector is th
 The demo reproduces the failure end-to-end with no API keys and no setup:
 
 ```bash
-pip install tokenjuice
+pip install tokenjam
 tj demo retry-loop
 ```
 
@@ -83,4 +83,4 @@ Most of the agents I see have the second problem. Once you can replay the span s
 
 ---
 
-*Part of the [Agent Incident Library](https://github.com/Metabuilder-Labs/Token Juice) — reproducible scenarios for the failures that don't show up in your logs.*
+*Part of the [Agent Incident Library](https://github.com/Metabuilder-Labs/TokenJam) — reproducible scenarios for the failures that don't show up in your logs.*

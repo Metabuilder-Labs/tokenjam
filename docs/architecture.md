@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the architecture of Token Juice (ocw) — a local-first, OTel-native observability CLI for autonomous AI agents.
+This document describes the architecture of TokenJam (ocw) — a local-first, OTel-native observability CLI for autonomous AI agents.
 
 ## Design principles
 
@@ -22,10 +22,10 @@ flowchart TD
     ClaudeCode["Claude Code"]
 
     Agent --> PythonSDK["Python SDK\n@watch + patch_* integrations"]
-    Agent --> TypeScriptSDK["TypeScript SDK\n@tokenjuice/sdk"]
+    Agent --> TypeScriptSDK["TypeScript SDK\n@tokenjam/sdk"]
     ClaudeCode --> Logs["POST /v1/logs\nOTLP log records"]
 
-    PythonSDK --> Exporter["OcwSpanExporter"]
+    PythonSDK --> Exporter["TjSpanExporter"]
     TypeScriptSDK --> HTTP["POST /api/v1/spans\nOTLP JSON"]
 
     Exporter --> Ingest
@@ -60,7 +60,7 @@ Three ingest paths, one pipeline. Spans from Python land via the in-process OTel
 All spans converge at `IngestPipeline.process()` regardless of origin:
 
 **Path 1 — In-process (Python SDK):**
-`@watch()` + `patch_*()` create OTel spans → `OcwSpanExporter` converts `ReadableSpan` to `NormalizedSpan` → `IngestPipeline.process()`
+`@watch()` + `patch_*()` create OTel spans → `TjSpanExporter` converts `ReadableSpan` to `NormalizedSpan` → `IngestPipeline.process()`
 
 **Path 2 — HTTP spans (external clients):**
 TypeScript SDK / OpenClaw / any OTLP client → `POST /api/v1/spans` (or `/v1/traces` for standard OTLP path) → parse OTLP JSON → `IngestPipeline.process()`
@@ -157,7 +157,7 @@ Provider patches monkey-patch LLM client methods to intercept API calls and crea
 
 ### LiteLLM double-counting prevention
 
-When both `patch_litellm()` and individual provider patches (e.g., `patch_openai()`) are active, a `contextvars.ContextVar` (`_ocw_litellm_active`) prevents double-counted spans. The LiteLLM wrapper sets this var to `True` before calling the underlying provider; inner provider patches check it and skip span creation if active.
+When both `patch_litellm()` and individual provider patches (e.g., `patch_openai()`) are active, a `contextvars.ContextVar` (`_tj_litellm_active`) prevents double-counted spans. The LiteLLM wrapper sets this var to `True` before calling the underlying provider; inner provider patches check it and skip span creation if active.
 
 ### Framework patches vs native OTel
 
@@ -297,7 +297,7 @@ A fifth layer (`tests/e2e/`) makes real LLM API calls and is auto-skipped withou
 
 Config is TOML, discovered in order: `tj.toml` → `.tj/config.toml` → `~/.config/tj/config.toml`. Override with `--config` flag or `TJ_CONFIG` env var.
 
-The `OcwConfig` dataclass tree in `ocw/core/config.py` defines the full hierarchy: agents (with budgets, sensitive actions, drift config, output schema), storage, export (OTLP, Prometheus), alerts (cooldown, channels), security, API, and capture settings.
+The `TjConfig` dataclass tree in `ocw/core/config.py` defines the full hierarchy: agents (with budgets, sensitive actions, drift config, output schema), storage, export (OTLP, Prometheus), alerts (cooldown, channels), security, API, and capture settings.
 
 `tomllib.load()` requires binary mode (`"rb"`) — text mode raises `TypeError` at runtime. The codebase uses conditional imports: `tomllib` (Python 3.11+) or `tomli` (3.10). Writing config uses `tomli_w`.
 
@@ -412,8 +412,8 @@ Z-scores are color-coded: green (|z| < 1.0), yellow (approaching threshold), red
 
 ## Packaging
 
-- **PyPI package name:** `tokenjuice` (not `ocw`)
+- **PyPI package name:** `tokenjam` (not `ocw`)
 - **CLI command:** `ocw`
 - **Python package directory:** `ocw/`
 - **Build system:** hatchling, with `[tool.hatch.build.targets.wheel] packages = ["ocw"]` because the package name differs from the directory name
-- **npm package:** `@tokenjuice/sdk` under `sdk-ts/`
+- **npm package:** `@tokenjam/sdk` under `sdk-ts/`

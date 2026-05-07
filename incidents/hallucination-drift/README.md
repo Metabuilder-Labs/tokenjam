@@ -1,6 +1,6 @@
 # My agent worked yesterday. Today it's possessed.
 
-**Run it:** `pip install tokenjuice && tj demo hallucination-drift`
+**Run it:** `pip install tokenjam && tj demo hallucination-drift`
 
 ---
 
@@ -60,7 +60,7 @@ The demo uses `baseline_sessions = 5` for speed. In production, 10–50 sessions
 ## Try it yourself
 
 ```bash
-pip install tokenjuice
+pip install tokenjam
 tj demo hallucination-drift
 ```
 
@@ -75,4 +75,4 @@ To track drift on your real agent, wire up the OCW SDK, enable drift in `ocw.tom
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/Token Juice) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjuice` and start seeing what your agent actually does.
+[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.

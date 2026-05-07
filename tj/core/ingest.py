@@ -5,7 +5,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from tj.core.models import NormalizedSpan, SessionRecord, SpanStatus
-from tj.core.config import OcwConfig, SecurityConfig, CaptureConfig
+from tj.core.config import TjConfig, SecurityConfig, CaptureConfig
 from tj.otel.semconv import GenAIAttributes
 from tj.utils.ids import new_uuid
 
@@ -88,7 +88,7 @@ def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
 
 class IngestPipeline:
     """
-    Central ingest hub. All spans — whether from the Python SDK's OcwSpanExporter
+    Central ingest hub. All spans — whether from the Python SDK's TjSpanExporter
     or from the REST API — flow through here.
 
     Post-ingest hooks run synchronously after the span is written to DB:
@@ -100,7 +100,7 @@ class IngestPipeline:
     def __init__(
         self,
         db: StorageBackend,
-        config: OcwConfig,
+        config: TjConfig,
         cost_engine: CostEngine | None = None,
         alert_engine: AlertEngine | None = None,
         schema_validator: SchemaValidator | None = None,
@@ -239,7 +239,7 @@ class IngestPipeline:
                 logger.warning("SchemaValidator hook failed: %s", exc)
 
 
-def build_default_pipeline(db: "StorageBackend", config: OcwConfig) -> "IngestPipeline":
+def build_default_pipeline(db: "StorageBackend", config: TjConfig) -> "IngestPipeline":
     """Construct an IngestPipeline with all standard post-ingest hooks wired up.
 
     Used by both `tj serve` and the SDK auto-bootstrap so alerts, drift detection,

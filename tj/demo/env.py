@@ -34,7 +34,7 @@ class DemoEnvironment:
         agent_configs: "dict[str, AgentConfig] | None" = None,
     ) -> None:
         from tj.core.alerts import AlertEngine
-        from tj.core.config import AlertsConfig, OcwConfig, SecurityConfig
+        from tj.core.config import AlertsConfig, TjConfig, SecurityConfig
         from tj.core.cost import CostEngine
         from tj.core.db import InMemoryBackend
         from tj.core.drift import DriftDetector
@@ -42,7 +42,7 @@ class DemoEnvironment:
 
         self.db = InMemoryBackend()
 
-        self.config = OcwConfig(
+        self.config = TjConfig(
             version="1",
             security=SecurityConfig(ingest_secret="demo"),
             alerts=AlertsConfig(channels=[], cooldown_seconds=0),

@@ -13,7 +13,7 @@ from tj.core.config import (
     ApiAuthConfig,
     ApiConfig,
     BudgetConfig,
-    OcwConfig,
+    TjConfig,
     SecurityConfig,
 )
 from tj.core.db import InMemoryBackend
@@ -33,7 +33,7 @@ def db():
 
 @pytest.fixture
 def config():
-    return OcwConfig(
+    return TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret=INGEST_SECRET),
         api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
@@ -42,7 +42,7 @@ def config():
 
 @pytest.fixture
 def config_with_api_auth():
-    return OcwConfig(
+    return TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret=INGEST_SECRET),
         api=ApiConfig(auth=ApiAuthConfig(enabled=True, api_key="my-api-key")),
@@ -344,7 +344,7 @@ async def test_status_and_traces_agree_on_agent_ids(client):
 
 async def test_post_budget_zero_clears_limit(db):
     """Posting daily_usd=0 (empty field from UI) should set limit to None (no limit)."""
-    cfg = OcwConfig(
+    cfg = TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret=INGEST_SECRET),
         api=ApiConfig(auth=ApiAuthConfig(enabled=False)),

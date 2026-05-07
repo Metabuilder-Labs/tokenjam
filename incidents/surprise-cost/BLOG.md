@@ -55,7 +55,7 @@ The per-session cost looks fine until it compounds. $3.52 per session × 3 sessi
 See it in 30 seconds, no API keys:
 
 ```bash
-pip install tokenjuice
+pip install tokenjam
 tj demo surprise-cost
 ```
 
@@ -93,4 +93,4 @@ The cost isn't the problem. Invisibility is the problem. Once you can see which 
 
 ---
 
-*Part of the [Agent Incident Library](https://github.com/Metabuilder-Labs/Token Juice)*
+*Part of the [Agent Incident Library](https://github.com/Metabuilder-Labs/TokenJam)*

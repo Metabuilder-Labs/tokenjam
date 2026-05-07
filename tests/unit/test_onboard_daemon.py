@@ -10,7 +10,7 @@ class TestDaemonAlreadyRunning:
     def test_darwin_plist_exists_and_loaded(self, tmp_path, monkeypatch):
         """Returns True on macOS when plist exists and launchctl list succeeds."""
         monkeypatch.setattr("tj.cli.cmd_onboard.platform.system", lambda: "Darwin")
-        plist = tmp_path / "Library" / "LaunchAgents" / "com.tokenjuice.serve.plist"
+        plist = tmp_path / "Library" / "LaunchAgents" / "com.tokenjam.serve.plist"
         plist.parent.mkdir(parents=True)
         plist.write_text("<plist/>")
         monkeypatch.setattr("tj.cli.cmd_onboard.Path.home", lambda: tmp_path)
@@ -19,7 +19,7 @@ class TestDaemonAlreadyRunning:
         with patch("tj.cli.cmd_onboard.subprocess.run", return_value=result_mock) as run_mock:
             assert _daemon_already_running() is True
             run_mock.assert_called_once_with(
-                ["launchctl", "list", "com.tokenjuice.serve"],
+                ["launchctl", "list", "com.tokenjam.serve"],
                 capture_output=True, text=True,
             )
 
@@ -32,7 +32,7 @@ class TestDaemonAlreadyRunning:
     def test_darwin_plist_exists_but_not_loaded(self, tmp_path, monkeypatch):
         """Returns False on macOS when plist exists but launchctl list fails."""
         monkeypatch.setattr("tj.cli.cmd_onboard.platform.system", lambda: "Darwin")
-        plist = tmp_path / "Library" / "LaunchAgents" / "com.tokenjuice.serve.plist"
+        plist = tmp_path / "Library" / "LaunchAgents" / "com.tokenjam.serve.plist"
         plist.parent.mkdir(parents=True)
         plist.write_text("<plist/>")
         monkeypatch.setattr("tj.cli.cmd_onboard.Path.home", lambda: tmp_path)
@@ -48,7 +48,7 @@ class TestDaemonAlreadyRunning:
         with patch("tj.cli.cmd_onboard.subprocess.run", return_value=result_mock) as run_mock:
             assert _daemon_already_running() is True
             run_mock.assert_called_once_with(
-                ["systemctl", "--user", "is-active", "tokenjuice"],
+                ["systemctl", "--user", "is-active", "tokenjam"],
                 capture_output=True, text=True,
             )
 

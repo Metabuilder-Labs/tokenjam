@@ -50,12 +50,12 @@ Point any of these frameworks' built-in OTel exporter at `tj serve`, no integrat
 
 ## TypeScript / Node.js
 
-`@tokenjuice/sdk` provides `OcwClient` and `SpanBuilder` for sending spans to `tj serve` from any TypeScript agent:
+`@tokenjam/sdk` provides `TjClient` and `SpanBuilder` for sending spans to `tj serve` from any TypeScript agent:
 
 ```typescript
-import { OcwClient, SpanBuilder } from "@tokenjuice/sdk";
+import { TjClient, SpanBuilder } from "@tokenjam/sdk";
 
-const client = new OcwClient({
+const client = new TjClient({
   baseUrl:      "http://127.0.0.1:7391",
   ingestSecret: process.env.TJ_INGEST_SECRET ?? "",
 });

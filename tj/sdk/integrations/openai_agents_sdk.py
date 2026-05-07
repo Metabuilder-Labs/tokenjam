@@ -12,12 +12,12 @@ from typing import TYPE_CHECKING
 from tj.core.config import load_config
 
 if TYPE_CHECKING:
-    from tj.core.config import OcwConfig
+    from tj.core.config import TjConfig
 
 logger = logging.getLogger(__name__)
 
 
-def patch_openai_agents(config: OcwConfig | None = None) -> None:
+def patch_openai_agents(config: TjConfig | None = None) -> None:
     """
     Configure OpenAI Agents SDK's built-in OTel support to export to tj serve.
     Uses the SDK's official set_trace_processors() API.

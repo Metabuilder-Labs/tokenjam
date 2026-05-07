@@ -130,7 +130,7 @@ def _export_otlp(ctx: click.Context, db: object, traces: list) -> None:
         payload = {
             "resourceSpans": [{
                 "resource": {"attributes": [
-                    {"key": "service.name", "value": {"stringValue": "tokenjuice"}},
+                    {"key": "service.name", "value": {"stringValue": "tokenjam"}},
                 ]},
                 "scopeSpans": [{
                     "spans": [

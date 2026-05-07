@@ -43,7 +43,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         return
 
     console.print()
-    console.print("[bold]Setting up Token Juice...[/bold]")
+    console.print("[bold]Setting up TokenJam...[/bold]")
     console.print()
 
     if budget is None:
@@ -64,7 +64,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         budget_line = f"daily_usd = {budget}"
 
     config_text = f"""\
-# Token Juice configuration
+# TokenJam configuration
 # Docs: https://github.com/Metabuilder-Labs/openclawwatch#configuration
 
 [defaults.budget]
@@ -154,7 +154,7 @@ def _onboard_claude_code(
 ) -> None:
     """Configure Claude Code to send telemetry to tj."""
     from tj.core.config import (
-        AgentConfig, BudgetConfig, OcwConfig, SecurityConfig, load_config, write_config,
+        AgentConfig, BudgetConfig, TjConfig, SecurityConfig, load_config, write_config,
     )
 
     # --claude-code always uses the global config so that all projects share one
@@ -185,7 +185,7 @@ def _onboard_claude_code(
         ingest_secret = secrets.token_hex(32)
         daily_usd = budget if budget and budget > 0 else None
         agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             agents=agents,
             security=SecurityConfig(ingest_secret=ingest_secret),
@@ -329,7 +329,7 @@ def _onboard_codex(
         import tomli as tomllib  # type: ignore[no-redef]
 
     from tj.core.config import (
-        AgentConfig, BudgetConfig, OcwConfig, SecurityConfig,
+        AgentConfig, BudgetConfig, TjConfig, SecurityConfig,
         load_config, write_config,
     )
 
@@ -370,7 +370,7 @@ def _onboard_codex(
         ingest_secret = secrets.token_hex(32)
         daily_usd = budget if budget and budget > 0 else None
         agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
-        config = OcwConfig(
+        config = TjConfig(
             version="1",
             agents=agents,
             security=SecurityConfig(ingest_secret=ingest_secret),
@@ -663,17 +663,17 @@ def _daemon_already_running() -> bool:
     """Check if the OCW daemon is already installed and loaded."""
     system = platform.system()
     if system == "Darwin":
-        plist = Path.home() / "Library/LaunchAgents/com.tokenjuice.serve.plist"
+        plist = Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
         if not plist.exists():
             return False
         result = subprocess.run(
-            ["launchctl", "list", "com.tokenjuice.serve"],
+            ["launchctl", "list", "com.tokenjam.serve"],
             capture_output=True, text=True,
         )
         return result.returncode == 0
     elif system == "Linux":
         result = subprocess.run(
-            ["systemctl", "--user", "is-active", "tokenjuice"],
+            ["systemctl", "--user", "is-active", "tokenjam"],
             capture_output=True, text=True,
         )
         return result.stdout.strip() == "active"
@@ -700,7 +700,7 @@ def _install_daemon(config_path: str) -> str | None:
 
 def _install_launchd(config_path: str) -> str | None:
     tj_path = shutil.which("tj") or sys.executable.replace("/python", "/tj").replace("/python3", "/tj")
-    plist_path = Path.home() / "Library/LaunchAgents/com.tokenjuice.serve.plist"
+    plist_path = Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_content = f"""\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -709,7 +709,7 @@ def _install_launchd(config_path: str) -> str | None:
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.tokenjuice.serve</string>
+    <string>com.tokenjam.serve</string>
     <key>ProgramArguments</key>
     <array>
         <string>{tj_path}</string>
@@ -758,11 +758,11 @@ def _install_launchd(config_path: str) -> str | None:
 
 def _install_systemd(config_path: str) -> str | None:
     tj_path = shutil.which("tj") or sys.executable.replace("/python", "/tj").replace("/python3", "/tj")
-    service_path = Path.home() / ".config/systemd/user/tokenjuice.service"
+    service_path = Path.home() / ".config/systemd/user/tokenjam.service"
     service_path.parent.mkdir(parents=True, exist_ok=True)
     service_content = f"""\
 [Unit]
-Description=Token Juice observability server
+Description=TokenJam observability server
 After=network.target
 
 [Service]
@@ -773,7 +773,7 @@ Restart=on-failure
 WantedBy=default.target"""
     service_path.write_text(service_content)
     subprocess.run(
-        ["systemctl", "--user", "enable", "--now", "tokenjuice"],
+        ["systemctl", "--user", "enable", "--now", "tokenjam"],
         check=True,
     )
     return f"Daemon installed at {service_path}"

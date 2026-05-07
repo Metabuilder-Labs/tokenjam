@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Drift display threshold bug in Z-score comparison
 - `tj stop` now passes `-w` to `launchctl unload` to prevent auto-restart on macOS; added Linux systemd support
 - Waterfall tooltip clipping for right-edge spans in web UI
-- CLAUDE.md install command corrected from `pip install tokenjuice` to `pip install tokenjuice`
+- CLAUDE.md install command corrected from `pip install tokenjam` to `pip install tokenjam`
 
 ### Improved
 - README updated with Claude Code integration section, budget/drift CLI references, MCP server docs
@@ -65,7 +65,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.1.4] - 2026-04-08
 
 ### Fixed
-- SDK DuckDB lock error when `tj serve` is running — bootstrap now detects the server and sends spans via HTTP (`OcwHttpExporter`) instead of opening DuckDB directly
+- SDK DuckDB lock error when `tj serve` is running — bootstrap now detects the server and sends spans via HTTP (`TjHttpExporter`) instead of opening DuckDB directly
 - LiteLLM model names no longer include provider prefix (`gpt-4o-mini` not `openai/gpt-4o-mini`), fixing pricing lookup failures
 - LiteLLM streaming wrappers now correctly attribute provider and stripped model name
 
@@ -129,7 +129,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `CODEOWNERS` requiring review from @anilmurty
 
 ### Changed
-- Renamed npm package from `@tokenjuice/sdk` to `@tokenjuice/sdk`
+- Renamed npm package from `@tokenjam/sdk` to `@tokenjam/sdk`
 - Consolidated `AGENTS.md` to point at `CLAUDE.md` as source of truth
 
 ## [0.1.0] - 2026-04-05
@@ -143,7 +143,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - CLI commands: `onboard`, `status`, `traces`, `cost`, `alerts`, `drift`, `tools`, `export`, `serve`, `doctor`
 - REST API with OTLP JSON ingest endpoint and Prometheus metrics
 - Python SDK: `@watch()` decorator, `patch_anthropic()`, `patch_openai()`, and 9 more provider/framework integrations
-- TypeScript SDK (`@tokenjuice/sdk`): `OcwClient` and `SpanBuilder` for Node.js agents
+- TypeScript SDK (`@tokenjam/sdk`): `TjClient` and `SpanBuilder` for Node.js agents
 - Auto-bootstrap: TracerProvider initializes lazily on first `@watch()` or `patch_*()` call
 - Community-maintained model pricing table (`pricing/models.toml`)
 - Session continuity via `conversation_id` across process restarts

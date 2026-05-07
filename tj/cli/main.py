@@ -4,7 +4,7 @@ from tj.core.db import open_db
 
 
 @click.group()
-@click.version_option(package_name="tokenjuice")
+@click.version_option(package_name="tokenjam")
 @click.option("--config", "config_path", default=None, envvar="TJ_CONFIG",
               help="Config file path (default: auto-discover)")
 @click.option("--json", "output_json", is_flag=True,

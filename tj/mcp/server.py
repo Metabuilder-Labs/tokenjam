@@ -7,7 +7,7 @@ mcp = FastMCP("tj")
 
 # Module-level state initialised by init() or cmd_mcp.py
 _ro_conn = None       # duckdb read-only connection
-_config = None        # OcwConfig
+_config = None        # TjConfig
 _ro_db = None         # _ReadOnlyDB or _HttpDB
 _serve_url: str | None = None  # base URL for tj serve HTTP API when DuckDB is locked
 

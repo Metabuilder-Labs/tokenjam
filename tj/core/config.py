@@ -138,7 +138,7 @@ class CaptureConfig:
 
 
 @dataclass
-class OcwConfig:
+class TjConfig:
     version:  str
     defaults: DefaultsConfig          = field(default_factory=DefaultsConfig)
     agents:   dict[str, AgentConfig]  = field(default_factory=dict)
@@ -174,16 +174,16 @@ def find_config_file(override: str | None = None) -> Path | None:
     return None
 
 
-def load_config(path: str | None = None) -> OcwConfig:
+def load_config(path: str | None = None) -> TjConfig:
     """
-    Load config from file, merge with defaults, return OcwConfig.
+    Load config from file, merge with defaults, return TjConfig.
 
     IMPORTANT: tomllib requires binary mode "rb" -- not text mode "r".
     Using "r" raises TypeError at runtime.
     """
     config_path = find_config_file(path)
     if config_path is None:
-        return OcwConfig(version="1")
+        return TjConfig(version="1")
 
     with open(config_path, "rb") as f:   # "rb" is REQUIRED
         raw = tomllib.load(f)
@@ -193,14 +193,14 @@ def load_config(path: str | None = None) -> OcwConfig:
     return cfg
 
 
-def write_config(config: OcwConfig, path: Path) -> None:
+def write_config(config: TjConfig, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "wb") as f:
         tomli_w.dump(_serialise(config), f)
 
 
-def _parse(raw: dict) -> OcwConfig:
-    """Convert raw TOML dict to OcwConfig, applying defaults for missing keys."""
+def _parse(raw: dict) -> TjConfig:
+    """Convert raw TOML dict to TjConfig, applying defaults for missing keys."""
     agents = {}
     for agent_id, agent_raw in raw.get("agents", {}).items():
         budget = BudgetConfig(**agent_raw.get("budget", {}))
@@ -283,7 +283,7 @@ def _parse(raw: dict) -> OcwConfig:
     defaults_budget_raw = defaults_raw.get("budget", {})
     defaults = DefaultsConfig(budget=BudgetConfig(**defaults_budget_raw))
 
-    return OcwConfig(
+    return TjConfig(
         version=raw.get("version", "1"),
         defaults=defaults,
         agents=agents,
@@ -296,8 +296,8 @@ def _parse(raw: dict) -> OcwConfig:
     )
 
 
-def _serialise(config: OcwConfig) -> dict:
-    """Convert OcwConfig back to a plain dict suitable for tomli_w."""
+def _serialise(config: TjConfig) -> dict:
+    """Convert TjConfig back to a plain dict suitable for tomli_w."""
     def _dc_to_dict(obj: object) -> dict:
         result = {}
         for f in fields(obj):  # type: ignore[arg-type]
@@ -326,7 +326,7 @@ def _serialise(config: OcwConfig) -> dict:
     return d
 
 
-def resolve_effective_budget(agent_id: str, config: OcwConfig) -> BudgetConfig:
+def resolve_effective_budget(agent_id: str, config: TjConfig) -> BudgetConfig:
     """
     Return the effective budget for an agent, merging per-agent overrides
     with global defaults on a per-field basis.

@@ -17,12 +17,12 @@ from typing import TYPE_CHECKING
 
 
 from tj.core.models import NormalizedSpan, SpanKind, SpanStatus
-from tj.otel.semconv import OcwAttributes
+from tj.otel.semconv import TjAttributes
 from tj.utils.ids import new_span_id, new_trace_id
 from tj.utils.time_parse import utcnow
 
 if TYPE_CHECKING:
-    from tj.core.config import OcwConfig
+    from tj.core.config import TjConfig
 
 logger = logging.getLogger(__name__)
 
@@ -91,16 +91,16 @@ class NemoClawGatewayObserver:
 
         now = utcnow()
         attrs: dict = {
-            OcwAttributes.SANDBOX_EVENT: ocw_event,
+            TjAttributes.SANDBOX_EVENT: ocw_event,
         }
 
         if ocw_event == "network_blocked":
-            attrs[OcwAttributes.EGRESS_HOST] = event.get("host", "unknown")
-            attrs[OcwAttributes.EGRESS_PORT] = event.get("port")
+            attrs[TjAttributes.EGRESS_HOST] = event.get("host", "unknown")
+            attrs[TjAttributes.EGRESS_PORT] = event.get("port")
         elif ocw_event == "fs_denied":
-            attrs[OcwAttributes.FILESYSTEM_PATH] = event.get("path", "unknown")
+            attrs[TjAttributes.FILESYSTEM_PATH] = event.get("path", "unknown")
         elif ocw_event == "syscall_denied":
-            attrs[OcwAttributes.SYSCALL_NAME] = event.get("syscall", "unknown")
+            attrs[TjAttributes.SYSCALL_NAME] = event.get("syscall", "unknown")
 
         return NormalizedSpan(
             span_id=new_span_id(),
@@ -118,7 +118,7 @@ class NemoClawGatewayObserver:
 
 def watch_nemoclaw(
     gateway_url: str = "ws://127.0.0.1:18789",
-    config: OcwConfig | None = None,
+    config: TjConfig | None = None,
 ) -> NemoClawGatewayObserver:
     """
     Convenience function. Creates an observer instance.

@@ -20,11 +20,11 @@ from tj.core.config import (
     AlertsConfig,
     BudgetConfig,
     DefaultsConfig,
-    OcwConfig,
+    TjConfig,
     SensitiveAction,
 )
 from tj.core.models import Alert, AlertType, Severity, SpanStatus
-from tj.otel.semconv import OcwAttributes
+from tj.otel.semconv import TjAttributes
 from tj.utils.ids import new_uuid
 from tj.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session, make_tool_span
@@ -34,9 +34,9 @@ def _make_config(
     agents: dict | None = None,
     cooldown_seconds: int = 0,
     include_captured_content: bool = False,
-) -> OcwConfig:
-    """Build a minimal OcwConfig for alert tests."""
-    return OcwConfig(
+) -> TjConfig:
+    """Build a minimal TjConfig for alert tests."""
+    return TjConfig(
         version="1",
         agents=agents or {},
         alerts=AlertsConfig(
@@ -48,7 +48,7 @@ def _make_config(
 
 
 def _make_engine(
-    config: OcwConfig | None = None,
+    config: TjConfig | None = None,
     db: MagicMock | None = None,
 ) -> tuple[AlertEngine, MagicMock]:
     """Create an AlertEngine with a mock DB."""
@@ -322,9 +322,9 @@ def test_sandbox_network_blocked_fires_correct_alert_type():
         agent_id="test-agent",
         tool_name="http_request",
     )
-    span.attributes[OcwAttributes.SANDBOX_EVENT] = "network_blocked"
-    span.attributes[OcwAttributes.EGRESS_HOST] = "evil.com"
-    span.attributes[OcwAttributes.EGRESS_PORT] = 443
+    span.attributes[TjAttributes.SANDBOX_EVENT] = "network_blocked"
+    span.attributes[TjAttributes.EGRESS_HOST] = "evil.com"
+    span.attributes[TjAttributes.EGRESS_PORT] = 443
     engine.evaluate(span)
     db.insert_alert.assert_called_once()
     alert: Alert = db.insert_alert.call_args[0][0]
@@ -336,8 +336,8 @@ def test_sandbox_network_blocked_fires_correct_alert_type():
 def test_sandbox_fs_denied_fires():
     engine, db = _make_engine()
     span = make_tool_span(agent_id="test-agent", tool_name="write_file")
-    span.attributes[OcwAttributes.SANDBOX_EVENT] = "fs_denied"
-    span.attributes[OcwAttributes.FILESYSTEM_PATH] = "/etc/passwd"
+    span.attributes[TjAttributes.SANDBOX_EVENT] = "fs_denied"
+    span.attributes[TjAttributes.FILESYSTEM_PATH] = "/etc/passwd"
     engine.evaluate(span)
     alert: Alert = db.insert_alert.call_args[0][0]
     assert alert.type == AlertType.FILESYSTEM_ACCESS_DENIED
@@ -346,8 +346,8 @@ def test_sandbox_fs_denied_fires():
 def test_sandbox_syscall_denied_fires():
     engine, db = _make_engine()
     span = make_tool_span(agent_id="test-agent", tool_name="exec")
-    span.attributes[OcwAttributes.SANDBOX_EVENT] = "syscall_denied"
-    span.attributes[OcwAttributes.SYSCALL_NAME] = "ptrace"
+    span.attributes[TjAttributes.SANDBOX_EVENT] = "syscall_denied"
+    span.attributes[TjAttributes.SYSCALL_NAME] = "ptrace"
     engine.evaluate(span)
     alert: Alert = db.insert_alert.call_args[0][0]
     assert alert.type == AlertType.SYSCALL_DENIED
@@ -356,7 +356,7 @@ def test_sandbox_syscall_denied_fires():
 def test_sandbox_inference_rerouted_fires():
     engine, db = _make_engine()
     span = make_llm_span(agent_id="test-agent")
-    span.attributes[OcwAttributes.SANDBOX_EVENT] = "inference_rerouted"
+    span.attributes[TjAttributes.SANDBOX_EVENT] = "inference_rerouted"
     engine.evaluate(span)
     alert: Alert = db.insert_alert.call_args[0][0]
     assert alert.type == AlertType.INFERENCE_REROUTED

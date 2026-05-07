@@ -1,4 +1,4 @@
-# Using Token Juice with OpenClaw
+# Using TokenJam with OpenClaw
 
 OpenClaw has built-in OpenTelemetry support via its `diagnostics-otel` plugin. Point it at `tj serve` and all your agent telemetry flows in automatically — no SDK code required.
 

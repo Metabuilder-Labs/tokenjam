@@ -18,7 +18,7 @@ SETUP NOTES:
     The region must have Bedrock model access enabled for the model used below.
 
 Requirements:
-    pip install boto3 tokenjuice
+    pip install boto3 tokenjam
 
 Environment:
     AWS_DEFAULT_REGION or AWS_REGION  — required (must have Bedrock access)

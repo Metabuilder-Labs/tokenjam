@@ -1,7 +1,7 @@
 """Unit tests for drift detection pure functions."""
 from unittest.mock import MagicMock
 
-from tj.core.config import OcwConfig
+from tj.core.config import TjConfig
 from tj.core.drift import DriftDetector, jaccard_similarity, z_score
 from tests.factories import make_session
 
@@ -64,7 +64,7 @@ class TestDriftDetectorAgentFallback:
         ]
         alert_engine = MagicMock()
         # Empty config — no [agents.<id>] block for "ad-hoc-agent"
-        config = OcwConfig(version="1")
+        config = TjConfig(version="1")
 
         detector = DriftDetector(db=db, alert_engine=alert_engine, config=config)
         session = make_session(

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`tj` (Token Juice) is a local-first, OTel-native observability CLI for AI agents. No cloud backend, no signup. It captures telemetry from agent runtimes, stores it in a local DuckDB database, and exposes a CLI + local REST API for querying. Install via `pip install tokenjuice`, run via `tj <subcommand>`. Requires Python >=3.10.
+`tj` (TokenJam) is a local-first, OTel-native observability CLI for AI agents. No cloud backend, no signup. It captures telemetry from agent runtimes, stores it in a local DuckDB database, and exposes a CLI + local REST API for querying. Install via `pip install tokenjam`, run via `tj <subcommand>`. Requires Python >=3.10.
 
 ## Build & Development
 
@@ -40,7 +40,7 @@ cd sdk-ts && npm install && npm test
 ## Repo Layout
 
 ```
-tokenjuice/
+tokenjam/
 ├── tj/                    Python package
 │   ├── cli/                Click CLI commands (one file per command)
 │   ├── core/               Domain logic — NO CLI or HTTP imports allowed here
@@ -54,7 +54,7 @@ tokenjuice/
 │   ├── single_framework/   One file per framework integration
 │   ├── multi/              Multi-provider/framework examples + sample_docs/
 │   └── alerts_and_drift/   Alert and drift demos (no API keys needed)
-├── sdk-ts/                 TypeScript SDK (@tokenjuice/sdk)
+├── sdk-ts/                 TypeScript SDK (@tokenjam/sdk)
 ├── pricing/                models.toml — community-maintained model pricing (USD per million tokens)
 └── tests/
     ├── factories.py        Span factory — use this in ALL tests
@@ -70,7 +70,7 @@ tokenjuice/
 ### Data Flow
 
 Spans enter from two paths, both converging at `IngestPipeline.process()`:
-1. **In-process**: Python SDK `@watch()` + provider patches -> `OcwSpanExporter` -> `IngestPipeline`
+1. **In-process**: Python SDK `@watch()` + provider patches -> `TjSpanExporter` -> `IngestPipeline`
 2. **HTTP**: TypeScript SDK (or any OTLP client) -> `POST /api/v1/spans` (auth required) -> `IngestPipeline`
 
 Post-ingest hooks run synchronously after each span is written to DB:
@@ -94,14 +94,14 @@ Post-ingest hooks run synchronously after each span is written to DB:
 - **`tj/core/drift.py`**: `DriftDetector` — Z-score based behavioral drift detection, fires at session end.
 - **`tj/core/schema_validator.py`**: Validates tool outputs against declared or genson-inferred JSON Schema. Only fires on `gen_ai.tool.call` spans with `gen_ai.tool.output` in attributes. Schema priority: 1) declared file from agent config `output_schema`, 2) inferred schema from `DriftBaseline.output_schema_inferred`. Caches schemas in-memory per agent.
 - **`tj/core/models.py`**: All domain dataclasses — `NormalizedSpan`, `SessionRecord`, `Alert`, `DriftBaseline`, filter types, etc.
-- **`tj/core/config.py`**: `OcwConfig` dataclass tree, TOML loading/writing, config file discovery.
+- **`tj/core/config.py`**: `TjConfig` dataclass tree, TOML loading/writing, config file discovery.
 - **`tj/sdk/agent.py`**: `@watch()` decorator creates session spans only. `record_llm_call()` and `record_tool_call()` create child spans for manual instrumentation. LLM call spans from provider clients require `patch_anthropic()`, `patch_openai()`, etc.
 - **`tj/sdk/transport.py`**: `HttpTransport` — buffers up to 1000 spans, retries with exponential backoff (3 attempts, 2s base). Used when `tj serve` runs as a separate process.
 - **`tj/sdk/bootstrap.py`**: `ensure_initialised()` — lazy, thread-safe, idempotent bootstrap of config -> DB -> IngestPipeline -> TracerProvider. Called automatically by `@watch()` and all `patch_*()` functions. Registers atexit flush.
-- **`tj/sdk/integrations/`**: `Integration` protocol in `base.py`. Provider patches (anthropic, openai, gemini, bedrock, litellm) monkey-patch client methods to create OTel spans with token usage. `litellm.py` covers 100+ providers via LiteLLM's unified interface and uses a `contextvars.ContextVar` (`_ocw_litellm_active`) to suppress inner provider patches (openai, anthropic) when active — prevents double-counted spans. Framework patches (langchain, langgraph, crewai, autogen) wrap LLM/tool methods. `llamaindex.py` and `openai_agents_sdk.py` are thin wrappers around those SDKs' native OTel support. `nemoclaw.py` is a WebSocket observer for OpenShell Gateway sandbox events.
-- **`tj/otel/provider.py`**: `OcwSpanExporter` (custom `SpanExporter` that feeds spans into `IngestPipeline`), `convert_otel_span()` (OTel `ReadableSpan` → `NormalizedSpan`), `build_tracer_provider()` (sets up global `TracerProvider` with local + optional OTLP exporters).
+- **`tj/sdk/integrations/`**: `Integration` protocol in `base.py`. Provider patches (anthropic, openai, gemini, bedrock, litellm) monkey-patch client methods to create OTel spans with token usage. `litellm.py` covers 100+ providers via LiteLLM's unified interface and uses a `contextvars.ContextVar` (`_tj_litellm_active`) to suppress inner provider patches (openai, anthropic) when active — prevents double-counted spans. Framework patches (langchain, langgraph, crewai, autogen) wrap LLM/tool methods. `llamaindex.py` and `openai_agents_sdk.py` are thin wrappers around those SDKs' native OTel support. `nemoclaw.py` is a WebSocket observer for OpenShell Gateway sandbox events.
+- **`tj/otel/provider.py`**: `TjSpanExporter` (custom `SpanExporter` that feeds spans into `IngestPipeline`), `convert_otel_span()` (OTel `ReadableSpan` → `NormalizedSpan`), `build_tracer_provider()` (sets up global `TracerProvider` with local + optional OTLP exporters).
 - **`tj/otel/exporters.py`**: Prometheus metric reader setup via `build_prometheus_exporter()`.
-- **`tj/otel/semconv.py`**: `GenAIAttributes` and `OcwAttributes` — OTel GenAI semantic convention constants.
+- **`tj/otel/semconv.py`**: `GenAIAttributes` and `TjAttributes` — OTel GenAI semantic convention constants.
 - **`tj/api/app.py`**: FastAPI app factory. `tj serve` starts it with uvicorn. Accepts `db`, `config`, `ingest_pipeline` for testability. Registers all routers under `/api/v1` plus `/metrics`.
 - **`tj/api/middleware.py`**: `IngestAuthMiddleware` — protects `POST /api/v1/spans` with Bearer token. Returns `JSONResponse(401)` directly (not `HTTPException`, which doesn't propagate from `BaseHTTPMiddleware.dispatch`).
 - **`tj/api/deps.py`**: `require_api_key` — FastAPI dependency for optional API key auth on GET endpoints. Only enforced when `api.auth.enabled = true` in config.
@@ -163,23 +163,23 @@ When a span has a `conversation_id` matching an existing session, it's attribute
 7. **Parameterised SQL only** — never use f-string SQL.
 8. **All test spans via factory** — never construct `NormalizedSpan` directly in tests; use `tests/factories.py` (`make_llm_span`, `make_session`, `make_tool_span`, `make_session_with_spans`).
 9. **Use `utcnow()` for timestamps** — always use `tj.utils.time_parse.utcnow()` instead of `datetime.now()` or `datetime.utcnow()`. It returns timezone-aware UTC datetimes.
-10. **Use semconv constants** — reference `GenAIAttributes` and `OcwAttributes` from `tj/otel/semconv.py` instead of hardcoding OTel attribute name strings.
+10. **Use semconv constants** — reference `GenAIAttributes` and `TjAttributes` from `tj/otel/semconv.py` instead of hardcoding OTel attribute name strings.
 11. **OTel TracerProvider is global and set-once** — `trace.set_tracer_provider()` only works once per process. In tests, set the provider once at module level (not per-test in a fixture) and clear spans between tests. Use a custom `_CollectingExporter(SpanExporter)` since `InMemorySpanExporter` is not available in the installed OTel version. See `tests/agents/test_mock_scenarios.py` for the SDK test pattern and `tests/integration/test_full_pipeline.py` for the pipeline pattern.
 12. **New SDK integrations must call `ensure_initialised()`** — every `patch_*()` convenience function must call `from tj.sdk.bootstrap import ensure_initialised; ensure_initialised()` before installing hooks. This lazily bootstraps the TracerProvider + IngestPipeline on first use.
-13. **PyPI package name is `tokenjuice`, not `ocw`** — `pip install tokenjuice` is the correct install command. The CLI command is `tj` (also `juice`) and the Python package directory is `tj/`. The published package name on PyPI is `tokenjuice`. Never write `pip install ocw` in docs, examples, or comments.
+13. **PyPI package name is `tokenjam`, not `ocw`** — `pip install tokenjam` is the correct install command. The CLI command is `tj` (also `jam`) and the Python package directory is `tj/`. The published package name on PyPI is `tokenjam`. Never write `pip install ocw` in docs, examples, or comments.
 14. **Version bump on release** — both `pyproject.toml` (`version = "X.Y.Z"`) and `sdk-ts/package.json` (`"version": "X.Y.Z"`) must be bumped to the new version before creating a GitHub release. The publish workflows (`publish-pypi.yml`, `publish-npm.yml`) trigger on `release published` events and will fail with 403 if the version already exists on PyPI/npm.
 
 ## Config
 
-Config is TOML, discovered at: `tj.toml` -> `.tj/config.toml` -> `~/.config/tj/config.toml`. Override with `--config` or `TJ_CONFIG` env var. Full config hierarchy is in `tj/core/config.py` (`OcwConfig` dataclass).
+Config is TOML, discovered at: `tj.toml` -> `.tj/config.toml` -> `~/.config/tj/config.toml`. Override with `--config` or `TJ_CONFIG` env var. Full config hierarchy is in `tj/core/config.py` (`TjConfig` dataclass).
 
 `tj onboard --claude-code` and `tj onboard --codex` always write to the **global** config (`~/.config/tj/config.toml`) regardless of cwd. This is intentional: each coding-agent integration reads one ingest secret from a single global location (`~/.claude/settings.json` or `~/.codex/config.toml`), and per-project configs would rotate that secret on every onboard, breaking auth for previously onboarded projects. Onboarded Claude Code project paths are tracked in `~/.config/tj/projects.json` for clean uninstall. Codex onboarding is fully project-agnostic — Codex hardcodes `service.name=codex_exec` in its binary, so there is one Codex agent ID for all projects.
 
 ## Daemon (launchd / systemd)
 
 `tj onboard` (and `tj onboard --claude-code` / `--codex`) installs a background daemon that runs `tj serve` on login:
-- **macOS**: `~/Library/LaunchAgents/com.tokenjuice.serve.plist` — loaded via `launchctl load`. Logs at `/tmp/tj-serve.{out,err}`.
-- **Linux**: `~/.config/systemd/user/tokenjuice.service` — enabled via `systemctl --user enable --now tokenjuice`.
+- **macOS**: `~/Library/LaunchAgents/com.tokenjam.serve.plist` — loaded via `launchctl load`. Logs at `/tmp/tj-serve.{out,err}`.
+- **Linux**: `~/.config/systemd/user/tokenjam.service` — enabled via `systemctl --user enable --now tokenjam`.
 - **Other**: skipped with a notice; user runs `tj serve` manually.
 
 Reinstall behavior: `--claude-code` and `--codex` onboard check `_daemon_already_running()` (launchctl list / systemctl is-active) and skip reinstall when the daemon is up unless `--force` is passed. This avoids spurious "Background Items Added" prompts on macOS during second-project onboards. The launchd path always uses `launchctl unload -w` then `launchctl load -w` — the `-w` flag clears any Disabled=true entry from the launchd database (`tj stop` writes Disabled=true via `launchctl unload -w`), without which a subsequent plain `launchctl load` is a silent no-op. Use `tj stop` to halt the daemon, `tj uninstall` to remove unit files. `tj stop` also sweeps for any orphan foreground `tj serve` processes (e.g. from a manual `tj serve &`) so it reliably frees port 7391.
@@ -223,7 +223,7 @@ All steps are blocking — lint, typecheck, and tests must pass for CI to go gre
 
 ## Packaging
 
-Build system is hatchling. The `pyproject.toml` requires `[tool.hatch.build.targets.wheel] packages = ["tj"]` because the package name (`tokenjuice`) differs from the directory name (`tj`). Without this, `pip install -e .` fails.
+Build system is hatchling. The `pyproject.toml` requires `[tool.hatch.build.targets.wheel] packages = ["tj"]` because the package name (`tokenjam`) differs from the directory name (`tj`). Without this, `pip install -e .` fails.
 
 Key runtime dependency: `pytz` is required by DuckDB for `TIMESTAMPTZ` column handling — it's listed explicitly in `dependencies` because DuckDB doesn't declare it on all platforms.
 

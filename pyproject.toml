@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "tokenjuice"
+name = "tokenjam"
 version = "0.1.9"
-description = "Token Juice — local-first OTel-native observability for Autonomous AI agents"
+description = "TokenJam — local-first OTel-native observability for Autonomous AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -58,7 +58,7 @@ mcp       = ["fastmcp"]
 
 [project.scripts]
 tj = "tj.cli.main:cli"
-juice = "tj.cli.main:cli"
+jam = "tj.cli.main:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/synthetic", "tests/agents", "tests/integration"]

@@ -14,7 +14,7 @@ from opentelemetry.sdk.trace import ReadableSpan
 logger = logging.getLogger("tj.sdk")
 
 
-class OcwHttpExporter(SpanExporter):
+class TjHttpExporter(SpanExporter):
     """Exports spans via HTTP POST to tj serve."""
 
     def __init__(self, endpoint: str, ingest_secret: str) -> None:
@@ -29,7 +29,7 @@ class OcwHttpExporter(SpanExporter):
         payload = {
             "resourceSpans": [{
                 "resource": {"attributes": [
-                    {"key": "service.name", "value": {"stringValue": "tokenjuice"}},
+                    {"key": "service.name", "value": {"stringValue": "tokenjam"}},
                 ]},
                 "scopeSpans": [{"spans": otlp_spans}],
             }],

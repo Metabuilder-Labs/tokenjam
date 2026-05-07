@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from tj.core.config import OcwConfig, AgentConfig
+from tj.core.config import TjConfig, AgentConfig
 from tj.core.models import (
     AlertType,
     DriftBaseline,
@@ -89,7 +89,7 @@ def _make_validator(
     if schema_file:
         agents[agent_id] = AgentConfig(output_schema=schema_file)
 
-    config = OcwConfig(version="1", agents=agents)
+    config = TjConfig(version="1", agents=agents)
 
     if baseline_schema:
         db.baselines[agent_id] = DriftBaseline(

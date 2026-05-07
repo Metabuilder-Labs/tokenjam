@@ -1,11 +1,11 @@
-# Token Juice configuration
+# TokenJam configuration
 # Docs: https://github.com/Metabuilder-Labs/openclawwatch#configuration
 
 [defaults.budget]
 daily_usd = 5.0
 
 [security]
-ingest_secret = "97a1ae325c52f03da9907b08cc4782393ec0f7c741c590381be7b4bbb509508e"
+ingest_secret = "e8f32840c09f9f2492bb8fe118747b7192e2d753c4ae5ed5c8c408f4b8104097"
 
 [capture]
 prompts = false

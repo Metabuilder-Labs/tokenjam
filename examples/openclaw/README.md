@@ -5,7 +5,7 @@ This is a config-only integration — no Python code needed. OpenClaw's built-in
 ## Step 1: Start OCW
 
 ```bash
-pip install tokenjuice
+pip install tokenjam
 ocw onboard
 ocw serve &
 ```

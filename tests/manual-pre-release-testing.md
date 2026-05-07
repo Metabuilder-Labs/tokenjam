@@ -6,7 +6,7 @@ Run through this sequence to test a branch before merging and cutting a release.
 
 - `ANTHROPIC_API_KEY` set (for Anthropic examples)
 - `OPENAI_API_KEY` set (for LiteLLM/OpenAI examples)
-- Both should be in `~/tokenjuice/.env.local` and sourced before running
+- Both should be in `~/tokenjam/.env.local` and sourced before running
 
 ## Test sequence
 
@@ -16,19 +16,19 @@ ocw uninstall --yes 2>/dev/null
 rm -rf ~/.ocw ~/.config/ocw .ocw
 
 # 2. Check out the branch to test
-cd ~/tokenjuice
+cd ~/tokenjam
 git fetch origin
 git checkout <branch-name>
 
 # 3. Install locally (editable — uses local files, no pip publish needed)
-# Uninstall any prior PyPI install of `tokenjuice` first so the editable
+# Uninstall any prior PyPI install of `tokenjam` first so the editable
 # install isn't shadowed. Targeted — we don't `--force-reinstall` the whole
 # dep tree (that bumps shared deps and breaks unrelated packages like litellm).
-pip3 uninstall -y tokenjuice
+pip3 uninstall -y tokenjam
 pip3 install -e ".[dev,mcp]"
 ocw --version
 # Verify the installed `ocw` actually imports from the repo, not site-packages
-python3 -c "import tj; print(tj.__file__)"   # must point inside ~/tokenjuice
+python3 -c "import tj; print(tj.__file__)"   # must point inside ~/tokenjam
 
 # 4. Run automated tests first
 pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
@@ -162,11 +162,11 @@ cat ~/.config/ocw/projects.json
 # Confirm --claude-code did NOT create a project-local config in this fresh
 # directory (this dir has no preexisting .ocw/, so the check is meaningful here).
 test ! -f .ocw/config.toml && echo "ok: --claude-code did not create project-local config"
-cd ~/tokenjuice
+cd ~/tokenjam
 
 # Verify global config fallback: CLI works from a directory with no local config
 cd /tmp && tj status   # should resolve to global config, not error out
-cd ~/tokenjuice
+cd ~/tokenjam
 
 # Verify --force does reinstall the daemon
 ocw onboard --claude-code --force
@@ -242,7 +242,7 @@ For smaller changes that don't touch the UI:
 ```bash
 ocw uninstall --yes 2>/dev/null
 rm -rf ~/.ocw ~/.config/ocw .ocw
-cd ~/tokenjuice
+cd ~/tokenjam
 git checkout <branch-name>
 pip3 install -e ".[dev,mcp]"
 ocw onboard --no-daemon

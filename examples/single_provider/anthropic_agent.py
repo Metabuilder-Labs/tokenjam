@@ -5,7 +5,7 @@ Demonstrates the full Anthropic tool-use loop: message -> tool_use -> tool_resul
 response, with each tool invocation recorded via ocw's record_tool_call().
 
 Requirements:
-    pip install anthropic tokenjuice
+    pip install anthropic tokenjam
 
 Environment:
     ANTHROPIC_API_KEY  — required

@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from tj.core.ingest import SpanRejectedError
 from tj.core.models import NormalizedSpan, SpanKind, SpanStatus
-from tj.otel.semconv import GenAIAttributes, OcwAttributes
+from tj.otel.semconv import GenAIAttributes, TjAttributes
 from tj.utils.ids import new_span_id
 
 logger = logging.getLogger(__name__)
@@ -157,7 +157,7 @@ def _parse_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan:
         input_tokens=_safe_int(attrs.get(GenAIAttributes.INPUT_TOKENS)),
         output_tokens=_safe_int(attrs.get(GenAIAttributes.OUTPUT_TOKENS)),
         cache_tokens=_safe_int(attrs.get(GenAIAttributes.CACHE_READ_TOKENS)),
-        cost_usd=_safe_float(attrs.get(OcwAttributes.COST_USD)),
+        cost_usd=_safe_float(attrs.get(TjAttributes.COST_USD)),
         request_type=attrs.get(GenAIAttributes.REQUEST_TYPE),
         conversation_id=attrs.get(GenAIAttributes.CONVERSATION_ID),
         session_id=attrs.get("session.id"),

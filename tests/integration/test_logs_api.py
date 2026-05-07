@@ -8,7 +8,7 @@ from tj.api.app import create_app
 from tj.core.config import (
     ApiAuthConfig,
     ApiConfig,
-    OcwConfig,
+    TjConfig,
     SecurityConfig,
 )
 from tj.core.db import InMemoryBackend
@@ -33,7 +33,7 @@ def db():
 
 @pytest.fixture
 def config():
-    return OcwConfig(
+    return TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret=INGEST_SECRET),
         api=ApiConfig(auth=ApiAuthConfig(enabled=False)),

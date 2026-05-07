@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 
 from tj.cli.main import cli
-from tj.core.config import AgentConfig, BudgetConfig, OcwConfig
+from tj.core.config import AgentConfig, BudgetConfig, TjConfig
 from tj.core.db import InMemoryBackend
 from tj.core.models import (
     AgentRecord,
@@ -31,7 +31,7 @@ def db():
 
 @pytest.fixture
 def config():
-    return OcwConfig(
+    return TjConfig(
         version="1",
         agents={"test-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
     )
@@ -382,7 +382,7 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
     assert data["env"].get("CLAUDE_CODE_ENABLE_TELEMETRY") == "1"
 
 
-def test_onboard_claude_code_creates_ocw_config(runner, tmp_path):
+def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
     """ocw config is created when none exists."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -393,7 +393,7 @@ def test_onboard_claude_code_creates_ocw_config(runner, tmp_path):
          patch("tj.core.config.write_config") as mock_write:
         runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
 
-    # write_config should have been called with an OcwConfig containing a claude-code-* agent
+    # write_config should have been called with an TjConfig containing a claude-code-* agent
     assert mock_write.called
     saved_config = mock_write.call_args[0][0]
     assert any(k.startswith("claude-code-") for k in saved_config.agents)
@@ -447,10 +447,10 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
     fake_config_path.parent.mkdir(parents=True)
     fake_config_path.touch()  # must exist so the "existing and not force" branch runs
 
-    from tj.core.config import AgentConfig, OcwConfig, SecurityConfig
-    fake_config = OcwConfig(
+    from tj.core.config import AgentConfig, TjConfig, SecurityConfig
+    fake_config = TjConfig(
         version="1",
-        agents={"claude-code-tokenjuice": AgentConfig()},
+        agents={"claude-code-tokenjam": AgentConfig()},
         security=SecurityConfig(ingest_secret=new_secret),
     )
 
@@ -493,10 +493,10 @@ def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
     fake_config_path.parent.mkdir(parents=True)
     fake_config_path.touch()  # must exist so the "existing and not force" branch runs
 
-    from tj.core.config import AgentConfig, OcwConfig, SecurityConfig
-    fake_config = OcwConfig(
+    from tj.core.config import AgentConfig, TjConfig, SecurityConfig
+    fake_config = TjConfig(
         version="1",
-        agents={"claude-code-tokenjuice": AgentConfig()},
+        agents={"claude-code-tokenjam": AgentConfig()},
         security=SecurityConfig(ingest_secret="newsecret" * 4),
     )
 

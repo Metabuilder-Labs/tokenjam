@@ -10,7 +10,7 @@ Agents SDK's native OTel support to export traces to `ocw serve` via OTLP.
 You must have `ocw serve` running before executing this script.
 
 Requirements:
-    pip install openai-agents httpx tokenjuice
+    pip install openai-agents httpx tokenjam
 
 Environment:
     OPENAI_API_KEY  — required

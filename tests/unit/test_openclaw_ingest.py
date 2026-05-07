@@ -5,7 +5,7 @@ import pytest
 import httpx
 
 from tj.api.app import create_app
-from tj.core.config import ApiAuthConfig, ApiConfig, OcwConfig, SecurityConfig
+from tj.core.config import ApiAuthConfig, ApiConfig, TjConfig, SecurityConfig
 from tj.core.db import InMemoryBackend
 from tj.core.ingest import IngestPipeline
 
@@ -30,7 +30,7 @@ def db():
 
 @pytest.fixture
 def config():
-    return OcwConfig(
+    return TjConfig(
         version="1",
         security=SecurityConfig(ingest_secret=INGEST_SECRET),
         api=ApiConfig(auth=ApiAuthConfig(enabled=False)),

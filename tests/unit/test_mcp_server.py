@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from tj.core.db import InMemoryBackend
-from tj.core.config import OcwConfig, AgentConfig, BudgetConfig, DefaultsConfig
+from tj.core.config import TjConfig, AgentConfig, BudgetConfig, DefaultsConfig
 from tj.core.models import AlertType, Severity, Alert, DriftBaseline, AgentRecord
 from tj.utils.time_parse import utcnow
 from tj.utils.ids import new_uuid
@@ -28,8 +28,8 @@ from tj.mcp.server import (
 )
 
 
-def _make_config(agent_id: str = "test-agent", daily_usd: float | None = 5.0) -> OcwConfig:
-    return OcwConfig(
+def _make_config(agent_id: str = "test-agent", daily_usd: float | None = 5.0) -> TjConfig:
+    return TjConfig(
         version="1",
         defaults=DefaultsConfig(budget=BudgetConfig(daily_usd=daily_usd)),
         agents={agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))},

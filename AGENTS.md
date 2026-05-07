@@ -1,4 +1,4 @@
-# AGENTS.md — Token Juice
+# AGENTS.md — TokenJam
 
 > **AI coding agents working in this repo should read [`CLAUDE.md`](./CLAUDE.md) instead.**
 > CLAUDE.md is the maintained source of truth and is kept up to date by the agents

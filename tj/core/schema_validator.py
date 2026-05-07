@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from tj.core.db import StorageBackend
     from tj.core.models import NormalizedSpan
     from tj.core.alerts import AlertEngine
-    from tj.core.config import OcwConfig
+    from tj.core.config import TjConfig
 
 logger = logging.getLogger("tj.schema")
 
@@ -36,7 +36,7 @@ class SchemaValidator:
     If neither exists yet, silently skip.
     """
 
-    def __init__(self, db: StorageBackend, alert_engine: AlertEngine, config: OcwConfig):
+    def __init__(self, db: StorageBackend, alert_engine: AlertEngine, config: TjConfig):
         self.db = db
         self.alert_engine = alert_engine
         self.config = config
@@ -120,7 +120,7 @@ class SchemaValidator:
 
         Relative paths are resolved relative to the config file's parent directory
         (config.config_path). Falls back to CWD-relative resolution when no config
-        file path is available (e.g. in tests with a synthetic OcwConfig).
+        file path is available (e.g. in tests with a synthetic TjConfig).
         """
         path = Path(path_str)
         if not path.is_absolute():

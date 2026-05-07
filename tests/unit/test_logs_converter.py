@@ -281,7 +281,7 @@ def test_api_error_missing_error_raises():
 # ── Codex converter tests ────────────────────────────────────────────────
 
 CODEX_CONV_ID = "conv-codex-abc"
-CODEX_RESOURCE = {"service.name": "codex-tokenjuice"}
+CODEX_RESOURCE = {"service.name": "codex-tokenjam"}
 
 
 def _codex_sse_attrs(**overrides) -> dict:
@@ -310,7 +310,7 @@ def test_codex_sse_completion_produces_llm_span():
     assert span.output_tokens == 150
     assert span.cache_tokens == 200
     assert span.session_id == CODEX_CONV_ID
-    assert span.agent_id == "codex-tokenjuice"
+    assert span.agent_id == "codex-tokenjam"
 
 
 def test_codex_sse_non_completion_returns_none():

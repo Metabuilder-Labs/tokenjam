@@ -1,6 +1,6 @@
 # OCW Examples
 
-Example agents demonstrating [ocw](https://github.com/Metabuilder-Labs/Token Juice) integrations, from single-provider basics to complex multi-agent workflows.
+Example agents demonstrating [ocw](https://github.com/Metabuilder-Labs/TokenJam) integrations, from single-provider basics to complex multi-agent workflows.
 
 ## Quick Start
 

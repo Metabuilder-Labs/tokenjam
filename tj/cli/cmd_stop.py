@@ -14,8 +14,8 @@ from tj.utils.formatting import console
 @click.pass_context
 def cmd_stop(ctx: click.Context) -> None:
     """Stop the tj serve daemon or background process."""
-    plist_path = Path.home() / "Library/LaunchAgents/com.tokenjuice.serve.plist"
-    systemd_path = Path.home() / ".config/systemd/user/tokenjuice.service"
+    plist_path = Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
+    systemd_path = Path.home() / ".config/systemd/user/tokenjam.service"
 
     stopped_via: list[str] = []
 
@@ -34,11 +34,11 @@ def cmd_stop(ctx: click.Context) -> None:
     # Try systemd (Linux).
     # `disable --now` stops the unit immediately AND removes it from the
     # boot-time targets, so it does not auto-start on next login.
-    # The service file stays on disk; `systemctl --user enable --now tokenjuice`
+    # The service file stays on disk; `systemctl --user enable --now tokenjam`
     # re-enables it.
     if systemd_path.exists():
         result = subprocess.run(
-            ["systemctl", "--user", "disable", "--now", "tokenjuice"],
+            ["systemctl", "--user", "disable", "--now", "tokenjam"],
             capture_output=True, text=True,
         )
         if result.returncode == 0:
