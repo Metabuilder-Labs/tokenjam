@@ -58,7 +58,6 @@ mcp       = ["fastmcp"]
 
 [project.scripts]
 tj = "tj.cli.main:cli"
-jm = "tj.cli.main:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/synthetic", "tests/agents", "tests/integration"]
