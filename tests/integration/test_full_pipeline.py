@@ -21,24 +21,24 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from tj.core.alerts import AlertEngine
-from tj.core.config import (
+from tokenjam.core.alerts import AlertEngine
+from tokenjam.core.config import (
     AgentConfig,
     BudgetConfig,
     CaptureConfig,
     TjConfig,
     SecurityConfig,
 )
-from tj.core.cost import CostEngine
-from tj.core.db import InMemoryBackend
-from tj.core.ingest import IngestPipeline
-from tj.core.models import AgentRecord, NormalizedSpan, SpanKind, SpanStatus
-from tj.core.schema_validator import SchemaValidator
-from tj.otel.provider import TjSpanExporter
-from tj.otel.semconv import GenAIAttributes
-from tj.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
-from tj.utils.time_parse import utcnow
-import tj.sdk.agent as agent_mod
+from tokenjam.core.cost import CostEngine
+from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.ingest import IngestPipeline
+from tokenjam.core.models import AgentRecord, NormalizedSpan, SpanKind, SpanStatus
+from tokenjam.core.schema_validator import SchemaValidator
+from tokenjam.otel.provider import TjSpanExporter
+from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
+from tokenjam.utils.time_parse import utcnow
+import tokenjam.sdk.agent as agent_mod
 
 
 
@@ -136,7 +136,7 @@ def full_stack():
     # Create a local TracerProvider (not global) and bind the SDK tracer to it
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(ocw_exporter))
-    agent_mod._tracer = provider.get_tracer("tj.sdk")
+    agent_mod._tracer = provider.get_tracer("tokenjam.sdk")
 
     # Seed agent records
     now = utcnow()

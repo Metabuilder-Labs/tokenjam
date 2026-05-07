@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tj.core.config import (
+from tokenjam.core.config import (
     find_config_file, load_config, _parse, _serialise, TjConfig, AgentConfig,
     BudgetConfig, DefaultsConfig, SensitiveAction, SecurityConfig, CaptureConfig,
     StorageConfig, resolve_effective_budget, validate_budget_value,
@@ -17,10 +17,10 @@ class TestFindConfigFile:
         global_config = tmp_path / ".config" / "tj" / "config.toml"
         global_config.parent.mkdir(parents=True)
         global_config.write_bytes(b'version = "1"\n\n[security]\ningest_secret = "global-secret"\n')
-        import tj.core.config as cfg_mod
-        from tj.core.config import find_config_file
+        import tokenjam.core.config as cfg_mod
+        from tokenjam.core.config import find_config_file
         monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
-            Path("tj.toml"),
+            Path("tokenjam.toml"),
             Path(".tj/config.toml"),
             global_config,
         ])
@@ -37,9 +37,9 @@ class TestFindConfigFile:
         global_config = tmp_path / ".config" / "tj" / "config.toml"
         global_config.parent.mkdir(parents=True)
         global_config.write_bytes(b'version = "1"\n\n[security]\ningest_secret = "global"\n')
-        import tj.core.config as cfg_mod
+        import tokenjam.core.config as cfg_mod
         monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
-            Path("tj.toml"),
+            Path("tokenjam.toml"),
             Path(".tj/config.toml"),
             global_config,
         ])
@@ -50,9 +50,9 @@ class TestFindConfigFile:
 
     def test_returns_none_when_no_config_anywhere(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        import tj.core.config as cfg_mod
+        import tokenjam.core.config as cfg_mod
         monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
-            Path("tj.toml"),
+            Path("tokenjam.toml"),
             Path(".tj/config.toml"),
             tmp_path / ".config" / "tj" / "config.toml",
         ])
@@ -64,9 +64,9 @@ class TestLoadConfig:
         monkeypatch.chdir(tmp_path)
         # SEARCH_PATHS is a module-level constant built at import time; patch it
         # directly so the real ~/.config/tj/config.toml is never found.
-        import tj.core.config as cfg_mod
+        import tokenjam.core.config as cfg_mod
         monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
-            Path("tj.toml"),
+            Path("tokenjam.toml"),
             Path(".tj/config.toml"),
             tmp_path / ".config" / "tj" / "config.toml",
         ])
@@ -77,7 +77,7 @@ class TestLoadConfig:
 
     def test_loads_from_file(self, tmp_path):
         toml_content = b'version = "1"\n\n[storage]\npath = "/tmp/test.duckdb"\n'
-        config_file = tmp_path / "tj.toml"
+        config_file = tmp_path / "tokenjam.toml"
         config_file.write_bytes(toml_content)
         config = load_config(str(config_file))
         assert config.storage.path == "/tmp/test.duckdb"
@@ -88,7 +88,7 @@ class TestLoadConfig:
 
     def test_binary_mode_required(self, tmp_path):
         # Verify the file is opened in binary mode by testing a valid TOML
-        config_file = tmp_path / "tj.toml"
+        config_file = tmp_path / "tokenjam.toml"
         config_file.write_bytes(b'version = "2"\n')
         config = load_config(str(config_file))
         assert config.version == "2"
@@ -214,10 +214,10 @@ class TestSerialise:
         """Regression: load_config sets config_path (a Path). Writing that
         config back must not crash with 'PosixPath is not TOML serializable'.
         See v0.1.7 fix."""
-        from tj.core.config import write_config
+        from tokenjam.core.config import write_config
 
         toml_content = b'version = "1"\n\n[security]\ningest_secret = "abc"\n'
-        config_file = tmp_path / "tj.toml"
+        config_file = tmp_path / "tokenjam.toml"
         config_file.write_bytes(toml_content)
 
         config = load_config(str(config_file))

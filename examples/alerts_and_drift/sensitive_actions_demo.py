@@ -27,7 +27,7 @@ import json
 import os
 import tempfile
 
-from tj.sdk.agent import watch, record_llm_call, record_tool_call
+from tokenjam.sdk.agent import watch, record_llm_call, record_tool_call
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ if __name__ == "__main__":
         },
     )
 
-    from tj.sdk.bootstrap import ensure_initialised
+    from tokenjam.sdk.bootstrap import ensure_initialised
     ensure_initialised()
 
     print("=" * 60)

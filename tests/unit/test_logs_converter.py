@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tj.api.routes.logs import (
+from tokenjam.api.routes.logs import (
     _api_error_to_span,
     _api_request_to_span,
     _codex_api_request_to_span,
@@ -21,8 +21,8 @@ from tj.api.routes.logs import (
     _user_prompt_to_span,
     parse_log_records,
 )
-from tj.core.models import SpanKind, SpanStatus
-from tj.otel.semconv import GenAIAttributes
+from tokenjam.core.models import SpanKind, SpanStatus
+from tokenjam.otel.semconv import GenAIAttributes
 from tests.factories import (
     make_claude_code_api_error_log,
     make_claude_code_api_request_log,

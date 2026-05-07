@@ -18,8 +18,8 @@ pip install anthropic          # for running the toy agent
 pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
 
 # Linting and type checking
-ruff check tj/
-mypy tj/
+ruff check tokenjam/
+mypy tokenjam/
 
 # E2e tests (requires real API key — costs fractions of a cent)
 export TJ_ANTHROPIC_API_KEY="sk-ant-..."
@@ -29,19 +29,19 @@ pytest tests/e2e/
 ## Before opening a PR
 
 - Run the full test suite and ensure it passes
-- Run `ruff check tj/` and fix any lint errors
-- If you're adding a framework integration, open an issue first so the approach can be aligned on before you write code — integrations have a specific pattern (see `tj/sdk/integrations/anthropic.py` as the reference implementation)
+- Run `ruff check tokenjam/` and fix any lint errors
+- If you're adding a framework integration, open an issue first so the approach can be aligned on before you write code — integrations have a specific pattern (see `tokenjam/sdk/integrations/anthropic.py` as the reference implementation)
 - Keep PRs focused — one feature or fix per PR
 
 ## Project structure
 
 ```
-tj/core/              Domain logic — no CLI or HTTP imports allowed here
-tj/cli/               Click commands — one file per command
-tj/api/               FastAPI routes
-tj/sdk/               @watch() decorator and provider/framework patches
-tj/otel/              OTel TracerProvider and span exporter wiring
-tj/utils/             Formatting, time parsing, ID generation
+tokenjam/core/              Domain logic — no CLI or HTTP imports allowed here
+tokenjam/cli/               Click commands — one file per command
+tokenjam/api/               FastAPI routes
+tokenjam/sdk/               @watch() decorator and provider/framework patches
+tokenjam/otel/              OTel TracerProvider and span exporter wiring
+tokenjam/utils/             Formatting, time parsing, ID generation
 sdk-ts/src/            TypeScript SDK (@tokenjam/sdk)
 pricing/models.toml    Community-maintained model pricing — PRs welcome here
 tests/factories.py     Span factory — use this in all synthetic tests, never
@@ -52,7 +52,7 @@ tests/factories.py     Span factory — use this in all synthetic tests, never
 
 This project was built using parallel Claude Code agents. The `.claude/` directory contains the original task files. If you're using Claude Code to contribute:
 
-- Read `AGENTS.md` at the repo root before starting — it contains the critical rules (DuckDB not SQLite, TOML not YAML, no CLI imports in `tj/core/`, etc.)
+- Read `AGENTS.md` at the repo root before starting — it contains the critical rules (DuckDB not SQLite, TOML not YAML, no CLI imports in `tokenjam/core/`, etc.)
 - The task files in `.claude/` show how the codebase was structured and are useful context for larger contributions
 
 ## Pricing table contributions

@@ -4,15 +4,15 @@ from __future__ import annotations
 import pytest
 import httpx
 
-from tj.api.app import create_app
-from tj.core.config import (
+from tokenjam.api.app import create_app
+from tokenjam.core.config import (
     ApiAuthConfig,
     ApiConfig,
     TjConfig,
     SecurityConfig,
 )
-from tj.core.db import InMemoryBackend
-from tj.core.ingest import IngestPipeline
+from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.ingest import IngestPipeline
 from tests.factories import (
     make_claude_code_api_error_log,
     make_claude_code_api_request_log,

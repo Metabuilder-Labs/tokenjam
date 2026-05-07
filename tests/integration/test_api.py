@@ -6,8 +6,8 @@ import httpx
 
 from unittest.mock import patch
 
-from tj.api.app import create_app
-from tj.core.config import (
+from tokenjam.api.app import create_app
+from tokenjam.core.config import (
     AgentConfig,
     AlertsConfig,
     ApiAuthConfig,
@@ -16,8 +16,8 @@ from tj.core.config import (
     TjConfig,
     SecurityConfig,
 )
-from tj.core.db import InMemoryBackend
-from tj.core.ingest import IngestPipeline
+from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.ingest import IngestPipeline
 from tests.factories import make_llm_span, make_tool_span
 
 
@@ -354,8 +354,8 @@ async def test_post_budget_zero_clears_limit(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tj.api.routes.budget.find_config_file", return_value="/fake/ocw.toml"), \
-         patch("tj.api.routes.budget.write_config"):
+    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/ocw.toml"), \
+         patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post("/api/v1/budget", json={"scope": "my-agent", "daily_usd": 0})
 

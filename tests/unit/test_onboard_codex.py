@@ -1,7 +1,7 @@
 """Unit tests for Codex config writing helpers in cmd_onboard."""
 from __future__ import annotations
 
-from tj.cli.cmd_onboard import _codex_apply_block, _codex_mcp_toml_block
+from tokenjam.cli.cmd_onboard import _codex_apply_block, _codex_mcp_toml_block
 
 
 class TestCodexApplyBlock:

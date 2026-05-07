@@ -6,17 +6,17 @@ from typing import Any
 
 import pytest
 
-from tj.core.config import TjConfig, AgentConfig
-from tj.core.models import (
+from tokenjam.core.config import TjConfig, AgentConfig
+from tokenjam.core.models import (
     AlertType,
     DriftBaseline,
     NormalizedSpan,
     SchemaValidationResult,
     Severity,
 )
-from tj.core.schema_validator import SchemaValidator
-from tj.otel.semconv import GenAIAttributes
-from tj.utils.time_parse import utcnow
+from tokenjam.core.schema_validator import SchemaValidator
+from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_tool_span
 
 

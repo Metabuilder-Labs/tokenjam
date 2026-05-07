@@ -4,12 +4,12 @@ use these factory functions. This ensures consistent defaults and readable tests
 """
 from __future__ import annotations
 from datetime import timedelta
-from tj.core.models import (
+from tokenjam.core.models import (
     NormalizedSpan, SessionRecord,
     SpanStatus, SpanKind,
 )
-from tj.utils.ids import new_uuid, new_trace_id, new_span_id
-from tj.utils.time_parse import utcnow
+from tokenjam.utils.ids import new_uuid, new_trace_id, new_span_id
+from tokenjam.utils.time_parse import utcnow
 
 
 def make_llm_span(

@@ -5,8 +5,8 @@ from datetime import date, timedelta
 
 import pytest
 
-from tj.core.db import InMemoryBackend, run_migrations
-from tj.core.models import (
+from tokenjam.core.db import InMemoryBackend, run_migrations
+from tokenjam.core.models import (
     AgentRecord,
     Alert,
     AlertFilters,
@@ -17,8 +17,8 @@ from tj.core.models import (
     Severity,
     TraceFilters,
 )
-from tj.utils.ids import new_uuid, new_span_id, new_trace_id
-from tj.utils.time_parse import utcnow
+from tokenjam.utils.ids import new_uuid, new_span_id, new_trace_id
+from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session, make_tool_span
 
 

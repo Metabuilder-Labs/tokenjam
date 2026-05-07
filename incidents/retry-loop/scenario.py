@@ -51,7 +51,7 @@ def run() -> None:
             "trace_count": result.trace_count,
         }, indent=2))
     else:
-        from tj.utils.formatting import console
+        from tokenjam.utils.formatting import console
         _render(console, result)
 
 
@@ -59,10 +59,10 @@ def _execute():
     """Run the scenario logic, return (env, result)."""
     from datetime import timedelta
 
-    from tj.core.models import NormalizedSpan, SpanKind, SpanStatus
-    from tj.demo.env import DemoEnvironment
-    from tj.utils.ids import new_span_id, new_trace_id, new_uuid
-    from tj.utils.time_parse import utcnow
+    from tokenjam.core.models import NormalizedSpan, SpanKind, SpanStatus
+    from tokenjam.demo.env import DemoEnvironment
+    from tokenjam.utils.ids import new_span_id, new_trace_id, new_uuid
+    from tokenjam.utils.time_parse import utcnow
 
     env = DemoEnvironment()
     now = utcnow()

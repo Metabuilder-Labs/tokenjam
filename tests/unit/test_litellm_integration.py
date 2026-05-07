@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tj.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ def _inject_fake_litellm():
     sys.modules["litellm"] = fake
     yield fake
     # Uninstall to reset state between tests
-    from tj.sdk.integrations.litellm import LiteLLMIntegration
+    from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
     LiteLLMIntegration.installed = False
     del sys.modules["litellm"]
 
@@ -85,7 +85,7 @@ class TestLiteLLMIntegration:
 
     def test_sync_completion_creates_span(self, tracer_and_spans):
         tracer, spans = tracer_and_spans
-        from tj.sdk.integrations.litellm import LiteLLMIntegration
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
         import litellm
 
         integration = LiteLLMIntegration()
@@ -106,7 +106,7 @@ class TestLiteLLMIntegration:
 
     def test_async_completion_creates_span(self, tracer_and_spans):
         tracer, spans = tracer_and_spans
-        from tj.sdk.integrations.litellm import LiteLLMIntegration
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
         import litellm
 
         integration = LiteLLMIntegration()
@@ -142,7 +142,7 @@ class TestLiteLLMIntegration:
             return resp
         litellm.completion = no_hidden
 
-        from tj.sdk.integrations.litellm import LiteLLMIntegration
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
         integration = LiteLLMIntegration()
         integration.install(tracer)
 
@@ -165,7 +165,7 @@ class TestLiteLLMIntegration:
             return resp
         litellm.completion = no_provider
 
-        from tj.sdk.integrations.litellm import LiteLLMIntegration
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
         integration = LiteLLMIntegration()
         integration.install(tracer)
 
@@ -188,7 +188,7 @@ class TestLiteLLMIntegration:
 
         litellm.completion = lambda *a, **kw: iter([chunk1, chunk2])
 
-        from tj.sdk.integrations.litellm import LiteLLMIntegration
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
         integration = LiteLLMIntegration()
         integration.install(tracer)
 
@@ -223,7 +223,7 @@ class TestLiteLLMIntegration:
 
         litellm.acompletion = fake_acompletion
 
-        from tj.sdk.integrations.litellm import LiteLLMIntegration
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
         integration = LiteLLMIntegration()
         integration.install(tracer)
 
@@ -247,7 +247,7 @@ class TestLiteLLMIntegration:
 
         litellm.completion = MagicMock(side_effect=RuntimeError("API down"))
 
-        from tj.sdk.integrations.litellm import LiteLLMIntegration
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
         integration = LiteLLMIntegration()
         integration.install(tracer)
 
@@ -265,7 +265,7 @@ class TestLiteLLMIntegration:
         import litellm
 
         original = litellm.completion
-        from tj.sdk.integrations.litellm import LiteLLMIntegration
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
         integration = LiteLLMIntegration()
         integration.install(tracer)
         assert litellm.completion is not original
@@ -275,7 +275,7 @@ class TestLiteLLMIntegration:
 
     def test_context_var_suppresses_openai_patch(self, tracer_and_spans):
         """When litellm patch is active, the openai patch skips span creation."""
-        from tj.sdk.integrations.litellm import _tj_litellm_active
+        from tokenjam.sdk.integrations.litellm import _tj_litellm_active
 
         # Verify the context var is False by default
         assert _tj_litellm_active.get(False) is False

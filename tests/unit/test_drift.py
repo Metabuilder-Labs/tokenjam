@@ -1,8 +1,8 @@
 """Unit tests for drift detection pure functions."""
 from unittest.mock import MagicMock
 
-from tj.core.config import TjConfig
-from tj.core.drift import DriftDetector, jaccard_similarity, z_score
+from tokenjam.core.config import TjConfig
+from tokenjam.core.drift import DriftDetector, jaccard_similarity, z_score
 from tests.factories import make_session
 
 

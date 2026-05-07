@@ -31,8 +31,8 @@ os.environ.setdefault("GOOGLE_API_KEY", api_key)
 
 import google.generativeai as genai  # noqa: E402
 
-from tj.sdk import watch  # noqa: E402
-from tj.sdk.integrations.gemini import patch_gemini  # noqa: E402
+from tokenjam.sdk import watch  # noqa: E402
+from tokenjam.sdk.integrations.gemini import patch_gemini  # noqa: E402
 
 # Monkey-patch the Gemini client BEFORE creating any model instances.
 patch_gemini()

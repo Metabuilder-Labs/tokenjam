@@ -70,8 +70,8 @@ ocw doctor     # verify your setup
 ```
 
 ```python
-from tj.sdk import watch
-from tj.sdk.integrations.anthropic import patch_anthropic
+from tokenjam.sdk import watch
+from tokenjam.sdk.integrations.anthropic import patch_anthropic
 
 patch_anthropic()    # auto-intercepts all Anthropic API calls
 
@@ -307,11 +307,11 @@ pip uninstall tokenjam -y
 Intercept at the API level. Framework-agnostic.
 
 ```python
-from tj.sdk.integrations.anthropic import patch_anthropic   # Anthropic
-from tj.sdk.integrations.openai    import patch_openai      # OpenAI
-from tj.sdk.integrations.gemini    import patch_gemini      # Google Gemini
-from tj.sdk.integrations.bedrock   import patch_bedrock     # AWS Bedrock
-from tj.sdk.integrations.litellm   import patch_litellm     # LiteLLM (100+ providers)
+from tokenjam.sdk.integrations.anthropic import patch_anthropic   # Anthropic
+from tokenjam.sdk.integrations.openai    import patch_openai      # OpenAI
+from tokenjam.sdk.integrations.gemini    import patch_gemini      # Google Gemini
+from tokenjam.sdk.integrations.bedrock   import patch_bedrock     # AWS Bedrock
+from tokenjam.sdk.integrations.litellm   import patch_litellm     # LiteLLM (100+ providers)
 ```
 
 `patch_litellm()` covers all providers LiteLLM routes to (OpenAI, Anthropic, Bedrock, Vertex, Cohere, Mistral, Ollama, etc.). If you use LiteLLM, you don't need individual patches.
@@ -323,13 +323,13 @@ OpenAI-compatible providers (Groq, Together, Fireworks, xAI, Azure OpenAI) work 
 Instrument the framework's own abstractions:
 
 ```python
-from tj.sdk.integrations.langchain         import patch_langchain        # BaseLLM + BaseTool
-from tj.sdk.integrations.langgraph         import patch_langgraph        # CompiledGraph
-from tj.sdk.integrations.crewai            import patch_crewai           # Task + Agent
-from tj.sdk.integrations.autogen           import patch_autogen          # ConversableAgent
-from tj.sdk.integrations.llamaindex        import patch_llamaindex       # Native OTel
-from tj.sdk.integrations.openai_agents_sdk import patch_openai_agents    # Native OTel
-from tj.sdk.integrations.nemoclaw          import watch_nemoclaw         # NemoClaw Gateway
+from tokenjam.sdk.integrations.langchain         import patch_langchain        # BaseLLM + BaseTool
+from tokenjam.sdk.integrations.langgraph         import patch_langgraph        # CompiledGraph
+from tokenjam.sdk.integrations.crewai            import patch_crewai           # Task + Agent
+from tokenjam.sdk.integrations.autogen           import patch_autogen          # ConversableAgent
+from tokenjam.sdk.integrations.llamaindex        import patch_llamaindex       # Native OTel
+from tokenjam.sdk.integrations.openai_agents_sdk import patch_openai_agents    # Native OTel
+from tokenjam.sdk.integrations.nemoclaw          import watch_nemoclaw         # NemoClaw Gateway
 ```
 
 Full framework support guide: [docs/framework-support.md](docs/framework-support.md)
@@ -367,7 +367,7 @@ Full alert reference — trigger conditions, cooldown config, content stripping,
 Running OpenClaw inside [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw)? `tj` connects to the OpenShell Gateway WebSocket and turns sandbox events — blocked network requests, filesystem denials, inference reroutes — into alerts.
 
 ```python
-from tj.sdk.integrations.nemoclaw import watch_nemoclaw
+from tokenjam.sdk.integrations.nemoclaw import watch_nemoclaw
 
 observer = watch_nemoclaw()
 asyncio.create_task(observer.connect())

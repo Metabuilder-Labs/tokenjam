@@ -4,10 +4,10 @@ from __future__ import annotations
 import pytest
 import httpx
 
-from tj.api.app import create_app
-from tj.core.config import ApiAuthConfig, ApiConfig, TjConfig, SecurityConfig
-from tj.core.db import InMemoryBackend
-from tj.core.ingest import IngestPipeline
+from tokenjam.api.app import create_app
+from tokenjam.core.config import ApiAuthConfig, ApiConfig, TjConfig, SecurityConfig
+from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.ingest import IngestPipeline
 
 
 INGEST_SECRET = "test-secret"
@@ -17,7 +17,7 @@ def _get_spans(db):
     """Query all spans from the in-memory DB."""
     rows = db.conn.execute("SELECT * FROM spans ORDER BY start_time").fetchall()
     cols = [d[0] for d in db.conn.description]
-    from tj.core.db import _row_to_span
+    from tokenjam.core.db import _row_to_span
     return [_row_to_span(r, cols) for r in rows]
 
 
@@ -323,8 +323,8 @@ class TestAgentsEndpoint:
 
     @pytest.mark.asyncio
     async def test_list_agents_returns_registered_agents(self, client, db):
-        from tj.core.models import AgentRecord
-        from tj.utils.time_parse import utcnow
+        from tokenjam.core.models import AgentRecord
+        from tokenjam.utils.time_parse import utcnow
 
         t = utcnow()
         db.upsert_agent(AgentRecord(agent_id="agent-a", first_seen=t, last_seen=t))

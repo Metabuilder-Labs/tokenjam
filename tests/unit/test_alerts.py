@@ -4,9 +4,9 @@ from __future__ import annotations
 from datetime import timedelta
 from unittest.mock import patch
 
-from tj.core.alerts import CooldownTracker
-from tj.core.models import AlertType
-from tj.utils.time_parse import utcnow
+from tokenjam.core.alerts import CooldownTracker
+from tokenjam.core.models import AlertType
+from tokenjam.utils.time_parse import utcnow
 
 
 def test_cooldown_allows_first_alert():

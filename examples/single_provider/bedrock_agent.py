@@ -43,8 +43,8 @@ if not region:
 
 import boto3  # noqa: E402
 
-from tj.sdk import watch  # noqa: E402
-from tj.sdk.integrations.bedrock import patch_bedrock  # noqa: E402
+from tokenjam.sdk import watch  # noqa: E402
+from tokenjam.sdk.integrations.bedrock import patch_bedrock  # noqa: E402
 
 # Monkey-patch the boto3 Bedrock client BEFORE creating any instances.
 patch_bedrock()

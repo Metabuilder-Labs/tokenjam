@@ -6,15 +6,15 @@ from datetime import datetime
 
 import pytest
 
-from tj.core.config import TjConfig, SecurityConfig, CaptureConfig
-from tj.core.ingest import (
+from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
+from tokenjam.core.ingest import (
     IngestPipeline,
     SpanRejectedError,
     SpanSanitizer,
     strip_captured_content,
 )
-from tj.core.models import NormalizedSpan, SessionRecord, SpanStatus
-from tj.otel.semconv import GenAIAttributes
+from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
+from tokenjam.otel.semconv import GenAIAttributes
 from tests.factories import make_llm_span, make_session, make_tool_span
 
 
