@@ -10,18 +10,39 @@
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap" rel="stylesheet">
 <style>
 :root {
+  /* Dark theme (default) — Vercel-style monochrome, matches tokenjam.dev */
   --bg: #000;
   --surface: #0a0a0a;
   --surface2: #111;
+  --surface3: #1a1a1a;
   --border: #1f1f1f;
   --text: #ededed;
   --text-dim: #a1a1a1;
   --text-faint: rgba(237,237,237,0.4);
-  --accent: #3d8eff;
+  --accent: #ededed;            /* monochrome intensity (active/hover/focus) */
+  --accent-rgb: 255,255,255;     /* for rgba() tints */
+  --brand: #3d8eff;              /* brand blue — logo + LLM category fill only */
   --warn: #f5a623;
   --error: #ee0000;
   --success: #0ce490;
   --info: #3d8eff;
+}
+[data-theme="light"] {
+  --bg: #fff;
+  --surface: #fafafa;
+  --surface2: #f4f4f4;
+  --surface3: #eaeaea;
+  --border: #eaeaea;
+  --text: #000;
+  --text-dim: #666;
+  --text-faint: rgba(0,0,0,0.4);
+  --accent: #000;
+  --accent-rgb: 0,0,0;
+  --brand: #3d8eff;
+  --warn: #c47e0c;
+  --error: #cc0000;
+  --success: #0a8050;
+  --info: #0070f3;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -62,7 +83,7 @@ code, .mono {
   align-items: center;
   gap: 8px;
 }
-.sidebar-brand .brand-claw { color: var(--accent); }
+.sidebar-brand .brand-mark { display: inline-flex; flex-shrink: 0; }
 .sidebar a {
   display: flex;
   align-items: center;
@@ -74,8 +95,8 @@ code, .mono {
   font-size: 13px;
   transition: background 0.15s, color 0.15s;
 }
-.sidebar a:hover { background: rgba(255,255,255,0.04); color: var(--text); }
-.sidebar a.active { color: var(--accent); background: rgba(61,142,255,0.08); }
+.sidebar a:hover { background: rgba(var(--accent-rgb),0.04); color: var(--text); }
+.sidebar a.active { color: var(--accent); background: rgba(var(--accent-rgb),0.08); }
 .sidebar a .icon { width: 16px; text-align: center; font-size: 14px; }
 .sidebar-footer {
   margin-top: auto;
@@ -93,12 +114,32 @@ code, .mono {
   font-size: 13px;
   transition: background 0.15s, color 0.15s;
 }
-.sidebar-footer a.footer-link:hover { background: rgba(255,255,255,0.04); color: var(--text); }
+.sidebar-footer a.footer-link:hover { background: rgba(var(--accent-rgb),0.04); color: var(--text); }
 .sidebar-footer .version {
   padding: 4px 16px 8px;
   font-size: 10px;
   color: var(--text-dim);
   font-family: 'Geist Mono', monospace;
+}
+.theme-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  text-align: left;
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.theme-toggle:hover { background: rgba(var(--accent-rgb),0.04); color: var(--text); }
+.theme-toggle .icon {
+  width: 16px; text-align: center; font-size: 14px;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 
 /* Main */
@@ -227,9 +268,9 @@ td {
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
-tr:hover td { background: rgba(255,255,255,0.02); }
+tr:hover td { background: rgba(var(--accent-rgb),0.02); }
 tr.clickable { cursor: pointer; }
-tr.clickable:hover td { background: rgba(61,142,255,0.06); }
+tr.clickable:hover td { background: rgba(var(--accent-rgb),0.06); }
 td.chevron { color: var(--text-dim); font-size: 14px; text-align: center; width: 24px; }
 tr.clickable:hover td.chevron { color: var(--accent); }
 
@@ -291,10 +332,10 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   border-radius: 4px;
   transition: background 0.1s;
 }
-.wf-row:hover { background: rgba(255,255,255,0.04); }
+.wf-row:hover { background: rgba(var(--accent-rgb),0.04); }
 .wf-row:hover .wf-label { color: var(--text); }
 .wf-row:hover .wf-bar { box-shadow: 0 0 8px rgba(61,142,255,0.25); }
-.wf-row.selected { background: rgba(61,142,255,0.08); border-left: 2px solid var(--accent); }
+.wf-row.selected { background: rgba(var(--accent-rgb),0.08); border-left: 2px solid var(--accent); }
 .wf-row.selected .wf-label { color: var(--accent); }
 .wf-label {
   flex-shrink: 0;
@@ -344,7 +385,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   white-space: nowrap;
 }
 .wf-bar.agent { background: var(--success); color: var(--bg); }
-.wf-bar.llm { background: var(--accent); }
+.wf-bar.llm { background: var(--brand); }
 .wf-bar.tool { background: var(--warn); color: var(--bg); }
 .wf-bar.other { background: var(--text-dim); }
 
@@ -448,11 +489,20 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   color: var(--text-dim);
 }
 </style>
+<script>
+  // Apply theme before paint to prevent flash of incorrect theme
+  (function () {
+    var pref = localStorage.getItem('tj-theme') || 'system';
+    var mql = window.matchMedia('(prefers-color-scheme: light)');
+    var isLight = pref === 'light' || (pref === 'system' && mql.matches);
+    document.documentElement.setAttribute('data-theme', isLight ? 'light' : 'dark');
+  })();
+</script>
 </head>
 <body>
 
 <nav class="sidebar">
-  <div class="sidebar-brand"><svg xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="22" height="22" style="flex-shrink:0" fill="none" stroke="var(--accent)" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/></svg><span>Token<span class="brand-claw">Jam</span></span></div>
+  <div class="sidebar-brand"><svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="26" height="26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="TokenJam"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/><g fill="currentColor" stroke="none" fill-rule="evenodd"><path transform="translate(85.68,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(106.83,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M4.74,-7.50 L4.74,-8.75 L7.24,-8.75 L7.24,-0.00 L5.86,-0.00 L5.86,-7.50 L4.74,-7.50 Z"/><path transform="translate(123.97,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(145.12,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M5.68,-1.86 Q6.83,-2.86 7.49,-3.50 Q8.16,-4.14 8.60,-4.84 Q9.05,-5.53 9.05,-6.23 Q9.05,-6.95 8.71,-7.36 Q8.36,-7.76 7.63,-7.76 Q6.92,-7.76 6.53,-7.31 Q6.14,-6.86 6.12,-6.11 L4.80,-6.11 Q4.84,-7.48 5.62,-8.20 Q6.41,-8.93 7.62,-8.93 Q8.93,-8.93 9.67,-8.21 Q10.40,-7.49 10.40,-6.29 Q10.40,-5.42 9.97,-4.63 Q9.53,-3.83 8.92,-3.20 Q8.32,-2.57 7.38,-1.74 L6.84,-1.26 L10.64,-1.26 L10.64,-0.12 L4.81,-0.12 L4.81,-1.12 L5.68,-1.86 Z"/><path transform="translate(84.35,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(105.44,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M7.46,-7.50 L7.46,-8.75 L9.96,-8.75 L9.96,-0.00 L8.58,-0.00 L8.58,-7.50 L7.46,-7.50 Z"/><path transform="translate(122.64,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(143.73,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M8.40,-1.86 Q9.55,-2.86 10.22,-3.50 Q10.88,-4.14 11.33,-4.84 Q11.77,-5.53 11.77,-6.23 Q11.77,-6.95 11.43,-7.36 Q11.09,-7.76 10.36,-7.76 Q9.65,-7.76 9.26,-7.31 Q8.87,-6.86 8.84,-6.11 L7.52,-6.11 Q7.56,-7.48 8.35,-8.20 Q9.13,-8.93 10.34,-8.93 Q11.65,-8.93 12.39,-8.21 Q13.13,-7.49 13.13,-6.29 Q13.13,-5.42 12.69,-4.63 Q12.25,-3.83 11.65,-3.20 Q11.04,-2.57 10.10,-1.74 L9.56,-1.26 L13.37,-1.26 L13.37,-0.12 L7.54,-0.12 L7.54,-1.12 L8.40,-1.86 Z"/></g></svg><span>TokenJam</span></div>
   <a href="#/status" class="nav-link" data-view="status"><span class="icon">&bull;</span> Status</a>
   <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Cost</a>
@@ -462,6 +512,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
     <a href="https://github.com/Metabuilder-Labs/tokenjam" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
+    <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme"><span class="icon" id="theme-icon">&#x2299;</span> <span id="theme-label">System</span></button>
     <div class="version">v0.1.4</div>
   </div>
 </nav>
@@ -1210,6 +1261,33 @@ function App() {
 }
 
 render(html`<${App} />`, document.getElementById('app'));
+</script>
+<script>
+  // Theme toggle: cycles dark → light → system
+  (function () {
+    var KEY = 'tj-theme';
+    var ICONS = { dark: '☾', light: '☀', system: '⊙' };  // ☾ ☀ ⊙
+    var LABELS = { dark: 'Dark', light: 'Light', system: 'System' };
+    var btn = document.getElementById('theme-toggle');
+    var iconEl = document.getElementById('theme-icon');
+    var labelEl = document.getElementById('theme-label');
+    var mql = window.matchMedia('(prefers-color-scheme: light)');
+    function apply(pref) {
+      var isLight = pref === 'light' || (pref === 'system' && mql.matches);
+      document.documentElement.setAttribute('data-theme', isLight ? 'light' : 'dark');
+      if (iconEl) iconEl.textContent = ICONS[pref];
+      if (labelEl) labelEl.textContent = LABELS[pref];
+      if (btn) btn.title = 'Theme: ' + pref + ' (click to cycle)';
+    }
+    var pref = localStorage.getItem(KEY) || 'system';
+    apply(pref);
+    if (btn) btn.addEventListener('click', function () {
+      pref = pref === 'system' ? 'light' : pref === 'light' ? 'dark' : 'system';
+      localStorage.setItem(KEY, pref);
+      apply(pref);
+    });
+    mql.addEventListener('change', function () { if (pref === 'system') apply(pref); });
+  })();
 </script>
 </body>
 </html>
