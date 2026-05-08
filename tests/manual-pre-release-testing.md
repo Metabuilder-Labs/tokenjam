@@ -12,8 +12,8 @@ Run through this sequence to test a branch before merging and cutting a release.
 
 ```bash
 # 1. Clean slate
-ocw uninstall --yes 2>/dev/null
-rm -rf ~/.ocw ~/.config/ocw .ocw
+tj uninstall --yes 2>/dev/null
+rm -rf ~/.tj ~/.config/tj .tj
 
 # 2. Check out the branch to test
 cd ~/tokenjam
@@ -26,20 +26,20 @@ git checkout <branch-name>
 # dep tree (that bumps shared deps and breaks unrelated packages like litellm).
 pip3 uninstall -y tokenjam
 pip3 install -e ".[dev,mcp]"
-ocw --version
-# Verify the installed `ocw` actually imports from the repo, not site-packages
-python3 -c "import tj; print(tj.__file__)"   # must point inside ~/tokenjam
+tj --version
+# Verify the installed `tj` actually imports from the repo, not site-packages
+python3 -c "import tokenjam; print(tokenjam.__file__)"   # must point inside ~/tokenjam
 
 # 4. Run automated tests first
 pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
-ruff check ocw/
+ruff check tokenjam/
 
 # 5. Onboard fresh
 # Note: daemon auto-installs by default (use --no-daemon to skip).
-ocw onboard
+tj onboard
 
 # 6. Stop daemon before manual testing (daemon auto-started by onboard)
-ocw stop
+tj stop
 
 # 7. Populate test data — simulated (free, no API keys)
 python3 examples/alerts_and_drift/sensitive_actions_demo.py
@@ -47,12 +47,12 @@ python3 examples/alerts_and_drift/budget_breach_demo.py
 python3 examples/alerts_and_drift/drift_demo.py
 
 # 7b. Run incident library demos (zero-config, no API keys)
-ocw demo                # lists available scenarios (no flag)
-ocw demo retry-loop
-ocw demo surprise-cost
-ocw demo hallucination-drift
+tj demo                # lists available scenarios (no flag)
+tj demo retry-loop
+tj demo surprise-cost
+tj demo hallucination-drift
 # [ ] Each runs without errors
-# [ ] Each writes spans to the DB (verify in step 9 with `ocw traces`)
+# [ ] Each writes spans to the DB (verify in step 9 with `tj traces`)
 
 # 8. Populate test data — real API calls
 source .env.local
@@ -60,17 +60,17 @@ python3 examples/single_provider/anthropic_agent.py
 python3 examples/single_provider/litellm_agent.py
 
 # 9. Verify CLI (direct DuckDB, no server)
-ocw status        # agents visible with cost > $0, tokens counted
-ocw traces        # spans from all runs
-ocw cost --since 1h   # real USD values, not $0.000000
-ocw alerts        # alerts from sensitive_actions and budget_breach demos
-ocw drift         # baseline built from drift_demo sessions
-ocw budget        # budget table with configured limits
-ocw doctor        # exit 0 (or 1 with warnings); no errors. Checks config, DB, secret, drift readiness
+tj status        # agents visible with cost > $0, tokens counted
+tj traces        # spans from all runs
+tj cost --since 1h   # real USD values, not $0.000000
+tj alerts        # alerts from sensitive_actions and budget_breach demos
+tj drift         # baseline built from drift_demo sessions
+tj budget        # budget table with configured limits
+tj doctor        # exit 0 (or 1 with warnings); no errors. Checks config, DB, secret, drift readiness
 
 # 10. Start server
 # Note: must stop daemon first (step 6) or this will fail with "Address already in use"
-ocw serve &
+tj serve &
 sleep 2
 
 # 11. Run one more example (tests SDK HTTP fallback while server holds DB lock)
@@ -82,8 +82,12 @@ open http://127.0.0.1:7391/
 # [ ] Each card shows cost, tokens, tool calls, duration
 # [ ] "Last seen" time shown
 # [ ] Cards are clickable (navigate to filtered traces)
-# [ ] Sidebar: Open(white)Claw(blue)Watch(white) with SVG icon
-# [ ] Sidebar footer: API docs + GitHub as proper nav links
+# [ ] Sidebar: TJ jar-mark SVG + "TokenJam" wordmark, all single-color
+#     (monochrome — SVG uses currentColor, so it follows text color)
+# [ ] Sidebar footer: API docs, GitHub, Light/Dark/System theme toggle, and version
+# [ ] Theme toggle (sidebar footer): clicking cycles System ⊙ → Light ☀ → Dark ☾,
+#     preference persists across reloads, no flash of wrong theme on reload
+# [ ] Light mode renders correctly: white bg, black text, status colors still legible
 
 # 13. Verify web UI — Traces
 # [ ] Agent name is first column, no Trace ID column
@@ -115,53 +119,53 @@ open http://127.0.0.1:7391/
 # [ ] Threshold shown in header (2.0σ)
 
 # 17. Verify CLI works while server is running (API fallback)
-ocw status
-ocw traces
-ocw cost --since 1h
+tj status
+tj traces
+tj cost --since 1h
 
 # 18. Clean up
-ocw stop
+tj stop
 ```
 
 ## Claude Code integration (if applicable)
 
 ```bash
 # Test after step 5:
-ocw onboard --claude-code
-# Should: write config to ~/.config/ocw/config.toml (global, not project-local),
+tj onboard --claude-code
+# Should: write config to ~/.config/tj/config.toml (global, not project-local),
 #         write settings to ~/.claude/settings.json,
 #         register MCP server if claude CLI available,
 #         auto-install daemon
-#         create ~/.config/ocw/projects.json with current cwd
+#         create ~/.config/tj/projects.json with current cwd
 
 # Verify global config exists.
-# Note: a project-local `.ocw/config.toml` likely already exists from step 5's
-# `ocw onboard` — `--claude-code` does NOT delete or overwrite it; it only
+# Note: a project-local `.tj/config.toml` likely already exists from step 5's
+# `tj onboard` — `--claude-code` does NOT delete or overwrite it; it only
 # writes to the global config. The "no project-local" check belongs in the
 # multi-project block below where cwd is genuinely fresh.
-test -f ~/.config/ocw/config.toml && echo "ok: global config"
+test -f ~/.config/tj/config.toml && echo "ok: global config"
 
 # Verify projects.json tracks the cwd
-cat ~/.config/ocw/projects.json   # should contain current working directory
+cat ~/.config/tj/projects.json   # should contain current working directory
 
 # Verify no crash on re-run (secret resync, same project)
-ocw onboard --claude-code --budget 5
+tj onboard --claude-code --budget 5
 # Output should include: "Daemon: already running (skipped reinstall)"
 # macOS should NOT show another "Background Items Added" notification.
 
 # Verify multi-project onboard (the 490ad8e fix)
-mkdir -p /tmp/ocw-test-project-2 && cd /tmp/ocw-test-project-2
+mkdir -p /tmp/tj-test-project-2 && cd /tmp/tj-test-project-2
 git init -q
-ocw onboard --claude-code
+tj onboard --claude-code
 # [ ] Output shows "Daemon: already running (skipped reinstall)" — daemon NOT reinstalled
 # [ ] No new "Background Items Added" prompt on macOS
-# [ ] ~/.config/ocw/projects.json now lists BOTH project paths
+# [ ] ~/.config/tj/projects.json now lists BOTH project paths
 # [ ] ingest_secret in ~/.claude/settings.json unchanged from first onboard
 #     (so the original project's auth still works)
-cat ~/.config/ocw/projects.json
+cat ~/.config/tj/projects.json
 # Confirm --claude-code did NOT create a project-local config in this fresh
-# directory (this dir has no preexisting .ocw/, so the check is meaningful here).
-test ! -f .ocw/config.toml && echo "ok: --claude-code did not create project-local config"
+# directory (this dir has no preexisting .tj/, so the check is meaningful here).
+test ! -f .tj/config.toml && echo "ok: --claude-code did not create project-local config"
 cd ~/tokenjam
 
 # Verify global config fallback: CLI works from a directory with no local config
@@ -169,11 +173,11 @@ cd /tmp && tj status   # should resolve to global config, not error out
 cd ~/tokenjam
 
 # Verify --force does reinstall the daemon
-ocw onboard --claude-code --force
+tj onboard --claude-code --force
 # Output should include: "Daemon: installing..."
 
 # Verify MCP server starts
-ocw mcp --help
+tj mcp --help
 ```
 
 ## Codex CLI integration (if applicable)
@@ -181,58 +185,57 @@ ocw mcp --help
 Codex hardcodes `service.name=codex_exec` in its binary, so this is a **one-time global** setup, not per-project. All Codex traces land under the `codex_exec` agent ID regardless of which project directory you onboard from.
 
 ```bash
-# Prereq: tj serve must be running so onboard can read ~/.local/share/ocw/server.state
-ocw serve &
-sleep 2
-
-# Verify the server state file was written by `ocw serve`
-test -f ~/.local/share/ocw/server.state && echo "ok: server.state exists"
-cat ~/.local/share/ocw/server.state   # should contain resolved config path
-
-# Onboard Codex
-ocw onboard --codex
-# Should: write [otel] block + [mcp_servers.ocw] to ~/.codex/config.toml,
-#         use ingest secret from the running server (matched via server.state),
+# Onboard Codex (no prereqs — onboarding writes to the global config and syncs
+# the secret into ~/.codex/config.toml; it does NOT read server.state).
+tj onboard --codex
+# Should: write [otel] block + [mcp_servers.tj] to ~/.codex/config.toml,
+#         use ingest secret from ~/.config/tj/config.toml (creating it if absent),
 #         NOT write [otel.resource] (Codex ignores it — would cause stale agent IDs)
+
+# Start tj serve so the codex exec test below can ingest. This also writes
+# ~/.local/share/tj/server.state for diagnostics (informational only).
+tj serve &
+sleep 2
+test -f ~/.local/share/tj/server.state && echo "ok: server.state exists (informational)"
 
 # Verify Codex config
 cat ~/.codex/config.toml
 # [ ] Contains [otel] block with otlp_endpoint, otlp_headers (Authorization=Bearer ...)
-# [ ] Contains [mcp_servers.ocw] block
+# [ ] Contains [mcp_servers.tj] block
 # [ ] Does NOT contain [otel.resource] block
 
 # Verify secret matches the running server.
 # Note: ~/.codex/config.toml uses TOML format `Authorization = "Bearer <secret>"`
 # (with spaces around `=` and surrounding quotes), so the grep must allow for
 # that — a literal `Authorization=Bearer ` pattern silently misses every match.
-SERVER_SECRET=$(grep ingest_secret ~/.config/ocw/config.toml | sed 's/.*= "//' | tr -d '"')
+SERVER_SECRET=$(grep ingest_secret ~/.config/tj/config.toml | sed 's/.*= "//' | tr -d '"')
 CODEX_SECRET=$(grep -oE 'Bearer [^"]+' ~/.codex/config.toml | sed 's/Bearer //')
 [ "$SERVER_SECRET" = "$CODEX_SECRET" ] && echo "ok: secret synced" || echo "FAIL: secret mismatch"
 
-# Verify skip-on-rerun (must have BOTH [otel] and [mcp_servers.ocw])
-ocw onboard --codex   # should print "already configured" / no-op
+# Verify skip-on-rerun (must have BOTH [otel] and [mcp_servers.tj])
+tj onboard --codex   # should print "already configured" / no-op
 
-# Stop the foreground `ocw serve` from the prereq before any --force flow,
+# Stop the foreground `tj serve` from the prereq before any --force flow,
 # so the daemon reinstall doesn't collide with the running server on port 7391.
-ocw stop
+tj stop
 
 # Verify cross-sync: re-onboarding Claude Code updates Codex config too.
-# `--force` reinstalls the launchd daemon which auto-starts a new `ocw serve`,
-# so do NOT manually run `ocw serve &` after this — that would collide on
+# `--force` reinstalls the launchd daemon which auto-starts a new `tj serve`,
+# so do NOT manually run `tj serve &` after this — that would collide on
 # port 7391. The just-reinstalled daemon is already serving.
-ocw onboard --claude-code --force
+tj onboard --claude-code --force
 # After: ingest secret in ~/.claude/settings.json, ~/.codex/config.toml,
-#        and ~/.config/ocw/config.toml should all match.
+#        and ~/.config/tj/config.toml should all match.
 sleep 2  # give the auto-started daemon a moment to bind the port
 
 # Drive a Codex session (if codex CLI installed) and verify ingestion
 codex exec "say hello"   # or any short codex command
-ocw status --agent codex_exec   # should show codex_exec agent with spans/cost
-ocw traces --agent codex_exec
+tj status --agent codex_exec   # should show codex_exec agent with spans/cost
+tj traces --agent codex_exec
 # [ ] Spans land under agent_id=codex_exec (NOT codex-<project-name>)
-# [ ] /v1/logs endpoint accepted the OTLP log records (no 400 in `ocw serve` output)
+# [ ] /v1/logs endpoint accepted the OTLP log records (no 400 in `tj serve` output)
 
-ocw stop
+tj stop
 ```
 
 ## Quick test (skip web UI — just verify core)
@@ -240,18 +243,18 @@ ocw stop
 For smaller changes that don't touch the UI:
 
 ```bash
-ocw uninstall --yes 2>/dev/null
-rm -rf ~/.ocw ~/.config/ocw .ocw
+tj uninstall --yes 2>/dev/null
+rm -rf ~/.tj ~/.config/tj .tj
 cd ~/tokenjam
 git checkout <branch-name>
 pip3 install -e ".[dev,mcp]"
-ocw onboard --no-daemon
+tj onboard --no-daemon
 source .env.local
 python3 examples/single_provider/anthropic_agent.py
-ocw status && ocw traces && ocw cost --since 1h
+tj status && tj traces && tj cost --since 1h
 # Verify: cost > $0, tokens counted, traces visible
 pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
-ruff check ocw/
+ruff check tokenjam/
 ```
 
 ## What to look for
@@ -272,8 +275,8 @@ ruff check ocw/
 ## Switching back to main after testing
 
 ```bash
-ocw stop
-ocw uninstall --yes 2>/dev/null
+tj stop
+tj uninstall --yes 2>/dev/null
 git checkout main
 pip3 install -e ".[dev,mcp]"
 ```
