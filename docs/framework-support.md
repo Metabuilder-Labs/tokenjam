@@ -1,17 +1,17 @@
 # Framework Support
 
-`ocw` is OTel-native. Any framework that emits OpenTelemetry spans works automatically — point its OTLP exporter at `tj serve` and you're done. For everything else, one-line patches exist.
+`tj` is OTel-native. Any framework that emits OpenTelemetry spans works automatically — point its OTLP exporter at `tj serve` and you're done. For everything else, one-line patches exist.
 
 ## Python provider patches
 
 Intercept at the API level, framework-agnostic:
 
 ```python
-from ocw.sdk.integrations.anthropic import patch_anthropic   # Anthropic — Messages.create + streaming
-from ocw.sdk.integrations.openai    import patch_openai      # OpenAI — chat completions
-from ocw.sdk.integrations.gemini    import patch_gemini      # Google Gemini — GenerativeModel
-from ocw.sdk.integrations.bedrock   import patch_bedrock     # AWS Bedrock — boto3 invoke_model/invoke_agent
-from ocw.sdk.integrations.litellm   import patch_litellm    # LiteLLM — unified interface for 100+ providers
+from tokenjam.sdk.integrations.anthropic import patch_anthropic   # Anthropic — Messages.create + streaming
+from tokenjam.sdk.integrations.openai    import patch_openai      # OpenAI — chat completions
+from tokenjam.sdk.integrations.gemini    import patch_gemini      # Google Gemini — GenerativeModel
+from tokenjam.sdk.integrations.bedrock   import patch_bedrock     # AWS Bedrock — boto3 invoke_model/invoke_agent
+from tokenjam.sdk.integrations.litellm   import patch_litellm    # LiteLLM — unified interface for 100+ providers
 ```
 
 `patch_litellm()` covers all providers LiteLLM routes to (OpenAI, Anthropic, Bedrock, Vertex, Cohere, Mistral, Ollama, etc.) with correct per-provider attribution. If you use LiteLLM, you don't need the individual provider patches above.
@@ -23,13 +23,13 @@ OpenAI-compatible providers (Groq, Together, Fireworks, xAI, Azure OpenAI) also 
 Instrument the framework's own tool and LLM abstractions:
 
 ```python
-from ocw.sdk.integrations.langchain         import patch_langchain        # BaseLLM + BaseTool
-from ocw.sdk.integrations.langgraph         import patch_langgraph        # CompiledGraph
-from ocw.sdk.integrations.crewai            import patch_crewai           # Task + Agent
-from ocw.sdk.integrations.autogen           import patch_autogen          # ConversableAgent
-from ocw.sdk.integrations.llamaindex        import patch_llamaindex       # Native OTel wrapper
-from ocw.sdk.integrations.openai_agents_sdk import patch_openai_agents   # Native OTel wrapper
-from ocw.sdk.integrations.nemoclaw          import watch_nemoclaw         # NemoClaw Gateway observer
+from tokenjam.sdk.integrations.langchain         import patch_langchain        # BaseLLM + BaseTool
+from tokenjam.sdk.integrations.langgraph         import patch_langgraph        # CompiledGraph
+from tokenjam.sdk.integrations.crewai            import patch_crewai           # Task + Agent
+from tokenjam.sdk.integrations.autogen           import patch_autogen          # ConversableAgent
+from tokenjam.sdk.integrations.llamaindex        import patch_llamaindex       # Native OTel wrapper
+from tokenjam.sdk.integrations.openai_agents_sdk import patch_openai_agents   # Native OTel wrapper
+from tokenjam.sdk.integrations.nemoclaw          import watch_nemoclaw         # NemoClaw Gateway observer
 ```
 
 ## Zero-code via OTLP

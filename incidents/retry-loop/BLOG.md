@@ -62,7 +62,7 @@ It synthesizes the span sequence above, runs both detectors against it, and show
 To wire it into a real agent, the SDK is three lines:
 
 ```python
-from ocw.sdk import patch_anthropic, watch
+from tokenjam.sdk import patch_anthropic, watch
 
 patch_anthropic()
 

@@ -1,14 +1,14 @@
 """
 LlamaIndex agent example with OCW observability.
 
-Uses LlamaIndex's native OTel support to export spans to ocw serve.
+Uses LlamaIndex's native OTel support to export spans to tj serve.
 Builds a VectorStoreIndex from sample documents and queries it.
 
-IMPORTANT: This example requires `ocw serve` to be running because
+IMPORTANT: This example requires `tj serve` to be running because
 LlamaIndex integration exports spans over HTTP (not in-process).
 
 Extra deps: pip install llama-index opentelemetry-instrumentation-llama-index
-Run:        ocw serve &
+Run:        tj serve &
             python examples/single_framework/llamaindex_agent.py
 """
 import os
@@ -26,8 +26,8 @@ try:
     httpx.get("http://127.0.0.1:8787/api/v1/traces", timeout=2)
 except httpx.ConnectError:
     sys.exit(
-        "This example requires ocw serve to be running.\n"
-        "Start it with: ocw serve &"
+        "This example requires tj serve to be running.\n"
+        "Start it with: tj serve &"
     )
 
 from pathlib import Path  # noqa: E402
@@ -36,7 +36,7 @@ from llama_index.core import Document, VectorStoreIndex  # noqa: E402
 
 from tokenjam.sdk import watch, patch_llamaindex  # noqa: E402
 
-# Configure LlamaIndex's native OTel to export to ocw serve
+# Configure LlamaIndex's native OTel to export to tj serve
 patch_llamaindex()
 
 # Sample documents directory: examples/multi/sample_docs/
@@ -108,8 +108,8 @@ def main():
     print("LlamaIndex integration captured spans via native OTel support:")
     print("  - Document indexing and embedding calls")
     print("  - Query engine retrieval and LLM synthesis")
-    print("  - Spans exported to ocw serve over HTTP")
-    print("Run 'ocw traces' to see the captured telemetry.")
+    print("  - Spans exported to tj serve over HTTP")
+    print("Run 'tj traces' to see the captured telemetry.")
 
 
 if __name__ == "__main__":

@@ -29,7 +29,7 @@ _PRINT_SIMULATION = """\
 def run() -> None:
     """
     Inject a retry-loop pattern directly into IngestPipeline + InMemoryBackend.
-    Renders Rich panels, or JSON if --json was passed to `ocw demo`.
+    Renders Rich panels, or JSON if --json was passed to `tj demo`.
     """
     import click
 
@@ -127,8 +127,8 @@ def _render(console, result) -> None:
         f"[bold]Traces:[/bold] {result.trace_count}\n\n"
         f"[bold]Alerts fired:[/bold]\n{alert_str}\n\n"
         "[dim]In your real agent:[/dim]\n"
-        "  ocw alerts          [dim]# see the retry_loop alert[/dim]\n"
-        "  ocw traces          [dim]# see the loop pattern[/dim]"
+        "  tj alerts          [dim]# see the retry_loop alert[/dim]\n"
+        "  tj traces          [dim]# see the loop pattern[/dim]"
     )
     console.print(Panel(ocw_output, title="[green]What OCW reveals[/green]", border_style="green"))
     console.print()

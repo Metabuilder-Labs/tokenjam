@@ -6,8 +6,8 @@ This is a config-only integration — no Python code needed. OpenClaw's built-in
 
 ```bash
 pip install tokenjam
-ocw onboard
-ocw serve &
+tj onboard
+tj serve &
 ```
 
 ## Step 2: Configure OpenClaw
@@ -40,7 +40,7 @@ Add this to your `openclaw.json`:
 
 ## Step 3: Configure sensitive action alerts (optional)
 
-Add to `.ocw/config.toml`:
+Add to `.tj/config.toml`:
 
 ```toml
 [agents.my-openclaw-agent]
@@ -68,22 +68,22 @@ Start your OpenClaw gateway, then check OCW:
 
 ```bash
 # Agent overview — should show your openclaw agent
-ocw status
+tj status
 
 # Trace listing — shows openclaw.request, openclaw.agent.turn, tool.* spans
-ocw traces
+tj traces
 
 # Span waterfall for a specific trace
-ocw trace <trace-id>
+tj trace <trace-id>
 
 # Cost breakdown — token usage from openclaw.model.usage spans
-ocw cost --since 1h
+tj cost --since 1h
 
 # Tool call summary — shows Read, exec, Write, web_search counts
-ocw tools
+tj tools
 
 # Alerts — shows any sensitive action or budget alerts
-ocw alerts
+tj alerts
 ```
 
 ## Expected output from `tj traces`

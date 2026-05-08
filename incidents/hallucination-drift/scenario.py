@@ -170,8 +170,8 @@ def _render(console, result) -> None:
         "  Input tokens: 50,000 vs baseline ~1,000 (Z-score: inf)\n"
         "  Tool sequence: 5 new tools never seen in baseline\n\n"
         "[dim]In your real agent:[/dim]\n"
-        "  ocw drift               [dim]# Z-scores and baseline stats[/dim]\n"
-        "  ocw alerts              [dim]# see the drift_detected alert[/dim]"
+        "  tj drift               [dim]# Z-scores and baseline stats[/dim]\n"
+        "  tj alerts              [dim]# see the drift_detected alert[/dim]"
     )
     console.print(Panel(ocw_output, title="[green]What OCW reveals[/green]", border_style="green"))
     console.print()

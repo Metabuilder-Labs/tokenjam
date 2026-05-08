@@ -21,9 +21,9 @@ describe("GenAIAttributes", () => {
 });
 
 describe("TjAttributes", () => {
-  it("has ocw-specific attribute keys", () => {
-    assert.equal(TjAttributes.COST_USD, "ocw.cost_usd");
-    assert.equal(TjAttributes.ALERT_TYPE, "ocw.alert.type");
-    assert.equal(TjAttributes.SANDBOX_EVENT, "ocw.sandbox.event");
+  it("has tj-specific attribute keys", () => {
+    assert.equal(TjAttributes.COST_USD, "tokenjam.cost_usd");
+    assert.equal(TjAttributes.ALERT_TYPE, "tokenjam.alert.type");
+    assert.equal(TjAttributes.SANDBOX_EVENT, "tokenjam.sandbox.event");
   });
 });

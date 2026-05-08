@@ -97,7 +97,7 @@ def main():
     print("LangChain integration captured spans for:")
     print("  - LLM calls via ChatOpenAI")
     print("  - Tool calls via BaseTool.run")
-    print("Run 'ocw traces' to see the captured telemetry.")
+    print("Run 'tj traces' to see the captured telemetry.")
 
 
 if __name__ == "__main__":

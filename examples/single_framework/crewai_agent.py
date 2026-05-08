@@ -82,7 +82,7 @@ def main():
     print("CrewAI integration captured spans for:")
     print("  - Task execution via Task.execute")
     print("  - Agent task execution via Agent.execute_task")
-    print("Run 'ocw traces' to see the captured telemetry.")
+    print("Run 'tj traces' to see the captured telemetry.")
 
 
 if __name__ == "__main__":

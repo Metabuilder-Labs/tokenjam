@@ -5,7 +5,7 @@ Phase 1: Builds a baseline from 12 normal sessions (same agent, consistent
          behavior).
 Phase 2: Runs 1 anomalous session with 5x token usage and different tool calls.
 
-Shows how ocw detects statistical drift and fires DRIFT_DETECTED alerts.
+Shows how tj detects statistical drift and fires DRIFT_DETECTED alerts.
 
 No API keys required — uses simulated instrumentation.
 
@@ -119,12 +119,12 @@ if __name__ == "__main__":
     print(
         "The anomalous session used 5x the normal token count and\n"
         "a completely different set of tool calls. If drift detection\n"
-        "is enabled in your ocw.toml, a DRIFT_DETECTED alert should\n"
+        "is enabled in your tj.toml, a DRIFT_DETECTED alert should\n"
         "fire when the anomalous session ends.\n"
         "\n"
         "Run these commands to inspect:\n"
         "\n"
-        "  ocw alerts                          # see drift alerts\n"
-        "  ocw status --agent drift-demo       # agent overview\n"
-        "  ocw traces                          # list all 13 traces\n"
+        "  tj alerts                          # see drift alerts\n"
+        "  tj status --agent drift-demo       # agent overview\n"
+        "  tj traces                          # list all 13 traces\n"
     )

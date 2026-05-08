@@ -15,7 +15,7 @@ export interface TjClientOptions {
   batchSize?: number;
   /** Flush interval in milliseconds (default: 5000) */
   flushIntervalMs?: number;
-  /** Service name reported in OTLP resource attributes (default: "ocw-ts-sdk") */
+  /** Service name reported in OTLP resource attributes (default: "tj-ts-sdk") */
   serviceName?: string;
   /** Maximum retry attempts on network errors or 5xx responses (default: 3) */
   maxRetries?: number;
@@ -104,7 +104,7 @@ export class TjClient {
     this.ingestSecret = options.ingestSecret;
     this.batchSize = options.batchSize ?? 50;
     this.flushIntervalMs = options.flushIntervalMs ?? 5000;
-    this.serviceName = options.serviceName ?? "ocw-ts-sdk";
+    this.serviceName = options.serviceName ?? "tj-ts-sdk";
     this.maxRetries = options.maxRetries ?? 3;
   }
 

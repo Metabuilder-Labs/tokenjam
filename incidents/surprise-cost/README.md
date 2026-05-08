@@ -55,7 +55,7 @@ OCW records `model`, `input_tokens`, and `output_tokens` on every LLM span. The 
 
 ## Set a budget before it happens
 
-Add to `ocw.toml`:
+Add to `tj.toml`:
 
 ```toml
 [agents.my-agent.budget]
@@ -81,7 +81,7 @@ tj demo surprise-cost
 
 Emits 8 synthetic LLM spans with real pricing math. No API keys, no model calls, no network traffic.
 
-To track real spend, instrument your agent with the OCW SDK and run `tj serve`. Then `tj cost --by model` shows live per-model attribution.
+To track real spend, instrument your agent with the tokenjam SDK and run `tj serve`. Then `tj cost --by model` shows live per-model attribution.
 
 ## Next in the incident library
 

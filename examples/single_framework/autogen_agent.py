@@ -78,7 +78,7 @@ def main():
     print("AutoGen integration captured spans for:")
     print("  - Chat initiation via ConversableAgent.initiate_chat")
     print("  - Reply generation via ConversableAgent.generate_reply")
-    print("Run 'ocw traces' to see the captured telemetry.")
+    print("Run 'tj traces' to see the captured telemetry.")
 
 
 if __name__ == "__main__":

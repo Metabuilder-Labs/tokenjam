@@ -258,7 +258,7 @@ async def test_get_metrics_returns_prometheus_format(client):
     resp = await client.get("/metrics")
     assert resp.status_code == 200
     text = resp.text
-    assert "ocw_cost_usd_total" in text
+    assert "tj_cost_usd_total" in text
     assert "# HELP" in text
     assert "# TYPE" in text
 
@@ -354,7 +354,7 @@ async def test_post_budget_zero_clears_limit(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/ocw.toml"), \
+    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post("/api/v1/budget", json={"scope": "my-agent", "daily_usd": 0})

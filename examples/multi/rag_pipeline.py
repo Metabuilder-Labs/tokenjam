@@ -2,7 +2,7 @@
 RAG Pipeline with Provider Fallback — LlamaIndex + OpenAI/Anthropic.
 
 Demonstrates a retrieval-augmented generation pipeline that falls back from
-OpenAI to Anthropic when the primary provider fails. Requires `ocw serve`
+OpenAI to Anthropic when the primary provider fails. Requires `tj serve`
 running on localhost:8787 for span ingestion.
 
 Extra deps:
@@ -12,7 +12,7 @@ Required env vars:
     OPENAI_API_KEY, ANTHROPIC_API_KEY
 
 Prerequisite:
-    ocw serve   (must be running on localhost:8787)
+    tj serve   (must be running on localhost:8787)
 """
 from __future__ import annotations
 
@@ -34,14 +34,14 @@ if missing:
     sys.exit(f"Missing env vars: {', '.join(missing)}")
 
 # ---------------------------------------------------------------------------
-# Connectivity check — ocw serve must be running
+# Connectivity check — tj serve must be running
 # ---------------------------------------------------------------------------
 try:
     resp = httpx.get("http://localhost:8787/api/v1/spans", timeout=3)
 except httpx.ConnectError:
     sys.exit(
-        "Cannot connect to ocw serve on localhost:8787. "
-        "Start it first: ocw serve"
+        "Cannot connect to tj serve on localhost:8787. "
+        "Start it first: tj serve"
     )
 
 # ---------------------------------------------------------------------------
@@ -150,15 +150,15 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # After running, inspect the RAG session:
 #
-#   ocw traces --since 10m
+#   tj traces --since 10m
 #       -> Single trace showing retrieval + LLM spans
 #
-#   ocw trace <trace-id>
+#   tj trace <trace-id>
 #       -> Waterfall: session -> retrieval tool calls -> LLM calls
 #          The second question shows both OpenAI (skipped) and Anthropic spans
 #
-#   ocw cost --since 1h
+#   tj cost --since 1h
 #       -> Cost comparison between OpenAI and Anthropic calls
 #
-#   ocw tools
+#   tj tools
 #       -> "retrieval" tool call count matching the number of questions

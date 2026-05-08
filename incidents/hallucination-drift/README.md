@@ -45,7 +45,7 @@ The `DriftDetector` builds a rolling baseline from prior sessions. When a new se
 
 ## Enable drift detection
 
-In `ocw.toml`:
+In `tj.toml`:
 
 ```toml
 [agents.my-agent.drift]
@@ -66,7 +66,7 @@ tj demo hallucination-drift
 
 Runs entirely in-process. No API keys, no real model calls, no network traffic.
 
-To track drift on your real agent, wire up the OCW SDK, enable drift in `ocw.toml`, and run `tj serve`. Then `tj drift` shows Z-scores; `tj alerts` shows the events.
+To track drift on your real agent, wire up the OCW SDK, enable drift in `tj.toml`, and run `tj serve`. Then `tj drift` shows Z-scores; `tj alerts` shows the events.
 
 ## Next in the incident library
 

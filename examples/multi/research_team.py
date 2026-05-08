@@ -2,7 +2,7 @@
 Multi-Framework Research Team — CrewAI agents with LangChain tools.
 
 Demonstrates deep span trees from combining CrewAI multi-agent orchestration
-with LangChain tool abstractions, all captured in a single ocw session.
+with LangChain tool abstractions, all captured in a single tj session.
 
 Extra deps:
     pip install anthropic crewai langchain-core
@@ -175,15 +175,15 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # After running, explore the multi-agent session:
 #
-#   ocw traces --since 10m
+#   tj traces --since 10m
 #       -> Single trace containing all three agents' activity
 #
-#   ocw trace <trace-id>
+#   tj trace <trace-id>
 #       -> Deep span tree: session -> agent tasks -> LLM calls + tool calls
 #
-#   ocw tools
+#   tj tools
 #       -> Breakdown of web_search, calculator, and file_reader usage
 #          showing call counts and average durations
 #
-#   ocw cost --since 1h
+#   tj cost --since 1h
 #       -> Total session cost across all LLM calls made by the crew

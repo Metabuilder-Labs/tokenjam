@@ -1,11 +1,11 @@
 # OCW Examples
 
-Example agents demonstrating [ocw](https://github.com/Metabuilder-Labs/TokenJam) integrations, from single-provider basics to complex multi-agent workflows.
+Example agents demonstrating [tj](https://github.com/Metabuilder-Labs/TokenJam) integrations, from single-provider basics to complex multi-agent workflows.
 
 ## Quick Start
 
 ```bash
-pip install -e ".[dev]"           # install ocw in dev mode
+pip install -e ".[dev]"           # install tokenjam in dev mode
 export ANTHROPIC_API_KEY=sk-...   # set your API key
 python examples/single_provider/anthropic_agent.py
 ```
@@ -13,17 +13,17 @@ python examples/single_provider/anthropic_agent.py
 After running any example, inspect the results with:
 
 ```bash
-ocw status       # agent session overview
-ocw traces       # list all spans from the run
-ocw cost --since 1h   # cost breakdown
-ocw alerts       # any fired alerts
+tj status       # agent session overview
+tj traces       # list all spans from the run
+tj cost --since 1h   # cost breakdown
+tj alerts       # any fired alerts
 ```
 
 ---
 
 ## Single Provider
 
-One integration per file. Simplest way to see ocw in action with your provider of choice.
+One integration per file. Simplest way to see tj in action with your provider of choice.
 
 | Example | Env Vars | Extra Deps | Description |
 |---|---|---|---|
@@ -40,7 +40,7 @@ One integration per file. Simplest way to see ocw in action with your provider o
 
 ## Single Framework
 
-One framework integration per file. Shows how ocw captures framework-level spans.
+One framework integration per file. Shows how tj captures framework-level spans.
 
 | Example | Env Vars | Extra Deps | Description |
 |---|---|---|---|
@@ -56,7 +56,7 @@ One framework integration per file. Shows how ocw captures framework-level spans
 
 ## Multi-Integration
 
-Complex real-world patterns combining multiple providers and frameworks. These showcase ocw's ability to track cost, performance, and behavior across a heterogeneous agent stack.
+Complex real-world patterns combining multiple providers and frameworks. These showcase tj's ability to track cost, performance, and behavior across a heterogeneous agent stack.
 
 | Example | Env Vars | Extra Deps | Description |
 |---|---|---|---|
@@ -70,7 +70,7 @@ Complex real-world patterns combining multiple providers and frameworks. These s
 
 ## Alerts and Drift
 
-These examples demonstrate what makes ocw unique: real-time alerting and behavioral drift detection. **No API keys required** -- they use simulated instrumentation via `record_llm_call()` and `record_tool_call()`.
+These examples demonstrate what makes tj unique: real-time alerting and behavioral drift detection. **No API keys required** -- they use simulated instrumentation via `record_llm_call()` and `record_tool_call()`.
 
 | Example | Env Vars | Description |
 |---|---|---|
@@ -78,15 +78,15 @@ These examples demonstrate what makes ocw unique: real-time alerting and behavio
 | [`budget_breach_demo.py`](alerts_and_drift/budget_breach_demo.py) | None | Exceeds budget limits, shows cost alerts |
 | [`drift_demo.py`](alerts_and_drift/drift_demo.py) | None | Builds baseline, then triggers drift detection |
 
-These examples include the required `ocw.toml` config snippets as comments at the top of each file. Copy the relevant config to your `ocw.toml` before running.
+These examples include the required `tj.toml` config snippets as comments at the top of each file. Copy the relevant config to your `tj.toml` before running.
 
 ```bash
 # No API keys needed -- just run:
 python examples/alerts_and_drift/budget_breach_demo.py
 
 # Then inspect:
-ocw alerts       # see budget-breach alerts
-ocw cost --since 1h   # see cost tracking
+tj alerts       # see budget-breach alerts
+tj cost --since 1h   # see cost tracking
 ```
 
 ---
@@ -102,5 +102,5 @@ Most examples use in-process telemetry (spans go directly to the local DuckDB). 
 Start the server before running them:
 
 ```bash
-ocw serve &
+tj serve &
 ```

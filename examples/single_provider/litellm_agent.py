@@ -3,7 +3,7 @@ LiteLLM multi-provider agent with OCW observability.
 
 Demonstrates patch_litellm() routing calls to multiple LLM providers through
 LiteLLM's unified interface. Each call is automatically attributed to the
-correct provider in ocw spans.
+correct provider in tj spans.
 
 Requirements:
     pip install litellm tokenjam
@@ -87,6 +87,6 @@ if __name__ == "__main__":
     print("All 3 calls routed through LiteLLM appear as separate spans,")
     print("each attributed to the correct provider (openai / anthropic).")
     print()
-    print("  ocw traces                        # see the trace with all 3 spans")
-    print("  ocw cost --since 1h               # cost breakdown by provider")
-    print("  ocw status --agent litellm-multi-provider")
+    print("  tj traces                        # see the trace with all 3 spans")
+    print("  tj cost --since 1h               # cost breakdown by provider")
+    print("  tj status --agent litellm-multi-provider")

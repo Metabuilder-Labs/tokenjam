@@ -66,7 +66,7 @@ tj demo surprise-cost
 Wire up your real agent:
 
 ```python
-from ocw.sdk import patch_anthropic, watch
+from tokenjam.sdk import patch_anthropic, watch
 
 patch_anthropic()
 
@@ -78,7 +78,7 @@ def run():
 Set a budget cap:
 
 ```toml
-# ocw.toml
+# tj.toml
 [agents.my-agent.budget]
 session_usd = 5.00
 ```

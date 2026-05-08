@@ -57,7 +57,7 @@ No API keys. Runs entirely in-process. Watch 5 normal sessions, then 1 anomalous
 Enable it for your real agent:
 
 ```toml
-# ocw.toml
+# tj.toml
 [agents.my-agent.drift]
 enabled            = true
 baseline_sessions  = 10

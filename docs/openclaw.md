@@ -67,7 +67,7 @@ The `serviceName` field in your OpenClaw config becomes the `agent_id` in OCW (u
 
 ## Sensitive action alerts
 
-Configure alerts for OpenClaw tool calls in `.ocw/config.toml`:
+Configure alerts for OpenClaw tool calls in `.tj/config.toml`:
 
 ```toml
 [agents.my-openclaw-agent]

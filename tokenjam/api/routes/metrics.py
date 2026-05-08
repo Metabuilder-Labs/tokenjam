@@ -20,30 +20,30 @@ async def prometheus_metrics(request: Request) -> PlainTextResponse:
     lines: list[str] = []
 
     # -- Cost per agent --
-    _add_header(lines, "ocw_cost_usd_total", "gauge", "Running cost total per agent")
+    _add_header(lines, "tj_cost_usd_total", "gauge", "Running cost total per agent")
     cost_rows = db.get_cost_summary(CostFilters(group_by="agent"))
     for row in cost_rows:
         agent = row.agent_id or "unknown"
-        lines.append(f'ocw_cost_usd_total{{agent_id="{_escape(agent)}"}} {row.cost_usd}')
+        lines.append(f'tj_cost_usd_total{{agent_id="{_escape(agent)}"}} {row.cost_usd}')
 
     # -- Tokens per agent and type --
-    _add_header(lines, "ocw_tokens_total", "counter", "Token usage by type")
+    _add_header(lines, "tj_tokens_total", "counter", "Token usage by type")
     for row in cost_rows:
         agent = row.agent_id or "unknown"
-        lines.append(f'ocw_tokens_total{{agent_id="{_escape(agent)}",type="input"}} {row.input_tokens}')
-        lines.append(f'ocw_tokens_total{{agent_id="{_escape(agent)}",type="output"}} {row.output_tokens}')
+        lines.append(f'tj_tokens_total{{agent_id="{_escape(agent)}",type="input"}} {row.input_tokens}')
+        lines.append(f'tj_tokens_total{{agent_id="{_escape(agent)}",type="output"}} {row.output_tokens}')
 
     # -- Tool calls per agent --
     tool_rows = db.get_tool_calls(None, None, None)
-    _add_header(lines, "ocw_tool_calls_total", "counter", "Total tool calls per agent and tool")
+    _add_header(lines, "tj_tool_calls_total", "counter", "Total tool calls per agent and tool")
     for row in tool_rows:
         agent = row.get("agent_id") or "unknown"
         tool = row.get("tool_name") or "unknown"
         count = row.get("call_count", 0)
-        lines.append(f'ocw_tool_calls_total{{agent_id="{_escape(agent)}",tool_name="{_escape(tool)}"}} {count}')
+        lines.append(f'tj_tool_calls_total{{agent_id="{_escape(agent)}",tool_name="{_escape(tool)}"}} {count}')
 
     # -- Alerts per agent, type, severity --
-    _add_header(lines, "ocw_alerts_total", "counter", "Total alerts fired")
+    _add_header(lines, "tj_alerts_total", "counter", "Total alerts fired")
     alerts = db.get_alerts(AlertFilters(limit=10000))
     alert_counts: dict[tuple[str, str, str], int] = {}
     for a in alerts:
@@ -51,19 +51,19 @@ async def prometheus_metrics(request: Request) -> PlainTextResponse:
         alert_counts[key] = alert_counts.get(key, 0) + 1
     for (agent, atype, sev), count in alert_counts.items():
         lines.append(
-            f'ocw_alerts_total{{agent_id="{_escape(agent)}",'
+            f'tj_alerts_total{{agent_id="{_escape(agent)}",'
             f'type="{_escape(atype)}",severity="{_escape(sev)}"}} {count}'
         )
 
     # -- Session duration (latest completed per agent) --
-    _add_header(lines, "ocw_session_duration_seconds", "gauge", "Duration of last completed session")
+    _add_header(lines, "tj_session_duration_seconds", "gauge", "Duration of last completed session")
     # Collect unique agent_ids from cost rows
     agent_ids = {row.agent_id for row in cost_rows if row.agent_id}
     for agent_id in sorted(agent_ids):
         sessions = db.get_completed_sessions(agent_id, limit=1)
         if sessions and sessions[0].duration_seconds is not None:
             lines.append(
-                f'ocw_session_duration_seconds{{agent_id="{_escape(agent_id)}"}} '
+                f'tj_session_duration_seconds{{agent_id="{_escape(agent_id)}"}} '
                 f'{sessions[0].duration_seconds:.1f}'
             )
 

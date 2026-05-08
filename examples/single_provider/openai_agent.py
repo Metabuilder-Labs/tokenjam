@@ -3,7 +3,7 @@ OpenAI tool-use agent with streaming and OCW observability.
 
 Demonstrates the OpenAI function-calling loop with a stub tool, then streams
 the final response token by token. All LLM calls and tool invocations are
-captured by ocw.
+captured by tj.
 
 Requirements:
     pip install openai tokenjam
@@ -131,7 +131,7 @@ def run() -> str:
             else:
                 tool_output = func(**func_args)
 
-            # Record the tool call in ocw
+            # Record the tool call in tj
             record_tool_call(
                 tool_name=func_name,
                 tool_input=func_args,
@@ -174,5 +174,5 @@ if __name__ == "__main__":
 
     print("\n--- OCW Observation ---")
     print("Session, LLM, and tool spans have been recorded.")
-    print("Run 'ocw status --agent openai-tool-agent' to view telemetry.")
-    print("Run 'ocw tools --agent openai-tool-agent' to see tool call stats.")
+    print("Run 'tj status --agent openai-tool-agent' to view telemetry.")
+    print("Run 'tj tools --agent openai-tool-agent' to see tool call stats.")

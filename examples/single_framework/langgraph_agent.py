@@ -109,7 +109,7 @@ def main():
     print("LangGraph integration captured spans for:")
     print("  - Graph invocation via CompiledGraph.invoke")
     print("  - Individual LLM calls within each node (via LangChain patch)")
-    print("Run 'ocw traces' to see the captured telemetry.")
+    print("Run 'tj traces' to see the captured telemetry.")
 
 
 if __name__ == "__main__":

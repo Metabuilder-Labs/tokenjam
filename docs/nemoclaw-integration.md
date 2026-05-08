@@ -1,9 +1,9 @@
 # NemoClaw Integration
 
-Running OpenClaw inside [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw)? `ocw` connects to the OpenShell Gateway WebSocket and turns every sandbox event — blocked network requests, filesystem denials, inference reroutes — into a first-class alert.
+Running OpenClaw inside [NVIDIA NemoClaw](https://github.com/NVIDIA/NemoClaw)? `tj` connects to the OpenShell Gateway WebSocket and turns every sandbox event — blocked network requests, filesystem denials, inference reroutes — into a first-class alert.
 
 ```python
-from ocw.sdk.integrations.nemoclaw import watch_nemoclaw
+from tokenjam.sdk.integrations.nemoclaw import watch_nemoclaw
 
 observer = watch_nemoclaw()
 asyncio.create_task(observer.connect())  # non-blocking, runs alongside your agent
@@ -26,7 +26,7 @@ These alerts flow through the standard alert pipeline — cooldown, dispatch to 
 
 ## Configuration
 
-Configure alert channels in `.ocw/config.toml` to get notified when sandbox events fire:
+Configure alert channels in `.tj/config.toml` to get notified when sandbox events fire:
 
 ```toml
 [[alerts.channels]]
