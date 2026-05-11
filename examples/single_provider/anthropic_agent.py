@@ -1,8 +1,8 @@
 """
-Anthropic tool-use agent with OCW observability.
+Anthropic tool-use agent with TokenJam observability.
 
 Demonstrates the full Anthropic tool-use loop: message -> tool_use -> tool_result -> final
-response, with each tool invocation recorded via ocw's record_tool_call().
+response, with each tool invocation recorded via tj's record_tool_call().
 
 Requirements:
     pip install anthropic tokenjam
@@ -140,7 +140,7 @@ def run() -> str:
             else:
                 tool_output = func(**tool_input)
 
-            # Record the tool call in ocw for observability
+            # Record the tool call in tj for observability
             record_tool_call(
                 tool_name=tool_name,
                 tool_input=tool_input,
@@ -182,7 +182,7 @@ if __name__ == "__main__":
     result = run()
     print(f"\nAgent response:\n{result}")
 
-    print("\n--- OCW Observation ---")
+    print("\n--- TokenJam Observation ---")
     print("Session and tool spans have been recorded.")
-    print("Run 'ocw status --agent anthropic-tool-agent' to view telemetry.")
-    print("Run 'ocw tools --agent anthropic-tool-agent' to see tool call stats.")
+    print("Run 'tj status --agent anthropic-tool-agent' to view telemetry.")
+    print("Run 'tj tools --agent anthropic-tool-agent' to see tool call stats.")

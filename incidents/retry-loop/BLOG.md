@@ -28,7 +28,7 @@ This is why people say agents are "flaky" — there's no error to grep for, just
 
 ---
 
-When I designed the `retry_loop` detector for OCW, the rule I landed on was deliberately boring: fire when the same tool name shows up 4+ times in the last 6 spans. No ML, no per-agent tuning. Most real loops are tighter than that — they're 6+ identical calls in a row — so 4-of-6 catches them early without false positives on legitimate retries.
+When I designed the `retry_loop` detector for TokenJam, the rule I landed on was deliberately boring: fire when the same tool name shows up 4+ times in the last 6 spans. No ML, no per-agent tuning. Most real loops are tighter than that — they're 6+ identical calls in a row — so 4-of-6 catches them early without false positives on legitimate retries.
 
 It runs alongside `failure_rate`, which trips when more than 20% of recent spans error out. Both default-on. Together they cover the two flavors of "stuck": looping on success and looping on failure.
 
@@ -55,14 +55,14 @@ pip install tokenjam
 tj demo retry-loop
 ```
 
-It synthesizes the span sequence above, runs both detectors against it, and shows you the `print()` view next to the OCW view. About 30 seconds.
+It synthesizes the span sequence above, runs both detectors against it, and shows you the `print()` view next to the TokenJam view. About 30 seconds.
 
 ---
 
 To wire it into a real agent, the SDK is three lines:
 
 ```python
-from ocw.sdk import patch_anthropic, watch
+from tokenjam.sdk import patch_anthropic, watch
 
 patch_anthropic()
 

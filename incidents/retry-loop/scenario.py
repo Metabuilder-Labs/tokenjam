@@ -3,14 +3,14 @@ Incident: "Your agent isn't flaky. You're blind."
 
 A tool call silently fails and retries itself in a loop. The agent keeps
 calling the same broken tool, burning time and money. With print(), you see
-"tool called" over and over. OCW sees the loop pattern and fires an alert.
+"tool called" over and over. TokenJam sees the loop pattern and fires an alert.
 
 No API keys required.
 """
 from __future__ import annotations
 
 AGENT_ID = "demo-retry-loop"
-DESCRIPTION = "Agent stuck retrying a failing tool — OCW detects the loop and fires an alert"
+DESCRIPTION = "Agent stuck retrying a failing tool — TokenJam detects the loop and fires an alert"
 
 _PRINT_SIMULATION = """\
 [agent] Starting task...
@@ -29,7 +29,7 @@ _PRINT_SIMULATION = """\
 def run() -> None:
     """
     Inject a retry-loop pattern directly into IngestPipeline + InMemoryBackend.
-    Renders Rich panels, or JSON if --json was passed to `ocw demo`.
+    Renders Rich panels, or JSON if --json was passed to `tj demo`.
     """
     import click
 
@@ -127,8 +127,8 @@ def _render(console, result) -> None:
         f"[bold]Traces:[/bold] {result.trace_count}\n\n"
         f"[bold]Alerts fired:[/bold]\n{alert_str}\n\n"
         "[dim]In your real agent:[/dim]\n"
-        "  ocw alerts          [dim]# see the retry_loop alert[/dim]\n"
-        "  ocw traces          [dim]# see the loop pattern[/dim]"
+        "  tj alerts          [dim]# see the retry_loop alert[/dim]\n"
+        "  tj traces          [dim]# see the loop pattern[/dim]"
     )
-    console.print(Panel(ocw_output, title="[green]What OCW reveals[/green]", border_style="green"))
+    console.print(Panel(ocw_output, title="[green]What TokenJam reveals[/green]", border_style="green"))
     console.print()

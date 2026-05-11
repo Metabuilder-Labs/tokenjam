@@ -1,7 +1,7 @@
 """
 Provider Router Agent — routes tasks to the best LLM provider.
 
-Demonstrates multi-provider observability with ocw: each routing decision
+Demonstrates multi-provider observability with tj: each routing decision
 and LLM call appears as a span in a single trace, enabling cost comparison
 across providers.
 
@@ -136,14 +136,14 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # After running this script, inspect the trace and cost breakdown:
 #
-#   ocw traces --since 5m
+#   tj traces --since 5m
 #       -> Shows a single trace with spans for each provider call
 #
-#   ocw trace <trace-id>
+#   tj trace <trace-id>
 #       -> Waterfall view: session span -> route tool calls + LLM calls
 #
-#   ocw cost --since 1h
+#   tj cost --since 1h
 #       -> Compare cost across gemini, anthropic, and openai in one session
 #
-#   ocw tools
+#   tj tools
 #       -> Shows the "route" tool call count and timing

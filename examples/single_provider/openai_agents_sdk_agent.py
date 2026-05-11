@@ -1,13 +1,13 @@
 """
-OpenAI Agents SDK multi-agent example with OCW observability.
+OpenAI Agents SDK multi-agent example with TokenJam observability.
 
 Demonstrates a triage/specialist handoff pattern using the OpenAI Agents SDK.
 The triage agent inspects the user query and delegates to a specialist agent
 for a detailed answer.
 
 This integration works differently from other providers: it configures the
-Agents SDK's native OTel support to export traces to `ocw serve` via OTLP.
-You must have `ocw serve` running before executing this script.
+Agents SDK's native OTel support to export traces to `tj serve` via OTLP.
+You must have `tj serve` running before executing this script.
 
 Requirements:
     pip install openai-agents httpx tokenjam
@@ -16,7 +16,7 @@ Environment:
     OPENAI_API_KEY  — required
 
 Prerequisites:
-    ocw serve must be running:  ocw serve --port 8787
+    tj serve must be running:  tj serve --port 8787
 
 Usage:
     python examples/single_provider/openai_agents_sdk_agent.py
@@ -32,21 +32,21 @@ if not os.environ.get("OPENAI_API_KEY"):
     print("  export OPENAI_API_KEY=sk-...")
     sys.exit(1)
 
-# Check that ocw serve is reachable before proceeding.
+# Check that tj serve is reachable before proceeding.
 try:
     import httpx
 
     resp = httpx.get("http://127.0.0.1:8787/api/v1/traces", timeout=2)
     if resp.status_code >= 500:
-        raise ConnectionError(f"ocw serve returned {resp.status_code}")
+        raise ConnectionError(f"tj serve returned {resp.status_code}")
 except Exception:
-    print("ERROR: Cannot reach ocw serve at http://127.0.0.1:8787")
+    print("ERROR: Cannot reach tj serve at http://127.0.0.1:8787")
     print()
-    print("This example requires a running ocw serve instance because the")
+    print("This example requires a running tj serve instance because the")
     print("OpenAI Agents SDK exports traces via OTLP HTTP to the local server.")
     print()
     print("Start it in another terminal:")
-    print("  ocw serve --port 8787")
+    print("  tj serve --port 8787")
     sys.exit(1)
 
 from agents import Agent, Runner  # noqa: E402
@@ -54,9 +54,9 @@ from agents import Agent, Runner  # noqa: E402
 from tokenjam.sdk import watch  # noqa: E402
 from tokenjam.sdk.integrations.openai_agents_sdk import patch_openai_agents  # noqa: E402
 
-# Configure the Agents SDK's native OTel to export to ocw serve.
+# Configure the Agents SDK's native OTel to export to tj serve.
 # NOTE: patch_openai_agents() does NOT call ensure_initialised() — it sets up
-# OTLP export to ocw serve instead. We still use @watch() for session tracking.
+# OTLP export to tj serve instead. We still use @watch() for session tracking.
 patch_openai_agents()
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     result = run()
     print(f"\nAgent response:\n{result}")
 
-    print("\n--- OCW Observation ---")
+    print("\n--- TokenJam Observation ---")
     print("Session and agent handoff spans have been recorded.")
-    print("Run 'ocw status --agent openai-agents-sdk-demo' to view telemetry.")
-    print("Run 'ocw traces --agent openai-agents-sdk-demo' to see the trace.")
+    print("Run 'tj status --agent openai-agents-sdk-demo' to view telemetry.")
+    print("Run 'tj traces --agent openai-agents-sdk-demo' to see the trace.")

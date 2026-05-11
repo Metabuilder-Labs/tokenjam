@@ -2,12 +2,12 @@
 Sensitive Actions Alert Demo
 
 Simulates an agent that performs sensitive actions (send_email, delete_file,
-submit_form). Shows how ocw detects and alerts on configured sensitive tools.
+submit_form). Shows how tj detects and alerts on configured sensitive tools.
 
 No API keys required — uses simulated instrumentation.
 
-The demo seeds its own [agents.sensitive-demo] block in the active ocw
-config on startup, so it works out of the box on a fresh `ocw onboard`.
+The demo seeds its own [agents.sensitive-demo] block in the active tj
+config on startup, so it works out of the box on a fresh `tj onboard`.
 The injected config is equivalent to:
 
     [agents.sensitive-demo]
@@ -36,7 +36,7 @@ from tokenjam.sdk.agent import watch, record_llm_call, record_tool_call
 
 def send_email(to: str, subject: str, body: str) -> dict:
     """Write an email record to a temp log file."""
-    log_path = os.path.join(tempfile.gettempdir(), "ocw_email_log.txt")
+    log_path = os.path.join(tempfile.gettempdir(), "tj_email_log.txt")
     with open(log_path, "a") as f:
         f.write(f"To: {to}\nSubject: {subject}\nBody: {body}\n---\n")
     return {"status": "sent", "log": log_path}
@@ -135,7 +135,7 @@ if __name__ == "__main__":
     ensure_initialised()
 
     print("=" * 60)
-    print("OCW Sensitive Actions Alert Demo")
+    print("TokenJam Sensitive Actions Alert Demo")
     print("=" * 60)
 
     run_sensitive_agent()
@@ -144,12 +144,12 @@ if __name__ == "__main__":
     print("What to observe:")
     print("=" * 60)
     print(
-        "If your ocw.toml has the sensitive_actions config shown at the\n"
-        "top of this file, ocw should have fired alerts for each tool.\n"
+        "If your tj.toml has the sensitive_actions config shown at the\n"
+        "top of this file, tj should have fired alerts for each tool.\n"
         "\n"
         "Run these commands to inspect:\n"
         "\n"
-        "  ocw alerts                  # see fired sensitive-action alerts\n"
-        "  ocw status                  # agent overview with alert count\n"
-        "  ocw traces                  # list recent traces\n"
+        "  tj alerts                  # see fired sensitive-action alerts\n"
+        "  tj status                  # agent overview with alert count\n"
+        "  tj traces                  # list recent traces\n"
     )

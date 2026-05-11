@@ -383,7 +383,7 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
 
 
 def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
-    """ocw config is created when none exists."""
+    """tj config is created when none exists."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
@@ -422,7 +422,7 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
 
     Regression test: previously the guard `if OTEL_EXPORTER_OTLP_ENDPOINT not in global_env`
     silently skipped updating the secret when settings.json already existed, causing 401s
-    whenever the OCW config was regenerated without re-running onboard --claude-code.
+    whenever the TokenJam config was regenerated without re-running onboard --claude-code.
     """
     fake_home = tmp_path / "home"
     (fake_home / ".claude").mkdir(parents=True)
@@ -462,14 +462,14 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
-    # Secret must be updated to match the current OCW config, not left as stale old value
+    # Secret must be updated to match the current TokenJam config, not left as stale old value
     assert data["env"]["OTEL_EXPORTER_OTLP_HEADERS"] == f"Authorization=Bearer {new_secret}"
 
 
 def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
     """Re-running --claude-code does NOT overwrite manually customised OTEL_EXPORTER_OTLP_HEADERS.
 
-    Only headers that were previously written by ocw (i.e. contain 'Authorization=Bearer')
+    Only headers that were previously written by tj (i.e. contain 'Authorization=Bearer')
     are eligible for syncing. A header set by the user to something else is left untouched.
     """
     fake_home = tmp_path / "home"
@@ -513,7 +513,7 @@ def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
 
 
 def test_onboard_does_not_prompt_for_daemon(runner, tmp_path):
-    """Regression: ocw onboard should auto-install the daemon without
+    """Regression: tj onboard should auto-install the daemon without
     prompting. The prompt was removed in v0.1.6 but reappeared.
     See v0.1.7 fix."""
     with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
@@ -536,14 +536,14 @@ def test_onboard_no_daemon_skips_install(runner, tmp_path):
 
 
 def test_budget_show_displays_defaults(runner, db, config):
-    """ocw budget with no flags shows current budgets."""
+    """tj budget with no flags shows current budgets."""
     result = _invoke(runner, db, config, ["budget"])
     assert result.exit_code == 0
     assert "5.00" in result.output  # fixture has daily_usd=5.0
 
 
 def test_budget_set_global_writes_config(runner, db, config, tmp_path):
-    """ocw budget --daily updates global defaults and writes config."""
+    """tj budget --daily updates global defaults and writes config."""
     config_file = tmp_path / "config.toml"
     config_file.write_text("")
 
@@ -560,7 +560,7 @@ def test_budget_set_global_writes_config(runner, db, config, tmp_path):
 
 
 def test_budget_set_agent_writes_config(runner, db, config, tmp_path):
-    """ocw budget --agent --daily --session updates per-agent budget."""
+    """tj budget --agent --daily --session updates per-agent budget."""
     config_file = tmp_path / "config.toml"
     config_file.write_text("")
 
@@ -580,7 +580,7 @@ def test_budget_set_agent_writes_config(runner, db, config, tmp_path):
 
 
 def test_budget_set_negative_daily_rejected(runner, db, config, tmp_path):
-    """ocw budget --daily -5 should error, not silently clear the limit."""
+    """tj budget --daily -5 should error, not silently clear the limit."""
     config_file = tmp_path / "config.toml"
     config_file.write_text("")
 

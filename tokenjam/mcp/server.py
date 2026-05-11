@@ -1,4 +1,4 @@
-"""OCW MCP server — exposes observability data to Claude Code via stdio."""
+"""TokenJam MCP server — exposes observability data to Claude Code via stdio."""
 from __future__ import annotations
 
 from fastmcp import FastMCP
@@ -28,7 +28,7 @@ def init(ro_conn, config, serve_url: str | None = None) -> None:
 def _no_config() -> dict:
     return {
         "error": (
-            "No OCW config found. "
+            "No TokenJam config found. "
             "Run 'tj onboard --claude-code' (Claude Code) "
             "or 'tj onboard --codex' (Codex CLI) to set up."
         )
@@ -744,7 +744,7 @@ def _tool_setup_project(
     existing["env"] = env
     settings_path.write_text(json.dumps(existing, indent=2) + "\n")
 
-    # Add agent entry to OCW config
+    # Add agent entry to TokenJam config
     if agent_id not in config.agents:
         config.agents[agent_id] = AgentConfig()
         write_config(config, Path(config_path))
@@ -800,7 +800,7 @@ def _tool_open_dashboard(config) -> dict:
     # Spawn tj serve detached from this process.
     # start_new_session is Unix-only; use DETACHED_PROCESS on Windows instead.
     import shutil as _shutil
-    ocw_bin = _shutil.which("tj") or sys.argv[0]
+    tj_bin = _shutil.which("tj") or sys.argv[0]
     import sys as _sys
     popen_kwargs: dict = {
         "stdout": subprocess.DEVNULL,
@@ -811,9 +811,9 @@ def _tool_open_dashboard(config) -> dict:
     else:
         popen_kwargs["start_new_session"] = True
     try:
-        subprocess.Popen([ocw_bin, "serve"], **popen_kwargs)
+        subprocess.Popen([tj_bin, "serve"], **popen_kwargs)
     except (FileNotFoundError, OSError):
-        return {"error": f"Could not find '{ocw_bin}' on PATH. Run 'tj serve' manually."}
+        return {"error": f"Could not find '{tj_bin}' on PATH. Run 'tj serve' manually."}
 
     # Wait up to 5 seconds for the port to open
     for _ in range(10):
@@ -867,7 +867,7 @@ def get_budget_headroom(agent_id: str) -> dict:
 @mcp.tool()
 def list_agents() -> dict:
     """
-    List all agents OCW has ever seen, with first/last seen timestamps and lifetime cost.
+    List all agents TokenJam has ever seen, with first/last seen timestamps and lifetime cost.
     Use this when the user asks which agents are being tracked, wants an overview of all
     projects, or asks about total spend across agents.
     """
@@ -1034,10 +1034,10 @@ def acknowledge_alert(alert_id: str) -> dict:
 @mcp.tool()
 def setup_project(agent_id: str | None = None, project_path: str | None = None) -> dict:
     """
-    Configure the current project to send telemetry to OCW. Writes OTEL_RESOURCE_ATTRIBUTES
+    Configure the current project to send telemetry to TokenJam. Writes OTEL_RESOURCE_ATTRIBUTES
     into .claude/settings.json so Claude Code tags spans with the right agent ID. For Codex
     CLI users the agent ID is set in ~/.codex/config.toml via 'tj onboard --codex'. Use
-    this when the user wants to start monitoring a new project, or asks how to set up OCW
+    this when the user wants to start monitoring a new project, or asks how to set up TokenJam
     for this repo. Infers agent_id from the git remote if not provided.
     """
     try:
@@ -1056,7 +1056,7 @@ def setup_project(agent_id: str | None = None, project_path: str | None = None) 
 @mcp.tool()
 def open_dashboard() -> dict:
     """
-    Open the OCW web dashboard in the browser. Starts `tj serve` in the background if it
+    Open the TokenJam web dashboard in the browser. Starts `tj serve` in the background if it
     is not already running — do NOT start tj serve manually via Bash. Call this tool
     whenever the user asks to open the dashboard, view the UI, or browse observability data
     visually. Returns the URL to open. Safe to call repeatedly — detects if already running.

@@ -1,6 +1,6 @@
 /**
  * OpenTelemetry GenAI Semantic Convention attribute names.
- * Mirrors ocw/otel/semconv.py — keep in sync.
+ * Mirrors tokenjam/otel/semconv.py — keep in sync.
  */
 export const GenAIAttributes = {
   AGENT_ID: "gen_ai.agent.id",
@@ -27,19 +27,19 @@ export const GenAIAttributes = {
 } as const;
 
 export const TjAttributes = {
-  COST_USD: "ocw.cost_usd",
-  ALERT_TYPE: "ocw.alert.type",
-  ALERT_SEVERITY: "ocw.alert.severity",
-  SANDBOX_EVENT: "ocw.sandbox.event",
-  EGRESS_HOST: "ocw.sandbox.egress_host",
-  EGRESS_PORT: "ocw.sandbox.egress_port",
-  FILESYSTEM_PATH: "ocw.sandbox.filesystem_path",
-  SYSCALL_NAME: "ocw.sandbox.syscall_name",
+  COST_USD: "tokenjam.cost_usd",
+  ALERT_TYPE: "tokenjam.alert.type",
+  ALERT_SEVERITY: "tokenjam.alert.severity",
+  SANDBOX_EVENT: "tokenjam.sandbox.event",
+  EGRESS_HOST: "tokenjam.sandbox.egress_host",
+  EGRESS_PORT: "tokenjam.sandbox.egress_port",
+  FILESYSTEM_PATH: "tokenjam.sandbox.filesystem_path",
+  SYSCALL_NAME: "tokenjam.sandbox.syscall_name",
 } as const;
 
 /**
  * Event names and attribute constants from Claude Code's OTel log exporter.
- * Mirrors ClaudeCodeEvents in ocw/otel/semconv.py — keep in sync.
+ * Mirrors ClaudeCodeEvents in tokenjam/otel/semconv.py — keep in sync.
  */
 export const ClaudeCodeEvents = {
   // Event names (logRecord body values)

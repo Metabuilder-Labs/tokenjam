@@ -1,8 +1,8 @@
 """
-LangGraph agent example with OCW observability.
+LangGraph agent example with TokenJam observability.
 
 Builds a simple 3-node StateGraph (plan -> execute -> review) and runs it.
-OCW patches CompiledGraph.invoke to capture the graph execution as a span,
+TokenJam patches CompiledGraph.invoke to capture the graph execution as a span,
 and BaseLLM.generate to capture individual LLM calls within each node.
 
 Extra deps: pip install langgraph langchain-openai
@@ -105,11 +105,11 @@ def main():
     print(f"Review:\n{result['review']}\n")
 
     # --- Observation ---
-    print("--- OCW Observation ---")
+    print("--- TokenJam Observation ---")
     print("LangGraph integration captured spans for:")
     print("  - Graph invocation via CompiledGraph.invoke")
     print("  - Individual LLM calls within each node (via LangChain patch)")
-    print("Run 'ocw traces' to see the captured telemetry.")
+    print("Run 'tj traces' to see the captured telemetry.")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Tests for the LiteLLM integration (ocw.sdk.integrations.litellm)."""
+"""Tests for the LiteLLM integration (tokenjam.sdk.integrations.litellm)."""
 from __future__ import annotations
 
 import asyncio

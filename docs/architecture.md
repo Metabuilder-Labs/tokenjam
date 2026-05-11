@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the architecture of TokenJam (ocw) — a local-first, OTel-native observability CLI for autonomous AI agents.
+This document describes the architecture of TokenJam (`tj`) — a local-first, OTel-native observability CLI for autonomous AI agents.
 
 ## Design principles
 
@@ -10,7 +10,7 @@ This document describes the architecture of TokenJam (ocw) — a local-first, OT
 
 3. **Never crash the agent.** The SDK, ingest pipeline, and all post-ingest hooks are designed to fail silently. Hook failures are logged but never propagated. A span rejection never takes down the instrumented agent.
 
-4. **Core is pure domain logic.** `ocw/core/` has no CLI or HTTP imports. CLI and API layers import from core, never the reverse. This makes the domain logic independently testable and reusable.
+4. **Core is pure domain logic.** `tokenjam/core/` has no CLI or HTTP imports. CLI and API layers import from core, never the reverse. This makes the domain logic independently testable and reusable.
 
 ---
 
@@ -42,7 +42,7 @@ flowchart TD
     Alerts --> DB
     Schema --> DB
 
-    DB --> CLI["ocw CLI"]
+    DB --> CLI["tj CLI"]
     DB --> API["REST API\n:7391/docs"]
     DB --> WebUI["Web UI\n:7391/"]
     DB --> MCP["MCP Server\nstdio"]
@@ -91,7 +91,7 @@ Sessions are identified by `conversation_id`. When a span arrives with a `conver
 ## Package structure and dependency rules
 
 ```
-ocw/
+tokenjam/
 ├── core/       Pure domain logic — NO imports from cli/ or api/
 ├── cli/        Click commands — imports from core/
 ├── api/        FastAPI routes — imports from core/
@@ -141,7 +141,7 @@ DuckDB allows only one write connection. When `tj serve` is running, CLI command
 
 ### Bootstrap
 
-`ensure_initialised()` in `ocw/sdk/bootstrap.py` is the lazy, thread-safe, idempotent entry point. It bootstraps: config loading → DB connection → IngestPipeline creation → TracerProvider setup. Called automatically by `@watch()` and all `patch_*()` functions. Registers an `atexit` handler to flush pending spans.
+`ensure_initialised()` in `tokenjam/sdk/bootstrap.py` is the lazy, thread-safe, idempotent entry point. It bootstraps: config loading → DB connection → IngestPipeline creation → TracerProvider setup. Called automatically by `@watch()` and all `patch_*()` functions. Registers an `atexit` handler to flush pending spans.
 
 ### @watch() creates sessions, not LLM spans
 
@@ -256,7 +256,7 @@ A stub endpoint at `/v1/metrics` returns 200 OK to prevent noisy warnings from O
 
 ## Web UI
 
-A single-file SPA (`ocw/ui/index.html`) served by `tj serve` at `http://127.0.0.1:7391/`. No build step, no node_modules — vanilla JS with Alpine.js from CDN.
+A single-file SPA (`tokenjam/ui/index.html`) served by `tj serve` at `http://127.0.0.1:7391/`. No build step, no node_modules — vanilla JS with Alpine.js from CDN.
 
 Six views: Status, Traces (with span waterfall visualization), Cost, Alerts, Budget, Drift. Hash-based routing (`/#/status`, `/#/traces`, etc.). The UI consumes the same REST API endpoints as external clients. All views auto-poll (Status at 5s, all others at 10s).
 
@@ -287,7 +287,7 @@ A fifth layer (`tests/e2e/`) makes real LLM API calls and is auto-skipped withou
 
 - **OTel TracerProvider:** Global and set-once per process. In SDK tests, set the provider once at module level (not per-test) and clear spans between tests using a custom `_CollectingExporter`.
 
-- **CLI tests:** Use `click.testing.CliRunner` with `unittest.mock.patch` on `ocw.cli.main.load_config` and `ocw.cli.main.open_db` to inject test fixtures.
+- **CLI tests:** Use `click.testing.CliRunner` with `unittest.mock.patch` on `tokenjam.cli.main.load_config` and `tokenjam.cli.main.open_db` to inject test fixtures.
 
 - **API tests:** Use `httpx.AsyncClient` with `httpx.ASGITransport(app=app)` against `InMemoryBackend`.
 
@@ -297,7 +297,7 @@ A fifth layer (`tests/e2e/`) makes real LLM API calls and is auto-skipped withou
 
 Config is TOML, discovered in order: `tj.toml` → `.tj/config.toml` → `~/.config/tj/config.toml`. Override with `--config` flag or `TJ_CONFIG` env var.
 
-The `TjConfig` dataclass tree in `ocw/core/config.py` defines the full hierarchy: agents (with budgets, sensitive actions, drift config, output schema), storage, export (OTLP, Prometheus), alerts (cooldown, channels), security, API, and capture settings.
+The `TjConfig` dataclass tree in `tokenjam/core/config.py` defines the full hierarchy: agents (with budgets, sensitive actions, drift config, output schema), storage, export (OTLP, Prometheus), alerts (cooldown, channels), security, API, and capture settings.
 
 `tomllib.load()` requires binary mode (`"rb"`) — text mode raises `TypeError` at runtime. The codebase uses conditional imports: `tomllib` (Python 3.11+) or `tomli` (3.10). Writing config uses `tomli_w`.
 
@@ -305,7 +305,7 @@ The `TjConfig` dataclass tree in `ocw/core/config.py` defines the full hierarchy
 
 ## MCP server (Claude Code integration)
 
-`tj mcp` is a stdio-based MCP (Model Context Protocol) server that gives Claude Code direct access to OCW observability data. It exposes 13 tools that Claude Code can call during a session.
+`tj mcp` is a stdio-based MCP (Model Context Protocol) server that gives Claude Code direct access to TokenJam observability data. It exposes 13 tools that Claude Code can call during a session.
 
 ### Dual-mode operation
 
@@ -348,7 +348,7 @@ If `tj serve` is not running, `cmd_mcp.py` can auto-start it as a detached subpr
 The `--claude-code` flag configures the full telemetry pipeline in one command:
 
 1. **Derives agent ID** from the git remote origin name (fallback: folder name), prefixed with `claude-code-`
-2. **Writes OCW config** to `~/.config/tj/config.toml` (global, shared across all projects) with agent entry and optional daily budget
+2. **Writes TokenJam config** to `~/.config/tj/config.toml` (global, shared across all projects) with agent entry and optional daily budget
 3. **Updates global Claude settings** (`~/.claude/settings.json`) with OTLP exporter env vars: `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, endpoint, protocol. On re-runs, always resyncs the `OTEL_EXPORTER_OTLP_HEADERS` auth header to fix 401s without manual setup.
 4. **Writes project settings** (`./.claude/settings.json`) with `OTEL_RESOURCE_ATTRIBUTES=service.name={agent_id}` so spans are tagged to the right agent
 5. **Updates shell env** (`~/.zshrc`) with Docker-compatible endpoint (`host.docker.internal:{port}`) for harness sessions that can't reach `127.0.0.1`
@@ -373,7 +373,7 @@ The converted spans flow through the standard `IngestPipeline.process()` path �
 
 ### Semantic conventions (`ClaudeCodeEvents`)
 
-`ocw/otel/semconv.py` defines `ClaudeCodeEvents` constants for Claude Code's log event attributes: session context (`session.id`, `prompt.id`, `event.sequence`), API request metrics (`cost_usd`, `duration_ms`, `speed`, token counts), tool result fields (`success`, `error`, `tool_parameters`), and error context (`status_code`, `attempt`).
+`tokenjam/otel/semconv.py` defines `ClaudeCodeEvents` constants for Claude Code's log event attributes: session context (`session.id`, `prompt.id`, `event.sequence`), API request metrics (`cost_usd`, `duration_ms`, `speed`, token counts), tool result fields (`success`, `error`, `tool_parameters`), and error context (`status_code`, `attempt`).
 
 ---
 
@@ -412,8 +412,8 @@ Z-scores are color-coded: green (|z| < 1.0), yellow (approaching threshold), red
 
 ## Packaging
 
-- **PyPI package name:** `tokenjam` (not `ocw`)
-- **CLI command:** `ocw`
-- **Python package directory:** `ocw/`
-- **Build system:** hatchling, with `[tool.hatch.build.targets.wheel] packages = ["ocw"]` because the package name differs from the directory name
+- **PyPI package name:** `tokenjam`
+- **CLI command:** `tj`
+- **Python package directory:** `tokenjam/`
+- **Build system:** hatchling, with `[tool.hatch.build.targets.wheel] packages = ["tokenjam"]`
 - **npm package:** `@tokenjam/sdk` under `sdk-ts/`

@@ -25,7 +25,7 @@ This is the worst kind of bug. No stack trace. No error. No crash. Just behavior
 [agent] But hey, it completed successfully. Moving on.
 ```
 
-## What you see with OCW
+## What you see with TokenJam
 
 ```
 Sessions: 5 baseline + 1 anomalous
@@ -39,13 +39,13 @@ The anomalous session had:
   Tool sequence: 5 new tools never seen in baseline
 ```
 
-Five sessions averaged 1,000 input tokens with tools `[search, summarize]`. Session 6 came in with 50,000 tokens and tools `[fetch_url, parse_html, extract_entities, classify, store_results]`. Every metric was off the chart. OCW fired `drift_detected` the moment the session closed.
+Five sessions averaged 1,000 input tokens with tools `[search, summarize]`. Session 6 came in with 50,000 tokens and tools `[fetch_url, parse_html, extract_entities, classify, store_results]`. Every metric was off the chart. TokenJam fired `drift_detected` the moment the session closed.
 
 The `DriftDetector` builds a rolling baseline from prior sessions. When a new session's token counts exceed a Z-score of 2.0, or the tool sequence Jaccard distance exceeds 0.4 — it fires. You find out in seconds, not after a week of "huh, that output seemed weird."
 
 ## Enable drift detection
 
-In `ocw.toml`:
+In `tj.toml`:
 
 ```toml
 [agents.my-agent.drift]
@@ -66,7 +66,7 @@ tj demo hallucination-drift
 
 Runs entirely in-process. No API keys, no real model calls, no network traffic.
 
-To track drift on your real agent, wire up the OCW SDK, enable drift in `ocw.toml`, and run `tj serve`. Then `tj drift` shows Z-scores; `tj alerts` shows the events.
+To track drift on your real agent, wire up the TokenJam SDK, enable drift in `tj.toml`, and run `tj serve`. Then `tj drift` shows Z-scores; `tj alerts` shows the events.
 
 ## Next in the incident library
 
@@ -75,4 +75,4 @@ To track drift on your real agent, wire up the OCW SDK, enable drift in `ocw.tom
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.
+[TokenJam](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.

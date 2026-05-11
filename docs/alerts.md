@@ -1,6 +1,6 @@
 # Alerts
 
-`ocw` fires alerts the moment something happens — sensitive tool calls, budget breaches, behavioral drift, sandbox violations. Alerts are evaluated after every span ingest and dispatched to your configured channels in real time.
+`tj` fires alerts the moment something happens — sensitive tool calls, budget breaches, behavioral drift, sandbox violations. Alerts are evaluated after every span ingest and dispatched to your configured channels in real time.
 
 ## Alert types
 
@@ -22,7 +22,7 @@
 
 ## Channels
 
-Configure where alerts go in `.ocw/config.toml`. Multiple channels work simultaneously — you can get push notifications on your phone and a Discord message at the same time.
+Configure where alerts go in `.tj/config.toml`. Multiple channels work simultaneously — you can get push notifications on your phone and a Discord message at the same time.
 
 ```toml
 # Push notification (free, no account required)
@@ -49,7 +49,7 @@ url = "https://your-endpoint.com/alerts"
 # Local file log
 [[alerts.channels]]
 type = "file"
-path = "~/.ocw/alerts.log"
+path = "~/.tj/alerts.log"
 
 # Stdout (always enabled by default)
 [[alerts.channels]]
@@ -77,7 +77,7 @@ Define which tool calls should trigger immediate alerts:
 
 ## Cooldown
 
-To prevent alert storms, `ocw` tracks a cooldown per agent + alert type. Repeat alerts within the cooldown window are suppressed — still persisted to the database, but not dispatched to channels.
+To prevent alert storms, `tj` tracks a cooldown per agent + alert type. Repeat alerts within the cooldown window are suppressed — still persisted to the database, but not dispatched to channels.
 
 ```toml
 [alerts]

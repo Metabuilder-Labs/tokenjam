@@ -1,6 +1,6 @@
 # Export and Integrate
 
-`ocw` stores all telemetry in a local DuckDB database. Export it in multiple formats for analysis, evaluation, or forwarding to external backends.
+`tj` stores all telemetry in a local DuckDB database. Export it in multiple formats for analysis, evaluation, or forwarding to external backends.
 
 ## Export formats
 

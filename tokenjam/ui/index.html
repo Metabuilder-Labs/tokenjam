@@ -527,7 +527,7 @@ import htm from 'https://esm.sh/htm@3.1.1';
 const html = htm.bind(h);
 
 // --- API ---
-const apiKeyMeta = document.querySelector('meta[name="ocw-api-key"]');
+const apiKeyMeta = document.querySelector('meta[name="tj-api-key"]');
 const API_KEY = apiKeyMeta ? apiKeyMeta.getAttribute('content') : null;
 
 async function api(path, params = {}) {
@@ -975,7 +975,7 @@ function AlertsView() {
       </select>
       <button class="btn" onClick=${load}>Refresh</button>
     </div>
-    ${alerts.length === 0 ? html`<div class="empty">No alerts fired. Configure sensitive actions in ${'`.ocw/config.toml`'}.</div>` : html`
+    ${alerts.length === 0 ? html`<div class="empty">No alerts fired. Configure sensitive actions in ${'`tj.toml`'}.</div>` : html`
       <div class="table-wrap"><table>
         <thead><tr><th></th><th>Time</th><th>Severity</th><th>Type</th><th>Title</th><th>Agent</th></tr></thead>
         <tbody>

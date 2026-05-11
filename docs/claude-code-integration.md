@@ -10,7 +10,7 @@ tj status --agent claude-code-<project>
 ```
 
 `tj onboard --claude-code` does everything in one shot:
-- Creates a shared config at `~/.config/ocw/config.toml` (one config for all your projects)
+- Creates a shared config at `~/.config/tj/config.toml` (one config for all your projects)
 - Writes OTLP exporter vars to `~/.claude/settings.json` so Claude Code sends telemetry automatically
 - Tags this project's sessions by writing `OTEL_RESOURCE_ATTRIBUTES=service.name=claude-code-<project>` to `.claude/settings.json`
 - Registers the MCP server globally (`claude mcp add --scope user tj -- tj mcp`)
@@ -50,32 +50,32 @@ The MCP server is included in the `[mcp]` extra and registered automatically by 
 | `get_tool_stats` | Tool call counts and average duration |
 | `get_drift_report` | Behavioral drift baseline vs latest session |
 | `acknowledge_alert` | Mark an alert as acknowledged |
-| `setup_project` | Configure a project to send telemetry to OCW |
+| `setup_project` | Configure a project to send telemetry to TokenJam |
 | `open_dashboard` | Open the web UI — starts `tj serve` on demand if needed |
 
 The MCP server opens the DuckDB file read-only — no lock conflicts with `tj serve` if both are running. The single write operation (`acknowledge_alert`) opens a short-lived read-write connection only for its UPDATE.
 
 **Per-project telemetry tagging** — after installing the MCP server globally, ask Claude Code to set up each project:
 
-> "Set up OCW for this project"
+> "Set up TokenJam for this project"
 
 Claude calls `setup_project`, which writes `.claude/settings.json` with `OTEL_RESOURCE_ATTRIBUTES=service.name=<project>` so spans from that project are tagged with the right agent ID.
 
 ## Uninstalling
 
 ```bash
-# Remove all OCW data, config, daemon, MCP registration, and env vars from every onboarded project:
+# Remove all TokenJam data, config, daemon, MCP registration, and env vars from every onboarded project:
 tj uninstall --yes
 
-# Then remove the package itself (ocw uninstall intentionally skips this):
+# Then remove the package itself (tj uninstall intentionally skips this):
 pip uninstall tokenjam -y
 ```
 
 `tj uninstall` cleans up everything set by `tj onboard --claude-code`:
 - Stops and removes the background daemon (launchd/systemd)
 - Deregisters the MCP server from Claude Code
-- Deletes `~/.ocw/` (telemetry database)
-- Deletes `~/.config/ocw/` (global config and projects index)
+- Deletes `~/.tj/` (telemetry database)
+- Deletes `~/.config/tj/` (global config and projects index)
 - Removes OTLP env vars from `~/.claude/settings.json`
 - Removes `OTEL_RESOURCE_ATTRIBUTES` from `.claude/settings.json` in every onboarded project
 - Removes the harness env block from `~/.zshrc`

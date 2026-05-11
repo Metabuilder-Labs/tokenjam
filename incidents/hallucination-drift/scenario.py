@@ -2,7 +2,7 @@
 Incident: "My agent worked yesterday. Today it's possessed."
 
 Behavioral drift: the agent's token usage and tool patterns have shifted
-significantly. With print(), you notice "outputs look different." OCW
+significantly. With print(), you notice "outputs look different." TokenJam
 measures the deviation with Z-scores and fires a DRIFT_DETECTED alert.
 
 No API keys required.
@@ -10,7 +10,7 @@ No API keys required.
 from __future__ import annotations
 
 AGENT_ID = "demo-hallucination-drift"
-DESCRIPTION = "Agent behavior shifts unexpectedly — OCW catches statistical drift and fires an alert"
+DESCRIPTION = "Agent behavior shifts unexpectedly — TokenJam catches statistical drift and fires an alert"
 
 _PRINT_SIMULATION = """\
 [agent] Session 1... output looks reasonable
@@ -170,8 +170,8 @@ def _render(console, result) -> None:
         "  Input tokens: 50,000 vs baseline ~1,000 (Z-score: inf)\n"
         "  Tool sequence: 5 new tools never seen in baseline\n\n"
         "[dim]In your real agent:[/dim]\n"
-        "  ocw drift               [dim]# Z-scores and baseline stats[/dim]\n"
-        "  ocw alerts              [dim]# see the drift_detected alert[/dim]"
+        "  tj drift               [dim]# Z-scores and baseline stats[/dim]\n"
+        "  tj alerts              [dim]# see the drift_detected alert[/dim]"
     )
-    console.print(Panel(ocw_output, title="[green]What OCW reveals[/green]", border_style="green"))
+    console.print(Panel(ocw_output, title="[green]What TokenJam reveals[/green]", border_style="green"))
     console.print()

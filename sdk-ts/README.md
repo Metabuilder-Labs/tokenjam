@@ -2,7 +2,7 @@
 
 TypeScript SDK for [TokenJam](https://github.com/Metabuilder-Labs/tokenjam) — local-first, OTel-native observability for AI agents.
 
-Communicates with a running `ocw serve` instance via HTTP. No in-process OTel pipeline — spans are built with `SpanBuilder` and sent by `TjClient`.
+Communicates with a running `tj serve` instance via HTTP. No in-process OTel pipeline — spans are built with `SpanBuilder` and sent by `TjClient`.
 
 > **Note:** Provider auto-instrumentation (the `patch_anthropic()`, `patch_openai()`, etc. convenience wrappers from the Python SDK) does not exist in this package. Every LLM call and tool call must be manually instrumented using `SpanBuilder`.
 
@@ -12,11 +12,11 @@ Communicates with a running `ocw serve` instance via HTTP. No in-process OTel pi
 npm install @tokenjam/sdk
 ```
 
-Requires Node.js >= 18. Start the OCW server before sending spans:
+Requires Node.js >= 18. Start the TokenJam server before sending spans:
 
 ```bash
 pip install tokenjam
-ocw serve
+tj serve
 ```
 
 ## Quick start
@@ -25,8 +25,8 @@ ocw serve
 import { TjClient, SpanBuilder, SpanStatus } from "@tokenjam/sdk";
 
 const client = new TjClient({
-  ingestSecret: "your-ingest-secret",   // from ocw.toml security.ingest_secret
-  serviceName: "my-agent",              // shown as agent ID in ocw status
+  ingestSecret: "your-ingest-secret",   // from tj.toml security.ingest_secret
+  serviceName: "my-agent",              // shown as agent ID in tj status
 }).start();
 
 // Record an LLM call
@@ -56,9 +56,9 @@ new TjClient(options: TjClientOptions)
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `ingestSecret` | `string` | required | Bearer token from `security.ingest_secret` in `ocw.toml` |
-| `baseUrl` | `string` | `http://127.0.0.1:7391` | OCW server base URL |
-| `serviceName` | `string` | `"ocw-ts-sdk"` | Reported as `service.name` in OTLP resource attributes; used as fallback agent ID |
+| `ingestSecret` | `string` | required | Bearer token from `security.ingest_secret` in `tj.toml` |
+| `baseUrl` | `string` | `http://127.0.0.1:7391` | `tj serve` base URL |
+| `serviceName` | `string` | `"tj-ts-sdk"` | Reported as `service.name` in OTLP resource attributes; used as fallback agent ID |
 | `batchSize` | `number` | `50` | Max spans buffered before auto-flush |
 | `flushIntervalMs` | `number` | `5000` | Interval between automatic flushes (ms) |
 | `maxRetries` | `number` | `3` | Retry attempts on network errors and 5xx responses; 4xx errors are not retried |
@@ -135,9 +135,9 @@ GenAIAttributes.REQUEST_MODEL      // "gen_ai.request.model"
 GenAIAttributes.CACHE_CREATE_TOKENS // "gen_ai.usage.cache_creation_tokens"
 // ...
 
-// OCW-specific attribute name strings
-TjAttributes.COST_USD             // "ocw.cost_usd"
-TjAttributes.SANDBOX_EVENT        // "ocw.sandbox.event"
+// tj-specific attribute name strings
+TjAttributes.COST_USD             // "tokenjam.cost_usd"
+TjAttributes.SANDBOX_EVENT        // "tokenjam.sandbox.event"
 // ...
 
 // Claude Code OTel log event names and attribute constants
@@ -148,7 +148,7 @@ ClaudeCodeEvents.INPUT_TOKENS      // "input_tokens"
 // ...
 ```
 
-Use `ClaudeCodeEvents` when writing agents that consume Claude Code's own OTel log output (e.g. via the `ocw` MCP server or a log subscriber).
+Use `ClaudeCodeEvents` when writing agents that consume Claude Code's own OTel log output (e.g. via the `tj` MCP server or a log subscriber).
 
 ## SpanKind and SpanStatus
 
@@ -173,6 +173,6 @@ Unlike the Python SDK (`pip install tokenjam`), this package does **not** includ
 - **Session management** (`@watch()` decorator / `AgentSession` context manager) — you must manually build and send `invoke_agent` session spans.
 - **Provider auto-instrumentation** — no `patchAnthropic()`, `patchOpenAI()`, etc. Every LLM call requires an explicit `SpanBuilder`.
 - **Framework patches** — no LangChain JS, OpenAI Agents SDK, or Vercel AI SDK integration.
-- **In-process OTel pipeline** — all telemetry goes over HTTP to `ocw serve`.
+- **In-process OTel pipeline** — all telemetry goes over HTTP to `tj serve`.
 
 See the [Python SDK docs](https://github.com/Metabuilder-Labs/tokenjam#python-sdk) for the full-featured in-process instrumentation path.

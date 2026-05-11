@@ -2,14 +2,14 @@
 Incident: "Why did my agent just spend $47 on a hello world?"
 
 The model silently escalated from cheap Haiku to expensive Opus mid-chain.
-With print(), you see "response received". OCW shows cost per model, per call.
+With print(), you see "response received". TokenJam shows cost per model, per call.
 
 No API keys required.
 """
 from __future__ import annotations
 
 AGENT_ID = "demo-surprise-cost"
-DESCRIPTION = "Agent silently burns budget on expensive models — OCW tracks every dollar"
+DESCRIPTION = "Agent silently burns budget on expensive models — TokenJam tracks every dollar"
 
 _PRINT_SIMULATION = """\
 [agent] Starting document analysis...
@@ -40,7 +40,7 @@ _CALLS = [
 def run() -> None:
     """
     Inject multi-model LLM calls showing escalating costs.
-    Renders Rich panels, or JSON if --json was passed to `ocw demo`.
+    Renders Rich panels, or JSON if --json was passed to `tj demo`.
     """
     import click
 
@@ -148,8 +148,8 @@ def _render(console, result, model_breakdown) -> None:
     tmp.print(table)
     tmp.print(Text(f"Total session cost: ${result.total_cost_usd:.4f}", style="bold red"))
     tmp.print("\n[dim]In your real agent:[/dim]")
-    tmp.print("  ocw cost --by model    [dim]# per-model spend[/dim]")
-    tmp.print("  ocw cost               [dim]# daily breakdown[/dim]")
+    tmp.print("  tj cost --by model    [dim]# per-model spend[/dim]")
+    tmp.print("  tj cost               [dim]# daily breakdown[/dim]")
 
-    console.print(Panel(buf.getvalue(), title="[green]What OCW reveals[/green]", border_style="green"))
+    console.print(Panel(buf.getvalue(), title="[green]What TokenJam reveals[/green]", border_style="green"))
     console.print()

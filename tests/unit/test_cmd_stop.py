@@ -1,4 +1,4 @@
-"""Unit tests for `ocw stop` lifecycle behavior."""
+"""Unit tests for `tj stop` lifecycle behavior."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -9,9 +9,9 @@ from tokenjam.cli.cmd_stop import cmd_stop
 
 
 class TestStopSweepsForegroundProcesses:
-    """`ocw stop` must reap orphan foreground `ocw serve &` processes after
+    """`tj stop` must reap orphan foreground `tj serve &` processes after
     a successful launchctl unload — otherwise port 7391 stays held and
-    "ocw stop didn't actually stop ocw" (C6)."""
+    "tj stop didn't actually stop tj" (C6)."""
 
     def test_kills_foreground_after_launchd_unload(self, tmp_path, monkeypatch):
         # Pretend a plist exists so the launchd branch runs.
@@ -43,7 +43,7 @@ class TestStopSweepsForegroundProcesses:
     def test_does_not_loop_on_slow_shutdown(self, tmp_path, monkeypatch):
         """SIGTERM is async — if the target process hasn't exited before the
         next pgrep, the sweep must NOT re-signal the same PID. Otherwise a
-        slow shutdown handler can make `ocw stop` hang forever."""
+        slow shutdown handler can make `tj stop` hang forever."""
         monkeypatch.setattr("tokenjam.cli.cmd_stop.Path.home", lambda: tmp_path)
         kill_mock = MagicMock()
         # pgrep keeps returning the same PID — simulates a process whose

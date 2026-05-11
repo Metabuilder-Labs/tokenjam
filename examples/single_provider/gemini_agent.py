@@ -1,9 +1,9 @@
 """
-Google Gemini summarization agent with OCW observability.
+Google Gemini summarization agent with TokenJam observability.
 
 Demonstrates the Gemini provider path: passes a multi-paragraph text to
 gemini-2.0-flash and asks for a concise summary. All LLM calls are captured
-by ocw via the Gemini integration patch.
+by tj via the Gemini integration patch.
 
 Requirements:
     pip install google-generativeai tokenjam
@@ -101,7 +101,7 @@ if __name__ == "__main__":
     result = run()
     print(f"\nSummary:\n{result}")
 
-    print("\n--- OCW Observation ---")
+    print("\n--- TokenJam Observation ---")
     print("Session and LLM spans have been recorded.")
-    print("Run 'ocw status --agent gemini-summarizer' to view telemetry.")
-    print("Run 'ocw cost --agent gemini-summarizer' to see token costs.")
+    print("Run 'tj status --agent gemini-summarizer' to view telemetry.")
+    print("Run 'tj cost --agent gemini-summarizer' to see token costs.")

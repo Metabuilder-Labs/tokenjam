@@ -28,7 +28,7 @@ def _port_open(host: str, port: int) -> bool:
 def _start_and_wait(host: str, port: int, timeout: float = 10.0) -> bool:
     """Start tj serve in the background and wait up to *timeout* seconds for it
     to accept connections. Returns True if the server is ready in time."""
-    ocw_bin = shutil.which("tj") or sys.argv[0]
+    tj_bin = shutil.which("tj") or sys.argv[0]
     popen_kwargs: dict = {
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
@@ -39,7 +39,7 @@ def _start_and_wait(host: str, port: int, timeout: float = 10.0) -> bool:
         popen_kwargs["start_new_session"] = True
 
     try:
-        subprocess.Popen([ocw_bin, "serve"], **popen_kwargs)
+        subprocess.Popen([tj_bin, "serve"], **popen_kwargs)
     except (FileNotFoundError, OSError):
         return False
 
@@ -54,7 +54,7 @@ def _start_and_wait(host: str, port: int, timeout: float = 10.0) -> bool:
 @click.command("mcp")
 @click.pass_context
 def cmd_mcp(ctx: click.Context) -> None:
-    """Start the OCW MCP server (stdio transport for Claude Code)."""
+    """Start the TokenJam MCP server (stdio transport for Claude Code)."""
     from tokenjam.mcp.server import mcp, init
 
     config_path = find_config_file()

@@ -1,4 +1,4 @@
-"""Unit tests for ocw.core.cost and ocw.core.pricing."""
+"""Unit tests for tokenjam.core.cost and tokenjam.core.pricing."""
 from __future__ import annotations
 import logging
 

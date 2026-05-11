@@ -156,7 +156,7 @@ tj stop
 
 ### `tj uninstall`
 
-Remove all OCW data, config, daemon, MCP registration, and env vars.
+Remove all TokenJam data, config, daemon, MCP registration, and env vars.
 
 ```bash
 tj uninstall          # interactive confirmation

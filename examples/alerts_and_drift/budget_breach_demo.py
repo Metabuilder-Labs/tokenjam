@@ -2,12 +2,12 @@
 Budget Breach Alert Demo
 
 Simulates an agent that exceeds a very low budget ($0.05 daily, $0.02 session).
-Shows how ocw tracks costs and fires budget alerts.
+Shows how tj tracks costs and fires budget alerts.
 
 No API keys required — uses simulated instrumentation.
 
-The demo seeds its own [agents.budget-demo] block in the active ocw
-config on startup, so it works out of the box on a fresh `ocw onboard`.
+The demo seeds its own [agents.budget-demo] block in the active tj
+config on startup, so it works out of the box on a fresh `tj onboard`.
 The injected config is equivalent to:
 
     [agents.budget-demo.budget]
@@ -86,7 +86,7 @@ if __name__ == "__main__":
     ensure_initialised()
 
     print("=" * 60)
-    print("OCW Budget Breach Alert Demo")
+    print("TokenJam Budget Breach Alert Demo")
     print("=" * 60)
     print(
         "\nMaking 10 LLM calls with escalating token counts.\n"
@@ -100,12 +100,12 @@ if __name__ == "__main__":
     print("What to observe:")
     print("=" * 60)
     print(
-        "If your ocw.toml has the budget config shown at the top of\n"
-        "this file, ocw should have fired budget alerts.\n"
+        "If your tj.toml has the budget config shown at the top of\n"
+        "this file, tj should have fired budget alerts.\n"
         "\n"
         "Run these commands to inspect:\n"
         "\n"
-        "  ocw cost --since 1h         # cost breakdown for the last hour\n"
-        "  ocw alerts                  # see budget-breach alerts\n"
-        "  ocw status                  # agent overview with cost totals\n"
+        "  tj cost --since 1h         # cost breakdown for the last hour\n"
+        "  tj alerts                  # see budget-breach alerts\n"
+        "  tj status                  # agent overview with cost totals\n"
     )

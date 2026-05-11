@@ -15,10 +15,10 @@ from tokenjam.utils.formatting import console
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
 def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
-    """Remove all OCW data, config, and daemon."""
+    """Remove all TokenJam data, config, and daemon."""
     if not yes:
         confirmed = click.confirm(
-            "This will delete all OCW data including telemetry history. Continue?",
+            "This will delete all TokenJam data including telemetry history. Continue?",
             default=False,
         )
         if not confirmed:
@@ -58,10 +58,10 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
         console.print(f"  Removed {systemd_path}")
 
     # 5. Delete ~/.tj/ (telemetry DB)
-    ocw_dir = Path.home() / ".tj"
-    if ocw_dir.exists():
-        shutil.rmtree(ocw_dir)
-        console.print(f"  Removed {ocw_dir}")
+    tj_dir = Path.home() / ".tj"
+    if tj_dir.exists():
+        shutil.rmtree(tj_dir)
+        console.print(f"  Removed {tj_dir}")
 
     # 6. Read projects index BEFORE deleting the global config dir.
     global_config_dir = Path.home() / ".config" / "tj"
@@ -80,10 +80,10 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
         console.print(f"  Removed {global_config_dir}")
 
     # 8. Delete local .tj/ if present
-    local_ocw = Path(".tj")
-    if local_ocw.exists():
-        shutil.rmtree(local_ocw)
-        console.print(f"  Removed {local_ocw}")
+    local_tj = Path(".tj")
+    if local_tj.exists():
+        shutil.rmtree(local_tj)
+        console.print(f"  Removed {local_tj}")
 
     # 9. Delete temp files
     for tmp_file in ["/tmp/tj-serve.out", "/tmp/tj-serve.err"]:
@@ -92,7 +92,7 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
             p.unlink()
             console.print(f"  Removed {tmp_file}")
 
-    # 10. Remove OCW env vars from ~/.claude/settings.json
+    # 10. Remove TokenJam env vars from ~/.claude/settings.json
     _GLOBAL_TJ_KEYS = {
         "CLAUDE_CODE_ENABLE_TELEMETRY",
         "OTEL_LOGS_EXPORTER",
@@ -111,7 +111,7 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
             if removed:
                 gs["env"] = env
                 global_settings_path.write_text(json.dumps(gs, indent=2) + "\n")
-                console.print(f"  Cleaned {len(removed)} OCW env vars from {global_settings_path}")
+                console.print(f"  Cleaned {len(removed)} TokenJam env vars from {global_settings_path}")
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {global_settings_path}: {exc}[/yellow]")
 
@@ -150,7 +150,7 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
             )
             if cleaned != text:
                 zshrc.write_text(cleaned)
-                console.print(f"  Removed OCW env block from {zshrc}")
+                console.print(f"  Removed TokenJam env block from {zshrc}")
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {zshrc}: {exc}[/yellow]")
 

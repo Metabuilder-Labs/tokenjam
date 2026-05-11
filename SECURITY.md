@@ -26,4 +26,4 @@ Security issues in these areas are especially important to report.
 ## Not in Scope
 
 - Vulnerabilities in upstream dependencies (report to the upstream project)
-- Issues that require physical access to the machine running `ocw`
+- Issues that require physical access to the machine running `tj`

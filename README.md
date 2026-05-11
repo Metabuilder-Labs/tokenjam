@@ -66,7 +66,7 @@ For any Python agent — Anthropic, OpenAI, Gemini, Bedrock, LangChain, CrewAI, 
 ```bash
 pip install tokenjam
 tj onboard    # creates config, generates ingest secret
-ocw doctor     # verify your setup
+tj doctor     # verify your setup
 ```
 
 ```python
@@ -155,12 +155,12 @@ https://github.com/user-attachments/assets/b94d13f6-1432-40d4-b093-6958d74f0e65
 
 ```bash
 tj status           # current state, cost, active alerts
-ocw traces           # full span history with waterfall view
-ocw cost --since 7d  # cost breakdown by agent, model, day
-ocw alerts           # everything that fired while you were away
-ocw budget           # view and set daily/session cost limits
-ocw drift            # behavioral drift Z-scores vs baseline
-ocw tools            # tool call history with error rates
+tj traces           # full span history with waterfall view
+tj cost --since 7d  # cost breakdown by agent, model, day
+tj alerts           # everything that fired while you were away
+tj budget           # view and set daily/session cost limits
+tj drift            # behavioral drift Z-scores vs baseline
+tj tools            # tool call history with error rates
 tj serve            # start the web UI + REST API
 ```
 
@@ -183,7 +183,7 @@ No signup, no cloud — runs entirely on your machine.
 
 ---
 
-## ocw vs LangSmith vs Langfuse
+## tj vs LangSmith vs Langfuse
 
 LangSmith and Langfuse are excellent for tracing LLM API calls and running evals on chat outputs. `tj` solves a different problem: **autonomous agents running unsupervised with real-world consequences**.
 
@@ -251,14 +251,14 @@ The MCP server gives Claude Code direct access to your observability data inside
 | `get_tool_stats` | Tool call counts and average duration |
 | `get_drift_report` | Drift baseline vs latest session |
 | `acknowledge_alert` | Mark an alert as acknowledged |
-| `setup_project` | Configure a project for OCW telemetry |
+| `setup_project` | Configure a project for TokenJam telemetry |
 | `open_dashboard` | Open the web UI (starts `tj serve` if needed) |
 
 The MCP server opens DuckDB read-only — no lock conflicts with `tj serve`.
 
 **Per-project tagging** — after installing globally, ask Claude Code:
 
-> "Set up OCW for this project"
+> "Set up TokenJam for this project"
 
 Claude calls `setup_project`, which writes `.claude/settings.json` with the right `OTEL_RESOURCE_ATTRIBUTES` for this project.
 
@@ -274,8 +274,8 @@ tj onboard --codex
 `tj onboard --codex` is project-agnostic. It writes to `~/.codex/config.toml` (Codex's single global config), so you only run it once — not once per project. Codex hardcodes `service.name="codex_exec"` in its binary, so all sessions appear under the same agent ID regardless of which repo you're working in.
 
 `tj onboard --codex`:
-- Writes an `[otel]` block and `[mcp_servers.ocw]` to `~/.codex/config.toml`
-- Registers the MCP server so Codex can call OCW tools directly
+- Writes an `[otel]` block and `[mcp_servers.tj]` to `~/.codex/config.toml`
+- Registers the MCP server so Codex can call TokenJam tools directly
 - Installs the background daemon (launchd / systemd)
 
 **Codex must be restarted** after running `tj onboard --codex`.
@@ -289,14 +289,14 @@ The same 13 MCP tools available to Claude Code are available to Codex after rest
 ### Uninstalling
 
 ```bash
-# Remove all OCW data, config, daemon, MCP registration, and env vars:
-ocw uninstall --yes
+# Remove all TokenJam data, config, daemon, MCP registration, and env vars:
+tj uninstall --yes
 
 # Then remove the package:
 pip uninstall tokenjam -y
 ```
 
-`tj uninstall` cleans up everything set by `tj onboard --claude-code`: daemon, MCP server, `~/.ocw/`, `~/.config/ocw/`, OTLP env vars in `~/.claude/settings.json`, `OTEL_RESOURCE_ATTRIBUTES` in every onboarded project's `.claude/settings.json`, and the harness env block in `~/.zshrc`.
+`tj uninstall` cleans up everything set by `tj onboard --claude-code`: daemon, MCP server, `~/.tj/`, `~/.config/tj/`, OTLP env vars in `~/.claude/settings.json`, `OTEL_RESOURCE_ATTRIBUTES` in every onboarded project's `.claude/settings.json`, and the harness env block in `~/.zshrc`.
 
 ---
 
@@ -341,7 +341,7 @@ Full framework support guide: [docs/framework-support.md](docs/framework-support
 Configure where alerts go. Multiple channels work simultaneously.
 
 ```toml
-# .ocw/config.toml
+# .tj/config.toml
 
 [[alerts.channels]]
 type = "ntfy"
@@ -382,10 +382,10 @@ Full event table and configuration: [docs/nemoclaw-integration.md](docs/nemoclaw
 ## Export and integrate
 
 ```bash
-ocw export --format otlp       # forward to Grafana, Datadog, any OTel backend
-ocw export --format openevals  # openevals / agentevals trajectory evaluation
-ocw export --format json       # NDJSON
-ocw export --format csv
+tj export --format otlp       # forward to Grafana, Datadog, any OTel backend
+tj export --format openevals  # openevals / agentevals trajectory evaluation
+tj export --format json       # NDJSON
+tj export --format csv
 ```
 
 Prometheus metrics at `http://127.0.0.1:7391/metrics` when `tj serve` is running.
@@ -422,7 +422,7 @@ flowchart TD
     Alerts --> DB
     Schema --> DB
 
-    DB --> CLI["ocw CLI"]
+    DB --> CLI["tj CLI"]
     DB --> API["REST API + Web UI\n:7391"]
     DB --> MCP["MCP Server\n13 tools"]
     DB --> Prom["Prometheus\n:7391/metrics"]
@@ -435,7 +435,7 @@ Full architecture deep-dive — design principles, SDK internals, alert system, 
 ## Configuration
 
 ```toml
-# .ocw/config.toml — generated by tj onboard
+# .tj/config.toml — generated by tj onboard
 
 [defaults.budget]
 daily_usd = 10.00
@@ -462,7 +462,7 @@ completions  = false
 tool_outputs = false
 
 [storage]
-path           = "~/.ocw/telemetry.duckdb"
+path           = "~/.tj/telemetry.duckdb"
 retention_days = 90
 ```
 
@@ -503,18 +503,18 @@ See [`examples/README.md`](examples/README.md) for the full list.
 Reproducible AI agent failures you can run in 30 seconds. No API keys, no config, no setup.
 
 ```bash
-ocw demo                     # list all scenarios
-ocw demo retry-loop          # run one
-ocw demo retry-loop --json   # machine-readable output
+tj demo                     # list all scenarios
+tj demo retry-loop          # run one
+tj demo retry-loop --json   # machine-readable output
 ```
 
-| Scenario | What goes wrong | What OCW catches |
+| Scenario | What goes wrong | What TokenJam catches |
 |---|---|---|
 | [`retry-loop`](incidents/retry-loop/README.md) | Agent retries a failing tool in a loop, burning time and tokens | `retry_loop` + `failure_rate` alerts fire automatically |
 | [`surprise-cost`](incidents/surprise-cost/README.md) | Model silently escalates from Haiku to Opus mid-chain | Per-model cost breakdown shows the $3+ you didn't expect |
 | [`hallucination-drift`](incidents/hallucination-drift/README.md) | Agent behavior shifts — different tokens, different tools | `drift_detected` alert fires with Z-scores at session end |
 
-Each scenario runs against an in-memory backend and produces a side-by-side comparison: what `print()` shows vs. what OCW reveals.
+Each scenario runs against an in-memory backend and produces a side-by-side comparison: what `print()` shows vs. what TokenJam reveals.
 
 ---
 

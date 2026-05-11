@@ -67,12 +67,12 @@ class TestDaemonAlreadyRunning:
 
 class TestLaunchdInstallUsesWFlag:
     """`_install_launchd` must pass -w to both unload and load so it clears
-    the Disabled=true flag that `ocw stop` writes (C1)."""
+    the Disabled=true flag that `tj stop` writes (C1)."""
 
     def test_load_uses_w_flag(self, tmp_path, monkeypatch):
         from tokenjam.cli.cmd_onboard import _install_launchd
         monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
-        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/ocw")
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/bin/tj")
 
         run_mock = MagicMock(return_value=MagicMock(returncode=0))
         with patch("tokenjam.cli.cmd_onboard.subprocess.run", run_mock):

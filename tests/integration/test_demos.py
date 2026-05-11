@@ -1,4 +1,4 @@
-"""Integration tests for `ocw demo` CLI command."""
+"""Integration tests for `tj demo` CLI command."""
 from __future__ import annotations
 
 import json

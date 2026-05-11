@@ -1,8 +1,8 @@
 """
-AWS Bedrock agent with OCW observability.
+AWS Bedrock agent with TokenJam observability.
 
 Demonstrates calling Claude via AWS Bedrock's invoke_model API. All LLM calls
-are captured by ocw via the Bedrock integration patch.
+are captured by tj via the Bedrock integration patch.
 
 SETUP NOTES:
     This example requires valid AWS credentials configured in your environment.
@@ -96,7 +96,7 @@ if __name__ == "__main__":
     result = run()
     print(f"\nAgent response:\n{result}")
 
-    print("\n--- OCW Observation ---")
+    print("\n--- TokenJam Observation ---")
     print("Session and LLM spans have been recorded.")
-    print("Run 'ocw status --agent bedrock-agent' to view telemetry.")
-    print("Run 'ocw cost --agent bedrock-agent' to see token costs.")
+    print("Run 'tj status --agent bedrock-agent' to view telemetry.")
+    print("Run 'tj cost --agent bedrock-agent' to see token costs.")

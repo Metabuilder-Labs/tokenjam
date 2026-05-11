@@ -1,4 +1,4 @@
-"""Tests for ocw.core.schema_validator — schema validation, inference, skipping."""
+"""Tests for tokenjam.core.schema_validator — schema validation, inference, skipping."""
 from __future__ import annotations
 
 import json

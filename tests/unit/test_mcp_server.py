@@ -1,4 +1,4 @@
-"""Unit tests for OCW MCP server tool handlers."""
+"""Unit tests for TokenJam MCP server tool handlers."""
 from __future__ import annotations
 
 import json

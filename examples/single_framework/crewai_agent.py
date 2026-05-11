@@ -1,8 +1,8 @@
 """
-CrewAI agent example with OCW observability.
+CrewAI agent example with TokenJam observability.
 
 Creates a 2-agent crew (researcher + writer) that collaborates on a task.
-OCW patches Task.execute and Agent.execute_task to capture spans automatically.
+TokenJam patches Task.execute and Agent.execute_task to capture spans automatically.
 
 Extra deps: pip install crewai
 Run:        python examples/single_framework/crewai_agent.py
@@ -78,11 +78,11 @@ def main():
     print(f"\n--- Crew Result ---\n{result}\n")
 
     # --- Observation ---
-    print("--- OCW Observation ---")
+    print("--- TokenJam Observation ---")
     print("CrewAI integration captured spans for:")
     print("  - Task execution via Task.execute")
     print("  - Agent task execution via Agent.execute_task")
-    print("Run 'ocw traces' to see the captured telemetry.")
+    print("Run 'tj traces' to see the captured telemetry.")
 
 
 if __name__ == "__main__":

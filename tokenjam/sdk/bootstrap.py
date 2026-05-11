@@ -1,5 +1,5 @@
 """
-Auto-bootstrap: lazily initialise the OCW TracerProvider + IngestPipeline
+Auto-bootstrap: lazily initialise the TokenJam TracerProvider + IngestPipeline
 the first time @watch() or a provider patch creates a span.
 
 This ensures that SDK users don't need to manually wire up the pipeline.
@@ -57,7 +57,7 @@ def ensure_initialised() -> None:
             # Ensure spans are flushed on exit
             atexit.register(_shutdown)
 
-            logger.debug("OCW: writing spans to local DuckDB (%s)", config.storage.path)
+            logger.debug("TokenJam: writing spans to local DuckDB (%s)", config.storage.path)
 
         except Exception as exc:
             # DuckDB lock error — try HTTP fallback
@@ -71,7 +71,7 @@ def ensure_initialised() -> None:
                         return
                 except Exception:
                     pass
-            logger.warning("OCW bootstrap failed — spans will not be recorded: %s", exc)
+            logger.warning("TokenJam bootstrap failed — spans will not be recorded: %s", exc)
             _initialised = True  # Don't retry on every call
 
 

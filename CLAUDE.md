@@ -127,7 +127,7 @@ Post-ingest hooks run synchronously after each span is written to DB:
 | `tj drift` | `cmd_drift.py` | Show drift baselines and Z-scores for recent sessions |
 | `tj demo [scenario]` | `cmd_demo.py` | Run Agent Incident Library scenarios (zero-config, no API keys). `tj demo` lists all; `tj demo retry-loop` runs one |
 | `tj mcp` | `cmd_mcp.py` | Start the stdio MCP server for Claude Code integration |
-| `tj uninstall` | `cmd_uninstall.py` | Remove all OCW data, config, and daemon |
+| `tj uninstall` | `cmd_uninstall.py` | Remove all TokenJam data, config, and daemon |
 | `tj doctor` | `cmd_doctor.py` | Health checks (config, DB, secrets, webhooks, drift readiness, schema-vs-capture consistency). Exit 0 = ok, 1 = warnings, 2 = errors |
 
 All commands support `--json` for machine-readable output. Commands that query alerts use exit code 1 if active (unacknowledged, unsuppressed) alerts exist.

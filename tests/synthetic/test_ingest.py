@@ -1,4 +1,4 @@
-"""Tests for ocw.core.ingest — sanitizer, pipeline, session resolution, capture stripping."""
+"""Tests for tokenjam.core.ingest — sanitizer, pipeline, session resolution, capture stripping."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
