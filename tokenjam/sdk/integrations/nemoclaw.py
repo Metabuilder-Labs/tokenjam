@@ -85,27 +85,27 @@ class NemoClawGatewayObserver:
     def _translate_event(self, event: dict) -> NormalizedSpan | None:
         """Convert an OpenShell gateway event to a NormalizedSpan."""
         event_type = event.get("type", "")
-        ocw_event = SANDBOX_EVENT_MAP.get(event_type)
-        if not ocw_event:
+        tj_event = SANDBOX_EVENT_MAP.get(event_type)
+        if not tj_event:
             return None
 
         now = utcnow()
         attrs: dict = {
-            TjAttributes.SANDBOX_EVENT: ocw_event,
+            TjAttributes.SANDBOX_EVENT: tj_event,
         }
 
-        if ocw_event == "network_blocked":
+        if tj_event == "network_blocked":
             attrs[TjAttributes.EGRESS_HOST] = event.get("host", "unknown")
             attrs[TjAttributes.EGRESS_PORT] = event.get("port")
-        elif ocw_event == "fs_denied":
+        elif tj_event == "fs_denied":
             attrs[TjAttributes.FILESYSTEM_PATH] = event.get("path", "unknown")
-        elif ocw_event == "syscall_denied":
+        elif tj_event == "syscall_denied":
             attrs[TjAttributes.SYSCALL_NAME] = event.get("syscall", "unknown")
 
         return NormalizedSpan(
             span_id=new_span_id(),
             trace_id=new_trace_id(),
-            name=f"sandbox.{ocw_event}",
+            name=f"sandbox.{tj_event}",
             kind=SpanKind.INTERNAL,
             status_code=SpanStatus.ERROR,
             start_time=now,

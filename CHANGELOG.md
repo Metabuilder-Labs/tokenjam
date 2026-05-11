@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [0.1.7] - 2026-04-13
 
 ### Added
-- **MCP server (`tj mcp`)** — stdio-based Model Context Protocol server giving Claude Code direct access to OCW observability data. 13 tool handlers: status, traces, alerts, budget headroom, cost summary, drift report, tool stats, trace detail, acknowledge alerts, setup project, list sessions, open dashboard. Dual-mode operation: routes queries through REST API when `tj serve` is running, falls back to read-only DuckDB otherwise. Auto-starts `tj serve` on demand.
+- **MCP server (`tj mcp`)** — stdio-based Model Context Protocol server giving Claude Code direct access to TokenJam observability data. 13 tool handlers: status, traces, alerts, budget headroom, cost summary, drift report, tool stats, trace detail, acknowledge alerts, setup project, list sessions, open dashboard. Dual-mode operation: routes queries through REST API when `tj serve` is running, falls back to read-only DuckDB otherwise. Auto-starts `tj serve` on demand.
 - **Claude Code integration (`tj onboard --claude-code`)** — one-command setup for Claude Code telemetry. Configures OTLP log exporter in `~/.claude/settings.json`, sets project-level `OTEL_RESOURCE_ATTRIBUTES`, adds Docker-compatible endpoint to shell env, and optionally installs background daemon. Re-runs resync the auth header to fix 401s without manual setup.
 - **Logs ingestion (`POST /v1/logs`)** — new OTLP log endpoint that converts Claude Code log events (`api_request`, `tool_result`, `api_error`, `user_prompt`, `tool_decision`) into NormalizedSpans with deterministic trace/span IDs. Spans flow through the standard ingest pipeline for cost, alerts, and drift.
 - **`tj drift` CLI** — behavioral drift report with Rich table output showing baseline vs latest session Z-scores per dimension (input tokens, output tokens, duration, tool call count, tool sequence similarity). Color-coded thresholds, `--json` support, exit code 1 if drift detected.
@@ -106,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `tj stop` command — graceful shutdown of daemon or background process
-- `tj uninstall` command — clean removal of all OCW data, config, and daemon
+- `tj uninstall` command — clean removal of all TokenJam data, config, and daemon
 - 16 runnable example agents across 4 tiers: single provider, single framework, multi-agent, and alerts/drift demos
 - API fallback backend (`ApiBackend`) so CLI works while `tj serve` holds the DB lock
 

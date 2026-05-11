@@ -1,8 +1,8 @@
-# OpenClaw + OCW Example
+# OpenClaw + TokenJam Example
 
 This is a config-only integration — no Python code needed. OpenClaw's built-in OTel exporter sends traces directly to `tj serve`.
 
-## Step 1: Start OCW
+## Step 1: Start TokenJam
 
 ```bash
 pip install tokenjam
@@ -64,7 +64,7 @@ Add to `.tj/config.toml`:
 
 ## Step 4: Run OpenClaw and verify
 
-Start your OpenClaw gateway, then check OCW:
+Start your OpenClaw gateway, then check TokenJam:
 
 ```bash
 # Agent overview — should show your openclaw agent

@@ -69,7 +69,7 @@ def _list_scenarios(scenarios: dict[str, ModuleType]) -> None:
 
     console.print()
     console.print(
-        "[bold]OCW Agent Incident Library[/bold]\n"
+        "[bold]TokenJam Agent Incident Library[/bold]\n"
         "Reproducible AI agent failures — no API keys, no config needed.\n"
     )
     table = Table(box=box.SIMPLE, show_header=True, header_style="bold")

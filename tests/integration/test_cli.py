@@ -422,7 +422,7 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
 
     Regression test: previously the guard `if OTEL_EXPORTER_OTLP_ENDPOINT not in global_env`
     silently skipped updating the secret when settings.json already existed, causing 401s
-    whenever the OCW config was regenerated without re-running onboard --claude-code.
+    whenever the TokenJam config was regenerated without re-running onboard --claude-code.
     """
     fake_home = tmp_path / "home"
     (fake_home / ".claude").mkdir(parents=True)
@@ -462,7 +462,7 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
-    # Secret must be updated to match the current OCW config, not left as stale old value
+    # Secret must be updated to match the current TokenJam config, not left as stale old value
     assert data["env"]["OTEL_EXPORTER_OTLP_HEADERS"] == f"Authorization=Bearer {new_secret}"
 
 

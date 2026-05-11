@@ -54,16 +54,16 @@ OpenClaw has built-in OpenTelemetry support via its `diagnostics-otel` plugin. P
 
 ## How it works
 
-OpenClaw's `diagnostics-otel` plugin exports standard OTLP/HTTP JSON to `{endpoint}/v1/traces`. OCW accepts this at `POST /v1/traces` and maps OpenClaw-specific span patterns:
+OpenClaw's `diagnostics-otel` plugin exports standard OTLP/HTTP JSON to `{endpoint}/v1/traces`. TokenJam accepts this at `POST /v1/traces` and maps OpenClaw-specific span patterns:
 
-| OpenClaw span name | OCW interpretation |
+| OpenClaw span name | TokenJam interpretation |
 |---|---|
 | `openclaw.request` | Root agent session span |
 | `openclaw.agent.turn` | Agent turn (child of session) |
 | `tool.Read`, `tool.exec`, `tool.Write`, etc. | Tool call — tool name extracted from span name |
 | `openclaw.model.usage` | LLM call — token counts extracted for cost tracking |
 
-The `serviceName` field in your OpenClaw config becomes the `agent_id` in OCW (used for filtering, budgets, and alerts).
+The `serviceName` field in your OpenClaw config becomes the `agent_id` in TokenJam (used for filtering, budgets, and alerts).
 
 ## Sensitive action alerts
 

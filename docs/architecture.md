@@ -305,7 +305,7 @@ The `TjConfig` dataclass tree in `tokenjam/core/config.py` defines the full hier
 
 ## MCP server (Claude Code integration)
 
-`tj mcp` is a stdio-based MCP (Model Context Protocol) server that gives Claude Code direct access to OCW observability data. It exposes 13 tools that Claude Code can call during a session.
+`tj mcp` is a stdio-based MCP (Model Context Protocol) server that gives Claude Code direct access to TokenJam observability data. It exposes 13 tools that Claude Code can call during a session.
 
 ### Dual-mode operation
 
@@ -348,7 +348,7 @@ If `tj serve` is not running, `cmd_mcp.py` can auto-start it as a detached subpr
 The `--claude-code` flag configures the full telemetry pipeline in one command:
 
 1. **Derives agent ID** from the git remote origin name (fallback: folder name), prefixed with `claude-code-`
-2. **Writes OCW config** to `~/.config/tj/config.toml` (global, shared across all projects) with agent entry and optional daily budget
+2. **Writes TokenJam config** to `~/.config/tj/config.toml` (global, shared across all projects) with agent entry and optional daily budget
 3. **Updates global Claude settings** (`~/.claude/settings.json`) with OTLP exporter env vars: `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, endpoint, protocol. On re-runs, always resyncs the `OTEL_EXPORTER_OTLP_HEADERS` auth header to fix 401s without manual setup.
 4. **Writes project settings** (`./.claude/settings.json`) with `OTEL_RESOURCE_ATTRIBUTES=service.name={agent_id}` so spans are tagged to the right agent
 5. **Updates shell env** (`~/.zshrc`) with Docker-compatible endpoint (`host.docker.internal:{port}`) for harness sessions that can't reach `127.0.0.1`

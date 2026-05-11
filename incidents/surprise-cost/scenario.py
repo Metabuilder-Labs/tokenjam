@@ -2,14 +2,14 @@
 Incident: "Why did my agent just spend $47 on a hello world?"
 
 The model silently escalated from cheap Haiku to expensive Opus mid-chain.
-With print(), you see "response received". OCW shows cost per model, per call.
+With print(), you see "response received". TokenJam shows cost per model, per call.
 
 No API keys required.
 """
 from __future__ import annotations
 
 AGENT_ID = "demo-surprise-cost"
-DESCRIPTION = "Agent silently burns budget on expensive models — OCW tracks every dollar"
+DESCRIPTION = "Agent silently burns budget on expensive models — TokenJam tracks every dollar"
 
 _PRINT_SIMULATION = """\
 [agent] Starting document analysis...
@@ -151,5 +151,5 @@ def _render(console, result, model_breakdown) -> None:
     tmp.print("  tj cost --by model    [dim]# per-model spend[/dim]")
     tmp.print("  tj cost               [dim]# daily breakdown[/dim]")
 
-    console.print(Panel(buf.getvalue(), title="[green]What OCW reveals[/green]", border_style="green"))
+    console.print(Panel(buf.getvalue(), title="[green]What TokenJam reveals[/green]", border_style="green"))
     console.print()

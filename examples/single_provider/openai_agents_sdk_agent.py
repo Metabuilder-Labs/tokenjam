@@ -1,5 +1,5 @@
 """
-OpenAI Agents SDK multi-agent example with OCW observability.
+OpenAI Agents SDK multi-agent example with TokenJam observability.
 
 Demonstrates a triage/specialist handoff pattern using the OpenAI Agents SDK.
 The triage agent inspects the user query and delegates to a specialist agent
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     result = run()
     print(f"\nAgent response:\n{result}")
 
-    print("\n--- OCW Observation ---")
+    print("\n--- TokenJam Observation ---")
     print("Session and agent handoff spans have been recorded.")
     print("Run 'tj status --agent openai-agents-sdk-demo' to view telemetry.")
     print("Run 'tj traces --agent openai-agents-sdk-demo' to see the trace.")

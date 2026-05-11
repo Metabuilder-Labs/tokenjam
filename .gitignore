@@ -39,8 +39,8 @@ sdk-ts/dist/
 # Secrets and env files
 .env
 .env.*
-ocw.toml
-.ocw/
+tj.toml
+.tj/
 
 # Claude Code
 .claude/

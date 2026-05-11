@@ -10,9 +10,9 @@ test-e2e:
 	pytest tests/e2e/
 
 lint:
-	ruff check ocw/
+	ruff check tokenjam/
 
 typecheck:
-	mypy ocw/
+	mypy tokenjam/
 
 all: lint typecheck test

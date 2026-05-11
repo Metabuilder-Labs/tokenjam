@@ -1,5 +1,5 @@
 """
-OpenAI tool-use agent with streaming and OCW observability.
+OpenAI tool-use agent with streaming and TokenJam observability.
 
 Demonstrates the OpenAI function-calling loop with a stub tool, then streams
 the final response token by token. All LLM calls and tool invocations are
@@ -172,7 +172,7 @@ def run() -> str:
 if __name__ == "__main__":
     result = run()
 
-    print("\n--- OCW Observation ---")
+    print("\n--- TokenJam Observation ---")
     print("Session, LLM, and tool spans have been recorded.")
     print("Run 'tj status --agent openai-tool-agent' to view telemetry.")
     print("Run 'tj tools --agent openai-tool-agent' to see tool call stats.")

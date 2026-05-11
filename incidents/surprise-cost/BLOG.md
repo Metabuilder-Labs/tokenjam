@@ -38,7 +38,7 @@ Total                          $3.5192
 
 Three calls to Opus. 92% of the bill. The `model=` config said Haiku. A fallback router in the chain was escalating harder subtasks — exactly as configured, two weeks ago, by someone who then forgot.
 
-`print()` has no way to tell you which model handled which call. HTTP responses don't include "by the way, this one cost $1.20." OCW does.
+`print()` has no way to tell you which model handled which call. HTTP responses don't include "by the way, this one cost $1.20." TokenJam does.
 
 ---
 
@@ -59,7 +59,7 @@ pip install tokenjam
 tj demo surprise-cost
 ```
 
-8 synthetic LLM spans with real pricing math — same model mix, same token counts as the real scenario. Side-by-side: what `print()` shows vs. what OCW reveals.
+8 synthetic LLM spans with real pricing math — same model mix, same token counts as the real scenario. Side-by-side: what `print()` shows vs. what TokenJam reveals.
 
 ---
 
@@ -83,7 +83,7 @@ Set a budget cap:
 session_usd = 5.00
 ```
 
-OCW fires an alert when you cross it. Not on the bill. When the call happens.
+TokenJam fires an alert when you cross it. Not on the bill. When the call happens.
 
 ---
 

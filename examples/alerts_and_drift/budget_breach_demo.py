@@ -86,7 +86,7 @@ if __name__ == "__main__":
     ensure_initialised()
 
     print("=" * 60)
-    print("OCW Budget Breach Alert Demo")
+    print("TokenJam Budget Breach Alert Demo")
     print("=" * 60)
     print(
         "\nMaking 10 LLM calls with escalating token counts.\n"

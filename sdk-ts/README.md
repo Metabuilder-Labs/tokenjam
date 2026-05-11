@@ -12,7 +12,7 @@ Communicates with a running `tj serve` instance via HTTP. No in-process OTel pip
 npm install @tokenjam/sdk
 ```
 
-Requires Node.js >= 18. Start the OCW server before sending spans:
+Requires Node.js >= 18. Start the TokenJam server before sending spans:
 
 ```bash
 pip install tokenjam

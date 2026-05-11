@@ -135,7 +135,7 @@ if __name__ == "__main__":
     ensure_initialised()
 
     print("=" * 60)
-    print("OCW Sensitive Actions Alert Demo")
+    print("TokenJam Sensitive Actions Alert Demo")
     print("=" * 60)
 
     run_sensitive_agent()

@@ -98,7 +98,7 @@ if __name__ == "__main__":
     ensure_initialised()
 
     print("=" * 60)
-    print("OCW Behavioral Drift Detection Demo")
+    print("TokenJam Behavioral Drift Detection Demo")
     print("=" * 60)
 
     # Phase 1 -- build baseline

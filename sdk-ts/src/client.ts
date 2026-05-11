@@ -1,5 +1,5 @@
 /**
- * TjClient — sends spans to the OCW REST API.
+ * TjClient — sends spans to the TokenJam REST API.
  * Communicates via HTTP POST to /api/v1/spans in OTLP JSON format.
  */
 import { GenAIAttributes } from "./semconv.js";
@@ -7,7 +7,7 @@ import type { IngestResult, OtlpSpan, OtlpValue, Span, SpanBatch } from "./types
 import { SpanKind, SpanStatus } from "./types.js";
 
 export interface TjClientOptions {
-  /** Base URL of the OCW server (default: http://127.0.0.1:7391) */
+  /** Base URL of the TokenJam server (default: http://127.0.0.1:7391) */
   baseUrl?: string;
   /** Ingest secret for authentication */
   ingestSecret: string;
@@ -216,7 +216,7 @@ export class TjClient {
 
       const text = await response.text().catch(() => "");
       const error = new Error(
-        `OCW ingest failed: ${response.status} ${response.statusText} — ${text}`
+        `TokenJam ingest failed: ${response.status} ${response.statusText} — ${text}`
       );
 
       // 4xx: not retriable (auth/validation failure)
@@ -228,6 +228,6 @@ export class TjClient {
       lastError = error;
     }
 
-    throw lastError ?? new Error("OCW ingest failed after retries");
+    throw lastError ?? new Error("TokenJam ingest failed after retries");
   }
 }

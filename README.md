@@ -251,14 +251,14 @@ The MCP server gives Claude Code direct access to your observability data inside
 | `get_tool_stats` | Tool call counts and average duration |
 | `get_drift_report` | Drift baseline vs latest session |
 | `acknowledge_alert` | Mark an alert as acknowledged |
-| `setup_project` | Configure a project for OCW telemetry |
+| `setup_project` | Configure a project for TokenJam telemetry |
 | `open_dashboard` | Open the web UI (starts `tj serve` if needed) |
 
 The MCP server opens DuckDB read-only — no lock conflicts with `tj serve`.
 
 **Per-project tagging** — after installing globally, ask Claude Code:
 
-> "Set up OCW for this project"
+> "Set up TokenJam for this project"
 
 Claude calls `setup_project`, which writes `.claude/settings.json` with the right `OTEL_RESOURCE_ATTRIBUTES` for this project.
 
@@ -275,7 +275,7 @@ tj onboard --codex
 
 `tj onboard --codex`:
 - Writes an `[otel]` block and `[mcp_servers.tj]` to `~/.codex/config.toml`
-- Registers the MCP server so Codex can call OCW tools directly
+- Registers the MCP server so Codex can call TokenJam tools directly
 - Installs the background daemon (launchd / systemd)
 
 **Codex must be restarted** after running `tj onboard --codex`.
@@ -289,7 +289,7 @@ The same 13 MCP tools available to Claude Code are available to Codex after rest
 ### Uninstalling
 
 ```bash
-# Remove all OCW data, config, daemon, MCP registration, and env vars:
+# Remove all TokenJam data, config, daemon, MCP registration, and env vars:
 tj uninstall --yes
 
 # Then remove the package:
@@ -508,13 +508,13 @@ tj demo retry-loop          # run one
 tj demo retry-loop --json   # machine-readable output
 ```
 
-| Scenario | What goes wrong | What OCW catches |
+| Scenario | What goes wrong | What TokenJam catches |
 |---|---|---|
 | [`retry-loop`](incidents/retry-loop/README.md) | Agent retries a failing tool in a loop, burning time and tokens | `retry_loop` + `failure_rate` alerts fire automatically |
 | [`surprise-cost`](incidents/surprise-cost/README.md) | Model silently escalates from Haiku to Opus mid-chain | Per-model cost breakdown shows the $3+ you didn't expect |
 | [`hallucination-drift`](incidents/hallucination-drift/README.md) | Agent behavior shifts — different tokens, different tools | `drift_detected` alert fires with Z-scores at session end |
 
-Each scenario runs against an in-memory backend and produces a side-by-side comparison: what `print()` shows vs. what OCW reveals.
+Each scenario runs against an in-memory backend and produces a side-by-side comparison: what `print()` shows vs. what TokenJam reveals.
 
 ---
 

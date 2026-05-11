@@ -1,8 +1,8 @@
 """
-AutoGen agent example with OCW observability.
+AutoGen agent example with TokenJam observability.
 
 Creates two ConversableAgent debaters that argue for and against a position.
-OCW patches ConversableAgent.generate_reply and .initiate_chat for span capture.
+TokenJam patches ConversableAgent.generate_reply and .initiate_chat for span capture.
 
 Extra deps: pip install pyautogen
 Run:        python examples/single_framework/autogen_agent.py
@@ -56,7 +56,7 @@ def main():
     print(f"Debate topic: {TOPIC}\n")
     print("Starting 3-turn debate...\n")
 
-    # initiate_chat is patched by OCW to create a span
+    # initiate_chat is patched by TokenJam to create a span
     chat_result = debater_for.initiate_chat(
         debater_against,
         message=(
@@ -74,7 +74,7 @@ def main():
         print(f"[{role}] {content}\n")
 
     # --- Observation ---
-    print("--- OCW Observation ---")
+    print("--- TokenJam Observation ---")
     print("AutoGen integration captured spans for:")
     print("  - Chat initiation via ConversableAgent.initiate_chat")
     print("  - Reply generation via ConversableAgent.generate_reply")

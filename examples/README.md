@@ -1,4 +1,4 @@
-# OCW Examples
+# TokenJam Examples
 
 Example agents demonstrating [tj](https://github.com/Metabuilder-Labs/TokenJam) integrations, from single-provider basics to complex multi-agent workflows.
 

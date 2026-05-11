@@ -1,5 +1,5 @@
 """
-LlamaIndex agent example with OCW observability.
+LlamaIndex agent example with TokenJam observability.
 
 Uses LlamaIndex's native OTel support to export spans to tj serve.
 Builds a VectorStoreIndex from sample documents and queries it.
@@ -104,7 +104,7 @@ def main():
         print(f"A: {response}\n")
 
     # --- Observation ---
-    print("--- OCW Observation ---")
+    print("--- TokenJam Observation ---")
     print("LlamaIndex integration captured spans via native OTel support:")
     print("  - Document indexing and embedding calls")
     print("  - Query engine retrieval and LLM synthesis")

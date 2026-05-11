@@ -7,7 +7,7 @@ import { SpanKind, SpanStatus } from "./types.js";
 
 /**
  * Spin up a local HTTP server that captures requests, so we can test
- * the client without a real OCW server.
+ * the client without a real TokenJam server.
  */
 function createMockServer(): {
   server: ReturnType<typeof createServer>;

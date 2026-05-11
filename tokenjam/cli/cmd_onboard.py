@@ -217,7 +217,7 @@ def _onboard_claude_code(
             global_settings = {}
 
     # Write global OTLP config — always overwrite endpoint vars so reinstall stays in sync.
-    # Custom headers (non-OCW) are preserved; only OCW-generated "Authorization=Bearer"
+    # Custom headers (non-TokenJam) are preserved; only TokenJam-generated "Authorization=Bearer"
     # headers are replaced when the secret rotates.
     port = config.api.port
     secret = config.security.ingest_secret
@@ -346,7 +346,7 @@ def _onboard_codex(
     # `--codex` always writes to the global config, mirroring `--claude-code`.
     # Codex's own config (~/.codex/config.toml) is global and the agent_id
     # `codex_exec` is project-agnostic by design (Codex hardcodes service.name
-    # in its binary). Per-project OCW configs would rotate the secret on every
+    # in its binary). Per-project TokenJam configs would rotate the secret on every
     # onboard, breaking the running server.
     config_path = Path.home() / ".config" / "tj" / "config.toml"
 
@@ -462,7 +462,7 @@ def _onboard_codex(
     console.print()
     console.print("[bold green]Codex CLI observability configured.[/bold green]")
     console.print(f"  Codex config:        {codex_config_path}")
-    console.print(f"  OCW config:          {config_path}")
+    console.print(f"  TokenJam config:     {config_path}")
     if budget and budget > 0:
         console.print(f"  Daily budget:        ${budget:.2f}")
     console.print(f"  OTLP endpoint:       http://127.0.0.1:{port}/v1/logs")
@@ -475,7 +475,7 @@ def _onboard_codex(
     if not want_daemon:
         console.print("[dim]Start the server:[/dim]  tj serve")
     console.print(
-        "[dim]Codex can now call OCW tools (open_dashboard, get_status, etc.) directly.[/dim]"
+        "[dim]Codex can now call TokenJam tools (open_dashboard, get_status, etc.) directly.[/dim]"
     )
     console.print("[dim]Then run:[/dim]  tj traces")
 
@@ -513,7 +513,7 @@ def _codex_mcp_toml_block() -> str:
     """Return the [mcp_servers.tj] TOML block for ~/.codex/config.toml."""
     return (
         "[mcp_servers.tj]\n"
-        "# Managed by tj — gives Codex access to OCW observability tools\n"
+        "# Managed by tj — gives Codex access to TokenJam observability tools\n"
         'command = "tj"\n'
         'args = ["mcp"]\n'
     )
@@ -660,7 +660,7 @@ def _derive_project_name() -> str:
 
 
 def _daemon_already_running() -> bool:
-    """Check if the OCW daemon is already installed and loaded."""
+    """Check if the TokenJam daemon is already installed and loaded."""
     system = platform.system()
     if system == "Darwin":
         plist = Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"

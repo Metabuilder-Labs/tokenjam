@@ -1,8 +1,8 @@
 """
-LangChain agent example with OCW observability.
+LangChain agent example with TokenJam observability.
 
 Uses ChatOpenAI with tool bindings to demonstrate LangChain integration.
-OCW patches BaseLLM.generate and BaseTool.run to capture spans automatically.
+TokenJam patches BaseLLM.generate and BaseTool.run to capture spans automatically.
 
 Extra deps: pip install langchain-core langchain-openai
 Run:        python examples/single_framework/langchain_agent.py
@@ -72,7 +72,7 @@ def main():
             tool_args = tc["args"]
             print(f"\nTool call: {tool_name}({tool_args})")
             tool = tool_map[tool_name]
-            # BaseTool.run is patched by OCW
+            # BaseTool.run is patched by TokenJam
             result = tool.run(tool_args)
             print(f"Tool result: {result}")
             tool_results.append({"tool_call_id": tc["id"], "result": result})
@@ -93,7 +93,7 @@ def main():
         print(f"\nFinal answer: {final.content}")
 
     # --- Observation ---
-    print("\n--- OCW Observation ---")
+    print("\n--- TokenJam Observation ---")
     print("LangChain integration captured spans for:")
     print("  - LLM calls via ChatOpenAI")
     print("  - Tool calls via BaseTool.run")

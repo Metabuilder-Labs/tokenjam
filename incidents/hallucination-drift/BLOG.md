@@ -37,7 +37,7 @@ Five new tools. 50x the tokens. Every metric off the chart.
 
 Your `print()` logs said: *output looks reasonable. Moving on.*
 
-OCW fired `drift_detected` the moment the session closed.
+TokenJam fired `drift_detected` the moment the session closed.
 
 ---
 

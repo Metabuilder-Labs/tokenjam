@@ -50,21 +50,21 @@ The MCP server is included in the `[mcp]` extra and registered automatically by 
 | `get_tool_stats` | Tool call counts and average duration |
 | `get_drift_report` | Behavioral drift baseline vs latest session |
 | `acknowledge_alert` | Mark an alert as acknowledged |
-| `setup_project` | Configure a project to send telemetry to OCW |
+| `setup_project` | Configure a project to send telemetry to TokenJam |
 | `open_dashboard` | Open the web UI — starts `tj serve` on demand if needed |
 
 The MCP server opens the DuckDB file read-only — no lock conflicts with `tj serve` if both are running. The single write operation (`acknowledge_alert`) opens a short-lived read-write connection only for its UPDATE.
 
 **Per-project telemetry tagging** — after installing the MCP server globally, ask Claude Code to set up each project:
 
-> "Set up OCW for this project"
+> "Set up TokenJam for this project"
 
 Claude calls `setup_project`, which writes `.claude/settings.json` with `OTEL_RESOURCE_ATTRIBUTES=service.name=<project>` so spans from that project are tagged with the right agent ID.
 
 ## Uninstalling
 
 ```bash
-# Remove all OCW data, config, daemon, MCP registration, and env vars from every onboarded project:
+# Remove all TokenJam data, config, daemon, MCP registration, and env vars from every onboarded project:
 tj uninstall --yes
 
 # Then remove the package itself (tj uninstall intentionally skips this):

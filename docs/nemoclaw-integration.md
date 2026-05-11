@@ -13,9 +13,9 @@ This is the observability layer that NemoClaw doesn't ship with.
 
 ## What gets captured
 
-The NemoClaw observer listens on the OpenShell Gateway WebSocket for sandbox enforcement events and converts them into OCW alerts:
+The NemoClaw observer listens on the OpenShell Gateway WebSocket for sandbox enforcement events and converts them into TokenJam alerts:
 
-| NemoClaw event | OCW alert type | Severity |
+| NemoClaw event | TokenJam alert type | Severity |
 |---|---|---|
 | Network egress blocked | `network_egress_blocked` | critical |
 | Filesystem access denied | `filesystem_access_denied` | critical |

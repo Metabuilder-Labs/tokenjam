@@ -38,7 +38,7 @@ The logs said "tool called, tool returned." They were right. They just didn't te
 
 Technically correct. Completely useless.
 
-## What you see with OCW
+## What you see with TokenJam
 
 ```
 Spans ingested: 6
@@ -63,7 +63,7 @@ tj demo retry-loop
 
 30 seconds, no API keys, no config file. The demo runs against an in-memory backend so nothing persists to disk.
 
-To catch this in your real agent, wire up the OCW SDK (`@watch()` + `patch_anthropic()` or `patch_openai()`) and run `tj serve` in the background. After that, `tj alerts` and `tj traces` work against your live data.
+To catch this in your real agent, wire up the TokenJam SDK (`@watch()` + `patch_anthropic()` or `patch_openai()`) and run `tj serve` in the background. After that, `tj alerts` and `tj traces` work against your live data.
 
 ## Next in the incident library
 
@@ -72,4 +72,4 @@ To catch this in your real agent, wire up the OCW SDK (`@watch()` + `patch_anthr
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.
+[TokenJam](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.

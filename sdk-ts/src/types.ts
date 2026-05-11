@@ -1,5 +1,5 @@
 /**
- * Core types for the OCW TypeScript SDK.
+ * Core types for the TokenJam TypeScript SDK.
  */
 
 export enum SpanKind {

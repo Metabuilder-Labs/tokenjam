@@ -37,7 +37,7 @@ Eight responses. All 200. Nothing wrong. Except three of those calls weren't Hai
 
 Eight successes. No errors. Nothing to investigate.
 
-## What you see with OCW
+## What you see with TokenJam
 
 ```
  Model               Calls   Cost (USD)
@@ -51,7 +51,7 @@ Total session cost: $3.5192
 
 Two Haiku calls: $0.009. Three Opus calls: $3.23. You paid 350x more for Opus than Haiku, in the same session, and `print()` gave you eight identical lines.
 
-OCW records `model`, `input_tokens`, and `output_tokens` on every LLM span. The `CostEngine` prices each call using per-model rates from `pricing/models.toml`. The escalation is visible the moment it happens — not at the end of the month on a bill.
+TokenJam records `model`, `input_tokens`, and `output_tokens` on every LLM span. The `CostEngine` prices each call using per-model rates from `pricing/models.toml`. The escalation is visible the moment it happens — not at the end of the month on a bill.
 
 ## Set a budget before it happens
 
@@ -70,7 +70,7 @@ Or set a global default for all agents:
 daily_usd = 10.00
 ```
 
-OCW fires `cost_budget_session` and `cost_budget_daily` alerts when limits are crossed.
+TokenJam fires `cost_budget_session` and `cost_budget_daily` alerts when limits are crossed.
 
 ## Try it yourself
 
@@ -90,4 +90,4 @@ To track real spend, instrument your agent with the tokenjam SDK and run `tj ser
 
 ---
 
-[OCW](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.
+[TokenJam](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.
