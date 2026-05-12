@@ -391,6 +391,15 @@ def _onboard_codex(
 
     existing_content = codex_config_path.read_text() if codex_config_path.exists() else ""
 
+    # Purge any legacy `ocw`-managed sections left over from pre-rebrand
+    # onboards. If anything was stripped, persist the cleaned file now so the
+    # "already configured" early-return path below doesn't leave the legacy
+    # sections sitting in the file forever.
+    cleaned = _codex_purge_legacy_ocw(existing_content)
+    if cleaned != existing_content:
+        codex_config_path.write_text(cleaned)
+        existing_content = cleaned
+
     # Check whether an [otel] section already exists
     existing_codex: dict = {}
     if existing_content:
@@ -547,6 +556,57 @@ def _codex_apply_block(
         return (stripped + "\n\n" + block) if stripped else block
     # Section absent — append.
     return (content.rstrip() + "\n\n" + block) if content.strip() else block
+
+
+def _codex_purge_legacy_ocw(content: str) -> str:
+    """Remove ocw-managed sections from ~/.codex/config.toml left behind by
+    pre-rebrand onboards.
+
+    Before the project was renamed, the legacy `ocw` CLI wrote a
+    `[mcp_servers.ocw]` block (pointing `command = "ocw"`) and an `[otel]`
+    block with a `# Managed by ocw` comment. After the rebrand, the new
+    onboard appends the `[mcp_servers.tj]` block but does not touch the
+    legacy `ocw` sections — so Codex ends up with both registered, and
+    tries to spawn a non-existent `ocw` MCP server on every launch.
+
+    This unconditionally strips the legacy sections so the normal onboard
+    flow can write fresh tj-managed blocks in their place.
+    """
+    import re as _re
+
+    # Drop the entire [mcp_servers.ocw] section (and any nested tables).
+    content = _re.sub(
+        r"\[mcp_servers\.ocw\].*?(?=\n\[|\Z)",
+        "",
+        content,
+        flags=_re.DOTALL,
+    )
+
+    # If the existing [otel] block is marked "Managed by ocw", strip the
+    # whole [otel] tree so the new tj-managed block is written cleanly.
+    # We use a non-anchored search across the whole content because the
+    # comment may sit a few lines below the section header.
+    has_legacy_otel = bool(
+        _re.search(
+            r"\[otel\][^\[]*?#\s*Managed by ocw",
+            content,
+            flags=_re.IGNORECASE,
+        )
+    )
+    if has_legacy_otel:
+        for pat in (
+            r"\[otel\.exporter\.\"otlp-http\"\.headers\].*?(?=\n\[|\Z)",
+            r"\[otel\.exporter\.\"otlp-http\"\].*?(?=\n\[|\Z)",
+            r"\[otel\.exporter\.\"otlp-grpc\"\.headers\].*?(?=\n\[|\Z)",
+            r"\[otel\.exporter\.\"otlp-grpc\"\].*?(?=\n\[|\Z)",
+            r"\[otel\.resource\].*?(?=\n\[|\Z)",
+            r"\[otel\].*?(?=\n\[|\Z)",
+        ):
+            content = _re.sub(pat, "", content, flags=_re.DOTALL)
+
+    # Collapse runs of 3+ blank lines left behind by removals.
+    content = _re.sub(r"\n{3,}", "\n\n", content)
+    return content.strip() + ("\n" if content.strip() else "")
 
 
 def _codex_strip_otel_sections(content: str) -> str:
