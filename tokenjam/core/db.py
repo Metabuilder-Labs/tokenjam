@@ -271,6 +271,72 @@ def _int_or_none(val: object) -> int | None:
 
 
 # ---------------------------------------------------------------------------
+# Column-statistics corruption check & repair (DuckDB v1.5.x bug)
+# ---------------------------------------------------------------------------
+# Under some write patterns, DuckDB's per-row-group min/max statistics for the
+# spans table get out of sync with the actual data. The equality fast-path then
+# skips every row group, so `WHERE trace_id = X` returns 0 rows even when the
+# data is clearly there. `WHERE trace_id LIKE X || '%'` works because it forces
+# a full scan that bypasses the bad stats.
+#
+# Detection: pick a known trace_id (via wildcard-LIKE), then verify that the
+# `=` predicate finds it too. If they disagree the table's stats are corrupt.
+#
+# Repair: copy the table to a fresh one and rename. CHECKPOINT alone does not
+# rebuild stats; only a full table copy does.
+#
+# See issue #56.
+
+
+def check_spans_stats_corruption(conn: duckdb.DuckDBPyConnection) -> bool:
+    """Return True if the spans table's column-equality fast-path is broken.
+
+    Samples up to 3 distinct trace_ids and compares `=` vs `LIKE col || '%'`
+    counts. Any mismatch indicates corrupt column statistics. Returns False
+    on an empty spans table (nothing to check, so nothing to fix).
+    """
+    try:
+        sample = conn.execute(
+            "SELECT DISTINCT trace_id FROM spans LIMIT 3"
+        ).fetchall()
+    except duckdb.Error:
+        return False
+    if not sample:
+        return False
+    for (tid,) in sample:
+        if tid is None:
+            continue
+        try:
+            eq_row = conn.execute(
+                "SELECT COUNT(*) FROM spans WHERE trace_id = $1", [tid]
+            ).fetchone()
+            like_row = conn.execute(
+                "SELECT COUNT(*) FROM spans WHERE trace_id LIKE $1 || '%'", [tid]
+            ).fetchone()
+        except duckdb.Error:
+            return False
+        # COUNT(*) always returns one row, but mypy doesn't know that.
+        eq = eq_row[0] if eq_row else 0
+        like = like_row[0] if like_row else 0
+        if eq == 0 and like > 0:
+            return True
+    return False
+
+
+def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
+    """Rebuild the spans table to refresh column statistics.
+
+    Idempotent — safe to call when the table is healthy. Data is preserved.
+    Caller is responsible for ensuring no other process holds a write lock on
+    the database file (DuckDB enforces exclusive write access).
+    """
+    conn.execute("CREATE TABLE _spans_repair AS SELECT * FROM spans")
+    conn.execute("DROP TABLE spans")
+    conn.execute("ALTER TABLE _spans_repair RENAME TO spans")
+    conn.execute("CHECKPOINT")
+
+
+# ---------------------------------------------------------------------------
 # DuckDBBackend
 # ---------------------------------------------------------------------------
 
