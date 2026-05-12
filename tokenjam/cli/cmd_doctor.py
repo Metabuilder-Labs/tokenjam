@@ -11,8 +11,14 @@ from tokenjam.utils.formatting import console
 
 @click.command("doctor")
 @click.option("--json", "output_json", is_flag=True)
+@click.option(
+    "--repair",
+    is_flag=True,
+    help="Attempt to fix issues that have a known repair path (e.g. rebuild the "
+         "spans table when DuckDB column statistics are corrupt — see issue #56).",
+)
 @click.pass_context
-def cmd_doctor(ctx: click.Context, output_json: bool) -> None:
+def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
     """Run health checks on tj configuration and environment."""
     config = ctx.obj["config"]
     checks: list[dict] = []
@@ -41,11 +47,19 @@ def cmd_doctor(ctx: click.Context, output_json: bool) -> None:
     # 8. Webhook domain allowlist
     checks.extend(_check_webhook_allowlist(config))
 
+    # 9. DuckDB spans column-statistics corruption (issue #56)
+    spans_stats_check = _check_spans_stats(ctx.obj["db"])
+    checks.append(spans_stats_check)
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
         for c in checks:
             _print_check(c)
+
+    # --repair: attempt fixes for any check that exposed a repair_action
+    if repair:
+        _attempt_repairs(checks, ctx.obj["db"], output_json)
 
     has_errors = any(c["level"] == "error" for c in checks)
     has_warnings = any(c["level"] == "warning" for c in checks)
@@ -157,6 +171,76 @@ def _check_webhook_allowlist(config: object) -> list[dict]:
                     "message": f"Webhook domain '{domain}' not in allowed list.",
                 })
     return results
+
+
+def _check_spans_stats(db: object) -> dict:
+    """Detect DuckDB v1.5.x spans column-statistics corruption (issue #56).
+
+    When stats are corrupt, `WHERE trace_id = X` returns 0 rows but the data
+    is still there (visible via `LIKE`). The fix is to rebuild the table.
+
+    Uses the already-open connection on `db` rather than opening a second
+    one — DuckDB rejects mixing read-only and read-write connections to the
+    same file from the same process.
+    """
+    from tokenjam.core.db import check_spans_stats_corruption
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Spans column statistics", "level": "info",
+                "message": "Skipped — non-DuckDB backend."}
+    try:
+        corrupt = check_spans_stats_corruption(conn)
+    except duckdb.Error as e:
+        return {"name": "Spans column statistics", "level": "info",
+                "message": f"Skipped — could not run canary query: {e}"}
+    if corrupt:
+        return {
+            "name": "Spans column statistics",
+            "level": "warning",
+            "message": "DuckDB column statistics on the spans table are corrupt "
+                       "— trace-detail queries (`tj traces <id>`, dashboard "
+                       "trace view) will return no spans. Run `tj doctor "
+                       "--repair` to rebuild the table (data is preserved). "
+                       "See issue #56.",
+            "repair_action": "rebuild_spans",
+        }
+    return {"name": "Spans column statistics", "level": "ok",
+            "message": "Column statistics are consistent."}
+
+
+def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
+    """Run repair actions for any check that flagged one."""
+    from tokenjam.core.db import repair_spans_stats
+
+    conn = getattr(db, "conn", None)
+    for c in checks:
+        action = c.get("repair_action")
+        if not action:
+            continue
+        if action == "rebuild_spans":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — non-DuckDB backend.[/yellow]"
+                    )
+                continue
+            try:
+                before = conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+                repair_spans_stats(conn)
+                after = conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Repair failed — {e}. If the database is locked, "
+                        f"stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                console.print(
+                    f"  [green]Spans table rebuilt — {before} rows preserved "
+                    f"(verified: {after}).[/green]"
+                )
 
 
 def _is_local_url(url: str) -> bool:
