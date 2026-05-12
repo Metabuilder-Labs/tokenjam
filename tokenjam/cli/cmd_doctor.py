@@ -226,9 +226,11 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                     )
                 continue
             try:
-                before = conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+                before_row = conn.execute("SELECT COUNT(*) FROM spans").fetchone()
                 repair_spans_stats(conn)
-                after = conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+                after_row = conn.execute("SELECT COUNT(*) FROM spans").fetchone()
+                before = before_row[0] if before_row else 0
+                after = after_row[0] if after_row else 0
             except duckdb.Error as e:
                 if not output_json:
                     console.print(

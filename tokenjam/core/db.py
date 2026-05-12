@@ -307,14 +307,17 @@ def check_spans_stats_corruption(conn: duckdb.DuckDBPyConnection) -> bool:
         if tid is None:
             continue
         try:
-            eq = conn.execute(
+            eq_row = conn.execute(
                 "SELECT COUNT(*) FROM spans WHERE trace_id = $1", [tid]
-            ).fetchone()[0]
-            like = conn.execute(
+            ).fetchone()
+            like_row = conn.execute(
                 "SELECT COUNT(*) FROM spans WHERE trace_id LIKE $1 || '%'", [tid]
-            ).fetchone()[0]
+            ).fetchone()
         except duckdb.Error:
             return False
+        # COUNT(*) always returns one row, but mypy doesn't know that.
+        eq = eq_row[0] if eq_row else 0
+        like = like_row[0] if like_row else 0
         if eq == 0 and like > 0:
             return True
     return False
