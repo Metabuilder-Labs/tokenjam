@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from html import escape as html_escape
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, AsyncContextManager, Callable
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,18 +23,25 @@ def create_app(
     config: TjConfig,
     db: StorageBackend,
     ingest_pipeline: IngestPipeline,
+    lifespan: Callable[[FastAPI], AsyncContextManager[Any]] | None = None,
 ) -> FastAPI:
     """
     Build and return the FastAPI app.
 
     db and ingest_pipeline are passed in (not imported globally) so tests
     can inject mocks easily.
+
+    `lifespan`, if provided, is a FastAPI lifespan context manager — used by
+    `tj serve` to start/stop the retention scheduler and write server.state
+    only after uvicorn has bound the port (so a failed bind can't clobber a
+    running daemon's state file).
     """
     app = FastAPI(
         title="TokenJam",
         version="0.1.0",
         docs_url="/docs",
         redoc_url=None,
+        lifespan=lifespan,
     )
 
     # CORS — local only by default

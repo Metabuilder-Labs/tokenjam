@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import click
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator
 
 from tokenjam.utils.formatting import console
 
@@ -19,12 +21,12 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     bind_port = port or config.api.port
 
     import uvicorn
+    from fastapi import FastAPI
     from tokenjam.api.app import create_app
     from tokenjam.core.ingest import build_default_pipeline
 
     db = ctx.obj["db"]
     pipeline = build_default_pipeline(db, config)
-    app = create_app(config, db, pipeline)
 
     # Schedule retention cleanup using a separate DB connection per run
     # to avoid concurrent write conflicts with uvicorn worker threads.
@@ -46,22 +48,20 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         hour=0,
         minute=0,
     )
-    scheduler.start()
 
-    @app.on_event("shutdown")
-    async def _shutdown_scheduler() -> None:
-        scheduler.shutdown(wait=False)
-
-    # Write the resolved config path so other subcommands (e.g. onboard --codex)
-    # can find the secret this server is using regardless of CWD. Defer the
-    # write to a FastAPI startup event so it only fires after uvicorn binds
-    # the port — otherwise a failed-to-bind serve clobbers the state file
-    # of the running daemon (D2).
+    # ~/.local/share/tj/server.state lets other subcommands (e.g. `tj onboard
+    # --codex`) find the config this server is using regardless of CWD. We
+    # write it from the lifespan so it only happens after uvicorn binds the
+    # port — a failed bind must NOT clobber the running daemon's state file.
+    # Same reasoning for `scheduler.start()`: don't fire off a background
+    # thread for a server that's about to exit with EADDRINUSE.
     import json as _json
     _state_path = Path.home() / ".local" / "share" / "tj" / "server.state"
 
-    @app.on_event("startup")
-    async def _write_server_state() -> None:
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # startup
+        scheduler.start()
         _state_path.parent.mkdir(parents=True, exist_ok=True)
         _state_path.write_text(
             _json.dumps({
@@ -70,6 +70,13 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
                 "pid": __import__("os").getpid(),
             })
         )
+        try:
+            yield
+        finally:
+            # shutdown
+            scheduler.shutdown(wait=False)
+
+    app = create_app(config, db, pipeline, lifespan=_lifespan)
 
     console.print(f"[bold]tj serve[/bold] starting on http://{bind_host}:{bind_port}")
     console.print(f"  API docs:    http://{bind_host}:{bind_port}/docs")

@@ -22,7 +22,7 @@ from tokenjam.sdk.agent import watch, record_llm_call, record_tool_call
 
 
 # ---------------------------------------------------------------------------
-# Pricing reference (from pricing/models.toml for claude-sonnet-4-20250514):
+# Pricing reference (from pricing/models.toml for claude-sonnet-4-6):
 #   input  = $3.00 / MTok  -> $0.000003 per token
 #   output = $15.00 / MTok -> $0.000015 per token
 #
@@ -44,7 +44,7 @@ def run_expensive_agent() -> None:
         input_tokens = 1000 + (i * 200)
         output_tokens = 500 + (i * 100)
 
-        # Estimate cost (using claude-sonnet-4-20250514 rates)
+        # Estimate cost (using claude-sonnet-4-6 rates)
         est_cost = (input_tokens * 3e-6) + (output_tokens * 15e-6)
         cumulative_cost += est_cost
 
@@ -52,7 +52,7 @@ def run_expensive_agent() -> None:
               f"  ~${est_cost:.4f}  (cumulative ~${cumulative_cost:.4f})")
 
         record_llm_call(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             provider="anthropic",
             input_tokens=input_tokens,
             output_tokens=output_tokens,

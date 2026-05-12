@@ -127,13 +127,24 @@ def _check_schema_vs_capture(config: object) -> dict:
 
 
 def _check_drift_inactive(config: object, db: object) -> dict:
+    """Report drift-baseline progress for any agent that hasn't reached threshold yet.
+
+    Drift detection is enabled by default, so brand-new agents (0–9 sessions)
+    would otherwise trip a warning on every `tj doctor` run — pure noise,
+    since collection-in-progress is the expected state. Downgraded to `info`
+    so the user can see which agents are still building a baseline without
+    treating it as a problem.
+    """
+    in_progress: list[str] = []
     for agent_id, ac in config.agents.items():
-        if ac.drift.enabled:
-            count = db.get_completed_session_count(agent_id)
-            if count < ac.drift.baseline_sessions:
-                return {"name": "Drift detection", "level": "warning",
-                        "message": f"Agent '{agent_id}' has drift enabled but only "
-                                   f"{count}/{ac.drift.baseline_sessions} baseline sessions."}
+        if not ac.drift.enabled:
+            continue
+        count = db.get_completed_session_count(agent_id)
+        if count < ac.drift.baseline_sessions:
+            in_progress.append(f"{agent_id} ({count}/{ac.drift.baseline_sessions})")
+    if in_progress:
+        return {"name": "Drift detection", "level": "info",
+                "message": "Collecting baseline: " + ", ".join(in_progress)}
     return {"name": "Drift detection", "level": "ok",
             "message": "Drift detection status is consistent."}
 
@@ -188,7 +199,8 @@ def _check_spans_stats(db: object) -> dict:
     conn = getattr(db, "conn", None)
     if conn is None:
         return {"name": "Spans column statistics", "level": "info",
-                "message": "Skipped — non-DuckDB backend."}
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
     try:
         corrupt = check_spans_stats_corruption(conn)
     except duckdb.Error as e:
@@ -222,7 +234,9 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
             if conn is None:
                 if not output_json:
                     console.print(
-                        "  [yellow]Repair skipped — non-DuckDB backend.[/yellow]"
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
                     )
                 continue
             try:
