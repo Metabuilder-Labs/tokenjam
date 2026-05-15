@@ -49,6 +49,24 @@ def load_pricing_table() -> dict[str, dict[str, ModelRates]]:
 
 
 def get_rates(provider: str, model: str) -> ModelRates | None:
-    """Return ModelRates for the given provider/model, or None if not found."""
+    """
+    Return ModelRates for the given provider/model, or None if not found.
+
+    Tries an exact match first, then falls back to stripping a trailing
+    YYYYMMDD release-date suffix (Anthropic/OpenAI both ship dated variants
+    like `claude-haiku-4-5-20251001`). This keeps pricing/models.toml short
+    while still pricing the dated names that flow through Claude Code logs.
+    """
     table = load_pricing_table()
-    return table.get(provider, {}).get(model)
+    rates = table.get(provider, {}).get(model)
+    if rates is not None:
+        return rates
+    # Strip trailing 8-digit date suffix
+    import re as _re
+    m = _re.match(r"^(.*)-(\d{8})$", model)
+    if m:
+        base = m.group(1)
+        rates = table.get(provider, {}).get(base)
+        if rates is not None:
+            return rates
+    return None

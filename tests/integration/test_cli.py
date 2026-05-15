@@ -579,6 +579,84 @@ def test_budget_set_agent_writes_config(runner, db, config, tmp_path):
     assert saved_config.agents["test-agent"].budget.session_usd == 0.25
 
 
+def test_optimize_empty_db_outputs_friendly_message(runner, db, config):
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    assert "No usage data found" in result.output
+
+
+def test_optimize_flags_downgrade_candidate(runner, db, config):
+    """A small Opus session in the window should appear as a candidate."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span
+    from tokenjam.utils.time_parse import utcnow
+
+    start = utcnow() - timedelta(days=2)
+    span = make_llm_span(
+        agent_id="test-agent",
+        model="claude-opus-4-7",
+        provider="anthropic",
+        input_tokens=1000,
+        output_tokens=200,
+        cost_usd=0.030,
+        session_id="s-opus",
+        start_time=start,
+    )
+    db.insert_span(span)
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    assert "Model downgrade" in result.output
+    # Mandatory caveat must appear in human output
+    assert "Candidate-flagging heuristic" in result.output
+
+
+def test_optimize_json_output_includes_caveat(runner, db, config):
+    from datetime import timedelta
+    from tests.factories import make_llm_span
+    from tokenjam.utils.time_parse import utcnow
+
+    span = make_llm_span(
+        agent_id="test-agent", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.030,
+        session_id="s", start_time=utcnow() - timedelta(days=1),
+    )
+    db.insert_span(span)
+
+    result = _invoke(runner, db, config, ["optimize", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["downgrade"] is not None
+    assert "Candidate-flagging heuristic" in data["downgrade"]["caveat"]
+
+
+def test_optimize_budget_projection_from_config(runner, db):
+    """Budget configured via [budget.anthropic] should surface a projection."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span
+    from tokenjam.core.config import ProviderBudget
+    from tokenjam.utils.time_parse import utcnow
+
+    cfg = TjConfig(
+        version="1",
+        agents={"test-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
+        budgets={"anthropic": ProviderBudget(usd=10.0, cycle_start_day=1)},
+    )
+    # Insert spend that exceeds the small budget
+    for i in range(5):
+        span = make_llm_span(
+            agent_id="test-agent", model="claude-opus-4-7", provider="anthropic",
+            input_tokens=10_000, output_tokens=1_000, cost_usd=20.0,
+            session_id=f"s{i}", start_time=utcnow() - timedelta(days=1),
+        )
+        db.insert_span(span)
+
+    result = _invoke(runner, db, cfg, ["optimize", "--only", "budget"])
+    assert result.exit_code == 0
+    assert "Budget projection" in result.output
+    assert "anthropic" in result.output
+
+
 def test_budget_set_negative_daily_rejected(runner, db, config, tmp_path):
     """tj budget --daily -5 should error, not silently clear the limit."""
     config_file = tmp_path / "config.toml"

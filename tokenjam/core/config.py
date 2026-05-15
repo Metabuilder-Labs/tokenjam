@@ -138,6 +138,22 @@ class CaptureConfig:
 
 
 @dataclass
+class ProviderBudget:
+    """
+    Per-provider periodic spending budget used by `tj optimize` projections.
+
+    Distinct from BudgetConfig (per-agent daily/session alert thresholds).
+    ProviderBudget is a recurring monthly ceiling — typed against a provider
+    so projection scopes to the spend that actually counts toward that budget.
+    """
+    usd:                  float | None      = None
+    cycle_start_day:      int               = 1
+    # service.name values that count toward this budget. Empty = all services
+    # billed by this provider.
+    applies_to_services:  list[str]         = field(default_factory=list)
+
+
+@dataclass
 class TjConfig:
     version:  str
     defaults: DefaultsConfig          = field(default_factory=DefaultsConfig)
@@ -148,6 +164,7 @@ class TjConfig:
     security: SecurityConfig          = field(default_factory=SecurityConfig)
     api:      ApiConfig               = field(default_factory=ApiConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
+    budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     # Path to the config file on disk; set by load_config() so that relative
     # paths in the config (e.g. output_schema) can be resolved correctly.
     config_path: Path | None          = field(default=None, repr=False, compare=False)
@@ -283,6 +300,18 @@ def _parse(raw: dict) -> TjConfig:
     defaults_budget_raw = defaults_raw.get("budget", {})
     defaults = DefaultsConfig(budget=BudgetConfig(**defaults_budget_raw))
 
+    # [budget.<provider>] sections — periodic monthly ceilings used by tj optimize.
+    # Distinct from [defaults.budget] / [agents.X.budget] (per-agent alert thresholds).
+    budgets: dict[str, ProviderBudget] = {}
+    for provider, prov_raw in raw.get("budget", {}).items():
+        if not isinstance(prov_raw, dict):
+            continue
+        budgets[provider] = ProviderBudget(
+            usd=prov_raw.get("usd"),
+            cycle_start_day=int(prov_raw.get("cycle_start_day", 1)),
+            applies_to_services=list(prov_raw.get("applies_to_services", [])),
+        )
+
     return TjConfig(
         version=raw.get("version", "1"),
         defaults=defaults,
@@ -293,6 +322,7 @@ def _parse(raw: dict) -> TjConfig:
         security=security,
         api=api,
         capture=capture,
+        budgets=budgets,
     )
 
 
@@ -316,12 +346,23 @@ def _serialise(config: TjConfig) -> dict:
         return result
 
     d = _dc_to_dict(config)
+    # `budgets` (dataclass field) maps to `[budget.*]` (TOML key); strip raw form.
+    d.pop("budgets", None)
 
     # agents is a dict of str -> AgentConfig, handle specially
     agents_out = {}
     for agent_id, agent_cfg in config.agents.items():
         agents_out[agent_id] = _dc_to_dict(agent_cfg)
     d["agents"] = agents_out
+
+    # budgets is a dict of str -> ProviderBudget, handle specially
+    budgets_out: dict = {}
+    for provider, prov_cfg in config.budgets.items():
+        budgets_out[provider] = _dc_to_dict(prov_cfg)
+    if budgets_out:
+        d["budget"] = budgets_out
+    elif "budgets" in d:
+        d.pop("budgets", None)
 
     return d
 

@@ -2,6 +2,18 @@
 # Prices in USD per million tokens.
 # Submit a PR when provider prices change.
 
+[anthropic.claude-opus-4-7]
+input_per_mtok = 15.00
+output_per_mtok = 75.00
+cache_read_per_mtok = 1.50
+cache_write_per_mtok = 18.75
+
+[anthropic.claude-opus-4-5]
+input_per_mtok = 15.00
+output_per_mtok = 75.00
+cache_read_per_mtok = 1.50
+cache_write_per_mtok = 18.75
+
 [anthropic.claude-opus-4-6]
 input_per_mtok = 15.00
 output_per_mtok = 75.00
