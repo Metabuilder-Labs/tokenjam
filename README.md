@@ -32,23 +32,42 @@ Your agent sends emails, writes files, calls APIs, and spends your money — all
 **Cost optimization for Claude Code — out of the box.** Run `tj onboard --claude-code` and TokenJam reads your existing Claude Code session logs (up to 30 days, whatever your local retention has kept) so you can run `tj optimize` immediately:
 
 ```
-$ tj optimize
-Analyzing 39 sessions, 3.9M tokens, $237.39 spend (last 30d, claude-code-myproj)…
+$ tj optimize --agent claude-code-myproj
+Analyzing 39 sessions, 1.8M tokens, $160.3500 spend (last 30d,
+claude-code-myproj)…
 
-  ① Model downgrade: 12% of sessions match a smaller-model candidate shape
+  ① Model downgrade: 13% of sessions match a smaller-model candidate shape
      • 5 of 39 sessions matched structural heuristics
-     • Would have cost ~$1.47 on the smaller model vs $42.18 actual (in window)
-     • Projected savings if pattern holds: $51.30/mo
-     ! Candidate-flagging heuristic, not a quality judgment.
-       Review the example sessions before changing models.
+     • Would have cost ~$0.0140 on the smaller model vs $2.2500 actual (in
+window)
+     • Projected savings if pattern holds: $2.2400/mo
+     • Pattern: claude-opus-4-7 → claude-haiku-4-5
 
-  ② Budget projection (anthropic, $200/cycle): projected to exceed cycle budget
-     • Monthly run rate: $237.39 (1.2× the budget)
-     • At current pace, exhausted on 2026-05-26 (11 days from now)
-     • Projected overage: $37.39
+     Examples:
+       2cce7903..  2 tool calls   0.8s   $0.4500  (claude-opus-4-7)
+       e292ccbe..  2 tool calls   0.8s   $0.4500  (claude-opus-4-7)
+       d59cb502..  2 tool calls   0.8s   $0.4500  (claude-opus-4-7)
+
+     ! Candidate-flagging heuristic, not a quality judgment. Review the
+example sessions before changing models.
+
+  ② Budget projection (anthropic, $200.0000/cycle): comfortably within budget
+     Run rate $160.3500/mo — 19% of cycle budget unused.
 ```
 
 Two analyzers reading the same spans you'd otherwise pay LangSmith to host: structural model-downgrade candidate flagging (never claims quality equivalence — surfaces examples to review) and per-provider monthly budget projection. Works with **any** agent already sending TokenJam data, not just Claude Code.
+
+Try a tighter budget to see the over-budget renderer:
+
+```
+$ tj optimize --budget anthropic --budget-usd 50
+  ② Budget projection (anthropic, $50.0000/cycle): projected to exceed cycle
+budget
+     • Monthly run rate: $160.3500 (3.2× the budget)
+     • At current pace, budget exhausted on 2026-05-15 (0.0 day(s) from now)
+     • Days remaining in cycle: 16
+     • Projected cycle total: $162.8700, overage: $112.8700
+```
 
 **Real-time cost tracking.** Every LLM call is priced as it happens — by agent, model, session, and tool. Budget alerts fire before you hit the limit, not after.
 
