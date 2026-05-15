@@ -179,9 +179,6 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7391
 
 ```
 tj status
-```
-
-```
 ● my-email-agent   completed   (2m 14s)
 
   Cost today:     $0.0340 / $5.0000 limit
@@ -191,8 +188,6 @@ tj status
 
   send_email called (sensitive action: critical)
 ```
-
-https://github.com/user-attachments/assets/b94d13f6-1432-40d4-b093-6958d74f0e65
 
 ```bash
 tj status              # current state, cost, active alerts
@@ -213,8 +208,6 @@ tj serve               # start the web UI + REST API
 
 `tj serve` starts a local dashboard at `http://127.0.0.1:7391/`.
 
-https://github.com/user-attachments/assets/ff09caec-3487-4542-8628-d62b7d92591f
-
 - **Status** — agent overview with cost, tokens, tool calls, and active alerts
 - **Traces** — trace list with span waterfall visualization
 - **Cost** — breakdown by agent, model, day, or tool
@@ -223,6 +216,24 @@ https://github.com/user-attachments/assets/ff09caec-3487-4542-8628-d62b7d92591f
 - **Drift** — behavioral drift report with Z-score analysis
 
 No signup, no cloud — runs entirely on your machine.
+
+### Screenshots
+
+<table>
+<tr>
+<td width="50%"><strong>Status</strong> — agent overview with cost, tokens, tool calls, and active alerts.<br><br><img src="docs/screenshots/tj-status.png" alt="tj status page" /></td>
+<td width="50%"><strong>Traces</strong> — recent traces with cost, duration, and span count. Click a row for the waterfall view.<br><br><img src="docs/screenshots/tj-traces.png" alt="tj traces page" /></td>
+</tr>
+<tr>
+<td width="50%"><strong>Cost</strong> — spend broken down by day, agent, model, or tool.<br><br><img src="docs/screenshots/tj-cost.png" alt="tj cost page" /></td>
+<td width="50%"><strong>Alerts</strong> — full alert history with severity filter and inline detail expansion.<br><br><img src="docs/screenshots/tj-alerts.png" alt="tj alerts page" /></td>
+</tr>
+<tr>
+<td colspan="2"><strong>Budget</strong> — view and edit daily/per-session cost limits per agent, with recent budget alerts inline.<br><br><img src="docs/screenshots/tj-budget.png" alt="tj budget page" /></td>
+</tr>
+</table>
+
+
 
 ---
 
