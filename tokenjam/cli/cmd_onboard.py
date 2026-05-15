@@ -154,7 +154,8 @@ def _onboard_claude_code(
 ) -> None:
     """Configure Claude Code to send telemetry to tj."""
     from tokenjam.core.config import (
-        AgentConfig, BudgetConfig, TjConfig, SecurityConfig, load_config, write_config,
+        AgentConfig, BudgetConfig, ProviderBudget, TjConfig, SecurityConfig,
+        load_config, write_config,
     )
 
     # --claude-code always uses the global config so that all projects share one
@@ -178,6 +179,11 @@ def _onboard_claude_code(
             config.agents[agent_id] = AgentConfig()
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
+        # Write a sensible default [budget.anthropic] for tj optimize projections
+        # if the user hasn't already configured one. Users can edit the value or
+        # delete the section; we never overwrite an existing budget.
+        if "anthropic" not in config.budgets:
+            config.budgets["anthropic"] = ProviderBudget(usd=200.0, cycle_start_day=1)
         config_path = global_config_path
         write_config(config, config_path)
         console.print(f"  tj config updated: {config_path}")
@@ -189,6 +195,7 @@ def _onboard_claude_code(
             version="1",
             agents=agents,
             security=SecurityConfig(ingest_secret=ingest_secret),
+            budgets={"anthropic": ProviderBudget(usd=200.0, cycle_start_day=1)},
         )
         config_path = global_config_path
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -297,6 +304,37 @@ def _onboard_claude_code(
             console.print("  Daemon:              installing...")
             _install_daemon(str(config_path.resolve()))
 
+    # --- Backfill existing Claude Code session logs ---
+    # First-time users have no history yet; this populates the DB so that
+    # `tj optimize` returns useful output on first run. Idempotent — safe to
+    # re-run; will skip already-ingested spans.
+    backfill_msg: str | None = None
+    try:
+        from tokenjam.core.backfill import (
+            CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code,
+        )
+        if CLAUDE_CODE_PROJECTS_ROOT.exists():
+            from tokenjam.core.db import open_db
+            try:
+                db = open_db(config.storage)
+                result = ingest_claude_code(db)
+                db.close()
+                if result.sessions_ingested > 0:
+                    days = None
+                    if result.earliest and result.latest:
+                        days = (result.latest - result.earliest).days
+                    pieces = [f"{result.sessions_ingested} sessions"]
+                    if days is not None:
+                        pieces.append(f"over {days} day{'s' if days != 1 else ''}")
+                    pieces.append(f"${result.total_cost_usd:.0f} total")
+                    backfill_msg = ", ".join(pieces)
+                elif result.sessions_seen > 0:
+                    backfill_msg = "history already up to date"
+            except Exception as exc:
+                backfill_msg = f"skipped ({exc})"
+    except Exception:
+        pass
+
     console.print()
     console.print("[bold green]Claude Code observability configured.[/bold green]")
     console.print(f"  Global settings:     {global_settings_path}")
@@ -309,6 +347,12 @@ def _onboard_claude_code(
     console.print(f"                       http://host.docker.internal:{port} (harness)")
     if secret:
         console.print(f"  Ingest secret:       {secret[:8]}...")
+    if backfill_msg:
+        console.print(f"  Backfilled:          {backfill_msg}")
+    console.print(
+        "  Budget projection:   "
+        "[budget.anthropic] usd = 200 written to config (edit to change)"
+    )
     console.print()
     if not want_daemon:
         console.print("[dim]Start the server:[/dim]  tj serve")

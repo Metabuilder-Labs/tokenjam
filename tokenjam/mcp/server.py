@@ -1053,6 +1053,71 @@ def setup_project(agent_id: str | None = None, project_path: str | None = None) 
         return {"error": str(e)}
 
 
+def _tool_get_optimize_report(
+    db, config, agent_id: str | None, since: str | None, only: str | None,
+    budget_provider: str | None, budget_usd: float | None,
+) -> dict:
+    from tokenjam.core.optimize import build_report, report_to_dict
+    from tokenjam.utils.time_parse import parse_since, utcnow
+    if config is None:
+        return _no_config()
+    if db is None or getattr(db, "conn", None) is None:
+        return {
+            "error": (
+                "Optimize requires a direct database connection. "
+                "Stop tj serve or run via the CLI."
+            )
+        }
+    since_dt = parse_since(since) if since else parse_since("30d")
+    report = build_report(
+        db=db,
+        config=config,
+        since=since_dt,
+        until=utcnow(),
+        agent_id=agent_id,
+        only=only,
+        budget_provider_filter=budget_provider,
+        budget_usd_override=budget_usd,
+    )
+    return report_to_dict(report)
+
+
+@mcp.tool()
+def get_optimize_report(
+    agent_id: str | None = None,
+    since: str | None = "30d",
+    only: str | None = None,
+    budget_provider: str | None = None,
+    budget_usd: float | None = None,
+) -> dict:
+    """
+    Return cost-saving candidates and budget projections — equivalent to
+    `tj optimize`. Use this when the user asks where they could save money,
+    whether they're going to exceed a budget, what their monthly run rate
+    looks like, or which sessions look like they could have used a cheaper
+    model. Includes a mandatory caveat field reminding callers that the
+    model-downgrade finding is a structural heuristic, not a quality
+    judgment. `only` accepts 'model' or 'budget' to scope to one analyzer.
+    """
+    if _config is None:
+        return _no_config()
+    try:
+        # Pass the writable backend (not _ro_db) so the analyzers can read
+        # via the same DuckDB connection the CLI uses.
+        from tokenjam.core.db import open_db
+        if _ro_conn is not None:
+            class _Shim:
+                conn = _ro_conn
+            db = _Shim()
+        else:
+            db = open_db(_config.storage)
+        return _tool_get_optimize_report(
+            db, _config, agent_id, since, only, budget_provider, budget_usd,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @mcp.tool()
 def open_dashboard() -> dict:
     """
