@@ -29,6 +29,46 @@ Your agent sends emails, writes files, calls APIs, and spends your money — all
 
 ## What you get
 
+**Cost optimization for Claude Code — out of the box.** Run `tj onboard --claude-code` and TokenJam reads your existing Claude Code session logs (up to 30 days, whatever your local retention has kept) so you can run `tj optimize` immediately:
+
+```
+$ tj optimize --agent claude-code-myproj
+Analyzing 39 sessions, 1.8M tokens, $160.3500 spend (last 30d,
+claude-code-myproj)…
+
+  ① Model downgrade: 13% of sessions match a smaller-model candidate shape
+     • 5 of 39 sessions matched structural heuristics
+     • Would have cost ~$0.0140 on the smaller model vs $2.2500 actual (in
+window)
+     • Projected savings if pattern holds: $2.2400/mo
+     • Pattern: claude-opus-4-7 → claude-haiku-4-5
+
+     Examples:
+       2cce7903..  2 tool calls   0.8s   $0.4500  (claude-opus-4-7)
+       e292ccbe..  2 tool calls   0.8s   $0.4500  (claude-opus-4-7)
+       d59cb502..  2 tool calls   0.8s   $0.4500  (claude-opus-4-7)
+
+     ! Candidate-flagging heuristic, not a quality judgment. Review the
+example sessions before changing models.
+
+  ② Budget projection (anthropic, $200.0000/cycle): comfortably within budget
+     Run rate $160.3500/mo — 19% of cycle budget unused.
+```
+
+Two analyzers reading the same spans you'd otherwise pay LangSmith to host: structural model-downgrade candidate flagging (never claims quality equivalence — surfaces examples to review) and per-provider monthly budget projection. Works with **any** agent already sending TokenJam data, not just Claude Code.
+
+Try a tighter budget to see the over-budget renderer:
+
+```
+$ tj optimize --budget anthropic --budget-usd 50
+  ② Budget projection (anthropic, $50.0000/cycle): projected to exceed cycle
+budget
+     • Monthly run rate: $160.3500 (3.2× the budget)
+     • At current pace, budget exhausted on 2026-05-15 (0.0 day(s) from now)
+     • Days remaining in cycle: 16
+     • Projected cycle total: $162.8700, overage: $112.8700
+```
+
 **Real-time cost tracking.** Every LLM call is priced as it happens — by agent, model, session, and tool. Budget alerts fire before you hit the limit, not after.
 
 **Safety alerts.** Configure any tool call as a sensitive action (`send_email`, `delete_file`, `submit_form`) and get notified instantly via ntfy, Discord, Telegram, webhook, or stdout.
@@ -52,10 +92,11 @@ For **Claude Code**, **Codex**, and any agent that already emits OpenTelemetry. 
 ```bash
 pip install "tokenjam[mcp]"
 tj onboard --claude-code    # or: tj onboard --codex
-# Restart your coding agent
+tj optimize                 # see cost-saving candidates + budget projection
+# Restart your coding agent for live telemetry
 ```
 
-Every session, API call, tool use, and error is now a tracked span with cost and alert evaluation. The MCP server gives your coding agent 13 tools to query its own telemetry mid-session — just ask "how much have I spent today?" or "are there any active alerts?"
+`tj onboard --claude-code` auto-backfills your existing session logs from `~/.claude/projects/` so `tj optimize` works on the first run — no waiting for new data to accumulate. The MCP server gives your coding agent 14 tools to query its own telemetry mid-session — just ask "how much have I spent today?" or "where could I save money?"
 
 [Full Claude Code & Codex setup →](#claude-code--coding-agents)
 
@@ -138,9 +179,6 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:7391
 
 ```
 tj status
-```
-
-```
 ● my-email-agent   completed   (2m 14s)
 
   Cost today:     $0.0340 / $5.0000 limit
@@ -151,17 +189,17 @@ tj status
   send_email called (sensitive action: critical)
 ```
 
-https://github.com/user-attachments/assets/b94d13f6-1432-40d4-b093-6958d74f0e65
-
 ```bash
-tj status           # current state, cost, active alerts
-tj traces           # full span history with waterfall view
-tj cost --since 7d  # cost breakdown by agent, model, day
-tj alerts           # everything that fired while you were away
-tj budget           # view and set daily/session cost limits
-tj drift            # behavioral drift Z-scores vs baseline
-tj tools            # tool call history with error rates
-tj serve            # start the web UI + REST API
+tj status              # current state, cost, active alerts
+tj traces              # full span history with waterfall view
+tj cost --since 7d     # cost breakdown by agent, model, day
+tj optimize            # cost-saving candidates + budget projection
+tj backfill claude-code  # ingest historical sessions from ~/.claude/projects/
+tj alerts              # everything that fired while you were away
+tj budget              # view and set daily/session cost limits
+tj drift               # behavioral drift Z-scores vs baseline
+tj tools               # tool call history with error rates
+tj serve               # start the web UI + REST API
 ```
 
 ---
@@ -169,8 +207,6 @@ tj serve            # start the web UI + REST API
 ## Web UI
 
 `tj serve` starts a local dashboard at `http://127.0.0.1:7391/`.
-
-https://github.com/user-attachments/assets/ff09caec-3487-4542-8628-d62b7d92591f
 
 - **Status** — agent overview with cost, tokens, tool calls, and active alerts
 - **Traces** — trace list with span waterfall visualization
@@ -180,6 +216,24 @@ https://github.com/user-attachments/assets/ff09caec-3487-4542-8628-d62b7d92591f
 - **Drift** — behavioral drift report with Z-score analysis
 
 No signup, no cloud — runs entirely on your machine.
+
+### Screenshots
+
+<table>
+<tr>
+<td width="50%"><strong>Status</strong> — agent overview with cost, tokens, tool calls, and active alerts.<br><br><img src="docs/screenshots/tj-status.png" alt="tj status page" /></td>
+<td width="50%"><strong>Traces</strong> — recent traces with cost, duration, and span count. Click a row for the waterfall view.<br><br><img src="docs/screenshots/tj-traces.png" alt="tj traces page" /></td>
+</tr>
+<tr>
+<td width="50%"><strong>Cost</strong> — spend broken down by day, agent, model, or tool.<br><br><img src="docs/screenshots/tj-cost.png" alt="tj cost page" /></td>
+<td width="50%"><strong>Alerts</strong> — full alert history with severity filter and inline detail expansion.<br><br><img src="docs/screenshots/tj-alerts.png" alt="tj alerts page" /></td>
+</tr>
+<tr>
+<td colspan="2"><strong>Budget</strong> — view and edit daily/per-session cost limits per agent, with recent budget alerts inline.<br><br><img src="docs/screenshots/tj-budget.png" alt="tj budget page" /></td>
+</tr>
+</table>
+
+
 
 ---
 
@@ -192,6 +246,7 @@ LangSmith and Langfuse are excellent for tracing LLM API calls and running evals
 | Signup required | ❌ | ✅ | ✅ | ✅ |
 | Data leaves your machine | ❌ | ✅ | cloud only | ✅ |
 | Real-time sensitive action alerts | ✅ | ❌ | ❌ | ❌ |
+| Model-downgrade cost recommendations | ✅ | ❌ | ❌ | ❌ |
 | Behavioral drift detection | ✅ | ❌ | ❌ | ❌ |
 | Local-first, no cloud required | ✅ | ❌ | self-host only | ❌ |
 | OTel GenAI SemConv native | ✅ | partial | partial | partial |
@@ -205,13 +260,13 @@ LangSmith and Langfuse are excellent for tracing LLM API calls and running evals
 
 ### Claude Code
 
-Monitor every Claude Code session — costs, tool calls, API requests, errors — with two commands:
+Monitor every Claude Code session and get cost-optimization recommendations from your existing usage in three commands:
 
 ```bash
 pip install "tokenjam[mcp]"
-tj onboard --claude-code
-# Restart Claude Code, then:
-tj status --agent claude-code-<project>
+tj onboard --claude-code   # auto-backfills your existing session logs
+tj optimize                # cost-saving candidates + budget projection
+# Then restart Claude Code so live telemetry starts flowing
 ```
 
 `tj onboard --claude-code` does everything in one shot:
@@ -221,8 +276,27 @@ tj status --agent claude-code-<project>
 - Registers the MCP server globally (`claude mcp add --scope user tj -- tj mcp`)
 - Installs a background daemon (launchd on macOS, systemd on Linux)
 - Adds Docker harness-compatible OTLP env vars to `~/.zshrc`
+- **Reads your existing `~/.claude/projects/*.jsonl` session logs** and ingests them into the local DB so `tj optimize` returns real numbers on first run (idempotent — safe to re-run)
+- Writes a sensible default `[budget.anthropic] usd = 200` for the budget projector to project against — edit `~/.config/tj/config.toml` to change
 
 **Claude Code must be restarted** after running `tj onboard --claude-code`.
+
+#### `tj optimize` — what you actually get
+
+Two analyzers run over the spans TokenJam has captured. The output is read-only recommendations — `tj optimize` never changes how your agent runs.
+
+**① Model-downgrade candidates.** Flags sessions whose structural shape (short input, short output, few tool calls) matches a class of work where a cheaper model in the same provider family is worth reviewing. Never asserts the cheaper model *would have produced the same answer* — only that the shape is worth a look. Real examples are surfaced so you can spot-check before changing models.
+
+**② Budget projection.** Per-provider monthly projection against any `[budget.<provider>]` ceiling you've configured. Scopes spend by provider — an Anthropic budget excludes OpenAI spend. Shows exhaustion date, projected overage, and what the run rate would drop to if you acted on the downgrade candidates.
+
+```bash
+tj optimize                                # both analyzers, last 30 days
+tj optimize --only budget                  # just the projection
+tj optimize --budget anthropic --budget-usd 50   # test a different ceiling
+tj optimize --json                         # machine-readable for piping
+```
+
+Works alongside a running `tj serve` (read-only fallback). Also exposed as the `get_optimize_report` MCP tool — your coding agent can ask itself "where could I save money?" mid-session.
 
 **Adding more projects** — run once per project directory:
 
@@ -236,10 +310,11 @@ Each project gets its own agent ID (`claude-code-<repo-name>`), all sharing one 
 
 ### MCP server
 
-The MCP server gives Claude Code direct access to your observability data inside the session. 13 tools available after restart:
+The MCP server gives Claude Code direct access to your observability data inside the session. 14 tools available after restart:
 
 | Tool | What it does |
 |---|---|
+| `get_optimize_report` | Cost-saving candidates and budget projection — fires for either question (e.g. "where could I save money?" / "will I exceed my budget?") |
 | `get_status` | Current agent state — tokens, cost, active alerts |
 | `get_budget_headroom` | Budget limit vs spend |
 | `list_active_sessions` | All running sessions across agents |
