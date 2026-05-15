@@ -68,6 +68,30 @@ tj drift         # baseline built from drift_demo sessions
 tj budget        # budget table with configured limits
 tj doctor        # exit 0 (or 1 with warnings); no errors. Checks config, DB, secret, drift readiness
 
+# 9b. tj optimize + tj backfill (new in 0.3.x)
+# Empty-DB short-circuit before backfill:
+tj uninstall --yes 2>/dev/null && rm -rf ~/.tj && tj onboard --no-daemon  # fresh DB
+tj optimize       # should print "No usage data found." and exit 0
+
+# If a Claude Code log history exists on this machine, backfill is idempotent.
+ls ~/.claude/projects/ >/dev/null 2>&1 && tj backfill claude-code
+# [ ] Prints "Backfilled N of N sessions" with span over multiple days
+# [ ] Re-running prints "Skipped … spans already present (idempotent re-run)"
+tj backfill claude-code
+
+# Re-populate the DB for the rest of step 9:
+source .env.local
+python3 examples/single_provider/anthropic_agent.py
+
+# Optimize after data is present:
+tj optimize                                   # both analyzers (no [budget.*] yet — only model finding may appear)
+tj optimize --budget anthropic --budget-usd 5 # force an over-budget projection
+# [ ] Model-downgrade finding (if any) ends with the caveat line "Candidate-flagging heuristic, not a quality judgment."
+# [ ] Budget projection shows exhaustion date when over budget
+# [ ] Spend total from `tj optimize` matches `tj cost --since 30d` for the same scope
+tj optimize --json                            # caveat present in JSON payload
+tj optimize --json | python3 -c "import json,sys; r=json.load(sys.stdin); d=r.get('downgrade'); assert d is None or 'Candidate-flagging heuristic' in d['caveat']; print('ok: caveat enforced')"
+
 # 10. Start server
 # Note: must stop daemon first (step 6) or this will fail with "Address already in use"
 tj serve &
@@ -251,8 +275,8 @@ pip3 install -e ".[dev,mcp]"
 tj onboard --no-daemon
 source .env.local
 python3 examples/single_provider/anthropic_agent.py
-tj status && tj traces && tj cost --since 1h
-# Verify: cost > $0, tokens counted, traces visible
+tj status && tj traces && tj cost --since 1h && tj optimize
+# Verify: cost > $0, tokens counted, traces visible, optimize renders both analyzers
 pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
 ruff check tokenjam/
 ```
@@ -267,6 +291,7 @@ ruff check tokenjam/
 | 7 | Simulated demos run without errors, no API keys needed |
 | 8 | Real examples run, no DuckDB lock errors |
 | 9 | CLI shows data: cost > $0, tokens counted, traces visible, alerts fired, drift baseline built |
+| 9b | `tj backfill claude-code` is idempotent (skip count > 0 on re-run); `tj optimize` JSON output includes a `caveat` field on any downgrade finding; `tj optimize` and `tj cost` agree on window totals |
 | 10 | Server starts on `:7391`, prints correct metrics URL |
 | 11 | No "Could not set lock on file" error — HTTP fallback works |
 | 12-16 | Web UI views render correctly with real data |

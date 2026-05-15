@@ -63,75 +63,57 @@ tj status       # should show both agents
 tj traces       # should show traces from both runs
 tj cost --since 1h   # model names should be clean (gpt-4o-mini, not openai/gpt-4o-mini)
 
-# 11. Clean up
+# 11. tj optimize + tj backfill smoke check (new in 0.3.x)
+# Stop the server so the DB is unlocked (optimize uses a read-only fallback
+# but backfill needs the write lock).
 tj stop
+
+# If this machine has Claude Code history, backfill is idempotent and surfaces
+# real spend numbers. Otherwise this step is a no-op.
+ls ~/.claude/projects/ >/dev/null 2>&1 && tj backfill claude-code
+
+tj optimize                                   # both analyzers
+tj optimize --budget anthropic --budget-usd 5 # force an over-budget finding to see the renderer
+tj optimize --json | python3 -c "import json,sys; r=json.load(sys.stdin); d=r.get('downgrade'); assert d is None or 'Candidate-flagging heuristic' in d['caveat']; print('ok: caveat enforced')"
+# [ ] Empty-DB case prints "No usage data found." (run after `tj uninstall` if curious)
+# [ ] Over-budget projection shows exhaustion date
+# [ ] Spend totals reconcile between `tj optimize` and `tj cost --since 30d`
+
+# 12. Clean up
 ```
 
 ## Claude Code integration (if applicable)
 
+Smoke check only — multi-project, secret-rotation, and global-config-fallback details live in `manual-pre-release-testing.md` and are exercised before release.
+
 ```bash
-# After step 3 above, also test:
 tj onboard --claude-code
-# Should: not prompt for daemon, write config to ~/.config/tj/config.toml,
-#         write settings to ~/.claude/settings.json,
-#         register MCP server with Claude Code (if claude CLI is installed)
-
-# Verify settings written
-cat ~/.claude/settings.json | python3 -m json.tool
-# Should contain OTEL_LOGS_EXPORTER, OTEL_EXPORTER_OTLP_ENDPOINT, etc.
-
-# Re-run to test secret resync (should not crash)
-tj onboard --claude-code --budget 5
-# Output should include: "Daemon: already running (skipped reinstall)"
-# macOS should NOT show a second "Background Items Added" prompt
-
-# Verify projects index exists
+# Verify expected files written
+cat ~/.claude/settings.json | python3 -m json.tool | grep -E "OTEL_LOGS_EXPORTER|OTEL_EXPORTER_OTLP_ENDPOINT"
 cat ~/.config/tj/projects.json   # should list current cwd
 
-# Multi-project onboard — daemon should NOT reinstall, secret should NOT rotate
-ORIG_SECRET=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.claude/settings.json')))['env']['OTEL_EXPORTER_OTLP_HEADERS'])")
-mkdir -p /tmp/tj-test-project-2 && cd /tmp/tj-test-project-2
-git init -q
-tj onboard --claude-code
-NEW_SECRET=$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('~/.claude/settings.json')))['env']['OTEL_EXPORTER_OTLP_HEADERS'])")
-[ "$ORIG_SECRET" = "$NEW_SECRET" ] && echo "ok: secret unchanged" || echo "FAIL: secret rotated"
-cd ~/tokenjam
+# Re-run should be a quiet no-op (no second "Background Items Added" prompt on macOS)
+tj onboard --claude-code --budget 5
 
-# Verify global config fallback: CLI works from a dir with no local config
-cd /tmp && tj status && cd ~/tokenjam
+# Backfill ran automatically during onboard — verify history is present
+tj cost --since 30d --agent claude-code-tokenjam
 ```
 
 ## Codex CLI integration (if applicable)
 
-Codex onboarding is **one-time global** (Codex hardcodes `service.name=codex_exec`); all Codex traces land under the `codex_exec` agent ID.
+Smoke check only — the full multi-step Codex test (cross-sync, no-op re-runs, secret rotation) lives in `manual-pre-release-testing.md` and doesn't need to repeat for a published-release verification.
 
 ```bash
-# Onboard Codex (no prereqs — writes to global config; does NOT read server.state).
 tj onboard --codex
-# Should: write [otel] + [mcp_servers.tj] to ~/.codex/config.toml,
-#         use ingest secret from ~/.config/tj/config.toml (creating it if absent),
-#         NOT write [otel.resource] block (Codex ignores it).
-
-# Start tj serve so the codex exec test below can ingest.
 tj serve &
 sleep 2
-
-# Verify secret synced between server and Codex config.
-# ~/.codex/config.toml uses TOML format `Authorization = "Bearer <secret>"`,
-# so the grep must allow the spaces around `=` and the surrounding quotes.
+# Spot-check the secret was synced
 SERVER_SECRET=$(grep ingest_secret ~/.config/tj/config.toml | sed 's/.*= "//' | tr -d '"')
 CODEX_SECRET=$(grep -oE 'Bearer [^"]+' ~/.codex/config.toml | sed 's/Bearer //')
 [ "$SERVER_SECRET" = "$CODEX_SECRET" ] && echo "ok: secret synced"
 
-# Re-run is a no-op when both [otel] and [mcp_servers.tj] already present
-tj onboard --codex
-
-# If codex CLI is installed, drive a session and verify ingest
-codex exec "say hello"
-tj status --agent codex_exec   # should show codex_exec (NOT codex-<project>)
-tj traces --agent codex_exec
-
-# Stop the background server started in the prereq
+# If codex CLI installed, drive a session and confirm ingest
+codex exec "say hello" 2>/dev/null && tj traces --agent codex_exec
 tj stop
 ```
 
@@ -158,4 +140,5 @@ tj demo hallucination-drift
 | 8 | Agent runs without "Could not set lock on file" error (HTTP fallback works) |
 | 9 | Web UI loads, shows data; sidebar has TJ jar SVG + "TokenJam" wordmark in monochrome; theme toggle cycles System/Light/Dark |
 | 10 | CLI queries work while server is running (API fallback); model names are clean |
-| 11 | `tj stop` stops the server cleanly |
+| 11 | `tj backfill claude-code` is idempotent on re-run; `tj optimize` prints both analyzers (or a friendly empty-DB message); JSON output includes the caveat string; spend totals reconcile with `tj cost` |
+| 12 | `tj stop` stops the server cleanly |
