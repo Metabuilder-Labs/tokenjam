@@ -8,8 +8,45 @@ from tokenjam.core.models import (
     NormalizedSpan, SessionRecord,
     SpanStatus, SpanKind,
 )
+from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.utils.ids import new_uuid, new_trace_id, new_span_id
 from tokenjam.utils.time_parse import utcnow
+
+
+def make_invoke_agent_span(
+    agent_id: str = "test-agent",
+    session_id: str | None = None,
+    conversation_id: str | None = None,
+    duration_ms: float = 0.0,
+    start_time=None,
+    trace_id: str | None = None,
+) -> NormalizedSpan:
+    """Create an ``invoke_agent`` span.
+
+    ``duration_ms == 0`` -> a zero-duration turn-start marker, exactly what the
+    Claude Code / Codex logs path emits for every ``user_prompt`` event
+    (``end_time == start_time``). These mark the *start* of a turn and must NOT
+    complete the session.
+
+    ``duration_ms > 0`` -> a real session-wrapping span, what the SDK
+    ``@watch()`` path emits to bracket a whole agent run. This DOES complete the
+    session.
+    """
+    now = start_time or utcnow()
+    end = now + timedelta(milliseconds=duration_ms)
+    return NormalizedSpan(
+        span_id=new_span_id(),
+        trace_id=trace_id or new_trace_id(),
+        name=GenAIAttributes.SPAN_INVOKE_AGENT,
+        kind=SpanKind.SERVER,
+        status_code=SpanStatus.OK,
+        start_time=now,
+        end_time=end,
+        duration_ms=duration_ms if duration_ms else None,
+        agent_id=agent_id,
+        session_id=session_id,
+        conversation_id=conversation_id,
+    )
 
 
 def make_llm_span(

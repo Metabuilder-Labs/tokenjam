@@ -42,7 +42,7 @@ async def get_status(
         if hasattr(db, "conn"):
             active_rows = db.conn.execute(
                 "SELECT * FROM sessions WHERE agent_id = $1 AND status = 'active' "
-                "ORDER BY started_at DESC LIMIT 1",
+                "ORDER BY COALESCE(ended_at, started_at) DESC LIMIT 1",
                 [aid],
             ).fetchall()
             if active_rows:
@@ -64,7 +64,7 @@ async def get_status(
 
         agent_data = {
             "agent_id": aid,
-            "status": session.status if session else "idle",
+            "status": session.effective_status if session else "idle",
             "session_id": session.session_id if session else None,
             "cost_today": today_cost,
             "input_tokens": session.input_tokens if session else 0,

@@ -141,10 +141,22 @@ class IngestPipeline:
 
         # 5. Session upsert (update running totals)
         session = self._build_or_update_session(span)
-        self.db.upsert_session(session)
 
-        # 5b. Complete session when invoke_agent span ends
-        if span.name == GenAIAttributes.SPAN_INVOKE_AGENT and span.end_time:
+        # 5b. Session lifecycle.
+        #
+        # A session is "completed" only when we see a *real* session-wrapping
+        # invoke_agent span — one whose end_time is strictly after its
+        # start_time. The SDK `@watch()` path emits exactly that: one span that
+        # brackets the whole agent run.
+        #
+        # The Claude Code / Codex logs path instead maps each `user_prompt`
+        # event to a zero-duration invoke_agent span (end_time == start_time)
+        # that marks the *start* of a turn, not the end of the session.
+        # Treating those markers as completions was the bug: every live session
+        # was force-completed on its first prompt (so the dashboard showed
+        # active work as "completed" with 0 duration), and the drift/alert
+        # session-end hooks fired on every single turn.
+        if self._is_session_end(span):
             session.status = "completed"
             self.db.upsert_session(session)
             if self.drift_detector and span.agent_id:
@@ -157,9 +169,34 @@ class IngestPipeline:
                     self.alert_engine.evaluate_session_end(session)
                 except Exception as exc:
                     logger.warning("AlertEngine session-end hook failed: %s", exc)
+        else:
+            # Any other span is ongoing activity. Streaming telemetry (the logs
+            # path) never sends an explicit end event, so a session that keeps
+            # receiving spans is still alive — re-activate a record that was
+            # previously (mis)marked completed. Genuinely idle sessions are
+            # surfaced as "stale" at read time via
+            # SessionRecord.effective_status (SESSION_STALE_THRESHOLD).
+            if session.status != "active":
+                session.status = "active"
+            self.db.upsert_session(session)
 
         # 6. Post-ingest hooks (never let hook errors kill the pipeline)
         self._run_hooks(span)
+
+    @staticmethod
+    def _is_session_end(span: NormalizedSpan) -> bool:
+        """True when the span is a real session-wrapping invoke_agent span.
+
+        Distinguishes the SDK `@watch()` session span (real duration) from the
+        zero-duration invoke_agent markers the Claude Code / Codex logs path
+        emits at the start of every turn (end_time == start_time).
+        """
+        return (
+            span.name == GenAIAttributes.SPAN_INVOKE_AGENT
+            and span.end_time is not None
+            and span.start_time is not None
+            and span.end_time > span.start_time
+        )
 
     def _resolve_session(self, span: NormalizedSpan) -> NormalizedSpan:
         """

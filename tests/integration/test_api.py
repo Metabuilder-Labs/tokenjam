@@ -18,7 +18,7 @@ from tokenjam.core.config import (
 )
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
-from tests.factories import make_llm_span, make_tool_span
+from tests.factories import make_invoke_agent_span, make_llm_span, make_tool_span
 
 
 INGEST_SECRET = "test-secret-token"
@@ -362,3 +362,56 @@ async def test_post_budget_zero_clears_limit(db):
     assert resp.status_code == 200
     agent = resp.json()["agents"]["my-agent"]
     assert agent["configured"]["daily_usd"] is None  # limit was cleared
+
+
+# ===========================================================================
+# Status route: live Claude Code session must read as active, not "completed"
+#
+# Regression for the dashboard showing a live session as "completed" with 0
+# duration / 0 tokens. Claude Code's logs path emits a zero-duration
+# invoke_agent marker per user prompt; a newer empty marker used to hijack the
+# Status tile. Uses DuckDBBackend because /status reads via db.conn.
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_status_shows_live_session_over_empty_marker(tmp_path):
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code", first_seen=now, last_seen=now))
+
+        # Live session: turn-start marker + real LLM activity.
+        pipeline.process(make_invoke_agent_span(
+            agent_id="claude-code", session_id="live", conversation_id="c1", duration_ms=0.0))
+        pipeline.process(make_llm_span(
+            agent_id="claude-code", session_id="live", conversation_id="c1",
+            input_tokens=19562, output_tokens=1321, cost_usd=0.17))
+        # A newer but EMPTY marker session (used to win the tile and show 0/0).
+        pipeline.process(make_invoke_agent_span(
+            agent_id="claude-code", session_id="empty", conversation_id="c2", duration_ms=0.0))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        agents = {a["agent_id"]: a for a in resp.json()["agents"]}
+        cc = agents["claude-code"]
+        assert cc["status"] == "active"
+        assert cc["session_id"] == "live"
+        assert cc["input_tokens"] == 19562
+        assert cc["output_tokens"] == 1321
+    finally:
+        db.close()

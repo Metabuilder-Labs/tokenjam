@@ -15,7 +15,12 @@ from tokenjam.core.ingest import (
 )
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.otel.semconv import GenAIAttributes
-from tests.factories import make_llm_span, make_session, make_tool_span
+from tests.factories import (
+    make_invoke_agent_span,
+    make_llm_span,
+    make_session,
+    make_tool_span,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -349,3 +354,57 @@ class TestErrorHandling:
         # Should NOT raise even though cost engine fails
         pipeline.process(span)
         assert len(db.spans) == 1
+
+
+# ===========================================================================
+# Session lifecycle tests
+#
+# Regression coverage for the Claude Code / Codex logs path, where each
+# user_prompt event is mapped to a zero-duration invoke_agent span. Treating
+# those turn-start markers as session completions force-completed every live
+# session on its first prompt — the dashboard showed active work as
+# "completed" with 0 duration, and the drift/alert session-end hooks fired on
+# every turn.
+# ===========================================================================
+
+class TestSessionLifecycle:
+
+    def test_zero_duration_invoke_agent_marker_keeps_session_active(self):
+        # Claude Code maps each user_prompt to a zero-duration invoke_agent
+        # span (end_time == start_time). It marks the START of a turn.
+        pipeline, db = _make_pipeline()
+        marker = make_invoke_agent_span(session_id="s1", duration_ms=0.0)
+
+        pipeline.process(marker)
+
+        session = db.get_session("s1")
+        assert session is not None
+        assert session.status == "active"
+
+    def test_streaming_activity_keeps_session_active(self):
+        # A marker followed by real LLM activity is still an ongoing session.
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_invoke_agent_span(session_id="s1", duration_ms=0.0))
+        pipeline.process(make_llm_span(session_id="s1"))
+
+        assert db.get_session("s1").status == "active"
+
+    def test_real_invoke_agent_span_completes_session(self):
+        # The SDK @watch() path emits one invoke_agent span that brackets the
+        # whole run (end_time strictly after start_time). That DOES complete it.
+        pipeline, db = _make_pipeline()
+        end_span = make_invoke_agent_span(session_id="s1", duration_ms=5000.0)
+
+        pipeline.process(end_span)
+
+        assert db.get_session("s1").status == "completed"
+
+    def test_activity_reactivates_mistakenly_completed_session(self):
+        # An in-flight session left "completed" (e.g. by the old bug, or a
+        # prior restart) must self-heal when new activity arrives.
+        pipeline, db = _make_pipeline()
+        db.upsert_session(make_session(session_id="s1", status="completed"))
+
+        pipeline.process(make_llm_span(session_id="s1"))
+
+        assert db.get_session("s1").status == "active"
