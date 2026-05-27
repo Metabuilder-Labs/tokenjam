@@ -150,6 +150,8 @@ def make_session(
     status: str = "completed",
     duration_seconds: float = 60.0,
     plan_tier: str = "api",
+    started_at=None,
+    ended_at=None,
 ) -> SessionRecord:
     """
     Create a SessionRecord with sensible defaults.
@@ -157,15 +159,23 @@ def make_session(
     `plan_tier` defaults to "api" so existing tests see dollar figures
     rendered normally (least-disruption). Tests for subscription / local /
     unknown rendering paths should pass it explicitly.
+
+    Pass `started_at` / `ended_at` to control the timeline explicitly (e.g.
+    to test ordering by last activity); otherwise they derive from
+    `duration_seconds` ending at "now".
     """
     now = utcnow()
-    started = now - timedelta(seconds=duration_seconds)
+    started = started_at or (now - timedelta(seconds=duration_seconds))
+    if ended_at is not None:
+        ended = ended_at
+    else:
+        ended = now if status == "completed" else None
 
     return SessionRecord(
         session_id=session_id or new_uuid(),
         agent_id=agent_id,
         started_at=started,
-        ended_at=now if status == "completed" else None,
+        ended_at=ended,
         conversation_id=conversation_id or new_uuid(),
         status=status,
         total_cost_usd=total_cost_usd,

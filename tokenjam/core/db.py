@@ -721,9 +721,14 @@ class DuckDBBackend:
         )
 
     def get_completed_sessions(self, agent_id: str, limit: int) -> list[SessionRecord]:
+        # Order by last activity (ended_at), not start time. A short fragment
+        # that *started* later must not hide a long-running session that was
+        # still active afterwards — otherwise the status tile shows a 40s blip
+        # instead of the real multi-hour session. Falls back to started_at when
+        # ended_at is NULL.
         cur = self.conn.execute(
             "SELECT * FROM sessions WHERE agent_id = $1 AND status = 'completed' "
-            "ORDER BY started_at DESC LIMIT $2",
+            "ORDER BY COALESCE(ended_at, started_at) DESC LIMIT $2",
             [agent_id, limit],
         )
         rows = cur.fetchall()

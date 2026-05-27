@@ -241,9 +241,17 @@ def _onboard_claude_code(
 
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
-    # service.namespace groups repos under one dashboard "project". Default to
-    # the git org; --project overrides (e.g. org "aquanodeio" -> "aquanode").
-    namespace = project_override or _derive_org_name()
+    # Project name = OTel service.namespace, the key the dashboard groups by.
+    # A meta-repo (e.g. git repo "harness" holding all of "aquanode") wants a
+    # human project name, so prompt with the repo name as default. --project
+    # skips the prompt for non-interactive use.
+    if project_override:
+        namespace = project_override
+    else:
+        namespace = click.prompt(
+            "Project name (groups related repos under one dashboard tile)",
+            default=project_name, show_default=True,
+        ).strip() or project_name
 
     if budget is None:
         budget = click.prompt(
@@ -949,30 +957,6 @@ def _derive_project_name() -> str:
     except Exception:
         pass
     return Path.cwd().name.lower()
-
-
-def _derive_org_name() -> str:
-    """
-    Derive the org/owner slug from the git remote, for service.namespace.
-    e.g. https://github.com/Aquanodeio/harness.git -> "aquanodeio"
-         git@github.com:Aquanodeio/harness.git     -> "aquanodeio"
-    Returns "" when there is no readable git remote (no namespace written).
-    """
-    try:
-        result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=3,
-        )
-        if result.returncode == 0:
-            url = result.stdout.strip().rstrip("/").removesuffix(".git")
-            # Normalize ssh ":" and https "//" separators, then the org is the
-            # second-to-last path segment (… / ORG / REPO).
-            parts = [p for p in url.replace(":", "/").split("/") if p]
-            if len(parts) >= 2:
-                return parts[-2].lower()
-    except Exception:
-        pass
-    return ""
 
 
 def _daemon_already_running() -> bool:

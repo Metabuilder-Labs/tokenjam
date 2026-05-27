@@ -347,7 +347,7 @@ def test_onboard_claude_code_writes_settings(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     assert result.exit_code == 0
     assert settings_path.exists()
@@ -371,7 +371,7 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     data = json.loads(settings_path.read_text())
     # Original top-level key preserved
@@ -391,7 +391,7 @@ def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     # write_config should have been called with an TjConfig containing a claude-code-* agent
     assert mock_write.called
@@ -408,13 +408,57 @@ def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x"], input="7.0\n")
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x", "--project", "aquanode"], input="7.0\n")
 
     assert result.exit_code == 0
     assert mock_write.called
     saved_config = mock_write.call_args[0][0]
     agent_id = next(k for k in saved_config.agents if k.startswith("claude-code-"))
     assert saved_config.agents[agent_id].budget.daily_usd == 7.0
+
+
+def test_onboard_claude_code_project_flag_sets_namespace(runner, tmp_path):
+    """--project writes service.namespace into the project OTEL_RESOURCE_ATTRIBUTES."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    with runner.isolated_filesystem() as cwd, \
+         patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ])
+        assert result.exit_code == 0
+        attrs = json.loads(
+            (Path(cwd) / ".claude" / "settings.json").read_text()
+        )["env"]["OTEL_RESOURCE_ATTRIBUTES"]
+
+    assert "service.name=claude-code-" in attrs
+    assert "service.namespace=aquanode" in attrs
+
+
+def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
+    """Without --project, onboard prompts for a project name and uses the answer."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    with runner.isolated_filesystem() as cwd, \
+         patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        # First prompt is the project name; budget is supplied via flag.
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x",
+        ], input="myproject\n")
+        assert result.exit_code == 0
+        attrs = json.loads(
+            (Path(cwd) / ".claude" / "settings.json").read_text()
+        )["env"]["OTEL_RESOURCE_ATTRIBUTES"]
+
+    assert "service.namespace=myproject" in attrs
 
 
 def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
@@ -458,7 +502,7 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -504,7 +548,7 @@ def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
