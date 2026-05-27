@@ -194,6 +194,10 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS billing_account TEXT;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS plan_tier       TEXT DEFAULT 'unknown'"
     )),
+    # Migration 5: service_namespace on sessions — the OTel service.namespace
+    # the session's service rolls up under (the dashboard's "project" grouping
+    # key). Nullable; sessions whose telemetry carried no namespace stay NULL.
+    (5, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_namespace TEXT"),
 ]
 
 
@@ -275,6 +279,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         tool_call_count=d.get("tool_call_count") or 0,
         error_count=d.get("error_count") or 0,
         plan_tier=d.get("plan_tier") or "unknown",
+        service_namespace=d.get("service_namespace"),
     )
 
 
@@ -420,8 +425,8 @@ class DuckDBBackend:
             INSERT INTO sessions (
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
-                tool_call_count, error_count, plan_tier
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                tool_call_count, error_count, plan_tier, service_namespace
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -431,14 +436,15 @@ class DuckDBBackend:
                 cache_tokens = EXCLUDED.cache_tokens,
                 tool_call_count = EXCLUDED.tool_call_count,
                 error_count = EXCLUDED.error_count,
-                plan_tier = EXCLUDED.plan_tier
+                plan_tier = EXCLUDED.plan_tier,
+                service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace)
             """,
             [
                 session.session_id, session.agent_id, session.conversation_id,
                 session.started_at, session.ended_at, session.status,
                 session.total_cost_usd, session.input_tokens, session.output_tokens,
                 session.cache_tokens, session.tool_call_count, session.error_count,
-                session.plan_tier,
+                session.plan_tier, session.service_namespace,
             ],
         )
 

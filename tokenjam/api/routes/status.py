@@ -64,6 +64,7 @@ async def get_status(
 
         agent_data = {
             "agent_id": aid,
+            "namespace": session.service_namespace if session else None,
             "status": session.effective_status if session else "idle",
             "session_id": session.session_id if session else None,
             "cost_today": today_cost,

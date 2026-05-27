@@ -408,3 +408,29 @@ class TestSessionLifecycle:
         pipeline.process(make_llm_span(session_id="s1"))
 
         assert db.get_session("s1").status == "active"
+
+
+class TestServiceNamespace:
+    """service.namespace (project grouping) capture on the session."""
+
+    def test_session_captures_service_namespace(self):
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_llm_span(session_id="s1", service_namespace="aquanode"))
+
+        assert db.get_session("s1").service_namespace == "aquanode"
+
+    def test_namespace_late_resolves_from_later_span(self):
+        # A tool span with no namespace creates the session; a later LLM span
+        # that carries the namespace backfills it.
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_invoke_agent_span(session_id="s1", service_namespace=None))
+        assert db.get_session("s1").service_namespace is None
+
+        pipeline.process(make_llm_span(session_id="s1", service_namespace="aquanode"))
+        assert db.get_session("s1").service_namespace == "aquanode"
+
+    def test_namespace_absent_stays_none(self):
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_llm_span(session_id="s1"))
+
+        assert db.get_session("s1").service_namespace is None

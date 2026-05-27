@@ -248,6 +248,10 @@ class IngestPipeline:
                 resolved = self._resolve_plan_tier(span.billing_account)
                 if resolved != "unknown":
                     existing.plan_tier = resolved
+            # Late-resolve service_namespace if an earlier span (e.g. a tool
+            # span on a fresh session) carried none.
+            if existing.service_namespace is None and span.service_namespace:
+                existing.service_namespace = span.service_namespace
             return existing
 
         # New session
@@ -266,6 +270,7 @@ class IngestPipeline:
             tool_call_count=1 if span.tool_name else 0,
             error_count=1 if span.status_code == SpanStatus.ERROR else 0,
             plan_tier=plan_tier,
+            service_namespace=span.service_namespace,
         )
 
     def _resolve_plan_tier(self, billing_account: str | None) -> str:

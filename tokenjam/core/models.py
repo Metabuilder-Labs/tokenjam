@@ -73,6 +73,10 @@ class NormalizedSpan:
     # Provider-only billing identifier (anthropic | openai | google | bedrock
     # | local.ollama). Plan tier lives on SessionRecord, not here.
     billing_account: str | None    = None
+    # OTel service.namespace — the logical "project" this service rolls up
+    # under (e.g. all Aquanodeio/* repos -> "aquanode"). Transient on the span;
+    # persisted on the session it creates so the dashboard can group by it.
+    service_namespace: str | None  = None
 
 
 @dataclass
@@ -95,6 +99,10 @@ class SessionRecord:
     # default to "unknown" — `tj optimize` suppresses dollar figures for those.
     # Valid values: see VALID_PLAN_TIERS in tokenjam.otel.semconv.
     plan_tier:       str          = "unknown"
+    # OTel service.namespace — the logical "project" this session's service
+    # rolls up under (e.g. repo `Aquanodeio/harness` -> namespace "aquanode").
+    # Drives dashboard grouping. None when the telemetry carried no namespace.
+    service_namespace: str | None = None
 
     @property
     def duration_seconds(self) -> float | None:

@@ -648,11 +648,20 @@ function StatusView() {
   if (!data) return html`<div class="empty">Loading...</div>`;
   if (!data.agents.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
-  return html`
-    <div class="page-title">Status</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on an agent tile for details</div>
-    <div class="cards">
-      ${data.agents.map(a => html`
+  // Group agent tiles by project (service.namespace). Agents whose telemetry
+  // carried no namespace fall under "Ungrouped".
+  const UNGROUPED = ' ungrouped';
+  const groups = {};
+  for (const a of data.agents) {
+    const key = a.namespace || UNGROUPED;
+    (groups[key] = groups[key] || []).push(a);
+  }
+  const groupKeys = Object.keys(groups).sort((x, y) =>
+    x === UNGROUPED ? 1 : y === UNGROUPED ? -1 : x.localeCompare(y));
+  // Only show project headers when at least one agent has a real namespace.
+  const showHeadings = groupKeys.some(k => k !== UNGROUPED);
+
+  const agentCard = (a) => html`
         <div class="card clickable" onClick=${() => { location.hash = '#/traces'; }}>
           <div class="card-header">
             <span class="status-dot ${a.status}"></span>
@@ -665,9 +674,21 @@ function StatusView() {
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
-        </div>
-      `)}
-    </div>
+        </div>`;
+
+  return html`
+    <div class="page-title">Status</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on an agent tile for details</div>
+    ${groupKeys.map(key => html`
+      ${showHeadings ? html`
+        <div style="display:flex;align-items:baseline;gap:10px;margin:18px 0 10px;font-family:'Geist Mono',monospace">
+          <span style="font-size:13px;font-weight:600;color:var(--text)">${key === UNGROUPED ? 'Ungrouped' : key}</span>
+          <span style="font-size:12px;color:var(--text-dim)">${groups[key].length} agent${groups[key].length > 1 ? 's' : ''} · ${fmtCost(groups[key].reduce((s, a) => s + (a.cost_today || 0), 0))} today</span>
+        </div>` : null}
+      <div class="cards">
+        ${groups[key].map(agentCard)}
+      </div>
+    `)}
     ${alerts.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>

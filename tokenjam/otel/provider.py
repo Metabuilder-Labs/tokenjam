@@ -14,7 +14,7 @@ from opentelemetry.trace import SpanKind as OtelSpanKind
 
 from tokenjam.core.models import NormalizedSpan, SpanStatus, SpanKind
 from tokenjam.core.config import TjConfig
-from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
+from tokenjam.otel.semconv import GenAIAttributes, ResourceAttributes, TjAttributes
 
 if TYPE_CHECKING:
     from tokenjam.core.ingest import IngestPipeline
@@ -88,6 +88,12 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
     # Map gen_ai.provider.name values to billing_account (provider-only).
     billing_account = attrs.pop(TjAttributes.BILLING_ACCOUNT, None) or _provider_to_billing_account(provider)
 
+    # service.namespace is a resource attribute (set on the TracerProvider /
+    # OTEL_RESOURCE_ATTRIBUTES), not a span attribute.
+    resource = getattr(otel_span, "resource", None)
+    resource_attrs = dict(resource.attributes) if resource and resource.attributes else {}
+    service_namespace = resource_attrs.get(ResourceAttributes.SERVICE_NAMESPACE)
+
     # Convert int tokens to int (OTel may store as strings)
     if input_tokens is not None:
         input_tokens = int(input_tokens)
@@ -157,6 +163,7 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
         attributes=attrs,
         events=events,
         billing_account=billing_account,
+        service_namespace=service_namespace,
     )
 
 

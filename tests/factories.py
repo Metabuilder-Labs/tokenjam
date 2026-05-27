@@ -20,6 +20,7 @@ def make_invoke_agent_span(
     duration_ms: float = 0.0,
     start_time=None,
     trace_id: str | None = None,
+    service_namespace: str | None = None,
 ) -> NormalizedSpan:
     """Create an ``invoke_agent`` span.
 
@@ -46,6 +47,7 @@ def make_invoke_agent_span(
         agent_id=agent_id,
         session_id=session_id,
         conversation_id=conversation_id,
+        service_namespace=service_namespace,
     )
 
 
@@ -67,6 +69,7 @@ def make_llm_span(
     session_id: str | None = None,
     extra_attributes: dict | None = None,
     billing_account: str | None = "anthropic",
+    service_namespace: str | None = None,
 ) -> NormalizedSpan:
     """
     Create a NormalizedSpan representing a single LLM call.
@@ -100,6 +103,7 @@ def make_llm_span(
         conversation_id=conversation_id,
         attributes=attrs,
         billing_account=billing_account,
+        service_namespace=service_namespace,
     )
 
 

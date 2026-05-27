@@ -415,3 +415,37 @@ async def test_status_shows_live_session_over_empty_marker(tmp_path):
         assert cc["output_tokens"] == 1321
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_returns_service_namespace(tmp_path):
+    """The status tile carries service.namespace so the dashboard groups by project."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="s1",
+            service_namespace="aquanode"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        agents = {a["agent_id"]: a for a in resp.json()["agents"]}
+        assert agents["claude-code-harness"]["namespace"] == "aquanode"
+    finally:
+        db.close()

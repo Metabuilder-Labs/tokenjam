@@ -36,13 +36,17 @@ from tokenjam.utils.formatting import console
               help="Plan tier for the provider being onboarded. Skips the "
                    "interactive plan prompt when set. Choices: api / pro / "
                    "max_5x / max_20x (Anthropic), plus / team / enterprise (OpenAI).")
+@click.option("--project", "project_override", default=None,
+              help="Project name to group this repo under in the dashboard "
+                   "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
+                   "'aquanode'). Defaults to the git org. Used with --claude-code.")
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
-                reconfigure: bool, plan: str | None) -> None:
+                reconfigure: bool, plan: str | None, project_override: str | None) -> None:
     """Interactive setup wizard for tj."""
     if claude_code:
-        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan)
+        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan, project_override)
         return
     if codex:
         _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan)
@@ -221,6 +225,7 @@ def _onboard_claude_code(
     force: bool,
     reconfigure: bool = False,
     plan_override: str | None = None,
+    project_override: str | None = None,
 ) -> None:
     """Configure Claude Code to send telemetry to tj."""
     from tokenjam.core.config import (
@@ -236,6 +241,9 @@ def _onboard_claude_code(
 
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
+    # service.namespace groups repos under one dashboard "project". Default to
+    # the git org; --project overrides (e.g. org "aquanodeio" -> "aquanode").
+    namespace = project_override or _derive_org_name()
 
     if budget is None:
         budget = click.prompt(
@@ -365,7 +373,10 @@ def _onboard_claude_code(
             project_settings = {}
 
     project_env: dict = project_settings.get("env", {})
-    project_env["OTEL_RESOURCE_ATTRIBUTES"] = f"service.name={agent_id}"
+    resource_attr = f"service.name={agent_id}"
+    if namespace:
+        resource_attr += f",service.namespace={namespace}"
+    project_env["OTEL_RESOURCE_ATTRIBUTES"] = resource_attr
     project_settings["env"] = project_env
     project_settings_path.write_text(json_mod.dumps(project_settings, indent=2) + "\n")
 
@@ -938,6 +949,30 @@ def _derive_project_name() -> str:
     except Exception:
         pass
     return Path.cwd().name.lower()
+
+
+def _derive_org_name() -> str:
+    """
+    Derive the org/owner slug from the git remote, for service.namespace.
+    e.g. https://github.com/Aquanodeio/harness.git -> "aquanodeio"
+         git@github.com:Aquanodeio/harness.git     -> "aquanodeio"
+    Returns "" when there is no readable git remote (no namespace written).
+    """
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip().rstrip("/").removesuffix(".git")
+            # Normalize ssh ":" and https "//" separators, then the org is the
+            # second-to-last path segment (… / ORG / REPO).
+            parts = [p for p in url.replace(":", "/").split("/") if p]
+            if len(parts) >= 2:
+                return parts[-2].lower()
+    except Exception:
+        pass
+    return ""
 
 
 def _daemon_already_running() -> bool:
