@@ -188,6 +188,56 @@ class ApiBackend:
     def get_recent_spans(self, session_id: str, limit: int) -> list[NormalizedSpan]:
         return []
 
+    def get_baseline(self, agent_id: str):
+        """
+        Fetch a drift baseline for a single agent via /api/v1/drift?agent_id=X.
+
+        Returns DriftBaseline or None. Mirrors the StorageBackend method so
+        cmd_drift can call it transparently in API-shim mode (#68 §3).
+        """
+        from tokenjam.core.models import DriftBaseline
+        try:
+            data = self._get("/api/v1/drift", {"agent_id": agent_id})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        b = data.get("baseline")
+        if not b:
+            return None
+        return DriftBaseline(
+            agent_id=agent_id,
+            sessions_sampled=int(b.get("sessions_sampled", 0)),
+            computed_at=(
+                datetime.fromisoformat(b["computed_at"])
+                if b.get("computed_at") else datetime.now()
+            ),
+            avg_input_tokens=b.get("avg_input_tokens"),
+            stddev_input_tokens=b.get("stddev_input_tokens"),
+            avg_output_tokens=b.get("avg_output_tokens"),
+            stddev_output_tokens=b.get("stddev_output_tokens"),
+            avg_session_duration_s=b.get("avg_session_duration_s"),
+            stddev_session_duration=b.get("stddev_session_duration"),
+            avg_tool_call_count=b.get("avg_tool_call_count"),
+            stddev_tool_call_count=b.get("stddev_tool_call_count"),
+        )
+
+    def list_baseline_agents(self) -> list[str]:
+        """
+        Enumerate agent IDs that have a drift baseline. Hits /api/v1/drift
+        (no agent_id) which returns {"agents": [...]} for every baseline.
+
+        Used by cmd_drift to discover agents under API-shim mode (#68 §3).
+        """
+        try:
+            data = self._get("/api/v1/drift")
+        except Exception:
+            return []
+        return [
+            a["agent_id"] for a in data.get("agents", [])
+            if a.get("agent_id")
+        ]
+
     def fetch_optimize_report(
         self,
         *,

@@ -20,7 +20,12 @@ def cmd_drift(ctx: click.Context, agent: str | None, output_json: bool) -> None:
     config = ctx.obj["config"]
     agent_filter = agent or ctx.obj.get("agent")
 
-    # Discover agents with baselines
+    # Discover agents with baselines. Two paths:
+    # - Direct DB (no daemon, or daemon stopped): SELECT from drift_baselines.
+    # - API shim (daemon up, db.conn is None): hit /api/v1/drift via the
+    #   ApiBackend. Without this fallback `tj drift` reported "No drift
+    #   baselines found" even when drift_detected had clearly fired —
+    #   confusing users (#68 §3).
     if agent_filter:
         agent_ids = [agent_filter]
     elif hasattr(db, "conn"):
@@ -28,6 +33,9 @@ def cmd_drift(ctx: click.Context, agent: str | None, output_json: bool) -> None:
             "SELECT DISTINCT agent_id FROM drift_baselines ORDER BY agent_id"
         ).fetchall()
         agent_ids = [r[0] for r in rows]
+    elif hasattr(db, "list_baseline_agents"):
+        # ApiBackend method
+        agent_ids = db.list_baseline_agents()
     else:
         agent_ids = []
 
