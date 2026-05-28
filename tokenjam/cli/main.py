@@ -24,7 +24,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         config.storage.path = db_path
 
     # Commands that don't need a database connection
-    no_db_commands = {"stop", "uninstall", "onboard", "mcp", "demo"}
+    no_db_commands = {"stop", "uninstall", "onboard", "mcp", "demo", "policy"}
     invoked = ctx.invoked_subcommand
     if invoked in no_db_commands:
         ctx.obj["config"] = config
@@ -83,6 +83,8 @@ from tokenjam.cli.cmd_doctor import cmd_doctor  # noqa: E402
 from tokenjam.cli.cmd_budget import cmd_budget  # noqa: E402
 from tokenjam.cli.cmd_optimize import cmd_optimize  # noqa: E402
 from tokenjam.cli.cmd_backfill import cmd_backfill  # noqa: E402
+from tokenjam.cli.cmd_report import cmd_report  # noqa: E402
+from tokenjam.cli.cmd_policy import cmd_policy  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 cli.add_command(cmd_status, name="status")
@@ -99,6 +101,8 @@ cli.add_command(cmd_doctor, name="doctor")
 cli.add_command(cmd_budget, name="budget")
 cli.add_command(cmd_optimize, name="optimize")
 cli.add_command(cmd_backfill, name="backfill")
+cli.add_command(cmd_report, name="report")
+cli.add_command(cmd_policy, name="policy")
 
 # cmd_drift is provided by task 05 — register if available
 try:

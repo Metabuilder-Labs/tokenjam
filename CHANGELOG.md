@@ -5,6 +5,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+- **`tj policy list` read-only preview.** Consolidated view of existing alerts, drift, schema, sensitive-actions, capture, and per-provider budget configuration under a unified `policy` framing. Each row points back to the TOML section it was read from. `--json` supported for machine readers. The full `tj policy add | edit | apply | remove | test` surface (and the underlying unified `[policy]` config migration) lands next sprint. See `docs/policy/overview.md`.
+- **Three new `tj optimize` analyzers (Wave 2 of the May 26 sprint):**
+  - **`cache-efficacy`** (Cache product, no content capture needed). Measures the user's current prompt-caching usage per (provider, model). Anthropic fully supported; OpenAI / Gemini best-effort; Bedrock / LiteLLM / Cohere unsupported in v1. Flags rows with ≥100K input tokens and <30% caching efficacy.
+  - **`cache-recommend`** (Cache product, Anthropic-only v1, requires `[capture] prompts = true`). Walks captured prompts, hashes first ~2000 chars, flags prefixes shared by ≥3 calls as `cache_control` breakpoint candidates.
+  - **`workflow-restructure`** (Script product). Clusters sessions by `(tool_name, arg_shape)` signature. Flags clusters with ≥20 instances as candidates for replacement with deterministic shell scripts. `arg_shape` classifies args by type (`file_path` / `command_string` / `json_object` / `array` / `number` / `boolean` / `string`) so structural patterns cluster even when values vary. Degrades to tool-names-only when `capture.tool_inputs = false`.
+  - **`prompt-bloat`** (Trim product, optional `tokenjam[bloat]` extra). LLMLingua-2 token-significance classifier identifies long low-significance regions in captured prompts. Self-registers without the extra installed; surfaces a clear install hint on first run if missing. Model downloads on first use (~110MB) and caches under `~/.cache/tokenjam/models/`. Never auto-rewrites prompts — recommendations only.
+- **`tj report --bloat [<agent_id>]` command.** Generates an HTML visualization of the Trim analyzer's findings. Output saved under `~/.cache/tokenjam/reports/` and opened in the user's default browser. `--no-open` writes without opening.
+- **`OptimizeReport.findings` generic dict.** Wave 2 analyzers attach their results here keyed by registration name. Adding a new analyzer no longer requires a typed slot on `OptimizeReport`. The existing typed slots (`downgrade`, `budgets`) stay for backwards compatibility with cmd_optimize and the MCP server.
+- **`tokenjam[bloat]` optional dependency.** Pulls `llmlingua>=0.2` (and transitively torch + transformers, ~2GB). Kept out of the base install. Documented in `docs/optimize/trim.md`.
+- **Per-analyzer documentation.** New pages: `docs/optimize/cache.md` (per-provider support table for cache-efficacy + recommendation engine for cache-recommend), `docs/optimize/script.md` (worked example of signature definition), `docs/optimize/trim.md` (install + capture requirements + performance numbers).
+- **v1.1 plan-tier-aware `tj optimize` rendering.** Subscription users (`pro` / `max_5x` / `max_20x` / `plus` / `team` / `enterprise`) see "implied API value" framing — never a dollar "spend" figure they didn't pay. Header surfaces plan label + monthly fee multiplier; downgrade body reframes savings as token-share against the plan's allocation. Local users see token-only framing. API users see the existing dollar-denominated rendering. JSON output carries top-level `plan` and `pricing_mode` fields plus a `monthly_tokens_freed` field on downgrade findings for non-API plans. Budget projections suppressed for subscription users (no dollar-denominated cap).
+- **Langfuse ingest adapter** — new `tj backfill langfuse` subcommand with `--source-url` (live API) and `--source-file` (JSON dump) modes. Maps Langfuse `Observation` records onto `NormalizedSpan` with deterministic span IDs for idempotent re-runs. `billing_account` derived from model name (claude-* → anthropic, gpt-* → openai, gemini-* → google). Supports `{data: [...]}`, bare list, and NDJSON input shapes. See `docs/backfill/langfuse.md` and `docs/backfill/overview.md`.
+- **`--compare` flag on `tj cost` and `tj optimize`** — surfaces a window-cost diff against a prior period. Accepts `previous` / `last-week` / `last-month` / `last-7d` / `last-30d` keywords (equal-length prior window) or `YYYY-MM-DD:YYYY-MM-DD` for explicit ranges. Output includes spend delta, token delta, and top per-agent/per-model shifts with ▲/▼ indicators. `--json` returns a structured `CostDiff` payload.
+- **Plan tier as a first-class concept.** New `plan_tier` column on `SessionRecord` (`api` / `pro` / `max_5x` / `max_20x` / `plus` / `team` / `enterprise` / `local` / `unknown`). `tj onboard --claude-code` and `tj onboard --codex` now prompt for the user's plan and write it to `[budget.<provider>] plan = "..."`. `tj onboard --reconfigure` re-runs the prompts against an existing config. `--plan` CLI flag bypasses the interactive prompt for scripted onboards.
+- **`billing_account` on spans.** Provider-only identifier (`anthropic` / `openai` / `google` / `bedrock` / `local.ollama`) set by every integration that writes spans (OTel patches, Claude Code JSONL backfill, OTLP HTTP ingest, OTLP logs ingest). Analyzers JOIN through `SessionRecord` for plan context.
+- **`pricing_mode` derived property on `SessionRecord`.** Returns `local` / `subscription` / `api` / `unknown`. Single source of truth for plan-tier rendering.
+- **`capture.include_content` documentation.** New "Content capture and privacy" section in `docs/configuration.md` documents the existing four-flag `[capture]` config (`prompts` / `completions` / `tool_inputs` / `tool_outputs`), the strip-on-ingest gate in `IngestPipeline.process()`, and the precedence with `alerts.include_captured_content`.
+- **Registry-driven optimize analyzers.** `tokenjam/core/optimize.py` split into `tokenjam/core/optimize/` package with `registry.py`, `runner.py`, `types.py`, and `analyzers/` subpackage using `pkgutil` auto-discovery. New analyzers drop a file under `analyzers/` with a `@register("name")` decorator — nothing else needs editing. See `tokenjam/core/optimize/README.md`.
+- **`TjAttributes.BILLING_ACCOUNT` and `TjAttributes.PLAN_TIER`** semconv constants, plus `VALID_PLAN_TIERS` / `SUBSCRIPTION_PLAN_TIERS` frozensets in `tokenjam.otel.semconv`.
+- **v1.1 honest-output spec** committed at `docs/internal/specs/v1.1-honest-output.md` for Wave 1 reference.
+
+### Changed
+- **`tj optimize --finding` replaces `--only`.** Registry-driven valid choices (`model-downgrade`, `budget-projection`, plus any future analyzer). Repeatable. The `--only model|budget` flag has been removed (no backwards-compat per the no-external-users decision).
+- **`tj onboard` no longer auto-writes `[budget.anthropic] usd = 200`.** Subscription users see no auto-written ceiling; API users are explicitly prompted for an optional self-imposed monthly ceiling.
+- **`tj status` surfaces unknown plan tiers.** When sessions exist with `plan_tier = 'unknown'`, prints a one-line note pointing the user at `tj onboard --reconfigure`. Exit code unchanged.
+- **`tj optimize` plan-tier-aware rendering.** When every session in the window has `plan_tier = 'unknown'`, dollar figures are suppressed and a header note explains why. Mixed / partial-unknown windows render normally with an advisory note.
+- **MCP `get_optimize_report` tool.** Now accepts `findings: list[str]` (was `only: str`). Docstring surfaces for both API-billing and subscription-plan-efficiency phrasings.
+
+### Internal
+- DuckDB migration 4 adds `spans.billing_account TEXT` and `sessions.plan_tier TEXT DEFAULT 'unknown'`. New columns use `ALTER TABLE ADD COLUMN`; no backfill heuristics (product has no external users).
+- `IngestPipeline._build_or_update_session` late-resolves `plan_tier` when a session starts on a tool span (no billing signal) and a later LLM span carries `billing_account`. Once set to a known value, plan_tier is never demoted back to `unknown`.
+- Test factories `make_session(plan_tier="api")` and `make_llm_span(billing_account="anthropic")` carry safe defaults so existing tests behave as before.
+
 ## [0.1.7] - 2026-04-13
 
 ### Added

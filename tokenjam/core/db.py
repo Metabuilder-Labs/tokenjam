@@ -182,6 +182,18 @@ MIGRATIONS: list[tuple[int, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_spans_tool_name   ON spans(tool_name);\n"
         "CREATE INDEX IF NOT EXISTS idx_spans_conv_id     ON spans(conversation_id)"
     )),
+    # Migration 4: billing_account on spans, plan_tier on sessions.
+    # `billing_account` is provider-only (anthropic | openai | google |
+    # bedrock | local.ollama). Plan tier lives on sessions, not spans.
+    # `plan_tier` defaults to 'unknown' for backfilled rows; new sessions
+    # get it set at creation time from ProviderBudget.plan.
+    (4, (
+        # DuckDB ALTER TABLE doesn't support NOT NULL on added columns, so
+        # plan_tier is nullable in the schema. Application code defaults
+        # NULL to 'unknown' on read (see _row_to_session).
+        "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS billing_account TEXT;\n"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS plan_tier       TEXT DEFAULT 'unknown'"
+    )),
 ]
 
 
@@ -243,6 +255,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         cost_usd=d.get("cost_usd"),
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
+        billing_account=d.get("billing_account"),
     )
 
 
@@ -261,6 +274,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         cache_tokens=d.get("cache_tokens") or 0,
         tool_call_count=d.get("tool_call_count") or 0,
         error_count=d.get("error_count") or 0,
+        plan_tier=d.get("plan_tier") or "unknown",
     )
 
 
@@ -352,9 +366,18 @@ class DuckDBBackend:
     # -- writes --
 
     def insert_span(self, span: NormalizedSpan) -> None:
+        # Named-column INSERT so future migrations adding columns don't break
+        # positional-arg ordering (migration 4 added billing_account at the
+        # end of the table, but we don't want to silently rely on that).
         self.conn.execute(
-            "INSERT INTO spans VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
+            "INSERT INTO spans ("
+            "span_id, trace_id, parent_span_id, session_id, agent_id, "
+            "name, kind, status_code, status_message, start_time, end_time, "
+            "duration_ms, attributes, provider, model, tool_name, "
+            "input_tokens, output_tokens, cache_tokens, cost_usd, "
+            "request_type, conversation_id, events, billing_account"
+            ") VALUES "
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -362,6 +385,7 @@ class DuckDBBackend:
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
+                span.billing_account,
             ],
         )
 
@@ -385,9 +409,19 @@ class DuckDBBackend:
         )
 
     def upsert_session(self, session: SessionRecord) -> None:
+        # Named-column INSERT for migration safety (plan_tier added in migration 4).
+        # plan_tier is updated on conflict because IngestPipeline late-resolves
+        # it: a session that started with billing_account=None (e.g. tool span
+        # first) can be promoted from 'unknown' to a real plan_tier when a
+        # later LLM span carries billing_account. The Python side never demotes
+        # a known plan_tier back to 'unknown', so always copying EXCLUDED is safe.
         self.conn.execute(
             """
-            INSERT INTO sessions VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            INSERT INTO sessions (
+                session_id, agent_id, conversation_id, started_at, ended_at,
+                status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
+                tool_call_count, error_count, plan_tier
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -396,13 +430,15 @@ class DuckDBBackend:
                 output_tokens = EXCLUDED.output_tokens,
                 cache_tokens = EXCLUDED.cache_tokens,
                 tool_call_count = EXCLUDED.tool_call_count,
-                error_count = EXCLUDED.error_count
+                error_count = EXCLUDED.error_count,
+                plan_tier = EXCLUDED.plan_tier
             """,
             [
                 session.session_id, session.agent_id, session.conversation_id,
                 session.started_at, session.ended_at, session.status,
                 session.total_cost_usd, session.input_tokens, session.output_tokens,
                 session.cache_tokens, session.tool_call_count, session.error_count,
+                session.plan_tier,
             ],
         )
 

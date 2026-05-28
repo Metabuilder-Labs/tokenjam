@@ -26,15 +26,26 @@ from tokenjam.utils.formatting import console
 @click.option("--no-daemon", is_flag=True, default=False,
               help="Skip background daemon installation")
 @click.option("--force", is_flag=True, help="Overwrite existing config")
+@click.option("--reconfigure", is_flag=True, default=False,
+              help="Re-prompt for plan tier and budget against an existing config. "
+                   "Equivalent to onboard but skips agent-runtime re-detection.")
+@click.option("--plan",
+              type=click.Choice(["api", "pro", "max_5x", "max_20x",
+                                  "plus", "team", "enterprise"]),
+              default=None,
+              help="Plan tier for the provider being onboarded. Skips the "
+                   "interactive plan prompt when set. Choices: api / pro / "
+                   "max_5x / max_20x (Anthropic), plus / team / enterprise (OpenAI).")
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
-                install_daemon: bool, no_daemon: bool, force: bool) -> None:
+                install_daemon: bool, no_daemon: bool, force: bool,
+                reconfigure: bool, plan: str | None) -> None:
     """Interactive setup wizard for tj."""
     if claude_code:
-        _onboard_claude_code(ctx, budget, no_daemon, force)
+        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan)
         return
     if codex:
-        _onboard_codex(ctx, budget, no_daemon, force)
+        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan)
         return
     existing = find_config_file()
     if existing and not force:
@@ -146,11 +157,48 @@ retention_days = 90
     console.print()
 
 
+_ANTHROPIC_PLAN_CHOICES = [
+    ("api",      "API (per-token billing through console.anthropic.com)"),
+    ("pro",      "Pro plan ($20/mo subscription)"),
+    ("max_5x",   "Max 5x plan ($100/mo subscription)"),
+    ("max_20x",  "Max 20x plan ($200/mo subscription)"),
+]
+
+_OPENAI_PLAN_CHOICES = [
+    ("api",        "API (per-token billing through platform.openai.com)"),
+    ("plus",       "ChatGPT Plus ($20/mo subscription)"),
+    ("team",       "ChatGPT Team ($25–30/seat subscription)"),
+    ("enterprise", "ChatGPT Enterprise"),
+]
+
+
+def _prompt_plan(provider_label: str, choices: list[tuple[str, str]],
+                 current: str | None = None) -> str:
+    """
+    Render a numbered menu and return the chosen plan key. `current` is the
+    existing value (shown as the default when reconfiguring).
+    """
+    console.print(f"\nHow do you pay for {provider_label}?")
+    for i, (_key, desc) in enumerate(choices, start=1):
+        console.print(f"  {i}) {desc}")
+    keys = [k for k, _ in choices]
+    default_idx = keys.index(current) + 1 if current in keys else 1
+    raw = click.prompt(
+        "Choose",
+        type=click.IntRange(1, len(choices)),
+        default=default_idx,
+        show_default=True,
+    )
+    return keys[int(raw) - 1]
+
+
 def _onboard_claude_code(
     ctx: click.Context,
     budget: float | None,
     no_daemon: bool,
     force: bool,
+    reconfigure: bool = False,
+    plan_override: str | None = None,
 ) -> None:
     """Configure Claude Code to send telemetry to tj."""
     from tokenjam.core.config import (
@@ -179,11 +227,40 @@ def _onboard_claude_code(
             config.agents[agent_id] = AgentConfig()
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
-        # Write a sensible default [budget.anthropic] for tj optimize projections
-        # if the user hasn't already configured one. Users can edit the value or
-        # delete the section; we never overwrite an existing budget.
-        if "anthropic" not in config.budgets:
-            config.budgets["anthropic"] = ProviderBudget(usd=200.0, cycle_start_day=1)
+
+        existing_plan = (
+            config.budgets["anthropic"].plan
+            if "anthropic" in config.budgets else None
+        )
+        # Prompt for plan tier when:
+        #   - this is a fresh onboard for this agent (no existing plan), or
+        #   - the user passed --reconfigure to explicitly re-prompt
+        # `plan_override` (from --plan CLI flag) bypasses the prompt entirely.
+        if existing_plan is None or reconfigure or plan_override:
+            if plan_override:
+                plan = plan_override
+            else:
+                plan = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES, current=existing_plan)
+            # Subscription plans don't get an auto-written budget ceiling.
+            usd: float | None = None
+            if plan == "api" and not plan_override:
+                # API users may want a self-imposed soft ceiling — only prompt
+                # when interactive (no --plan flag).
+                ceiling = click.prompt(
+                    "Monthly Anthropic API spend ceiling in USD (0 = no limit)",
+                    type=float, default=0.0, show_default=False,
+                )
+                if ceiling > 0:
+                    usd = ceiling
+            existing_budget = config.budgets.get("anthropic")
+            if existing_budget is not None:
+                existing_budget.plan = plan
+                if usd is not None:
+                    existing_budget.usd = usd
+            else:
+                config.budgets["anthropic"] = ProviderBudget(
+                    usd=usd, cycle_start_day=1, plan=plan,
+                )
         config_path = global_config_path
         write_config(config, config_path)
         console.print(f"  tj config updated: {config_path}")
@@ -191,11 +268,25 @@ def _onboard_claude_code(
         ingest_secret = secrets.token_hex(32)
         daily_usd = budget if budget and budget > 0 else None
         agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
+        if plan_override:
+            plan = plan_override
+        else:
+            plan = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES)
+        usd: float | None = None  # type: ignore[no-redef]
+        if plan == "api" and not plan_override:
+            ceiling = click.prompt(
+                "Monthly Anthropic API spend ceiling in USD (0 = no limit)",
+                type=float, default=0.0, show_default=False,
+            )
+            if ceiling > 0:
+                usd = ceiling
         config = TjConfig(
             version="1",
             agents=agents,
             security=SecurityConfig(ingest_secret=ingest_secret),
-            budgets={"anthropic": ProviderBudget(usd=200.0, cycle_start_day=1)},
+            budgets={"anthropic": ProviderBudget(
+                usd=usd, cycle_start_day=1, plan=plan,
+            )},
         )
         config_path = global_config_path
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -349,10 +440,19 @@ def _onboard_claude_code(
         console.print(f"  Ingest secret:       {secret[:8]}...")
     if backfill_msg:
         console.print(f"  Backfilled:          {backfill_msg}")
-    console.print(
-        "  Budget projection:   "
-        "[budget.anthropic] usd = 200 written to config (edit to change)"
-    )
+    # Surface what we wrote for [budget.anthropic]: the user's plan tier, and
+    # the spending ceiling only when one is set (API users may opt in to one).
+    from tokenjam.core.config import load_config as _lc
+    try:
+        _cfg = _lc(str(global_config_path))
+        _ab = _cfg.budgets.get("anthropic")
+        if _ab is not None and _ab.plan:
+            _line = f"[budget.anthropic] plan = \"{_ab.plan}\""
+            if _ab.usd:
+                _line += f", usd = {_ab.usd}"
+            console.print(f"  Budget projection:   {_line}")
+    except Exception:
+        pass
     console.print()
     if not want_daemon:
         console.print("[dim]Start the server:[/dim]  tj serve")
@@ -365,6 +465,8 @@ def _onboard_codex(
     budget: float | None,
     no_daemon: bool,
     force: bool,
+    reconfigure: bool = False,
+    plan_override: str | None = None,
 ) -> None:
     """Configure Codex CLI to send telemetry to tj."""
     try:
@@ -373,7 +475,7 @@ def _onboard_codex(
         import tomli as tomllib  # type: ignore[no-redef]
 
     from tokenjam.core.config import (
-        AgentConfig, BudgetConfig, TjConfig, SecurityConfig,
+        AgentConfig, BudgetConfig, ProviderBudget, TjConfig, SecurityConfig,
         load_config, write_config,
     )
 
@@ -408,16 +510,58 @@ def _onboard_codex(
             config.agents[agent_id] = AgentConfig()
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
+
+        existing_plan = (
+            config.budgets["openai"].plan
+            if "openai" in config.budgets else None
+        )
+        if existing_plan is None or reconfigure or plan_override:
+            if plan_override:
+                plan = plan_override
+            else:
+                plan = _prompt_plan("OpenAI / Codex", _OPENAI_PLAN_CHOICES, current=existing_plan)
+            usd: float | None = None
+            if plan == "api" and not plan_override:
+                ceiling = click.prompt(
+                    "Monthly OpenAI API spend ceiling in USD (0 = no limit)",
+                    type=float, default=0.0, show_default=False,
+                )
+                if ceiling > 0:
+                    usd = ceiling
+            existing_budget = config.budgets.get("openai")
+            if existing_budget is not None:
+                existing_budget.plan = plan
+                if usd is not None:
+                    existing_budget.usd = usd
+            else:
+                config.budgets["openai"] = ProviderBudget(
+                    usd=usd, cycle_start_day=1, plan=plan,
+                )
         write_config(config, config_path)
         console.print(f"  tj config updated: {config_path}")
     else:
         ingest_secret = secrets.token_hex(32)
         daily_usd = budget if budget and budget > 0 else None
         agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
+        if plan_override:
+            plan = plan_override
+        else:
+            plan = _prompt_plan("OpenAI / Codex", _OPENAI_PLAN_CHOICES)
+        usd: float | None = None  # type: ignore[no-redef]
+        if plan == "api" and not plan_override:
+            ceiling = click.prompt(
+                "Monthly OpenAI API spend ceiling in USD (0 = no limit)",
+                type=float, default=0.0, show_default=False,
+            )
+            if ceiling > 0:
+                usd = ceiling
         config = TjConfig(
             version="1",
             agents=agents,
             security=SecurityConfig(ingest_secret=ingest_secret),
+            budgets={"openai": ProviderBudget(
+                usd=usd, cycle_start_day=1, plan=plan,
+            )},
         )
         config_path.parent.mkdir(parents=True, exist_ok=True)
         write_config(config, config_path)

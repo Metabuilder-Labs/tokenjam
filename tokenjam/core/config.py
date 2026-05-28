@@ -145,12 +145,21 @@ class ProviderBudget:
     Distinct from BudgetConfig (per-agent daily/session alert thresholds).
     ProviderBudget is a recurring monthly ceiling — typed against a provider
     so projection scopes to the spend that actually counts toward that budget.
+
+    `plan` is the user's declared plan tier for this provider, written by
+    `tj onboard`. SessionRecord.plan_tier is set at session creation by
+    reading this field for the matching billing_account. Valid values: see
+    VALID_PLAN_TIERS in tokenjam.otel.semconv.
     """
     usd:                  float | None      = None
     cycle_start_day:      int               = 1
     # service.name values that count toward this budget. Empty = all services
     # billed by this provider.
     applies_to_services:  list[str]         = field(default_factory=list)
+    # Declared plan tier (api | pro | max_5x | max_20x | plus | team |
+    # enterprise | local). Defaults to None so missing config produces
+    # plan_tier='unknown' on sessions rather than a silent 'api' guess.
+    plan:                 str | None        = None
 
 
 @dataclass
@@ -310,6 +319,7 @@ def _parse(raw: dict) -> TjConfig:
             usd=prov_raw.get("usd"),
             cycle_start_day=int(prov_raw.get("cycle_start_day", 1)),
             applies_to_services=list(prov_raw.get("applies_to_services", [])),
+            plan=prov_raw.get("plan"),
         )
 
     return TjConfig(

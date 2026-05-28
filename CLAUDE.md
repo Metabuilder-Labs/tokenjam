@@ -37,34 +37,6 @@ cd sdk-ts && npm install && npm test
 ```
 
 
-## Repo Layout
-
-```
-tokenjam/
-├── tokenjam/                    Python package
-│   ├── cli/                Click CLI commands (one file per command)
-│   ├── core/               Domain logic — NO CLI or HTTP imports allowed here
-│   ├── otel/               OTel SDK wiring + semantic conventions
-│   ├── api/                FastAPI local REST API
-│   ├── mcp/                MCP stdio server (Claude Code integration)
-│   ├── sdk/                Python instrumentation SDK
-│   └── utils/              Formatting, time parsing, ID generation
-├── examples/               Runnable example agents (see examples/README.md)
-│   ├── single_provider/    One file per LLM provider integration
-│   ├── single_framework/   One file per framework integration
-│   ├── multi/              Multi-provider/framework examples + sample_docs/
-│   └── alerts_and_drift/   Alert and drift demos (no API keys needed)
-├── sdk-ts/                 TypeScript SDK (@tokenjam/sdk)
-├── pricing/                models.toml — community-maintained model pricing (USD per million tokens)
-└── tests/
-    ├── factories.py        Span factory — use this in ALL tests
-    ├── unit/               Pure logic tests, no I/O
-    ├── synthetic/          Span injection tests via factories.py
-    ├── agents/             Mock agent scenario scripts
-    ├── integration/        CLI + API integration tests
-    └── e2e/                Real LLM tests — skipped without API key env vars
-```
-
 ## Architecture
 
 ### Data Flow
@@ -92,18 +64,21 @@ Post-ingest hooks run synchronously after each span is written to DB:
 - **`tokenjam/core/cost.py`**: `calculate_cost()` (pure function, rounds to 8dp) + `CostEngine` (post-ingest hook that updates `spans.cost_usd` and `sessions.total_cost_usd` via `db.conn` — see db.py note). Pricing loaded from `pricing/models.toml`.
 - **`tokenjam/core/alerts.py`**: `AlertEngine` with 13 alert types, `CooldownTracker` (in-memory, per agent+type, resets on restart), `AlertDispatcher` routing to 6 channel types (stdout, file, ntfy, webhook, Discord, Telegram). `AlertEngine.fire()` is the external entry point for other modules (SchemaValidator, DriftDetector) to fire alerts. Suppressed alerts are still persisted to DB but not dispatched to channels. Hardcoded thresholds: retry loop fires at 4+ identical tool calls in last 6 spans; failure rate fires at >20% errors in last 20 spans (checked every 5th error); session duration default 3600s. Stdout and file channels always include full detail regardless of `include_captured_content` config.
 - **`tokenjam/core/drift.py`**: `DriftDetector` — Z-score based behavioral drift detection, fires at session end.
-- **`tokenjam/core/optimize.py`**: Two analyzers used by `tj optimize` and the `get_optimize_report` MCP tool. `analyze_model_downgrade()` flags sessions whose structural shape (input < 5K tokens AND output < 500 tokens AND tool_calls ≤ 5) matches a class of work where a cheaper alternative model is worth reviewing — never claims quality equivalence. `MODEL_DOWNGRADE_CAVEAT` is in the dataclass default so it cannot be removed accidentally. `project_budget()` projects current cycle spend against a `[budget.<provider>]` ceiling; only fires when budget > 0. Both functions operate on `db.conn` directly.
+- **`tokenjam/core/optimize/`**: Package powering `tj optimize` and the `get_optimize_report` MCP tool. Public API re-exported from `__init__.py`: `build_report()` (orchestrator), `report_to_dict()`, `ANALYZER_REGISTRY`, `ANALYZER_ORDER`, plus result dataclasses. Architecture: `registry.py` holds the `@register("name")` decorator and `ANALYZER_REGISTRY` dict; `runner.py` defines `ANALYZER_ORDER` and orchestrates execution; `types.py` holds `AnalyzerContext` + result dataclasses + `MODEL_DOWNGRADE_CAVEAT`. Individual analyzers live in `analyzers/`, each as a single file registering via `@register`: `model_downgrade.py` (structural candidates — input < 5K tokens AND output < 500 tokens AND tool_calls ≤ 5; never claims quality equivalence, caveat baked into dataclass default), `budget_projection.py` (per-provider cycle spend vs `[budget.<provider>]` ceiling; only fires when budget > 0), `cache_efficacy.py`, `cache_recommend.py`, `prompt_bloat.py`, `workflow_restructure.py`. Analyzers receive an `AnalyzerContext` and operate on `db.conn` directly. To add a new analyzer: drop a file under `analyzers/`, decorate with `@register("name")`, append to `ANALYZER_ORDER` if ordering matters — `cmd_optimize --finding` choices auto-derive from the registry.
+- **`tokenjam/core/ingest_adapters/`**: Third-party trace-export adapters that normalize external payloads (`langfuse.py`, `helicone.py`, `otlp.py`) into `NormalizedSpan` for ingest. Each is reachable as a `tj backfill <name>` subcommand and accepts `--source-url` (live API) or `--source-file` (offline JSON dump). Adapters write deterministic span IDs derived from the source's identifiers so re-runs are idempotent. `otlp.py` shares span-mapping logic with the live `POST /api/v1/spans` route via `tokenjam/otel/otlp_parsing.py`.
+- **`tokenjam/core/export/`**: Routing-config snippet generators for `tj optimize --export-config`. Currently `claude_code.py` emits a JSONC fragment under a `tokenjam.routing_recommendations` namespace with honest-framing caveat comments baked in. Writes to `~/.config/tokenjam/exports/`; never touches `~/.claude/settings.json` or other external configs (no `--apply` flag — Claude Code doesn't currently honor TokenJam routing keys, so auto-writing would change nothing and erode trust).
 - **`tokenjam/core/backfill.py`**: Parses Claude Code on-disk session JSONL files into `NormalizedSpan`s. Cost is recomputed from `pricing/models.toml` because the on-disk format has no `cost_usd`. The parser tolerates the dated `claude-<family>-<ver>-YYYYMMDD` model-name suffixes Anthropic ships (handled by `core/pricing.py.get_rates()`, which strips the trailing 8-digit date suffix when no exact pricing match exists). Idempotency relies on deterministic span IDs derived from `(session_id, message uuid)` / `(session_id, tool_use id)`.
 - **`tokenjam/core/schema_validator.py`**: Validates tool outputs against declared or genson-inferred JSON Schema. Only fires on `gen_ai.tool.call` spans with `gen_ai.tool.output` in attributes. Schema priority: 1) declared file from agent config `output_schema`, 2) inferred schema from `DriftBaseline.output_schema_inferred`. Caches schemas in-memory per agent.
-- **`tokenjam/core/models.py`**: All domain dataclasses — `NormalizedSpan`, `SessionRecord`, `Alert`, `DriftBaseline`, filter types, etc.
-- **`tokenjam/core/config.py`**: `TjConfig` dataclass tree, TOML loading/writing, config file discovery.
+- **`tokenjam/core/models.py`**: All domain dataclasses — `NormalizedSpan`, `SessionRecord`, `Alert`, `DriftBaseline`, filter types, etc. `NormalizedSpan` carries `billing_account` (provider-only: `anthropic` / `openai` / `google` / `bedrock` / `local.ollama`). `SessionRecord` carries `plan_tier` (api / pro / max_5x / max_20x / plus / team / enterprise / local / unknown) plus a derived `pricing_mode` property (`local` / `subscription` / `api` / `unknown`). Spans inherit plan via the session FK — analyzers JOIN through `SessionRecord` when they need plan context.
+- **`tokenjam/core/config.py`**: `TjConfig` dataclass tree, TOML loading/writing, config file discovery. `ProviderBudget` carries an optional `plan` field (set by `tj onboard`'s plan-tier prompt) that `IngestPipeline._build_or_update_session` reads to populate `SessionRecord.plan_tier` at session creation. `CaptureConfig` has four fine-grained content-capture toggles (`prompts` / `completions` / `tool_inputs` / `tool_outputs`); `strip_captured_content()` in `core/ingest.py` enforces them at the single ingest-pipeline gate.
 - **`tokenjam/sdk/agent.py`**: `@watch()` decorator creates session spans only. `record_llm_call()` and `record_tool_call()` create child spans for manual instrumentation. LLM call spans from provider clients require `patch_anthropic()`, `patch_openai()`, etc.
 - **`tokenjam/sdk/transport.py`**: `HttpTransport` — buffers up to 1000 spans, retries with exponential backoff (3 attempts, 2s base). Used when `tj serve` runs as a separate process.
 - **`tokenjam/sdk/bootstrap.py`**: `ensure_initialised()` — lazy, thread-safe, idempotent bootstrap of config -> DB -> IngestPipeline -> TracerProvider. Called automatically by `@watch()` and all `patch_*()` functions. Registers atexit flush.
 - **`tokenjam/sdk/integrations/`**: `Integration` protocol in `base.py`. Provider patches (anthropic, openai, gemini, bedrock, litellm) monkey-patch client methods to create OTel spans with token usage. `litellm.py` covers 100+ providers via LiteLLM's unified interface and uses a `contextvars.ContextVar` (`_tj_litellm_active`) to suppress inner provider patches (openai, anthropic) when active — prevents double-counted spans. Framework patches (langchain, langgraph, crewai, autogen) wrap LLM/tool methods. `llamaindex.py` and `openai_agents_sdk.py` are thin wrappers around those SDKs' native OTel support. `nemoclaw.py` is a WebSocket observer for OpenShell Gateway sandbox events.
 - **`tokenjam/otel/provider.py`**: `TjSpanExporter` (custom `SpanExporter` that feeds spans into `IngestPipeline`), `convert_otel_span()` (OTel `ReadableSpan` → `NormalizedSpan`), `build_tracer_provider()` (sets up global `TracerProvider` with local + optional OTLP exporters).
 - **`tokenjam/otel/exporters.py`**: Prometheus metric reader setup via `build_prometheus_exporter()`.
-- **`tokenjam/otel/semconv.py`**: `GenAIAttributes` and `TjAttributes` — OTel GenAI semantic convention constants.
+- **`tokenjam/otel/otlp_parsing.py`**: Shared OTLP JSON → `NormalizedSpan` parser. Two callers: `api/routes/spans.py` (live `POST /api/v1/spans`) and `core/ingest_adapters/otlp.py` (`tj backfill otlp`). Keep parsing in this one place — the live receive path and the backfill adapter must agree on attribute extraction, billing_account derivation, and timestamp handling.
+- **`tokenjam/otel/semconv.py`**: `GenAIAttributes`, `TjAttributes` (includes `BILLING_ACCOUNT` and `PLAN_TIER`), `VALID_PLAN_TIERS` and `SUBSCRIPTION_PLAN_TIERS` frozensets — OTel GenAI semantic convention constants plus tj-specific extensions.
 - **`tokenjam/api/app.py`**: FastAPI app factory. `tj serve` starts it with uvicorn. Accepts `db`, `config`, `ingest_pipeline` for testability. Registers all routers under `/api/v1` plus `/metrics`.
 - **`tokenjam/api/middleware.py`**: `IngestAuthMiddleware` — protects `POST /api/v1/spans` with Bearer token. Returns `JSONResponse(401)` directly (not `HTTPException`, which doesn't propagate from `BaseHTTPMiddleware.dispatch`).
 - **`tokenjam/api/deps.py`**: `require_api_key` — FastAPI dependency for optional API key auth on GET endpoints. Only enforced when `api.auth.enabled = true` in config.
@@ -113,30 +88,24 @@ Post-ingest hooks run synchronously after each span is written to DB:
 
 ### CLI Commands
 
-| Command | File | Description |
-|---|---|---|
-| `tj onboard` | `cmd_onboard.py` | Setup wizard: agent ID, budget, ingest secret, optional daemon install (launchd/systemd) |
-| `tj status` | `cmd_status.py` | Agent overview: session, cost, tokens, alerts. Exit 1 if active alerts |
-| `tj traces` | `cmd_traces.py` | List recent traces in table format |
-| `tj trace <id>` | `cmd_traces.py` | Span waterfall tree for a single trace |
-| `tj cost` | `cmd_cost.py` | Cost breakdown by day/agent/model/tool with `--json` support |
-| `tj alerts` | `cmd_alerts.py` | Alert history with severity/type filtering |
-| `tj tools` | `cmd_tools.py` | Tool call summary: call counts, avg duration |
-| `tj export` | `cmd_export.py` | Export spans as json (NDJSON), csv, otlp, or openevals format |
-| `tj serve` | `cmd_serve.py` | Start FastAPI + uvicorn server with retention cleanup cron |
-| `tj stop` | `cmd_stop.py` | Stop background daemon or tj serve process |
-| `tj budget` | `cmd_budget.py` | Get/set daily and session budget limits per agent or globally |
-| `tj drift` | `cmd_drift.py` | Show drift baselines and Z-scores for recent sessions |
-| `tj demo [scenario]` | `cmd_demo.py` | Run Agent Incident Library scenarios (zero-config, no API keys). `tj demo` lists all; `tj demo retry-loop` runs one |
-| `tj mcp` | `cmd_mcp.py` | Start the stdio MCP server for Claude Code integration |
-| `tj uninstall` | `cmd_uninstall.py` | Remove all TokenJam data, config, and daemon |
-| `tj doctor` | `cmd_doctor.py` | Health checks (config, DB, secrets, webhooks, drift readiness, schema-vs-capture consistency). Exit 0 = ok, 1 = warnings, 2 = errors |
-| `tj optimize` | `cmd_optimize.py` | Two analyzers: model-downgrade candidates + per-provider budget projection. `--since 30d`, `--only model\|budget`, `--budget <provider>`, `--budget-usd <amount>`. JSON output supported. Opens the live DB read-only so it works alongside a running `tj serve`. |
-| `tj backfill claude-code` | `cmd_backfill.py` | Parse `~/.claude/projects/*.jsonl` and ingest historical sessions. Idempotent — deterministic span IDs (SHA-256 of `session_id + uuid`) mean re-runs skip already-ingested rows. Auto-invoked at the end of `tj onboard --claude-code`. Future agent log formats (Codex, etc.) plug in as additional subcommands. |
+`tj --help` lists all commands; most are self-explanatory. Non-obvious ones:
+
+- **`tj demo [scenario]`** (`cmd_demo.py`) — runs Agent Incident Library scenarios (zero-config, no API keys). `tj demo` lists all; `tj demo retry-loop` runs one.
+- **`tj doctor`** (`cmd_doctor.py`) — health checks (config, DB, secrets, webhooks, drift readiness, schema-vs-capture consistency). Exit 0 = ok, 1 = warnings, 2 = errors.
+- **`tj optimize`** (`cmd_optimize.py`) — six analyzers, registry-driven: `model-downgrade`, `budget-projection`, `cache-efficacy`, `cache-recommend`, `workflow-restructure`, `prompt-bloat`. Flags: `--since 30d`, `--finding <name>` (repeatable; choices auto-derive from `ANALYZER_REGISTRY` at click decoration time), `--budget <provider>`, `--budget-usd <amount>`, `--compare <period>` (window-cost diff vs prior period; accepts `previous` / `last-week` / `last-month` / `last-7d` / `last-30d` / `YYYY-MM-DD:YYYY-MM-DD`), `--export-config <target>` (writes a routing snippet — currently `claude-code` — under `~/.config/tokenjam/exports/`; no `--apply` flag by design). Plan-tier-aware rendering: subscription users see "implied API value" framing and token-share savings (never dollar "spend"); local users see token-only framing; unknown-plan users see dollar figures suppressed with a `tj onboard --reconfigure` hint. Opens the live DB read-only so it works alongside a running `tj serve`.
+- **`tj cost`** (`cmd_cost.py`) — cost breakdown by `--group-by agent|model|day|tool`. Same `--compare <period>` flag as `tj optimize` for window-over-window diffs (▲/▼ indicators, per-agent and per-model top-shifts, dollar + token deltas).
+- **`tj backfill <source>`** (`cmd_backfill.py`) — ingest historical telemetry from external sources. Subcommands: `claude-code` (parses `~/.claude/projects/*.jsonl`, auto-invoked at the end of `tj onboard --claude-code`), `langfuse` (live API or JSON dump), `helicone` (live API or JSON dump), `otlp` (raw OTLP JSON via URL or file — reuses the same parser as the live `POST /api/v1/spans` route). All idempotent via deterministic span IDs.
+- **`tj onboard`** (`cmd_onboard.py`) — `--claude-code` and `--codex` flags trigger integration-specific flows. Prompts for plan tier (api / pro / max_5x / max_20x for Anthropic; api / plus / team / enterprise for OpenAI) and writes it to `[budget.<provider>] plan = "..."`. Supports `--reconfigure` to re-prompt against an existing config, and `--plan <tier>` for non-interactive use. Does NOT auto-write a default `usd = 200` cycle ceiling — subscription users get only the `plan` field; API users are explicitly asked whether they want a self-imposed ceiling.
+- **`tj report`** (`cmd_report.py`) — generates standalone HTML visualizations of analyzer findings (e.g. `tj report --bloat [<agent_id>]` renders the prompt-bloat analyzer's per-token significance). Writes to `~/.cache/tokenjam/reports/` (override via `TOKENJAM_REPORT_DIR`) and opens in the default browser.
+- **`tj policy list`** (`cmd_policy.py`) — read-only preview of the unified policy surface. Consolidates existing `[alerts]`, `[alerts.channels]`, `[defaults.budget]`, `[budget.<provider>]`, per-agent `budget`/`drift`/`sensitive_actions`/`output_schema`, and `[capture]` config into one table; each row carries its source TOML section. Supports `--json`. `tj policy add | edit | apply | remove | test` are intentionally absent this sprint — the unified config migration is next sprint's work. `policy` is in `no_db_commands` in `cli/main.py` so it doesn't open the DB. Rich source-section strings (`[budget.anthropic]`, `[[alerts.channels]]`) must be passed through `rich.markup.escape()` before rendering — otherwise Rich consumes them as style tags.
 
 All commands support `--json` for machine-readable output. Commands that query alerts use exit code 1 if active (unacknowledged, unsuppressed) alerts exist.
 
 **CLI testing pattern:** Tests use `click.testing.CliRunner` with `unittest.mock.patch` on `tokenjam.cli.main.load_config` and `tokenjam.cli.main.open_db` to inject an `InMemoryBackend` and test config. See `tests/integration/test_cli.py`. Note: `cmd_doctor` opens its own DuckDB connection via `config.storage.path` to verify writability — in tests you must set this to a real temp path (e.g. `tmp_path / "test.duckdb"`).
+
+**`no_db_commands` in `cli/main.py`:** Commands that don't open the DB at startup — currently `{stop, uninstall, onboard, mcp, demo, policy}`. New commands that read only from config (or do their own DB connection later) should be added to this set so they work when `tj serve` holds the write lock. Tests for these commands can patch `open_db` with `side_effect=AssertionError(...)` to verify they never touch the DB.
+
+**Test factories:** `tests/factories.py` provides `make_llm_span(billing_account="anthropic", ...)` and `make_session(plan_tier="api", ...)` with safe defaults that preserve existing test behavior. Tests exercising subscription / local / unknown plan-tier rendering paths should pass the field explicitly.
 
 ### REST API
 
@@ -162,7 +131,7 @@ When a span has a `conversation_id` matching an existing session, it's attribute
 2. **TOML binary mode** — `tomllib.load()` requires `open(path, "rb")` not `"r"`. Text mode raises `TypeError` at runtime. Use the conditional import: `tomllib` (3.11+) or `tomli` (3.10). Writing config uses `tomli_w`.
 3. **`@watch()` alone does NOT create LLM spans** — only session start/end. Provider patches (`patch_anthropic()`, `patch_openai()`, etc.) are needed for individual LLM call spans.
 4. **Ingest auth** — `POST /api/v1/spans` requires `Authorization: Bearer <ingest_secret>` from `security.ingest_secret` in `tj.toml`.
-5. **Alert content stripping** — remove `prompt_content`, `completion_content`, `tool_input`, `tool_output` from alert payloads sent to external channels unless `alerts.include_captured_content = true`. Stdout and file channels always get full payload.
+5. **Alert content stripping** — remove `gen_ai.prompt.content`, `gen_ai.completion.content`, `gen_ai.tool.input`, `gen_ai.tool.output` from alert payloads sent to external channels unless `alerts.include_captured_content = true`. Stdout and file channels always get full payload. Note: content is also stripped at *ingest* (before DB write) by `strip_captured_content()` in `core/ingest.py` per the four `[capture]` toggles (`prompts` / `completions` / `tool_inputs` / `tool_outputs`) — so the alert flag is moot when the corresponding capture flag is off.
 6. **No unicode bullets** — never hardcode `•` or `\u2022`; Rich handles bullet formatting.
 7. **Parameterised SQL only** — never use f-string SQL.
 8. **All test spans via factory** — never construct `NormalizedSpan` directly in tests; use `tests/factories.py` (`make_llm_span`, `make_session`, `make_tool_span`, `make_session_with_spans`).
@@ -171,8 +140,10 @@ When a span has a `conversation_id` matching an existing session, it's attribute
 11. **OTel TracerProvider is global and set-once** — `trace.set_tracer_provider()` only works once per process. In tests, set the provider once at module level (not per-test in a fixture) and clear spans between tests. Use a custom `_CollectingExporter(SpanExporter)` since `InMemorySpanExporter` is not available in the installed OTel version. See `tests/agents/test_mock_scenarios.py` for the SDK test pattern and `tests/integration/test_full_pipeline.py` for the pipeline pattern.
 12. **New SDK integrations must call `ensure_initialised()`** — every `patch_*()` convenience function must call `from tokenjam.sdk.bootstrap import ensure_initialised; ensure_initialised()` before installing hooks. This lazily bootstraps the TracerProvider + IngestPipeline on first use.
 13. **PyPI package name is `tokenjam`, not `ocw`** — `pip install tokenjam` is the correct install command. The CLI command is `tj` and the Python package directory is `tokenjam/`. The published package name on PyPI is `tokenjam`. Never write `pip install ocw` in docs, examples, or comments.
-14. **`tj optimize` output must never claim quality equivalence** — the model-downgrade finding flags structural candidates only. Every user-visible string says "looks like" / "candidate" / "review before switching" — never "safe to downgrade" or "would have worked." The `MODEL_DOWNGRADE_CAVEAT` constant lives on `DowngradeFinding` as a dataclass default so it can't be removed by accident; it must also appear in human-readable CLI output. Equivalent honesty applies to future optimize analyzers (cache-opportunity, prompt-bloat).
+14. **`tj optimize` output must never claim quality equivalence** — the model-downgrade finding flags structural candidates only. Every user-visible string says "looks like" / "candidate" / "review before switching" — never "safe to downgrade" or "would have worked." The `MODEL_DOWNGRADE_CAVEAT` constant lives on `DowngradeFinding` as a dataclass default so it can't be removed by accident; it must also appear in human-readable CLI output. The same honesty discipline applies to all other analyzers — `cache-efficacy` ("you're getting X% of available caching"), `cache-recommend` (Anthropic-only, structural prefix detection), `workflow-restructure` ("structural shape matches", "review before replacing with a script"), `prompt-bloat` ("predicted low-significance regions; review before editing"). `tj optimize --export-config` snippets bake the caveat block into the JSONC output as comments.
 15. **Version bump on release** — both `pyproject.toml` (`version = "X.Y.Z"`) and `sdk-ts/package.json` (`"version": "X.Y.Z"`) must be bumped to the new version before creating a GitHub release. The publish workflows (`publish-pypi.yml`, `publish-npm.yml`) trigger on `release published` events and will fail with 403 if the version already exists on PyPI/npm.
+16. **New optimize analyzers self-register** — drop a `.py` file under `tokenjam/core/optimize/analyzers/` with a function decorated `@register("name")` taking `AnalyzerContext`. Auto-discovery in `analyzers/__init__.py` walks the directory at import time. `cmd_optimize.py`'s `--finding` choices read from `ANALYZER_REGISTRY.keys()` at click decoration — no edits needed there. If your analyzer depends on (or is depended on by) another, append it to `ANALYZER_ORDER` in `runner.py` at the right position. Wave-2 analyzers attach their findings to `OptimizeReport.findings[name]` (generic dict); the older `model-downgrade` / `budget-projection` analyzers retain typed slots on `OptimizeReport` for backwards compat with `cmd_optimize` and the MCP server.
+17. **OTLP parsing has one home** — `tokenjam/otel/otlp_parsing.py`. Both the live `POST /api/v1/spans` route and the `tj backfill otlp` adapter import `parse_otlp_span` and `extract_resource_attrs` from there. If you need to extend OTLP attribute extraction, do it once in that module; do not copy-paste into either caller.
 
 ## Config
 
@@ -180,7 +151,7 @@ Config is TOML, discovered at: `tj.toml` -> `.tj/config.toml` -> `~/.config/tj/c
 
 Two distinct budget concepts coexist — do not conflate:
 - **`[defaults.budget]` / `[agents.<id>.budget]`** (`daily_usd`, `session_usd`) — per-agent alert thresholds checked on every span by `AlertEngine`.
-- **`[budget.<provider>]`** (`usd`, `cycle_start_day`, `applies_to_services`) — periodic monthly ceilings used only by `tj optimize` projections. Read-only at projection time; no alerts fire from these. `tj onboard --claude-code` writes a default `[budget.anthropic] usd = 200` if no provider budget is configured. The analyzer scopes spend by `provider` column and (optionally) by `agent_id IN applies_to_services`.
+- **`[budget.<provider>]`** (`plan`, `usd`, `cycle_start_day`, `applies_to_services`) — per-provider budget config. `plan` is the user's declared plan tier (api / pro / max_5x / max_20x / plus / team / enterprise / local), prompted for by `tj onboard` and used by `IngestPipeline` to populate `SessionRecord.plan_tier` at session creation. `usd` is a periodic monthly ceiling used only by `tj optimize` budget-projection (read-only; no alerts fire from it). Onboard does NOT auto-write `usd = 200` — subscription users get only the `plan` field; API users are explicitly asked whether they want a self-imposed ceiling. The budget-projection analyzer scopes spend by `provider` column and (optionally) by `agent_id IN applies_to_services`.
 
 `tj onboard --claude-code` and `tj onboard --codex` always write to the **global** config (`~/.config/tj/config.toml`) regardless of cwd. This is intentional: each coding-agent integration reads one ingest secret from a single global location (`~/.claude/settings.json` or `~/.codex/config.toml`), and per-project configs would rotate that secret on every onboard, breaking auth for previously onboarded projects. Onboarded Claude Code project paths are tracked in `~/.config/tj/projects.json` for clean uninstall. Codex onboarding is fully project-agnostic — Codex hardcodes `service.name=codex_exec` in its binary, so there is one Codex agent ID for all projects.
 
@@ -222,6 +193,8 @@ The Agent Incident Library at `incidents/` is separate: each scenario is a `scen
 
 Model pricing lives in `pricing/models.toml` (USD per million tokens). Structure: `[provider.model_name]` with `input_per_mtok`, `output_per_mtok`, and optional `cache_read_per_mtok`/`cache_write_per_mtok`. Unknown models fall back to default rates ($0.50/$2.00 per MTok) with a logged warning. The pricing table is LRU-cached at process startup — restart to pick up changes.
 
+Pricing is community-maintained: submit a PR editing `pricing/models.toml` when provider prices change. No code changes needed — the file is loaded at runtime.
+
 ## CI
 
 GitHub Actions workflow at `.github/workflows/ci.yml` runs on push/PR to `main`:
@@ -230,11 +203,29 @@ GitHub Actions workflow at `.github/workflows/ci.yml` runs on push/PR to `main`:
 
 All steps are blocking — lint, typecheck, and tests must pass for CI to go green.
 
+There is no pre-commit configuration in this repo; `ruff` and `mypy` only run in CI. Run them locally before pushing.
+
+## Releases
+
+PyPI and npm publishes are triggered by GitHub Release events (`.github/workflows/publish-pypi.yml`, `publish-npm.yml`, both `on: release: types: [published]`). Release flow:
+
+1. Bump both `pyproject.toml` `version` and `sdk-ts/package.json` `"version"` to the new `X.Y.Z` (see Critical Rule 15).
+2. Merge to `main`.
+3. Create a GitHub Release with tag `vX.Y.Z` (e.g. via `gh release create vX.Y.Z --generate-notes`). Publishing the release fires both workflows.
+
+If a version already exists on PyPI or npm, the publish workflow fails with 403 — bump again rather than retrying.
+
 ## Packaging
 
 Build system is hatchling. The `pyproject.toml` requires `[tool.hatch.build.targets.wheel] packages = ["tj"]` because the package name (`tokenjam`) differs from the directory name (`tj`). Without this, `pip install -e .` fails.
 
 Key runtime dependency: `pytz` is required by DuckDB for `TIMESTAMPTZ` column handling — it's listed explicitly in `dependencies` because DuckDB doesn't declare it on all platforms.
+
+**Optional extras** (declared under `[project.optional-dependencies]`):
+- `tokenjam[bloat]` — `llmlingua>=0.2`, used by the Trim analyzer. Pulls PyTorch + transformers (~2GB). Kept out of base install. The analyzer self-registers without the extra installed; the deferred `import llmlingua` inside the analysis function body raises a typed message pointing the user at the install command.
+- Framework extras `[langchain]`, `[crewai]`, `[autogen]`, `[litellm]` for SDK patches.
+- `[dev]` for local development (`pytest`, `ruff`, `mypy`, `httpx`).
+- `[mcp]` for the FastMCP stdio server.
 
 ## Further Reading
 

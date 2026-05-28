@@ -29,8 +29,15 @@ def make_llm_span(
     span_id: str | None = None,
     session_id: str | None = None,
     extra_attributes: dict | None = None,
+    billing_account: str | None = "anthropic",
 ) -> NormalizedSpan:
-    """Create a NormalizedSpan representing a single LLM call."""
+    """
+    Create a NormalizedSpan representing a single LLM call.
+
+    `billing_account` defaults to "anthropic" so existing tests using the
+    default `provider="anthropic"` get a sensible value. Tests exercising
+    OpenAI/Google/Bedrock/local paths should pass it explicitly.
+    """
     now = start_time or utcnow()
     end = now + timedelta(milliseconds=duration_ms)
     attrs = extra_attributes.copy() if extra_attributes else {}
@@ -55,6 +62,7 @@ def make_llm_span(
         cost_usd=cost_usd,
         conversation_id=conversation_id,
         attributes=attrs,
+        billing_account=billing_account,
     )
 
 
@@ -100,8 +108,15 @@ def make_session(
     total_cost_usd: float | None = None,
     status: str = "completed",
     duration_seconds: float = 60.0,
+    plan_tier: str = "api",
 ) -> SessionRecord:
-    """Create a SessionRecord with sensible defaults."""
+    """
+    Create a SessionRecord with sensible defaults.
+
+    `plan_tier` defaults to "api" so existing tests see dollar figures
+    rendered normally (least-disruption). Tests for subscription / local /
+    unknown rendering paths should pass it explicitly.
+    """
     now = utcnow()
     started = now - timedelta(seconds=duration_seconds)
 
@@ -117,6 +132,7 @@ def make_session(
         output_tokens=output_tokens,
         tool_call_count=tool_call_count,
         error_count=error_count,
+        plan_tier=plan_tier,
     )
 
 

@@ -183,6 +183,11 @@ class IngestPipeline:
         """
         Fetch the current session record and update its running totals
         from this span's token counts, cost, error status, etc.
+
+        plan_tier resolution: derived from ProviderBudget.plan for the
+        session's billing_account. Set at session creation; subsequent spans
+        only update plan_tier if it's currently 'unknown' (e.g. tool spans
+        arrived before an LLM span on a fresh session).
         """
         assert span.session_id is not None
 
@@ -200,9 +205,16 @@ class IngestPipeline:
             # Update end time to track session duration
             if span.end_time and (existing.ended_at is None or span.end_time > existing.ended_at):
                 existing.ended_at = span.end_time
+            # Late-resolve plan_tier if this span finally carries a known
+            # billing_account and the session was previously unknown.
+            if existing.plan_tier == "unknown" and span.billing_account:
+                resolved = self._resolve_plan_tier(span.billing_account)
+                if resolved != "unknown":
+                    existing.plan_tier = resolved
             return existing
 
         # New session
+        plan_tier = self._resolve_plan_tier(span.billing_account)
         return SessionRecord(
             session_id=span.session_id,
             agent_id=span.agent_id or "unknown",
@@ -216,7 +228,29 @@ class IngestPipeline:
             cache_tokens=span.cache_tokens or 0,
             tool_call_count=1 if span.tool_name else 0,
             error_count=1 if span.status_code == SpanStatus.ERROR else 0,
+            plan_tier=plan_tier,
         )
+
+    def _resolve_plan_tier(self, billing_account: str | None) -> str:
+        """
+        Look up ProviderBudget.plan for the given billing_account.
+
+        Returns 'unknown' when billing_account is None (e.g. tool spans),
+        when no ProviderBudget is configured for the provider, or when the
+        ProviderBudget exists but has no plan set. Onboarding writes the
+        plan field; `tj optimize` suppresses dollar figures for unknown.
+
+        Special case: billing_account 'local.ollama' always resolves to
+        'local' regardless of config — local inference has no plan tier.
+        """
+        if not billing_account:
+            return "unknown"
+        if billing_account == "local.ollama":
+            return "local"
+        bcfg = self.config.budgets.get(billing_account)
+        if bcfg is None or not bcfg.plan:
+            return "unknown"
+        return bcfg.plan
 
     def _run_hooks(self, span: NormalizedSpan) -> None:
         """Run post-ingest hooks. Errors are logged, never propagated."""

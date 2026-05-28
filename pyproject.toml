@@ -55,6 +55,10 @@ autogen   = ["pyautogen>=0.2"]
 litellm   = ["litellm>=1.40"]
 dev       = ["pytest", "pytest-asyncio", "httpx", "ruff", "mypy"]
 mcp       = ["fastmcp"]
+# Trim analyzer (`tj optimize --finding prompt-bloat`). LLMLingua-2 pulls in
+# PyTorch and transformers, ~2GB total. Kept optional so the base install
+# stays small — most users don't run the bloat analyzer.
+bloat     = ["llmlingua>=0.2"]
 
 [project.scripts]
 tj = "tokenjam.cli.main:cli"
