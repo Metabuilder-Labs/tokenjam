@@ -1,6 +1,10 @@
-# `tj optimize --finding prompt-bloat` (Trim)
+# Trim
 
-User-facing product name: **Trim**. Internal/CLI name: `prompt-bloat`.
+Product name: **Trim**. Internal/CLI name: `prompt-bloat`.
+
+```bash
+tj optimize --finding prompt-bloat
+```
 
 Scores token-by-token significance in captured prompts using
 LLMLingua-2 (BERT-class classifier, MIT-licensed, runs on CPU).
@@ -74,3 +78,9 @@ heavy parallelism, expect similar latency.
 domain, so its low-significance predictions are heuristic — not a quality
 claim about whether the model would have produced the same output with
 the region removed. The caveat surfaces this in every report.
+
+## See also
+
+- [Downsize](downsize.md) — flag sessions whose shape matches a cheaper-model candidate
+- [Cache](cache.md) — measure and improve prompt-cache usage
+- [Script](script.md) — find workflows that look like deterministic shell scripts

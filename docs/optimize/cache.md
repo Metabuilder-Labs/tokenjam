@@ -1,8 +1,11 @@
-# `tj optimize --finding cache-efficacy` / `cache-recommend`
+# Cache
 
-Two related findings under the **Cache** product. Both surface
-prompt-caching opportunities; they differ in what they need and what
-they recommend.
+Product name: **Cache**. Internal/CLI names: `cache-efficacy` and `cache-recommend`. Two related findings under the same product — both surface prompt-caching opportunities; they differ in what they need and what they recommend.
+
+```bash
+tj optimize --finding cache-efficacy
+tj optimize --finding cache-recommend
+```
 
 ## `cache-efficacy` — measure current caching
 
@@ -56,3 +59,9 @@ the captured data; they don't validate that enabling caching produces
 the same model output (Anthropic's cache is content-addressed, so the
 output is identical, but other future providers may not be). For Wave 2
 this is the right level.
+
+## See also
+
+- [Downsize](downsize.md) — flag sessions whose shape matches a cheaper-model candidate
+- [Script](script.md) — find workflows that look like deterministic shell scripts
+- [Trim](trim.md) — identify low-significance tokens in captured prompts
