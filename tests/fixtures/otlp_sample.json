@@ -1,0 +1,76 @@
+{
+  "resourceSpans": [
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "test-agent"}},
+          {"key": "service.version", "value": {"stringValue": "0.1.0"}}
+        ]
+      },
+      "scopeSpans": [
+        {
+          "scope": {"name": "tokenjam.test", "version": "1.0"},
+          "spans": [
+            {
+              "traceId": "0102030405060708090a0b0c0d0e0f10",
+              "spanId": "0102030405060708",
+              "name": "gen_ai.llm.call",
+              "kind": 3,
+              "startTimeUnixNano": "1748736000000000000",
+              "endTimeUnixNano": "1748736001500000000",
+              "status": {"code": 1},
+              "attributes": [
+                {"key": "gen_ai.provider.name", "value": {"stringValue": "anthropic"}},
+                {"key": "gen_ai.request.model", "value": {"stringValue": "claude-sonnet-4-6"}},
+                {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "1500"}},
+                {"key": "gen_ai.usage.output_tokens", "value": {"intValue": "320"}},
+                {"key": "tokenjam.cost_usd", "value": {"doubleValue": 0.00513}}
+              ]
+            },
+            {
+              "traceId": "0102030405060708090a0b0c0d0e0f10",
+              "spanId": "1112131415161718",
+              "parentSpanId": "0102030405060708",
+              "name": "gen_ai.tool.call",
+              "kind": 1,
+              "startTimeUnixNano": "1748736000500000000",
+              "endTimeUnixNano": "1748736000600000000",
+              "status": {"code": 1},
+              "attributes": [
+                {"key": "gen_ai.tool.name", "value": {"stringValue": "search"}}
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "resource": {
+        "attributes": [
+          {"key": "service.name", "value": {"stringValue": "test-agent-2"}}
+        ]
+      },
+      "scopeSpans": [
+        {
+          "spans": [
+            {
+              "traceId": "2122232425262728292a2b2c2d2e2f30",
+              "spanId": "3132333435363738",
+              "name": "gen_ai.llm.call",
+              "kind": 3,
+              "startTimeUnixNano": "1748822400000000000",
+              "endTimeUnixNano": "1748822401000000000",
+              "status": {"code": 1},
+              "attributes": [
+                {"key": "gen_ai.provider.name", "value": {"stringValue": "openai"}},
+                {"key": "gen_ai.request.model", "value": {"stringValue": "gpt-4o"}},
+                {"key": "gen_ai.usage.input_tokens", "value": {"intValue": "800"}},
+                {"key": "gen_ai.usage.output_tokens", "value": {"intValue": "200"}}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

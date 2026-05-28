@@ -70,6 +70,9 @@ class NormalizedSpan:
     cost_usd:       float | None   = None
     request_type:   str | None     = None
     conversation_id: str | None    = None
+    # Provider-only billing identifier (anthropic | openai | google | bedrock
+    # | local.ollama). Plan tier lives on SessionRecord, not here.
+    billing_account: str | None    = None
 
 
 @dataclass
@@ -86,6 +89,12 @@ class SessionRecord:
     cache_tokens:    int          = 0
     tool_call_count: int          = 0
     error_count:     int          = 0
+    # Canonical plan-tier identifier for the user's billing relationship with
+    # this session's provider. Set at session creation by reading
+    # ProviderBudget.plan for the matching billing_account. Backfilled sessions
+    # default to "unknown" — `tj optimize` suppresses dollar figures for those.
+    # Valid values: see VALID_PLAN_TIERS in tokenjam.otel.semconv.
+    plan_tier:       str          = "unknown"
 
     @property
     def duration_seconds(self) -> float | None:
@@ -103,6 +112,31 @@ class SessionRecord:
         if last_activity and (utcnow() - last_activity) > SESSION_STALE_THRESHOLD:
             return "stale"
         return "active"
+
+    @property
+    def pricing_mode(self) -> str:
+        """
+        Derived pricing mode: 'local' | 'subscription' | 'api' | 'unknown'.
+
+        Branches evaluated top-to-bottom; first match wins:
+          1. local if plan_tier == 'local'
+          2. subscription if plan_tier is in SUBSCRIPTION_PLAN_TIERS
+          3. api if plan_tier == 'api'
+          4. unknown otherwise
+
+        Note: 'local' here keys off plan_tier (set at session creation from the
+        billing_account 'local.ollama' -> plan 'local'). This avoids reading
+        the underlying span's billing_account every time pricing_mode is needed.
+        """
+        from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
+        pt = self.plan_tier
+        if pt == "local":
+            return "local"
+        if pt in SUBSCRIPTION_PLAN_TIERS:
+            return "subscription"
+        if pt == "api":
+            return "api"
+        return "unknown"
 
 
 @dataclass

@@ -88,18 +88,31 @@ effective.session_usd = agent.session_usd ?? defaults.session_usd
 
 Set limits via CLI (`tj budget --daily 10`), the REST API (`POST /api/v1/budget`), or the web UI.
 
-## Capture settings
+## Content capture and privacy
 
-By default, `tj` does not capture prompt content, completion content, or tool outputs. Enable these selectively if you need them for debugging or evaluation:
+By default, `tj` does not capture prompt content, completion content, or tool inputs/outputs — only token counts, model names, tool names, timestamps, and structural metadata. Enable content capture selectively when you need it (for debugging, prompt-bloat analysis, or evaluation):
 
 ```toml
 [capture]
-prompts      = true    # capture LLM input prompts
-completions  = true    # capture LLM output completions
-tool_outputs = true    # capture tool call outputs
+prompts      = true    # capture LLM input prompts (gen_ai.prompt.content)
+completions  = true    # capture LLM output completions (gen_ai.completion.content)
+tool_inputs  = true    # capture tool call inputs (gen_ai.tool.input)
+tool_outputs = true    # capture tool call outputs (gen_ai.tool.output)
 ```
 
-Captured content is stored locally and never sent to external alert channels unless `alerts.include_captured_content = true`.
+The four flags are independent: capture prompts without completions, or tool inputs without prompts. This gives finer control than a single on/off switch.
+
+**Where the gate runs.** All spans flow through `IngestPipeline.process()`, which calls `strip_captured_content()` once before any DB write. The receiver, the OTLP HTTP endpoint, and the Claude Code JSONL backfill all go through this single gate — there's no per-source duplication.
+
+**Precedence with alert channels.** `alerts.include_captured_content = true` lets external alert channels (webhook, Discord, Telegram, ntfy) receive full payloads. If the corresponding `[capture]` flag is `false`, the content is already stripped at ingest, so the alert flag is moot — channels can't include what was never captured. Stdout and file alert channels always receive full payloads from the in-memory span before the DB strip, so they still see content during the brief in-process window.
+
+**What this means for downstream analyzers.**
+
+- `tj optimize --finding cache-efficacy` reads token-count fields and works without content capture.
+- `tj optimize --finding prompt-bloat` reads prompt text and requires `capture.prompts = true`.
+- `tj optimize --finding cache-recommend` reads prompts and requires `capture.prompts = true`.
+
+The analyzers that need content fail with a clear message ("set `capture.prompts = true` in tj.toml and let the daemon collect a fresh window of data") rather than running on partial data.
 
 ## Verifying your config
 

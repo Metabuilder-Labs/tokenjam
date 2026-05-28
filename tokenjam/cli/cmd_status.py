@@ -100,11 +100,29 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
         if not output_json:
             _print_agent_status(agent_data, active_alerts, session)
 
+    # Count sessions with plan_tier='unknown' so the user knows to reconfigure.
+    # Informational only — exit code stays driven by alert state.
+    unknown_count = 0
+    if hasattr(db, "conn"):
+        try:
+            row = db.conn.execute(
+                "SELECT COUNT(*) FROM sessions WHERE plan_tier IS NULL OR plan_tier = 'unknown'"
+            ).fetchone()
+            unknown_count = int(row[0]) if row else 0
+        except Exception:
+            unknown_count = 0
+
     if output_json:
         click.echo(json.dumps({
             "agents": agents_data,
             "has_active_alerts": has_active_alerts,
+            "unknown_plan_tier_sessions": unknown_count,
         }, default=str))
+    elif unknown_count > 0:
+        console.print(
+            f"[dim]Note: {unknown_count} session(s) have unknown plan tier. "
+            f"Run [bold]tj onboard --reconfigure[/bold] to set it.[/dim]"
+        )
 
     ctx.exit(1 if has_active_alerts else 0)
 
