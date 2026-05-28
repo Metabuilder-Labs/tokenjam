@@ -94,6 +94,14 @@ def run_anomalous_session() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # drift_demo doesn't need ensure_demo_agent_config because drift
+    # detection is on by default (DriftConfig.enabled = True). But it
+    # still needs to warn the user about a running daemon — without a
+    # restart, the daemon's DriftDetector won't reload thresholds set
+    # in tj.toml at runtime (#68 §6).
+    from examples.alerts_and_drift._shared import warn_if_daemon_running
+    warn_if_daemon_running()
+
     from tokenjam.sdk.bootstrap import ensure_initialised
     ensure_initialised()
 

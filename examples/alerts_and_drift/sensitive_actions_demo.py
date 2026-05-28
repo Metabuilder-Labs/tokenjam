@@ -119,7 +119,10 @@ def run_sensitive_agent() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from examples.alerts_and_drift._shared import ensure_demo_agent_config
+    from examples.alerts_and_drift._shared import (
+        ensure_demo_agent_config,
+        warn_if_daemon_running,
+    )
     ensure_demo_agent_config(
         "sensitive-demo",
         {
@@ -130,6 +133,10 @@ if __name__ == "__main__":
             ],
         },
     )
+    # If the daemon's already up, the freshly-merged config won't reach
+    # its AlertEngine without a restart. Surface that loudly so users
+    # don't see "No active alerts" and get confused (#68 §6).
+    warn_if_daemon_running()
 
     from tokenjam.sdk.bootstrap import ensure_initialised
     ensure_initialised()
