@@ -668,7 +668,8 @@ function StatusView() {
             ${a.agent_id}
             <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
           </div>
-          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(a.cost_today)}</span></div>
+          ${a.session_id ? html`<div class="card-row"><span class="label">Session</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.session_id.slice(0, 8)}</span></div>` : null}
+          <div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(a.total_cost_usd)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(a.duration_seconds * 1000)}</span></div>` : null}
@@ -683,7 +684,7 @@ function StatusView() {
       ${showHeadings ? html`
         <div style="display:flex;align-items:baseline;gap:10px;margin:18px 0 10px;font-family:'Geist Mono',monospace">
           <span style="font-size:13px;font-weight:600;color:var(--text)">${key === UNGROUPED ? 'Ungrouped' : key}</span>
-          <span style="font-size:12px;color:var(--text-dim)">${groups[key].length} agent${groups[key].length > 1 ? 's' : ''} · ${fmtCost(groups[key].reduce((s, a) => s + (a.cost_today || 0), 0))} today</span>
+          <span style="font-size:12px;color:var(--text-dim)">${groups[key].length} session${groups[key].length > 1 ? 's' : ''} · ${fmtCost(Object.values(groups[key].reduce((m, a) => (m[a.agent_id] = a.cost_today || 0, m), {})).reduce((s, c) => s + c, 0))} today</span>
         </div>` : null}
       <div class="cards">
         ${groups[key].map(agentCard)}

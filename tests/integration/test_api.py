@@ -365,12 +365,13 @@ async def test_post_budget_zero_clears_limit(db):
 
 
 # ===========================================================================
-# Status route: live Claude Code session must read as active, not "completed"
+# Status route: concurrent live sessions each get a tile, read as active
 #
-# Regression for the dashboard showing a live session as "completed" with 0
-# duration / 0 tokens. Claude Code's logs path emits a zero-duration
-# invoke_agent marker per user prompt; a newer empty marker used to hijack the
-# Status tile. Uses DuckDBBackend because /status reads via db.conn.
+# Claude Code's logs path emits a zero-duration invoke_agent marker per user
+# prompt and never an explicit end. Each live terminal is its own session;
+# the status route surfaces one tile per recently-active session (not a single
+# collapsed/"completed" tile). Uses DuckDBBackend because /status reads via
+# db.conn.
 # ===========================================================================
 
 @pytest.mark.asyncio
@@ -407,12 +408,16 @@ async def test_status_shows_live_session_over_empty_marker(tmp_path):
             resp = await c.get("/api/v1/status")
 
         assert resp.status_code == 200
-        agents = {a["agent_id"]: a for a in resp.json()["agents"]}
-        cc = agents["claude-code"]
-        assert cc["status"] == "active"
-        assert cc["session_id"] == "live"
-        assert cc["input_tokens"] == 19562
-        assert cc["output_tokens"] == 1321
+        # Concurrent active sessions each get their own tile (one per terminal).
+        cc_tiles = [a for a in resp.json()["agents"] if a["agent_id"] == "claude-code"]
+        by_session = {a["session_id"]: a for a in cc_tiles}
+        assert "live" in by_session and "empty" in by_session
+        live = by_session["live"]
+        assert live["status"] == "active"
+        assert live["input_tokens"] == 19562
+        assert live["output_tokens"] == 1321
+        # The just-started marker session is its own tile with no work yet.
+        assert by_session["empty"]["input_tokens"] == 0
     finally:
         db.close()
 
@@ -486,5 +491,48 @@ async def test_status_namespace_falls_back_to_configured_project(tmp_path):
         assert resp.status_code == 200
         agents = {a["agent_id"]: a for a in resp.json()["agents"]}
         assert agents["claude-code-harness"]["namespace"] == "aquanode"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_one_tile_per_concurrent_session(tmp_path):
+    """Three concurrent terminals under one agent each get a tile, grouped by project."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig, AgentConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
+        # Three live terminals = three session ids under one agent.
+        for sid, intok in [("term-a", 100), ("term-b", 200), ("term-c", 300)]:
+            pipeline.process(make_llm_span(
+                agent_id="claude-code-harness", session_id=sid, conversation_id=sid,
+                input_tokens=intok, output_tokens=10))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        tiles = [a for a in resp.json()["agents"] if a["agent_id"] == "claude-code-harness"]
+        assert len(tiles) == 3
+        assert {t["session_id"] for t in tiles} == {"term-a", "term-b", "term-c"}
+        assert all(t["namespace"] == "aquanode" for t in tiles)
+        assert all(t["status"] == "active" for t in tiles)
+        assert {t["session_id"]: t["input_tokens"] for t in tiles} == {
+            "term-a": 100, "term-b": 200, "term-c": 300,
+        }
     finally:
         db.close()
