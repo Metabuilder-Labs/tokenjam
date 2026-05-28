@@ -239,4 +239,4 @@ Key runtime dependency: `pytz` is required by DuckDB for `TIMESTAMPTZ` column ha
   - [`trim.md`](docs/optimize/trim.md) — LLMLingua-2 token-significance classifier (`prompt-bloat`), install + capture requirements, performance numbers
 - **Backfill adapters** — `docs/backfill/overview.md` lists the four sources (`claude-code` / `langfuse` / `helicone` / `otlp`) with the partnership-posture framing; per-adapter pages document modes (URL / file), field mapping, idempotency, and v1 limitations.
 - **[docs/policy/overview.md](docs/policy/overview.md)** — read-only preview of the unified policy surface (`tj policy list`). Notes that the `add` / `edit` / `apply` subcommands and the underlying `[policy]` config migration land next sprint.
-- **Internal specs** — `docs/internal/specs/v1.1-honest-output.md` is the canonical spec for the subscription-user reframing in `tj optimize`.
+- **Internal specs** — `docs/internal/specs/` is reserved for canonical specs that production code references at long-term. Currently empty (sprint specs have been cleaned up after merge); add new ones here when a feature needs a stable, code-referenced source of truth.
