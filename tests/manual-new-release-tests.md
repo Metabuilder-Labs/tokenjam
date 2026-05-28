@@ -1,144 +1,180 @@
-# Manual Release Testing
+# Post-Release Smoke Test
 
-Run through this sequence after a new release is published to PyPI to verify the release works end-to-end.
+Run this after a new release publishes to PyPI to verify it works end-to-end. This is intentionally lighter than `manual-pre-release-testing.md` — the multi-project / secret-rotation / theme-toggle detail lives there and was exercised on the branch before merge. Here we're confirming the published artifact actually installs and the core surfaces are alive.
 
 ## Prerequisites
 
-- `ANTHROPIC_API_KEY` set (for Anthropic examples)
-- `OPENAI_API_KEY` set (for LiteLLM/OpenAI examples)
-- Both should be in `~/tokenjam/.env.local` and sourced before running
+- `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` in `~/tokenjam/.env.local`
+- Sourced before running
 
-## Test sequence
+## 1. Install the published release
 
 ```bash
-# 1. Clean slate
 tj uninstall --yes 2>/dev/null
 rm -rf ~/.tj ~/.config/tj .tj
 
-# 2. Install latest
 pip3 install --upgrade tokenjam
 tj --version
+```
 
-# 3. Onboard
-# Note: daemon auto-installs by default (use --no-daemon to skip).
-# Budget prompt appears — enter a value or press enter for default.
-tj onboard
+**Pass criteria:** version matches the release being tested.
 
-# 4. Stop daemon before manual testing (daemon auto-started by onboard)
-tj stop
+## 2. Onboard
 
-# 5. Run an example (no server — tests direct DuckDB write)
+```bash
+tj onboard --no-daemon   # daemon auto-installs by default; --no-daemon for this smoke pass
+```
+
+The prompt should ask for plan tier (api / pro / max_5x / max_20x). Pick `api` so dollar rendering kicks in for the rest of the smoke.
+
+```bash
+grep "^plan = " ~/.config/tj/config.toml || grep "^plan = " .tj/config.toml
+# [ ] plan field is set; no auto-written usd = 200 in [budget.anthropic]
+```
+
+## 3. Drive an example + verify CLI
+
+```bash
 cd ~/tokenjam
 source .env.local
 python3 examples/single_provider/anthropic_agent.py
 
-# 6. Verify CLI (direct DuckDB, no server)
-tj status       # should show agent with cost > $0, tokens, completed status
-tj traces       # should show traces with span waterfall
-tj cost --since 1h   # should show cost breakdown by model (not $0.000000)
-tj budget       # should show budget table with configured limits
-tj alerts       # should show alert history (may be empty)
-tj doctor       # exit 0 or 1 (warnings ok), no errors
+tj status        # agent with cost > $0, tokens > 0
+tj traces        # waterfall renders
+tj cost --since 1h    # real USD values (not $0.000000)
+tj doctor             # exit 0 or 1 (warnings ok)
+```
 
-# 7. Start server (tests web UI + HTTP exporter)
+## 4. Cost-optimization analyzers (smoke — verify each runs)
+
+```bash
+tj optimize                                # all analyzers
+tj optimize --finding model-downgrade      # Downsize
+tj optimize --finding cache-efficacy       # Cache (efficacy)
+tj optimize --finding cache-recommend      # Cache (recommend) — surfaces "enable capture.prompts" if not set
+tj optimize --finding workflow-restructure # Script — likely no candidates on a fresh DB
+tj optimize --finding prompt-bloat         # Trim — should print install hint without [bloat] extra
+
+# Caveat enforcement on the downgrade finding
+tj optimize --json | python3 -c \
+  "import json,sys;r=json.load(sys.stdin);d=r.get('downgrade');assert d is None or 'Candidate-flagging heuristic' in d['caveat'];print('ok: caveat enforced')"
+
+# Plan-tier metadata in JSON
+tj optimize --json | python3 -c \
+  "import json,sys;d=json.load(sys.stdin);assert 'plan' in d and 'pricing_mode' in d;print('ok')"
+```
+
+**Pass criteria:** every `--finding` runs without crashing. Optional analyzers (`cache-recommend`, `prompt-bloat`) surface clear hints when their prereqs aren't met instead of erroring.
+
+## 5. Backfill adapters (smoke against committed fixtures)
+
+```bash
+tj backfill langfuse --source-file tests/fixtures/langfuse_real_response.json
+tj backfill helicone --source-file tests/fixtures/helicone_real_response.json
+tj backfill otlp --source-file tests/fixtures/otlp_sample.json
+# Re-run any of them — must be idempotent
+tj backfill langfuse --source-file tests/fixtures/langfuse_real_response.json
+# [ ] "skipped N already present" on the re-run
+```
+
+If this machine has Claude Code history:
+
+```bash
+ls ~/.claude/projects/ >/dev/null 2>&1 && tj backfill claude-code
+```
+
+## 6. Period comparison + config export
+
+```bash
+tj cost --since 7d --compare previous
+# [ ] Current + Previous summary lines, cost/token delta lines
+
+tj optimize --export-config claude-code
+ls ~/.config/tokenjam/exports/
+# [ ] claude-code-<date>.json file present
+# [ ] Contains "STRUCTURAL HEURISTIC ONLY" caveat comments
+```
+
+## 7. Policy list
+
+```bash
+tj policy list
+# [ ] Table renders with POLICY / SETTING / SOURCE columns
+# [ ] "read-only preview" footer note
+```
+
+## 8. Server + Web UI
+
+```bash
 tj serve &
 sleep 2
 
-# 8. Run another example (tests SDK HTTP fallback)
+# HTTP fallback while server holds the lock
 python3 examples/single_provider/litellm_agent.py
+tj cost --since 1h   # works via API fallback
 
-# 9. Verify web UI
 open http://127.0.0.1:7391/
-# Check: Status page shows agent cards with cost, tokens
-# Check: Traces page shows span waterfall
-# Check: Cost page shows non-zero USD values
-# Check: Sidebar has TJ jar-mark SVG + "TokenJam" wordmark, monochrome black/white
-#        styling matching tokenjam.dev (no blue UI chrome — only the LLM workflow bar
-#        uses brand blue as a categorical fill)
-# Check: Light/Dark/System theme toggle in sidebar footer cycles through all three
-#        states and persists across reloads
-
-# 10. Verify both agents show up
-tj status       # should show both agents
-tj traces       # should show traces from both runs
-tj cost --since 1h   # model names should be clean (gpt-4o-mini, not openai/gpt-4o-mini)
-
-# 11. tj optimize + tj backfill smoke check (new in 0.3.x)
-# Stop the server so the DB is unlocked (optimize uses a read-only fallback
-# but backfill needs the write lock).
-tj stop
-
-# If this machine has Claude Code history, backfill is idempotent and surfaces
-# real spend numbers. Otherwise this step is a no-op.
-ls ~/.claude/projects/ >/dev/null 2>&1 && tj backfill claude-code
-
-tj optimize                                   # both analyzers
-tj optimize --budget anthropic --budget-usd 5 # force an over-budget finding to see the renderer
-tj optimize --json | python3 -c "import json,sys; r=json.load(sys.stdin); d=r.get('downgrade'); assert d is None or 'Candidate-flagging heuristic' in d['caveat']; print('ok: caveat enforced')"
-# [ ] Empty-DB case prints "No usage data found." (run after `tj uninstall` if curious)
-# [ ] Over-budget projection shows exhaustion date
-# [ ] Spend totals reconcile between `tj optimize` and `tj cost --since 30d`
-
-# 12. Clean up
 ```
 
-## Claude Code integration (if applicable)
+Spot-check:
 
-Smoke check only — multi-project, secret-rotation, and global-config-fallback details live in `manual-pre-release-testing.md` and are exercised before release.
+- [ ] Status page shows both agents with cost / tokens
+- [ ] Traces page renders the waterfall
+- [ ] Cost page shows non-zero USD values
+- [ ] Sidebar theme toggle works
 
 ```bash
-tj onboard --claude-code
-# Verify expected files written
-cat ~/.claude/settings.json | python3 -m json.tool | grep -E "OTEL_LOGS_EXPORTER|OTEL_EXPORTER_OTLP_ENDPOINT"
-cat ~/.config/tj/projects.json   # should list current cwd
+tj stop
+```
 
-# Re-run should be a quiet no-op (no second "Background Items Added" prompt on macOS)
-tj onboard --claude-code --budget 5
+---
+
+## Claude Code integration (smoke)
+
+```bash
+tj onboard --claude-code --plan max_20x
+cat ~/.claude/settings.json | python3 -m json.tool | grep -E "OTEL_LOGS_EXPORTER|OTEL_EXPORTER_OTLP_ENDPOINT"
+cat ~/.config/tj/projects.json   # current cwd present
+
+# Re-run is a quiet no-op
+tj onboard --claude-code --plan max_20x
 
 # Backfill ran automatically during onboard — verify history is present
-tj cost --since 30d --agent claude-code-tokenjam
+tj cost --since 30d --agent claude-code-tokenjam || true
 ```
 
-## Codex CLI integration (if applicable)
-
-Smoke check only — the full multi-step Codex test (cross-sync, no-op re-runs, secret rotation) lives in `manual-pre-release-testing.md` and doesn't need to repeat for a published-release verification.
+## Codex integration (smoke)
 
 ```bash
-tj onboard --codex
+tj onboard --codex --plan plus
 tj serve &
 sleep 2
-# Spot-check the secret was synced
+
 SERVER_SECRET=$(grep ingest_secret ~/.config/tj/config.toml | sed 's/.*= "//' | tr -d '"')
 CODEX_SECRET=$(grep -oE 'Bearer [^"]+' ~/.codex/config.toml | sed 's/Bearer //')
 [ "$SERVER_SECRET" = "$CODEX_SECRET" ] && echo "ok: secret synced"
 
-# If codex CLI installed, drive a session and confirm ingest
+# If codex CLI is installed
 codex exec "say hello" 2>/dev/null && tj traces --agent codex_exec
+
 tj stop
 ```
 
-## Incident library demos
+---
 
-```bash
-# Zero-config scenarios — no API keys, no live agents needed.
-tj demo                # lists available scenarios (no flag)
-tj demo retry-loop
-tj demo surprise-cost
-tj demo hallucination-drift
-# Each writes synthetic spans; verify visible in `tj traces` and `tj alerts`.
-```
-
-## What to look for
+## Pass criteria summary
 
 | Step | Pass criteria |
 |------|--------------|
-| 2 | Version matches the release being tested |
-| 3 | Config created at `.tj/config.toml`, ingest secret generated, daemon installed |
-| 5 | Agent runs without errors, no DuckDB lock warnings |
-| 6 | `tj status` shows non-zero cost and tokens; `tj cost` shows real USD values (not $0.000000) |
-| 7 | Server starts on `:7391`, prints correct metrics URL |
-| 8 | Agent runs without "Could not set lock on file" error (HTTP fallback works) |
-| 9 | Web UI loads, shows data; sidebar has TJ jar SVG + "TokenJam" wordmark in monochrome; theme toggle cycles System/Light/Dark |
-| 10 | CLI queries work while server is running (API fallback); model names are clean |
-| 11 | `tj backfill claude-code` is idempotent on re-run; `tj optimize` prints both analyzers (or a friendly empty-DB message); JSON output includes the caveat string; spend totals reconcile with `tj cost` |
-| 12 | `tj stop` stops the server cleanly |
+| 1 | `pip install --upgrade tokenjam` succeeds, version matches release |
+| 2 | Onboard prompts for plan tier; config records it; no auto `usd = 200` written |
+| 3 | Example runs without DB-lock errors; CLI shows real USD values |
+| 4 | All four optimize analyzers run; caveat appears in downgrade JSON; `plan` + `pricing_mode` in JSON output |
+| 5 | All three backfill adapters ingest from fixtures; re-runs are idempotent |
+| 6 | `--compare previous` produces a diff report; `--export-config` writes a snippet with caveat comments |
+| 7 | `tj policy list` renders the unified table |
+| 8 | `tj serve` starts, web UI loads, HTTP fallback works while server holds lock |
+| Claude Code | Onboard writes settings.json + projects.json; re-run is a no-op |
+| Codex | Onboard writes `[otel]` + `[mcp_servers.tj]` to codex config; secret synced |
+
+If any of these break, **don't ship from this release tag** — file a follow-up fix and re-cut.
