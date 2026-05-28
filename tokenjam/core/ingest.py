@@ -248,10 +248,13 @@ class IngestPipeline:
                 resolved = self._resolve_plan_tier(span.billing_account)
                 if resolved != "unknown":
                     existing.plan_tier = resolved
-            # Late-resolve service_namespace if an earlier span (e.g. a tool
-            # span on a fresh session) carried none.
-            if existing.service_namespace is None and span.service_namespace:
-                existing.service_namespace = span.service_namespace
+            # Late-resolve service_namespace: from the span if it now carries
+            # one, otherwise from the agent's configured project (server-side
+            # fallback for agents that never send service.namespace).
+            if existing.service_namespace is None:
+                resolved_ns = span.service_namespace or self._resolve_project(span.agent_id)
+                if resolved_ns:
+                    existing.service_namespace = resolved_ns
             return existing
 
         # New session
@@ -270,8 +273,20 @@ class IngestPipeline:
             tool_call_count=1 if span.tool_name else 0,
             error_count=1 if span.status_code == SpanStatus.ERROR else 0,
             plan_tier=plan_tier,
-            service_namespace=span.service_namespace,
+            service_namespace=span.service_namespace or self._resolve_project(span.agent_id),
         )
+
+    def _resolve_project(self, agent_id: str | None) -> str | None:
+        """Project name configured for this agent (``[agents.<id>].project``).
+
+        Server-side fallback for service.namespace so sessions group by project
+        even when the agent never sends service.namespace on the wire (e.g. an
+        already-running Claude Code session whose env was fixed at startup).
+        """
+        if not agent_id:
+            return None
+        agent_cfg = self.config.agents.get(agent_id)
+        return agent_cfg.project if agent_cfg else None
 
     def _resolve_plan_tier(self, billing_account: str | None) -> str:
         """

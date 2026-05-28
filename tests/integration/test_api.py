@@ -18,7 +18,7 @@ from tokenjam.core.config import (
 )
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
-from tests.factories import make_invoke_agent_span, make_llm_span, make_tool_span
+from tests.factories import make_invoke_agent_span, make_llm_span, make_session, make_tool_span
 
 
 INGEST_SECRET = "test-secret-token"
@@ -438,6 +438,45 @@ async def test_status_returns_service_namespace(tmp_path):
         pipeline.process(make_llm_span(
             agent_id="claude-code-harness", session_id="s1",
             service_namespace="aquanode"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        agents = {a["agent_id"]: a for a in resp.json()["agents"]}
+        assert agents["claude-code-harness"]["namespace"] == "aquanode"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_namespace_falls_back_to_configured_project(tmp_path):
+    """An agent with no per-session namespace still groups via [agents.<id>].project.
+
+    Covers the already-running session case: no service.namespace ever arrived
+    on the wire, but the server-side project mapping groups it anyway.
+    """
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig, AgentConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
+        # Pre-existing session with NO namespace (collected before the mapping).
+        db.upsert_session(make_session(
+            agent_id="claude-code-harness", session_id="s1", status="completed"))
 
         app = create_app(config=config, db=db, ingest_pipeline=pipeline)
         transport = httpx.ASGITransport(app=app)

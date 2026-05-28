@@ -6,7 +6,7 @@ from datetime import datetime
 
 import pytest
 
-from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
+from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig, AgentConfig
 from tokenjam.core.ingest import (
     IngestPipeline,
     SpanRejectedError,
@@ -78,6 +78,7 @@ def _make_pipeline(
     security: SecurityConfig | None = None,
     capture: CaptureConfig | None = None,
     db: InMemoryBackend | None = None,
+    agents: dict | None = None,
 ) -> tuple[IngestPipeline, InMemoryBackend]:
     """Create an IngestPipeline with sensible defaults for testing."""
     db = db or InMemoryBackend()
@@ -85,6 +86,7 @@ def _make_pipeline(
         version="1",
         security=security or SecurityConfig(),
         capture=capture or CaptureConfig(),
+        agents=agents or {},
     )
     pipeline = IngestPipeline(
         db=db,
@@ -434,3 +436,23 @@ class TestServiceNamespace:
         pipeline.process(make_llm_span(session_id="s1"))
 
         assert db.get_session("s1").service_namespace is None
+
+    def test_namespace_falls_back_to_configured_project(self):
+        # An already-running agent never sends service.namespace; the agent's
+        # configured project supplies it server-side (no restart needed).
+        pipeline, db = _make_pipeline(
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+        )
+        pipeline.process(make_llm_span(agent_id="claude-code-harness", session_id="s1"))
+
+        assert db.get_session("s1").service_namespace == "aquanode"
+
+    def test_wire_namespace_wins_over_configured_project(self):
+        pipeline, db = _make_pipeline(
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+        )
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="s1",
+            service_namespace="explicit-ns"))
+
+        assert db.get_session("s1").service_namespace == "explicit-ns"

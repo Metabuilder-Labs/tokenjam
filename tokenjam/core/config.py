@@ -40,6 +40,11 @@ class AgentConfig:
     sensitive_actions: list[SensitiveAction] = field(default_factory=list)
     output_schema:    str | None           = None
     drift:            DriftConfig          = field(default_factory=DriftConfig)
+    # Project this agent rolls up under in the dashboard (server-side fallback
+    # for OTel service.namespace). Lets already-running sessions group by
+    # project without restarting the agent — the mapping is applied by tj, so
+    # no service.namespace needs to arrive on the wire.
+    project:          str | None           = None
 
 
 @dataclass
@@ -309,6 +314,7 @@ def _parse(raw: dict) -> TjConfig:
             sensitive_actions=sensitive_actions,
             output_schema=agent_raw.get("output_schema"),
             drift=drift,
+            project=agent_raw.get("project"),
         )
 
     storage_raw = raw.get("storage", {})

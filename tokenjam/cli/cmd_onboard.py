@@ -265,6 +265,9 @@ def _onboard_claude_code(
             config.agents[agent_id] = AgentConfig()
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
+        # Server-side project mapping so already-running sessions group by
+        # project without restarting the agent (see AgentConfig.project).
+        config.agents[agent_id].project = namespace
 
         existing_plan = (
             config.budgets["anthropic"].plan
@@ -305,7 +308,7 @@ def _onboard_claude_code(
     else:
         ingest_secret = secrets.token_hex(32)
         daily_usd = budget if budget and budget > 0 else None
-        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
+        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd), project=namespace)}
         if plan_override:
             plan = plan_override
         else:

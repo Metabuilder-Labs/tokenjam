@@ -34,6 +34,7 @@ async def get_status(
 
     has_active_alerts = False
     agents_data = []
+    config = getattr(request.app.state, "config", None)
 
     for aid in agent_ids:
         session = None
@@ -62,9 +63,17 @@ async def get_status(
         if active_alerts:
             has_active_alerts = True
 
+        # Project grouping: prefer the namespace captured on the session;
+        # fall back to the agent's configured project ([agents.<id>].project)
+        # so already-running agents that never sent service.namespace still
+        # group correctly without a restart.
+        agent_cfg = config.agents.get(aid) if config else None
+        configured_project = agent_cfg.project if agent_cfg else None
+        namespace = (session.service_namespace if session else None) or configured_project
+
         agent_data = {
             "agent_id": aid,
-            "namespace": session.service_namespace if session else None,
+            "namespace": namespace,
             "status": session.effective_status if session else "idle",
             "session_id": session.session_id if session else None,
             "cost_today": today_cost,
