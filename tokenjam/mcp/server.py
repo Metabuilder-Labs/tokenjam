@@ -1054,7 +1054,7 @@ def setup_project(agent_id: str | None = None, project_path: str | None = None) 
 
 
 def _tool_get_optimize_report(
-    db, config, agent_id: str | None, since: str | None, only: str | None,
+    db, config, agent_id: str | None, since: str | None, findings: list[str] | None,
     budget_provider: str | None, budget_usd: float | None,
 ) -> dict:
     from tokenjam.core.optimize import build_report, report_to_dict
@@ -1075,7 +1075,7 @@ def _tool_get_optimize_report(
         since=since_dt,
         until=utcnow(),
         agent_id=agent_id,
-        only=only,
+        findings=findings,
         budget_provider_filter=budget_provider,
         budget_usd_override=budget_usd,
     )
@@ -1086,7 +1086,7 @@ def _tool_get_optimize_report(
 def get_optimize_report(
     agent_id: str | None = None,
     since: str | None = "30d",
-    only: str | None = None,
+    findings: list[str] | None = None,
     budget_provider: str | None = None,
     budget_usd: float | None = None,
 ) -> dict:
@@ -1094,10 +1094,21 @@ def get_optimize_report(
     Return cost-saving candidates and budget projections — equivalent to
     `tj optimize`. Use this when the user asks where they could save money,
     whether they're going to exceed a budget, what their monthly run rate
-    looks like, or which sessions look like they could have used a cheaper
-    model. Includes a mandatory caveat field reminding callers that the
-    model-downgrade finding is a structural heuristic, not a quality
-    judgment. `only` accepts 'model' or 'budget' to scope to one analyzer.
+    looks like, which sessions look like they could have used a cheaper
+    model, whether they're using their Claude plan efficiently, or whether
+    they're getting their money's worth from a subscription plan. Includes a
+    mandatory caveat field reminding callers that the model-downgrade
+    finding is a structural heuristic, not a quality judgment.
+
+    `findings` is a list of analyzer names to run (e.g. ['model-downgrade']
+    or ['budget-projection']). Omit to run all registered analyzers.
+
+    Output includes a `pricing_mode` field derived from the session's
+    plan_tier: 'api' (per-token billing), 'subscription' (flat-rate plan;
+    dollar figures shown as implied API value, not spend), 'local' (no
+    marginal cost), or 'unknown' (plan not configured — dollar figures
+    suppressed). Subscription-tier output reframes savings as token
+    headroom freed against the plan cap rather than dollars saved.
     """
     if _config is None:
         return _no_config()
@@ -1112,7 +1123,7 @@ def get_optimize_report(
         else:
             db = open_db(_config.storage)
         return _tool_get_optimize_report(
-            db, _config, agent_id, since, only, budget_provider, budget_usd,
+            db, _config, agent_id, since, findings, budget_provider, budget_usd,
         )
     except Exception as e:
         return {"error": str(e)}

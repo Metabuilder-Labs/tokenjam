@@ -239,6 +239,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                 request_type="completion",
                 conversation_id=sid_str,
                 attributes={"source": "backfill.claude_code"},
+                billing_account="anthropic",
             )
         )
         total_input += input_tokens
@@ -426,8 +427,14 @@ def _insert_session_idempotent(db, parsed: ParsedSession) -> int:
         if exists:
             continue
         conn.execute(
-            "INSERT INTO spans VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
+            "INSERT INTO spans ("
+            "span_id, trace_id, parent_span_id, session_id, agent_id, "
+            "name, kind, status_code, status_message, start_time, end_time, "
+            "duration_ms, attributes, provider, model, tool_name, "
+            "input_tokens, output_tokens, cache_tokens, cost_usd, "
+            "request_type, conversation_id, events, billing_account"
+            ") VALUES "
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -435,6 +442,7 @@ def _insert_session_idempotent(db, parsed: ParsedSession) -> int:
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
+                span.billing_account,
             ],
         )
         inserted += 1

@@ -84,6 +84,9 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
     agent_id = attrs.pop(GenAIAttributes.AGENT_ID, None)
     cost_usd = attrs.pop(TjAttributes.COST_USD, None)
     session_id = attrs.pop(TjAttributes.SESSION_ID, None)
+    # billing_account: explicit attribute wins, otherwise derived from provider.
+    # Map gen_ai.provider.name values to billing_account (provider-only).
+    billing_account = attrs.pop(TjAttributes.BILLING_ACCOUNT, None) or _provider_to_billing_account(provider)
 
     # Convert int tokens to int (OTel may store as strings)
     if input_tokens is not None:
@@ -153,7 +156,33 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
         conversation_id=conversation_id,
         attributes=attrs,
         events=events,
+        billing_account=billing_account,
     )
+
+
+def _provider_to_billing_account(provider: str | None) -> str | None:
+    """
+    Map gen_ai.provider.name to a tj billing_account (provider-only identifier).
+
+    Returns None for non-LLM spans or unrecognised providers — the analyzers
+    skip rows with a NULL billing_account when scoping per-provider spend.
+    """
+    if not provider:
+        return None
+    p = str(provider).lower()
+    # Direct hits
+    if p in {"anthropic", "openai", "google", "bedrock", "local.ollama"}:
+        return p
+    # Aliases
+    if p in {"aws.bedrock", "aws_bedrock"}:
+        return "bedrock"
+    if p in {"google.gemini", "gemini", "vertex", "vertex_ai"}:
+        return "google"
+    if p in {"ollama"}:
+        return "local.ollama"
+    if p in {"azure", "azure.openai", "azure_openai"}:
+        return "openai"  # Azure OpenAI billed as openai for plan-tier purposes
+    return None
 
 
 def _ns_to_datetime(ns: int) -> datetime:

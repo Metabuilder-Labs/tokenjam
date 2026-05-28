@@ -136,9 +136,32 @@ class TjAttributes:
     SESSION_ID       = "session.id"
     ALERT_TYPE       = "tokenjam.alert.type"
     ALERT_SEVERITY   = "tokenjam.alert.severity"
+
+    # Billing / plan classification
+    # `billing_account` is provider-only (anthropic, openai, google, bedrock,
+    # local.ollama). It's a span-level attribute set by each integration.
+    # `plan_tier` is set on the session record at session creation by reading
+    # ProviderBudget.plan for the matching billing_account; it does NOT live
+    # on individual spans. Analyzers JOIN through SessionRecord to read it.
+    BILLING_ACCOUNT  = "tokenjam.billing_account"
+    PLAN_TIER        = "tokenjam.plan_tier"
+
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"
     EGRESS_HOST      = "tokenjam.sandbox.egress_host"
     EGRESS_PORT      = "tokenjam.sandbox.egress_port"
     FILESYSTEM_PATH  = "tokenjam.sandbox.filesystem_path"
     SYSCALL_NAME     = "tokenjam.sandbox.syscall_name"
+
+
+# Valid plan_tier values. `unknown` is the default for backfilled or pre-onboard
+# sessions; `tj optimize` suppresses dollar figures for unknown sessions.
+VALID_PLAN_TIERS = frozenset({
+    "api", "pro", "max_5x", "max_20x", "plus", "team", "enterprise", "local", "unknown",
+})
+
+# plan_tier values that mean "flat-rate subscription with allocation/cap."
+# pricing_mode = "subscription" for these.
+SUBSCRIPTION_PLAN_TIERS = frozenset({
+    "pro", "max_5x", "max_20x", "plus", "team", "enterprise",
+})

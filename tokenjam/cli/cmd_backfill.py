@@ -11,6 +11,9 @@ from tokenjam.core.backfill import (
     BackfillResult,
     ingest_claude_code,
 )
+from tokenjam.core.ingest_adapters.helicone import ingest_helicone
+from tokenjam.core.ingest_adapters.langfuse import ingest_langfuse
+from tokenjam.core.ingest_adapters.otlp import ingest_otlp
 from tokenjam.utils.formatting import console, format_cost
 from tokenjam.utils.time_parse import utcnow
 
@@ -108,3 +111,153 @@ def claude_code(ctx: click.Context, root_path: str | None, since_days: int | Non
             "  [dim]Less than 7 days of history available — `tj optimize` will "
             "flag thin-data projections.[/dim]"
         )
+
+
+@cmd_backfill.command("langfuse")
+@click.option("--source-url", default=None,
+              help="Live Langfuse base URL (e.g. https://cloud.langfuse.com). "
+                   "Reads /api/public/observations with --api-key Bearer auth.")
+@click.option("--source-file", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="Local JSON file containing a Langfuse observations dump. "
+                   "Accepts a bare list, {\"data\": [...]} envelope, or NDJSON.")
+@click.option("--api-key", default=None, help="Langfuse public API key (Bearer).")
+@click.option("--since", default=None,
+              help="Only ingest observations newer than this. Accepts '30d', "
+                   "'24h', or an ISO-8601 timestamp.")
+@click.pass_context
+def langfuse(ctx: click.Context, source_url: str | None, source_file: str | None,
+             api_key: str | None, since: str | None) -> None:
+    """Ingest Langfuse observations from a live API or a JSON dump."""
+    db = ctx.obj.get("db")
+    if db is None:
+        raise click.ClickException("backfill requires a database connection.")
+    if (source_url is None) == (source_file is None):
+        raise click.UsageError("Provide exactly one of --source-url or --source-file.")
+
+    since_dt = None
+    if since:
+        from tokenjam.utils.time_parse import parse_since
+        try:
+            since_dt = parse_since(since)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="'--since'") from exc
+
+    source_label = source_url or source_file
+    console.print(f"Ingesting Langfuse observations from {source_label} …")
+    try:
+        result = ingest_langfuse(
+            db,
+            source_url=source_url,
+            source_file=source_file,
+            api_key=api_key,
+            since=since_dt,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    console.print(
+        f"[green]✓[/green] Read [bold]{result['observations_read']}[/bold] "
+        f"observation(s); wrote [bold]{result['spans_written']}[/bold] new "
+        f"span(s); skipped [bold]{result['spans_skipped']}[/bold] already "
+        f"present."
+    )
+
+
+@cmd_backfill.command("helicone")
+@click.option("--source-url", default=None,
+              help="Live Helicone base URL (e.g. https://api.helicone.ai). "
+                   "POSTs /v1/request/query with --api-key Bearer auth.")
+@click.option("--source-file", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="Local JSON file containing a Helicone records dump. "
+                   "Accepts a bare list, {\"data\": [...]} envelope, or NDJSON.")
+@click.option("--api-key", default=None, help="Helicone API key (Bearer).")
+@click.option("--since", default=None,
+              help="Only ingest records newer than this. Accepts '30d', "
+                   "'24h', or an ISO-8601 timestamp.")
+@click.pass_context
+def helicone(ctx: click.Context, source_url: str | None, source_file: str | None,
+             api_key: str | None, since: str | None) -> None:
+    """Ingest Helicone request records from a live API or a JSON dump."""
+    db = ctx.obj.get("db")
+    if db is None:
+        raise click.ClickException("backfill requires a database connection.")
+    if (source_url is None) == (source_file is None):
+        raise click.UsageError("Provide exactly one of --source-url or --source-file.")
+
+    since_dt = None
+    if since:
+        from tokenjam.utils.time_parse import parse_since
+        try:
+            since_dt = parse_since(since)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="'--since'") from exc
+
+    source_label = source_url or source_file
+    console.print(f"Ingesting Helicone records from {source_label} …")
+    try:
+        result = ingest_helicone(
+            db,
+            source_url=source_url,
+            source_file=source_file,
+            api_key=api_key,
+            since=since_dt,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    console.print(
+        f"[green]✓[/green] Read [bold]{result['records_read']}[/bold] "
+        f"record(s); wrote [bold]{result['spans_written']}[/bold] new "
+        f"span(s); skipped [bold]{result['spans_skipped']}[/bold] already "
+        f"present."
+    )
+
+
+@cmd_backfill.command("otlp")
+@click.option("--source-url", default=None,
+              help="HTTP(S) URL to an OTLP JSON dump (GET-fetched). For "
+                   "live push-style OTLP ingestion, point your collector "
+                   "at the tj serve endpoint instead.")
+@click.option("--source-file", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="Local OTLP JSON file to ingest. Accepts a single "
+                   "{\"resourceSpans\": [...]} envelope or NDJSON with one "
+                   "envelope per line.")
+@click.option("--since", default=None,
+              help="Only ingest spans newer than this. Accepts '30d', "
+                   "'24h', or an ISO-8601 timestamp.")
+@click.pass_context
+def otlp(ctx: click.Context, source_url: str | None, source_file: str | None,
+         since: str | None) -> None:
+    """Ingest a raw OTLP JSON dump from a live endpoint or a file."""
+    db = ctx.obj.get("db")
+    if db is None:
+        raise click.ClickException("backfill requires a database connection.")
+    if (source_url is None) == (source_file is None):
+        raise click.UsageError("Provide exactly one of --source-url or --source-file.")
+
+    since_dt = None
+    if since:
+        from tokenjam.utils.time_parse import parse_since
+        try:
+            since_dt = parse_since(since)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="'--since'") from exc
+
+    source_label = source_url or source_file
+    console.print(f"Ingesting OTLP spans from {source_label} …")
+    try:
+        result = ingest_otlp(
+            db,
+            source_url=source_url,
+            source_file=source_file,
+            since=since_dt,
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    console.print(
+        f"[green]✓[/green] Saw [bold]{result['spans_seen']}[/bold] span(s); "
+        f"wrote [bold]{result['spans_written']}[/bold] new; "
+        f"skipped [bold]{result['spans_skipped']}[/bold] already present; "
+        f"rejected [bold]{result['spans_rejected']}[/bold]."
+    )

@@ -347,7 +347,7 @@ def test_onboard_claude_code_writes_settings(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     assert settings_path.exists()
@@ -371,7 +371,7 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     data = json.loads(settings_path.read_text())
     # Original top-level key preserved
@@ -391,7 +391,7 @@ def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     # write_config should have been called with an TjConfig containing a claude-code-* agent
     assert mock_write.called
@@ -408,7 +408,7 @@ def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon"], input="7.0\n")
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x"], input="7.0\n")
 
     assert result.exit_code == 0
     assert mock_write.called
@@ -458,7 +458,7 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -504,7 +504,7 @@ def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -630,6 +630,171 @@ def test_optimize_json_output_includes_caveat(runner, db, config):
     assert "Candidate-flagging heuristic" in data["downgrade"]["caveat"]
 
 
+def _seed_optimize_window(db, *, plan_tier: str, sessions: int = 5,
+                          billing_account: str = "anthropic") -> None:
+    """
+    Helper: insert N sessions with the given plan_tier plus matching LLM spans.
+    Used by the v1.1 plan-tier-aware rendering tests below.
+    """
+    from datetime import timedelta
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.utils.time_parse import utcnow
+
+    for i in range(sessions):
+        sess = make_session(
+            agent_id="test-agent",
+            session_id=f"s{i}",
+            plan_tier=plan_tier,
+            duration_seconds=60.0,
+        )
+        db.upsert_session(sess)
+        span = make_llm_span(
+            agent_id="test-agent",
+            model="claude-opus-4-7",
+            provider="anthropic",
+            billing_account=billing_account,
+            input_tokens=2_000, output_tokens=200, cost_usd=4.0,
+            session_id=f"s{i}",
+            start_time=utcnow() - timedelta(days=1),
+        )
+        db.insert_span(span)
+
+
+def test_optimize_subscription_renders_implied_api_value(runner, db, config):
+    """Subscription users see implied-API-value framing, never dollar 'spend'."""
+    _seed_optimize_window(db, plan_tier="max_20x")
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+    # Subscription header: plan label + implied API value
+    assert "Max 20x plan" in out
+    assert "Implied API value" in out
+    # Token-share framing in downgrade body (no "$X/mo savings")
+    assert "this cycle's tokens" in out or "% of this cycle's tokens" in out
+    # The caveat line stays
+    assert "Candidate-flagging heuristic" in out
+    # The literal phrase "spend (last" must NOT appear in subscription rendering
+    assert "spend (last" not in out
+
+
+def test_optimize_local_suppresses_dollar_figures(runner, db, config):
+    """Local-inference users see no dollar figures at all."""
+    _seed_optimize_window(db, plan_tier="local", billing_account="local.ollama")
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "Local inference" in out
+    assert "no marginal cost" in out
+    # Token framing in downgrade body
+    if "Model downgrade" in out:
+        assert "Relevant for capacity planning" in out
+
+
+def test_optimize_api_mode_unchanged(runner, db, config):
+    """API users see the existing dollar-denominated rendering."""
+    _seed_optimize_window(db, plan_tier="api")
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+    assert "spend (last" in out  # historical header
+    assert "Implied API value" not in out
+
+
+def test_optimize_json_includes_plan_and_pricing_mode(runner, db, config):
+    """JSON output carries plan and pricing_mode fields."""
+    _seed_optimize_window(db, plan_tier="max_20x")
+
+    result = _invoke(runner, db, config, ["optimize", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["plan"] == "max_20x"
+    assert data["pricing_mode"] == "subscription"
+    # plan_tier_mix carries the raw counts
+    assert data["plan_tier_mix"].get("max_20x", 0) > 0
+    # For subscription, downgrade payload carries monthly_tokens_freed
+    if data.get("downgrade"):
+        assert "monthly_tokens_freed" in data["downgrade"]
+
+
+def test_cost_compare_renders_window_diff(runner, db, config):
+    """`tj cost --compare previous` produces a diff report against the prior window."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+    for i in range(3):
+        s = make_session(session_id=f"prev-{i}", plan_tier="api")
+        db.upsert_session(s)
+        db.insert_span(make_llm_span(
+            session_id=f"prev-{i}",
+            input_tokens=1000, output_tokens=200, cost_usd=0.01,
+            start_time=now - timedelta(days=10) + timedelta(hours=i),
+        ))
+    for i in range(3):
+        s = make_session(session_id=f"cur-{i}", plan_tier="api")
+        db.upsert_session(s)
+        db.insert_span(make_llm_span(
+            session_id=f"cur-{i}",
+            input_tokens=2000, output_tokens=400, cost_usd=0.05,
+            start_time=now - timedelta(days=3) + timedelta(hours=i),
+        ))
+
+    result = _invoke(runner, db, config, ["cost", "--since", "7d", "--compare", "previous"])
+    assert result.exit_code == 0
+    out = result.output
+    # Header lines for both windows
+    assert "Current" in out
+    assert "Previous" in out
+    # Cost delta + token delta lines
+    assert "Cost delta" in out
+    assert "Token delta" in out
+
+
+def test_cost_compare_json_output(runner, db, config):
+    """--compare combined with --json returns structured diff data."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+    s = make_session(session_id="cur", plan_tier="api")
+    db.upsert_session(s)
+    db.insert_span(make_llm_span(
+        session_id="cur",
+        input_tokens=1000, output_tokens=200, cost_usd=0.05,
+        start_time=now - timedelta(days=3),
+    ))
+
+    result = _invoke(runner, db, config, [
+        "cost", "--since", "7d", "--compare", "previous", "--json",
+    ])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert "current" in data and "previous" in data
+    assert "cost_delta_usd" in data
+    assert "tokens_delta" in data
+
+
+def test_cost_compare_invalid_keyword_rejected(runner, db, config):
+    """Unknown --compare value raises BadParameter."""
+    result = _invoke(runner, db, config, ["cost", "--compare", "yesterday"])
+    assert result.exit_code != 0
+    assert "Unknown --compare" in result.output
+
+
+def test_optimize_compare_appends_window_diff(runner, db, config):
+    """`tj optimize --compare previous` surfaces the diff alongside findings."""
+    _seed_optimize_window(db, plan_tier="api")
+    result = _invoke(runner, db, config, ["optimize", "--compare", "previous"])
+    assert result.exit_code == 0
+    # The diff section header is appended after the regular optimize report.
+    assert "Window comparison" in result.output
+
+
 def test_optimize_budget_projection_from_config(runner, db):
     """Budget configured via [budget.anthropic] should surface a projection."""
     from datetime import timedelta
@@ -651,7 +816,7 @@ def test_optimize_budget_projection_from_config(runner, db):
         )
         db.insert_span(span)
 
-    result = _invoke(runner, db, cfg, ["optimize", "--only", "budget"])
+    result = _invoke(runner, db, cfg, ["optimize", "--finding", "budget-projection"])
     assert result.exit_code == 0
     assert "Budget projection" in result.output
     assert "anthropic" in result.output

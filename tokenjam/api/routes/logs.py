@@ -76,6 +76,7 @@ def _api_request_to_span(
         conversation_id=prompt_id,
         parent_span_id=_span_id_from_prompt(prompt_id) if prompt_id else None,
         provider="anthropic",
+        billing_account="anthropic",
         model=str(attrs["model"]) if "model" in attrs else None,
         input_tokens=_safe_int(attrs.get(ClaudeCodeEvents.INPUT_TOKENS)),
         output_tokens=_safe_int(attrs.get(ClaudeCodeEvents.OUTPUT_TOKENS)),
@@ -171,6 +172,7 @@ def _api_error_to_span(
         conversation_id=prompt_id,
         parent_span_id=_span_id_from_prompt(prompt_id) if prompt_id else None,
         provider="anthropic",
+        billing_account="anthropic",
         model=str(attrs["model"]) if "model" in attrs else None,
         attributes=extra_attrs,
     )
@@ -276,6 +278,7 @@ def _codex_api_request_to_span(
         session_id=conversation_id,
         conversation_id=conversation_id,
         provider="openai",
+        billing_account="openai",
         model=str(attrs["model"]) if "model" in attrs else None,
         attributes=extra_attrs,
     )
@@ -318,6 +321,7 @@ def _codex_sse_event_to_span(
         session_id=conversation_id,
         conversation_id=conversation_id,
         provider="openai",
+        billing_account="openai",
         model=str(attrs["model"]) if "model" in attrs else None,
         input_tokens=_safe_int(attrs.get(CodexEvents.INPUT_TOKEN_COUNT)),
         output_tokens=_safe_int(attrs.get(CodexEvents.OUTPUT_TOKEN_COUNT)),

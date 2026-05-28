@@ -216,6 +216,7 @@ def _dict_to_span(d: dict) -> NormalizedSpan:
         cost_usd=d.get("cost_usd"),
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
+        billing_account=d.get("billing_account"),
     )
 
 

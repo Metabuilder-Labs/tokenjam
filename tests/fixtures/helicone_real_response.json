@@ -1,0 +1,79 @@
+{
+  "data": [
+    {
+      "request": {
+        "id": "req-aaa-001",
+        "user_id": "test-user",
+        "model": "claude-sonnet-4-6",
+        "provider": "ANTHROPIC",
+        "created_at": "2026-04-01T10:00:00.000Z",
+        "prompt_tokens": 1500,
+        "properties": {
+          "Helicone-Property-Session": "sess-1"
+        }
+      },
+      "response": {
+        "id": "resp-aaa-001",
+        "completion_tokens": 320,
+        "delay_ms": 3500,
+        "status": 200
+      },
+      "cost_usd": 0.00513
+    },
+    {
+      "request": {
+        "id": "req-aaa-002",
+        "user_id": "test-user",
+        "model": "gpt-4o-mini",
+        "provider": "OPENAI",
+        "created_at": "2026-04-01T10:00:05.000Z",
+        "prompt_tokens": 800,
+        "properties": {
+          "Helicone-Property-Session": "sess-1"
+        }
+      },
+      "response": {
+        "id": "resp-aaa-002",
+        "completion_tokens": 150,
+        "delay_ms": 1200,
+        "status": 200
+      },
+      "cost_usd": 0.000210
+    },
+    {
+      "request": {
+        "id": "req-aaa-003",
+        "user_id": "test-user",
+        "model": "gemini-2-5-flash",
+        "provider": "GOOGLE",
+        "created_at": "2026-04-02T11:00:00.000Z",
+        "prompt_tokens": 600
+      },
+      "response": {
+        "id": "resp-aaa-003",
+        "completion_tokens": 240,
+        "delay_ms": 1800,
+        "status": 200
+      },
+      "cost_usd": 0.000132
+    },
+    {
+      "request": {
+        "id": "req-aaa-004",
+        "user_id": "test-user",
+        "model": "claude-haiku-4-5",
+        "provider": "ANTHROPIC",
+        "created_at": "2026-04-02T12:00:00.000Z",
+        "prompt_tokens": 400
+      },
+      "response": {
+        "id": "resp-aaa-004",
+        "completion_tokens": 90,
+        "delay_ms": 800,
+        "status": 500,
+        "error": "model overloaded"
+      },
+      "cost_usd": 0.000356
+    }
+  ]
+}

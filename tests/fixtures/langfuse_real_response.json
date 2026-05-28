@@ -1,0 +1,88 @@
+{
+  "data": [
+    {
+      "id": "obs-001",
+      "traceId": "trace-abc",
+      "type": "GENERATION",
+      "name": "anthropic-chat",
+      "startTime": "2026-04-01T10:00:00.000Z",
+      "endTime": "2026-04-01T10:00:03.500Z",
+      "model": "claude-sonnet-4-6",
+      "modelParameters": {"temperature": 0.7},
+      "usage": {
+        "input": 1500,
+        "output": 320,
+        "total": 1820,
+        "unit": "TOKENS"
+      },
+      "usageDetails": {
+        "input": 1500,
+        "output": 320,
+        "input_cache_read": 200
+      },
+      "calculatedTotalCost": 0.00513,
+      "calculatedInputCost": 0.00337,
+      "calculatedOutputCost": 0.00176,
+      "sessionId": "sess-xyz",
+      "parentObservationId": null,
+      "level": "DEFAULT",
+      "statusMessage": null,
+      "userId": "test-user",
+      "metadata": {"app_version": "0.3.1"}
+    },
+    {
+      "id": "obs-002",
+      "traceId": "trace-abc",
+      "type": "SPAN",
+      "name": "vector-search",
+      "startTime": "2026-04-01T10:00:01.000Z",
+      "endTime": "2026-04-01T10:00:01.350Z",
+      "parentObservationId": "obs-001",
+      "sessionId": "sess-xyz",
+      "level": "DEFAULT",
+      "metadata": {"k": 5}
+    },
+    {
+      "id": "obs-003",
+      "traceId": "trace-abc",
+      "type": "GENERATION",
+      "name": "openai-chat",
+      "startTime": "2026-04-01T10:00:05.000Z",
+      "endTime": "2026-04-01T10:00:06.200Z",
+      "model": "gpt-4o-mini",
+      "usage": {
+        "input": 800,
+        "output": 150,
+        "total": 950,
+        "unit": "TOKENS"
+      },
+      "calculatedTotalCost": 0.000210,
+      "sessionId": "sess-xyz",
+      "parentObservationId": null,
+      "level": "DEFAULT",
+      "userId": "test-user"
+    },
+    {
+      "id": "obs-004",
+      "traceId": "trace-def",
+      "type": "GENERATION",
+      "name": "gemini-chat",
+      "startTime": "2026-04-02T11:00:00.000Z",
+      "endTime": "2026-04-02T11:00:01.800Z",
+      "model": "gemini-2-5-flash",
+      "usage": {
+        "input": 600,
+        "output": 240
+      },
+      "calculatedTotalCost": 0.000132,
+      "sessionId": "sess-def",
+      "userId": "test-user"
+    }
+  ],
+  "meta": {
+    "page": 1,
+    "limit": 100,
+    "totalItems": 4,
+    "totalPages": 1
+  }
+}
