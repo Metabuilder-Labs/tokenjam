@@ -167,3 +167,222 @@ def report_to_dict(report: OptimizeReport) -> dict:
             return {k: _serialise(v) for k, v in o.items()}
         return o
     return _serialise(report)
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    """Parse an ISO-8601 string back into datetime; tolerate None / already-dt."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        s = value.replace("Z", "+00:00") if value.endswith("Z") else value
+        try:
+            return datetime.fromisoformat(s)
+        except ValueError:
+            return None
+    return None
+
+
+def report_from_dict(d: dict) -> OptimizeReport:
+    """
+    Reconstruct an OptimizeReport from the dict produced by `report_to_dict`.
+
+    Symmetric with `report_to_dict`. Used by the CLI when fetching an
+    optimize report from a running `tj serve` via /api/v1/optimize — the
+    daemon serialises the report and the CLI deserialises here so the same
+    rendering path works for both local and HTTP-fetched reports
+    (issue #68 §12).
+
+    Wave-2 analyzer findings live under `d["findings"]` keyed by analyzer
+    name; each registered analyzer module's `from_dict` helper is invoked
+    via the registry. Unknown finding names are dropped silently — this
+    keeps the CLI forward-compatible if the daemon advertises a finding
+    the local install doesn't know how to render yet.
+    """
+    from tokenjam.core.optimize.types import (
+        BudgetProjection,
+        DowngradeExample,
+        DowngradeFinding,
+        WindowSummary,
+    )
+
+    w = d.get("window") or {}
+    window = WindowSummary(
+        since=_parse_dt(w.get("since")) or datetime.now(tz=timezone.utc),
+        until=_parse_dt(w.get("until")) or datetime.now(tz=timezone.utc),
+        days=float(w.get("days", 0.0)),
+        sessions=int(w.get("sessions", 0)),
+        spans=int(w.get("spans", 0)),
+        total_tokens=int(w.get("total_tokens", 0)),
+        total_cost_usd=float(w.get("total_cost_usd", 0.0)),
+        thin_data=bool(w.get("thin_data", False)),
+    )
+
+    downgrade = None
+    if d.get("downgrade"):
+        dd = dict(d["downgrade"])
+        examples = [
+            DowngradeExample(
+                trace_id=str(ex.get("trace_id", "")),
+                session_id=ex.get("session_id"),
+                model=str(ex.get("model", "")),
+                tool_calls=int(ex.get("tool_calls", 0)),
+                duration_seconds=ex.get("duration_seconds"),
+                cost_usd=float(ex.get("cost_usd", 0.0)),
+            )
+            for ex in (dd.get("examples") or [])
+        ]
+        downgrade = DowngradeFinding(
+            candidate_sessions=int(dd.get("candidate_sessions", 0)),
+            total_sessions=int(dd.get("total_sessions", 0)),
+            actual_cost_usd=float(dd.get("actual_cost_usd", 0.0)),
+            alternative_cost_usd=float(dd.get("alternative_cost_usd", 0.0)),
+            monthly_savings_usd=float(dd.get("monthly_savings_usd", 0.0)),
+            percent_of_sessions=float(dd.get("percent_of_sessions", 0.0)),
+            examples=examples,
+            suggestions=dict(dd.get("suggestions") or {}),
+            caveat=str(dd.get("caveat", "")),
+            candidate_tokens=int(dd.get("candidate_tokens", 0)),
+            window_total_tokens=int(dd.get("window_total_tokens", 0)),
+            percent_of_tokens=float(dd.get("percent_of_tokens", 0.0)),
+            monthly_tokens_in_candidates=int(dd.get("monthly_tokens_in_candidates", 0)),
+        )
+
+    budgets = []
+    for b in d.get("budgets") or []:
+        bb = dict(b)
+        budgets.append(BudgetProjection(
+            provider=str(bb.get("provider", "")),
+            budget_usd=float(bb.get("budget_usd", 0.0)),
+            cycle_start_day=int(bb.get("cycle_start_day", 1)),
+            cycle_start=_parse_dt(bb.get("cycle_start")) or datetime.now(tz=timezone.utc),
+            cycle_end=_parse_dt(bb.get("cycle_end")) or datetime.now(tz=timezone.utc),
+            days_into_cycle=float(bb.get("days_into_cycle", 0.0)),
+            days_remaining=float(bb.get("days_remaining", 0.0)),
+            window_spend_usd=float(bb.get("window_spend_usd", 0.0)),
+            daily_run_rate_usd=float(bb.get("daily_run_rate_usd", 0.0)),
+            monthly_run_rate_usd=float(bb.get("monthly_run_rate_usd", 0.0)),
+            projected_cycle_total=float(bb.get("projected_cycle_total", 0.0)),
+            projected_overage_usd=float(bb.get("projected_overage_usd", 0.0)),
+            exhaustion_date=_parse_dt(bb.get("exhaustion_date")),
+            days_until_exhaustion=bb.get("days_until_exhaustion"),
+            over_budget=bool(bb.get("over_budget", False)),
+            applies_to_services=list(bb.get("applies_to_services") or []),
+            downgrade_run_rate_usd=bb.get("downgrade_run_rate_usd"),
+        ))
+
+    findings = {}
+    for name, payload in (d.get("findings") or {}).items():
+        constructor = _finding_constructor_for(name)
+        if constructor is None:
+            # Forward-compatible: ignore unknown findings rather than crash.
+            continue
+        try:
+            findings[name] = constructor(payload)
+        except Exception:
+            # Don't let one malformed finding break the whole report.
+            continue
+
+    return OptimizeReport(
+        window=window,
+        downgrade=downgrade,
+        budgets=budgets,
+        notes=list(d.get("notes") or []),
+        findings=findings,
+    )
+
+
+# Dispatch table: finding-registration-name -> (dict) -> dataclass constructor.
+# Filled lazily so importing runner.py doesn't require every analyzer module
+# to be imported (analyzers self-register via auto-discovery; the order
+# matters during package init).
+def _build_finding_constructors() -> dict:
+    from tokenjam.core.optimize.analyzers.cache_efficacy import (
+        CacheEfficacyFinding,
+        CacheEfficacyRow,
+    )
+    from tokenjam.core.optimize.analyzers.cache_recommend import (
+        CachePrefixCandidate,
+        CacheRecommendFinding,
+    )
+    from tokenjam.core.optimize.analyzers.prompt_bloat import (
+        BloatPrompt,
+        BloatRegion,
+        PromptBloatFinding,
+    )
+    from tokenjam.core.optimize.analyzers.workflow_restructure import (
+        WorkflowCluster,
+        WorkflowRestructureFinding,
+    )
+
+    def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
+        rows = [CacheEfficacyRow(**r) for r in d.get("rows") or []]
+        flagged = [CacheEfficacyRow(**r) for r in d.get("flagged") or []]
+        return CacheEfficacyFinding(
+            rows=rows, flagged=flagged,
+            confidence=d.get("confidence", "structural"),
+        )
+
+    def _cache_recommend(d: dict) -> CacheRecommendFinding:
+        candidates = [
+            CachePrefixCandidate(**c) for c in d.get("candidates") or []
+        ]
+        return CacheRecommendFinding(
+            enabled=bool(d.get("enabled", False)),
+            candidates=candidates,
+            skipped_provider_count=int(d.get("skipped_provider_count", 0)),
+            confidence=d.get("confidence", "structural"),
+            hint=d.get("hint"),
+        )
+
+    def _workflow_restructure(d: dict) -> WorkflowRestructureFinding:
+        clusters = [WorkflowCluster(**c) for c in d.get("clusters") or []]
+        return WorkflowRestructureFinding(
+            clusters=clusters,
+            sessions_examined=int(d.get("sessions_examined", 0)),
+            degraded=bool(d.get("degraded", False)),
+            confidence=d.get("confidence", "structural"),
+            caveat=d.get("caveat", ""),
+        )
+
+    def _prompt_bloat(d: dict) -> PromptBloatFinding:
+        per_prompt = []
+        for p in d.get("per_prompt") or []:
+            regions = [BloatRegion(**r) for r in p.get("regions") or []]
+            pp = dict(p)
+            pp["regions"] = regions
+            per_prompt.append(BloatPrompt(**pp))
+        return PromptBloatFinding(
+            enabled=bool(d.get("enabled", False)),
+            prompts_scored=int(d.get("prompts_scored", 0)),
+            prompts_skipped=int(d.get("prompts_skipped", 0)),
+            total_bloat_chars=int(d.get("total_bloat_chars", 0)),
+            total_chars=int(d.get("total_chars", 0)),
+            per_prompt=per_prompt,
+            confidence=d.get("confidence", "structural"),
+            hint=d.get("hint"),
+        )
+
+    return {
+        "cache-efficacy": _cache_efficacy,
+        "cache-recommend": _cache_recommend,
+        "workflow-restructure": _workflow_restructure,
+        "prompt-bloat": _prompt_bloat,
+    }
+
+
+_FINDING_CONSTRUCTORS: dict = {}
+
+
+def _ensure_constructors_loaded() -> dict:
+    """Lazy-load the finding constructors on first use."""
+    global _FINDING_CONSTRUCTORS
+    if not _FINDING_CONSTRUCTORS:
+        _FINDING_CONSTRUCTORS = _build_finding_constructors()
+    return _FINDING_CONSTRUCTORS
+
+
+# Wire the lazy loader into report_from_dict above.
+def _finding_constructor_for(name: str):
+    return _ensure_constructors_loaded().get(name)

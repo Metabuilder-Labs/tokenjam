@@ -29,6 +29,7 @@ from tokenjam.core.optimize.registry import ANALYZER_REGISTRY, register
 from tokenjam.core.optimize.runner import (
     ANALYZER_ORDER,
     build_report,
+    report_from_dict,
     report_to_dict,
     summarize_window,
 )
@@ -69,6 +70,7 @@ __all__ = [
     "build_report",
     "project_budget",
     "register",
+    "report_from_dict",
     "report_to_dict",
     "summarize_window",
 ]

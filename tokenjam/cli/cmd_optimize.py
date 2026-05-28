@@ -13,6 +13,7 @@ from tokenjam.core.optimize import (
     DowngradeFinding,
     OptimizeReport,
     build_report,
+    report_from_dict,
     report_to_dict,
 )
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
@@ -119,60 +120,93 @@ def cmd_optimize(
 
     until_dt = utcnow()
 
-    # If tj serve is running it holds the write-lock, and main.py hands us an
-    # API-proxy backend that has no .conn. Open the DB ourselves read-only so
-    # optimize works alongside a running server.
+    # Two paths depending on whether the daemon holds the DB lock.
+    #
+    # Local DB available (no daemon, or we got handed a real DuckDBBackend) →
+    # build the report locally using db.conn directly. Fastest, no HTTP.
+    #
+    # Daemon up (main.py handed us an ApiBackend because DuckDB refused to
+    # open) → fetch the report from /api/v1/optimize. Previously this path
+    # tried to open the DB read-only, but DuckDB blocks read-only attaches
+    # while another process holds the write lock — `tj optimize` failed with
+    # "Could not set lock on file" any time the daemon was up. See issue
+    # #68 §12.
     conn = getattr(db, "conn", None)
+    report: OptimizeReport
+    plan_mix: dict[str, int]
     if conn is None:
-        import duckdb
-        from pathlib import Path as _Path
-        db_path = str(_Path(config.storage.path).expanduser())
+        # API-shim path
+        from tokenjam.core.api_backend import ApiBackend
+        if not isinstance(db, ApiBackend):
+            raise click.ClickException(
+                "optimize requires either a direct DuckDB connection or a "
+                "running tj serve at the configured api.{host,port}."
+            )
         try:
-            ro_conn = duckdb.connect(db_path, read_only=True)
+            report_dict = db.fetch_optimize_report(
+                since=since,
+                agent_id=agent,
+                findings=list(findings) if findings else None,
+                budget_provider=budget_provider,
+                budget_usd=budget_usd,
+            )
         except Exception as exc:
             raise click.ClickException(
-                f"Could not open {db_path} read-only: {exc}"
+                f"Failed to fetch optimize report from tj serve: {exc}"
             ) from exc
 
-        class _RoShim:
-            def __init__(self, c):
-                self.conn = c
-        db = _RoShim(ro_conn)
-        conn = ro_conn
-    row = conn.execute(
-        "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
-    ).fetchone()
-    if not row or not row[0]:
-        if output_json:
-            click.echo(json.dumps({
-                "error": "no_data",
-                "message": "No span data available — let TokenJam run for a few "
-                           "days, or `tj backfill claude-code` if you use Claude Code.",
-            }))
-        else:
-            console.print(
-                "[yellow]No usage data found.[/yellow] "
-                "[dim]Let TokenJam run for a few days, or — if you use "
-                "Claude Code — try [bold]tj backfill claude-code[/bold] to "
-                "ingest historical sessions.[/dim]"
-            )
-        return
+        if report_dict.get("error") == "no_data":
+            if output_json:
+                click.echo(json.dumps(report_dict))
+            else:
+                console.print(
+                    "[yellow]No usage data found.[/yellow] "
+                    "[dim]Let TokenJam run for a few days, or — if you use "
+                    "Claude Code — try [bold]tj backfill claude-code[/bold] to "
+                    "ingest historical sessions.[/dim]"
+                )
+            return
 
-    report = build_report(
-        db=db,
-        config=config,
-        since=since_dt,
-        until=until_dt,
-        agent_id=agent,
-        findings=list(findings) if findings else None,
-        budget_provider_filter=budget_provider,
-        budget_usd_override=budget_usd,
-    )
+        report = report_from_dict(report_dict)
+        # Plan-tier mix isn't on the report payload yet; the API path renders
+        # without per-session plan_tier breakdown. Empty dict → _dominant_plan
+        # returns "api" (the historical default). The honesty-discipline
+        # behaviors that rely on plan_mix (the unknown-tier note, subscription
+        # reframing) are best-effort here; a richer API payload is a future
+        # enhancement (see #68 §12 follow-up).
+        plan_mix = {}
+    else:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
+        ).fetchone()
+        if not row or not row[0]:
+            if output_json:
+                click.echo(json.dumps({
+                    "error": "no_data",
+                    "message": "No span data available — let TokenJam run for a few "
+                               "days, or `tj backfill claude-code` if you use Claude Code.",
+                }))
+            else:
+                console.print(
+                    "[yellow]No usage data found.[/yellow] "
+                    "[dim]Let TokenJam run for a few days, or — if you use "
+                    "Claude Code — try [bold]tj backfill claude-code[/bold] to "
+                    "ingest historical sessions.[/dim]"
+                )
+            return
 
-    # Query plan-tier mix in this window. Used for both the unknown-tier note
-    # (0.4b) and dominant-plan rendering (when Task 1.1 ships the full
-    # subscription reframing this stays useful as the signal).
-    plan_mix = _plan_tier_mix(conn, since_dt, until_dt, agent)
+        report = build_report(
+            db=db,
+            config=config,
+            since=since_dt,
+            until=until_dt,
+            agent_id=agent,
+            findings=list(findings) if findings else None,
+            budget_provider_filter=budget_provider,
+            budget_usd_override=budget_usd,
+        )
+
+        plan_mix = _plan_tier_mix(conn, since_dt, until_dt, agent)
 
     dominant = _dominant_plan(plan_mix)
     pricing_mode = _pricing_mode_for(dominant)
@@ -193,11 +227,22 @@ def cmd_optimize(
     # before reading the recommendations.
     cost_diff = None
     if compare:
-        from tokenjam.core.cost import compute_cost_diff
-        try:
-            cost_diff = compute_cost_diff(db, since_dt, until_dt, compare, agent_id=agent)
-        except ValueError as exc:
-            raise click.BadParameter(str(exc), param_hint="'--compare'") from exc
+        if conn is None:
+            # API-shim path doesn't yet expose period comparison; would need
+            # a /api/v1/cost/compare route (#68 §12 follow-up). Surface
+            # explicitly rather than crash deep inside compute_cost_diff.
+            console.print(
+                "[yellow]Note:[/yellow] [dim]--compare is not yet supported "
+                "while [bold]tj serve[/bold] is running. Stop the daemon "
+                "([bold]tj stop[/bold]) and re-run, or omit --compare. "
+                "Continuing without comparison.[/dim]\n"
+            )
+        else:
+            from tokenjam.core.cost import compute_cost_diff
+            try:
+                cost_diff = compute_cost_diff(db, since_dt, until_dt, compare, agent_id=agent)
+            except ValueError as exc:
+                raise click.BadParameter(str(exc), param_hint="'--compare'") from exc
 
     if output_json:
         payload = report_to_dict(report)

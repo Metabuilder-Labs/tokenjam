@@ -6,6 +6,7 @@ queries through the REST API.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 import httpx
 
@@ -186,6 +187,37 @@ class ApiBackend:
 
     def get_recent_spans(self, session_id: str, limit: int) -> list[NormalizedSpan]:
         return []
+
+    def fetch_optimize_report(
+        self,
+        *,
+        since: str = "30d",
+        agent_id: str | None = None,
+        findings: list[str] | None = None,
+        budget_provider: str | None = None,
+        budget_usd: float | None = None,
+    ) -> dict:
+        """
+        Fetch a serialized optimize report from `tj serve`.
+
+        Used by cmd_optimize when the local DuckDB connection is unavailable
+        (daemon holds the write lock). Returns the dict that `report_to_dict`
+        produced server-side; the CLI passes it through `report_from_dict`
+        before rendering.
+
+        See issue #68 §12 for the rationale.
+        """
+        params: dict[str, Any] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        if findings:
+            # FastAPI accepts repeated query params for list values.
+            params["finding"] = findings
+        if budget_provider:
+            params["budget_provider"] = budget_provider
+        if budget_usd is not None:
+            params["budget_usd"] = budget_usd
+        return self._get("/api/v1/optimize", params)
 
     def close(self) -> None:
         self.client.close()
