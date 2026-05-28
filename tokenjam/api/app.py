@@ -73,6 +73,7 @@ def create_app(
     from tokenjam.api.routes.budget import router as budget_router
     from tokenjam.api.routes.agents import router as agents_router
     from tokenjam.api.routes.optimize import router as optimize_router
+    from tokenjam.api.routes.cost_compare import router as cost_compare_router
 
     app.include_router(spans_router, prefix="/api/v1")
     app.include_router(traces_router, prefix="/api/v1")
@@ -84,6 +85,7 @@ def create_app(
     app.include_router(budget_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(optimize_router, prefix="/api/v1")
+    app.include_router(cost_compare_router, prefix="/api/v1")
     app.include_router(metrics_router)  # /metrics — no prefix
     app.include_router(otlp_router)  # /v1/traces, /v1/metrics, /v1/logs — no prefix
 

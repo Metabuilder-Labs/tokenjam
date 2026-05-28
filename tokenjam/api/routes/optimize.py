@@ -57,12 +57,13 @@ def get_optimize(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
 
+    until_dt = utcnow()
     try:
         report = build_report(
             db=db,
             config=config,
             since=since_dt,
-            until=utcnow(),
+            until=until_dt,
             agent_id=agent_id,
             findings=list(finding) if finding else None,
             budget_provider_filter=budget_provider,
@@ -73,4 +74,31 @@ def get_optimize(
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return report_to_dict(report)
+    payload = report_to_dict(report)
+
+    # Plan-tier mix lets the CLI render subscription / local / unknown
+    # framings correctly under daemon mode. Without this the CLI defaults
+    # to "api" pricing_mode regardless of the user's actual plan (#68 §12
+    # follow-up). Best-effort: depends on db.conn (DuckDBBackend); skip
+    # silently if the daemon's storage layer doesn't expose a connection.
+    conn = getattr(db, "conn", None)
+    if conn is not None:
+        try:
+            clauses = ["started_at >= $1", "started_at < $2"]
+            params: list = [since_dt, until_dt]
+            if agent_id:
+                clauses.append(f"agent_id = ${len(params) + 1}")
+                params.append(agent_id)
+            where = " AND ".join(clauses)
+            rows = conn.execute(
+                f"SELECT COALESCE(plan_tier, 'unknown'), COUNT(*) FROM sessions "
+                f"WHERE {where} GROUP BY 1",
+                params,
+            ).fetchall()
+            payload["plan_tier_mix"] = {str(r[0]): int(r[1]) for r in rows}
+        except Exception:
+            payload["plan_tier_mix"] = {}
+    else:
+        payload["plan_tier_mix"] = {}
+
+    return payload

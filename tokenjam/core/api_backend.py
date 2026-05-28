@@ -238,6 +238,28 @@ class ApiBackend:
             if a.get("agent_id")
         ]
 
+    def fetch_cost_compare(
+        self,
+        *,
+        since: str = "7d",
+        compare: str = "previous",
+        agent_id: str | None = None,
+        top_n: int = 5,
+    ) -> dict:
+        """
+        Fetch a window-vs-window cost diff from tj serve. Mirrors
+        compute_cost_diff's output schema; used by cmd_cost and cmd_optimize
+        when the daemon holds the DB lock (#68 §12 follow-up).
+        """
+        params: dict[str, Any] = {
+            "since": since,
+            "compare": compare,
+            "top_n": top_n,
+        }
+        if agent_id:
+            params["agent_id"] = agent_id
+        return self._get("/api/v1/cost/compare", params)
+
     def fetch_optimize_report(
         self,
         *,

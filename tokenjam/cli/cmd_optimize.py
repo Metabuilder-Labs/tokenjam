@@ -168,13 +168,10 @@ def cmd_optimize(
             return
 
         report = report_from_dict(report_dict)
-        # Plan-tier mix isn't on the report payload yet; the API path renders
-        # without per-session plan_tier breakdown. Empty dict → _dominant_plan
-        # returns "api" (the historical default). The honesty-discipline
-        # behaviors that rely on plan_mix (the unknown-tier note, subscription
-        # reframing) are best-effort here; a richer API payload is a future
-        # enhancement (see #68 §12 follow-up).
-        plan_mix = {}
+        # Plan-tier mix is included in the /api/v1/optimize payload as of
+        # #68 §12 follow-up #29, so the CLI can render subscription /
+        # local / unknown framings correctly under daemon mode.
+        plan_mix = report_dict.get("plan_tier_mix") or {}
     else:
         row = conn.execute(
             "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
@@ -226,17 +223,26 @@ def cmd_optimize(
     # surfaces a window-cost diff at the top so the user can see trend
     # before reading the recommendations.
     cost_diff = None
+    cost_diff_dict = None  # populated under API-shim mode
     if compare:
         if conn is None:
-            # API-shim path doesn't yet expose period comparison; would need
-            # a /api/v1/cost/compare route (#68 §12 follow-up). Surface
-            # explicitly rather than crash deep inside compute_cost_diff.
-            console.print(
-                "[yellow]Note:[/yellow] [dim]--compare is not yet supported "
-                "while [bold]tj serve[/bold] is running. Stop the daemon "
-                "([bold]tj stop[/bold]) and re-run, or omit --compare. "
-                "Continuing without comparison.[/dim]\n"
-            )
+            # API-shim path: fetch from /api/v1/cost/compare. Result is a
+            # dict (not a CostDiff dataclass) so we render it via
+            # _render_diff_dict instead of _render_diff.
+            if hasattr(db, "fetch_cost_compare"):
+                try:
+                    cost_diff_dict = db.fetch_cost_compare(
+                        since=since, compare=compare, agent_id=agent,
+                    )
+                except Exception as exc:
+                    raise click.ClickException(
+                        f"Failed to fetch --compare from tj serve: {exc}"
+                    ) from exc
+            else:
+                console.print(
+                    "[yellow]Note:[/yellow] [dim]--compare is not supported "
+                    "via this backend. Continuing without comparison.[/dim]\n"
+                )
         else:
             from tokenjam.core.cost import compute_cost_diff
             try:
@@ -252,6 +258,8 @@ def cmd_optimize(
         if cost_diff is not None:
             from tokenjam.cli.cmd_cost import _diff_to_dict
             payload["compare"] = _diff_to_dict(cost_diff)
+        elif cost_diff_dict is not None:
+            payload["compare"] = cost_diff_dict
         # For subscription/local users, the dollar fields on the downgrade
         # finding mislead — surface the token-share fields instead. Don't
         # remove actual_cost_usd / alternative_cost_usd; those are useful
@@ -273,6 +281,10 @@ def cmd_optimize(
         from tokenjam.cli.cmd_cost import _render_diff
         console.print("\n[bold]Window comparison[/bold]")
         _render_diff(cost_diff)
+    elif cost_diff_dict is not None:
+        from tokenjam.cli.cmd_cost import _render_diff_dict
+        console.print("\n[bold]Window comparison[/bold]")
+        _render_diff_dict(cost_diff_dict)
 
 
 def _plan_tier_mix(conn, since, until, agent_id: str | None) -> dict[str, int]:
