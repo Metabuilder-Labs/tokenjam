@@ -1,7 +1,10 @@
-# `tj optimize --finding workflow-restructure`
+# Script
 
-User-facing product name: **Script**. Internal/CLI name:
-`workflow-restructure`.
+Product name: **Script**. Internal/CLI name: `workflow-restructure`.
+
+```bash
+tj optimize --finding workflow-restructure
+```
 
 Flags sessions whose tool-call sequence is structurally identical
 across many runs — strong signal that a deterministic shell script
@@ -78,3 +81,9 @@ regardless of the exact argument shapes. The user should still review.
 `structural` with an explicit caveat about reviewing each cluster before
 replacing with a script. The analyzer doesn't claim quality equivalence;
 it claims structural identity, which is a different (and weaker) thing.
+
+## See also
+
+- [Downsize](downsize.md) — flag sessions whose shape matches a cheaper-model candidate
+- [Cache](cache.md) — measure and improve prompt-cache usage
+- [Trim](trim.md) — identify low-significance tokens in captured prompts
