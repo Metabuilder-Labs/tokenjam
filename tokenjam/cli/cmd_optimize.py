@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 import click
+from rich.markup import escape as _rich_escape
 
 from tokenjam.core.optimize import (
     ANALYZER_REGISTRY,
@@ -344,10 +345,29 @@ def _render_report(
             _render_budget(proj)
             console.print()
 
-    if (
-        report.downgrade is None
-        and not (pricing_mode == "api" and report.budgets)
-    ):
+    # ----- Wave-2 findings (cache-efficacy, cache-recommend,
+    # workflow-restructure, prompt-bloat) — these attach to report.findings
+    # rather than typed slots. Dispatch to a per-finding renderer; ignore
+    # any unknown finding names (forward-compatible with future analyzers).
+    rendered_any_wave2 = False
+    for name, finding in (report.findings or {}).items():
+        renderer = _FINDING_RENDERERS.get(name)
+        if renderer is None:
+            continue
+        renderer(finding, pricing_mode=pricing_mode)
+        console.print()
+        rendered_any_wave2 = True
+
+    # Only show the catch-all when truly nothing rendered. The earlier
+    # condition missed the Wave-2 findings dict, so cache-efficacy /
+    # cache-recommend / workflow-restructure / prompt-bloat were silently
+    # falling into "No candidates flagged" (issue #68 §15).
+    rendered_any = (
+        report.downgrade is not None
+        or (pricing_mode == "api" and bool(report.budgets))
+        or rendered_any_wave2
+    )
+    if not rendered_any:
         console.print(
             "[dim]No candidates flagged in this window. Either spend is small or "
             "all sessions already use a cost-effective model.[/dim]"
@@ -418,13 +438,26 @@ def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
     if d.examples:
         console.print()
         console.print("     [dim]Examples:[/dim]")
+        # The per-example cost figure has the same honesty problem as the
+        # top-level savings line: in non-api modes we either don't know whether
+        # the number is real spend (unknown), or we know it isn't (subscription
+        # users on flat fees, local users with zero marginal cost). Drop the
+        # column rather than leak the dollar value into a context where we've
+        # explicitly suppressed it above. (issue #68 §14)
         for ex in d.examples:
             dur = f"{ex.duration_seconds:.1f}s" if ex.duration_seconds else "—"
-            console.print(
-                f"       [dim]{ex.trace_id[:8]}..[/dim]  "
-                f"{ex.tool_calls} tool calls   {dur}   "
-                f"{format_cost(ex.cost_usd)}  ({ex.model})"
-            )
+            if pricing_mode == "api":
+                console.print(
+                    f"       [dim]{ex.trace_id[:8]}..[/dim]  "
+                    f"{ex.tool_calls} tool calls   {dur}   "
+                    f"{format_cost(ex.cost_usd)}  ({ex.model})"
+                )
+            else:
+                console.print(
+                    f"       [dim]{ex.trace_id[:8]}..[/dim]  "
+                    f"{ex.tool_calls} tool calls   {dur}   "
+                    f"({ex.model})"
+                )
     console.print()
     console.print(
         f"     [yellow]![/yellow] [italic]{MODEL_DOWNGRADE_CAVEAT}[/italic]"
@@ -530,3 +563,243 @@ def _export_snippet(
             "\n[dim]TokenJam does not enforce these rules. The snippet is "
             "a recommendation, not an active routing config.[/dim]"
         )
+
+
+# ---------------------------------------------------------------------------
+# Wave-2 finding renderers
+# ---------------------------------------------------------------------------
+# These render the findings attached to OptimizeReport.findings (the generic
+# dict keyed by analyzer name). _FINDING_RENDERERS at the bottom maps each
+# analyzer's registration name to the function that renders its finding.
+#
+# Each renderer takes (finding, pricing_mode=str) and prints to the global
+# `console`. Adding a new analyzer: add a renderer here and an entry in the
+# dispatch table. cmd_optimize._render_report iterates report.findings and
+# calls into here.
+
+def _render_cache_efficacy(finding, *, pricing_mode: str = "api") -> None:
+    """
+    Render the cache-efficacy finding — current caching-ratio table per
+    (provider, model). When any rows are flagged, surface them prominently;
+    otherwise show the full table dimmed so the user sees the underlying
+    data even when no recommendation is warranted.
+    """
+    console.print("  [bold]Cache efficacy:[/bold]")
+    if not finding.rows:
+        console.print(
+            "     [dim]No LLM spans with provider/model in this window.[/dim]"
+        )
+        return
+
+    flagged = list(finding.flagged) if finding.flagged else []
+    if flagged:
+        console.print(
+            f"     • [bold]{len(flagged)}[/bold] (provider, model) "
+            f"row{'s' if len(flagged) != 1 else ''} flagged below the "
+            f"30% efficacy threshold at ≥100K input tokens:"
+        )
+        for r in flagged:
+            console.print(
+                f"       [bold]{r.provider}/{r.model}[/bold]  "
+                f"{r.efficacy*100:.0f}% efficacy  "
+                f"({format_tokens(r.input_tokens)} input / "
+                f"{format_tokens(r.cache_tokens)} cache)"
+            )
+        console.print()
+
+    console.print("     [dim]All (provider, model) usage in window:[/dim]")
+    for r in finding.rows:
+        caveat = ""
+        if r.support == "best_effort":
+            caveat = " [dim](best-effort)[/dim]"
+        elif r.support == "unsupported":
+            caveat = " [dim](unsupported)[/dim]"
+        flag_marker = "[yellow]![/yellow] " if r.flagged else "  "
+        console.print(
+            f"     {flag_marker}{r.provider}/{r.model}  "
+            f"[dim]efficacy[/dim] {r.efficacy*100:.0f}%  "
+            f"[dim]input[/dim] {format_tokens(r.input_tokens)}  "
+            f"[dim]cache[/dim] {format_tokens(r.cache_tokens)}"
+            f"{caveat}"
+        )
+
+
+def _render_cache_recommend(finding, *, pricing_mode: str = "api") -> None:
+    """
+    Render the cache-recommend finding — Anthropic-only v1 breakpoint
+    candidates. When the analyzer is disabled (capture.prompts off), surface
+    the hint instead of an empty table.
+    """
+    console.print("  [bold]Cache recommend:[/bold]")
+    if not finding.enabled:
+        # Hint includes the install / config instruction from the analyzer.
+        # _rich_escape because the hint contains TOML section names like
+        # `[capture]` which Rich would otherwise interpret as a style tag
+        # and silently strip from the output.
+        if finding.hint:
+            console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
+        else:
+            console.print(
+                "     [dim]Disabled. Set [bold]capture.prompts = true[/bold] "
+                "in tj.toml to run this analyzer.[/dim]"
+            )
+        return
+
+    if not finding.candidates:
+        msg = "     [dim]No stable prefixes shared across ≥3 Anthropic calls"
+        if finding.skipped_provider_count:
+            msg += (
+                f". Skipped {finding.skipped_provider_count} non-Anthropic "
+                f"span(s) — multi-provider support is a future feature."
+            )
+        msg += ".[/dim]"
+        console.print(msg)
+        return
+
+    console.print(
+        f"     • [bold]{len(finding.candidates)}[/bold] prefix candidate"
+        f"{'s' if len(finding.candidates) != 1 else ''} for "
+        f"[bold]cache_control[/bold] placement:"
+    )
+    for c in finding.candidates:
+        sample = c.sample_chars.replace("\n", " ")[:80]
+        if len(c.sample_chars) > 80:
+            sample = sample[:77] + "..."
+        console.print(
+            f"       [dim]{c.prefix_hash[:8]}..[/dim]  "
+            f"{c.occurrences}× shared  "
+            f"~{format_tokens(c.estimated_cacheable_tokens)} cacheable/call  "
+            f"[dim]({format_tokens(int(c.avg_input_tokens))} avg input)[/dim]"
+        )
+        console.print(f"           [dim italic]{sample}[/dim italic]")
+
+    if finding.skipped_provider_count:
+        console.print(
+            f"     [dim]Note: {finding.skipped_provider_count} non-Anthropic "
+            f"span(s) skipped — multi-provider support is a future feature.[/dim]"
+        )
+
+
+def _render_workflow_restructure(finding, *, pricing_mode: str = "api") -> None:
+    """
+    Render the workflow-restructure (Script) finding — clusters of sessions
+    matching the same (tool_name, arg_shape) signature.
+    """
+    console.print("  [bold]Workflow restructure:[/bold]")
+    if not finding.clusters:
+        if finding.sessions_examined == 0:
+            console.print(
+                "     [dim]No tool spans in this window.[/dim]"
+            )
+        else:
+            console.print(
+                f"     [dim]Examined {finding.sessions_examined} session"
+                f"{'s' if finding.sessions_examined != 1 else ''}; "
+                f"no clusters above threshold (≥20 identical signatures, "
+                f"zero branching).[/dim]"
+            )
+        if finding.degraded:
+            console.print(
+                "     [dim]Clustering ran in tool-names-only mode "
+                "(capture.tool_inputs = false). Enable to "
+                "cluster by argument shape too.[/dim]"
+            )
+        return
+
+    note = ""
+    if finding.degraded:
+        note = " [dim](tool-names-only — enable capture.tool_inputs for "\
+               "finer clustering)[/dim]"
+    console.print(
+        f"     • [bold]{len(finding.clusters)}[/bold] deterministic-pattern "
+        f"cluster{'s' if len(finding.clusters) != 1 else ''} found{note}"
+    )
+    for c in finding.clusters:
+        # Build a compact signature preview
+        sig_preview = " → ".join(
+            f"{step['tool']}({','.join(step.get('args', [])) or '-'})"
+            for step in c.signature
+        )
+        if len(sig_preview) > 100:
+            sig_preview = sig_preview[:97] + "..."
+        dur = (
+            f"{c.avg_duration_seconds:.1f}s avg"
+            if c.avg_duration_seconds else "—"
+        )
+        console.print(
+            f"       [bold]{c.instances}×[/bold] {sig_preview}  "
+            f"[dim]({dur})[/dim]"
+        )
+        if pricing_mode == "api" and c.avg_cost_usd > 0:
+            console.print(
+                f"          [dim]avg session cost {format_cost(c.avg_cost_usd)}; "
+                f"replacing with a deterministic script would eliminate it.[/dim]"
+            )
+    if finding.caveat:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
+def _render_prompt_bloat(finding, *, pricing_mode: str = "api") -> None:
+    """
+    Render the prompt-bloat (Trim) finding — LLMLingua-2 token-significance
+    summary. When the analyzer is disabled (either capture off or extra
+    not installed), surface the hint.
+    """
+    console.print("  [bold]Prompt bloat:[/bold]")
+    if not finding.enabled:
+        if finding.hint:
+            # Escape Rich markup — hints can contain TOML section names
+            # (`[capture]`) or bracketed install hints (`tokenjam[bloat]`).
+            console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
+        else:
+            console.print(
+                "     [dim]Disabled. See "
+                "[bold]docs/optimize/trim.md[/bold] for install + capture "
+                "requirements.[/dim]"
+            )
+        return
+
+    if not finding.per_prompt:
+        console.print(
+            f"     [dim]Scanned {finding.prompts_scored} prompt"
+            f"{'s' if finding.prompts_scored != 1 else ''}; "
+            f"skipped {finding.prompts_skipped}. No bloat regions above "
+            f"the minimum-length threshold.[/dim]"
+        )
+        return
+
+    pct = (
+        finding.total_bloat_chars / finding.total_chars * 100.0
+        if finding.total_chars > 0 else 0.0
+    )
+    console.print(
+        f"     • Scored [bold]{finding.prompts_scored}[/bold] prompt"
+        f"{'s' if finding.prompts_scored != 1 else ''}: "
+        f"[bold]{pct:.1f}%[/bold] of chars in flagged regions "
+        f"([bold]{finding.total_bloat_chars}[/bold] / "
+        f"{finding.total_chars})"
+    )
+    console.print("     • Top prompts by bloat volume:")
+    for p in finding.per_prompt[:5]:
+        sample = p.sample_chars.replace("\n", " ")[:80]
+        if len(p.sample_chars) > 80:
+            sample = sample[:77] + "..."
+        console.print(
+            f"       [dim]{p.agent_id}[/dim]  "
+            f"[bold]{p.bloat_chars}[/bold] bloat / {p.prompt_chars} chars  "
+            f"[dim]~{p.estimated_token_reduction} tokens trimmable[/dim]"
+        )
+        console.print(f"           [dim italic]{sample}[/dim italic]")
+    console.print(
+        "     [dim]For per-prompt highlights run: "
+        "[bold]tj report --bloat[/bold][/dim]"
+    )
+
+
+# Dispatch table — analyzer registration name → renderer.
+_FINDING_RENDERERS = {
+    "cache-efficacy":       _render_cache_efficacy,
+    "cache-recommend":      _render_cache_recommend,
+    "workflow-restructure": _render_workflow_restructure,
+    "prompt-bloat":         _render_prompt_bloat,
+}
