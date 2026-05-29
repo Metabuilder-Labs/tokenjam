@@ -665,9 +665,10 @@ function StatusView() {
         <div class="card clickable" onClick=${() => { location.hash = '#/traces'; }}>
           <div class="card-header">
             <span class="status-dot ${a.status}"></span>
-            ${a.agent_id}
+            ${a.label || a.agent_id}
             <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
           </div>
+          ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
           ${a.session_id ? html`<div class="card-row"><span class="label">Session</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.session_id.slice(0, 8)}</span></div>` : null}
           <div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(a.total_cost_usd)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>

@@ -179,6 +179,11 @@ class TjConfig:
     api:      ApiConfig               = field(default_factory=ApiConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
+    # Manual session_id -> human label overrides ([session_labels] in TOML).
+    # Keys may be a full session_id or a prefix (e.g. the 8-char short id shown
+    # on the dashboard). Lets you name already-running terminals immediately;
+    # for durable naming prefer OTel service.instance.id.
+    session_labels: dict[str, str]    = field(default_factory=dict)
     # Path to the config file on disk; set by load_config() so that relative
     # paths in the config (e.g. output_schema) can be resolved correctly.
     config_path: Path | None          = field(default=None, repr=False, compare=False)
@@ -408,6 +413,7 @@ def _parse(raw: dict) -> TjConfig:
         api=api,
         capture=capture,
         budgets=budgets,
+        session_labels=dict(raw.get("session_labels", {})),
     )
 
 

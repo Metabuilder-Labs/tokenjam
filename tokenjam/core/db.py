@@ -198,6 +198,9 @@ MIGRATIONS: list[tuple[int, str]] = [
     # the session's service rolls up under (the dashboard's "project" grouping
     # key). Nullable; sessions whose telemetry carried no namespace stay NULL.
     (5, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_namespace TEXT"),
+    # Migration 6: service_instance_id on sessions — the per-terminal label
+    # (OTel service.instance.id) used as the session's display name.
+    (6, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_instance_id TEXT"),
 ]
 
 
@@ -280,6 +283,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         error_count=d.get("error_count") or 0,
         plan_tier=d.get("plan_tier") or "unknown",
         service_namespace=d.get("service_namespace"),
+        service_instance_id=d.get("service_instance_id"),
     )
 
 
@@ -425,8 +429,9 @@ class DuckDBBackend:
             INSERT INTO sessions (
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
-                tool_call_count, error_count, plan_tier, service_namespace
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                tool_call_count, error_count, plan_tier, service_namespace,
+                service_instance_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -437,7 +442,8 @@ class DuckDBBackend:
                 tool_call_count = EXCLUDED.tool_call_count,
                 error_count = EXCLUDED.error_count,
                 plan_tier = EXCLUDED.plan_tier,
-                service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace)
+                service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
+                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id)
             """,
             [
                 session.session_id, session.agent_id, session.conversation_id,
@@ -445,6 +451,7 @@ class DuckDBBackend:
                 session.total_cost_usd, session.input_tokens, session.output_tokens,
                 session.cache_tokens, session.tool_call_count, session.error_count,
                 session.plan_tier, session.service_namespace,
+                session.service_instance_id,
             ],
         )
 

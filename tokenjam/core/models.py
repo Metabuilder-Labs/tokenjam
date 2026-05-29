@@ -77,6 +77,9 @@ class NormalizedSpan:
     # under (e.g. all Aquanodeio/* repos -> "aquanode"). Transient on the span;
     # persisted on the session it creates so the dashboard can group by it.
     service_namespace: str | None  = None
+    # OTel service.instance.id — the per-terminal/process label (e.g.
+    # "founder-os"). Persisted on the session for use as its display name.
+    service_instance_id: str | None = None
 
 
 @dataclass
@@ -103,6 +106,9 @@ class SessionRecord:
     # rolls up under (e.g. repo `Aquanodeio/harness` -> namespace "aquanode").
     # Drives dashboard grouping. None when the telemetry carried no namespace.
     service_namespace: str | None = None
+    # OTel service.instance.id — the per-terminal label (e.g. "founder-os").
+    # Used as the session's display name when set; None otherwise.
+    service_instance_id: str | None = None
 
     @property
     def duration_seconds(self) -> float | None:

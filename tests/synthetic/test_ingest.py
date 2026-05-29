@@ -456,3 +456,11 @@ class TestServiceNamespace:
             service_namespace="explicit-ns"))
 
         assert db.get_session("s1").service_namespace == "explicit-ns"
+
+    def test_session_captures_service_instance_id(self):
+        # The per-terminal instance id (e.g. "founder-os") is persisted on the
+        # session for use as its display label.
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_llm_span(session_id="s1", service_instance_id="founder-os"))
+
+        assert db.get_session("s1").service_instance_id == "founder-os"

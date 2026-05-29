@@ -183,6 +183,7 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
             or provider_to_billing_account(provider)
         ),
         service_namespace=attrs.get(ResourceAttributes.SERVICE_NAMESPACE),
+        service_instance_id=attrs.get(ResourceAttributes.SERVICE_INSTANCE_ID),
     )
 
 

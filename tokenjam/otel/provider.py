@@ -93,6 +93,7 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
     resource = getattr(otel_span, "resource", None)
     resource_attrs = dict(resource.attributes) if resource and resource.attributes else {}
     service_namespace = resource_attrs.get(ResourceAttributes.SERVICE_NAMESPACE)
+    service_instance_id = resource_attrs.get(ResourceAttributes.SERVICE_INSTANCE_ID)
 
     # Convert int tokens to int (OTel may store as strings)
     if input_tokens is not None:
@@ -164,6 +165,7 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
         events=events,
         billing_account=billing_account,
         service_namespace=service_namespace,
+        service_instance_id=service_instance_id,
     )
 
 

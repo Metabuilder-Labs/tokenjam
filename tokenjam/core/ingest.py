@@ -255,6 +255,9 @@ class IngestPipeline:
                 resolved_ns = span.service_namespace or self._resolve_project(span.agent_id)
                 if resolved_ns:
                     existing.service_namespace = resolved_ns
+            # Late-resolve the per-terminal instance id (display label).
+            if existing.service_instance_id is None and span.service_instance_id:
+                existing.service_instance_id = span.service_instance_id
             return existing
 
         # New session
@@ -274,6 +277,7 @@ class IngestPipeline:
             error_count=1 if span.status_code == SpanStatus.ERROR else 0,
             plan_tier=plan_tier,
             service_namespace=span.service_namespace or self._resolve_project(span.agent_id),
+            service_instance_id=span.service_instance_id,
         )
 
     def _resolve_project(self, agent_id: str | None) -> str | None:

@@ -509,10 +509,14 @@ def parse_log_records(
                     span = converter(attrs, resource_attrs, timestamp_ns)
                     if span is None:
                         continue
-                    # service.namespace is a resource-level attr (one project
-                    # per service); stamp it on every span the converter built.
+                    # service.namespace / service.instance.id are resource-level
+                    # attrs (project + terminal); stamp them on every span the
+                    # converter built.
                     span.service_namespace = resource_attrs.get(
                         ResourceAttributes.SERVICE_NAMESPACE
+                    )
+                    span.service_instance_id = resource_attrs.get(
+                        ResourceAttributes.SERVICE_INSTANCE_ID
                     )
                     pipeline.process(span)
                     ingested += 1

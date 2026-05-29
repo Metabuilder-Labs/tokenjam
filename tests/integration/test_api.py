@@ -536,3 +536,55 @@ async def test_status_one_tile_per_concurrent_session(tmp_path):
         }
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_session_labels(tmp_path):
+    """Session label resolves: manual override > service.instance.id > short id."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig, AgentConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+            # prefix override for a current terminal; "ovr" overrides instance.id
+            session_labels={"manual": "harness", "ovr": "config-wins"},
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
+        # instance.id on the wire -> durable label
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="wired", conversation_id="w",
+            service_instance_id="founder-os"))
+        # manual config prefix label only
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="manual-123", conversation_id="m"))
+        # both present -> manual override wins
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="ovr-9", conversation_id="o",
+            service_instance_id="wire-name"))
+        # neither -> label is None (UI falls back to short id)
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="plain", conversation_id="p"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        by = {a["session_id"]: a for a in resp.json()["agents"]
+              if a["agent_id"] == "claude-code-harness"}
+        assert by["wired"]["label"] == "founder-os"      # from instance.id
+        assert by["manual-123"]["label"] == "harness"    # from config prefix
+        assert by["ovr-9"]["label"] == "config-wins"     # config beats instance.id
+        assert by["plain"]["label"] is None              # no label
+    finally:
+        db.close()

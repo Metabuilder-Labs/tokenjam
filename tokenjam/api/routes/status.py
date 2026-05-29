@@ -11,6 +11,26 @@ from tokenjam.utils.time_parse import utcnow
 router = APIRouter(dependencies=[Depends(require_api_key)])
 
 
+def _session_label(
+    session_id: str | None,
+    instance_id: str | None,
+    session_labels: dict[str, str],
+) -> str | None:
+    """Human display name for a session's terminal.
+
+    Priority: manual [session_labels] override (full id or prefix match, for
+    naming already-running terminals) -> OTel service.instance.id (durable,
+    set at launch) -> None (UI falls back to the short session id).
+    """
+    if session_id and session_labels:
+        if session_id in session_labels:
+            return session_labels[session_id]
+        for key, label in session_labels.items():
+            if session_id.startswith(key):
+                return label
+    return instance_id
+
+
 @router.get("/status")
 async def get_status(
     request: Request,
@@ -35,6 +55,7 @@ async def get_status(
     has_active_alerts = False
     agents_data = []
     config = getattr(request.app.state, "config", None)
+    session_labels = dict(config.session_labels) if config else {}
     # Recency window for "currently active" — a session whose last span is
     # within this window is a live terminal. Several at once = concurrent
     # terminals sharing one agent_id (e.g. 3 Claude Code tabs in one repo).
@@ -78,7 +99,8 @@ async def get_status(
             # Agent known (has spans) but no session row — show an idle tile.
             agents_data.append({
                 "agent_id": aid, "namespace": configured_project, "status": "idle",
-                "session_id": None, "cost_today": today_cost, "total_cost_usd": 0.0,
+                "session_id": None, "label": None,
+                "cost_today": today_cost, "total_cost_usd": 0.0,
                 "input_tokens": 0, "output_tokens": 0, "tool_call_count": 0,
                 "error_count": 0, "active_alerts": len(active_alerts),
                 "duration_seconds": None, "started_at": None, "last_span_time": None,
@@ -102,6 +124,9 @@ async def get_status(
                 "namespace": namespace,
                 "status": session.effective_status,
                 "session_id": session.session_id,
+                "label": _session_label(
+                    session.session_id, session.service_instance_id, session_labels
+                ),
                 "cost_today": today_cost,
                 "total_cost_usd": (
                     float(session.total_cost_usd)

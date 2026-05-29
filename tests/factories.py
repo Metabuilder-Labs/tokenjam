@@ -70,6 +70,7 @@ def make_llm_span(
     extra_attributes: dict | None = None,
     billing_account: str | None = "anthropic",
     service_namespace: str | None = None,
+    service_instance_id: str | None = None,
 ) -> NormalizedSpan:
     """
     Create a NormalizedSpan representing a single LLM call.
@@ -104,6 +105,7 @@ def make_llm_span(
         attributes=attrs,
         billing_account=billing_account,
         service_namespace=service_namespace,
+        service_instance_id=service_instance_id,
     )
 
 
