@@ -213,6 +213,32 @@ def parse_compare_window(
     return prev_since, prev_until
 
 
+def override_since_for_compare(
+    compare: str, default_since: datetime, current_until: datetime,
+) -> datetime:
+    """
+    Resolve `--compare` keywords that imply a *specific* current-window
+    length (`last-7d`, `last-30d`, `last-week`) to a `since` datetime that
+    makes the comparison symmetric.
+
+    Without this, `tj optimize --compare last-7d` would render a 30d-vs-30d
+    comparison (because `--since` defaults to 30d) while
+    `tj cost --compare last-7d` would render a 7d-vs-7d comparison (because
+    `--since` defaults to 7d) — the same flag producing different shapes
+    across commands (#71 finding 5). Forcing `last-Nd` to N days everywhere
+    gives the user the comparison they asked for.
+
+    Returns `default_since` unchanged for keywords without an implied window
+    length (`previous`, `last-month`) or explicit date ranges.
+    """
+    c = compare.strip().lower()
+    if c == "last-7d" or c == "last-week":
+        return current_until - timedelta(days=7)
+    if c == "last-30d":
+        return current_until - timedelta(days=30)
+    return default_since
+
+
 def compute_window_totals(
     conn, since: datetime, until: datetime, agent_id: str | None = None,
 ) -> WindowTotals:

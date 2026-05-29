@@ -69,6 +69,28 @@ def _dominant_plan(plan_mix: dict[str, int]) -> str:
     return max(known.items(), key=lambda kv: kv[1])[0]
 
 
+def _config_declared_plan(config) -> str | None:
+    """
+    Return the user's currently-declared plan tier from config.
+
+    Pulls from `[budget.<provider>].plan` — the field set by
+    `tj onboard --reconfigure`. When multiple providers declare a plan
+    we surface the first one in sorted order (deterministic). Returns
+    None when no provider has a plan declared.
+
+    This is used by the optimize renderer to surface a note when the
+    historical plan-tier mix disagrees with the user's currently-
+    declared plan (#71 finding 1) — without overriding the data-driven
+    rendering, which would be dishonest about what actually happened.
+    """
+    budgets = getattr(config, "budgets", None) or {}
+    for provider in sorted(budgets.keys()):
+        plan = getattr(budgets[provider], "plan", None)
+        if plan:
+            return str(plan)
+    return None
+
+
 @click.command("optimize")
 @click.option("--agent", default=None, help="Scope to a specific agent_id.")
 @click.option("--since", default="30d", help="Window for analysis (default 30d).")
@@ -119,6 +141,16 @@ def cmd_optimize(
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
 
     until_dt = utcnow()
+
+    # If user passed --compare last-7d / last-30d / last-week, override
+    # --since so the analysis window matches the comparison period (#71
+    # finding 5). Without this, `tj optimize --compare last-7d` would do
+    # 30d-vs-30d (because --since defaults to 30d), while `tj cost` did
+    # 7d-vs-7d — same flag, two shapes.
+    if compare:
+        from tokenjam.core.cost import override_since_for_compare
+        since_dt = override_since_for_compare(compare, since_dt, until_dt)
+        since = f"{(until_dt - since_dt).days}d"
 
     # Two paths depending on whether the daemon holds the DB lock.
     #
@@ -207,6 +239,7 @@ def cmd_optimize(
 
     dominant = _dominant_plan(plan_mix)
     pricing_mode = _pricing_mode_for(dominant)
+    declared_plan = _config_declared_plan(config)
 
     # --export-config branch: write the snippet to disk and exit. Skips
     # the normal rendering path. The user reads the snippet file and
@@ -276,6 +309,7 @@ def cmd_optimize(
     _render_report(
         report, agent=agent, plan_mix=plan_mix,
         dominant_plan=dominant, pricing_mode=pricing_mode,
+        declared_plan=declared_plan,
     )
     if cost_diff is not None:
         from tokenjam.cli.cmd_cost import _render_diff
@@ -313,6 +347,7 @@ def _render_report(
     plan_mix: dict[str, int] | None = None,
     dominant_plan: str = "unknown",
     pricing_mode: str = "unknown",
+    declared_plan: str | None = None,
 ) -> None:
     w = report.window
     scope_tag = f", {agent}" if agent else ""
@@ -374,6 +409,23 @@ def _render_report(
                 f"for those. Run [bold]tj onboard --reconfigure[/bold] to "
                 f"resolve.[/dim]\n"
             )
+
+    # Surface a divergence note when the user has reconfigured to a new plan
+    # but historical sessions still reflect the previous plan. Honest framing:
+    # show the data as it was actually generated, but flag that future
+    # sessions will be costed differently (#71 finding 1).
+    if (
+        declared_plan
+        and declared_plan != dominant_plan
+        and declared_plan in _PLAN_LABEL_AND_FEE  # only flag subscription deltas
+    ):
+        label, _ = _PLAN_LABEL_AND_FEE[declared_plan]
+        console.print(
+            f"[dim]Note: your config declares "
+            f"[bold]{label}[/bold] but historical sessions ran under "
+            f"a different plan — rendering reflects what actually ran. "
+            f"New sessions will use the configured plan.[/dim]\n"
+        )
 
     if w.sessions == 0:
         console.print("[dim]No sessions in window.[/dim]")
@@ -589,7 +641,7 @@ def _export_snippet(
             plan_tier=dominant_plan,
             agent_id=agent_id,
         )
-        ext = "json"
+        ext = "jsonc"
     else:
         # Click's Choice() already constrained this; defensive only.
         raise click.ClickException(f"Unknown export target: {target}")

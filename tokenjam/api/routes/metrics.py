@@ -20,18 +20,38 @@ async def prometheus_metrics(request: Request) -> PlainTextResponse:
     lines: list[str] = []
 
     # -- Cost per agent --
+    # Prometheus requires each {metric, label_set} to appear at most once
+    # per scrape. `db.get_cost_summary(group_by="agent")` returns one row
+    # per (agent_id, model), which produces duplicate label sets when the
+    # same agent uses multiple models. Aggregate by agent_id here before
+    # emitting (#71 finding 8).
     _add_header(lines, "tj_cost_usd_total", "gauge", "Running cost total per agent")
     cost_rows = db.get_cost_summary(CostFilters(group_by="agent"))
+    agent_totals: dict[str, dict[str, float]] = {}
     for row in cost_rows:
         agent = row.agent_id or "unknown"
-        lines.append(f'tj_cost_usd_total{{agent_id="{_escape(agent)}"}} {row.cost_usd}')
+        bucket = agent_totals.setdefault(
+            agent, {"cost_usd": 0.0, "input_tokens": 0, "output_tokens": 0},
+        )
+        bucket["cost_usd"] += float(row.cost_usd or 0.0)
+        bucket["input_tokens"] += int(row.input_tokens or 0)
+        bucket["output_tokens"] += int(row.output_tokens or 0)
+    for agent, totals in agent_totals.items():
+        lines.append(
+            f'tj_cost_usd_total{{agent_id="{_escape(agent)}"}} {totals["cost_usd"]}'
+        )
 
     # -- Tokens per agent and type --
     _add_header(lines, "tj_tokens_total", "counter", "Token usage by type")
-    for row in cost_rows:
-        agent = row.agent_id or "unknown"
-        lines.append(f'tj_tokens_total{{agent_id="{_escape(agent)}",type="input"}} {row.input_tokens}')
-        lines.append(f'tj_tokens_total{{agent_id="{_escape(agent)}",type="output"}} {row.output_tokens}')
+    for agent, totals in agent_totals.items():
+        lines.append(
+            f'tj_tokens_total{{agent_id="{_escape(agent)}",type="input"}} '
+            f'{totals["input_tokens"]}'
+        )
+        lines.append(
+            f'tj_tokens_total{{agent_id="{_escape(agent)}",type="output"}} '
+            f'{totals["output_tokens"]}'
+        )
 
     # -- Tool calls per agent --
     tool_rows = db.get_tool_calls(None, None, None)
