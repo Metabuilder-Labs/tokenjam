@@ -27,6 +27,8 @@ class HttpTransport:
 
     Buffers up to 1000 spans if tj serve is not reachable.
     Retries with exponential backoff (max 3 attempts, 2s base delay).
+    On 401 (secret mismatch) fails fast — retrying won't change the
+    answer — and surfaces a clear diagnostic so the user notices.
     Drops buffered spans on process exit with a log warning.
     """
 
@@ -36,11 +38,15 @@ class HttpTransport:
         )
         self.secret = config.security.ingest_secret
         self._buffer: list[dict] = []
+        # Counter of spans dropped on 401. Exposed so `tj doctor` can
+        # surface it later (#68 §2 follow-up: doctor integration).
+        self.dropped_auth_failures = 0
 
     def send(self, spans: list[dict]) -> bool:
         """
         POST spans to tj serve.
-        Returns True on success, False on failure (spans are buffered).
+        Returns True on success, False on failure (spans are buffered,
+        except on 401 — see below).
         """
         # Add new spans to buffer
         self._buffer.extend(spans)
@@ -65,6 +71,33 @@ class HttpTransport:
                 if resp.status_code < 300:
                     self._buffer.clear()
                     return True
+                if resp.status_code == 401:
+                    # Auth failure won't change on retry. Don't burn the
+                    # backoff window (would be 6s of waiting per send call
+                    # while the user's agent stalls). Fail fast, log loudly
+                    # so the silent-data-loss footgun (#68 §2) is visible,
+                    # and clear the buffer — these spans will never succeed
+                    # with this secret. The configured secret is included
+                    # in the message (truncated) to make the mismatch
+                    # debuggable.
+                    secret_fingerprint = (
+                        f"{self.secret[:8]}..." if self.secret
+                        else "(no ingest_secret configured)"
+                    )
+                    logger.error(
+                        "tj serve rejected span export with 401 — your SDK "
+                        "is using ingest_secret=%s but the running daemon "
+                        "expects a different secret. Spans are being "
+                        "dropped (not buffered). Check that .tj/config.toml "
+                        "and ~/.config/tj/config.toml agree, or restart "
+                        "tj serve after rotating the secret. Dropped %d "
+                        "span(s) so far.",
+                        secret_fingerprint,
+                        len(payload) + self.dropped_auth_failures,
+                    )
+                    self.dropped_auth_failures += len(payload)
+                    self._buffer.clear()
+                    return False
                 logger.warning(
                     "tj serve returned %d on attempt %d",
                     resp.status_code, attempt + 1,

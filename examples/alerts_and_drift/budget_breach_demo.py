@@ -76,11 +76,16 @@ def run_expensive_agent() -> None:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    from examples.alerts_and_drift._shared import ensure_demo_agent_config
+    from examples.alerts_and_drift._shared import (
+        ensure_demo_agent_config,
+        warn_if_daemon_running,
+    )
     ensure_demo_agent_config(
         "budget-demo",
         {"budget": {"daily_usd": 0.05, "session_usd": 0.02}},
     )
+    # Surface the "daemon already running" footgun before bootstrap (#68 §6).
+    warn_if_daemon_running()
 
     from tokenjam.sdk.bootstrap import ensure_initialised
     ensure_initialised()

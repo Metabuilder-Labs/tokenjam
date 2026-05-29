@@ -94,13 +94,28 @@ def _show_budgets(config, db) -> None:
         _fmt(config.defaults.budget.session_usd),
     )
 
-    # Merge agent IDs from config + DB-observed agents
+    # Merge agent IDs from config + DB-observed agents. Two paths:
+    # - Direct DB: pull distinct agent_ids from sessions table.
+    # - API shim (daemon up, no db.conn): derive from recent traces.
+    #   Without this fallback, `tj budget` silently misses every agent
+    #   that hasn't been declared in tj.toml when the daemon is running
+    #   (#68 §11). Mirrors the pattern already used by cmd_status.
     agent_ids = set(config.agents)
-    if db is not None and hasattr(db, "conn"):
-        rows = db.conn.execute(
-            "SELECT DISTINCT agent_id FROM sessions ORDER BY agent_id"
-        ).fetchall()
-        agent_ids |= {r[0] for r in rows}
+    if db is not None:
+        if hasattr(db, "conn"):
+            rows = db.conn.execute(
+                "SELECT DISTINCT agent_id FROM sessions ORDER BY agent_id"
+            ).fetchall()
+            agent_ids |= {r[0] for r in rows if r[0]}
+        else:
+            try:
+                from tokenjam.core.models import TraceFilters
+                traces = db.get_traces(TraceFilters(limit=200))
+                agent_ids |= {t.agent_id for t in traces if t.agent_id}
+            except Exception:
+                # API call failed (server down, transient error) —
+                # render what we have from config rather than crash.
+                pass
 
     for agent_id in sorted(agent_ids):
         agent_cfg = config.agents.get(agent_id)

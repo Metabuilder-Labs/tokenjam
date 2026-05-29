@@ -86,6 +86,12 @@ def _check_config() -> dict:
 
 
 def _check_db(config: object) -> dict:
+    """
+    Verify the DuckDB file is writable. The daemon legitimately holds
+    the write lock when running — that's the recommended operating mode
+    after `tj onboard`. Detect a lock-conflict error and downgrade to
+    informational rather than flagging it as ✗ (#68 §4).
+    """
     try:
         from pathlib import Path
         db_path = Path(config.storage.path).expanduser()
@@ -94,6 +100,21 @@ def _check_db(config: object) -> dict:
         return {"name": "DuckDB writable", "level": "ok",
                 "message": f"Database accessible: {db_path}"}
     except Exception as e:
+        # DuckDB raises "Could not set lock on file ... Conflicting lock
+        # is held in ... PID N" when another process (the daemon, in the
+        # common case) has the DB open in write mode. That's the expected
+        # operating state — surface as info, not error.
+        err_msg = str(e).lower()
+        if "conflicting lock" in err_msg or "could not set lock" in err_msg:
+            return {
+                "name": "DuckDB writable",
+                "level": "info",
+                "message": (
+                    "Skipped — DB write lock held by another process "
+                    "(typically tj serve). This is the expected operating "
+                    "state when the daemon is running."
+                ),
+            }
         return {"name": "DuckDB writable", "level": "error",
                 "message": f"Cannot open database: {e}"}
 

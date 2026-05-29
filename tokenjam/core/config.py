@@ -188,6 +188,68 @@ SEARCH_PATHS = [
 ]
 
 
+def _warn_if_secrets_diverge(active_path: Path, active_raw: dict) -> None:
+    """
+    Emit a stderr warning if a shadowed config exists with a different
+    ingest_secret. Tracks the common footgun (#68 §5): project-local
+    .tj/config.toml has secret A; global ~/.config/tj/config.toml has
+    secret B; the SDK uses A; the daemon (started with global config)
+    uses B; span pushes 401 silently.
+
+    Fires at most once per process via the module-level guard so this
+    doesn't spam multi-call test environments.
+    """
+    global _SECRET_DIVERGENCE_WARNED
+    if _SECRET_DIVERGENCE_WARNED:
+        return
+    active_secret = (active_raw.get("security") or {}).get("ingest_secret")
+    if not active_secret:
+        return
+    try:
+        active_resolved = active_path.resolve()
+    except OSError:
+        return
+    for candidate in SEARCH_PATHS:
+        try:
+            cand_resolved = candidate.resolve()
+        except OSError:
+            continue
+        if cand_resolved == active_resolved:
+            continue
+        if not candidate.exists():
+            continue
+        try:
+            with open(candidate, "rb") as f:
+                other_raw = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        other_secret = (other_raw.get("security") or {}).get("ingest_secret")
+        if not other_secret or other_secret == active_secret:
+            continue
+        # Diverged. Warn once.
+        print(
+            f"warning: ingest_secret differs between {active_path} "
+            f"and {candidate}. The SDK will use the secret from "
+            f"{active_path} but a daemon launched from a different cwd "
+            f"may use the other one — span pushes will 401 silently. "
+            f"Align them (copy one secret into the other config) or "
+            f"delete the unused config.",
+            file=sys.stderr,
+        )
+        _SECRET_DIVERGENCE_WARNED = True
+        return
+
+
+# Module-level guard. Reset for tests via the helper exposed below.
+_SECRET_DIVERGENCE_WARNED = False
+
+
+def _reset_secret_divergence_warning() -> None:
+    """Test helper — reset the once-per-process warning guard."""
+    global _SECRET_DIVERGENCE_WARNED
+    _SECRET_DIVERGENCE_WARNED = False
+
+
 def find_config_file(override: str | None = None) -> Path | None:
     if override:
         p = Path(override)
@@ -213,6 +275,13 @@ def load_config(path: str | None = None) -> TjConfig:
 
     with open(config_path, "rb") as f:   # "rb" is REQUIRED
         raw = tomllib.load(f)
+
+    # Diverged-secret detection (#68 §5). When a project-local config
+    # shadows a global one with a different ingest_secret, the SDK and
+    # daemon end up with different secrets and span pushes silently 401.
+    # Warn at config-load time so the user gets a chance to align them
+    # before debugging mysterious 401s.
+    _warn_if_secrets_diverge(config_path, raw)
 
     cfg = _parse(raw)
     cfg.config_path = config_path.resolve()

@@ -30,20 +30,37 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
     # before the regular grouped report and exits — the two outputs are
     # different shapes and combining them would be cluttered.
     if compare:
-        if not hasattr(db, "conn"):
-            raise click.ClickException(
-                "--compare requires a direct DuckDB connection. Stop tj serve first."
-            )
-        until_dt = utcnow()
-        try:
-            diff = compute_cost_diff(db, since_dt, until_dt, compare, agent_id=agent)
-        except ValueError as exc:
-            raise click.BadParameter(str(exc), param_hint="'--compare'") from exc
-        if output_json:
-            click.echo(json.dumps(_diff_to_dict(diff), default=str))
-        else:
-            _render_diff(diff)
-        return
+        if hasattr(db, "conn"):
+            until_dt = utcnow()
+            try:
+                diff = compute_cost_diff(db, since_dt, until_dt, compare, agent_id=agent)
+            except ValueError as exc:
+                raise click.BadParameter(str(exc), param_hint="'--compare'") from exc
+            if output_json:
+                click.echo(json.dumps(_diff_to_dict(diff), default=str))
+            else:
+                _render_diff(diff)
+            return
+        # API-shim path: fetch the diff from tj serve. The endpoint
+        # mirrors compute_cost_diff's output schema, so we can pass
+        # the dict to _render_diff_from_dict (or just emit it as JSON).
+        if hasattr(db, "fetch_cost_compare"):
+            try:
+                diff_dict = db.fetch_cost_compare(
+                    since=since, compare=compare, agent_id=agent,
+                )
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Failed to fetch comparison from tj serve: {exc}"
+                ) from exc
+            if output_json:
+                click.echo(json.dumps(diff_dict, default=str))
+            else:
+                _render_diff_dict(diff_dict)
+            return
+        raise click.ClickException(
+            "--compare requires a direct DuckDB connection or a running tj serve."
+        )
 
     filters = CostFilters(
         agent_id=agent,
@@ -213,3 +230,88 @@ def _diff_to_dict(diff) -> dict:
         "by_agent": diff.by_agent,
         "by_model": diff.by_model,
     }
+
+
+def _render_diff_dict(d: dict) -> None:
+    """
+    Render the cost-diff dict format returned by `/api/v1/cost/compare`.
+
+    Same visual structure as `_render_diff` but operates on the JSON shape
+    directly so cmd_cost doesn't have to round-trip through CostDiff
+    dataclasses when fetched from the API (#68 §12 follow-up).
+    """
+    from datetime import datetime
+    cur = d.get("current") or {}
+    prev = d.get("previous") or {}
+
+    def _pd(s: str | None):
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    cur_since = _pd(cur.get("since"))
+    cur_until = _pd(cur.get("until"))
+    prev_since = _pd(prev.get("since"))
+    prev_until = _pd(prev.get("until"))
+    cur_days = max((cur_until - cur_since).days, 1) if (cur_since and cur_until) else 1
+    prev_days = max((prev_until - prev_since).days, 1) if (prev_since and prev_until) else 1
+
+    console.print(
+        f"\n[bold]Current  "
+        f"({cur_since.date() if cur_since else '?'} → "
+        f"{cur_until.date() if cur_until else '?'}, {cur_days}d):[/bold]  "
+        f"{cur.get('sessions', 0)} sessions, "
+        f"{format_tokens(int(cur.get('total_tokens', 0)))} tokens, "
+        f"{format_cost(float(cur.get('total_cost_usd', 0)))}"
+    )
+    console.print(
+        f"[bold]Previous "
+        f"({prev_since.date() if prev_since else '?'} → "
+        f"{prev_until.date() if prev_until else '?'}, {prev_days}d):[/bold] "
+        f"{prev.get('sessions', 0)} sessions, "
+        f"{format_tokens(int(prev.get('total_tokens', 0)))} tokens, "
+        f"{format_cost(float(prev.get('total_cost_usd', 0)))}"
+    )
+    console.print()
+
+    cost_delta = float(d.get("cost_delta_usd", 0))
+    tokens_delta = int(d.get("tokens_delta", 0))
+    cost_pct = d.get("cost_delta_pct")
+    tokens_pct = d.get("tokens_delta_pct")
+    console.print(
+        f"  Cost delta:   {_arrow(cost_delta)} "
+        f"[bold]{format_cost(abs(cost_delta))}[/bold] "
+        f"{_pct_str(cost_pct)}"
+    )
+    console.print(
+        f"  Token delta:  {_arrow(tokens_delta)} "
+        f"[bold]{format_tokens(abs(tokens_delta))}[/bold] "
+        f"{_pct_str(tokens_pct)}"
+    )
+
+    by_agent = d.get("by_agent") or []
+    by_model = d.get("by_model") or []
+    if by_agent:
+        console.print("\n  [bold]Top shifts by agent:[/bold]")
+        for entry in by_agent:
+            delta = float(entry.get("delta", 0))
+            console.print(
+                f"    {_arrow(delta)} {str(entry.get('group', '')):<24} "
+                f"{format_cost(float(entry.get('previous_cost', 0)))} → "
+                f"{format_cost(float(entry.get('current_cost', 0)))}  "
+                f"[dim]({'+' if delta >= 0 else ''}{format_cost(delta)})[/dim]"
+            )
+    if by_model:
+        console.print("\n  [bold]Top shifts by model:[/bold]")
+        for entry in by_model:
+            delta = float(entry.get("delta", 0))
+            console.print(
+                f"    {_arrow(delta)} {str(entry.get('group', '')):<32} "
+                f"{format_cost(float(entry.get('previous_cost', 0)))} → "
+                f"{format_cost(float(entry.get('current_cost', 0)))}  "
+                f"[dim]({'+' if delta >= 0 else ''}{format_cost(delta)})[/dim]"
+            )
+    console.print()

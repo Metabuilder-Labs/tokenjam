@@ -49,6 +49,28 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         return
     existing = find_config_file()
     if existing and not force:
+        # --reconfigure is only meaningful with --claude-code / --codex.
+        # The bare onboard path writes a generic config and doesn't manage
+        # plan tier — that's per-provider, written into [budget.<provider>]
+        # sections by the integration-specific onboarders. Silently
+        # no-op'ing here would frustrate users who pass --reconfigure --plan
+        # expecting their plan field to update (#68 §1).
+        if reconfigure:
+            console.print(
+                "[red]--reconfigure has no effect without --claude-code or "
+                "--codex.[/red]"
+            )
+            console.print(
+                "\nThe bare onboard path writes a generic config and doesn't "
+                "manage plan tier — that's per-provider, set by the "
+                "integration-specific flows.\n"
+            )
+            console.print(
+                "Try [bold]tj onboard --claude-code --reconfigure[/bold] or "
+                "[bold]tj onboard --codex --reconfigure[/bold] instead."
+            )
+            ctx.exit(1)
+            return
         console.print(f"[bold]Config already exists:[/bold] {existing}")
         console.print("Use [bold]--force[/bold] to overwrite.")
         return

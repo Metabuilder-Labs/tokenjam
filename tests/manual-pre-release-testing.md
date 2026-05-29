@@ -7,6 +7,7 @@ Run through this sequence to test a branch before merging and cutting a release.
 - `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` set (used by example agents)
 - Both in `~/tokenjam/.env.local`, sourced before running
 - A clean shell (`tj uninstall --yes && rm -rf ~/.tj ~/.config/tj .tj` if anything from a prior test lingers)
+- **No lingering daemon from a prior install.** Run `tj stop` early — if a previous `tj onboard` installed the launchd / systemd unit, the daemon may still be live with stale config. Verify with `launchctl list | grep tokenjam` (macOS) or `systemctl --user is-active tokenjam` (Linux).
 
 ## 1. Install and verify the build
 
@@ -35,25 +36,41 @@ pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
 ruff check tokenjam/
 ```
 
-**Pass criteria:** all tests green, ruff at or below the documented baseline (49 errors as of v0.3.x — none of them new).
+**Pass criteria:** all tests green, ruff clean (no errors). If ruff reports anything, only proceed if the errors are pre-existing on `main` — confirm by running `ruff check` on `main` first.
 
-## 3. Onboard with plan-tier prompts
+## 3. Onboard
 
 ```bash
 tj onboard --no-daemon   # daemon auto-starts otherwise; stop afterward
 ```
 
-Verify the onboard flow now prompts for **plan tier** (api / pro / max_5x / max_20x for Anthropic; api / plus / team / enterprise for OpenAI when applicable). Pick `api` for this test run so dollar-denominated rendering kicks in across the rest of the script.
+The bare `tj onboard` doesn't prompt for plan tier (plan tier is per-provider — it's set by the integration-specific flows). It only asks for a daily-budget number.
+
+Plan-tier prompting happens in `--claude-code` and `--codex`:
 
 ```bash
-# Confirm the plan landed in config.
-grep -A2 "^\[budget.anthropic\]" .tj/config.toml || grep -A2 "^\[budget.anthropic\]" ~/.config/tj/config.toml
-# [ ] shows plan = "api" (or whichever you picked)
+# Use whichever plan you actually have on the test machine.
+# The examples below use max_5x; substitute max_20x / pro / plus / etc.
+# as appropriate. The format of the expected output is what matters,
+# not the specific plan label.
+tj onboard --claude-code --plan max_5x --no-daemon
+# [ ] prompts for plan tier if --plan not provided
+# [ ] writes plan = "max_5x" under [budget.anthropic] in ~/.config/tj/config.toml
+
+# Confirm the plan landed.
+grep -A3 "^\[budget.anthropic\]" ~/.config/tj/config.toml
+# [ ] plan = "max_5x" (or whichever you picked)
 # [ ] does NOT auto-write usd = 200 (that default is gone in v0.3.x)
 
-# Test --reconfigure re-prompts against an existing config.
-tj onboard --reconfigure --plan max_20x   # non-interactive override
-# [ ] succeeds; plan field updated in config
+# --reconfigure on the integration paths actually re-prompts.
+tj onboard --claude-code --reconfigure --plan api
+# [ ] config updated; plan field flipped
+
+# Bare `tj onboard --reconfigure` is an error now (#68 §1) — points at
+# the integration-specific flows. Verify the explicit error renders.
+tj onboard --reconfigure --plan max_5x; echo "expected exit 1, got $?"
+# [ ] prints "--reconfigure has no effect without --claude-code or --codex"
+# [ ] exit code 1
 ```
 
 ## 4. Populate test data
@@ -164,13 +181,18 @@ tj optimize --json | python3 -c \
 Reconfigure to a subscription plan and re-run `tj optimize` — output should reframe.
 
 ```bash
-tj onboard --reconfigure --plan max_20x
+# Use the plan you actually have on this machine. Expected output shape:
+#   pro     → "Pro plan, $20/mo flat"
+#   max_5x  → "Max 5x plan, $100/mo flat"
+#   max_20x → "Max 20x plan, $200/mo flat"
+#   plus    → "ChatGPT Plus, $20/mo flat"
+tj onboard --claude-code --reconfigure --plan max_5x
 tj optimize
-# [ ] Header reads "(Max 20x plan, $200/mo flat)" + "Implied API value: $X — about Y× your plan cost"
+# [ ] Header reads "(<Plan label>, $<fee>/mo flat)" + "Implied API value: $X — about Y× your plan cost"
 # [ ] NO line that uses the word "spend" against a dollar figure
 # [ ] Downgrade body (if any) uses token-share framing, not "$X/mo savings"
 
-tj onboard --reconfigure --plan api
+tj onboard --claude-code --reconfigure --plan api
 tj optimize
 # [ ] Back to "$X spend (last 30d)..." header and dollar-denominated downgrade savings
 
@@ -306,7 +328,7 @@ tj stop
 ## Claude Code integration (if the change touches onboard / settings.json / daemon)
 
 ```bash
-tj onboard --claude-code --plan max_20x   # non-interactive
+tj onboard --claude-code --plan max_5x   # non-interactive
 # [ ] writes ~/.config/tj/config.toml (global, not project-local)
 # [ ] writes ~/.claude/settings.json with OTEL_EXPORTER_OTLP_ENDPOINT and Bearer header
 # [ ] registers MCP server if `claude` CLI on PATH
@@ -314,11 +336,11 @@ tj onboard --claude-code --plan max_20x   # non-interactive
 # [ ] adds cwd to ~/.config/tj/projects.json
 
 # Re-run is a quiet no-op (no duplicate "Background Items Added" notification on macOS)
-tj onboard --claude-code --plan max_20x
+tj onboard --claude-code --plan max_5x
 
 # Multi-project: secret must NOT rotate on second project
 mkdir -p /tmp/tj-test-project-2 && cd /tmp/tj-test-project-2 && git init -q
-tj onboard --claude-code --plan max_20x
+tj onboard --claude-code --plan max_5x
 # [ ] "Daemon: already running (skipped reinstall)"
 # [ ] ~/.config/tj/projects.json lists BOTH paths
 # [ ] ingest_secret in ~/.claude/settings.json unchanged from the first onboard
@@ -326,7 +348,7 @@ test ! -f .tj/config.toml && echo "ok: --claude-code did not create project-loca
 cd ~/tokenjam
 
 # --force does reinstall the daemon
-tj onboard --claude-code --plan max_20x --force
+tj onboard --claude-code --plan max_5x --force
 # [ ] "Daemon: installing..."
 
 tj mcp --help   # MCP server CLI exists

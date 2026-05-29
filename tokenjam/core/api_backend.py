@@ -6,6 +6,7 @@ queries through the REST API.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 import httpx
 
@@ -186,6 +187,109 @@ class ApiBackend:
 
     def get_recent_spans(self, session_id: str, limit: int) -> list[NormalizedSpan]:
         return []
+
+    def get_baseline(self, agent_id: str):
+        """
+        Fetch a drift baseline for a single agent via /api/v1/drift?agent_id=X.
+
+        Returns DriftBaseline or None. Mirrors the StorageBackend method so
+        cmd_drift can call it transparently in API-shim mode (#68 §3).
+        """
+        from tokenjam.core.models import DriftBaseline
+        try:
+            data = self._get("/api/v1/drift", {"agent_id": agent_id})
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        b = data.get("baseline")
+        if not b:
+            return None
+        return DriftBaseline(
+            agent_id=agent_id,
+            sessions_sampled=int(b.get("sessions_sampled", 0)),
+            computed_at=(
+                datetime.fromisoformat(b["computed_at"])
+                if b.get("computed_at") else datetime.now()
+            ),
+            avg_input_tokens=b.get("avg_input_tokens"),
+            stddev_input_tokens=b.get("stddev_input_tokens"),
+            avg_output_tokens=b.get("avg_output_tokens"),
+            stddev_output_tokens=b.get("stddev_output_tokens"),
+            avg_session_duration_s=b.get("avg_session_duration_s"),
+            stddev_session_duration=b.get("stddev_session_duration"),
+            avg_tool_call_count=b.get("avg_tool_call_count"),
+            stddev_tool_call_count=b.get("stddev_tool_call_count"),
+        )
+
+    def list_baseline_agents(self) -> list[str]:
+        """
+        Enumerate agent IDs that have a drift baseline. Hits /api/v1/drift
+        (no agent_id) which returns {"agents": [...]} for every baseline.
+
+        Used by cmd_drift to discover agents under API-shim mode (#68 §3).
+        """
+        try:
+            data = self._get("/api/v1/drift")
+        except Exception:
+            return []
+        return [
+            a["agent_id"] for a in data.get("agents", [])
+            if a.get("agent_id")
+        ]
+
+    def fetch_cost_compare(
+        self,
+        *,
+        since: str = "7d",
+        compare: str = "previous",
+        agent_id: str | None = None,
+        top_n: int = 5,
+    ) -> dict:
+        """
+        Fetch a window-vs-window cost diff from tj serve. Mirrors
+        compute_cost_diff's output schema; used by cmd_cost and cmd_optimize
+        when the daemon holds the DB lock (#68 §12 follow-up).
+        """
+        params: dict[str, Any] = {
+            "since": since,
+            "compare": compare,
+            "top_n": top_n,
+        }
+        if agent_id:
+            params["agent_id"] = agent_id
+        return self._get("/api/v1/cost/compare", params)
+
+    def fetch_optimize_report(
+        self,
+        *,
+        since: str = "30d",
+        agent_id: str | None = None,
+        findings: list[str] | None = None,
+        budget_provider: str | None = None,
+        budget_usd: float | None = None,
+    ) -> dict:
+        """
+        Fetch a serialized optimize report from `tj serve`.
+
+        Used by cmd_optimize when the local DuckDB connection is unavailable
+        (daemon holds the write lock). Returns the dict that `report_to_dict`
+        produced server-side; the CLI passes it through `report_from_dict`
+        before rendering.
+
+        See issue #68 §12 for the rationale.
+        """
+        params: dict[str, Any] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        if findings:
+            # FastAPI accepts repeated query params for list values.
+            params["finding"] = findings
+        if budget_provider:
+            params["budget_provider"] = budget_provider
+        if budget_usd is not None:
+            params["budget_usd"] = budget_usd
+        return self._get("/api/v1/optimize", params)
 
     def close(self) -> None:
         self.client.close()

@@ -132,12 +132,12 @@ tj stop
 ## Claude Code integration (smoke)
 
 ```bash
-tj onboard --claude-code --plan max_20x
+tj onboard --claude-code --plan max_5x   # substitute your actual plan
 cat ~/.claude/settings.json | python3 -m json.tool | grep -E "OTEL_LOGS_EXPORTER|OTEL_EXPORTER_OTLP_ENDPOINT"
 cat ~/.config/tj/projects.json   # current cwd present
 
 # Re-run is a quiet no-op
-tj onboard --claude-code --plan max_20x
+tj onboard --claude-code --plan max_5x   # substitute your actual plan
 
 # Backfill ran automatically during onboard — verify history is present
 tj cost --since 30d --agent claude-code-tokenjam || true
