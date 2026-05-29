@@ -1,5 +1,5 @@
 """
-Trim analyzer (internal: prompt-bloat).
+Trim analyzer (internal: trim).
 
 Scores token-by-token significance in captured prompts using LLMLingua-2
 (BERT-class token classifier, MIT-licensed, runs on CPU). Identifies
@@ -16,7 +16,7 @@ Dependency handling:
     The transitive footprint is ~2GB (PyTorch + transformers), so we
     don't pull it into the base install.
   - The import is deferred to the analysis function body so the analyzer
-    self-registers and shows up in `--finding` choices regardless of
+    self-registers and shows up in positional analyzer name choices regardless of
     whether the extra is installed.
   - Missing extra → analysis returns a finding with a clear message
     pointing the user at the install command.
@@ -229,12 +229,12 @@ def _stringify_prompt(value: Any) -> str:
     return str(value)
 
 
-@register("prompt-bloat")
+@register("trim")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a PromptBloatFinding to ctx.report.findings."""
     capture = getattr(ctx.config, "capture", None)
     if capture is None or not getattr(capture, "prompts", False):
-        ctx.report.findings["prompt-bloat"] = PromptBloatFinding(
+        ctx.report.findings["trim"] = PromptBloatFinding(
             enabled=False,
             hint=(
                 "Enable `[capture] prompts = true` in tj.toml and let the "
@@ -249,7 +249,7 @@ def run(ctx: AnalyzerContext) -> None:
     try:
         PromptCompressor = _try_import_llmlingua()
     except ImportError as exc:
-        ctx.report.findings["prompt-bloat"] = PromptBloatFinding(
+        ctx.report.findings["trim"] = PromptBloatFinding(
             enabled=False,
             hint=str(exc),
         )
@@ -273,7 +273,7 @@ def run(ctx: AnalyzerContext) -> None:
     ).fetchall()
 
     if not rows:
-        ctx.report.findings["prompt-bloat"] = PromptBloatFinding(enabled=True)
+        ctx.report.findings["trim"] = PromptBloatFinding(enabled=True)
         return
 
     # Lazy-instantiate the compressor with cached model storage.
@@ -340,7 +340,7 @@ def run(ctx: AnalyzerContext) -> None:
     # Sort by bloat absolute volume — biggest opportunities first.
     per_prompt.sort(key=lambda p: p.bloat_chars, reverse=True)
 
-    ctx.report.findings["prompt-bloat"] = PromptBloatFinding(
+    ctx.report.findings["trim"] = PromptBloatFinding(
         enabled=True,
         prompts_scored=prompts_scored,
         prompts_skipped=prompts_skipped,

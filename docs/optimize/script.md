@@ -1,9 +1,9 @@
 # Script
 
-Product name: **Script**. Internal/CLI name: `workflow-restructure`.
+Product name: **Script**. Internal/CLI name: `script`.
 
 ```bash
-tj optimize --finding workflow-restructure
+tj optimize script
 ```
 
 Flags sessions whose tool-call sequence is structurally identical

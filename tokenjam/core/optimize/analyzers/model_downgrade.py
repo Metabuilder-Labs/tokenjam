@@ -204,7 +204,7 @@ def analyze_model_downgrade(
     )
 
 
-@register("model-downgrade")
+@register("downsize")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Mutates ctx.report.downgrade."""
     ctx.report.downgrade = analyze_model_downgrade(

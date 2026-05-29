@@ -17,7 +17,7 @@ def run(ctx: AnalyzerContext) -> None:
 Auto-discovery in `analyzers/__init__.py` imports every `.py` file under that
 directory, so the `@register` side effect fires automatically. No edit to
 `__init__.py` or `cmd_optimize.py` is required — the CLI reads valid
-`--finding` choices from `ANALYZER_REGISTRY.keys()` at click decoration time.
+positional analyzer name choices from `ANALYZER_REGISTRY.keys()` at click decoration time.
 
 ## Ordering
 

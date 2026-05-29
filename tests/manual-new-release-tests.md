@@ -49,11 +49,11 @@ tj doctor             # exit 0 or 1 (warnings ok)
 
 ```bash
 tj optimize                                # all analyzers
-tj optimize --finding model-downgrade      # Downsize
-tj optimize --finding cache-efficacy       # Cache (efficacy)
-tj optimize --finding cache-recommend      # Cache (recommend) — surfaces "enable capture.prompts" if not set
-tj optimize --finding workflow-restructure # Script — likely no candidates on a fresh DB
-tj optimize --finding prompt-bloat         # Trim — should print install hint without [bloat] extra
+tj optimize downsize      # Downsize
+tj optimize cache       # Cache (efficacy)
+tj optimize cache-recommend      # Cache (recommend) — surfaces "enable capture.prompts" if not set
+tj optimize script # Script — likely no candidates on a fresh DB
+tj optimize trim         # Trim — should print install hint without [bloat] extra
 
 # Caveat enforcement on the downgrade finding
 tj optimize --json | python3 -c \
@@ -64,7 +64,7 @@ tj optimize --json | python3 -c \
   "import json,sys;d=json.load(sys.stdin);assert 'plan' in d and 'pricing_mode' in d;print('ok')"
 ```
 
-**Pass criteria:** every `--finding` runs without crashing. Optional analyzers (`cache-recommend`, `prompt-bloat`) surface clear hints when their prereqs aren't met instead of erroring.
+**Pass criteria:** every positional analyzer name runs without crashing. Optional analyzers (`cache-recommend`, `trim`) surface clear hints when their prereqs aren't met instead of erroring.
 
 ## 5. Backfill adapters (smoke against committed fixtures)
 

@@ -92,15 +92,13 @@ def _config_declared_plan(config) -> str | None:
 
 
 @click.command("optimize")
+@click.argument(
+    "findings",
+    nargs=-1,
+    type=click.Choice(sorted(ANALYZER_REGISTRY.keys())),
+)
 @click.option("--agent", default=None, help="Scope to a specific agent_id.")
 @click.option("--since", default="30d", help="Window for analysis (default 30d).")
-@click.option(
-    "--finding",
-    "findings",
-    multiple=True,
-    type=click.Choice(sorted(ANALYZER_REGISTRY.keys())),
-    help="Run only the named analyzer(s). Repeatable. Default: run all.",
-)
 @click.option("--budget", "budget_provider", default=None,
               help="Scope budget projection to a single provider (e.g. anthropic).")
 @click.option("--budget-usd", type=float, default=None,
@@ -454,8 +452,8 @@ def _render_report(
             _render_budget(proj)
             console.print()
 
-    # ----- Wave-2 findings (cache-efficacy, cache-recommend,
-    # workflow-restructure, prompt-bloat) — these attach to report.findings
+    # ----- Wave-2 findings (cache, cache-recommend,
+    # script, trim) — these attach to report.findings
     # rather than typed slots. Dispatch to a per-finding renderer; ignore
     # any unknown finding names (forward-compatible with future analyzers).
     rendered_any_wave2 = False
@@ -468,8 +466,8 @@ def _render_report(
         rendered_any_wave2 = True
 
     # Only show the catch-all when truly nothing rendered. The earlier
-    # condition missed the Wave-2 findings dict, so cache-efficacy /
-    # cache-recommend / workflow-restructure / prompt-bloat were silently
+    # condition missed the Wave-2 findings dict, so cache /
+    # cache-recommend / script / trim were silently
     # falling into "No candidates flagged" (issue #68 §15).
     rendered_any = (
         report.downgrade is not None
@@ -485,7 +483,7 @@ def _render_report(
 
 def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
     """
-    Render the model-downgrade finding for the given pricing mode.
+    Render the downsize finding for the given pricing mode.
 
     - api:          dollar-denominated savings (current behavior)
     - subscription: token-share framing — "candidate sessions are X% of your
@@ -607,7 +605,7 @@ def _render_budget(p: BudgetProjection) -> None:
     )
     if p.downgrade_run_rate_usd is not None and p.downgrade_run_rate_usd < p.monthly_run_rate_usd:
         console.print(
-            f"     • With model-downgrade pattern: run rate drops to "
+            f"     • With downsize pattern: run rate drops to "
             f"[bold]{format_cost(p.downgrade_run_rate_usd)}/mo[/bold]"
         )
     if p.applies_to_services:
@@ -688,7 +686,7 @@ def _export_snippet(
 
 def _render_cache_efficacy(finding, *, pricing_mode: str = "api") -> None:
     """
-    Render the cache-efficacy finding — current caching-ratio table per
+    Render the cache finding — current caching-ratio table per
     (provider, model). When any rows are flagged, surface them prominently;
     otherwise show the full table dimmed so the user sees the underlying
     data even when no recommendation is warranted.
@@ -791,7 +789,7 @@ def _render_cache_recommend(finding, *, pricing_mode: str = "api") -> None:
 
 def _render_workflow_restructure(finding, *, pricing_mode: str = "api") -> None:
     """
-    Render the workflow-restructure (Script) finding — clusters of sessions
+    Render the script (Script) finding — clusters of sessions
     matching the same (tool_name, arg_shape) signature.
     """
     console.print("  [bold]Workflow restructure:[/bold]")
@@ -850,7 +848,7 @@ def _render_workflow_restructure(finding, *, pricing_mode: str = "api") -> None:
 
 def _render_prompt_bloat(finding, *, pricing_mode: str = "api") -> None:
     """
-    Render the prompt-bloat (Trim) finding — LLMLingua-2 token-significance
+    Render the trim (Trim) finding — LLMLingua-2 token-significance
     summary. When the analyzer is disabled (either capture off or extra
     not installed), surface the hint.
     """
@@ -901,14 +899,14 @@ def _render_prompt_bloat(finding, *, pricing_mode: str = "api") -> None:
         console.print(f"           [dim italic]{sample}[/dim italic]")
     console.print(
         "     [dim]For per-prompt highlights run: "
-        "[bold]tj report --bloat[/bold][/dim]"
+        "[bold]tj report --trim[/bold][/dim]"
     )
 
 
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
-    "cache-efficacy":       _render_cache_efficacy,
+    "cache":       _render_cache_efficacy,
     "cache-recommend":      _render_cache_recommend,
-    "workflow-restructure": _render_workflow_restructure,
-    "prompt-bloat":         _render_prompt_bloat,
+    "script": _render_workflow_restructure,
+    "trim":         _render_prompt_bloat,
 }

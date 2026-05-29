@@ -55,7 +55,7 @@ example sessions before changing models.
      Run rate $160.3500/mo — 19% of cycle budget unused.
 ```
 
-Two analyzers reading the same spans you'd otherwise pay LangSmith to host: structural model-downgrade candidate flagging (never claims quality equivalence — surfaces examples to review) and per-provider monthly budget projection. Works with **any** agent already sending TokenJam data, not just Claude Code.
+Two analyzers reading the same spans you'd otherwise pay LangSmith to host: structural downsize candidate flagging (never claims quality equivalence — surfaces examples to review) and per-provider monthly budget projection. Works with **any** agent already sending TokenJam data, not just Claude Code.
 
 Try a tighter budget to see the over-budget renderer:
 

@@ -1,5 +1,5 @@
 """
-Unit tests for the prompt-bloat (Trim) analyzer.
+Unit tests for the trim (Trim) analyzer.
 
 The LLMLingua-2 model is mocked across these tests so CI doesn't have to
 download ~110MB and run an actual BERT classifier. The mock returns
@@ -83,8 +83,8 @@ def test_disabled_without_capture_prompts(db):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["prompt-bloat"])
-    finding = report.findings["prompt-bloat"]
+                          findings=["trim"])
+    finding = report.findings["trim"]
     assert isinstance(finding, PromptBloatFinding)
     assert finding.enabled is False
     assert "capture" in finding.hint.lower()
@@ -98,8 +98,8 @@ def test_disabled_when_llmlingua_missing(db, monkeypatch):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["prompt-bloat"])
-    finding = report.findings["prompt-bloat"]
+                          findings=["trim"])
+    finding = report.findings["trim"]
     assert finding.enabled is False
     assert "tokenjam[bloat]" in finding.hint
 
@@ -153,8 +153,8 @@ def test_scores_prompts_and_finds_bloat(db, monkeypatch):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["prompt-bloat"])
-    finding = report.findings["prompt-bloat"]
+                          findings=["trim"])
+    finding = report.findings["trim"]
     assert finding.enabled is True
     assert finding.prompts_scored == 3
     # Each scored prompt produces one BloatPrompt entry, up to the 10 cap.
@@ -173,8 +173,8 @@ def test_skips_short_prompts(db, monkeypatch):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["prompt-bloat"])
-    finding = report.findings["prompt-bloat"]
+                          findings=["trim"])
+    finding = report.findings["trim"]
     assert finding.prompts_scored == 0
     assert finding.prompts_skipped == 5
     assert finding.per_prompt == []

@@ -17,7 +17,7 @@ Adding a new analyzer:
      @register("name") taking (ctx: AnalyzerContext) -> None
   2. Add the name to ANALYZER_ORDER in runner.py if it depends on or is
      depended upon by another analyzer
-  3. Nothing else needs editing — cmd_optimize's --finding choices read
+  3. Nothing else needs editing — cmd_optimize's positional choices read
      from ANALYZER_REGISTRY directly
 
 See README.md in this package for details.

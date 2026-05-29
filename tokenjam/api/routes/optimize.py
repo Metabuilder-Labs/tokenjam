@@ -40,7 +40,7 @@ def get_optimize(
     """
     Run the optimize analyzers server-side and return the serialized report.
 
-    Mirrors the CLI `tj optimize` flags: --since, --agent, --finding (repeatable),
+    Mirrors the CLI `tj optimize` flags: --since, --agent, positional NAME args,
     --budget, --budget-usd. Returns the same dict shape `report_to_dict` produces
     locally, so the CLI can reconstruct an `OptimizeReport` and render it.
     """

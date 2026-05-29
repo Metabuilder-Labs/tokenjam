@@ -125,7 +125,7 @@ def run(ctx: AnalyzerContext) -> None:
     Registry entry point. Appends one BudgetProjection per configured
     provider budget to ctx.report.budgets.
 
-    Reads ctx.report.downgrade (set by model-downgrade analyzer, if it ran)
+    Reads ctx.report.downgrade (set by downsize analyzer, if it ran)
     to provide a downgrade-adjusted run-rate for each provider projection.
     """
     config = ctx.config

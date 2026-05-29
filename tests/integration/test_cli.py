@@ -816,7 +816,7 @@ def test_optimize_budget_projection_from_config(runner, db):
         )
         db.insert_span(span)
 
-    result = _invoke(runner, db, cfg, ["optimize", "--finding", "budget-projection"])
+    result = _invoke(runner, db, cfg, ["optimize", "budget-projection"])
     assert result.exit_code == 0
     assert "Budget projection" in result.output
     assert "anthropic" in result.output

@@ -2,8 +2,8 @@
 `tj report` — generate detailed HTML reports for analyzer findings.
 
 Currently supports:
-  - `tj report --bloat [<agent_id>]`: open an HTML visualization of the
-    prompt-bloat analyzer's findings, with high-significance tokens in
+  - `tj report --trim [<agent_id>]`: open an HTML visualization of the
+    Trim analyzer's findings, with high-significance tokens in
     bold and low-significance regions dimmed.
 
 The HTML is written to a local file and opened in the user's default
@@ -33,30 +33,30 @@ def _report_dir() -> Path:
 
 
 @click.command("report")
-@click.option("--bloat", "bloat_agent", default=None, flag_value="",
-              is_flag=False, help="Generate the prompt-bloat HTML report. "
+@click.option("--trim", "trim_agent", default=None, flag_value="",
+              is_flag=False, help="Generate the Trim HTML report. "
                                    "Optional agent_id scopes the report.")
 @click.option("--since", default="30d", help="Window for the report (default 30d).")
 @click.option("--no-open", "no_open", is_flag=True, default=False,
               help="Write the HTML file without opening it in a browser.")
 @click.pass_context
-def cmd_report(ctx: click.Context, bloat_agent: str | None, since: str,
+def cmd_report(ctx: click.Context, trim_agent: str | None, since: str,
                no_open: bool) -> None:
     """Generate detailed HTML reports for analyzer findings."""
-    if bloat_agent is None:
+    if trim_agent is None:
         raise click.UsageError(
-            "Specify a report type. Currently supported: --bloat [<agent_id>]"
+            "Specify a report type. Currently supported: --trim [<agent_id>]"
         )
-    _render_bloat_report(ctx, bloat_agent or None, since, no_open)
+    _render_trim_report(ctx, trim_agent or None, since, no_open)
 
 
-def _render_bloat_report(
+def _render_trim_report(
     ctx: click.Context,
     agent_id: str | None,
     since: str,
     no_open: bool,
 ) -> None:
-    """Run the prompt-bloat analyzer and write its findings as HTML."""
+    """Run the Trim analyzer and write its findings as HTML."""
     from tokenjam.core.optimize import build_report
     from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -74,11 +74,11 @@ def _render_bloat_report(
         db=db, config=config,
         since=since_dt, until=utcnow(),
         agent_id=agent_id,
-        findings=["prompt-bloat"],
+        findings=["trim"],
     )
-    finding = report.findings.get("prompt-bloat")
+    finding = report.findings.get("trim")
     if finding is None:
-        raise click.ClickException("Prompt-bloat analyzer didn't produce a finding.")
+        raise click.ClickException("Trim analyzer didn't produce a finding.")
 
     if not finding.enabled:
         # Show the hint inline rather than producing an empty HTML file.
@@ -101,7 +101,7 @@ def _render_bloat_report(
 
 def _render_html(finding, agent_scope: str | None, since: str) -> str:
     """
-    Render the prompt-bloat finding as a standalone HTML page.
+    Render the Trim finding as a standalone HTML page.
 
     Per-prompt detail: the prompt text is split into segments — high-sig
     (bold) vs flagged bloat regions (dimmed + struck through). Each region

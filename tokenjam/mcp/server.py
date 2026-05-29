@@ -1097,10 +1097,10 @@ def get_optimize_report(
     looks like, which sessions look like they could have used a cheaper
     model, whether they're using their Claude plan efficiently, or whether
     they're getting their money's worth from a subscription plan. Includes a
-    mandatory caveat field reminding callers that the model-downgrade
+    mandatory caveat field reminding callers that the downsize
     finding is a structural heuristic, not a quality judgment.
 
-    `findings` is a list of analyzer names to run (e.g. ['model-downgrade']
+    `findings` is a list of analyzer names to run (e.g. ['downsize']
     or ['budget-projection']). Omit to run all registered analyzers.
 
     Output includes a `pricing_mode` field derived from the session's
