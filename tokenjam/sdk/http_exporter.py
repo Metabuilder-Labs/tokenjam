@@ -19,10 +19,14 @@ class TjHttpExporter(SpanExporter):
 
     def __init__(self, endpoint: str, ingest_secret: str) -> None:
         self._endpoint = endpoint
+        self._ingest_secret = ingest_secret
         self._headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {ingest_secret}",
         }
+        # Cumulative count of spans dropped on auth failure. Exposed so
+        # `tj doctor` can surface this in a future enhancement (#68 §2).
+        self.dropped_auth_failures = 0
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         otlp_spans = [_span_to_otlp(s) for s in spans]
@@ -40,7 +44,31 @@ class TjHttpExporter(SpanExporter):
             )
             if resp.status_code < 300:
                 return SpanExportResult.SUCCESS
-            logger.warning("tj serve returned %d on span export", resp.status_code)
+            if resp.status_code == 401:
+                # 401 won't change on retry. Log loudly at ERROR level with
+                # the secret fingerprint so the user can spot the mismatch
+                # without grepping debug logs (#68 §2). The OTel
+                # BatchSpanProcessor treats FAILURE as drop-after-retries
+                # — by the time we get here the spans are effectively lost.
+                self.dropped_auth_failures += len(spans)
+                secret_fp = (
+                    f"{self._ingest_secret[:8]}..." if self._ingest_secret
+                    else "(no ingest_secret configured)"
+                )
+                logger.error(
+                    "tj serve rejected span export with 401 — your SDK is "
+                    "using ingest_secret=%s but the running daemon expects "
+                    "a different secret. Spans are being DROPPED. Check "
+                    "that .tj/config.toml and ~/.config/tj/config.toml "
+                    "agree (or run `tj stop && tj serve &` after rotating "
+                    "the secret). Dropped %d span(s) so far.",
+                    secret_fp,
+                    self.dropped_auth_failures,
+                )
+            else:
+                logger.warning(
+                    "tj serve returned %d on span export", resp.status_code,
+                )
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             logger.warning("Failed to export spans to tj serve: %s", exc)
         return SpanExportResult.FAILURE
