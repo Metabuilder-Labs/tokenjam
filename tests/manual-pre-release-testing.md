@@ -106,61 +106,61 @@ tj doctor     # exit 0 (or 1 with warnings); no errors
 
 ## 6. Cost-optimization analyzers (the four products)
 
-### 6a. Downsize (`--finding model-downgrade`)
+### 6a. Downsize
 
 ```bash
-tj optimize --finding model-downgrade
+tj optimize downsize
 # [ ] If candidates found: caveat "Candidate-flagging heuristic, not a quality judgment." is present
 # [ ] If no candidates: clean "No candidates flagged" message — not a crash
-tj optimize --finding model-downgrade --json | python3 -c \
+tj optimize downsize --json | python3 -c \
   "import json,sys;r=json.load(sys.stdin);d=r.get('downgrade');assert d is None or 'Candidate-flagging heuristic' in d['caveat'];print('ok: caveat enforced')"
 ```
 
-### 6b. Cache (`--finding cache-efficacy` + `--finding cache-recommend`)
+### 6b. Cache
 
 ```bash
-# cache-efficacy works without content capture
-tj optimize --finding cache-efficacy
+# cache works without content capture
+tj optimize cache
 # [ ] Per (provider, model) rows. Anthropic shows numerically-accurate ratios.
 # [ ] OpenAI / Gemini rows (if present) carry the best-effort caveat.
 # [ ] Rows for Bedrock / LiteLLM / Cohere (if present) show unsupported, not flagged.
 
 # cache-recommend needs capture.prompts. Without it, the analyzer returns a hint.
-tj optimize --finding cache-recommend
+tj optimize cache-recommend
 # [ ] Without capture.prompts: surfaces the "enable capture.prompts" hint, doesn't crash.
 # [ ] With capture.prompts and ≥3 calls sharing a long prefix: surfaces breakpoint candidates.
 ```
 
 To exercise the content-needed branch, set `capture.prompts = true` in `.tj/config.toml`, re-run an example, then re-run `cache-recommend`.
 
-### 6c. Script (`--finding workflow-restructure`)
+### 6c. Script
 
 ```bash
-tj optimize --finding workflow-restructure
+tj optimize script
 # [ ] If ≥20 sessions match a single (tool_name, arg_shape) signature: cluster surfaces with
 #     "review carefully" caveat. With v1's conservative thresholds, most fresh test DBs see no candidates.
 # [ ] No crash; "no clusters found" message is acceptable.
 ```
 
-### 6d. Trim (`--finding prompt-bloat`)
+### 6d. Trim
 
 Trim requires the optional `tokenjam[bloat]` extra (LLMLingua-2 + torch + transformers, ~2GB).
 
 ```bash
 # Without the extra installed: self-registers, errors gracefully with install hint.
-tj optimize --finding prompt-bloat
+tj optimize trim
 # [ ] Output points the user at: pip install "tokenjam[bloat]"
 
 # Install the extra and re-run — only do this if you actually want to test Trim end-to-end
 # (the 2GB download is real). Skip this on quick passes.
 pip3 install -e ".[dev,mcp,bloat]"
 # Enable capture.prompts in .tj/config.toml, re-run examples to populate content, then:
-tj optimize --finding prompt-bloat
+tj optimize trim
 # [ ] First run downloads the ~110MB BERT model under ~/.cache/tokenjam/models/.
 # [ ] Subsequent runs are offline.
 
 # HTML report renderer
-tj report --bloat --no-open
+tj report --trim --no-open
 # [ ] Writes to ~/.cache/tokenjam/reports/trim-<timestamp>.html
 # [ ] HTML contains a caveat block + per-prompt sections
 ```
@@ -400,8 +400,8 @@ python3 examples/single_provider/anthropic_agent.py
 
 tj status && tj traces && tj cost --since 1h
 tj optimize           # all analyzers
-tj optimize --finding model-downgrade
-tj optimize --finding cache-efficacy
+tj optimize downsize
+tj optimize cache
 tj backfill langfuse --source-file tests/fixtures/langfuse_real_response.json
 tj backfill helicone --source-file tests/fixtures/helicone_real_response.json
 tj backfill otlp --source-file tests/fixtures/otlp_sample.json

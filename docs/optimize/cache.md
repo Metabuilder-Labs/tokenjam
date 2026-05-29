@@ -1,13 +1,13 @@
 # Cache
 
-Product name: **Cache**. Internal/CLI names: `cache-efficacy` and `cache-recommend`. Two related findings under the same product — both surface prompt-caching opportunities; they differ in what they need and what they recommend.
+Product name: **Cache**. Internal/CLI names: `cache` and `cache-recommend`. Two related findings under the same product — both surface prompt-caching opportunities; they differ in what they need and what they recommend.
 
 ```bash
-tj optimize --finding cache-efficacy
-tj optimize --finding cache-recommend
+tj optimize cache
+tj optimize cache-recommend
 ```
 
-## `cache-efficacy` — measure current caching
+## `cache` — measure current caching
 
 Reads aggregate `input_tokens` and `cache_tokens` from spans in the
 window. Computes the share of input bytes served from cache per

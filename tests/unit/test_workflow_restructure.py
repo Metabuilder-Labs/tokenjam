@@ -1,4 +1,4 @@
-"""Unit tests for the workflow-restructure analyzer."""
+"""Unit tests for the script analyzer."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -107,8 +107,8 @@ def test_flags_cluster_at_or_above_threshold(db):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["workflow-restructure"])
-    finding = report.findings["workflow-restructure"]
+                          findings=["script"])
+    finding = report.findings["script"]
     assert finding.degraded is False
     assert len(finding.clusters) == 1
     c = finding.clusters[0]
@@ -131,8 +131,8 @@ def test_below_threshold_not_flagged(db):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["workflow-restructure"])
-    assert report.findings["workflow-restructure"].clusters == []
+                          findings=["script"])
+    assert report.findings["script"].clusters == []
 
 
 def test_value_variation_doesnt_split_cluster(db):
@@ -157,8 +157,8 @@ def test_value_variation_doesnt_split_cluster(db):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["workflow-restructure"])
-    finding = report.findings["workflow-restructure"]
+                          findings=["script"])
+    finding = report.findings["script"]
     assert len(finding.clusters) == 1
     assert finding.clusters[0].instances == MIN_CLUSTER_INSTANCES
 
@@ -179,8 +179,8 @@ def test_different_signatures_form_separate_clusters(db):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["workflow-restructure"])
-    assert len(report.findings["workflow-restructure"].clusters) == 2
+                          findings=["script"])
+    assert len(report.findings["script"].clusters) == 2
 
 
 def test_degraded_mode_when_tool_inputs_not_captured(db):
@@ -199,8 +199,8 @@ def test_degraded_mode_when_tool_inputs_not_captured(db):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["workflow-restructure"])
-    finding = report.findings["workflow-restructure"]
+                          findings=["script"])
+    finding = report.findings["script"]
     assert finding.degraded is True
     assert len(finding.clusters) == 1
     # Without arg shape captured, signature carries only tool names.
@@ -213,7 +213,7 @@ def test_no_tool_spans_in_window(db):
     since = datetime(2026, 5, 1, tzinfo=timezone.utc)
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
-                          findings=["workflow-restructure"])
-    finding = report.findings["workflow-restructure"]
+                          findings=["script"])
+    finding = report.findings["script"]
     assert finding.clusters == []
     assert finding.sessions_examined == 0

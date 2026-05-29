@@ -113,13 +113,13 @@ def _compute_rows(conn, since, until, agent_id: str | None) -> list[CacheEfficac
     return result
 
 
-@register("cache-efficacy")
+@register("cache")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches the finding to ctx.report.findings."""
     rows = _compute_rows(ctx.conn, ctx.since, ctx.until, ctx.agent_id)
     if not rows:
         return
-    ctx.report.findings["cache-efficacy"] = CacheEfficacyFinding(
+    ctx.report.findings["cache"] = CacheEfficacyFinding(
         rows=rows,
         flagged=[r for r in rows if r.flagged],
     )

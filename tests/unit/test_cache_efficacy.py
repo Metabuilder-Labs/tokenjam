@@ -1,4 +1,4 @@
-"""Unit tests for the cache-efficacy analyzer."""
+"""Unit tests for the cache analyzer."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -140,10 +140,10 @@ def test_run_integrates_with_build_report(db, config):
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(
         db=db, config=config, since=since, until=until,
-        findings=["cache-efficacy"],
+        findings=["cache"],
     )
-    assert "cache-efficacy" in report.findings
-    finding = report.findings["cache-efficacy"]
+    assert "cache" in report.findings
+    finding = report.findings["cache"]
     assert finding.confidence == "structural"
     assert len(finding.rows) == 1
     assert len(finding.flagged) == 1

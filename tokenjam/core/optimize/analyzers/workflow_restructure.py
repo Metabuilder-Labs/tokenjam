@@ -118,7 +118,7 @@ def _extract_tool_input(attrs: Any) -> Any:
     return attrs.get(GenAIAttributes.TOOL_INPUT)
 
 
-@register("workflow-restructure")
+@register("script")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a WorkflowRestructureFinding to ctx.report.findings."""
     capture = getattr(ctx.config, "capture", None)
@@ -143,7 +143,7 @@ def run(ctx: AnalyzerContext) -> None:
     ).fetchall()
 
     if not rows:
-        ctx.report.findings["workflow-restructure"] = WorkflowRestructureFinding(
+        ctx.report.findings["script"] = WorkflowRestructureFinding(
             degraded=not has_tool_inputs,
         )
         return
@@ -199,7 +199,7 @@ def run(ctx: AnalyzerContext) -> None:
     # are the biggest savings opportunities.
     interesting.sort(key=lambda c: c.instances, reverse=True)
 
-    ctx.report.findings["workflow-restructure"] = WorkflowRestructureFinding(
+    ctx.report.findings["script"] = WorkflowRestructureFinding(
         clusters=interesting,
         sessions_examined=len(session_signatures),
         degraded=not has_tool_inputs,

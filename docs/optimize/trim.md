@@ -1,9 +1,9 @@
 # Trim
 
-Product name: **Trim**. Internal/CLI name: `prompt-bloat`.
+Product name: **Trim**. Internal/CLI name: `trim`.
 
 ```bash
-tj optimize --finding prompt-bloat
+tj optimize trim
 ```
 
 Scores token-by-token significance in captured prompts using
@@ -26,7 +26,7 @@ pip install "tokenjam[bloat]"
 ```
 
 The base `pip install tokenjam` does NOT pull torch. Trim shows up in
-`tj optimize --finding` choices regardless, but running it without the
+`tj optimize` analyzer choices regardless, but running it without the
 extra prints a clear install hint and exits.
 
 ## Requirements
@@ -56,10 +56,10 @@ marked.
 ## HTML report
 
 ```bash
-tj report --bloat                # all agents, 30d window
-tj report --bloat my-agent       # scope to one agent
-tj report --bloat --since 7d     # custom window
-tj report --bloat --no-open      # write file without opening browser
+tj report --trim                # all agents, 30d window
+tj report --trim my-agent       # scope to one agent
+tj report --trim --since 7d     # custom window
+tj report --trim --no-open      # write file without opening browser
 ```
 
 Output goes to `~/.cache/tokenjam/reports/trim-<timestamp>.html` and

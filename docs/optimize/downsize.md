@@ -1,9 +1,9 @@
 # Downsize
 
-Product name: **Downsize**. Internal/CLI name: `model-downgrade`.
+Product name: **Downsize**. Internal/CLI name: `downsize`.
 
 ```bash
-tj optimize --finding model-downgrade
+tj optimize downsize
 ```
 
 Flags sessions whose structural shape — short input (< 5K tokens), short output (< 500 tokens), few tool calls (≤ 5) — matches a class of work where a cheaper model in the same provider family is worth reviewing.
@@ -37,7 +37,7 @@ JSON output mirrors the same data with top-level `plan` and `pricing_mode` field
 
 ## Confidence
 
-`structural`. The model-downgrade finding identifies a structural pattern in the captured data; it does not validate that the cheaper model would produce equivalent output. The mandatory caveat is the honest framing of that limitation.
+`structural`. The downsize finding identifies a structural pattern in the captured data; it does not validate that the cheaper model would produce equivalent output. The mandatory caveat is the honest framing of that limitation.
 
 ## See also
 

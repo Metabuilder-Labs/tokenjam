@@ -3,7 +3,7 @@ Optimize orchestrator. Builds OptimizeReport by running selected analyzers
 from the registry in a deterministic order.
 
 Analyzer ordering matters: budget-projection reads ctx.report.downgrade,
-so model-downgrade must run first when both are selected.
+so downsize must run first when both are selected.
 """
 from __future__ import annotations
 
@@ -24,15 +24,15 @@ from tokenjam.core.optimize.types import (
 from tokenjam.core.optimize import analyzers as _analyzers  # noqa: F401
 
 # Deterministic order. Adding a new analyzer? Append to this list. Analyzers
-# requested via --finding are filtered against ANALYZER_REGISTRY but executed
+# requested via positional are filtered against ANALYZER_REGISTRY but executed
 # in the order defined here, so cross-analyzer dependencies stay stable.
 ANALYZER_ORDER: list[str] = [
-    "model-downgrade",
+    "downsize",
     "budget-projection",
-    "cache-efficacy",
+    "cache",
     "cache-recommend",
-    "workflow-restructure",
-    "prompt-bloat",
+    "script",
+    "trim",
 ]
 
 THIN_DATA_DAYS = 7
@@ -365,10 +365,10 @@ def _build_finding_constructors() -> dict:
         )
 
     return {
-        "cache-efficacy": _cache_efficacy,
+        "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
-        "workflow-restructure": _workflow_restructure,
-        "prompt-bloat": _prompt_bloat,
+        "script": _workflow_restructure,
+        "trim": _prompt_bloat,
     }
 
 

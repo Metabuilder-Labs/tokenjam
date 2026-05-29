@@ -1,5 +1,5 @@
 """
-Generate Claude Code routing snippets from the model-downgrade analyzer.
+Generate Claude Code routing snippets from the downsize analyzer.
 
 Output shape — a `.claude/settings.json`-shaped fragment under a
 `tokenjam.routing_recommendations` namespace, with honest-framing

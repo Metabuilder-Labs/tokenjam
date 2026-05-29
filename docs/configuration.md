@@ -90,7 +90,7 @@ Set limits via CLI (`tj budget --daily 10`), the REST API (`POST /api/v1/budget`
 
 ## Content capture and privacy
 
-By default, `tj` does not capture prompt content, completion content, or tool inputs/outputs — only token counts, model names, tool names, timestamps, and structural metadata. Enable content capture selectively when you need it (for debugging, prompt-bloat analysis, or evaluation):
+By default, `tj` does not capture prompt content, completion content, or tool inputs/outputs — only token counts, model names, tool names, timestamps, and structural metadata. Enable content capture selectively when you need it (for debugging, trim analysis, or evaluation):
 
 ```toml
 [capture]
@@ -108,9 +108,9 @@ The four flags are independent: capture prompts without completions, or tool inp
 
 **What this means for downstream analyzers.**
 
-- `tj optimize --finding cache-efficacy` reads token-count fields and works without content capture.
-- `tj optimize --finding prompt-bloat` reads prompt text and requires `capture.prompts = true`.
-- `tj optimize --finding cache-recommend` reads prompts and requires `capture.prompts = true`.
+- `tj optimize cache` reads token-count fields and works without content capture.
+- `tj optimize trim` reads prompt text and requires `capture.prompts = true`.
+- `tj optimize cache-recommend` reads prompts and requires `capture.prompts = true`.
 
 The analyzers that need content fail with a clear message ("set `capture.prompts = true` in tj.toml and let the daemon collect a fresh window of data") rather than running on partial data.
 

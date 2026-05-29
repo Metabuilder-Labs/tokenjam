@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-# Mandatory caveat string. Every channel that surfaces the model-downgrade
+# Mandatory caveat string. Every channel that surfaces the downsize
 # finding must include this verbatim; spec rule #2 is non-negotiable.
 MODEL_DOWNGRADE_CAVEAT = (
     "Candidate-flagging heuristic, not a quality judgment. "
@@ -84,10 +84,10 @@ class OptimizeReport:
     budgets:   list[BudgetProjection] = field(default_factory=list)
     notes:     list[str] = field(default_factory=list)
     # Generic findings dict keyed by analyzer registration name. Wave 2
-    # analyzers (cache-efficacy, cache-recommend, prompt-bloat,
-    # workflow-restructure) attach their results here so adding a new
+    # analyzers (cache, cache-recommend, trim,
+    # script) attach their results here so adding a new
     # analyzer doesn't require a typed slot on this dataclass.
-    # Existing analyzers (model-downgrade, budget-projection) keep their
+    # Existing analyzers (downsize, budget-projection) keep their
     # typed slots above for backwards-compat with cmd_optimize and mcp.
     findings:  dict = field(default_factory=dict)
 
