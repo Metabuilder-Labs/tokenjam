@@ -28,7 +28,9 @@ from tokenjam.core.optimize.types import DowngradeFinding
 
 
 def _comment_block(lines: list[str]) -> str:
-    return "\n".join(f"  // {line}" for line in lines)
+    # 6-space indent so the comment block aligns with the surrounding
+    # "routing_recommendations" object body (#71 finding 4).
+    return "\n".join(f"      // {line}" for line in lines)
 
 
 def render_claude_code_snippet(

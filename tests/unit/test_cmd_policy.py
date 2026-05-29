@@ -51,9 +51,11 @@ def _invoke(runner, config, args):
 
 # --- _collect_rows ---
 
-def test_empty_config_yields_no_rows_apart_from_default_alerts():
+def test_empty_config_yields_default_alerts_and_capture_rows():
     # Default AlertsConfig has one stdout channel — so the alerts row always
-    # shows. defaults.budget unset, no provider budgets, no agents, no capture.
+    # shows. capture also shows even when all toggles are off (#71 fix —
+    # an explicit "off" is still a policy choice worth surfacing).
+    # defaults.budget unset, no provider budgets, no agents.
     cfg = _empty_config()
     rows = _collect_rows(cfg)
     policies = [r.policy for r in rows]
@@ -62,7 +64,7 @@ def test_empty_config_yields_no_rows_apart_from_default_alerts():
     assert "defaults.budget" not in policies
     assert all(not p.startswith("budget.") for p in policies)
     assert all(not p.startswith("agents.") for p in policies)
-    assert "capture" not in policies
+    assert "capture" in policies
 
 
 def test_provider_budget_row_shows_usd_and_plan():
@@ -122,9 +124,11 @@ def test_agent_rows_emitted_only_for_overrides():
     assert "file_delete" in sa_row.setting
 
 
-def test_capture_row_only_when_any_flag_true():
+def test_capture_row_always_shown():
+    # Capture is a policy choice even when all toggles are off (#71 fix).
     cfg = _empty_config()
-    assert not any(r.policy == "capture" for r in _collect_rows(cfg))
+    row = next(r for r in _collect_rows(cfg) if r.policy == "capture")
+    assert "prompts=false" in row.setting
     cfg.capture = CaptureConfig(prompts=True)
     row = next(r for r in _collect_rows(cfg) if r.policy == "capture")
     assert "prompts=true" in row.setting

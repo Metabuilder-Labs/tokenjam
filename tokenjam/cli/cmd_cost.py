@@ -32,6 +32,8 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
     if compare:
         if hasattr(db, "conn"):
             until_dt = utcnow()
+            from tokenjam.core.cost import override_since_for_compare
+            since_dt = override_since_for_compare(compare, since_dt, until_dt)
             try:
                 diff = compute_cost_diff(db, since_dt, until_dt, compare, agent_id=agent)
             except ValueError as exc:

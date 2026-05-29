@@ -444,7 +444,18 @@ def _onboard_claude_code(
                 elif result.sessions_seen > 0:
                     backfill_msg = "history already up to date"
             except Exception as exc:
-                backfill_msg = f"skipped ({exc})"
+                # Friendly message for the most common case: daemon holds
+                # the DB write lock. Backfill is a writer and can't share
+                # the lock; raw DuckDB IO error is unhelpful (#71 finding 2).
+                _err = str(exc).lower()
+                if "lock" in _err or "i/o error" in _err or "io error" in _err:
+                    backfill_msg = (
+                        "skipped — daemon holds the DB write lock. "
+                        "Stop the daemon (`tj stop`) and re-run "
+                        "`tj backfill claude-code`."
+                    )
+                else:
+                    backfill_msg = f"skipped ({exc})"
     except Exception:
         pass
 

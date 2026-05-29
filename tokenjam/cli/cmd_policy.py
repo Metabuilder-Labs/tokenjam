@@ -51,11 +51,15 @@ def cmd_policy() -> None:
 
 
 @cmd_policy.command("list")
+@click.option("--json", "output_json_flag", is_flag=True,
+              help="Emit machine-readable JSON.")
 @click.pass_context
-def cmd_policy_list(ctx: click.Context) -> None:
+def cmd_policy_list(ctx: click.Context, output_json_flag: bool) -> None:
     """List existing alerts, drift, schema, and budget configuration."""
     config: TjConfig = ctx.obj["config"]
-    output_json: bool = ctx.obj.get("output_json", False)
+    # Honour either the root `tj --json policy list` form or the
+    # command-level `tj policy list --json` form (#71 finding 6).
+    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
 
     rows = _collect_rows(config)
 
@@ -226,8 +230,9 @@ def _drift_summary(drift: DriftConfig) -> str:
 
 
 def _capture_rows(capture: CaptureConfig) -> list[PolicyRow]:
-    if not any([capture.prompts, capture.completions, capture.tool_inputs, capture.tool_outputs]):
-        return []
+    # Always emit the row — capture is a policy choice even when all four
+    # toggles are off (the default). Suppressing it hid the section from
+    # users who'd explicitly verified their privacy settings (#71 finding 7).
     parts = [
         f"prompts={str(capture.prompts).lower()}",
         f"completions={str(capture.completions).lower()}",
