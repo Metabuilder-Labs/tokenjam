@@ -880,3 +880,109 @@ def test_budget_set_negative_daily_rejected(runner, db, config, tmp_path):
     assert result.exit_code != 0
     assert "non-negative" in result.output.lower()
     mock_write.assert_not_called()
+
+
+# -- otel-resource-attrs tests --
+
+def test_otel_resource_attrs_includes_namespace_for_configured_project(runner):
+    """When the repo's agent has a project set, namespace is appended."""
+    cfg = TjConfig(
+        version="1",
+        agents={"claude-code-myrepo": AgentConfig(project="aquanode")},
+    )
+    with patch("tokenjam.cli.cmd_otel._derive_project_name", return_value="myrepo"), \
+         patch("tokenjam.cli.main.load_config", return_value=cfg):
+        result = runner.invoke(cli, ["otel-resource-attrs"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == (
+        "service.name=claude-code-myrepo,service.namespace=aquanode"
+    )
+
+
+def test_otel_resource_attrs_omits_namespace_without_config(runner):
+    """No config / no project => service.name only, single line, nothing else."""
+    cfg = TjConfig(version="1")  # no agents configured
+    with patch("tokenjam.cli.cmd_otel._derive_project_name", return_value="myrepo"), \
+         patch("tokenjam.cli.main.load_config", return_value=cfg):
+        result = runner.invoke(cli, ["otel-resource-attrs"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "service.name=claude-code-myrepo"
+    # Single bare line — safe to embed in $(tj otel-resource-attrs).
+    assert "service.namespace" not in result.output
+    assert result.output.count("\n") == 1
+
+
+# -- onboard --claude-code per-terminal wrapper tests --
+
+def test_onboard_claude_code_installs_claude_wrapper(runner, tmp_path):
+    """--claude-code installs the per-terminal `claude` wrapper into ~/.zshrc."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+
+    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ])
+
+    assert result.exit_code == 0
+    assert zshrc.exists()
+    text = zshrc.read_text()
+    assert "# tj per-terminal naming" in text
+    assert "claude() {" in text
+    # The wrapper sources project attrs from the new utility command and tags
+    # a per-terminal instance id, invoking the real binary without recursion.
+    assert "tj otel-resource-attrs" in text
+    assert "service.instance.id=" in text
+    assert "command claude" in text
+    assert "--as" in text
+
+
+def test_onboard_claude_code_wrapper_is_idempotent(runner, tmp_path):
+    """Re-running --claude-code does not duplicate the wrapper block."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+
+    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        args = [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ]
+        first = runner.invoke(cli, args)
+        second = runner.invoke(cli, args)
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    text = zshrc.read_text()
+    assert text.count("claude() {") == 1
+    assert text.count("# tj per-terminal naming") == 1
+    assert text.count("# end tj per-terminal naming") == 1
+
+
+def test_onboard_claude_code_wrapper_writes_bashrc_when_present(runner, tmp_path):
+    """~/.bashrc gets the wrapper only when it already exists."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    bashrc = fake_home / ".bashrc"
+    bashrc.write_text("# existing bashrc\n")
+
+    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ])
+
+    assert result.exit_code == 0
+    bashrc_text = bashrc.read_text()
+    assert "# existing bashrc" in bashrc_text  # preserved
+    assert "claude() {" in bashrc_text

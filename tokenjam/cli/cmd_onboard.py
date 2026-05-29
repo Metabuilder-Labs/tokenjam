@@ -431,6 +431,12 @@ def _onboard_claude_code(
         )
         zshrc.write_text(updated)
 
+    # --- Per-terminal naming: install the `claude` shell wrapper ---
+    # Tags each terminal with a distinct service.instance.id so concurrent
+    # Claude Code sessions render as separate dashboard tiles, without the user
+    # hand-editing their shell rc. Idempotent across re-onboards.
+    wrapper_files = _install_claude_wrapper()
+
     want_daemon = not no_daemon
     if want_daemon:
         if not force and _daemon_already_running():
@@ -486,6 +492,11 @@ def _onboard_claude_code(
     console.print(f"  Global settings:     {global_settings_path}")
     console.print(f"  Project settings:    {project_settings_path}")
     console.print("  Shell env:           ~/.zshrc (harness-compatible endpoint)")
+    if wrapper_files:
+        console.print(
+            f"  claude wrapper:      {', '.join(wrapper_files)} "
+            "(per-terminal naming)"
+        )
     console.print(f"  Agent ID:            {agent_id}")
     if budget and budget > 0:
         console.print(f"  Daily budget:        ${budget:.2f}")
@@ -512,6 +523,11 @@ def _onboard_claude_code(
     if not want_daemon:
         console.print("[dim]Start the server:[/dim]  tj serve")
     console.print("[dim]Restart Claude Code for settings to take effect.[/dim]")
+    console.print(
+        "[dim]Open a new terminal, then launch with[/dim]  claude  "
+        "[dim](each terminal becomes its own dashboard tile;[/dim] "
+        "claude --as <name> [dim]to label it).[/dim]"
+    )
     console.print(f"[dim]Then run:[/dim]  tj status --agent {agent_id}")
 
 
@@ -936,6 +952,97 @@ def _sync_secret_to_claude_code(secret: str) -> bool:
     settings["env"] = env
     settings_path.write_text(json_mod.dumps(settings, indent=2) + "\n")
     return True
+
+
+_WRAPPER_MARKER = "# tj per-terminal naming"
+_WRAPPER_END_MARKER = "# end tj per-terminal naming"
+
+
+def _claude_wrapper_block() -> str:
+    """Return the idempotent ``claude`` shell-wrapper block.
+
+    The wrapper tags each terminal with a distinct ``service.instance.id`` so
+    concurrent Claude Code sessions show as separate dashboard tiles. It:
+
+    - consumes an optional ``--as <name>`` flag and passes the rest through,
+    - derives the instance id from ``--as`` else the tty basename else
+      ``unknown``,
+    - exports ``OTEL_RESOURCE_ATTRIBUTES`` (project attrs from
+      ``tj otel-resource-attrs`` + the instance id),
+    - runs the real binary via ``command claude`` so it never recurses.
+
+    Written portably so it works in both zsh and bash.
+    """
+    return (
+        f"{_WRAPPER_MARKER}\n"
+        f"# Tags each terminal with a distinct service.instance.id so concurrent\n"
+        f"# Claude Code sessions appear as separate TokenJam dashboard tiles.\n"
+        f"# Override the label with: claude --as <name>\n"
+        f"claude() {{\n"
+        f'  local _tj_as=""\n'
+        f"  local -a _tj_args=()\n"
+        f'  while [ "$#" -gt 0 ]; do\n'
+        f'    case "$1" in\n'
+        f'      --as) _tj_as="$2"; shift 2 ;;\n'
+        f'      --as=*) _tj_as="${{1#--as=}}"; shift ;;\n'
+        f'      *) _tj_args+=("$1"); shift ;;\n'
+        f"    esac\n"
+        f"  done\n"
+        f'  local _tj_inst="$_tj_as"\n'
+        f'  if [ -z "$_tj_inst" ]; then\n'
+        f'    local _tj_tty\n'
+        f'    _tj_tty="$(tty 2>/dev/null)"\n'
+        f'    case "$_tj_tty" in\n'
+        f'      /dev/*) _tj_inst="${{_tj_tty#/dev/}}"; _tj_inst="${{_tj_inst//\\//-}}" ;;\n'
+        f"    esac\n"
+        f"  fi\n"
+        f'  [ -z "$_tj_inst" ] && _tj_inst="unknown"\n'
+        f'  export OTEL_RESOURCE_ATTRIBUTES="$(tj otel-resource-attrs),service.instance.id=$_tj_inst"\n'
+        f'  command claude "${{_tj_args[@]}}"\n'
+        f"}}\n"
+        f"{_WRAPPER_END_MARKER}\n"
+    )
+
+
+def _install_claude_wrapper() -> list[str]:
+    """Install the idempotent ``claude`` wrapper into the user's shell rc files.
+
+    Always writes ``~/.zshrc`` (created if absent); also writes ``~/.bashrc``
+    only when it already exists. Re-running replaces the existing block in place
+    (matched between the begin/end markers) so onboards never duplicate it.
+
+    Returns the list of rc files that were written.
+    """
+    import re as _re
+
+    block = _claude_wrapper_block()
+    written: list[str] = []
+
+    zshrc = Path.home() / ".zshrc"
+    zshrc.touch(exist_ok=True)
+    targets = [zshrc]
+    bashrc = Path.home() / ".bashrc"
+    if bashrc.exists():
+        targets.append(bashrc)
+
+    for rc in targets:
+        text = rc.read_text()
+        if _WRAPPER_MARKER not in text:
+            with rc.open("a") as f:
+                # Ensure a blank line before the block for readability.
+                f.write(("" if text.endswith("\n") or not text else "\n") + "\n" + block)
+        else:
+            # Replace the existing block (begin marker .. end marker) in place.
+            updated = _re.sub(
+                _re.escape(_WRAPPER_MARKER) + r".*?" + _re.escape(_WRAPPER_END_MARKER) + r"\n",
+                block,
+                text,
+                flags=_re.DOTALL,
+            )
+            rc.write_text(updated)
+        written.append(str(rc))
+
+    return written
 
 
 def _derive_project_name() -> str:
