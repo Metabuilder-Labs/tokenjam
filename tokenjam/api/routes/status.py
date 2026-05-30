@@ -1,14 +1,27 @@
-"""GET /api/v1/status — agent status overview."""
+"""GET /api/v1/status — agent status overview + session archive."""
 from __future__ import annotations
+
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.db import _row_to_session
-from tokenjam.core.models import AlertFilters, SESSION_STALE_THRESHOLD
+from tokenjam.core.models import (
+    SESSION_IDLE_THRESHOLD,
+    AlertFilters,
+    SessionRecord,
+)
 from tokenjam.utils.time_parse import utcnow
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
+
+# Max current (active/idle) tiles to surface per agent. Extra concurrent
+# terminals beyond this are reported via the per-tile `overflow` count rather
+# than silently dropped.
+MAX_SESSION_TILES = 6
+# How many archived (closed/stale) sessions to return, most-recent first.
+ARCHIVE_LIMIT = 50
 
 
 def _session_label(
@@ -31,12 +44,89 @@ def _session_label(
     return instance_id
 
 
+def _idle_threshold(config) -> timedelta:
+    """Configured idle window ([sessions] idle_minutes), else the default."""
+    if config is not None:
+        return timedelta(minutes=config.session_idle_minutes)
+    return SESSION_IDLE_THRESHOLD
+
+
+def _project_for(config, agent_id: str) -> str | None:
+    """Server-side project fallback ([agents.<id>].project) for an agent."""
+    if config is None:
+        return None
+    agent_cfg = config.agents.get(agent_id)
+    return agent_cfg.project if agent_cfg else None
+
+
+def _build_archive(
+    db,
+    config,
+    session_labels: dict[str, str],
+    idle_threshold: timedelta,
+    cutoff,
+    agent_id: str | None,
+) -> list[dict]:
+    """Closed + stale sessions, most-recent first, capped at ARCHIVE_LIMIT.
+
+    Stale = an 'active' session whose last activity is older than the idle
+    window (a zombie that was never explicitly closed). Closed = a session
+    explicitly ended via /api/v1/sessions/close.
+    """
+    if not hasattr(db, "conn"):
+        return []
+
+    clause = (
+        "status = 'closed' "
+        "OR (status = 'active' AND COALESCE(ended_at, started_at) <= $1)"
+    )
+    params: list = [cutoff]
+    sql = f"SELECT * FROM sessions WHERE ({clause})"
+    if agent_id:
+        params.append(agent_id)
+        sql += f" AND agent_id = ${len(params)}"
+    params.append(ARCHIVE_LIMIT)
+    sql += f" ORDER BY COALESCE(ended_at, started_at) DESC LIMIT ${len(params)}"
+
+    rows = db.conn.execute(sql, params).fetchall()
+    cols = [d[0] for d in db.conn.description]
+    archived: list[dict] = []
+    for r in rows:
+        s = _row_to_session(r, cols)
+        namespace = s.service_namespace or _project_for(config, s.agent_id)
+        archived.append({
+            "agent_id": s.agent_id,
+            "namespace": namespace,
+            "session_id": s.session_id,
+            "label": _session_label(
+                s.session_id, s.service_instance_id, session_labels
+            ),
+            "status": s.status_at(idle_threshold),
+            "input_tokens": s.input_tokens,
+            "output_tokens": s.output_tokens,
+            "tool_call_count": s.tool_call_count,
+            "total_cost_usd": (
+                float(s.total_cost_usd) if s.total_cost_usd is not None else 0.0
+            ),
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "last_span_time": s.ended_at.isoformat() if s.ended_at else None,
+        })
+    return archived
+
+
 @router.get("/status")
 async def get_status(
     request: Request,
     agent_id: str | None = None,
 ) -> dict:
     db = request.app.state.db
+    config = getattr(request.app.state, "config", None)
+    session_labels = dict(config.session_labels) if config else {}
+    idle_threshold = _idle_threshold(config)
+    now = utcnow()
+    # Sessions whose last activity is newer than this are "current" (active or
+    # idle) and get a tile; older active sessions are stale -> archive only.
+    current_cutoff = now - idle_threshold
 
     # Discover agent IDs
     if agent_id:
@@ -53,34 +143,25 @@ async def get_status(
         agent_ids = []
 
     has_active_alerts = False
-    agents_data = []
-    config = getattr(request.app.state, "config", None)
-    session_labels = dict(config.session_labels) if config else {}
-    # Recency window for "currently active" — a session whose last span is
-    # within this window is a live terminal. Several at once = concurrent
-    # terminals sharing one agent_id (e.g. 3 Claude Code tabs in one repo).
-    active_cutoff = utcnow() - SESSION_STALE_THRESHOLD
+    agents_data: list[dict] = []
 
     for aid in agent_ids:
-        # One tile per concurrently-active session (terminal). Fall back to the
-        # latest completed session so an idle agent still shows a single tile.
-        sessions: list = []
+        # Current tiles: active sessions (one per live terminal) whose last
+        # activity is within the idle window. Closed/completed/stale sessions
+        # never become a current tile — they live only in the archive.
+        sessions: list[SessionRecord] = []
         if hasattr(db, "conn"):
             rows = db.conn.execute(
                 "SELECT * FROM sessions WHERE agent_id = $1 AND status = 'active' "
                 "AND COALESCE(ended_at, started_at) > $2 "
                 "ORDER BY COALESCE(ended_at, started_at) DESC",
-                [aid, active_cutoff],
+                [aid, current_cutoff],
             ).fetchall()
             if rows:
                 cols = [d[0] for d in db.conn.description]
                 sessions = [_row_to_session(r, cols) for r in rows]
-        if not sessions:
-            completed = db.get_completed_sessions(aid, limit=1)
-            if completed:
-                sessions = [completed[0]]
 
-        today_cost = db.get_daily_cost(aid, utcnow().date())
+        today_cost = db.get_daily_cost(aid, now.date())
 
         # Active (unacknowledged, unsuppressed) alerts for this agent.
         alerts = db.get_alerts(AlertFilters(agent_id=aid, unread=True, limit=50))
@@ -88,27 +169,16 @@ async def get_status(
         if active_alerts:
             has_active_alerts = True
 
-        # Project grouping: prefer the namespace captured on the session;
-        # fall back to the agent's configured project ([agents.<id>].project)
-        # so already-running agents that never sent service.namespace still
-        # group correctly without a restart.
-        agent_cfg = config.agents.get(aid) if config else None
-        configured_project = agent_cfg.project if agent_cfg else None
-
         if not sessions:
-            # Agent known (has spans) but no session row — show an idle tile.
-            agents_data.append({
-                "agent_id": aid, "namespace": configured_project, "status": "idle",
-                "session_id": None, "label": None,
-                "cost_today": today_cost, "total_cost_usd": 0.0,
-                "input_tokens": 0, "output_tokens": 0, "tool_call_count": 0,
-                "error_count": 0, "active_alerts": len(active_alerts),
-                "duration_seconds": None, "started_at": None, "last_span_time": None,
-            })
+            # No active/idle session — contribute no current tile.
             continue
 
-        multi = len(sessions) > 1
-        for session in sessions:
+        configured_project = _project_for(config, aid)
+        # Cap tiles by recency; surface (don't silently drop) the overflow.
+        overflow = max(0, len(sessions) - MAX_SESSION_TILES)
+        shown = sessions[:MAX_SESSION_TILES]
+        multi = len(shown) > 1
+        for session in shown:
             namespace = session.service_namespace or configured_project
             # When several sessions share one agent, attribute alerts per
             # session; otherwise use the agent-level count (covers alerts that
@@ -122,7 +192,7 @@ async def get_status(
             agents_data.append({
                 "agent_id": aid,
                 "namespace": namespace,
-                "status": session.effective_status,
+                "status": session.status_at(idle_threshold),
                 "session_id": session.session_id,
                 "label": _session_label(
                     session.session_id, session.service_instance_id, session_labels
@@ -144,9 +214,16 @@ async def get_status(
                 "last_span_time": (
                     session.ended_at.isoformat() if session.ended_at else None
                 ),
+                # Per-agent count of current sessions hidden by the tile cap.
+                "overflow": overflow,
             })
+
+    archived = _build_archive(
+        db, config, session_labels, idle_threshold, current_cutoff, agent_id
+    )
 
     return {
         "agents": agents_data,
+        "archived": archived,
         "has_active_alerts": has_active_alerts,
     }

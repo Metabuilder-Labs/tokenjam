@@ -44,6 +44,8 @@ class StorageBackend(Protocol):
     def upsert_baseline(self, baseline: DriftBaseline) -> None: ...
     def get_session(self, session_id: str) -> SessionRecord | None: ...
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None: ...
+    def close_sessions_by_instance(self, instance_id: str) -> int: ...
+    def close_session_by_id(self, session_id: str) -> int: ...
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
@@ -523,6 +525,49 @@ class DuckDBBackend:
             return None
         cols = [d[0] for d in cur.description]
         return _row_to_session(rows[0], cols)
+
+    def close_sessions_by_instance(self, instance_id: str) -> int:
+        """Mark all currently-active sessions for a terminal as 'closed'.
+
+        Returns the number closed. Idempotent: already-closed/completed rows are
+        not matched (status='active' filter), so re-closing is a no-op (0).
+        ended_at is bumped to now only when now is later than the existing one.
+        """
+        now = utcnow()
+        count_row = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE service_instance_id = $1 AND status = 'active'",
+            [instance_id],
+        ).fetchone()
+        count = count_row[0] if count_row else 0
+        if count:
+            self.conn.execute(
+                "UPDATE sessions SET status = 'closed', "
+                "ended_at = CASE WHEN ended_at IS NULL OR ended_at < $2 "
+                "THEN $2 ELSE ended_at END "
+                "WHERE service_instance_id = $1 AND status = 'active'",
+                [instance_id, now],
+            )
+        return count
+
+    def close_session_by_id(self, session_id: str) -> int:
+        """Mark a single active session as 'closed'. Idempotent (see above)."""
+        now = utcnow()
+        count_row = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE session_id = $1 AND status = 'active'",
+            [session_id],
+        ).fetchone()
+        count = count_row[0] if count_row else 0
+        if count:
+            self.conn.execute(
+                "UPDATE sessions SET status = 'closed', "
+                "ended_at = CASE WHEN ended_at IS NULL OR ended_at < $2 "
+                "THEN $2 ELSE ended_at END "
+                "WHERE session_id = $1 AND status = 'active'",
+                [session_id, now],
+            )
+        return count
 
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
         clauses: list[str] = []

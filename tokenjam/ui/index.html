@@ -182,9 +182,10 @@ code, .mono {
 }
 .status-dot.active { background: var(--success); }
 .status-dot.completed { background: var(--success); }
-.status-dot.idle { background: var(--text-dim); }
+.status-dot.idle { background: var(--warn); }
 .status-dot.error { background: var(--error); }
-.status-dot.stale { background: var(--warn); }
+.status-dot.stale { background: var(--text-dim); }
+.status-dot.closed { background: var(--text-dim); }
 .card-row {
   display: flex;
   justify-content: space-between;
@@ -286,7 +287,9 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .badge-ok, .badge-completed { background: rgba(12,228,144,0.15); color: var(--success); }
 .badge-error { background: rgba(238,0,0,0.15); color: var(--error); }
 .badge-active { background: rgba(12,228,144,0.15); color: var(--success); }
-.badge-stale { background: rgba(245,166,35,0.15); color: var(--warn); }
+.badge-idle { background: rgba(245,166,35,0.15); color: var(--warn); }
+.badge-stale { background: rgba(140,140,140,0.15); color: var(--text-dim); }
+.badge-closed { background: rgba(140,140,140,0.15); color: var(--text-dim); }
 .badge-critical { background: rgba(238,0,0,0.15); color: var(--error); }
 .badge-warning { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge-info { background: rgba(61,142,255,0.15); color: var(--info); }
@@ -661,6 +664,18 @@ function StatusView() {
   // Only show project headers when at least one agent has a real namespace.
   const showHeadings = groupKeys.some(k => k !== UNGROUPED);
 
+  const archived = data.archived || [];
+  // Per-group count of current sessions hidden by the per-agent tile cap.
+  // `overflow` is duplicated across an agent's tiles, so dedupe by agent_id.
+  const groupOverflow = (key) => {
+    const seen = {};
+    let total = 0;
+    for (const a of groups[key]) {
+      if (a.overflow && !seen[a.agent_id]) { seen[a.agent_id] = 1; total += a.overflow; }
+    }
+    return total;
+  };
+
   const agentCard = (a) => html`
         <div class="card clickable" onClick=${() => { location.hash = '#/traces'; }}>
           <div class="card-header">
@@ -682,15 +697,34 @@ function StatusView() {
     <div class="page-title">Status</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on an agent tile for details</div>
     ${groupKeys.map(key => html`
-      ${showHeadings ? html`
+      ${(showHeadings || groupOverflow(key) > 0) ? html`
         <div style="display:flex;align-items:baseline;gap:10px;margin:18px 0 10px;font-family:'Geist Mono',monospace">
           <span style="font-size:13px;font-weight:600;color:var(--text)">${key === UNGROUPED ? 'Ungrouped' : key}</span>
-          <span style="font-size:12px;color:var(--text-dim)">${groups[key].length} session${groups[key].length > 1 ? 's' : ''} · ${fmtCost(Object.values(groups[key].reduce((m, a) => (m[a.agent_id] = a.cost_today || 0, m), {})).reduce((s, c) => s + c, 0))} today</span>
+          <span style="font-size:12px;color:var(--text-dim)">${groups[key].length} session${groups[key].length > 1 ? 's' : ''} · ${fmtCost(Object.values(groups[key].reduce((m, a) => (m[a.agent_id] = a.cost_today || 0, m), {})).reduce((s, c) => s + c, 0))} today${groupOverflow(key) > 0 ? ' · +' + groupOverflow(key) + ' more' : ''}</span>
         </div>` : null}
       <div class="cards">
         ${groups[key].map(agentCard)}
       </div>
     `)}
+    ${archived.length > 0 ? html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Archived sessions</div>
+      <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Closed or stale terminals — no longer live</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Session</th><th>Project</th><th>Status</th><th>Last seen</th><th>Tokens</th><th>Cost</th></tr></thead>
+        <tbody>
+          ${archived.map(s => html`
+            <tr>
+              <td class="mono">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')}</td>
+              <td>${s.namespace || '-'}</td>
+              <td><span class="status-dot ${s.status}" style="margin-right:5px"></span><span class="badge badge-${s.status}">${s.status}</span></td>
+              <td>${fmtAgo(s.last_span_time || s.started_at)}</td>
+              <td>${fmtTokens(s.input_tokens)} in / ${fmtTokens(s.output_tokens)} out</td>
+              <td>${fmtCost(s.total_cost_usd)}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    ` : null}
     ${alerts.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>

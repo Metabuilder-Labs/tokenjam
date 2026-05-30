@@ -312,9 +312,14 @@ async def test_span_without_agent_id_normalizes_to_unknown(client):
     trace_agents = [t["agent_id"] for t in traces.json()["traces"]]
     assert "unknown" in trace_agents
 
-    # Verify sessions table agrees
+    # Verify sessions table agrees. The OTLP span carries an old timestamp, so
+    # the session is stale and surfaces in the archive (not a live tile).
     status = await client.get("/api/v1/status")
-    status_agents = [a["agent_id"] for a in status.json()["agents"]]
+    body_json = status.json()
+    status_agents = (
+        {a["agent_id"] for a in body_json["agents"]}
+        | {s["agent_id"] for s in body_json["archived"]}
+    )
     assert "unknown" in status_agents
 
 
@@ -335,7 +340,13 @@ async def test_status_and_traces_agree_on_agent_ids(client):
     status = await client.get("/api/v1/status")
     traces = await client.get("/api/v1/traces")
 
-    status_agents = {a["agent_id"] for a in status.json()["agents"]}
+    sj = status.json()
+    # An agent's sessions can be live (agents) or archived (closed/stale); the
+    # full set of known agent ids is the union of both.
+    status_agents = (
+        {a["agent_id"] for a in sj["agents"]}
+        | {s["agent_id"] for s in sj["archived"]}
+    )
     trace_agents = {t["agent_id"] for t in traces.json()["traces"]}
     assert trace_agents == status_agents
 
@@ -458,10 +469,12 @@ async def test_status_returns_service_namespace(tmp_path):
 
 @pytest.mark.asyncio
 async def test_status_namespace_falls_back_to_configured_project(tmp_path):
-    """An agent with no per-session namespace still groups via [agents.<id>].project.
+    """Archived sessions with no per-session namespace still group via
+    [agents.<id>].project.
 
     Covers the already-running session case: no service.namespace ever arrived
-    on the wire, but the server-side project mapping groups it anyway.
+    on the wire, but the server-side project mapping groups it anyway. A closed
+    session is no longer a live tile, so the fallback must apply to the archive.
     """
     from tokenjam.core.db import DuckDBBackend
     from tokenjam.core.config import StorageConfig, AgentConfig
@@ -481,7 +494,7 @@ async def test_status_namespace_falls_back_to_configured_project(tmp_path):
         db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
         # Pre-existing session with NO namespace (collected before the mapping).
         db.upsert_session(make_session(
-            agent_id="claude-code-harness", session_id="s1", status="completed"))
+            agent_id="claude-code-harness", session_id="s1", status="closed"))
 
         app = create_app(config=config, db=db, ingest_pipeline=pipeline)
         transport = httpx.ASGITransport(app=app)
@@ -489,8 +502,11 @@ async def test_status_namespace_falls_back_to_configured_project(tmp_path):
             resp = await c.get("/api/v1/status")
 
         assert resp.status_code == 200
-        agents = {a["agent_id"]: a for a in resp.json()["agents"]}
-        assert agents["claude-code-harness"]["namespace"] == "aquanode"
+        # Closed session -> archive, not a live tile.
+        assert resp.json()["agents"] == []
+        archived = {s["session_id"]: s for s in resp.json()["archived"]}
+        assert archived["s1"]["namespace"] == "aquanode"
+        assert archived["s1"]["status"] == "closed"
     finally:
         db.close()
 
@@ -586,5 +602,188 @@ async def test_status_session_labels(tmp_path):
         assert by["manual-123"]["label"] == "harness"    # from config prefix
         assert by["ovr-9"]["label"] == "config-wins"     # config beats instance.id
         assert by["plain"]["label"] is None              # no label
+    finally:
+        db.close()
+
+
+# ===========================================================================
+# Session lifecycle: active/idle tiers as tiles, closed/stale archived, cap.
+# ===========================================================================
+
+def _lifecycle_app(tmp_path, agents=None):
+    """A DuckDB-backed app for session-lifecycle tests (status reads db.conn)."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    config = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        agents=agents or {},
+    )
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    return db, app
+
+
+@pytest.mark.asyncio
+async def test_status_active_and_idle_become_tiles_stale_archived(tmp_path):
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        now = utcnow()
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="act", status="active",
+            started_at=now - timedelta(minutes=2), ended_at=now - timedelta(minutes=1)))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="idl", status="active",
+            started_at=now - timedelta(minutes=40), ended_at=now - timedelta(minutes=30)))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="stl", status="active",
+            started_at=now - timedelta(hours=6), ended_at=now - timedelta(hours=5)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        sj = resp.json()
+        tiles = {a["session_id"]: a for a in sj["agents"]}
+        assert set(tiles) == {"act", "idl"}            # only active + idle
+        assert tiles["act"]["status"] == "active"
+        assert tiles["idl"]["status"] == "idle"
+        archived = {s["session_id"]: s for s in sj["archived"]}
+        assert "stl" in archived and archived["stl"]["status"] == "stale"
+        assert "act" not in archived and "idl" not in archived
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_no_fallback_tile_for_completed_or_closed(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="done", status="completed"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="shut", status="closed"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        sj = resp.json()
+        # No active/idle session for this agent -> no current tile at all.
+        assert sj["agents"] == []
+        archived = {s["session_id"]: s["status"] for s in sj["archived"]}
+        # Closed lands in the archive; completed is neither current nor archived.
+        assert archived.get("shut") == "closed"
+        assert "done" not in archived
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_caps_tiles_per_agent_and_reports_overflow(tmp_path):
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        now = utcnow()
+        for i in range(9):
+            db.upsert_session(make_session(
+                agent_id="cc", session_id=f"s{i}", status="active",
+                started_at=now - timedelta(seconds=30 + i),
+                ended_at=now - timedelta(seconds=i)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        tiles = [a for a in resp.json()["agents"] if a["agent_id"] == "cc"]
+        assert len(tiles) == 6                 # MAX_SESSION_TILES
+        assert all(t["overflow"] == 3 for t in tiles)  # 9 - 6 surfaced, not dropped
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_sessions_by_instance_marks_closed_idempotent(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        from tokenjam.utils.time_parse import utcnow
+        now = utcnow()
+        for sid in ("s1", "s2"):
+            db.upsert_session(make_session(
+                agent_id="cc", session_id=sid, status="active",
+                service_instance_id="term-x", ended_at=now))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="s3", status="active",
+            service_instance_id="other", ended_at=now))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"instance_id": "term-x"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            assert resp.status_code == 200
+            assert resp.json()["closed"] == 2
+            # Re-closing is a no-op (idempotent).
+            resp2 = await c.post(
+                "/api/v1/sessions/close", json={"instance_id": "term-x"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            assert resp2.json()["closed"] == 0
+
+        assert db.get_session("s1").status == "closed"
+        assert db.get_session("s2").status == "closed"
+        assert db.get_session("s3").status == "active"   # different instance
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_session_by_id(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="s1", status="active"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"session_id": "s1"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+        assert resp.json()["closed"] == 1
+        assert db.get_session("s1").status == "closed"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_sessions_requires_ingest_secret(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"instance_id": "term-x"})
+        assert resp.status_code == 401
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_sessions_requires_an_id(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+        assert resp.status_code == 400
     finally:
         db.close()

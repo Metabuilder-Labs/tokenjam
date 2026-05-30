@@ -4,8 +4,13 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-# Sessions with no spans for this long are considered stale (zombie).
+# Sessions with no spans for this long are no longer "active" (live terminal).
 SESSION_STALE_THRESHOLD = timedelta(minutes=5)
+# Default idle window: active sessions quieter than the stale threshold but
+# within this window are "idle" (paused, likely to resume); beyond it they are
+# "stale" (zombie). Overridable per-install via [sessions] idle_minutes, applied
+# at the status route — effective_status itself stays config-free.
+SESSION_IDLE_THRESHOLD = timedelta(hours=4)
 
 
 class Severity(str, Enum):
@@ -118,14 +123,39 @@ class SessionRecord:
 
     @property
     def effective_status(self) -> str:
-        """Return 'stale' for zombie sessions whose process was killed."""
+        """Lifecycle tier for the dashboard (pure: uses module-default windows).
+
+        Tiers:
+          closed     -> explicitly ended (status='closed')
+          completed  -> wrapped by a real session span (status='completed')
+          active     -> last activity within SESSION_STALE_THRESHOLD (5 min)
+          idle       -> within SESSION_IDLE_THRESHOLD (default 4h)
+          stale      -> older than the idle window (zombie)
+
+        The status route honours the configurable [sessions] idle_minutes via
+        status_at(); this property stays config-free for use everywhere else.
+        """
+        return self.status_at(SESSION_IDLE_THRESHOLD)
+
+    def status_at(self, idle_threshold: timedelta = SESSION_IDLE_THRESHOLD) -> str:
+        """effective_status with a caller-supplied idle window.
+
+        Separate from the property so the status route can apply a config-driven
+        idle window while effective_status itself remains pure.
+        """
         if self.status != "active":
+            # closed / completed (or any other terminal state) pass through.
             return self.status
         from tokenjam.utils.time_parse import utcnow
         last_activity = self.ended_at or self.started_at
-        if last_activity and (utcnow() - last_activity) > SESSION_STALE_THRESHOLD:
-            return "stale"
-        return "active"
+        if not last_activity:
+            return "active"
+        gap = utcnow() - last_activity
+        if gap <= SESSION_STALE_THRESHOLD:
+            return "active"
+        if gap <= idle_threshold:
+            return "idle"
+        return "stale"
 
     @property
     def pricing_mode(self) -> str:

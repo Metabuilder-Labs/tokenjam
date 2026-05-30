@@ -184,6 +184,10 @@ class TjConfig:
     # on the dashboard). Lets you name already-running terminals immediately;
     # for durable naming prefer OTel service.instance.id.
     session_labels: dict[str, str]    = field(default_factory=dict)
+    # Idle window (minutes) for the session lifecycle ([sessions] idle_minutes).
+    # An active session quieter than SESSION_STALE_THRESHOLD (5 min) but within
+    # this window renders as "idle"; beyond it as "stale" (archived). 4h default.
+    session_idle_minutes: int         = 240
     # Path to the config file on disk; set by load_config() so that relative
     # paths in the config (e.g. output_schema) can be resolved correctly.
     config_path: Path | None          = field(default=None, repr=False, compare=False)
@@ -402,6 +406,8 @@ def _parse(raw: dict) -> TjConfig:
             plan=prov_raw.get("plan"),
         )
 
+    sessions_raw = raw.get("sessions", {})
+
     return TjConfig(
         version=raw.get("version", "1"),
         defaults=defaults,
@@ -414,6 +420,9 @@ def _parse(raw: dict) -> TjConfig:
         capture=capture,
         budgets=budgets,
         session_labels=dict(raw.get("session_labels", {})),
+        session_idle_minutes=int(
+            sessions_raw.get("idle_minutes", TjConfig.session_idle_minutes)
+        ),
     )
 
 
@@ -439,6 +448,11 @@ def _serialise(config: TjConfig) -> dict:
     d = _dc_to_dict(config)
     # `budgets` (dataclass field) maps to `[budget.*]` (TOML key); strip raw form.
     d.pop("budgets", None)
+
+    # `session_idle_minutes` (scalar field) maps to the `[sessions]` table.
+    idle_minutes = d.pop("session_idle_minutes", None)
+    if idle_minutes is not None:
+        d["sessions"] = {"idle_minutes": idle_minutes}
 
     # agents is a dict of str -> AgentConfig, handle specially
     agents_out = {}

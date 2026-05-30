@@ -154,6 +154,8 @@ def make_session(
     plan_tier: str = "api",
     started_at=None,
     ended_at=None,
+    service_namespace: str | None = None,
+    service_instance_id: str | None = None,
 ) -> SessionRecord:
     """
     Create a SessionRecord with sensible defaults.
@@ -163,8 +165,11 @@ def make_session(
     unknown rendering paths should pass it explicitly.
 
     Pass `started_at` / `ended_at` to control the timeline explicitly (e.g.
-    to test ordering by last activity); otherwise they derive from
-    `duration_seconds` ending at "now".
+    to test ordering by last activity, or the idle/stale lifecycle tiers);
+    otherwise they derive from `duration_seconds` ending at "now".
+
+    `service_instance_id` sets the per-terminal label (used by close-by-instance
+    and session-lifecycle tests); `service_namespace` sets the project grouping.
     """
     now = utcnow()
     started = started_at or (now - timedelta(seconds=duration_seconds))
@@ -186,6 +191,8 @@ def make_session(
         tool_call_count=tool_call_count,
         error_count=error_count,
         plan_tier=plan_tier,
+        service_namespace=service_namespace,
+        service_instance_id=service_instance_id,
     )
 
 

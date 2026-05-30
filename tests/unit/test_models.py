@@ -55,7 +55,7 @@ class TestSessionRecord:
         with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
             assert session.effective_status == "active"
 
-    def test_effective_status_active_stale_becomes_stale(self):
+    def test_effective_status_active_quiet_becomes_idle(self):
         now = datetime(2026, 3, 28, 12, 10, 0, tzinfo=timezone.utc)
         session = SessionRecord(
             session_id="s1",
@@ -64,7 +64,21 @@ class TestSessionRecord:
             ended_at=datetime(2026, 3, 28, 12, 3, 0, tzinfo=timezone.utc),
             status="active",
         )
-        # 7 minutes since last activity > 5 minute threshold
+        # 7 min since last activity: past the 5-min active window, well within
+        # the 4h idle window -> idle (not stale).
+        with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
+            assert session.effective_status == "idle"
+
+    def test_effective_status_active_old_becomes_stale(self):
+        now = datetime(2026, 3, 28, 17, 10, 0, tzinfo=timezone.utc)
+        session = SessionRecord(
+            session_id="s1",
+            agent_id="a1",
+            started_at=datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 3, 28, 12, 3, 0, tzinfo=timezone.utc),
+            status="active",
+        )
+        # >5h since last activity, beyond the 4h idle window -> stale.
         with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
             assert session.effective_status == "stale"
 
@@ -76,9 +90,33 @@ class TestSessionRecord:
             started_at=datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc),
             status="active",
         )
-        # 10 minutes since started_at, no ended_at
+        # 10 min since started_at, no ended_at -> idle (within the 4h window).
         with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
-            assert session.effective_status == "stale"
+            assert session.effective_status == "idle"
+
+    def test_effective_status_closed_unchanged(self):
+        session = SessionRecord(
+            session_id="s1",
+            agent_id="a1",
+            started_at=datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc),
+            status="closed",
+        )
+        assert session.effective_status == "closed"
+
+    def test_status_at_honours_custom_idle_window(self):
+        now = datetime(2026, 3, 28, 12, 30, 0, tzinfo=timezone.utc)
+        session = SessionRecord(
+            session_id="s1",
+            agent_id="a1",
+            started_at=datetime(2026, 3, 28, 12, 0, 0, tzinfo=timezone.utc),
+            ended_at=datetime(2026, 3, 28, 12, 3, 0, tzinfo=timezone.utc),
+            status="active",
+        )
+        # 27 min gap. With a 10-min idle window it is stale; the default 4h
+        # window keeps it idle.
+        with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
+            assert session.status_at(timedelta(minutes=10)) == "stale"
+            assert session.status_at(timedelta(hours=4)) == "idle"
 
 
 class TestEnums:

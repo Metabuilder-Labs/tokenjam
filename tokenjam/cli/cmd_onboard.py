@@ -383,11 +383,15 @@ def _onboard_claude_code(
         except (json_mod.JSONDecodeError, OSError):
             project_settings = {}
 
+    # The `claude` shell wrapper (installed below) now owns
+    # OTEL_RESOURCE_ATTRIBUTES, exporting a distinct service.instance.id per
+    # terminal. Claude Code's settings.json `env` block OVERRIDES shell env, so
+    # a value hardcoded here would clobber the wrapper's per-terminal value and
+    # silently collapse every terminal back into one dashboard tile. Do not
+    # write it, and delete any pre-existing one to migrate older setups (other
+    # env keys are left untouched).
     project_env: dict = project_settings.get("env", {})
-    resource_attr = f"service.name={agent_id}"
-    if namespace:
-        resource_attr += f",service.namespace={namespace}"
-    project_env["OTEL_RESOURCE_ATTRIBUTES"] = resource_attr
+    removed_resource_attr = project_env.pop("OTEL_RESOURCE_ATTRIBUTES", None) is not None
     project_settings["env"] = project_env
     project_settings_path.write_text(json_mod.dumps(project_settings, indent=2) + "\n")
 
@@ -491,11 +495,21 @@ def _onboard_claude_code(
     console.print("[bold green]Claude Code observability configured.[/bold green]")
     console.print(f"  Global settings:     {global_settings_path}")
     console.print(f"  Project settings:    {project_settings_path}")
+    if removed_resource_attr:
+        console.print(
+            "  [yellow]Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from project "
+            "settings[/yellow] (the claude wrapper now sets it per terminal)."
+        )
     console.print("  Shell env:           ~/.zshrc (harness-compatible endpoint)")
     if wrapper_files:
         console.print(
             f"  claude wrapper:      {', '.join(wrapper_files)} "
             "(per-terminal naming)"
+        )
+        console.print(
+            "  [dim]The claude wrapper controls OTEL_RESOURCE_ATTRIBUTES per "
+            "terminal (service.instance.id); project settings.json no longer "
+            "sets it.[/dim]"
         )
     console.print(f"  Agent ID:            {agent_id}")
     if budget and budget > 0:
@@ -969,7 +983,10 @@ def _claude_wrapper_block() -> str:
       ``unknown``,
     - exports ``OTEL_RESOURCE_ATTRIBUTES`` (project attrs from
       ``tj otel-resource-attrs`` + the instance id),
-    - runs the real binary via ``command claude`` so it never recurses.
+    - runs the real binary via ``command claude`` so it never recurses,
+    - reports the session closed (``tj session-end``) when claude exits or is
+      interrupted, so the dashboard archives the tile (Claude Code emits no
+      close event of its own). Best-effort and idempotent.
 
     Written portably so it works in both zsh and bash.
     """
@@ -998,7 +1015,14 @@ def _claude_wrapper_block() -> str:
         f"  fi\n"
         f'  [ -z "$_tj_inst" ] && _tj_inst="unknown"\n'
         f'  export OTEL_RESOURCE_ATTRIBUTES="$(tj otel-resource-attrs),service.instance.id=$_tj_inst"\n'
+        f"  # Report this terminal's session closed on exit/interrupt so the\n"
+        f"  # dashboard archives its tile. Idempotent — double-fire is harmless.\n"
+        f"  trap 'tj session-end --instance \"$_tj_inst\" >/dev/null 2>&1 || true' INT TERM HUP\n"
         f'  command claude "${{_tj_args[@]}}"\n'
+        f"  local _tj_status=$?\n"
+        f"  trap - INT TERM HUP\n"
+        f'  tj session-end --instance "$_tj_inst" >/dev/null 2>&1 || true\n'
+        f"  return $_tj_status\n"
         f"}}\n"
         f"{_WRAPPER_END_MARKER}\n"
     )
