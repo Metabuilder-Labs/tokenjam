@@ -787,3 +787,183 @@ async def test_close_sessions_requires_an_id(tmp_path):
         assert resp.status_code == 400
     finally:
         db.close()
+
+
+# ===========================================================================
+# GET /api/v1/sessions/{session_id} — Session Detail view (Layer 1).
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_session_detail_returns_rollup_tools_and_traces(tmp_path):
+    """A known session returns its rollup + per-tool breakdown + its traces."""
+    from tokenjam.core.models import Alert, AlertType, Severity
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "sess-1"
+        trace_a = "trace-a"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, conversation_id="conv-1",
+            input_tokens=5000, output_tokens=800, tool_call_count=3,
+            error_count=1, total_cost_usd=0.42, status="active",
+            plan_tier="api"))
+        # Two LLM spans (one with a tool_name, one a failing tool) on one trace.
+        db.insert_span(make_llm_span(
+            agent_id="cc", session_id=sid, conversation_id="conv-1",
+            trace_id=trace_a, input_tokens=2500, output_tokens=400,
+            cost_usd=0.21))
+        db.insert_span(make_llm_span(
+            agent_id="cc", session_id=sid, conversation_id="conv-1",
+            trace_id=trace_a, tool_name="Read", input_tokens=0,
+            output_tokens=0, cost_usd=0.0))
+        db.insert_span(make_llm_span(
+            agent_id="cc", session_id=sid, conversation_id="conv-2",
+            trace_id="trace-b", tool_name="Bash", status="error",
+            input_tokens=2500, output_tokens=400, cost_usd=0.21))
+        # An active alert attributed to this session, plus one to another.
+        now = utcnow()
+        db.insert_alert(Alert(
+            alert_id="al-1", fired_at=now, type=AlertType.RETRY_LOOP,
+            severity=Severity.WARNING, title="Retry loop detected",
+            detail={}, agent_id="cc", session_id=sid))
+        db.insert_alert(Alert(
+            alert_id="al-2", fired_at=now, type=AlertType.FAILURE_RATE,
+            severity=Severity.INFO, title="Other session", detail={},
+            agent_id="cc", session_id="someone-else"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        sess = body["session"]
+        assert sess["session_id"] == sid
+        assert sess["agent_id"] == "cc"
+        assert sess["plan_tier"] == "api"
+        assert sess["pricing_mode"] == "api"
+        assert sess["input_tokens"] == 5000
+        assert sess["output_tokens"] == 800
+        assert sess["total_cost_usd"] == 0.42
+        # Two distinct conversation_ids across the session's spans.
+        assert sess["conversation_count"] == 2
+        assert sess["active_alerts"] == 1
+
+        # Tool breakdown: Read (ok) + Bash (1 failure).
+        tools = {t["tool_name"]: t for t in body["tools"]}
+        assert tools["Read"]["count"] == 1 and tools["Read"]["error_count"] == 0
+        assert tools["Bash"]["count"] == 1 and tools["Bash"]["error_count"] == 1
+
+        # Only this session's alert appears.
+        assert [a["title"] for a in body["alerts"]] == ["Retry loop detected"]
+
+        # Traces: both the session's traces, newest first; status rolls up.
+        trace_ids = {t["trace_id"] for t in body["traces"]}
+        assert trace_ids == {"trace-a", "trace-b"}
+        by_trace = {t["trace_id"]: t for t in body["traces"]}
+        assert by_trace["trace-a"]["status_code"] == "ok"
+        assert by_trace["trace-b"]["status_code"] == "error"
+        assert by_trace["trace-a"]["span_count"] == 2
+
+        # No drift baseline recorded for this agent.
+        assert body["drift"] is None
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_unknown_returns_404(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/does-not-exist")
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["error"]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_subscription_plan_tier(tmp_path):
+    """A subscription session reports pricing_mode='subscription' so the UI
+    renders the implied-API-value framing (not a dollar 'spend' claim)."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "sub-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, plan_tier="max_20x",
+            input_tokens=1000, output_tokens=200, total_cost_usd=1.50,
+            status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        sess = resp.json()["session"]
+        assert sess["plan_tier"] == "max_20x"
+        assert sess["pricing_mode"] == "subscription"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_includes_drift_baseline(tmp_path):
+    """When the agent has a drift baseline, the detail view surfaces its
+    summary; otherwise it is null."""
+    from tokenjam.core.models import DriftBaseline
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "drift-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active"))
+        db.upsert_baseline(DriftBaseline(
+            agent_id="cc", sessions_sampled=12, computed_at=utcnow(),
+            avg_input_tokens=4200.0, avg_output_tokens=600.0,
+            avg_tool_call_count=3.5, avg_session_duration_s=120.0))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        drift = resp.json()["drift"]
+        assert drift is not None
+        assert drift["sessions_sampled"] == 12
+        assert drift["avg_input_tokens"] == 4200.0
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_requires_api_key_when_enabled(tmp_path):
+    """The GET is guarded by require_api_key like other GET endpoints."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "auth.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=True, api_key="my-api-key")),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="s1", status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            unauth = await c.get("/api/v1/sessions/s1")
+            assert unauth.status_code == 401
+            ok = await c.get(
+                "/api/v1/sessions/s1",
+                headers={"Authorization": "Bearer my-api-key"})
+            assert ok.status_code == 200
+    finally:
+        db.close()

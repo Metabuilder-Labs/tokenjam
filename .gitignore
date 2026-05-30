@@ -49,4 +49,6 @@ tj.toml
 
 # Superpowers skill output (internal planning artifacts, not for OSS)
 docs/superpowers/
+.plans/
+.specs/
 .gstack/
