@@ -1941,6 +1941,143 @@ function StatusView({ params }) {
 }
 
 // ============================
+// Session Detail View
+// ============================
+function SessionDetailView({ sessionId }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api('/sessions/' + sessionId);
+      setData(d);
+      setError(null);
+    } catch (e) {
+      setError(e && e.message ? e.message : 'Failed to load session');
+    }
+  }, [sessionId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+
+  const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/status'}>← Back to status</button>`;
+
+  if (error) return html`<div>${backBtn}<div class="empty">Session not found.<code>${sessionId}</code></div></div>`;
+  if (!data) return html`<div>${backBtn}<div class="empty">Loading session...</div></div>`;
+
+  const s = data.session;
+  const tools = data.tools || [];
+  const alerts = data.alerts || [];
+  const traces = data.traces || [];
+  const drift = data.drift;
+  const isSub = s.pricing_mode === 'subscription';
+  const isLocal = s.pricing_mode === 'local';
+  const title = s.label || s.agent_id;
+
+  return html`
+    ${backBtn}
+    <div class="page-title">${title}</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Session ${s.session_id}</div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <span class="status-dot ${s.status}"></span>
+          Overview
+          <span class="badge badge-${s.status}" style="margin-left:auto">${s.status}</span>
+        </div>
+        <div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${s.agent_id}</span></div>
+        ${s.namespace ? html`<div class="card-row"><span class="label">Project</span><span class="value">${s.namespace}</span></div>` : null}
+        <div class="card-row"><span class="label">Plan</span><span class="value">${s.plan_tier}</span></div>
+        ${s.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(s.duration_seconds * 1000)}</span></div>` : null}
+        ${s.started_at ? html`<div class="card-row"><span class="label">Started</span><span class="value">${fmtAgo(s.started_at)}</span></div>` : null}
+        ${s.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(s.last_span_time)}</span></div>` : null}
+        <div class="card-row"><span class="label">Conversations</span><span class="value">${s.conversation_count}</span></div>
+        ${s.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${s.active_alerts} active</span></div>` : null}
+      </div>
+
+      <div class="card">
+        <div class="card-header">Cost & Tokens</div>
+        ${isLocal
+          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
+          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(s.total_cost_usd)}</span></div>`}
+        <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(s.input_tokens)}</span></div>
+        <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(s.output_tokens)}</span></div>
+        ${s.cache_tokens ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens(s.cache_tokens)}</span></div>` : null}
+        <div class="card-row"><span class="label">Tool calls</span><span class="value">${s.tool_call_count}${s.error_count ? ' (' + s.error_count + ' failed)' : ''}</span></div>
+      </div>
+    </div>
+
+    ${tools.length > 0 ? html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Tools used</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Tool</th><th>Calls</th><th>Failed</th></tr></thead>
+        <tbody>
+          ${tools.map(t => html`
+            <tr>
+              <td class="mono">${t.tool_name}</td>
+              <td>${t.count}</td>
+              <td>${t.error_count ? html`<span style="color:var(--error)">${t.error_count}</span>` : '0'}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    ` : null}
+
+    ${alerts.length > 0 ? html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Alerts</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Severity</th><th>Type</th><th>Title</th></tr></thead>
+        <tbody>
+          ${alerts.map(a => html`
+            <tr>
+              <td>${fmtAgo(a.fired_at)}</td>
+              <td><span class="badge badge-${a.severity}">${a.severity}</span></td>
+              <td>${friendlyAlertType(a.type)}</td>
+              <td>${a.title}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    ` : null}
+
+    <div class="page-title" style="font-size:14px;margin-top:24px">Behavioral drift</div>
+    ${drift ? html`
+      <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Baseline computed from ${drift.sessions_sampled} session${drift.sessions_sampled === 1 ? '' : 's'}${drift.computed_at ? ' · ' + fmtAgo(drift.computed_at) : ''}</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Dimension</th><th>Baseline avg</th></tr></thead>
+        <tbody>
+          <tr><td>Input tokens</td><td>${drift.avg_input_tokens != null ? fmtTokens(Math.round(drift.avg_input_tokens)) : '-'}</td></tr>
+          <tr><td>Output tokens</td><td>${drift.avg_output_tokens != null ? fmtTokens(Math.round(drift.avg_output_tokens)) : '-'}</td></tr>
+          <tr><td>Tool calls</td><td>${drift.avg_tool_call_count != null ? drift.avg_tool_call_count.toFixed(1) : '-'}</td></tr>
+          <tr><td>Duration</td><td>${drift.avg_session_duration_s != null ? fmtDur(drift.avg_session_duration_s * 1000) : '-'}</td></tr>
+        </tbody>
+      </table></div>
+    ` : html`<div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">No drift recorded for this agent.</div>`}
+
+    <div class="page-title" style="font-size:14px;margin-top:24px">Traces</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Click a trace row to drill into its waterfall</div>
+    ${traces.length === 0 ? html`<div class="empty">No traces recorded for this session yet.</div>` : html`
+      <div class="table-wrap"><table>
+        <thead><tr><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Result</th><th>Spans</th><th></th></tr></thead>
+        <tbody>
+          ${traces.map(t => html`
+            <tr class="clickable" onClick=${() => location.hash = '#/traces/' + t.trace_id} title=${'Trace ' + t.trace_id}>
+              <td>${friendlySpanName(t.name)}</td>
+              <td>${fmtAgo(t.start_time)}</td>
+              <td>${fmtDur(t.duration_ms)}</td>
+              <td>${fmtCost(t.cost_usd)}</td>
+              <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
+              <td>${t.span_count}</td>
+              <td class="chevron">→</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    `}
+  `;
+}
+
+// ============================
 // Traces View
 // ============================
 function TracesListView({ params }) {
@@ -3894,6 +4031,9 @@ function App() {
     case 'traces':
       if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;
       return html`<${TracesListView} params=${p} />`;
+    case 'sessions':
+      if (route.param) return html`<${SessionDetailView} sessionId=${route.param} />`;
+      return html`<${StatusView} params=${p} />`;
     case 'cost': return html`<${CostView} params=${p} />`;
     case 'analytics': return html`<${AnalyticsView} params=${p} />`;
     case 'alerts': return html`<${AlertsView} params=${p} />`;
