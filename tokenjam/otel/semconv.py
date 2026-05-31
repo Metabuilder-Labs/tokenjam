@@ -159,6 +159,15 @@ class TjAttributes:
     BILLING_ACCOUNT  = "tokenjam.billing_account"
     PLAN_TIER        = "tokenjam.plan_tier"
 
+    # Cross-session run grouping (declared by the spawner, not inferred).
+    # `run_id` is an OTel *resource* attribute stamped by a fan-out harness
+    # (e.g. the governor) on every worker session it spawns — one id per run,
+    # shared by all its workers. `parent_session_id` is optional: the spawning
+    # session's id, for nested spawns. Both are persisted on SessionRecord so
+    # the dashboard can group a run's member sessions and render a parent tree.
+    RUN_ID            = "tokenjam.run_id"
+    PARENT_SESSION_ID = "tokenjam.parent_session_id"
+
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"
     EGRESS_HOST      = "tokenjam.sandbox.egress_host"

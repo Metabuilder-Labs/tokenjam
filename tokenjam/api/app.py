@@ -70,6 +70,7 @@ def create_app(
     from tokenjam.api.routes.metrics import router as metrics_router
     from tokenjam.api.routes.status import router as status_router
     from tokenjam.api.routes.sessions import router as sessions_router
+    from tokenjam.api.routes.runs import router as runs_router
     from tokenjam.api.routes.otlp import router as otlp_router
     from tokenjam.api.routes.budget import router as budget_router
     from tokenjam.api.routes.agents import router as agents_router
@@ -84,6 +85,7 @@ def create_app(
     app.include_router(drift_router, prefix="/api/v1")
     app.include_router(status_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
+    app.include_router(runs_router, prefix="/api/v1")
     app.include_router(budget_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(optimize_router, prefix="/api/v1")

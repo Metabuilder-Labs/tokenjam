@@ -793,6 +793,7 @@ function SessionDetailView({ sessionId }) {
         </div>
         <div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${s.agent_id}</span></div>
         ${s.namespace ? html`<div class="card-row"><span class="label">Project</span><span class="value">${s.namespace}</span></div>` : null}
+        ${s.run_id ? html`<div class="card-row"><span class="label">Run</span><span class="value clickable" onClick=${() => location.hash = '#/runs/' + s.run_id} title=${'Run ' + s.run_id} style="cursor:pointer;color:var(--brand);font-family:'Geist Mono',monospace;font-size:12px">${s.run_id.slice(0, 12)} →</span></div>` : null}
         <div class="card-row"><span class="label">Plan</span><span class="value">${s.plan_tier}</span></div>
         ${s.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(s.duration_seconds * 1000)}</span></div>` : null}
         ${s.started_at ? html`<div class="card-row"><span class="label">Started</span><span class="value">${fmtAgo(s.started_at)}</span></div>` : null}
@@ -917,6 +918,108 @@ function SessionDetailView({ sessionId }) {
         </tbody>
       </table></div>
     `}
+  `;
+}
+
+// ============================
+// Run Detail View
+// ============================
+function RunDetailView({ runId }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api('/runs/' + runId);
+      setData(d);
+      setError(null);
+    } catch (e) {
+      setError(e && e.message ? e.message : 'Failed to load run');
+    }
+  }, [runId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+
+  const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/status'}>← Back to status</button>`;
+
+  if (error) return html`<div>${backBtn}<div class="empty">Run not found.<code>${runId}</code></div></div>`;
+  if (!data) return html`<div>${backBtn}<div class="empty">Loading run...</div></div>`;
+
+  const r = data.run;
+  const sessions = data.sessions || [];
+  const tree = data.tree || [];
+  // Honest cost framing: a run aggregates member sessions; pricing_mode is
+  // 'subscription' / 'local' / 'api' / 'unknown' / 'mixed'. Treat 'mixed' like
+  // subscription for safety (show implied value, never a hard spend claim).
+  const isLocal = r.pricing_mode === 'local';
+  const isSub = r.pricing_mode === 'subscription' || r.pricing_mode === 'mixed';
+  const costTip = "Aggregated from member sessions' token usage. If any session is on a subscription plan (e.g. Claude Max), actual spend may differ.";
+
+  // Map session_id -> summary for tree rendering.
+  const byId = {};
+  for (const s of sessions) byId[s.session_id] = s;
+  // Has any real parent edge? (a node with children) -> render indented tree.
+  const hasEdges = tree.some(n => (n.children || []).length > 0);
+
+  const sessionRow = (s, depth) => html`
+    <tr class="clickable" onClick=${() => location.hash = '#/sessions/' + s.session_id} title=${'Session ' + s.session_id}>
+      <td class="mono" style=${'padding-left:' + (12 + depth * 18) + 'px'}>${depth > 0 ? '↳ ' : ''}${s.label || s.session_id.slice(0, 8)}</td>
+      <td><span class="status-dot ${s.status}" style="margin-right:5px"></span><span class="badge badge-${s.status}">${s.status}</span></td>
+      <td>${s.namespace || '-'}</td>
+      <td>${fmtTokens(s.input_tokens)} in / ${fmtTokens(s.output_tokens)} out</td>
+      <td>${s.tool_call_count}${s.error_count ? ' (' + s.error_count + ' failed)' : ''}</td>
+      <td>${isLocal ? '-' : fmtCost(s.total_cost_usd)}</td>
+      <td>${fmtAgo(s.last_span_time || s.started_at)}</td>
+      <td class="chevron">→</td>
+    </tr>`;
+
+  // Flatten the tree depth-first when parent edges exist; otherwise list flat.
+  const walk = (nodes, depth, out) => {
+    for (const n of nodes) {
+      const s = byId[n.session_id];
+      if (s) out.push(sessionRow(s, depth));
+      walk(n.children || [], depth + 1, out);
+    }
+    return out;
+  };
+  const rows = hasEdges ? walk(tree, 0, []) : sessions.map(s => sessionRow(s, 0));
+
+  return html`
+    ${backBtn}
+    <div class="page-title">Run</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">${runId} · ${r.session_count} session${r.session_count === 1 ? '' : 's'}</div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">Overview</div>
+        <div class="card-row"><span class="label">Sessions</span><span class="value">${r.session_count}</span></div>
+        ${r.started_at ? html`<div class="card-row"><span class="label">Started</span><span class="value">${fmtAgo(r.started_at)}</span></div>` : null}
+        ${r.last_activity ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(r.last_activity)}</span></div>` : null}
+        ${r.time_span_seconds != null ? html`<div class="card-row"><span class="label">Time span</span><span class="value">${fmtDur(r.time_span_seconds * 1000)}</span></div>` : null}
+        <div class="card-row"><span class="label">Spans</span><span class="value">${r.span_count}</span></div>
+        <div class="card-row"><span class="label">Tool calls</span><span class="value">${r.tool_call_count}${r.error_count ? ' (' + r.error_count + ' failed)' : ''}</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">Cost & Tokens</div>
+        ${isLocal
+          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
+          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">${costTip}</span></span></span><span class="value">${fmtCost(r.total_cost_usd)}</span></div>`}
+        <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(r.input_tokens)}</span></div>
+        <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(r.output_tokens)}</span></div>
+        ${r.cache_tokens ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens(r.cache_tokens)}</span></div>` : null}
+      </div>
+    </div>
+
+    <div class="page-title" style="font-size:14px;margin-top:24px">Sessions in this run</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">${hasEdges ? 'Indented by spawn parent · click a row to open the session' : 'Click a session row to open its detail'}</div>
+    ${sessions.length <= 1 ? html`<div style="font-size:12px;color:var(--text-dim);margin:-6px 0 12px;font-family:'Geist Mono',monospace">This run has only one session so far.</div>` : null}
+    <div class="table-wrap"><table>
+      <thead><tr><th>Session</th><th>Status</th><th>Project</th><th>Tokens</th><th>Tool calls</th><th>Cost <span class="info-btn">i<span class="info-tip">${costTip}</span></span></th><th>Last seen</th><th></th></tr></thead>
+      <tbody>
+        ${rows}
+      </tbody>
+    </table></div>
   `;
 }
 
@@ -1488,6 +1591,9 @@ function App() {
       return html`<${TracesListView} />`;
     case 'sessions':
       if (route.param) return html`<${SessionDetailView} sessionId=${route.param} />`;
+      return html`<${StatusView} />`;
+    case 'runs':
+      if (route.param) return html`<${RunDetailView} runId=${route.param} />`;
       return html`<${StatusView} />`;
     case 'cost': return html`<${CostView} />`;
     case 'alerts': return html`<${AlertsView} />`;

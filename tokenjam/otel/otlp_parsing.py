@@ -184,6 +184,8 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
         ),
         service_namespace=attrs.get(ResourceAttributes.SERVICE_NAMESPACE),
         service_instance_id=attrs.get(ResourceAttributes.SERVICE_INSTANCE_ID),
+        run_id=attrs.get(TjAttributes.RUN_ID),
+        parent_session_id=attrs.get(TjAttributes.PARENT_SESSION_ID),
     )
 
 

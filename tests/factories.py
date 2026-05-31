@@ -156,6 +156,8 @@ def make_session(
     ended_at=None,
     service_namespace: str | None = None,
     service_instance_id: str | None = None,
+    run_id: str | None = None,
+    parent_session_id: str | None = None,
 ) -> SessionRecord:
     """
     Create a SessionRecord with sensible defaults.
@@ -170,6 +172,10 @@ def make_session(
 
     `service_instance_id` sets the per-terminal label (used by close-by-instance
     and session-lifecycle tests); `service_namespace` sets the project grouping.
+
+    `run_id` ties this session to a fan-out harness run (cross-session run
+    grouping); `parent_session_id` is the optional spawning-session id for the
+    run tree.
     """
     now = utcnow()
     started = started_at or (now - timedelta(seconds=duration_seconds))
@@ -193,6 +199,8 @@ def make_session(
         plan_tier=plan_tier,
         service_namespace=service_namespace,
         service_instance_id=service_instance_id,
+        run_id=run_id,
+        parent_session_id=parent_session_id,
     )
 
 
@@ -343,15 +351,22 @@ def make_claude_code_api_error_log(
 def make_otlp_logs_body(
     log_records: list[dict],
     service_name: str = "claude-code",
+    resource_attributes: dict[str, str] | None = None,
 ) -> dict:
-    """Wrap log records in the full resourceLogs envelope."""
+    """Wrap log records in the full resourceLogs envelope.
+
+    `resource_attributes` adds extra string-valued resource attributes (e.g.
+    ``{"tokenjam.run_id": "run-1"}``) so tests can exercise resource-attr
+    capture (run grouping, service.namespace) on the logs path.
+    """
+    attributes = [
+        {"key": "service.name", "value": {"stringValue": service_name}},
+    ]
+    for key, value in (resource_attributes or {}).items():
+        attributes.append({"key": key, "value": {"stringValue": value}})
     return {
         "resourceLogs": [{
-            "resource": {
-                "attributes": [
-                    {"key": "service.name", "value": {"stringValue": service_name}},
-                ],
-            },
+            "resource": {"attributes": attributes},
             "scopeLogs": [{"logRecords": log_records}],
         }],
     }

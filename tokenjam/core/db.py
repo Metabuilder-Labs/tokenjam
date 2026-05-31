@@ -203,6 +203,14 @@ MIGRATIONS: list[tuple[int, str]] = [
     # Migration 6: service_instance_id on sessions — the per-terminal label
     # (OTel service.instance.id) used as the session's display name.
     (6, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_instance_id TEXT"),
+    # Migration 7: run_id + parent_session_id on sessions — cross-session run
+    # grouping declared by a fan-out harness (tokenjam.run_id /
+    # tokenjam.parent_session_id resource attributes). Both nullable; existing
+    # sessions stay NULL on upgrade.
+    (7, (
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_id            TEXT;\n"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_session_id TEXT"
+    )),
 ]
 
 
@@ -286,6 +294,8 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         plan_tier=d.get("plan_tier") or "unknown",
         service_namespace=d.get("service_namespace"),
         service_instance_id=d.get("service_instance_id"),
+        run_id=d.get("run_id"),
+        parent_session_id=d.get("parent_session_id"),
     )
 
 
@@ -432,8 +442,8 @@ class DuckDBBackend:
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                 tool_call_count, error_count, plan_tier, service_namespace,
-                service_instance_id
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                service_instance_id, run_id, parent_session_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -445,7 +455,9 @@ class DuckDBBackend:
                 error_count = EXCLUDED.error_count,
                 plan_tier = EXCLUDED.plan_tier,
                 service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
-                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id)
+                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
+                run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
+                parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id)
             """,
             [
                 session.session_id, session.agent_id, session.conversation_id,
@@ -453,7 +465,8 @@ class DuckDBBackend:
                 session.total_cost_usd, session.input_tokens, session.output_tokens,
                 session.cache_tokens, session.tool_call_count, session.error_count,
                 session.plan_tier, session.service_namespace,
-                session.service_instance_id,
+                session.service_instance_id, session.run_id,
+                session.parent_session_id,
             ],
         )
 

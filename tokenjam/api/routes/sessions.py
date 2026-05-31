@@ -296,6 +296,8 @@ async def get_session_detail(request: Request, session_id: str):
             "agent_id": session.agent_id,
             "label": session.service_instance_id,
             "namespace": session.service_namespace,
+            "run_id": session.run_id,
+            "parent_session_id": session.parent_session_id,
             "status": session.effective_status,
             "plan_tier": session.plan_tier,
             "pricing_mode": session.pricing_mode,
