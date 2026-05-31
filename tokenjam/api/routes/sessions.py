@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.db import delete_session_label, set_session_label
 from tokenjam.core.models import AlertFilters
+from tokenjam.otel.semconv import GenAIAttributes
 
 router = APIRouter()
 
@@ -43,6 +44,10 @@ MAX_SESSION_TOOLS = 15
 SESSION_ALERT_LIMIT = 50
 # Max traces to list for the session.
 SESSION_TRACE_LIMIT = 100
+# Max points emitted in the context-growth series. Sessions with more
+# llm.call spans are downsampled (first + last always kept) so the payload
+# stays bounded for the dashboard's inline visualization.
+MAX_CONTEXT_POINTS = 120
 
 
 @router.get("/sessions", dependencies=[Depends(require_api_key)])
@@ -269,6 +274,91 @@ def _session_drift(db: Any, agent_id: str) -> dict | None:
     }
 
 
+def _session_turn_count(db: Any, session_id: str) -> int:
+    """Number of ``gen_ai.llm.call`` spans for the session (one per turn/LLM
+    call). Honest descriptive count — not a routing-quality measure."""
+    if not hasattr(db, "conn"):
+        return 0
+    row = db.conn.execute(
+        "SELECT COUNT(*) FROM spans WHERE session_id = $1 AND name = $2",
+        [session_id, GenAIAttributes.SPAN_LLM_CALL],
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _session_model_mix(db: Any, session_id: str) -> list[dict]:
+    """Per-model rollup over the session's LLM calls, ordered by call count.
+
+    Descriptive only — shows *how this session split across models*. Makes no
+    claim that any model could be substituted for another. Reads ``db.conn``
+    directly (the StorageBackend protocol doesn't cover this query).
+    """
+    if not hasattr(db, "conn"):
+        return []
+    rows = db.conn.execute(
+        "SELECT model, COUNT(*) AS calls, "
+        "SUM(COALESCE(input_tokens, 0)) AS input_tokens, "
+        "SUM(COALESCE(output_tokens, 0)) AS output_tokens, "
+        "SUM(COALESCE(cache_tokens, 0)) AS cache_tokens, "
+        "SUM(COALESCE(cost_usd, 0)) AS cost_usd "
+        "FROM spans WHERE session_id = $1 AND name = $2 AND model IS NOT NULL "
+        "GROUP BY model ORDER BY calls DESC, model ASC",
+        [session_id, GenAIAttributes.SPAN_LLM_CALL],
+    ).fetchall()
+    return [
+        {
+            "model": r[0],
+            "calls": int(r[1]),
+            "input_tokens": int(r[2] or 0),
+            "output_tokens": int(r[3] or 0),
+            "cache_tokens": int(r[4] or 0),
+            "cost_usd": float(r[5]) if r[5] is not None else 0.0,
+        }
+        for r in rows
+    ]
+
+
+def _session_context_series(db: Any, session_id: str) -> list[dict]:
+    """Time-ordered per-turn context (input) tokens for the session's LLM calls.
+
+    Each point keeps that turn's real measured ``input_tokens`` — the size of
+    the context the model saw on that call ("context utilized" curve). When the
+    session has more than ``MAX_CONTEXT_POINTS`` LLM calls, the series is
+    downsampled by even index buckets (every Nth row, N = ceil(count / max))
+    so the payload stays bounded; the first and last turns are always kept.
+    """
+    if not hasattr(db, "conn"):
+        return []
+    rows = db.conn.execute(
+        "SELECT start_time, "
+        "COALESCE(input_tokens, 0) AS input_tokens, "
+        "COALESCE(cache_tokens, 0) AS cache_tokens, "
+        "COALESCE(output_tokens, 0) AS output_tokens "
+        "FROM spans WHERE session_id = $1 AND name = $2 "
+        "ORDER BY start_time ASC",
+        [session_id, GenAIAttributes.SPAN_LLM_CALL],
+    ).fetchall()
+
+    total = len(rows)
+    if total > MAX_CONTEXT_POINTS:
+        # Downsample by even index buckets, preserving first + last points.
+        step = -(-total // MAX_CONTEXT_POINTS)  # ceil(total / MAX_CONTEXT_POINTS)
+        kept = [rows[i] for i in range(0, total, step)]
+        if kept[-1] is not rows[-1]:
+            kept.append(rows[-1])
+        rows = kept
+
+    return [
+        {
+            "t": r[0].isoformat() if r[0] else None,
+            "input_tokens": int(r[1] or 0),
+            "cache_tokens": int(r[2] or 0),
+            "output_tokens": int(r[3] or 0),
+        }
+        for r in rows
+    ]
+
+
 @router.get(
     "/sessions/{session_id}",
     response_model=None,
@@ -302,6 +392,9 @@ async def get_session_detail(request: Request, session_id: str):
     conversation_count = _session_conversation_count(db, session_id)
     drift = _session_drift(db, session.agent_id)
     traces = _session_traces(db, session_id)
+    turn_count = _session_turn_count(db, session_id)
+    model_mix = _session_model_mix(db, session_id)
+    context_series = _session_context_series(db, session_id)
 
     return {
         "session": {
@@ -331,6 +424,9 @@ async def get_session_detail(request: Request, session_id: str):
             "conversation_count": conversation_count,
             "active_alerts": len(active_alerts),
         },
+        "turn_count": turn_count,
+        "model_mix": model_mix,
+        "context_series": context_series,
         "tools": tools,
         "alerts": [
             {

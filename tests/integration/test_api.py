@@ -1419,3 +1419,140 @@ async def test_session_detail_requires_api_key_when_enabled(tmp_path):
             assert ok.status_code == 200
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_model_mix_and_turn_count(tmp_path):
+    """Multi-model session: model_mix aggregates per model (calls + summed
+    tokens + cost), ordered by calls desc; turn_count == llm.call span count."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "mm-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", plan_tier="api"))
+        base = utcnow()
+        # opus x3, sonnet x2, haiku x1 -> ordered opus, sonnet, haiku.
+        specs = (
+            [("claude-opus-4-8", 1000, 100, 50, 0.30)] * 3
+            + [("claude-sonnet-4-6", 500, 80, 10, 0.05)] * 2
+            + [("claude-haiku-4-5", 200, 40, 0, 0.01)] * 1
+        )
+        for i, (model, inp, out, cache, cost) in enumerate(specs):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model=model,
+                input_tokens=inp, output_tokens=out, cache_tokens=cache,
+                cost_usd=cost, start_time=base + timedelta(seconds=i)))
+        # A tool span must not be counted as a turn or appear in model_mix.
+        db.insert_span(make_tool_span(agent_id="cc", tool_name="Read"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["turn_count"] == 6  # llm.call spans only
+
+        mix = body["model_mix"]
+        assert [m["model"] for m in mix] == [
+            "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5",
+        ]
+        by_model = {m["model"]: m for m in mix}
+        assert by_model["claude-opus-4-8"]["calls"] == 3
+        assert by_model["claude-opus-4-8"]["input_tokens"] == 3000
+        assert by_model["claude-opus-4-8"]["output_tokens"] == 300
+        assert by_model["claude-opus-4-8"]["cache_tokens"] == 150
+        assert by_model["claude-opus-4-8"]["cost_usd"] == pytest.approx(0.90)
+        assert by_model["claude-sonnet-4-6"]["calls"] == 2
+        assert by_model["claude-sonnet-4-6"]["input_tokens"] == 1000
+        assert by_model["claude-haiku-4-5"]["calls"] == 1
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_context_series_ordered_and_complete(tmp_path):
+    """A small session emits one context point per llm.call, time-ordered,
+    each carrying that turn's real input_tokens."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "ctx-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active"))
+        base = utcnow()
+        inputs = [100, 500, 1200, 800, 300]
+        # Insert out of chronological order to prove SQL ORDER BY start_time.
+        for i in [2, 0, 4, 1, 3]:
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-haiku-4-5",
+                input_tokens=inputs[i], output_tokens=10,
+                start_time=base + timedelta(seconds=i)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        series = resp.json()["context_series"]
+        assert len(series) == 5
+        # Time-ordered ascending.
+        ts = [p["t"] for p in series]
+        assert ts == sorted(ts)
+        # Each point keeps its turn's real input_tokens, in chronological order.
+        assert [p["input_tokens"] for p in series] == inputs
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_context_series_downsampled_preserves_first_last(tmp_path):
+    """A session with > MAX_CONTEXT_POINTS llm.calls is downsampled to <= 120
+    points, keeping the first and last turns."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+    from tokenjam.api.routes.sessions import MAX_CONTEXT_POINTS
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "big-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active"))
+        base = utcnow()
+        n = 300
+        first_input = 11
+        last_input = 9999
+        for i in range(n):
+            if i == 0:
+                inp = first_input
+            elif i == n - 1:
+                inp = last_input
+            else:
+                inp = 100 + i
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-haiku-4-5",
+                input_tokens=inp, output_tokens=10,
+                start_time=base + timedelta(seconds=i)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["turn_count"] == n  # turn_count is the true count, undownsampled
+        series = body["context_series"]
+        assert 0 < len(series) <= MAX_CONTEXT_POINTS
+        # First and last turns are preserved.
+        assert series[0]["input_tokens"] == first_input
+        assert series[-1]["input_tokens"] == last_input
+        # Still time-ordered.
+        ts = [p["t"] for p in series]
+        assert ts == sorted(ts)
+    finally:
+        db.close()
