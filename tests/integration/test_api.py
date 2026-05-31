@@ -1556,3 +1556,211 @@ async def test_session_context_series_downsampled_preserves_first_last(tmp_path)
         assert ts == sorted(ts)
     finally:
         db.close()
+
+
+# ===========================================================================
+# Cross-session run grouping (Layer 3): tokenjam.run_id resource attribute,
+# GET /api/v1/sessions/{id} exposing the fields, and GET /api/v1/runs/{run_id}.
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_ingest_logs_captures_run_id_from_resource_attrs(tmp_path):
+    """A Claude Code OTLP-logs batch with tokenjam.run_id in the resource attrs
+    produces a session carrying that run_id (and parent_session_id)."""
+    from tests.factories import (
+        make_claude_code_api_request_log,
+        make_otlp_logs_body,
+    )
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        body = make_otlp_logs_body(
+            [make_claude_code_api_request_log(session_id="cc-run-sess")],
+            resource_attributes={
+                "tokenjam.run_id": "run-42",
+                "tokenjam.parent_session_id": "parent-sess",
+            },
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/v1/logs", json=body,
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+        assert resp.status_code == 200
+
+        sess = db.get_session("cc-run-sess")
+        assert sess is not None
+        assert sess.run_id == "run-42"
+        assert sess.parent_session_id == "parent-sess"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_ingest_spans_captures_run_id_from_resource_attrs(tmp_path):
+    """The live spans path extracts tokenjam.run_id from resource attrs too
+    (shared otlp_parsing.py path)."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        body = {
+            "resourceSpans": [{
+                "resource": {"attributes": [
+                    {"key": "service.name", "value": {"stringValue": "worker-a"}},
+                    {"key": "session.id", "value": {"stringValue": "span-run-sess"}},
+                    {"key": "tokenjam.run_id", "value": {"stringValue": "run-7"}},
+                ]},
+                "scopeSpans": [{"spans": [_make_otlp_span()]}],
+            }]
+        }
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/spans", json=body,
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+        assert resp.status_code == 200
+
+        sess = db.get_session("span-run-sess")
+        assert sess is not None and sess.run_id == "run-7"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_exposes_run_fields(tmp_path):
+    """GET /api/v1/sessions/{id} surfaces run_id + parent_session_id."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="s-run", status="active",
+            run_id="run-9", parent_session_id="root-sess"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/s-run")
+        assert resp.status_code == 200
+        sess = resp.json()["session"]
+        assert sess["run_id"] == "run-9"
+        assert sess["parent_session_id"] == "root-sess"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_detail_groups_sessions_aggregates_and_tree(tmp_path):
+    """Three sessions sharing a run_id (one a child of another) group into one
+    run with aggregated totals and a parent-edge tree."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        # Root + one child + one leaf, all in run-100.
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="root", run_id="run-100",
+            input_tokens=1000, output_tokens=200, total_cost_usd=0.10,
+            tool_call_count=2, status="active", plan_tier="api"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="child", run_id="run-100",
+            parent_session_id="root", input_tokens=500, output_tokens=100,
+            total_cost_usd=0.05, tool_call_count=1, status="active",
+            plan_tier="api"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="leaf", run_id="run-100",
+            input_tokens=300, output_tokens=50, total_cost_usd=0.02,
+            status="active", plan_tier="api"))
+        # A session in a different run must NOT leak in.
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="other", run_id="run-999",
+            total_cost_usd=9.0, status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/runs/run-100")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        run = body["run"]
+        assert run["run_id"] == "run-100"
+        assert run["session_count"] == 3
+        # Totals aggregate over the 3 members only (not the other run).
+        assert round(run["total_cost_usd"], 2) == 0.17
+        assert run["input_tokens"] == 1800
+        assert run["output_tokens"] == 350
+        assert run["tool_call_count"] == 3
+        assert run["pricing_mode"] == "api"
+
+        member_ids = {s["session_id"] for s in body["sessions"]}
+        assert member_ids == {"root", "child", "leaf"}
+
+        # Tree: root and leaf are roots; child nests under root.
+        tree = body["tree"]
+        root_ids = {n["session_id"] for n in tree}
+        assert root_ids == {"root", "leaf"}
+        root_node = next(n for n in tree if n["session_id"] == "root")
+        assert [c["session_id"] for c in root_node["children"]] == ["child"]
+        leaf_node = next(n for n in tree if n["session_id"] == "leaf")
+        assert leaf_node["children"] == []
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_detail_unknown_returns_404(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/runs/nope")
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["error"]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_detail_mixed_pricing_mode(tmp_path):
+    """A run whose members span api + subscription reports pricing_mode='mixed'
+    so the dashboard avoids a single dollar 'spend' claim."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="api-s", run_id="run-mix",
+            plan_tier="api", status="active"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="sub-s", run_id="run-mix",
+            plan_tier="max_20x", status="active"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/runs/run-mix")
+        assert resp.status_code == 200
+        assert resp.json()["run"]["pricing_mode"] == "mixed"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_runs_index_lists_runs_newest_first(tmp_path):
+    """GET /api/v1/runs lists each run once with totals; sessions with no
+    run_id are excluded."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        now = utcnow()
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="old", run_id="run-old",
+            status="active", ended_at=now - timedelta(hours=2)))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="new", run_id="run-new",
+            status="active", ended_at=now))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="norun", status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/runs")
+        assert resp.status_code == 200
+        runs = resp.json()["runs"]
+        run_ids = [r["run_id"] for r in runs]
+        # Only runs with a run_id; newest activity first.
+        assert run_ids == ["run-new", "run-old"]
+        assert all(r["session_count"] == 1 for r in runs)
+    finally:
+        db.close()
