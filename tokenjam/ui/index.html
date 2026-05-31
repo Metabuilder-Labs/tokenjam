@@ -772,6 +772,9 @@ function SessionDetailView({ sessionId }) {
   const alerts = data.alerts || [];
   const traces = data.traces || [];
   const drift = data.drift;
+  const modelMix = data.model_mix || [];
+  const contextSeries = data.context_series || [];
+  const ctxMax = contextSeries.reduce((m, p) => Math.max(m, p.input_tokens || 0), 0);
   const isSub = s.pricing_mode === 'subscription';
   const isLocal = s.pricing_mode === 'local';
   const title = s.label || s.agent_id;
@@ -795,6 +798,7 @@ function SessionDetailView({ sessionId }) {
         ${s.started_at ? html`<div class="card-row"><span class="label">Started</span><span class="value">${fmtAgo(s.started_at)}</span></div>` : null}
         ${s.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(s.last_span_time)}</span></div>` : null}
         <div class="card-row"><span class="label">Conversations</span><span class="value">${s.conversation_count}</span></div>
+        <div class="card-row"><span class="label">LLM calls</span><span class="value">${data.turn_count || 0}</span></div>
         ${s.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${s.active_alerts} active</span></div>` : null}
       </div>
 
@@ -809,6 +813,42 @@ function SessionDetailView({ sessionId }) {
         <div class="card-row"><span class="label">Tool calls</span><span class="value">${s.tool_call_count}${s.error_count ? ' (' + s.error_count + ' failed)' : ''}</span></div>
       </div>
     </div>
+
+    ${(modelMix.length > 0 || contextSeries.length > 0) ? html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Models & context</div>
+      <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How this session split across models${data.turn_count ? ' · ' + data.turn_count + ' LLM call' + (data.turn_count === 1 ? '' : 's') : ''}</div>
+      ${modelMix.length > 0 ? html`
+        <div class="table-wrap"><table>
+          <thead><tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th></tr></thead>
+          <tbody>
+            ${modelMix.map(m => html`
+              <tr>
+                <td class="mono">${m.model}</td>
+                <td>${m.calls}</td>
+                <td>${fmtTokens(m.input_tokens)}</td>
+                <td>${fmtTokens(m.output_tokens)}</td>
+                <td>${m.cache_tokens ? fmtTokens(m.cache_tokens) : '-'}</td>
+                <td>${fmtCost(m.cost_usd)}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table></div>
+      ` : null}
+      ${contextSeries.length > 0 ? html`
+        <div style="margin-top:16px">
+          <div style="display:flex;align-items:flex-end;gap:2px;height:80px;padding:4px 0;border-bottom:1px solid var(--border);overflow:hidden">
+            ${contextSeries.map(p => html`
+              <div style=${'flex:1 1 0;min-width:1px;background:var(--brand);opacity:0.7;height:' + (ctxMax > 0 ? Math.max(2, Math.round((p.input_tokens / ctxMax) * 100)) : 2) + '%'} title=${fmtTokens(p.input_tokens) + ' input tokens' + (p.t ? ' · ' + fmtAgo(p.t) : '')}></div>
+            `)}
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-top:4px;font-family:'Geist Mono',monospace">
+            <span>0</span>
+            <span>peak ${fmtTokens(ctxMax)}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px;font-family:'Geist Mono',monospace">Input (context) tokens per LLM call over the session.</div>
+        </div>
+      ` : html`<div style="font-size:12px;color:var(--text-dim);margin:-4px 0 12px;font-family:'Geist Mono',monospace">No LLM calls recorded.</div>`}
+    ` : null}
 
     ${tools.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Tools used</div>
