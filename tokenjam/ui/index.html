@@ -772,7 +772,7 @@ function StatusView() {
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
   if (!data) return html`<div class="empty">Loading...</div>`;
-  if (!data.agents.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
+  if (!data.agents.length && !(data.archived || []).length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
   // Group agent tiles by project (service.namespace). Agents whose telemetry
   // carried no namespace fall under "Ungrouped".
