@@ -325,6 +325,35 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
 .btn-back { margin-bottom: 16px; }
 
+/* Tab bar (session detail) */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  margin-bottom: -1px;
+  cursor: pointer;
+  font-family: 'Geist Mono', monospace;
+  font-size: 13px;
+  font-weight: 500;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
 /* Waterfall */
 .waterfall { margin: 16px 0; }
 .wf-row {
@@ -927,6 +956,7 @@ function StorySection({ sessionId }) {
 function SessionDetailView({ sessionId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  const [tab, setTab] = useState('story');
 
   const load = useCallback(async () => {
     try {
@@ -993,8 +1023,16 @@ function SessionDetailView({ sessionId }) {
       </div>
     </div>
 
-    <${StorySection} sessionId=${sessionId} />
+    <div class="tab-bar" role="tablist">
+      <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Story</button>
+      <button class="tab ${tab === 'models' ? 'active' : ''}" role="tab" aria-selected=${tab === 'models'} onClick=${() => setTab('models')}>Models & context</button>
+      <button class="tab ${tab === 'alerts' ? 'active' : ''}" role="tab" aria-selected=${tab === 'alerts'} onClick=${() => setTab('alerts')}>Alerts</button>
+      <button class="tab ${tab === 'traces' ? 'active' : ''}" role="tab" aria-selected=${tab === 'traces'} onClick=${() => setTab('traces')}>Traces</button>
+    </div>
 
+    ${tab === 'story' ? html`<${StorySection} sessionId=${sessionId} />` : null}
+
+    ${tab === 'models' ? html`
     ${(modelMix.length > 0 || contextSeries.length > 0) ? html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Models & context</div>
       <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How this session split across models${data.turn_count ? ' · ' + data.turn_count + ' LLM call' + (data.turn_count === 1 ? '' : 's') : ''}</div>
@@ -1046,7 +1084,9 @@ function SessionDetailView({ sessionId }) {
         </tbody>
       </table></div>
     ` : null}
+    ` : null}
 
+    ${tab === 'alerts' ? html`
     ${alerts.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Alerts</div>
       <div class="table-wrap"><table>
@@ -1077,7 +1117,9 @@ function SessionDetailView({ sessionId }) {
         </tbody>
       </table></div>
     ` : html`<div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">No drift recorded for this agent.</div>`}
+    ` : null}
 
+    ${tab === 'traces' ? html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Traces</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Click a trace row to drill into its waterfall</div>
     ${traces.length === 0 ? html`<div class="empty">No traces recorded for this session yet.</div>` : html`
@@ -1098,6 +1140,7 @@ function SessionDetailView({ sessionId }) {
         </tbody>
       </table></div>
     `}
+    ` : null}
   `;
 }
 
