@@ -4,9 +4,9 @@
 
 # TokenJam
 
-### The Optimization Layer for AI Agents
+### Token Efficiency For AI Agents
 
-Cut LLM spend without changing what your agent does. Four analyzers. One CLI. Runs entirely on your machine.
+TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, and what to script. The result is a lower AI bill. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -25,9 +25,9 @@ pip install tokenjam
 
 ---
 
-## The four products
+## Four Analyzers. One Install.
 
-TokenJam reads the same telemetry your agent already emits and surfaces four kinds of savings. Every finding is structural, honest, and reviewable — no opaque "AI says so" recommendations.
+TokenJam reads telemetry from every major agent runtime, framework, provider, and observability tool and surfaces savings across four areas.
 
 <table>
 <tr>
@@ -35,11 +35,9 @@ TokenJam reads the same telemetry your agent already emits and surfaces four kin
 
 ### 🪶 Downsize
 
-Flag sessions where a cheaper model in the same family is worth a look. Never claims quality equivalence — surfaces examples so you can spot-check.
+Flags sessions where a cheaper model in the same family is worth a look. Never claims quality equivalence — surfaces examples so you can spot-check.
 
-```bash
-tj optimize downsize
-```
+<pre><code>tj optimize downsize</code></pre>
 
 [Details →](docs/optimize/downsize.md)
 
@@ -48,11 +46,9 @@ tj optimize downsize
 
 ### 💾 Cache
 
-Show your current caching ratio per (provider, model) and suggest Anthropic prompt-cache breakpoints from stable prefixes in your real usage.
+Shows your current caching ratio per (provider, model) and suggests Anthropic prompt-cache breakpoints from stable prefixes in your real usage.
 
-```bash
-tj optimize cache
-```
+<pre><code>tj optimize cache</code></pre>
 
 [Details →](docs/optimize/cache.md)
 
@@ -63,11 +59,9 @@ tj optimize cache
 
 ### 📜 Script
 
-Find clusters of deterministic `(tool_name, arg_shape)` sequences that match the shape of work a plain script could replace.
+Finds clusters of deterministic `(tool_name, arg_shape)` sequences that match the shape of work a plain script could replace.
 
-```bash
-tj optimize script
-```
+<pre><code>tj optimize script</code></pre>
 
 [Details →](docs/optimize/script.md)
 
@@ -76,11 +70,9 @@ tj optimize script
 
 ### ✂️ Trim
 
-LLMLingua-2 token-significance classifier — predicts which regions of your prompts the model gives little weight to. Surfaces what's safe to cut.
+Predicts which regions of your prompts the model gives little weight to. Surfaces what's safe to cut.
 
-```bash
-tj optimize trim
-```
+<pre><code>tj optimize trim</code></pre>
 
 [Details →](docs/optimize/trim.md)
 
