@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.models import AlertFilters
+from tokenjam.core.transcript import build_session_story, resolve_projects_root
 from tokenjam.otel.semconv import GenAIAttributes
 
 router = APIRouter()
@@ -336,3 +337,36 @@ async def get_session_detail(request: Request, session_id: str):
         "drift": drift,
         "traces": traces,
     }
+
+
+# Stable user-facing reason when a session has no on-disk CC transcript.
+_NO_TRANSCRIPT_REASON = (
+    "No on-disk transcript for this session "
+    "(SDK session, or transcript pruned)."
+)
+
+
+@router.get(
+    "/sessions/{session_id}/story",
+    response_model=None,
+    dependencies=[Depends(require_api_key)],
+)
+async def get_session_story(request: Request, session_id: str):
+    """Deterministic step-by-step story from the session's CC JSONL transcript.
+
+    Surfaces the agent's own narration + literal tool calls + ok/error outcomes
+    (no LLM, no generation). Found -> ``{"available": true, ...}``. No transcript
+    on disk -> ``{"available": false, "reason": ...}`` with HTTP 200 (a normal
+    "no data" state for SDK sessions, not an error).
+
+    The projects root resolves from ``app.state.claude_projects_root`` (tests),
+    then the ``TJ_CLAUDE_PROJECTS_ROOT`` env var, then ``~/.claude/projects``.
+    """
+    override = getattr(request.app.state, "claude_projects_root", None)
+    projects_root = resolve_projects_root(override)
+
+    story = build_session_story(session_id, projects_root=projects_root)
+    if story is None:
+        return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
+
+    return {"available": True, **story}
