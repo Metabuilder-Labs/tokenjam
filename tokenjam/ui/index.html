@@ -614,6 +614,29 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   font-family: 'Geist Mono', monospace;
   margin: -8px 0 12px;
 }
+/* Nested subagent stories (the COMPLETE log of everything a session spawned) */
+.story-subagent { margin-top: 8px; }
+.story-subagent-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-family: 'Geist Mono', monospace;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  user-select: none;
+}
+.story-subagent-head.error { border-color: var(--error); }
+.story-subagent-caret { color: var(--brand); width: 10px; display: inline-block; }
+.story-subagent-label { font-weight: 600; }
+.story-subagent-meta { color: var(--text-dim); margin-left: auto; }
+.story-subagent-body {
+  margin: 8px 0 4px 6px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+}
 </style>
 <script>
   // Apply theme before paint to prevent flash of incorrect theme
@@ -869,10 +892,56 @@ function StatusView() {
 // ============================
 // Session Detail View
 // ============================
+function SubagentBlock({ subagent }) {
+  const [open, setOpen] = useState(false);
+  const name = subagent.name || ('agent ' + (subagent.agent_id || '').slice(0, 8));
+  const steps = subagent.steps || [];
+  const count = subagent.step_count != null ? subagent.step_count : steps.length;
+  const status = subagent.is_error ? 'error' : 'ok';
+  // A capped/cycle ref has no expandable story — show a dim note instead.
+  const capped = subagent.depth_capped || subagent.budget_capped || subagent.cycle;
+  const cappedNote = subagent.cycle ? '… already shown above (cycle) …'
+    : subagent.depth_capped ? '… deeper subagents omitted (depth cap) …'
+    : subagent.budget_capped ? '… deeper subagents omitted (size cap) …'
+    : null;
+  return html`
+    <div class="story-subagent">
+      <div class=${'story-subagent-head' + (status === 'error' ? ' error' : '')}
+           onClick=${() => !capped && setOpen(o => !o)}
+           style=${capped ? 'cursor:default' : 'cursor:pointer'}>
+        <span class="story-subagent-caret">${capped ? '·' : (open ? '▾' : '▸')}</span>
+        <span class="story-subagent-label">subagent: ${name}</span>
+        ${!capped ? html`<span class="story-subagent-meta">${count} step${count === 1 ? '' : 's'} · ${status === 'error' ? '✗' : '✓'}</span>` : null}
+      </div>
+      ${cappedNote ? html`<div class="story-omitted">${cappedNote}</div>` : null}
+      ${(open && !capped) ? html`
+        <div class="story-subagent-body">
+          ${subagent.task ? html`
+            <div class="story-callout" style="margin-bottom:8px">
+              <div class="story-callout-label">Task</div>
+              <div class="story-callout-body">${subagent.task}</div>
+            </div>` : null}
+          <div class="story-steps">
+            ${steps.map((s, i) => s.omitted != null
+              ? html`<div class="story-omitted" key=${'om' + i}>… ${s.omitted} step${s.omitted === 1 ? '' : 's'} omitted …</div>`
+              : html`<${StoryStep} step=${s} key=${s.n} />`)}
+          </div>
+          ${subagent.outcome ? html`
+            <div class="story-callout" style="margin-top:8px">
+              <div class="story-callout-label">Outcome</div>
+              <div class="story-callout-body">${subagent.outcome}</div>
+            </div>` : null}
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
 function StoryStep({ step }) {
   const [expanded, setExpanded] = useState(false);
   const text = step.text || '';
   const canExpand = step.text_truncated || text.length > 180;
+  const subagents = step.subagents || (step.subagent ? [step.subagent] : []);
   return html`
     <div class=${'story-step' + (step.is_error ? ' error' : '')}>
       <div class="story-step-head">
@@ -896,6 +965,7 @@ function StoryStep({ step }) {
           `)}
         </div>
       ` : null}
+      ${subagents.map((sa, i) => html`<${SubagentBlock} subagent=${sa} key=${'sa' + (sa.agent_id || i)} />`)}
     </div>
   `;
 }

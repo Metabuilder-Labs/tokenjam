@@ -1400,3 +1400,91 @@ async def test_get_session_story_unavailable(config, db, tmp_path):
     body = resp.json()
     assert body["available"] is False
     assert "reason" in body
+
+
+def _write_story_with_subagent(projects_root, session_id: str) -> None:
+    """Parent transcript that spawns a subagent via a Task tool.
+
+    The child agentId lives in the Task tool_result; the child transcript lives
+    flat under ``<session_id>/subagents/agent-<id>.jsonl``.
+    """
+    import json as _json
+
+    child_id = "abcabcabcabcabc12"
+    project_dir = projects_root / "-Users-test-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    parent = [
+        {"type": "user", "message": {"role": "user", "content": "Orchestrate."}},
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-15T09:11:36.133Z",
+            "message": {"role": "assistant", "model": "claude-opus-4-8", "content": [
+                {"type": "text", "text": "Spawning a worker."},
+                {"type": "tool_use", "id": "tt1", "name": "Task",
+                 "input": {"description": "build-it",
+                           "subagent_type": "general-purpose"}},
+            ]},
+        },
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tt1",
+             "content": f"Agent (agentId: {child_id}) finished."}]}},
+        {"type": "assistant", "timestamp": "2026-06-15T09:12:00.000Z",
+         "message": {"role": "assistant", "model": "claude-opus-4-8",
+                     "content": [{"type": "text", "text": "All done."}]}},
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in parent), encoding="utf-8"
+    )
+    subdir = project_dir / session_id / "subagents"
+    subdir.mkdir(parents=True, exist_ok=True)
+    child = [
+        {"type": "user", "message": {"role": "user", "content": "Build it."}},
+        {"type": "assistant", "timestamp": "2026-06-15T09:11:40.000Z",
+         "message": {"role": "assistant", "model": "claude-opus-4-8",
+                     "content": [{"type": "text", "text": "Worker done."}]}},
+    ]
+    (subdir / f"agent-{child_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in child), encoding="utf-8"
+    )
+    (subdir / f"agent-{child_id}.meta.json").write_text(
+        _json.dumps({"agentType": "general-purpose", "name": "build-it",
+                     "toolUseId": "tt1"}), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_session_story_nested_subagent(config, db, tmp_path):
+    _write_story_with_subagent(tmp_path, "story-parent")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/story-parent/story")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    task_step = body["steps"][0]
+    assert task_step["tools"][0]["name"] == "Task"
+    sub = task_step["subagent"]
+    assert sub["name"] == "build-it"
+    assert sub["task"] == "Build it."
+    assert sub["outcome"] == "Worker done."
+    assert len(sub["steps"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_session_story_subagents_false_is_flat(config, db, tmp_path):
+    _write_story_with_subagent(tmp_path, "story-flat")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/story-flat/story?subagents=false")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert "subagent" not in body["steps"][0]

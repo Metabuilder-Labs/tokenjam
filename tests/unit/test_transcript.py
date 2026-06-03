@@ -12,6 +12,7 @@ from pathlib import Path
 from tokenjam.core.transcript import (
     MAX_STEP_TEXT_CHARS,
     MAX_STORY_STEPS,
+    MAX_SUBAGENT_DEPTH,
     MAX_TOOL_LABEL_CHARS,
     build_session_story,
 )
@@ -249,3 +250,273 @@ def test_step_cap_inserts_omitted_marker(tmp_path):
     assert markers[0]["omitted"] == 25
     # head + tail + 1 marker
     assert len(story["steps"]) == MAX_STORY_STEPS + 1
+
+
+# --- Nested subagent fixtures + tests ----------------------------------------
+
+def _agent_tool_result(tool_use_id: str, agent_id: str, is_error: bool = False) -> dict:
+    """A Task tool_result whose content carries the spawned child's agentId.
+
+    Mirrors real Claude Code: the result text embeds the child agentId (16-17
+    hex) which links to ``subagents/agent-<agentId>.jsonl``.
+    """
+    text = f"Agent (agentId: {agent_id}) finished. See results above."
+    block: dict = {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": text,
+    }
+    if is_error:
+        block["is_error"] = True
+    return {"type": "user", "message": {"role": "user", "content": [block]}}
+
+
+def _task_turn(text: str, tool_id: str, name: str = "do work") -> dict:
+    """An assistant turn that spawns a subagent via the Task tool."""
+    return _assistant(
+        text,
+        tools=[{"id": tool_id, "name": "Task", "input": {
+            "description": name, "subagent_type": "general-purpose",
+            "prompt": "do the work",
+        }}],
+    )
+
+
+def _write_subagent(
+    projects_root: Path,
+    root_session_id: str,
+    agent_id: str,
+    records: list[dict],
+    name: str | None = None,
+) -> None:
+    """Write a subagent transcript under <root>/subagents/agent-<id>.jsonl.
+
+    All subagents (any depth) live FLAT in the root session's subagents dir.
+    """
+    subdir = projects_root / "-Users-test-project" / root_session_id / "subagents"
+    subdir.mkdir(parents=True, exist_ok=True)
+    (subdir / f"agent-{agent_id}.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in records), encoding="utf-8"
+    )
+    if name is not None:
+        meta = {"agentType": "general-purpose", "name": name,
+                "description": name, "toolUseId": "toolu_x"}
+        (subdir / f"agent-{agent_id}.meta.json").write_text(
+            json.dumps(meta), encoding="utf-8"
+        )
+
+
+def test_subagent_attached_to_task_step(tmp_path):
+    sid = "root-1"
+    child = "abc123def456abc78"  # 17 hex
+    parent = [
+        _user_prompt("Orchestrate the build."),
+        _task_turn("Spawning a worker.", "tt1", name="impl-thing"),
+        _agent_tool_result("tt1", child),
+        _assistant("Worker finished, all good."),
+    ]
+    _write_transcript(tmp_path, sid, parent)
+    _write_subagent(tmp_path, sid, child, [
+        _user_prompt("Implement the thing."),
+        _assistant("Reading.", tools=[
+            {"id": "c1", "name": "Read", "input": {"file_path": "src/x.py"}}]),
+        _tool_result("c1"),
+        _assistant("Done implementing."),
+    ], name="impl-thing")
+
+    story = build_session_story(sid, projects_root=tmp_path)
+    assert story is not None
+    task_step = story["steps"][0]
+    assert task_step["tools"][0]["name"] == "Task"
+    sub = task_step["subagent"]
+    assert sub["agent_id"] == child
+    assert sub["name"] == "impl-thing"
+    assert sub["task"] == "Implement the thing."
+    assert sub["outcome"] == "Done implementing."
+    assert len(sub["steps"]) == 2
+    assert sub["steps"][0]["tools"][0]["label"] == "src/x.py"
+    # internal marker never leaks into the payload
+    assert "_spawns" not in json.dumps(story)
+
+
+def test_subagent_recurses_to_grandchild(tmp_path):
+    sid = "root-2"
+    child = "1111111111111111a"
+    grand = "2222222222222222b"
+    parent = [
+        _user_prompt("Top level task."),
+        _task_turn("Spawn child.", "p1"),
+        _agent_tool_result("p1", child),
+        _assistant("Child done."),
+    ]
+    _write_transcript(tmp_path, sid, parent)
+    # child itself spawns a grandchild
+    _write_subagent(tmp_path, sid, child, [
+        _user_prompt("Child task."),
+        _task_turn("Spawn grandchild.", "g1"),
+        _agent_tool_result("g1", grand),
+        _assistant("Grandchild done."),
+    ], name="child-agent")
+    _write_subagent(tmp_path, sid, grand, [
+        _user_prompt("Grandchild task."),
+        _assistant("Deep work complete."),
+    ], name="grand-agent")
+
+    story = build_session_story(sid, projects_root=tmp_path)
+    assert story is not None
+    child_sub = story["steps"][0]["subagent"]
+    assert child_sub["name"] == "child-agent"
+    # the child's own Task step carries ITS subagent (the grandchild)
+    grand_sub = child_sub["steps"][0]["subagent"]
+    assert grand_sub["agent_id"] == grand
+    assert grand_sub["name"] == "grand-agent"
+    assert grand_sub["task"] == "Grandchild task."
+    assert grand_sub["outcome"] == "Deep work complete."
+
+
+def test_subagent_agent_id_resolved_from_tool_result_regex(tmp_path):
+    """No meta.json present -> agentId comes purely from the tool_result regex."""
+    sid = "root-regex"
+    child = "deadbeefdeadbeef0"
+    parent = [
+        _user_prompt("go"),
+        _task_turn("spawn", "x1"),
+        _agent_tool_result("x1", child),
+    ]
+    _write_transcript(tmp_path, sid, parent)
+    # write child WITHOUT a meta.json -> name falls back to Task input
+    _write_subagent(tmp_path, sid, child, [
+        _user_prompt("child"),
+        _assistant("done"),
+    ], name=None)
+
+    story = build_session_story(sid, projects_root=tmp_path)
+    assert story is not None
+    sub = story["steps"][0]["subagent"]
+    assert sub["agent_id"] == child
+    # name fell back to the Task input (subagent_type wins over description).
+    assert sub["name"] == "general-purpose"
+
+
+def test_subagents_disabled_returns_flat(tmp_path):
+    sid = "root-flat"
+    child = "ffffffffffffffff1"
+    parent = [
+        _user_prompt("go"),
+        _task_turn("spawn", "f1"),
+        _agent_tool_result("f1", child),
+    ]
+    _write_transcript(tmp_path, sid, parent)
+    _write_subagent(tmp_path, sid, child, [
+        _user_prompt("child"), _assistant("done")], name="kid")
+
+    story = build_session_story(sid, projects_root=tmp_path, include_subagents=False)
+    assert story is not None
+    assert "subagent" not in story["steps"][0]
+    assert "_spawns" not in json.dumps(story)
+
+
+def test_subagent_depth_cap(tmp_path):
+    """A chain deeper than MAX_SUBAGENT_DEPTH gets a depth_capped marker."""
+    sid = "root-depth"
+    # build a linear chain of MAX_SUBAGENT_DEPTH + 2 agents
+    chain = [f"{i:016x}c" for i in range(MAX_SUBAGENT_DEPTH + 2)]
+    parent = [
+        _user_prompt("root"),
+        _task_turn("spawn", "d0"),
+        _agent_tool_result("d0", chain[0]),
+    ]
+    _write_transcript(tmp_path, sid, parent)
+    for i, aid in enumerate(chain):
+        if i + 1 < len(chain):
+            recs = [
+                _user_prompt(f"level {i}"),
+                _task_turn("deeper", f"d{i + 1}"),
+                _agent_tool_result(f"d{i + 1}", chain[i + 1]),
+            ]
+        else:
+            recs = [_user_prompt(f"level {i}"), _assistant("bottom")]
+        _write_subagent(tmp_path, sid, aid, recs, name=f"a{i}")
+
+    story = build_session_story(sid, projects_root=tmp_path)
+    assert story is not None
+    # descend the chain; somewhere at/below the cap a depth_capped marker appears
+    node = story["steps"][0]["subagent"]
+    depth = 1
+    seen_cap = False
+    while node is not None:
+        if node.get("depth_capped"):
+            seen_cap = True
+            break
+        steps = node.get("steps", [])
+        node = steps[0].get("subagent") if steps else None
+        depth += 1
+    assert seen_cap is True
+    assert depth <= MAX_SUBAGENT_DEPTH + 1
+
+
+def test_subagent_cycle_guard_does_not_hang(tmp_path):
+    """Two agents referencing each other must terminate, marked cycle."""
+    sid = "root-cycle"
+    a = "aaaaaaaaaaaaaaaa1"
+    b = "bbbbbbbbbbbbbbbb2"
+    parent = [
+        _user_prompt("root"),
+        _task_turn("spawn A", "r1"),
+        _agent_tool_result("r1", a),
+    ]
+    _write_transcript(tmp_path, sid, parent)
+    # A spawns B, B spawns A -> cycle
+    _write_subagent(tmp_path, sid, a, [
+        _user_prompt("A"),
+        _task_turn("spawn B", "a1"),
+        _agent_tool_result("a1", b),
+    ], name="agent-a")
+    _write_subagent(tmp_path, sid, b, [
+        _user_prompt("B"),
+        _task_turn("spawn A", "b1"),
+        _agent_tool_result("b1", a),
+    ], name="agent-b")
+
+    story = build_session_story(sid, projects_root=tmp_path)
+    assert story is not None
+    a_sub = story["steps"][0]["subagent"]
+    assert a_sub["name"] == "agent-a"
+    b_sub = a_sub["steps"][0]["subagent"]
+    assert b_sub["name"] == "agent-b"
+    # B's attempt to re-enter A is caught by the seen-set -> cycle marker.
+    a_again = b_sub["steps"][0]["subagent"]
+    assert a_again["cycle"] is True
+    assert a_again.get("steps") in (None, [])
+
+
+def test_subagent_privacy_no_full_io_at_any_depth(tmp_path):
+    """Full tool inputs/outputs never appear at any nesting level."""
+    sid = "root-priv"
+    child = "0123456789abcdef0"
+    secret_cmd = "rm -rf /super/secret/" + ("z" * 400)
+    secret_out = "LEAKED_OUTPUT_" + ("q" * 400)
+    parent = [
+        _user_prompt("go"),
+        _task_turn("spawn", "p1"),
+        _agent_tool_result("p1", child),
+    ]
+    _write_transcript(tmp_path, sid, parent)
+    _write_subagent(tmp_path, sid, child, [
+        _user_prompt("child"),
+        _assistant("running", tools=[
+            {"id": "c1", "name": "Bash", "input": {"command": secret_cmd}}]),
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "c1", "content": secret_out}]}},
+        _assistant("done"),
+    ], name="kid")
+
+    story = build_session_story(sid, projects_root=tmp_path)
+    assert story is not None
+    blob = json.dumps(story)
+    assert secret_cmd not in blob  # full command never surfaced
+    assert secret_out not in blob  # tool output never surfaced
+    # the Bash label is present but capped
+    sub = story["steps"][0]["subagent"]
+    bash_label = sub["steps"][0]["tools"][0]["label"]
+    assert len(bash_label) <= MAX_TOOL_LABEL_CHARS + 1
