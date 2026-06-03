@@ -895,6 +895,100 @@ a.health-tile.attn { border-color: var(--warn); }
 .opt-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
 .opt-table tr.flagged td { color: var(--warn); }
 .opt-caveat { font-size: 12px; font-style: italic; color: var(--warn); margin-top: 10px; }
+
+/* Session Story */
+.story-callout {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.story-callout .story-callout-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  margin-bottom: 6px;
+}
+.story-callout .story-callout-body {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.story-steps { display: flex; flex-direction: column; gap: 8px; }
+.story-step {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+}
+.story-step.error { border-color: var(--error); background: rgba(238,0,0,0.04); }
+.story-step-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  margin-bottom: 4px;
+}
+.story-step-n { color: var(--text-dim); }
+.story-retry { color: var(--warn); }
+.story-text {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.story-text.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.story-expand {
+  font-size: 11px;
+  color: var(--brand);
+  cursor: pointer;
+  font-family: 'Geist Mono', monospace;
+  margin-top: 4px;
+  display: inline-block;
+}
+.story-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.story-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-family: 'Geist Mono', monospace;
+  padding: 3px 8px;
+  border-radius: 5px;
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  max-width: 100%;
+}
+.story-chip.error { border-color: var(--error); color: var(--error); }
+.story-chip-name { font-weight: 600; }
+.story-chip-label { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.story-chip-status { margin-left: 2px; }
+.story-chip-status.ok { color: var(--info); }
+.story-chip-status.error { color: var(--error); }
+.story-omitted {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  padding: 6px 0;
+}
+.story-unavailable {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  margin: -8px 0 12px;
+}
 </style>
 <script>
   // Apply theme before paint to prevent flash of incorrect theme
@@ -1943,6 +2037,90 @@ function StatusView({ params }) {
 // ============================
 // Session Detail View
 // ============================
+function StoryStep({ step }) {
+  const [expanded, setExpanded] = useState(false);
+  const text = step.text || '';
+  const canExpand = step.text_truncated || text.length > 180;
+  return html`
+    <div class=${'story-step' + (step.is_error ? ' error' : '')}>
+      <div class="story-step-head">
+        <span class="story-step-n">#${step.n}</span>
+        ${step.ts ? html`<span title=${step.ts}>${fmtAgo(step.ts)}</span>` : null}
+        ${step.is_retry ? html`<span class="story-retry">↻ retry</span>` : null}
+        ${step.model ? html`<span style="margin-left:auto">${step.model}</span>` : null}
+      </div>
+      ${text ? html`
+        <div class=${'story-text' + (canExpand && !expanded ? ' clamped' : '')}>${text}</div>
+        ${canExpand ? html`<span class="story-expand" onClick=${() => setExpanded(e => !e)}>${expanded ? 'show less' : 'show more'}</span>` : null}
+      ` : null}
+      ${(step.tools && step.tools.length > 0) ? html`
+        <div class="story-chips">
+          ${step.tools.map(t => html`
+            <span class=${'story-chip' + (t.status === 'error' ? ' error' : '')} title=${t.label || t.name}>
+              <span class="story-chip-name">${t.name}</span>
+              ${t.label ? html`<span class="story-chip-label">${t.label}</span>` : null}
+              <span class=${'story-chip-status ' + t.status}>${t.status === 'error' ? '✗' : '✓'}</span>
+            </span>
+          `)}
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
+function StorySection({ sessionId }) {
+  const [story, setStory] = useState(null);
+  const [taskOpen, setTaskOpen] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api('/sessions/' + sessionId + '/story')
+      .then(d => { if (!cancelled) setStory(d); })
+      .catch(() => { if (!cancelled) setStory({ available: false }); });
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
+  if (!story) return null;
+
+  if (!story.available) {
+    return html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Story</div>
+      <div class="story-unavailable">No transcript on disk — Story is available for Claude Code sessions.</div>
+    `;
+  }
+
+  const steps = story.steps || [];
+  const taskLong = (story.task || '').length > 180;
+
+  return html`
+    <div class="page-title" style="font-size:14px;margin-top:24px">Story</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, step by step${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
+
+    ${story.task ? html`
+      <div class="story-callout">
+        <div class="story-callout-label">Task</div>
+        <div class=${'story-callout-body' + (taskLong && !taskOpen ? ' story-text clamped' : '')}>${story.task}</div>
+        ${taskLong ? html`<span class="story-expand" onClick=${() => setTaskOpen(o => !o)}>${taskOpen ? 'show less' : 'show more'}</span>` : null}
+      </div>
+    ` : null}
+
+    ${steps.length === 0
+      ? html`<div class="story-unavailable">Transcript found but no narrated steps.</div>`
+      : html`<div class="story-steps">
+          ${steps.map((step, i) => step.omitted != null
+            ? html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`
+            : html`<${StoryStep} step=${step} key=${step.n} />`)}
+        </div>`}
+
+    ${story.outcome ? html`
+      <div class="story-callout" style="margin-top:12px">
+        <div class="story-callout-label">Outcome</div>
+        <div class="story-callout-body">${story.outcome}</div>
+      </div>
+    ` : null}
+  `;
+}
+
 function SessionDetailView({ sessionId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -2011,6 +2189,8 @@ function SessionDetailView({ sessionId }) {
         <div class="card-row"><span class="label">Tool calls</span><span class="value">${s.tool_call_count}${s.error_count ? ' (' + s.error_count + ' failed)' : ''}</span></div>
       </div>
     </div>
+
+    <${StorySection} sessionId=${sessionId} />
 
     ${(modelMix.length > 0 || contextSeries.length > 0) ? html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Models & context</div>

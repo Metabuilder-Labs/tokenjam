@@ -1764,3 +1764,91 @@ async def test_runs_index_lists_runs_newest_first(tmp_path):
         assert all(r["session_count"] == 1 for r in runs)
     finally:
         db.close()
+
+
+# --- Session Story endpoint --------------------------------------------------
+
+def _write_story_transcript(projects_root, session_id: str) -> None:
+    """Write a minimal Claude Code JSONL transcript for the Story endpoint."""
+    import json as _json
+
+    project_dir = projects_root / "-Users-test-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "Build the thing."}},
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-15T09:11:36.133Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [
+                    {"type": "text", "text": "Reading the file."},
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Read",
+                        "input": {"file_path": "src/app.py"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "..."}
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-15T09:12:00.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": "Done — it works."}],
+            },
+        },
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in records), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_session_story_available(config, db, tmp_path):
+    _write_story_transcript(tmp_path, "story-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/story-sess/story")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["task"] == "Build the thing."
+    assert body["outcome"] == "Done — it works."
+    assert body["step_count"] == 2
+    assert body["steps"][0]["tools"][0]["name"] == "Read"
+    assert body["steps"][0]["tools"][0]["label"] == "src/app.py"
+    assert body["steps"][0]["tools"][0]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_get_session_story_unavailable(config, db, tmp_path):
+    # No transcript written -> available:false with HTTP 200.
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/unknown-sess/story")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "reason" in body
