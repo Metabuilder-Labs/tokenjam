@@ -48,7 +48,11 @@ HEAD_STEPS = 350
 TAIL_STEPS = 50
 
 #: Text trims (characters).
-MAX_STEP_TEXT_CHARS = 400
+#: ``MAX_STEP_TEXT_CHARS`` is a safety guard against a pathological single blob,
+#: NOT a preview trim — the UI shows only the first line collapsed and the full
+#: narration when a step is expanded, so trimming here would make "expand" lie.
+#: Keep it high enough that real assistant responses are never cut.
+MAX_STEP_TEXT_CHARS = 100_000
 MAX_TASK_OUTCOME_CHARS = 600
 MAX_TOOL_LABEL_CHARS = 120
 
