@@ -511,6 +511,8 @@ table.archive-list .a-id { color: var(--text); }
 .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-back { margin-bottom: 16px; }
+.btn-restore { padding: 3px 8px; font-size: 11px; white-space: nowrap; }
+.btn-restore.copied { border-color: var(--success); color: var(--success); }
 
 /* Segmented view toggle (Cards | List), e.g. the Status screen (#241). */
 .view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -1121,7 +1123,7 @@ a.health-tile.attn { border-color: var(--warn); }
 // importmap just redirects the bare specifiers to vendored local files
 // under /ui/vendor/ so the dashboard works fully offline. (Issue #87.)
 import { h, render, Component } from 'preact';
-import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'preact/hooks';
 import htm from 'htm';
 
 const html = htm.bind(h);
@@ -1913,6 +1915,59 @@ function SdkServicesPanel({ services, framing }) {
   `;
 }
 
+// Remember the window scroll position per list view so returning from a detail
+// page (e.g. clicking an archived session then "Back to status") lands you
+// where you were, not at the top. The window scrolls (.main#app has no own
+// overflow). Saved across remounts via a module-level map; restored once the
+// list has rendered (`ready`), since the list loads async and a too-early
+// scrollTo would clamp against the still-empty page.
+const _scrollMem = {};
+function useScrollMemory(key, ready) {
+  const restored = useRef(false);
+  useEffect(() => {
+    const onScroll = () => { _scrollMem[key] = window.scrollY; };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, [key]);
+  useLayoutEffect(() => {
+    if (ready && !restored.current && _scrollMem[key] != null) {
+      restored.current = true;
+      window.scrollTo(0, _scrollMem[key]);
+    }
+  }, [ready, key]);
+}
+
+// "restore session" button — copies `claude --resume <id>` to the clipboard so
+// an archived/idle Claude Code session can be picked back up in the terminal.
+// stopPropagation so it doesn't trigger the row/tile navigation it sits inside.
+function RestoreButton({ sessionId }) {
+  const [copied, setCopied] = useState(false);
+  if (!sessionId) return null;
+  const cmd = 'claude --resume ' + sessionId;
+  const copy = (e) => {
+    e.stopPropagation();
+    // execCommand is the reliable workhorse inside a click gesture (works even
+    // when the async Clipboard API hangs on a permission prompt). Then a
+    // best-effort, non-blocking upgrade to navigator.clipboard. Feedback fires
+    // synchronously regardless so the button never appears stuck.
+    const ta = document.createElement('textarea');
+    ta.value = cmd;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) { /* ignore */ }
+    document.body.removeChild(ta);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try { navigator.clipboard.writeText(cmd).catch(() => {}); } catch (_) { /* ignore */ }
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return html`<button class=${'btn btn-restore' + (copied ? ' copied' : '')} title=${cmd} onClick=${copy}>${copied ? 'copied ✓' : 'restore session'}</button>`;
+}
+
 // ============================
 // Status View
 // ============================
@@ -1946,6 +2001,9 @@ function StatusView({ params }) {
   }, []);
 
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+
+  // Restore scroll position when returning from a session/run detail page.
+  useScrollMemory('status', !!data);
 
   if (!data) return html`<div class="empty">Loading...</div>`;
   const sdkServices = data.sdk_services || [];
@@ -2030,6 +2088,7 @@ function StatusView({ params }) {
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
           <div class="card-foot">→ Map / Approach / Timeline</div>
+          ${a.status === 'idle' && a.session_id ? html`<div style="margin-top:10px"><${RestoreButton} sessionId=${a.session_id} /></div>` : null}
         </div>`;
   };
 
