@@ -1047,15 +1047,19 @@ function StoryStep({ step, prevModel }) {
 
 function StorySection({ sessionId }) {
   const [story, setStory] = useState(null);
-  const [taskOpen, setTaskOpen] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
+  // Poll like every other view on this route so a live session's Timeline
+  // updates in place. The /story endpoint re-parses the on-disk transcript on
+  // each call, so new steps appear without remounting (switching tabs / leaving
+  // and returning to the route). On a transient poll failure, keep the last
+  // good Timeline — only fall back to the unavailable state on the first load.
+  const load = useCallback(() => {
     api('/sessions/' + sessionId + '/story')
-      .then(d => { if (!cancelled) setStory(d); })
-      .catch(() => { if (!cancelled) setStory({ available: false }); });
-    return () => { cancelled = true; };
+      .then(d => setStory(d))
+      .catch(() => setStory(prev => prev || { available: false }));
   }, [sessionId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
   if (!story) return null;
 
@@ -1067,30 +1071,17 @@ function StorySection({ sessionId }) {
   }
 
   const steps = story.steps || [];
-  const taskLong = (story.task || '').length > 180;
 
+  // No pinned Task/Outcome summary: in a long-running session the first prompt
+  // and last narration go stale (new prompts get sent, work continues). The
+  // steps below already show everything in descending time order, newest first.
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest first${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
 
-    ${story.task ? html`
-      <div class="story-callout">
-        <div class="story-callout-label">Task</div>
-        <div class=${'story-callout-body' + (taskLong && !taskOpen ? ' story-text clamped' : '')}>${story.task}</div>
-        ${taskLong ? html`<span class="story-expand" onClick=${() => setTaskOpen(o => !o)}>${taskOpen ? 'show less' : 'show more'}</span>` : null}
-      </div>
-    ` : null}
-
     ${steps.length === 0
       ? html`<div class="story-unavailable">Transcript found but no narrated steps.</div>`
       : html`<div class="story-steps">${renderStepsNewestFirst(steps)}</div>`}
-
-    ${story.outcome ? html`
-      <div class="story-callout" style="margin-top:12px">
-        <div class="story-callout-label">Outcome</div>
-        <div class="story-callout-body">${story.outcome}</div>
-      </div>
-    ` : null}
   `;
 }
 
@@ -1467,9 +1458,13 @@ function TraceDetailView({ traceId }) {
   const [spans, setSpans] = useState([]);
   const [selected, setSelected] = useState(null);
 
-  useEffect(() => {
-    api('/traces/' + traceId).then(d => setSpans(d.spans || []));
+  // Poll so a live trace's spans appear without re-navigating. Selection is
+  // tracked by span_id, so replacing the spans array preserves it.
+  const load = useCallback(() => {
+    api('/traces/' + traceId).then(d => setSpans(d.spans || [])).catch(() => {});
   }, [traceId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
   if (!spans.length) return html`<div class="empty">Loading trace...</div>`;
 
