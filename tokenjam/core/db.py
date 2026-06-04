@@ -211,6 +211,23 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_id            TEXT;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_session_id TEXT"
     )),
+    # Migration 8: repair ended_at on already-closed sessions. A prior bug in
+    # close_session(s) advanced ended_at to the close time, so a session closed
+    # days after its last span showed a "Last seen" of the close moment instead
+    # of its real last activity. Recompute ended_at from the session's actual
+    # spans (max of end_time / start_time), but only LOWER it — never touch
+    # sessions whose ended_at already matches or precedes their last span.
+    # Idempotent: re-running finds nothing left to correct.
+    (8, (
+        "UPDATE sessions AS s "
+        "SET ended_at = sub.max_ts "
+        "FROM (SELECT session_id, MAX(COALESCE(end_time, start_time)) AS max_ts "
+        "      FROM spans GROUP BY session_id) AS sub "
+        "WHERE s.session_id = sub.session_id "
+        "  AND s.status = 'closed' "
+        "  AND sub.max_ts IS NOT NULL "
+        "  AND (s.ended_at IS NULL OR s.ended_at > sub.max_ts)"
+    )),
 ]
 
 
@@ -544,7 +561,10 @@ class DuckDBBackend:
 
         Returns the number closed. Idempotent: already-closed/completed rows are
         not matched (status='active' filter), so re-closing is a no-op (0).
-        ended_at is bumped to now only when now is later than the existing one.
+        ended_at is the session's last-activity time ("Last seen" in the UI), so
+        closing must NOT advance it — a session closed long after its last span
+        still last had telemetry at that span. Only stamp ended_at when it's
+        NULL (a session that never recorded an end gets the close time).
         """
         now = utcnow()
         count_row = self.conn.execute(
@@ -556,15 +576,18 @@ class DuckDBBackend:
         if count:
             self.conn.execute(
                 "UPDATE sessions SET status = 'closed', "
-                "ended_at = CASE WHEN ended_at IS NULL OR ended_at < $2 "
-                "THEN $2 ELSE ended_at END "
+                "ended_at = COALESCE(ended_at, $2) "
                 "WHERE service_instance_id = $1 AND status = 'active'",
                 [instance_id, now],
             )
         return count
 
     def close_session_by_id(self, session_id: str) -> int:
-        """Mark a single active session as 'closed'. Idempotent (see above)."""
+        """Mark a single active session as 'closed'. Idempotent (see above).
+
+        Preserves ended_at (last-activity / "Last seen"); only stamps it when
+        NULL. Closing is not telemetry, so it must not advance last-seen.
+        """
         now = utcnow()
         count_row = self.conn.execute(
             "SELECT COUNT(*) FROM sessions "
@@ -575,8 +598,7 @@ class DuckDBBackend:
         if count:
             self.conn.execute(
                 "UPDATE sessions SET status = 'closed', "
-                "ended_at = CASE WHEN ended_at IS NULL OR ended_at < $2 "
-                "THEN $2 ELSE ended_at END "
+                "ended_at = COALESCE(ended_at, $2) "
                 "WHERE session_id = $1 AND status = 'active'",
                 [session_id, now],
             )

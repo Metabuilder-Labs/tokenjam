@@ -746,6 +746,51 @@ async def test_close_sessions_by_instance_marks_closed_idempotent(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_close_preserves_last_activity_ended_at(tmp_path):
+    # ended_at is the session's last-activity ("Last seen") time. Closing a
+    # session long after its last span must NOT advance ended_at to the close
+    # moment — regression for the close-bumps-last-seen bug.
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        from datetime import timedelta
+        from tokenjam.utils.time_parse import utcnow
+        last_active = utcnow() - timedelta(days=2)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="old", status="active",
+            ended_at=last_active))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"session_id": "old"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            assert resp.json()["closed"] == 1
+        s = db.get_session("old")
+        assert s.status == "closed"
+        assert s.ended_at == last_active   # unchanged, not bumped to "now"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_stamps_ended_at_when_null(tmp_path):
+    # A session that never recorded an end time gets the close time stamped.
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="noend", status="active", ended_at=None))
+        assert db.get_session("noend").ended_at is None
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"session_id": "noend"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            assert resp.json()["closed"] == 1
+        assert db.get_session("noend").ended_at is not None
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_close_session_by_id(tmp_path):
     db, app = _lifecycle_app(tmp_path)
     try:
