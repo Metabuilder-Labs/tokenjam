@@ -543,25 +543,64 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   white-space: pre-wrap;
   word-break: break-word;
 }
-.story-steps { display: flex; flex-direction: column; gap: 8px; }
+.story-steps { display: flex; flex-direction: column; gap: 2px; }
+/* Compact single-line row (356 steps must stay scannable, not a wall of cards) */
 .story-step {
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
 }
 .story-step.error { border-color: var(--error); background: rgba(238,0,0,0.04); }
-.story-step-head {
+.story-step-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  font-size: 11px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+.story-step-row:hover { background: var(--surface2); }
+.story-caret {
+  color: var(--text-dim);
+  width: 10px;
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+.story-step-n {
   color: var(--text-dim);
   font-family: 'Geist Mono', monospace;
-  margin-bottom: 4px;
+  font-size: 11px;
+  flex: 0 0 auto;
 }
-.story-step-n { color: var(--text-dim); }
-.story-retry { color: var(--warn); }
+.story-step-time {
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+.story-retry { color: var(--warn); flex: 0 0 auto; font-size: 11px; }
+.story-model-tag {
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  font-size: 10px;
+  opacity: 0.7;
+  flex: 0 0 auto;
+}
+.story-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.story-line.dim { color: var(--text-dim); font-style: italic; }
+/* Expanded body */
+.story-step-body {
+  padding: 2px 8px 10px 26px;
+}
 .story-text {
   font-size: 13px;
   line-height: 1.5;
@@ -582,20 +621,21 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   margin-top: 4px;
   display: inline-block;
 }
-.story-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.story-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .story-chip {
   display: inline-flex;
   align-items: center;
   gap: 5px;
   font-size: 11px;
   font-family: 'Geist Mono', monospace;
-  padding: 3px 8px;
+  padding: 2px 7px;
   border-radius: 5px;
   background: var(--surface3);
   border: 1px solid var(--border);
   max-width: 100%;
 }
 .story-chip.error { border-color: var(--error); color: var(--error); }
+.story-chip.inline { padding: 1px 6px; }
 .story-chip-name { font-weight: 600; }
 .story-chip-label { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .story-chip-status { margin-left: 2px; }
@@ -921,11 +961,7 @@ function SubagentBlock({ subagent }) {
               <div class="story-callout-label">Task</div>
               <div class="story-callout-body">${subagent.task}</div>
             </div>` : null}
-          <div class="story-steps">
-            ${steps.map((s, i) => s.omitted != null
-              ? html`<div class="story-omitted" key=${'om' + i}>… ${s.omitted} step${s.omitted === 1 ? '' : 's'} omitted …</div>`
-              : html`<${StoryStep} step=${s} key=${s.n} />`)}
-          </div>
+          <div class="story-steps">${renderStepsNewestFirst(steps)}</div>
           ${subagent.outcome ? html`
             <div class="story-callout" style="margin-top:8px">
               <div class="story-callout-label">Outcome</div>
@@ -937,35 +973,74 @@ function SubagentBlock({ subagent }) {
   `;
 }
 
-function StoryStep({ step }) {
+// First line of the narration (for the collapsed dense row).
+function firstLine(text) {
+  if (!text) return '';
+  const nl = text.indexOf('\n');
+  return nl === -1 ? text : text.slice(0, nl);
+}
+
+// Render a step list NEWEST-FIRST (data is canonical oldest-first; we reverse in
+// render only). prevModel is the chronologically-previous step's model so the
+// "model changed" dim tag tracks the real timeline, not the reversed order.
+function renderStepsNewestFirst(steps) {
+  const out = [];
+  let prevModel = null;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (step.omitted != null) {
+      out.push(html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`);
+    } else {
+      out.push(html`<${StoryStep} step=${step} prevModel=${prevModel} key=${step.n} />`);
+      prevModel = step.model || prevModel;
+    }
+  }
+  out.reverse();
+  return out;
+}
+
+function StoryStep({ step, prevModel }) {
   const [expanded, setExpanded] = useState(false);
   const text = step.text || '';
-  const canExpand = step.text_truncated || text.length > 180;
+  const tools = step.tools || [];
   const subagents = step.subagents || (step.subagent ? [step.subagent] : []);
+  // Show the model only when it CHANGES from the previous step (noise on every row otherwise).
+  const showModel = step.model && step.model !== prevModel;
+  const preview = firstLine(text);
+  const hasMore = subagents.length > 0 || (text && (step.text_truncated || text.indexOf('\n') !== -1 || text.length > preview.length || tools.length > 0));
   return html`
     <div class=${'story-step' + (step.is_error ? ' error' : '')}>
-      <div class="story-step-head">
+      <div class="story-step-row" onClick=${() => setExpanded(e => !e)}>
+        <span class="story-caret">${hasMore ? (expanded ? '▾' : '▸') : ''}</span>
         <span class="story-step-n">#${step.n}</span>
-        ${step.ts ? html`<span title=${step.ts}>${fmtAgo(step.ts)}</span>` : null}
-        ${step.is_retry ? html`<span class="story-retry">↻ retry</span>` : null}
-        ${step.model ? html`<span style="margin-left:auto">${step.model}</span>` : null}
+        ${step.ts ? html`<span class="story-step-time" title=${step.ts}>${fmtAgo(step.ts)}</span>` : null}
+        ${step.is_retry ? html`<span class="story-retry" title="retry">↻</span>` : null}
+        ${tools.map(t => html`
+          <span class=${'story-chip inline' + (t.status === 'error' ? ' error' : '')} title=${t.label || t.name}>
+            <span class="story-chip-name">${t.name}</span>
+            <span class=${'story-chip-status ' + t.status}>${t.status === 'error' ? '✗' : '✓'}</span>
+          </span>
+        `)}
+        ${showModel ? html`<span class="story-model-tag" title=${step.model}>${step.model}</span>` : null}
+        <span class=${'story-line' + (preview ? '' : ' dim')}>${preview || '(no narration)'}</span>
       </div>
-      ${text ? html`
-        <div class=${'story-text' + (canExpand && !expanded ? ' clamped' : '')}>${text}</div>
-        ${canExpand ? html`<span class="story-expand" onClick=${() => setExpanded(e => !e)}>${expanded ? 'show less' : 'show more'}</span>` : null}
-      ` : null}
-      ${(step.tools && step.tools.length > 0) ? html`
-        <div class="story-chips">
-          ${step.tools.map(t => html`
-            <span class=${'story-chip' + (t.status === 'error' ? ' error' : '')} title=${t.label || t.name}>
-              <span class="story-chip-name">${t.name}</span>
-              ${t.label ? html`<span class="story-chip-label">${t.label}</span>` : null}
-              <span class=${'story-chip-status ' + t.status}>${t.status === 'error' ? '✗' : '✓'}</span>
-            </span>
-          `)}
+      ${expanded ? html`
+        <div class="story-step-body">
+          ${text ? html`<div class="story-text">${text}</div>` : null}
+          ${tools.length > 0 ? html`
+            <div class="story-chips" style="margin-top:8px">
+              ${tools.map(t => html`
+                <span class=${'story-chip' + (t.status === 'error' ? ' error' : '')} title=${t.label || t.name}>
+                  <span class="story-chip-name">${t.name}</span>
+                  ${t.label ? html`<span class="story-chip-label">${t.label}</span>` : null}
+                  <span class=${'story-chip-status ' + t.status}>${t.status === 'error' ? '✗' : '✓'}</span>
+                </span>
+              `)}
+            </div>
+          ` : null}
+          ${subagents.map((sa, i) => html`<${SubagentBlock} subagent=${sa} key=${'sa' + (sa.agent_id || i)} />`)}
         </div>
       ` : null}
-      ${subagents.map((sa, i) => html`<${SubagentBlock} subagent=${sa} key=${'sa' + (sa.agent_id || i)} />`)}
     </div>
   `;
 }
@@ -986,8 +1061,8 @@ function StorySection({ sessionId }) {
 
   if (!story.available) {
     return html`
-      <div class="page-title" style="font-size:14px;margin-top:24px">Story</div>
-      <div class="story-unavailable">No transcript on disk — Story is available for Claude Code sessions.</div>
+      <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
+      <div class="story-unavailable">No transcript on disk — Timeline is available for Claude Code sessions.</div>
     `;
   }
 
@@ -995,8 +1070,8 @@ function StorySection({ sessionId }) {
   const taskLong = (story.task || '').length > 180;
 
   return html`
-    <div class="page-title" style="font-size:14px;margin-top:24px">Story</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, step by step${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
+    <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest first${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
 
     ${story.task ? html`
       <div class="story-callout">
@@ -1008,11 +1083,7 @@ function StorySection({ sessionId }) {
 
     ${steps.length === 0
       ? html`<div class="story-unavailable">Transcript found but no narrated steps.</div>`
-      : html`<div class="story-steps">
-          ${steps.map((step, i) => step.omitted != null
-            ? html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`
-            : html`<${StoryStep} step=${step} key=${step.n} />`)}
-        </div>`}
+      : html`<div class="story-steps">${renderStepsNewestFirst(steps)}</div>`}
 
     ${story.outcome ? html`
       <div class="story-callout" style="margin-top:12px">
@@ -1094,7 +1165,7 @@ function SessionDetailView({ sessionId }) {
     </div>
 
     <div class="tab-bar" role="tablist">
-      <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Story</button>
+      <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Timeline</button>
       <button class="tab ${tab === 'models' ? 'active' : ''}" role="tab" aria-selected=${tab === 'models'} onClick=${() => setTab('models')}>Models & context</button>
       <button class="tab ${tab === 'alerts' ? 'active' : ''}" role="tab" aria-selected=${tab === 'alerts'} onClick=${() => setTab('alerts')}>Alerts</button>
       <button class="tab ${tab === 'traces' ? 'active' : ''}" role="tab" aria-selected=${tab === 'traces'} onClick=${() => setTab('traces')}>Traces</button>
