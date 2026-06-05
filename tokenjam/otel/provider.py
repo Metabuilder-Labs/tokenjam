@@ -79,6 +79,7 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
     input_tokens = attrs.pop(GenAIAttributes.INPUT_TOKENS, None)
     output_tokens = attrs.pop(GenAIAttributes.OUTPUT_TOKENS, None)
     cache_tokens = attrs.pop(GenAIAttributes.CACHE_READ_TOKENS, None)
+    cache_creation_tokens = attrs.pop(GenAIAttributes.CACHE_CREATE_TOKENS, None)
     conversation_id = attrs.pop(GenAIAttributes.CONVERSATION_ID, None)
     request_type = attrs.pop(GenAIAttributes.REQUEST_TYPE, None)
     agent_id = attrs.pop(GenAIAttributes.AGENT_ID, None)
@@ -107,6 +108,8 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
         output_tokens = int(output_tokens)
     if cache_tokens is not None:
         cache_tokens = int(cache_tokens)
+    if cache_creation_tokens is not None:
+        cache_creation_tokens = int(cache_creation_tokens)
     if cost_usd is not None:
         cost_usd = float(cost_usd)
 
@@ -163,6 +166,7 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_tokens=cache_tokens,
+        cache_creation_tokens=cache_creation_tokens,
         cost_usd=cost_usd,
         request_type=request_type,
         conversation_id=conversation_id,

@@ -195,6 +195,7 @@ def _session_model_mix(db: Any, session_id: str) -> list[dict]:
         "SUM(COALESCE(input_tokens, 0)) AS input_tokens, "
         "SUM(COALESCE(output_tokens, 0)) AS output_tokens, "
         "SUM(COALESCE(cache_tokens, 0)) AS cache_tokens, "
+        "SUM(COALESCE(cache_creation_tokens, 0)) AS cache_creation_tokens, "
         "SUM(COALESCE(cost_usd, 0)) AS cost_usd "
         "FROM spans WHERE session_id = $1 AND name = $2 AND model IS NOT NULL "
         "GROUP BY model ORDER BY calls DESC, model ASC",
@@ -207,7 +208,8 @@ def _session_model_mix(db: Any, session_id: str) -> list[dict]:
             "input_tokens": int(r[2] or 0),
             "output_tokens": int(r[3] or 0),
             "cache_tokens": int(r[4] or 0),
-            "cost_usd": float(r[5]) if r[5] is not None else 0.0,
+            "cache_creation_tokens": int(r[5] or 0),
+            "cost_usd": float(r[6]) if r[6] is not None else 0.0,
         }
         for r in rows
     ]
@@ -228,7 +230,8 @@ def _session_context_series(db: Any, session_id: str) -> list[dict]:
         "SELECT start_time, "
         "COALESCE(input_tokens, 0) AS input_tokens, "
         "COALESCE(cache_tokens, 0) AS cache_tokens, "
-        "COALESCE(output_tokens, 0) AS output_tokens "
+        "COALESCE(output_tokens, 0) AS output_tokens, "
+        "COALESCE(cache_creation_tokens, 0) AS cache_creation_tokens "
         "FROM spans WHERE session_id = $1 AND name = $2 "
         "ORDER BY start_time ASC",
         [session_id, GenAIAttributes.SPAN_LLM_CALL],
@@ -249,6 +252,7 @@ def _session_context_series(db: Any, session_id: str) -> list[dict]:
             "input_tokens": int(r[1] or 0),
             "cache_tokens": int(r[2] or 0),
             "output_tokens": int(r[3] or 0),
+            "cache_creation_tokens": int(r[4] or 0),
         }
         for r in rows
     ]
@@ -316,6 +320,7 @@ async def get_session_detail(request: Request, session_id: str):
             "input_tokens": session.input_tokens,
             "output_tokens": session.output_tokens,
             "cache_tokens": session.cache_tokens,
+            "cache_creation_tokens": session.cache_creation_tokens,
             "tool_call_count": session.tool_call_count,
             "error_count": session.error_count,
             "conversation_count": conversation_count,

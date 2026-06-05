@@ -1240,7 +1240,7 @@ function SessionDetailView({ sessionId }) {
           : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(s.total_cost_usd)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(s.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(s.output_tokens)}</span></div>
-        ${s.cache_tokens ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens(s.cache_tokens)}</span></div>` : null}
+        ${((s.cache_tokens || 0) + (s.cache_creation_tokens || 0)) ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens((s.cache_tokens || 0) + (s.cache_creation_tokens || 0))}</span></div>` : null}
         <div class="card-row"><span class="label">Tool calls</span><span class="value">${s.tool_call_count}${s.error_count ? ' (' + s.error_count + ' failed)' : ''}</span></div>
       </div>
     </div>
@@ -1268,7 +1268,7 @@ function SessionDetailView({ sessionId }) {
                 <td>${m.calls}</td>
                 <td>${fmtTokens(m.input_tokens)}</td>
                 <td>${fmtTokens(m.output_tokens)}</td>
-                <td>${m.cache_tokens ? fmtTokens(m.cache_tokens) : '-'}</td>
+                <td>${((m.cache_tokens || 0) + (m.cache_creation_tokens || 0)) ? fmtTokens((m.cache_tokens || 0) + (m.cache_creation_tokens || 0)) : '-'}</td>
                 <td>${fmtCost(m.cost_usd)}</td>
               </tr>
             `)}
@@ -1452,7 +1452,7 @@ function RunDetailView({ runId }) {
           : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">${costTip}</span></span></span><span class="value">${fmtCost(r.total_cost_usd)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(r.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(r.output_tokens)}</span></div>
-        ${r.cache_tokens ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens(r.cache_tokens)}</span></div>` : null}
+        ${((r.cache_tokens || 0) + (r.cache_creation_tokens || 0)) ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens((r.cache_tokens || 0) + (r.cache_creation_tokens || 0))}</span></div>` : null}
       </div>
     </div>
 

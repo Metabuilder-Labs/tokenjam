@@ -187,6 +187,23 @@ class TestSessionResolution:
 
         assert db.spans[-1].session_id == "my-session"
 
+    def test_cache_creation_tokens_aggregate_separately_from_reads(self):
+        # Cache reads accumulate into cache_tokens; cache writes/creation into
+        # cache_creation_tokens. The two must never be conflated.
+        pipeline, db = _make_pipeline()
+
+        pipeline.process(make_llm_span(
+            conversation_id="conv-cache", cache_tokens=100, cache_creation_tokens=40,
+        ))
+        pipeline.process(make_llm_span(
+            conversation_id="conv-cache", cache_tokens=200, cache_creation_tokens=10,
+        ))
+
+        session = db.get_session_by_conversation("conv-cache")
+        assert session is not None
+        assert session.cache_tokens == 300            # reads only
+        assert session.cache_creation_tokens == 50    # writes only
+
     def test_span_without_session_or_conversation_gets_new_session(self):
         pipeline, db = _make_pipeline()
 

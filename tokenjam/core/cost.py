@@ -72,6 +72,7 @@ class CostEngine:
             return
 
         cache_read_tokens = span.cache_tokens or 0
+        cache_write_tokens = span.cache_creation_tokens or 0
 
         # Record whether the span was already pre-priced before we compute.
         # Pre-priced spans have their session cost handled by _build_or_update_session
@@ -84,6 +85,7 @@ class CostEngine:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
         )
 
         span.cost_usd = cost

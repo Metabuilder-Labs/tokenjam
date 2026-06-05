@@ -65,6 +65,7 @@ class ParsedSession:
     total_input_tokens: int
     total_output_tokens: int
     total_cache_tokens: int
+    total_cache_creation_tokens: int
     total_cost_usd: float
     tool_call_count: int
 
@@ -142,6 +143,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
     total_input = 0
     total_output = 0
     total_cache = 0
+    total_cache_creation = 0
     total_cost = 0.0
     tool_count = 0
 
@@ -213,7 +215,6 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_creation,
         )
-        cache_tokens = cache_read + cache_creation
 
         agent_id = _agent_id_from_cwd(cwd)
         start_time = ts or datetime.now(tz=timezone.utc)
@@ -234,7 +235,8 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                 model=model,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                cache_tokens=cache_tokens,
+                cache_tokens=cache_read,
+                cache_creation_tokens=cache_creation,
                 cost_usd=cost,
                 request_type="completion",
                 conversation_id=sid_str,
@@ -244,7 +246,8 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
         )
         total_input += input_tokens
         total_output += output_tokens
-        total_cache += cache_tokens
+        total_cache += cache_read
+        total_cache_creation += cache_creation
         total_cost += cost
 
         # Tool uses inside the assistant message become tool spans
@@ -297,6 +300,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
         total_input_tokens=total_input,
         total_output_tokens=total_output,
         total_cache_tokens=total_cache,
+        total_cache_creation_tokens=total_cache_creation,
         total_cost_usd=round(total_cost, 8),
         tool_call_count=tool_count,
     )
@@ -343,6 +347,7 @@ def session_record_from_parsed(parsed: ParsedSession) -> SessionRecord:
         input_tokens=parsed.total_input_tokens,
         output_tokens=parsed.total_output_tokens,
         cache_tokens=parsed.total_cache_tokens,
+        cache_creation_tokens=parsed.total_cache_creation_tokens,
         tool_call_count=parsed.tool_call_count,
         error_count=0,
     )
@@ -432,9 +437,10 @@ def _insert_session_idempotent(db, parsed: ParsedSession) -> int:
             "name, kind, status_code, status_message, start_time, end_time, "
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account"
+            "request_type, conversation_id, events, billing_account, "
+            "cache_creation_tokens"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -442,7 +448,7 @@ def _insert_session_idempotent(db, parsed: ParsedSession) -> int:
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account,
+                span.billing_account, span.cache_creation_tokens,
             ],
         )
         inserted += 1

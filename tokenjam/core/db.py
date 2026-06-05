@@ -228,6 +228,15 @@ MIGRATIONS: list[tuple[int, str]] = [
         "  AND sub.max_ts IS NOT NULL "
         "  AND (s.ended_at IS NULL OR s.ended_at > sub.max_ts)"
     )),
+    # Migration 9: cache_creation_tokens on spans + sessions. Previously cache
+    # *write*/creation tokens were dropped at ingest (only cache reads landed in
+    # cache_tokens). Now tracked in their own column so the dashboard can show
+    # total cache activity (reads + writes) and the cost engine can price writes
+    # at the higher cache-write rate. Both nullable; existing rows default 0.
+    (9, (
+        "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS cache_creation_tokens BIGINT DEFAULT 0;\n"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cache_creation_tokens BIGINT DEFAULT 0"
+    )),
 ]
 
 
@@ -286,6 +295,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         input_tokens=_int_or_none(d.get("input_tokens")),
         output_tokens=_int_or_none(d.get("output_tokens")),
         cache_tokens=_int_or_none(d.get("cache_tokens")),
+        cache_creation_tokens=_int_or_none(d.get("cache_creation_tokens")),
         cost_usd=d.get("cost_usd"),
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
@@ -306,6 +316,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         input_tokens=d.get("input_tokens") or 0,
         output_tokens=d.get("output_tokens") or 0,
         cache_tokens=d.get("cache_tokens") or 0,
+        cache_creation_tokens=d.get("cache_creation_tokens") or 0,
         tool_call_count=d.get("tool_call_count") or 0,
         error_count=d.get("error_count") or 0,
         plan_tier=d.get("plan_tier") or "unknown",
@@ -413,9 +424,10 @@ class DuckDBBackend:
             "name, kind, status_code, status_message, start_time, end_time, "
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account"
+            "request_type, conversation_id, events, billing_account, "
+            "cache_creation_tokens"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -423,7 +435,7 @@ class DuckDBBackend:
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account,
+                span.billing_account, span.cache_creation_tokens,
             ],
         )
 
@@ -459,8 +471,8 @@ class DuckDBBackend:
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                 tool_call_count, error_count, plan_tier, service_namespace,
-                service_instance_id, run_id, parent_session_id
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                service_instance_id, run_id, parent_session_id, cache_creation_tokens
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -468,6 +480,7 @@ class DuckDBBackend:
                 input_tokens = EXCLUDED.input_tokens,
                 output_tokens = EXCLUDED.output_tokens,
                 cache_tokens = EXCLUDED.cache_tokens,
+                cache_creation_tokens = EXCLUDED.cache_creation_tokens,
                 tool_call_count = EXCLUDED.tool_call_count,
                 error_count = EXCLUDED.error_count,
                 plan_tier = EXCLUDED.plan_tier,
@@ -483,7 +496,7 @@ class DuckDBBackend:
                 session.cache_tokens, session.tool_call_count, session.error_count,
                 session.plan_tier, session.service_namespace,
                 session.service_instance_id, session.run_id,
-                session.parent_session_id,
+                session.parent_session_id, session.cache_creation_tokens,
             ],
         )
 

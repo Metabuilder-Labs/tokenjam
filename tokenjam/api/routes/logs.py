@@ -60,9 +60,10 @@ def _api_request_to_span(
     end_time = start_time + timedelta(milliseconds=duration_ms)
 
     extra_attrs: dict[str, Any] = {}
+    # CACHE_CREATION_TOKENS is now an indexed field (cache_creation_tokens), so
+    # it's no longer stuffed into the generic attributes blob.
     for key in (
         ClaudeCodeEvents.SPEED,
-        ClaudeCodeEvents.CACHE_CREATION_TOKENS,
         ClaudeCodeEvents.EVENT_SEQUENCE,
     ):
         if key in attrs:
@@ -87,6 +88,7 @@ def _api_request_to_span(
         input_tokens=_safe_int(attrs.get(ClaudeCodeEvents.INPUT_TOKENS)),
         output_tokens=_safe_int(attrs.get(ClaudeCodeEvents.OUTPUT_TOKENS)),
         cache_tokens=_safe_int(attrs.get(ClaudeCodeEvents.CACHE_READ_TOKENS, 0)),
+        cache_creation_tokens=_safe_int(attrs.get(ClaudeCodeEvents.CACHE_CREATION_TOKENS, 0)),
         cost_usd=float(attrs[ClaudeCodeEvents.COST_USD]) if ClaudeCodeEvents.COST_USD in attrs else None,
         attributes=extra_attrs,
     )

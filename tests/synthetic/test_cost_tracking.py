@@ -115,6 +115,27 @@ def test_cost_engine_accumulates_across_multiple_spans(
     assert session_cost == pytest.approx(0.0048)
 
 
+def test_cost_engine_prices_cache_creation_tokens(
+    fake_db: FakeDB, engine: CostEngine,
+) -> None:
+    # claude-haiku-4-5 rates: input=0.80, output=4.00, cache_read=0.08,
+    # cache_write=1.00 per MTok. The cache-WRITE tokens must be billed at the
+    # cache_write rate — previously they were dropped and never priced.
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=1000, output_tokens=200,
+        cache_tokens=5000,            # reads  -> 5000/1e6 * 0.08 = 0.0004
+        cache_creation_tokens=10000,  # writes -> 10000/1e6 * 1.00 = 0.01
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    # 0.0008 (in) + 0.0008 (out) + 0.0004 (read) + 0.01 (write) = 0.012
+    assert span.cost_usd == pytest.approx(0.012)
+    assert fake_db.get_span_cost(span.span_id) == pytest.approx(0.012)
+
+
 def test_cost_engine_no_op_when_tokens_missing(fake_db: FakeDB, engine: CostEngine) -> None:
     span = make_llm_span(
         provider="anthropic", model="claude-haiku-4-5",

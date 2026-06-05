@@ -70,10 +70,11 @@ def test_api_request_produces_llm_span():
 
 def test_api_request_cache_tokens():
     span = _api_request_to_span(_req_attrs(), RESOURCE, NOW_NS)
-    # cache_read_tokens -> cache_tokens field
+    # cache_read_tokens -> cache_tokens field (cache reads only)
     assert span.cache_tokens == 500
-    # cache_creation_tokens goes into attributes
-    assert span.attributes.get("cache_creation_tokens") == 100
+    # cache_creation_tokens is now its own indexed field, not stuffed in attrs
+    assert span.cache_creation_tokens == 100
+    assert "cache_creation_tokens" not in span.attributes
 
 
 def test_tool_result_success_produces_ok_span():
@@ -199,11 +200,13 @@ def test_event_sequence_in_attributes():
     assert span.attributes.get("event.sequence") == 99
 
 
-def test_cache_creation_tokens_in_attributes():
+def test_cache_creation_tokens_indexed_field():
     span = _api_request_to_span(_req_attrs(**{"cache_creation_tokens": 256}), RESOURCE, NOW_NS)
-    # cache_creation_tokens goes into attributes dict, not the cache_tokens field
-    assert span.attributes.get("cache_creation_tokens") == 256
-    # cache_tokens field is for reads
+    # cache_creation_tokens is captured as its own indexed field (not dropped
+    # into the generic attributes blob like it used to be)
+    assert span.cache_creation_tokens == 256
+    assert "cache_creation_tokens" not in span.attributes
+    # cache_tokens field stays reads-only
     assert span.cache_tokens == 500  # from default _req_attrs
 
 
