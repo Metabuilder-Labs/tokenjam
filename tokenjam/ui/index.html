@@ -935,7 +935,6 @@ function StatusView() {
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
-          ${a.status === 'idle' && a.session_id ? html`<div style="margin-top:10px"><${RestoreButton} sessionId=${a.session_id} /></div>` : null}
         </div>`;
 
   return html`
@@ -955,7 +954,7 @@ function StatusView() {
       <div class="page-title" style="font-size:14px;margin-top:24px">Archived sessions</div>
       <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Closed or stale terminals — no longer live</div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Session</th><th>Project</th><th>Status</th><th>Last seen</th><th>Tokens</th><th>Cost</th><th></th></tr></thead>
+        <thead><tr><th>Session</th><th>Project</th><th>Status</th><th>Last seen</th><th>Tokens</th><th>Cost</th></tr></thead>
         <tbody>
           ${archived.map(s => html`
             <tr class=${s.session_id ? 'clickable' : ''} onClick=${() => { if (s.session_id) location.hash = '#/sessions/' + s.session_id; }}>
@@ -965,7 +964,6 @@ function StatusView() {
               <td>${fmtAgo(s.last_span_time || s.started_at)}</td>
               <td>${fmtTokens(s.input_tokens)} in / ${fmtTokens(s.output_tokens)} out</td>
               <td>${fmtCost(s.total_cost_usd)}</td>
-              <td>${html`<${RestoreButton} sessionId=${s.session_id} />`}</td>
             </tr>
           `)}
         </tbody>
@@ -1183,6 +1181,7 @@ function SessionDetailView({ sessionId }) {
     ${backBtn}
     <div class="page-title">${title}</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Session ${s.session_id}</div>
+    ${s.status !== 'active' && s.session_id ? html`<div style="margin:-8px 0 16px"><${RestoreButton} sessionId=${s.session_id} /></div>` : null}
 
     <div class="cards">
       <div class="card">
