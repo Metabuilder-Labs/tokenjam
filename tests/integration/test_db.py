@@ -42,8 +42,8 @@ def _insert_agent(db, agent_id="test-agent"):
 def test_migrations_run_on_empty_db():
     backend = InMemoryBackend()
     rows = backend.conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert len(rows) == 7
-    assert {r[0] for r in rows} == {1, 2, 3, 4, 5, 6, 7}
+    assert len(rows) == 8
+    assert {r[0] for r in rows} == {1, 2, 3, 4, 5, 6, 7, 12}
     backend.close()
 
 
@@ -52,7 +52,7 @@ def test_migrations_are_idempotent():
     # Running migrations again should not raise
     run_migrations(backend.conn)
     rows = backend.conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert len(rows) == 7
+    assert len(rows) == 8
     backend.close()
 
 

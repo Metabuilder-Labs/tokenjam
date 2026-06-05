@@ -168,6 +168,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     input_tokens        BIGINT DEFAULT 0,
     output_tokens       BIGINT DEFAULT 0,
     cache_tokens        BIGINT DEFAULT 0,
+    -- cache_write_tokens (cache-CREATION tokens) added by migration 12. Kept
+    -- separate from cache_tokens (cache-read) because they bill at a higher rate.
+    cache_write_tokens  BIGINT DEFAULT 0,
     tool_call_count     INTEGER DEFAULT 0,
     error_count         INTEGER DEFAULT 0
 );
@@ -305,6 +308,17 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans ADD COLUMN IF NOT EXISTS request_params JSON;\n"
         "ALTER TABLE spans ADD COLUMN IF NOT EXISTS request_tools  JSON"
     )),
+    # Migration 12: cache_write_tokens on sessions. spans.cache_write_tokens
+    # already exists (migration 5); the per-session aggregate column was still
+    # missing, so cache-*write*/creation tokens never rolled up to the session
+    # row. Now tracked so the dashboard can show total cache activity
+    # (reads + writes) per session and the cost engine can price writes at the
+    # higher cache-write rate. Nullable; existing rows default 0. The spans line
+    # is a defensive no-op (the column is already present from migration 5).
+    (12, (
+        "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0;\n"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0"
+    )),
 ]
 
 
@@ -392,6 +406,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         input_tokens=d.get("input_tokens") or 0,
         output_tokens=d.get("output_tokens") or 0,
         cache_tokens=d.get("cache_tokens") or 0,
+        cache_write_tokens=d.get("cache_write_tokens") or 0,
         tool_call_count=d.get("tool_call_count") or 0,
         error_count=d.get("error_count") or 0,
         plan_tier=d.get("plan_tier") or "unknown",
@@ -717,8 +732,8 @@ class DuckDBBackend:
             INSERT INTO sessions (
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
-                tool_call_count, error_count, plan_tier
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                tool_call_count, error_count, plan_tier, cache_write_tokens
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -726,6 +741,7 @@ class DuckDBBackend:
                 input_tokens = EXCLUDED.input_tokens,
                 output_tokens = EXCLUDED.output_tokens,
                 cache_tokens = EXCLUDED.cache_tokens,
+                cache_write_tokens = EXCLUDED.cache_write_tokens,
                 tool_call_count = EXCLUDED.tool_call_count,
                 error_count = EXCLUDED.error_count,
                 plan_tier = CASE
@@ -739,7 +755,7 @@ class DuckDBBackend:
                 session.started_at, session.ended_at, session.status,
                 session.total_cost_usd, session.input_tokens, session.output_tokens,
                 session.cache_tokens, session.tool_call_count, session.error_count,
-                session.plan_tier,
+                session.plan_tier, session.cache_write_tokens,
             ],
         )
 

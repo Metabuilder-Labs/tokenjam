@@ -99,7 +99,10 @@ class SessionRecord:
     total_cost_usd:  float | None = None
     input_tokens:    int          = 0
     output_tokens:   int          = 0
+    # cache_tokens = cache reads (reused); cache_write_tokens = cache writes/
+    # creation. Kept separate; the dashboard's "Cache tokens" shows their sum.
     cache_tokens:    int          = 0
+    cache_write_tokens: int       = 0
     tool_call_count: int          = 0
     error_count:     int          = 0
     # Canonical plan-tier identifier for the user's billing relationship with
