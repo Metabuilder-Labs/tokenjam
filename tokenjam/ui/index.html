@@ -2088,7 +2088,6 @@ function StatusView({ params }) {
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
           <div class="card-foot">→ Map / Approach / Timeline</div>
-          ${a.status === 'idle' && a.session_id ? html`<div style="margin-top:10px"><${RestoreButton} sessionId=${a.session_id} /></div>` : null}
         </div>`;
   };
 
@@ -2379,6 +2378,7 @@ function SessionDetailView({ sessionId }) {
     ${backBtn}
     <div class="page-title">${title}</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Session ${s.session_id}</div>
+    ${s.status !== 'active' && s.session_id ? html`<div style="margin:-8px 0 16px"><${RestoreButton} sessionId=${s.session_id} /></div>` : null}
 
     <div class="cards">
       <div class="card">
