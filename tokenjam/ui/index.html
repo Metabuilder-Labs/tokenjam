@@ -2376,9 +2376,11 @@ function SessionDetailView({ sessionId }) {
 
   return html`
     ${backBtn}
-    <div class="page-title">${title}</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Session ${s.session_id}</div>
-    ${s.status !== 'active' && s.session_id ? html`<div style="margin:-8px 0 16px"><${RestoreButton} sessionId=${s.session_id} /></div>` : null}
+    <div style="display:flex;align-items:center;gap:16px">
+      <div class="page-title" style="margin-bottom:0">${title}</div>
+      ${s.status !== 'active' && s.session_id ? html`<div style="margin-left:auto"><${RestoreButton} sessionId=${s.session_id} /></div>` : null}
+    </div>
+    <div style="font-size:12px;color:var(--text-dim);margin:6px 0 16px;font-family:'Geist Mono',monospace">Session ${s.session_id}</div>
 
     <div class="cards">
       <div class="card">
