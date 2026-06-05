@@ -511,8 +511,32 @@ table.archive-list .a-id { color: var(--text); }
 .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-back { margin-bottom: 16px; }
-.btn-restore { padding: 3px 8px; font-size: 11px; white-space: nowrap; }
+.btn-restore { padding: 3px 8px; font-size: 11px; white-space: nowrap; position: relative; display: inline-flex; align-items: center; gap: 5px; }
 .btn-restore.copied { border-color: var(--success); color: var(--success); }
+.btn-restore svg { width: 12px; height: 12px; flex-shrink: 0; }
+.btn-restore .restore-tip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: 'Geist Mono', monospace;
+  font-weight: normal;
+  white-space: normal;
+  text-align: left;
+  max-width: 280px;
+  z-index: 100;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+.btn-restore:hover .restore-tip { display: block; }
+.btn-restore .restore-cmd { display: block; margin-top: 4px; color: var(--text-dim); word-break: break-all; }
 
 /* Segmented view toggle (Cards | List), e.g. the Status screen (#241). */
 .view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -1965,7 +1989,12 @@ function RestoreButton({ sessionId }) {
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };
-  return html`<button class=${'btn btn-restore' + (copied ? ' copied' : '')} title=${cmd} onClick=${copy}>${copied ? 'copied ✓' : 'restore session'}</button>`;
+  const copyIcon = html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+  return html`<button class=${'btn btn-restore' + (copied ? ' copied' : '')} onClick=${copy}>
+    ${copyIcon}
+    <span>${copied ? 'copied ✓' : 'restore session'}</span>
+    <span class="restore-tip">Paste & run in your terminal to resume this session:<span class="restore-cmd">${cmd}</span></span>
+  </button>`;
 }
 
 // ============================
