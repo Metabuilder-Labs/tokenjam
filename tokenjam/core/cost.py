@@ -8,6 +8,12 @@ from tokenjam.core.pricing import get_rates, ModelRates, DEFAULT_INPUT_PER_MTOK,
 
 logger = logging.getLogger(__name__)
 
+# Dedupe the "No pricing data" warning to one log line per (provider, model)
+# pair per process. Backfilling a 247-session Claude Code project used to
+# emit the same warning hundreds of times in a row (issue #98). Now it
+# emits exactly once and stays out of the way.
+_UNKNOWN_MODEL_WARNED: set[tuple[str, str]] = set()
+
 
 def calculate_cost(
     provider: str,
@@ -25,16 +31,25 @@ def calculate_cost(
     Logs a warning on fallback so developers know to add the model.
     Zero tokens -> zero cost (no warning).
     """
-    if input_tokens == 0 and output_tokens == 0:
+    if (
+        input_tokens == 0
+        and output_tokens == 0
+        and cache_read_tokens == 0
+        and cache_write_tokens == 0
+    ):
         return 0.0
 
     rates = get_rates(provider, model)
     if rates is None:
-        logger.warning(
-            "No pricing data for %s/%s — using default rates. "
-            "Add to tokenjam/pricing/models.toml to get accurate costs.",
-            provider, model,
-        )
+        # Warn once per (provider, model) per process — see _UNKNOWN_MODEL_WARNED.
+        key = (provider, model)
+        if key not in _UNKNOWN_MODEL_WARNED:
+            _UNKNOWN_MODEL_WARNED.add(key)
+            logger.warning(
+                "No pricing data for %s/%s — using default rates. "
+                "Add to tokenjam/pricing/models.toml to get accurate costs.",
+                provider, model,
+            )
         rates = ModelRates(
             input_per_mtok=DEFAULT_INPUT_PER_MTOK,
             output_per_mtok=DEFAULT_OUTPUT_PER_MTOK,
@@ -68,11 +83,15 @@ class CostEngine:
             return
         input_tokens = span.input_tokens or 0
         output_tokens = span.output_tokens or 0
-        if input_tokens == 0 and output_tokens == 0:
-            return
-
         cache_read_tokens = span.cache_tokens or 0
-        cache_write_tokens = span.cache_creation_tokens or 0
+        cache_write_tokens = span.cache_write_tokens or 0
+        if (
+            input_tokens == 0
+            and output_tokens == 0
+            and cache_read_tokens == 0
+            and cache_write_tokens == 0
+        ):
+            return
 
         # Record whether the span was already pre-priced before we compute.
         # Pre-priced spans have their session cost handled by _build_or_update_session

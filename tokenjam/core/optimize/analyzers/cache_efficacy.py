@@ -57,12 +57,65 @@ class CacheEfficacyRow:
     flagged:       bool            # surfaced as a recommendation candidate
 
 
+# Realistic cache-read efficacy ceiling. The recoverable estimate measures the
+# gap between current efficacy and this ceiling — not 100%, which is never
+# achievable (system + first-call input is always uncached).
+EFFICACY_CEILING = 0.80
+
+
 @dataclass
 class CacheEfficacyFinding:
     """All (provider, model) rows in the window, plus the flagged subset."""
     rows:        list[CacheEfficacyRow] = field(default_factory=list)
     flagged:     list[CacheEfficacyRow] = field(default_factory=list)
     confidence:  str = "structural"
+    # The realistic efficacy ceiling, exposed so the UI can classify an
+    # "already optimized" state without hardcoding the threshold (#135).
+    efficacy_ceiling: float = EFFICACY_CEILING
+    # Recoverable-savings contract (#111). See types.DowngradeFinding for the
+    # field semantics. None when no row has a caching dimension to recover.
+    estimated_recoverable_usd:    float | None = None
+    estimated_recoverable_tokens: int | None   = None
+    estimate_basis:               str          = ""
+    estimate_confidence:          str          = "heuristic"
+
+
+def estimate_cache_recoverable(
+    rows: list[CacheEfficacyRow],
+) -> tuple[float | None, int | None]:
+    """Estimate recoverable spend from closing the cache-efficacy gap.
+
+    For each (provider, model) row with a known cache-read rate, take the gap
+    between current efficacy and the 80% ceiling, apply it to the row's input
+    tokens, and price the shifted tokens at the input-vs-cache rate delta.
+    Returns (usd, tokens) summed across rows, or (None, None) when no row has a
+    caching dimension to recover against.
+    """
+    from tokenjam.core.pricing import get_rates
+
+    total_usd = 0.0
+    total_tokens = 0
+    any_priced = False
+    for r in rows:
+        rates = get_rates(r.provider, r.model)
+        if rates is None or rates.cache_read_per_mtok <= 0:
+            continue
+        rate_delta = rates.input_per_mtok - rates.cache_read_per_mtok
+        if rate_delta <= 0:
+            continue
+        gap = max(0.0, EFFICACY_CEILING - r.efficacy)
+        if gap <= 0:
+            continue
+        recoverable_tokens = gap * r.input_tokens
+        if recoverable_tokens <= 0:
+            continue
+        any_priced = True
+        total_usd += (recoverable_tokens / 1_000_000) * rate_delta
+        total_tokens += int(recoverable_tokens)
+
+    if not any_priced:
+        return None, None
+    return round(total_usd, 6), total_tokens
 
 
 def _compute_rows(conn, since, until, agent_id: str | None) -> list[CacheEfficacyRow]:
@@ -119,7 +172,14 @@ def run(ctx: AnalyzerContext) -> None:
     rows = _compute_rows(ctx.conn, ctx.since, ctx.until, ctx.agent_id)
     if not rows:
         return
+    rec_usd, rec_tokens = estimate_cache_recoverable(rows)
     ctx.report.findings["cache"] = CacheEfficacyFinding(
         rows=rows,
         flagged=[r for r in rows if r.flagged],
+        estimated_recoverable_usd=rec_usd,
+        estimated_recoverable_tokens=rec_tokens,
+        estimate_basis=(
+            "gap between current cache-read efficacy and 80% ceiling at the "
+            "input-vs-cache rate delta"
+        ),
     )

@@ -93,7 +93,7 @@ def _session_summary(db: Any, s: SessionRecord) -> dict[str, Any]:
         "input_tokens": s.input_tokens,
         "output_tokens": s.output_tokens,
         "cache_tokens": s.cache_tokens,
-        "cache_creation_tokens": s.cache_creation_tokens,
+        "cache_write_tokens": s.cache_write_tokens,
         "tool_call_count": s.tool_call_count,
         "error_count": s.error_count,
         "span_count": span_count,
@@ -199,7 +199,7 @@ async def get_run_detail(request: Request, run_id: str):
     total_input = sum(s["input_tokens"] for s in summaries)
     total_output = sum(s["output_tokens"] for s in summaries)
     total_cache = sum(s["cache_tokens"] for s in summaries)
-    total_cache_creation = sum(s["cache_creation_tokens"] for s in summaries)
+    total_cache_write = sum(s["cache_write_tokens"] for s in summaries)
     total_tools = sum(s["tool_call_count"] for s in summaries)
     total_errors = sum(s["error_count"] for s in summaries)
     total_spans = sum(s["span_count"] for s in summaries)
@@ -222,7 +222,7 @@ async def get_run_detail(request: Request, run_id: str):
             "input_tokens": total_input,
             "output_tokens": total_output,
             "cache_tokens": total_cache,
-            "cache_creation_tokens": total_cache_creation,
+            "cache_write_tokens": total_cache_write,
             "tool_call_count": total_tools,
             "error_count": total_errors,
             "span_count": total_spans,

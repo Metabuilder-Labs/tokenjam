@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, AsyncContextManager, Callable
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from tokenjam.api.middleware import IngestAuthMiddleware
 from tokenjam.core.config import TjConfig
@@ -37,7 +38,7 @@ def create_app(
     running daemon's state file).
     """
     app = FastAPI(
-        title="TokenJam",
+        title="TokenJam Lens",
         version="0.1.0",
         docs_url="/docs",
         redoc_url=None,
@@ -76,6 +77,7 @@ def create_app(
     from tokenjam.api.routes.agents import router as agents_router
     from tokenjam.api.routes.optimize import router as optimize_router
     from tokenjam.api.routes.cost_compare import router as cost_compare_router
+    from tokenjam.api.routes.version import router as version_router, health_router
 
     app.include_router(spans_router, prefix="/api/v1")
     app.include_router(traces_router, prefix="/api/v1")
@@ -90,6 +92,8 @@ def create_app(
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(optimize_router, prefix="/api/v1")
     app.include_router(cost_compare_router, prefix="/api/v1")
+    app.include_router(version_router, prefix="/api/v1")
+    app.include_router(health_router)  # /health — no prefix, for uptime probes
     app.include_router(metrics_router)  # /metrics — no prefix
     app.include_router(otlp_router)  # /v1/traces, /v1/metrics, /v1/logs — no prefix
 
@@ -107,6 +111,19 @@ def create_app(
                 f'<meta name="tj-api-key" content="{html_escape(config.api.auth.api_key, quote=True)}">\n</head>',
             )
         return HTMLResponse(html)
+
+    # Vendored JS modules (Preact + htm) served as static files so the
+    # dashboard works fully offline — see issue #87. Mounted FIRST so the
+    # /ui/{path} catchall below doesn't shadow it. Must include the
+    # `name="ui-vendor"` so the StaticFiles 404s cleanly when a vendor
+    # path doesn't exist, instead of falling through to the SPA catchall.
+    _vendor_dir = _UI_DIR / "vendor"
+    if _vendor_dir.exists():
+        app.mount(
+            "/ui/vendor",
+            StaticFiles(directory=str(_vendor_dir)),
+            name="ui-vendor",
+        )
 
     @app.get("/", include_in_schema=False)
     async def ui_root():

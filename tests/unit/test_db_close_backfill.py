@@ -16,7 +16,9 @@ from tests.factories import make_session
 
 
 def _migration_8_sql() -> str:
-    return next(sql for version, sql in MIGRATIONS if version == 8)
+    # The ended_at-repair migration, selected by content so it survives any
+    # renumbering (it moved from 8 -> 9 when the cache_write migration landed).
+    return next(sql for _v, sql in MIGRATIONS if "SET ended_at = sub.max_ts" in sql)
 
 
 def _insert_span(db, session_id: str, start, end) -> None:

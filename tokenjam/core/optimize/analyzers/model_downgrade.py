@@ -201,6 +201,17 @@ def analyze_model_downgrade(
         window_total_tokens=window_total_tokens,
         percent_of_tokens=round(percent_tokens, 1),
         monthly_tokens_in_candidates=monthly_tokens_in_candidates,
+        # Recoverable-savings contract (#111). Use the WINDOW savings (not the
+        # 30-day projection) so every analyzer's estimated_recoverable_usd shares
+        # one time basis — "recoverable over the analyzed window" — and the
+        # Overview tiles are directly comparable (#122). monthly_savings_usd
+        # remains for the CLI's own projected-savings line.
+        estimated_recoverable_usd=round(savings_window, 6),
+        estimated_recoverable_tokens=candidate_tokens,
+        estimate_basis=(
+            "candidate sessions routed to a cheaper model over the window — "
+            "structural fit only, no quality validation"
+        ),
     )
 
 

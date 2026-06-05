@@ -238,6 +238,154 @@ async def test_get_cost_returns_aggregated_rows(client):
     assert "total_cost_usd" in data
 
 
+async def test_trace_detail_includes_cache_write_tokens(db, client):
+    """The traces API exposes cache_write_tokens so per-span cost reconciles
+    from the displayed columns (#17 — it was the ~91% cost driver, hidden)."""
+    sp = make_llm_span(agent_id="a", model="claude-opus-4-8", provider="anthropic",
+                       input_tokens=2, output_tokens=465, cache_tokens=243597,
+                       cache_write_tokens=209000, cost_usd=1.4423)
+    db.insert_span(sp)
+    resp = await client.get(f"/api/v1/traces/{sp.trace_id}")
+    assert resp.status_code == 200
+    span = resp.json()["spans"][0]
+    assert span["cache_tokens"] == 243597
+    assert span["cache_write_tokens"] == 209000
+
+
+async def test_cost_rows_carry_cache_tokens(db, client):
+    """`/api/v1/cost` rows + totals include cache-read and cache-write (#17)."""
+    sp = make_llm_span(agent_id="a", model="claude-opus-4-8", provider="anthropic",
+                       input_tokens=2, output_tokens=465, cache_tokens=243597,
+                       cache_write_tokens=209000, cost_usd=1.4423)
+    db.insert_span(sp)
+    data = (await client.get("/api/v1/cost?group_by=model")).json()
+    assert data["rows"][0]["cache_tokens"] == 243597
+    assert data["rows"][0]["cache_write_tokens"] == 209000
+    assert data["total_cache_write_tokens"] == 209000
+
+
+async def test_cost_includes_window_series_for_chart(client):
+    """/api/v1/cost carries a window-bucketed series (per bucket+agent+model)
+    plus the bucket size and window bounds so the chart can span the full
+    selected window with zero-fill (#113/#133)."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/cost", params={"since": "7d", "group_by": "day"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "series" in data and isinstance(data["series"], list)
+    assert data["series_bucket"] in ("hour", "day")
+    assert isinstance(data["window_start"], int) and isinstance(data["window_end"], int)
+    assert data["window_end"] >= data["window_start"]
+    if data["series"]:
+        item = data["series"][0]
+        assert {"bucket", "agent_id", "model", "cost_usd",
+                "input_tokens", "output_tokens"} <= set(item)
+        assert isinstance(item["bucket"], int)  # epoch seconds
+
+
+async def test_cost_series_buckets_hourly_for_short_window(client):
+    """A ≤2-day window buckets hourly so 24h renders with hourly ticks (#133)."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/cost", params={"since": "24h"})
+    assert resp.json()["series_bucket"] == "hour"
+
+
+_FRAMING_KEYS = {
+    "pricing_mode", "plan_tier", "plan_label", "plan_monthly_usd",
+    "subscription_share_pct", "api_share_pct", "display_rule", "qualifier_text",
+}
+
+
+async def test_cost_response_includes_framing_block(client):
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/cost")
+    assert resp.status_code == 200
+    framing = resp.json()["framing"]
+    assert _FRAMING_KEYS <= set(framing)
+
+
+async def test_optimize_response_includes_framing_block(client):
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/optimize?since=30d")
+    assert resp.status_code == 200
+    data = resp.json()
+    if data.get("error") == "no_data":
+        pytest.skip("no spans landed for optimize in this fixture")
+    assert _FRAMING_KEYS <= set(data["framing"])
+
+
+async def test_optimize_response_always_carries_downgrade_key(client):
+    """The downsize typed slot must always be present (null when no candidates)
+    so the UI can always render a Downsize section (#126)."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/optimize?since=30d")
+    data = resp.json()
+    if data.get("error") == "no_data":
+        pytest.skip("no spans landed for optimize in this fixture")
+    assert "downgrade" in data  # present even when null
+
+
+async def test_root_serves_lens_title(client):
+    """Brand pass (#114): the served dashboard <title> is 'TokenJam Lens'."""
+    resp = await client.get("/")
+    assert resp.status_code == 200
+    assert "<title>TokenJam Lens</title>" in resp.text
+
+
+async def test_optimize_chain_framing_and_recoverable_fields(client):
+    """The framing block (#110) + per-finding recoverable fields (#111) are
+    both present on /api/v1/optimize — validates the chain Overview relies on."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/optimize?since=30d")
+    data = resp.json()
+    if data.get("error") == "no_data":
+        pytest.skip("no spans landed for optimize in this fixture")
+    assert _FRAMING_KEYS <= set(data["framing"])
+    # The savings analyzers carry the recoverable contract fields (#111).
+    # cache-recommend / budget-projection intentionally do not.
+    findings = data.get("findings") or {}
+    for name in ("cache", "script", "trim"):
+        if name in findings:
+            assert "estimated_recoverable_usd" in findings[name]
+            assert "estimate_basis" in findings[name]
+
+
+async def test_optimize_fast_skips_trim(client):
+    """fast=true skips the expensive Trim analyzer and reports it (#114)."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/optimize?since=30d&fast=true")
+    assert resp.status_code == 200
+    data = resp.json()
+    if data.get("error") == "no_data":
+        pytest.skip("no spans landed for optimize in this fixture")
+    assert "trim" in data.get("skipped_analyzers", [])
+    assert "trim" not in (data.get("findings") or {})
+
+
+async def test_budget_framing_reflects_configured_subscription_plan(db):
+    """The budget surface has no window, so framing falls back to the
+    declared plan in config (#110)."""
+    from tokenjam.core.config import ProviderBudget
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    cfg.budgets["anthropic"] = ProviderBudget(plan="max_5x")
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/budget")
+    assert resp.status_code == 200
+    framing = resp.json()["framing"]
+    assert framing["pricing_mode"] == "subscription"
+    assert framing["plan_tier"] == "max_5x"
+    assert framing["plan_label"] == "Max 5x plan"
+    assert framing["display_rule"] == "suppress_dollars_for_subscription_share"
+
+
 async def test_get_alerts_returns_list(client):
     resp = await client.get("/api/v1/alerts")
     assert resp.status_code == 200

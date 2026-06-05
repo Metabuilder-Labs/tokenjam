@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.cost import compute_cost_diff
+from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
@@ -63,6 +64,22 @@ def get_cost_compare(
             "total_tokens": w.total_tokens,
             "total_cost_usd": w.total_cost_usd,
         }
+    # Plan-tier framing for the current window (#110), so the UI frames the
+    # comparison's dollar deltas identically to the CLI.
+    conn = getattr(db, "conn", None)
+    mix = (
+        plan_tier_mix(conn, diff.current.since, diff.current.until, agent_id)
+        if conn is not None else {}
+    )
+    framing = compute_framing(
+        request.app.state.config,
+        WindowSummary(
+            total_cost_usd=diff.current.total_cost_usd,
+            total_tokens=diff.current.total_tokens,
+            sessions=sum(mix.values()),
+            plan_tier_mix=mix,
+        ),
+    )
     return {
         "current": _wt(diff.current),
         "previous": _wt(diff.previous),
@@ -72,4 +89,5 @@ def get_cost_compare(
         "tokens_delta_pct": diff.tokens_delta_pct,
         "by_agent": diff.by_agent,
         "by_model": diff.by_model,
+        "framing": framing.to_dict(),
     }

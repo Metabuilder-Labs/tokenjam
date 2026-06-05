@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+from rich.markup import escape as _rich_escape
 
 from tokenjam.utils.formatting import console
 
@@ -36,18 +37,27 @@ def _report_dir() -> Path:
 @click.option("--trim", "trim_agent", default=None, flag_value="",
               is_flag=False, help="Generate the Trim HTML report. "
                                    "Optional agent_id scopes the report.")
+@click.option("--reuse", "reuse_agent", default=None, flag_value="",
+              is_flag=False, help="Generate the Reuse HTML + Markdown report. "
+                                   "Optional agent_id scopes the report.")
 @click.option("--since", default="30d", help="Window for the report (default 30d).")
 @click.option("--no-open", "no_open", is_flag=True, default=False,
-              help="Write the HTML file without opening it in a browser.")
+              help="Write the report files without opening the HTML in a browser.")
 @click.pass_context
-def cmd_report(ctx: click.Context, trim_agent: str | None, since: str,
-               no_open: bool) -> None:
+def cmd_report(ctx: click.Context, trim_agent: str | None,
+               reuse_agent: str | None, since: str, no_open: bool) -> None:
     """Generate detailed HTML reports for analyzer findings."""
-    if trim_agent is None:
+    if trim_agent is not None and reuse_agent is not None:
+        raise click.UsageError("Pass only one of --trim / --reuse.")
+    if trim_agent is not None:
+        _render_trim_report(ctx, trim_agent or None, since, no_open)
+    elif reuse_agent is not None:
+        _render_reuse_report(ctx, reuse_agent or None, since, no_open)
+    else:
         raise click.UsageError(
-            "Specify a report type. Currently supported: --trim [<agent_id>]"
+            "Specify a report type. Supported: --trim [<agent_id>], "
+            "--reuse [<agent_id>]"
         )
-    _render_trim_report(ctx, trim_agent or None, since, no_open)
 
 
 def _render_trim_report(
@@ -82,7 +92,7 @@ def _render_trim_report(
 
     if not finding.enabled:
         # Show the hint inline rather than producing an empty HTML file.
-        console.print(f"[yellow]Trim analyzer not ready:[/yellow]\n{finding.hint}")
+        console.print(f"[yellow]Trim analyzer not ready:[/yellow]\n{_rich_escape(finding.hint)}")
         return
 
     if not finding.per_prompt:
@@ -97,6 +107,86 @@ def _render_trim_report(
     console.print(f"[green]✓[/green] Trim report written to [bold]{out_path}[/bold]")
     if not no_open:
         webbrowser.open(f"file://{out_path.resolve()}")
+
+
+def _render_reuse_report(
+    ctx: click.Context,
+    agent_id: str | None,
+    since: str,
+    no_open: bool,
+) -> None:
+    """Run the Reuse analyzer and write its HTML page + Markdown sidecars."""
+    from tokenjam import __version__
+    from tokenjam.core.export.reuse_report import write_reuse_report
+    from tokenjam.core.framing import (
+        dominant_plan,
+        plan_tier_mix,
+        pricing_mode_for,
+    )
+    from tokenjam.core.optimize import build_report
+    from tokenjam.utils.time_parse import parse_since, utcnow
+
+    db = ctx.obj.get("db")
+    config = ctx.obj.get("config")
+    if db is None or config is None:
+        raise click.ClickException("tj report requires a database connection.")
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        # The report needs direct DB access to fetch planning text. When the
+        # daemon holds the write lock, point the user at it rather than failing
+        # opaquely (same constraint as --trim).
+        raise click.ClickException(
+            "tj report --reuse needs direct database access. Stop the daemon "
+            "with `tj stop` and re-run, or query via the API."
+        )
+
+    try:
+        since_dt = parse_since(since)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="'--since'") from exc
+
+    until_dt = utcnow()
+    report = build_report(
+        db=db, config=config, since=since_dt, until=until_dt,
+        agent_id=agent_id, findings=["reuse"],
+    )
+    finding = report.findings.get("reuse")
+    if finding is None or not finding.clusters:
+        console.print(
+            "[dim]No repeated planning detected in the window — try a longer "
+            "[bold]--since[/bold].[/dim]"
+        )
+        return
+
+    pricing_mode = pricing_mode_for(
+        dominant_plan(plan_tier_mix(conn, since_dt, until_dt, agent_id))
+    )
+    now = utcnow()  # tz-aware UTC (Rule 9)
+    html_filename = f"reuse-{now:%Y%m%d-%H%M%S}.html"
+    out_dir = _report_dir()
+
+    html_path, md_paths = write_reuse_report(
+        finding,
+        conn=conn, config=config, out_dir=out_dir,
+        agent_scope=agent_id, since=since, pricing_mode=pricing_mode,
+        version=__version__, generated_at_iso=now.isoformat(),
+        html_filename=html_filename,
+    )
+
+    console.print(f"[green]✓[/green] Reuse report written to [bold]{html_path}[/bold]")
+    if md_paths:
+        console.print(
+            f"  [dim]{len(md_paths)} Markdown skeleton"
+            f"{'s' if len(md_paths) != 1 else ''} written alongside it.[/dim]"
+        )
+    else:
+        console.print(
+            "  [dim]No Markdown skeletons written — enable "
+            "[bold]capture.completions[/bold] to render skeleton text.[/dim]"
+        )
+    if not no_open:
+        webbrowser.open(f"file://{html_path.resolve()}")
 
 
 def _render_html(finding, agent_scope: str | None, since: str) -> str:

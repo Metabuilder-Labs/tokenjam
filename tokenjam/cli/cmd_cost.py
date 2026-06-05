@@ -41,7 +41,7 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
             if output_json:
                 click.echo(json.dumps(_diff_to_dict(diff), default=str))
             else:
-                _render_diff(diff)
+                _render_diff(diff, _compare_framing(ctx, db, since_dt, until_dt, agent, diff))
             return
         # API-shim path: fetch the diff from tj serve. The endpoint
         # mirrors compute_cost_diff's output schema, so we can pass
@@ -71,6 +71,8 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
     )
     rows = db.get_cost_summary(filters)
     total = sum(r.cost_usd for r in rows)
+    total_in = sum(r.input_tokens for r in rows)
+    total_out = sum(r.output_tokens for r in rows)
 
     if output_json:
         click.echo(json.dumps({
@@ -83,54 +85,72 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
         console.print("[dim]No cost data found for the given filters.[/dim]")
         return
 
+    # CACHE R / CACHE W columns make cost reconcilable from the shown tokens —
+    # cache-write is often the dominant driver and was previously invisible (#17).
+    cache_r = sum(r.cache_tokens for r in rows)
+    cache_w = sum(r.cache_write_tokens for r in rows)
     if group_by == "day":
-        table = make_table("DATE", "AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "COST")
+        table = make_table("DATE", "AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
         for r in rows:
             table.add_row(
-                r.group,
-                r.agent_id or "-",
-                r.model or "-",
-                format_tokens(r.input_tokens),
-                format_tokens(r.output_tokens),
+                r.group, r.agent_id or "-", r.model or "-",
+                format_tokens(r.input_tokens), format_tokens(r.output_tokens),
+                format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
                 format_cost(r.cost_usd),
             )
+        table.add_row("", "", "", format_tokens(total_in), format_tokens(total_out),
+                      format_tokens(cache_r), format_tokens(cache_w),
+                      f"[bold]{format_cost(total)}[/bold]")
     elif group_by == "agent":
-        table = make_table("AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "COST")
+        table = make_table("AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
         for r in rows:
             table.add_row(
-                r.group,
-                r.model or "-",
-                format_tokens(r.input_tokens),
-                format_tokens(r.output_tokens),
+                r.group, r.model or "-",
+                format_tokens(r.input_tokens), format_tokens(r.output_tokens),
+                format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
                 format_cost(r.cost_usd),
             )
+        table.add_row("", "", format_tokens(total_in), format_tokens(total_out),
+                      format_tokens(cache_r), format_tokens(cache_w),
+                      f"[bold]{format_cost(total)}[/bold]")
     elif group_by == "model":
-        table = make_table("MODEL", "TOKENS IN", "TOKENS OUT", "COST")
+        table = make_table("MODEL", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
         for r in rows:
             table.add_row(
                 r.group,
-                format_tokens(r.input_tokens),
-                format_tokens(r.output_tokens),
+                format_tokens(r.input_tokens), format_tokens(r.output_tokens),
+                format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
                 format_cost(r.cost_usd),
             )
+        table.add_row("", format_tokens(total_in), format_tokens(total_out),
+                      format_tokens(cache_r), format_tokens(cache_w),
+                      f"[bold]{format_cost(total)}[/bold]")
     elif group_by == "tool":
+        # Tool grouping has no token dimension — cost only.
         table = make_table("TOOL", "COST")
         for r in rows:
-            table.add_row(
-                r.group,
-                format_cost(r.cost_usd),
-            )
-
-    if group_by == "day":
-        table.add_row("", "", "", "", "[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
-    elif group_by == "agent":
-        table.add_row("", "", "", "[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
-    elif group_by == "model":
-        table.add_row("", "", "[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
-    elif group_by == "tool":
+            table.add_row(r.group, format_cost(r.cost_usd))
         table.add_row("[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
 
     console.print(table)
+
+
+def _compare_framing(ctx, db, since_dt, until_dt, agent, diff):
+    """Build the plan-tier Framing for the current comparison window from the
+    shared core/framing module (#120) — same source the API and tj optimize use.
+    Returns None if config/conn is unavailable (→ api-style rendering)."""
+    config = ctx.obj.get("config") if ctx.obj else None
+    conn = getattr(db, "conn", None)
+    if config is None or conn is None:
+        return None
+    from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
+    mix = plan_tier_mix(conn, since_dt, until_dt, agent)
+    return compute_framing(config, WindowSummary(
+        total_cost_usd=diff.current.total_cost_usd,
+        total_tokens=diff.current.total_tokens,
+        sessions=sum(mix.values()),
+        plan_tier_mix=mix,
+    ))
 
 
 def _arrow(delta: float) -> str:
@@ -148,41 +168,75 @@ def _pct_str(pct: float | None) -> str:
     return f"({sign}{pct:.1f}%)"
 
 
-def _render_diff(diff) -> None:
+# Plan-tier framing for the comparison view (#120). The mode decision comes from
+# core/framing.compute_framing — this only chooses which lines to render. In
+# subscription / local modes dollar deltas aren't marginal, so we suppress the
+# dollar lines and compare token usage; unknown keeps dollars with a qualifier;
+# api is byte-identical to the pre-framing output.
+def _suppresses_dollars(mode: str) -> bool:
+    return mode in ("subscription", "local")
+
+
+def _diff_note(mode: str, qualifier_text: str | None = None) -> str | None:
+    if mode == "subscription":
+        return ("Subscription plan — dollar deltas omitted (flat-fee billing); "
+                "comparing token usage.")
+    if mode == "local":
+        return "Local inference — no marginal cost; comparing token usage."
+    if mode == "unknown":
+        return qualifier_text or (
+            "Plan tier unknown — figures may overstate actual cost. "
+            "Run `tj onboard --reconfigure`."
+        )
+    return None  # api → no note (byte-identical)
+
+
+def _render_diff(diff, framing=None) -> None:
     """
-    Human-readable diff renderer. Plan-tier-aware rendering is deferred —
-    this v1 renders dollar deltas; tj optimize already handles the
-    subscription / local reframing in its own renderer.
+    Human-readable diff renderer. Plan-tier-aware (#120): subscription/local
+    suppress dollar deltas and compare token usage; unknown adds a qualifier;
+    api output is unchanged. The mode comes from core/framing.compute_framing.
     """
+    mode = getattr(framing, "pricing_mode", "api") if framing is not None else "api"
+    suppress = _suppresses_dollars(mode)
+    note = _diff_note(mode, getattr(framing, "qualifier_text", None))
+    if note:
+        console.print(f"[dim]{note}[/dim]")
+
     cur = diff.current
     prev = diff.previous
     cur_days = max((cur.until - cur.since).days, 1)
     prev_days = max((prev.until - prev.since).days, 1)
+    cur_cost = "" if suppress else f", {format_cost(cur.total_cost_usd)}"
+    prev_cost = "" if suppress else f", {format_cost(prev.total_cost_usd)}"
     console.print(
         f"\n[bold]Current  ({cur.since.date()} → {cur.until.date()}, "
         f"{cur_days}d):[/bold]  "
-        f"{cur.sessions} sessions, {format_tokens(cur.total_tokens)} tokens, "
-        f"{format_cost(cur.total_cost_usd)}"
+        f"{cur.sessions} sessions, {format_tokens(cur.total_tokens)} tokens"
+        f"{cur_cost}"
     )
     console.print(
         f"[bold]Previous ({prev.since.date()} → {prev.until.date()}, "
         f"{prev_days}d):[/bold] "
-        f"{prev.sessions} sessions, {format_tokens(prev.total_tokens)} tokens, "
-        f"{format_cost(prev.total_cost_usd)}"
+        f"{prev.sessions} sessions, {format_tokens(prev.total_tokens)} tokens"
+        f"{prev_cost}"
     )
     console.print()
-    console.print(
-        f"  Cost delta:   {_arrow(diff.cost_delta_usd)} "
-        f"[bold]{format_cost(abs(diff.cost_delta_usd))}[/bold] "
-        f"{_pct_str(diff.cost_delta_pct)}"
-    )
+    if not suppress:
+        console.print(
+            f"  Cost delta:   {_arrow(diff.cost_delta_usd)} "
+            f"[bold]{format_cost(abs(diff.cost_delta_usd))}[/bold] "
+            f"{_pct_str(diff.cost_delta_pct)}"
+        )
     console.print(
         f"  Token delta:  {_arrow(diff.tokens_delta)} "
         f"[bold]{format_tokens(abs(diff.tokens_delta))}[/bold] "
         f"{_pct_str(diff.tokens_delta_pct)}"
     )
 
-    if diff.by_agent:
+    # Per-agent / per-model shifts are dollar-denominated, so they're suppressed
+    # alongside the dollar deltas in flat-fee / local modes.
+    if not suppress and diff.by_agent:
         console.print()
         console.print("  [bold]Top shifts by agent:[/bold]")
         for entry in diff.by_agent:
@@ -194,7 +248,7 @@ def _render_diff(diff) -> None:
                 f"{format_cost(entry['delta'])})[/dim]"
             )
 
-    if diff.by_model:
+    if not suppress and diff.by_model:
         console.print()
         console.print("  [bold]Top shifts by model:[/bold]")
         for entry in diff.by_model:
@@ -261,21 +315,31 @@ def _render_diff_dict(d: dict) -> None:
     cur_days = max((cur_until - cur_since).days, 1) if (cur_since and cur_until) else 1
     prev_days = max((prev_until - prev_since).days, 1) if (prev_since and prev_until) else 1
 
+    # Plan-tier framing from the /api/v1/cost/compare response block (#120).
+    fr = d.get("framing") or {}
+    mode = fr.get("pricing_mode", "api")
+    suppress = _suppresses_dollars(mode)
+    note = _diff_note(mode, fr.get("qualifier_text"))
+    if note:
+        console.print(f"[dim]{note}[/dim]")
+
+    cur_cost = "" if suppress else f", {format_cost(float(cur.get('total_cost_usd', 0)))}"
+    prev_cost = "" if suppress else f", {format_cost(float(prev.get('total_cost_usd', 0)))}"
     console.print(
         f"\n[bold]Current  "
         f"({cur_since.date() if cur_since else '?'} → "
         f"{cur_until.date() if cur_until else '?'}, {cur_days}d):[/bold]  "
         f"{cur.get('sessions', 0)} sessions, "
-        f"{format_tokens(int(cur.get('total_tokens', 0)))} tokens, "
-        f"{format_cost(float(cur.get('total_cost_usd', 0)))}"
+        f"{format_tokens(int(cur.get('total_tokens', 0)))} tokens"
+        f"{cur_cost}"
     )
     console.print(
         f"[bold]Previous "
         f"({prev_since.date() if prev_since else '?'} → "
         f"{prev_until.date() if prev_until else '?'}, {prev_days}d):[/bold] "
         f"{prev.get('sessions', 0)} sessions, "
-        f"{format_tokens(int(prev.get('total_tokens', 0)))} tokens, "
-        f"{format_cost(float(prev.get('total_cost_usd', 0)))}"
+        f"{format_tokens(int(prev.get('total_tokens', 0)))} tokens"
+        f"{prev_cost}"
     )
     console.print()
 
@@ -283,19 +347,20 @@ def _render_diff_dict(d: dict) -> None:
     tokens_delta = int(d.get("tokens_delta", 0))
     cost_pct = d.get("cost_delta_pct")
     tokens_pct = d.get("tokens_delta_pct")
-    console.print(
-        f"  Cost delta:   {_arrow(cost_delta)} "
-        f"[bold]{format_cost(abs(cost_delta))}[/bold] "
-        f"{_pct_str(cost_pct)}"
-    )
+    if not suppress:
+        console.print(
+            f"  Cost delta:   {_arrow(cost_delta)} "
+            f"[bold]{format_cost(abs(cost_delta))}[/bold] "
+            f"{_pct_str(cost_pct)}"
+        )
     console.print(
         f"  Token delta:  {_arrow(tokens_delta)} "
         f"[bold]{format_tokens(abs(tokens_delta))}[/bold] "
         f"{_pct_str(tokens_pct)}"
     )
 
-    by_agent = d.get("by_agent") or []
-    by_model = d.get("by_model") or []
+    by_agent = d.get("by_agent") or [] if not suppress else []
+    by_model = d.get("by_model") or [] if not suppress else []
     if by_agent:
         console.print("\n  [bold]Top shifts by agent:[/bold]")
         for entry in by_agent:

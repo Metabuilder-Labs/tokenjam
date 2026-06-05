@@ -1092,3 +1092,103 @@ def test_session_end_requires_an_id(runner):
     with patch("tokenjam.cli.main.load_config", return_value=cfg):
         result = runner.invoke(cli, ["session-end"])
     assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# tj report --reuse / tj optimize reuse --export-templates  (issue #116)
+# ---------------------------------------------------------------------------
+
+def _reuse_config(completions: bool = True):
+    from tokenjam.core.config import CaptureConfig
+    return TjConfig(version="1", capture=CaptureConfig(completions=completions))
+
+
+def _seed_reuse_cluster(db, *, count: int = 3, completions: bool = True):
+    """Seed `count` sessions sharing a planning skeleton + tool sequence."""
+    from datetime import timedelta
+
+    from tokenjam.otel.semconv import GenAIAttributes
+    from tests.factories import make_session, make_tool_span
+
+    base = utcnow() - timedelta(days=2)
+    for i in range(count):
+        sid = f"reuse-{i}"
+        db.upsert_session(make_session(agent_id="test-agent", session_id=sid))
+        t0 = base + timedelta(minutes=i)
+        attrs = (
+            {GenAIAttributes.COMPLETION_CONTENT: f"Cut release v0.{i} then run tests"}
+            if completions else None
+        )
+        plan = make_llm_span(
+            agent_id="test-agent", session_id=sid, start_time=t0,
+            cost_usd=0.20, input_tokens=1000, output_tokens=300,
+            extra_attributes=attrs,
+        )
+        db.insert_span(plan)
+        for j, tn in enumerate(["read_file", "run_test"]):
+            ts = make_tool_span(tool_name=tn)
+            ts.session_id = sid
+            ts.start_time = t0 + timedelta(seconds=j + 1)
+            db.insert_span(ts)
+
+
+def test_report_reuse_writes_html_and_sidecars(runner, db, tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+    _seed_reuse_cluster(db, count=3, completions=True)
+
+    result = _invoke(runner, db, _reuse_config(completions=True),
+                     ["report", "--reuse", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "Reuse report written" in result.output
+    htmls = list(tmp_path.glob("reuse-*.html"))
+    mds = list(tmp_path.glob("reuse-*.md"))
+    assert len(htmls) == 1
+    assert len(mds) == 1                      # one cluster → one sidecar
+    # The skeleton picked up the varying version token as a slot.
+    assert "{{slot_1}}" in mds[0].read_text()
+    assert "cluster_id:" in mds[0].read_text()
+
+
+def test_report_reuse_sidecar_is_idempotent(runner, db, tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+    _seed_reuse_cluster(db, count=3, completions=True)
+    cfg = _reuse_config(completions=True)
+
+    _invoke(runner, db, cfg, ["report", "--reuse", "--no-open"])
+    _invoke(runner, db, cfg, ["report", "--reuse", "--no-open"])
+    # Re-running overwrites the same cluster_id-keyed sidecar, not duplicates.
+    assert len(list(tmp_path.glob("reuse-*.md"))) == 1
+
+
+def test_report_reuse_empty_window_writes_nothing(runner, db, tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+    result = _invoke(runner, db, _reuse_config(),
+                     ["report", "--reuse", "--no-open"])
+    assert result.exit_code == 0
+    assert "No repeated planning detected" in result.output
+    assert list(tmp_path.glob("reuse-*")) == []
+
+
+def test_report_reuse_capture_off_renders_html_without_sidecar(
+    runner, db, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+    _seed_reuse_cluster(db, count=3, completions=False)
+
+    result = _invoke(runner, db, _reuse_config(completions=False),
+                     ["report", "--reuse", "--no-open"])
+    assert result.exit_code == 0
+    assert len(list(tmp_path.glob("reuse-*.html"))) == 1
+    assert list(tmp_path.glob("reuse-*.md")) == []   # no skeleton text → no md
+
+
+def test_optimize_export_templates_writes_markdown(runner, db, tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+    _seed_reuse_cluster(db, count=3, completions=True)
+
+    result = _invoke(runner, db, _reuse_config(completions=True),
+                     ["optimize", "reuse", "--export-templates"])
+    assert result.exit_code == 0, result.output
+    assert "Reuse skeleton" in result.output
+    assert len(list(tmp_path.glob("reuse-*.md"))) == 1
+    assert list(tmp_path.glob("reuse-*.html")) == []   # markdown only, no HTML

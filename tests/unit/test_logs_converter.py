@@ -70,10 +70,13 @@ def test_api_request_produces_llm_span():
 
 def test_api_request_cache_tokens():
     span = _api_request_to_span(_req_attrs(), RESOURCE, NOW_NS)
-    # cache_read_tokens -> cache_tokens field (cache reads only)
+    # cache_read_tokens -> cache_tokens field (cache-read).
     assert span.cache_tokens == 500
-    # cache_creation_tokens is now its own indexed field, not stuffed in attrs
-    assert span.cache_creation_tokens == 100
+    # cache_creation_tokens -> cache_write_tokens (typed field, threaded
+    # through for cost reporting; was previously stuffed into the JSON
+    # attributes blob — see issue #93).
+    assert span.cache_write_tokens == 100
+    # And no longer leaks into the attribute bag.
     assert "cache_creation_tokens" not in span.attributes
 
 
@@ -200,13 +203,13 @@ def test_event_sequence_in_attributes():
     assert span.attributes.get("event.sequence") == 99
 
 
-def test_cache_creation_tokens_indexed_field():
+def test_cache_creation_tokens_populate_cache_write_field():
     span = _api_request_to_span(_req_attrs(**{"cache_creation_tokens": 256}), RESOURCE, NOW_NS)
-    # cache_creation_tokens is captured as its own indexed field (not dropped
-    # into the generic attributes blob like it used to be)
-    assert span.cache_creation_tokens == 256
-    assert "cache_creation_tokens" not in span.attributes
-    # cache_tokens field stays reads-only
+    # cache_creation_tokens now populates the typed cache_write_tokens field
+    # (issue #93). It used to live in span.attributes only, which meant the
+    # cost engine never charged for cache-write on this ingest path.
+    assert span.cache_write_tokens == 256
+    # cache_tokens (cache-read) is unaffected.
     assert span.cache_tokens == 500  # from default _req_attrs
 
 

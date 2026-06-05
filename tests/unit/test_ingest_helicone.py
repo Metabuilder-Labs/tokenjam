@@ -192,3 +192,71 @@ def test_ingest_rejects_both_sources(db):
 def test_ingest_rejects_neither_source(db):
     with pytest.raises(ValueError, match="exactly one"):
         ingest_helicone(db)
+
+
+# -- Cache token threading (issue #93) --
+
+def test_record_to_span_threads_cache_write_tokens():
+    """Anthropic-via-Helicone surfaces `cache_creation_input_tokens` on the
+    response object. The adapter now threads that into
+    `NormalizedSpan.cache_write_tokens` so cache-write cost is charged on
+    the Helicone backfill path the same way the live OTLP path charges it."""
+    record = {
+        "request": {
+            "id": "req-cw",
+            "created_at": "2026-04-01T10:00:00Z",
+            "model": "claude-haiku-4-5",
+            "provider": "ANTHROPIC",
+            "prompt_tokens": 100,
+        },
+        "response": {
+            "completion_tokens": 20,
+            "cache_read_input_tokens": 800,
+            "cache_creation_input_tokens": 1500,
+            "status": 200,
+        },
+        "cost_usd": 0.001,
+    }
+    span = _record_to_span(record)
+    assert span is not None
+    assert span.cache_tokens == 800
+    assert span.cache_write_tokens == 1500
+
+
+def test_record_to_span_cache_write_on_record_fallback():
+    """Older Helicone shape: cache token counts live on the top-level record
+    instead of nested under `response`. The adapter falls back to the
+    record-level key, same pattern as for cache_read."""
+    record = {
+        "request": {
+            "id": "req-cw-fallback",
+            "created_at": "2026-04-01T10:00:00Z",
+            "model": "claude-haiku-4-5",
+            "provider": "ANTHROPIC",
+            "prompt_tokens": 100,
+        },
+        "cache_read_input_tokens": 800,
+        "cache_creation_input_tokens": 1500,
+    }
+    span = _record_to_span(record)
+    assert span is not None
+    assert span.cache_tokens == 800
+    assert span.cache_write_tokens == 1500
+
+
+def test_record_to_span_cache_write_absent_leaves_field_none():
+    """When neither the response nor the record carries cache-creation,
+    the field stays None — distinguishes 'no data' from 'genuinely 0'."""
+    record = {
+        "request": {
+            "id": "req-no-cw",
+            "created_at": "2026-04-01T10:00:00Z",
+            "model": "claude-haiku-4-5",
+            "provider": "ANTHROPIC",
+            "prompt_tokens": 100,
+        },
+        "response": {"completion_tokens": 20},
+    }
+    span = _record_to_span(record)
+    assert span is not None
+    assert span.cache_write_tokens is None

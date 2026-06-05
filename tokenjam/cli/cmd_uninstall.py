@@ -4,11 +4,25 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import click
 
 from tokenjam.utils.formatting import console
+
+
+def _package_uninstall_hint() -> str:
+    """Return the right uninstall command for how the user installed.
+
+    pipx is the canonical install path (per README and docs/installation.md).
+    A pipx install lives at ~/.local/share/pipx/venvs/tokenjam/... — detect
+    that and recommend `pipx uninstall`, otherwise fall back to `pip uninstall`
+    for venv / pip installs.
+    """
+    if "pipx/venvs/" in sys.executable.replace("\\", "/"):
+        return "pipx uninstall tokenjam"
+    return "pip uninstall tokenjam"
 
 
 @click.command("uninstall")
@@ -156,4 +170,4 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
 
     console.print()
     console.print("[green]TokenJam data and config removed.[/green]")
-    console.print("To remove the package itself, run: [bold]pip uninstall tokenjam[/bold]")
+    console.print(f"To remove the package itself, run: [bold]{_package_uninstall_hint()}[/bold]")

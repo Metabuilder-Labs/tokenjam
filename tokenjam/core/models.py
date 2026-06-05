@@ -71,11 +71,11 @@ class NormalizedSpan:
     tool_name:      str | None     = None
     input_tokens:   int | None     = None
     output_tokens:  int | None     = None
-    # cache_tokens is cache-READ tokens only (reused from cache, billed cheap).
-    # cache-WRITE/creation tokens are tracked separately so the two are never
-    # conflated — analyzers and cost price them at different rates.
+    # cache_tokens counts cache-READ tokens; cache_write_tokens counts
+    # cache-CREATION tokens, which are priced at a higher rate. They are kept
+    # separate so cost can charge each at its own rate (see calculate_cost).
     cache_tokens:   int | None     = None
-    cache_creation_tokens: int | None = None
+    cache_write_tokens: int | None = None
     cost_usd:       float | None   = None
     request_type:   str | None     = None
     conversation_id: str | None    = None
@@ -109,10 +109,10 @@ class SessionRecord:
     total_cost_usd:  float | None = None
     input_tokens:    int          = 0
     output_tokens:   int          = 0
-    # cache_tokens = cache reads (reused); cache_creation_tokens = cache writes.
+    # cache_tokens = cache reads (reused); cache_write_tokens = cache writes.
     # Kept separate; the dashboard's "Cache tokens" shows their sum.
     cache_tokens:    int          = 0
-    cache_creation_tokens: int    = 0
+    cache_write_tokens: int       = 0
     tool_call_count: int          = 0
     error_count:     int          = 0
     # Canonical plan-tier identifier for the user's billing relationship with
@@ -290,6 +290,8 @@ class CostRow:
     model:        str | None  = None
     input_tokens: int         = 0
     output_tokens: int        = 0
+    cache_tokens: int         = 0   # cache-READ tokens
+    cache_write_tokens: int   = 0   # cache-CREATE tokens (the hidden cost driver, #17)
     cost_usd:     float       = 0.0
 
 

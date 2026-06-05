@@ -46,7 +46,7 @@ def _insert_minimal_span(conn, *, trace_id: str, span_id: str) -> None:
             0, 0, 0, 0.0,
             None, None, "[]",
             None,  # billing_account (migration 4)
-            0,     # cache_creation_tokens (migration 9)
+            None,  # cache_write_tokens (migration 5)
         ],
     )
 

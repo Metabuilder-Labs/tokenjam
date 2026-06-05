@@ -6,6 +6,13 @@ import json
 import click
 from rich.markup import escape as _rich_escape
 
+from tokenjam.core.framing import (
+    PLAN_LABEL_AND_FEE,
+    config_declared_plan,
+    dominant_plan,
+    plan_tier_mix,
+    pricing_mode_for,
+)
 from tokenjam.core.optimize import (
     ANALYZER_REGISTRY,
     MODEL_DOWNGRADE_CAVEAT,
@@ -16,7 +23,6 @@ from tokenjam.core.optimize import (
     report_from_dict,
     report_to_dict,
 )
-from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import (
     console,
     format_cost,
@@ -24,71 +30,10 @@ from tokenjam.utils.formatting import (
 )
 from tokenjam.utils.time_parse import parse_since, utcnow
 
-
-# Subscription plan label + flat monthly fee. Used in the implied-API-value
-# header line. Keys must match SessionRecord.plan_tier values. Plans whose
-# fee is contract-priced (enterprise, team variants) have no fee here — the
-# header line skips the multiplier in that case.
-_PLAN_LABEL_AND_FEE: dict[str, tuple[str, float | None]] = {
-    "pro":        ("Pro plan",         20.0),
-    "max_5x":     ("Max 5x plan",     100.0),
-    "max_20x":    ("Max 20x plan",    200.0),
-    "plus":       ("ChatGPT Plus",     20.0),
-    "team":       ("ChatGPT Team",      None),
-    "enterprise": ("ChatGPT Enterprise", None),
-}
-
-
-def _pricing_mode_for(plan_tier: str) -> str:
-    """Mirror SessionRecord.pricing_mode without needing an instance."""
-    if plan_tier == "local":
-        return "local"
-    if plan_tier in SUBSCRIPTION_PLAN_TIERS:
-        return "subscription"
-    if plan_tier == "api":
-        return "api"
-    return "unknown"
-
-
-def _dominant_plan(plan_mix: dict[str, int]) -> str:
-    """
-    Pick the rendering mode from the plan-tier mix.
-
-    - If plan_mix is empty (e.g. spans inserted without sessions in test
-      fixtures), default to 'api' — the historical rendering mode. Real
-      users always have a populated sessions table because IngestPipeline
-      creates sessions before writing spans.
-    - If any non-unknown plan_tier is present, return the most common one.
-    - Otherwise return 'unknown' (the caller handles dollar suppression).
-    """
-    if not plan_mix:
-        return "api"
-    known = {k: v for k, v in plan_mix.items() if k != "unknown"}
-    if not known:
-        return "unknown"
-    return max(known.items(), key=lambda kv: kv[1])[0]
-
-
-def _config_declared_plan(config) -> str | None:
-    """
-    Return the user's currently-declared plan tier from config.
-
-    Pulls from `[budget.<provider>].plan` — the field set by
-    `tj onboard --reconfigure`. When multiple providers declare a plan
-    we surface the first one in sorted order (deterministic). Returns
-    None when no provider has a plan declared.
-
-    This is used by the optimize renderer to surface a note when the
-    historical plan-tier mix disagrees with the user's currently-
-    declared plan (#71 finding 1) — without overriding the data-driven
-    rendering, which would be dishonest about what actually happened.
-    """
-    budgets = getattr(config, "budgets", None) or {}
-    for provider in sorted(budgets.keys()):
-        plan = getattr(budgets[provider], "plan", None)
-        if plan:
-            return str(plan)
-    return None
+# Plan-tier framing helpers (PLAN_LABEL_AND_FEE, pricing_mode_for,
+# dominant_plan, config_declared_plan, plan_tier_mix) live in
+# tokenjam.core.framing — the single source shared with cmd_tokenmaxx and the
+# REST API. See issue #110.
 
 
 @click.command("optimize")
@@ -113,6 +58,9 @@ def _config_declared_plan(config) -> str | None:
               help="Write the current recommendations to a snippet file the "
                    "user can merge into their routing config manually. Does "
                    "not modify any file outside the TokenJam config directory.")
+@click.option("--export-templates", "export_templates", is_flag=True, default=False,
+              help="Reuse only: write per-cluster Markdown skeletons to the "
+                   "reports directory without opening the HTML report.")
 @click.option("--json", "output_json", is_flag=True,
               help="Emit machine-readable JSON.")
 @click.pass_context
@@ -125,6 +73,7 @@ def cmd_optimize(
     budget_usd: float | None,
     compare: str | None,
     export_target: str | None,
+    export_templates: bool,
     output_json: bool,
 ) -> None:
     """Analyze recent usage for cost-saving candidates and budget exposure."""
@@ -233,11 +182,11 @@ def cmd_optimize(
             budget_usd_override=budget_usd,
         )
 
-        plan_mix = _plan_tier_mix(conn, since_dt, until_dt, agent)
+        plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
 
-    dominant = _dominant_plan(plan_mix)
-    pricing_mode = _pricing_mode_for(dominant)
-    declared_plan = _config_declared_plan(config)
+    dominant = dominant_plan(plan_mix)
+    pricing_mode = pricing_mode_for(dominant)
+    declared_plan = config_declared_plan(config)
 
     # --export-config branch: write the snippet to disk and exit. Skips
     # the normal rendering path. The user reads the snippet file and
@@ -248,6 +197,13 @@ def cmd_optimize(
             target=export_target, agent_id=agent,
             output_json=output_json,
         )
+        return
+
+    # --export-templates branch: write the Reuse Markdown skeletons and exit,
+    # without rendering the HTML report. Needs direct DB access (to fetch the
+    # planning completion text), so it's local-mode only.
+    if export_templates:
+        _export_reuse_templates(report, conn=conn, config=config, agent=agent)
         return
 
     # Optional period comparison. Independent of the analyzer findings —
@@ -319,22 +275,6 @@ def cmd_optimize(
         _render_diff_dict(cost_diff_dict)
 
 
-def _plan_tier_mix(conn, since, until, agent_id: str | None) -> dict[str, int]:
-    """Count sessions by plan_tier inside the analysis window."""
-    clauses = ["started_at >= $1", "started_at < $2"]
-    params: list = [since, until]
-    if agent_id:
-        clauses.append(f"agent_id = ${len(params) + 1}")
-        params.append(agent_id)
-    where = " AND ".join(clauses)
-    rows = conn.execute(
-        f"SELECT COALESCE(plan_tier, 'unknown'), COUNT(*) FROM sessions "
-        f"WHERE {where} GROUP BY 1",
-        params,
-    ).fetchall()
-    return {str(r[0]): int(r[1]) for r in rows}
-
-
 # ---------------------------------------------------------------------------
 # Human-readable renderer
 # ---------------------------------------------------------------------------
@@ -365,7 +305,7 @@ def _render_report(
             f"Run [bold]tj onboard --reconfigure[/bold] to set your plan.[/dim]\n"
         )
     elif pricing_mode == "subscription":
-        label, fee = _PLAN_LABEL_AND_FEE.get(dominant_plan, (dominant_plan, None))
+        label, fee = PLAN_LABEL_AND_FEE.get(dominant_plan, (dominant_plan, None))
         plan_suffix = f", ${fee:.0f}/mo flat" if fee else ""
         console.print(
             f"\nAnalyzing [bold]{w.sessions}[/bold] sessions, "
@@ -415,9 +355,9 @@ def _render_report(
     if (
         declared_plan
         and declared_plan != dominant_plan
-        and declared_plan in _PLAN_LABEL_AND_FEE  # only flag subscription deltas
+        and declared_plan in PLAN_LABEL_AND_FEE  # only flag subscription deltas
     ):
-        label, _ = _PLAN_LABEL_AND_FEE[declared_plan]
+        label, _ = PLAN_LABEL_AND_FEE[declared_plan]
         console.print(
             f"[dim]Note: your config declares "
             f"[bold]{label}[/bold] but historical sessions ran under "
@@ -612,6 +552,49 @@ def _render_budget(p: BudgetProjection) -> None:
         console.print(
             f"     [dim]Counted services: {', '.join(p.applies_to_services)}[/dim]"
         )
+
+
+def _export_reuse_templates(report, *, conn, config, agent: str | None) -> None:
+    """
+    Write the Reuse analyzer's Markdown skeletons to the reports directory and
+    print pointers. The `tj optimize reuse --export-templates` shortcut — same
+    sidecars `tj report --reuse` writes, minus the HTML/browser.
+    """
+    from tokenjam import __version__
+    from tokenjam.cli.cmd_report import _report_dir
+    from tokenjam.core.export.reuse_report import export_templates
+
+    if conn is None:
+        raise click.ClickException(
+            "--export-templates needs direct database access. Stop the daemon "
+            "with `tj stop` and re-run."
+        )
+    finding = report.findings.get("reuse")
+    if finding is None or not finding.clusters:
+        console.print(
+            "[dim]No repeated planning detected — nothing to export. Try a "
+            "longer [bold]--since[/bold].[/dim]"
+        )
+        return
+
+    now = utcnow()  # tz-aware UTC (Rule 9)
+    paths = export_templates(
+        finding, conn=conn, config=config, out_dir=_report_dir(),
+        version=__version__, generated_at_iso=now.isoformat(),
+    )
+    if not paths:
+        console.print(
+            "[yellow]No skeletons written.[/yellow] [dim]Enable "
+            "[bold]capture.completions[/bold] so the planning text is "
+            "available to render.[/dim]"
+        )
+        return
+    console.print(
+        f"[green]✓[/green] Wrote [bold]{len(paths)}[/bold] Reuse skeleton"
+        f"{'s' if len(paths) != 1 else ''}:"
+    )
+    for p in paths:
+        console.print(f"  [dim]{p}[/dim]")
 
 
 def _export_snippet(
@@ -903,10 +886,73 @@ def _render_prompt_bloat(finding, *, pricing_mode: str = "api") -> None:
     )
 
 
+def _render_reuse(finding, *, pricing_mode: str = "api") -> None:
+    """
+    Render the reuse (Reuse) finding — clusters of sessions whose planning
+    skeleton repeats. Two recoverable numbers per cluster: cache-reuse (reuse
+    the existing skeleton) and script-replacement (replace every planning call
+    with a deterministic template). Framed per pricing mode.
+    """
+    console.print("  [bold]Reuse:[/bold]")
+    if not finding.clusters:
+        console.print(
+            "     [dim]No repeated planning detected above threshold "
+            "(≥3 sessions sharing a skeleton).[/dim]"
+        )
+        if finding.hint:
+            console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
+        return
+
+    mode_note = (
+        " [dim](tool-sequence only — enable capture.prompts for finer "
+        "clustering)[/dim]"
+        if finding.capture_mode == "tool_sequence_only"
+        else ""
+    )
+    console.print(
+        f"     • [bold]{len(finding.clusters)}[/bold] cluster"
+        f"{'s' if len(finding.clusters) != 1 else ''} of repeated planning "
+        f"detected{mode_note}"
+    )
+
+    for c in finding.clusters[:5]:
+        sig_preview = " → ".join(c.tool_signature) if c.tool_signature else "(no tools)"
+        if len(sig_preview) > 100:
+            sig_preview = sig_preview[:97] + "..."
+        console.print(
+            f"       [bold]{c.repetitions}×[/bold] {sig_preview}"
+        )
+        # Recoverable framing. api → dollars; subscription/local → tokens;
+        # unknown → dollars with the standard overstate qualifier.
+        if pricing_mode in ("subscription", "local"):
+            cache_str = f"~{format_tokens(c.cache_reuse_recoverable_tokens)} tokens"
+            script_str = f"~{format_tokens(c.script_replacement_recoverable_tokens)} tokens"
+        else:
+            cache_str = format_cost(c.cache_reuse_recoverable_usd)
+            script_str = format_cost(c.script_replacement_recoverable_usd)
+        console.print(
+            f"          [dim]recoverable by reusing[/dim] [bold]{cache_str}[/bold]  "
+            f"[dim]· by scripting[/dim] {script_str}"
+        )
+        if pricing_mode == "unknown":
+            console.print(
+                "          [dim]figures may overstate — run "
+                "[bold]tj onboard --reconfigure[/bold][/dim]"
+            )
+
+    if finding.estimate_basis:
+        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.clusters:
+        console.print(
+            f"     [yellow]![/yellow] [italic]{finding.clusters[0].caveat}[/italic]"
+        )
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
     "cache-recommend":      _render_cache_recommend,
     "script": _render_workflow_restructure,
+    "reuse":        _render_reuse,
     "trim":         _render_prompt_bloat,
 }

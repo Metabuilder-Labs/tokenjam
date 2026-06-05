@@ -16,8 +16,10 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 [![OTel](https://img.shields.io/badge/OTel-GenAI%20SemConv-3d8eff?labelColor=0d1117)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ```
-pip install tokenjam
+pipx install tokenjam
 ```
+
+<sub>Don't have pipx? `brew install pipx` on macOS, `apt install pipx` on Debian/Ubuntu, or see [docs/installation.md](docs/installation.md). `pip install tokenjam` also works in a clean venv.</sub>
 
 **No cloud · No signup · No vendor lock-in**
 
@@ -89,10 +91,12 @@ Run all four with `tj optimize`. Run several with `tj optimize downsize cache tr
 For **Claude Code** users — zero code, auto-backfills your last 30 days:
 
 ```bash
-pip install "tokenjam[mcp]"
+pipx install 'tokenjam[mcp]'
 tj onboard --claude-code
 tj optimize          # cost-saving candidates from your actual usage
 ```
+
+To upgrade later: `pipx upgrade tokenjam` (then `tj stop && tj serve &` to reload the daemon, and `tj --version` to verify). See [docs/installation.md](docs/installation.md#upgrading).
 
 For any Python agent:
 
@@ -199,6 +203,8 @@ tj serve               # start the web UI + REST API
 **Shipped in 0.3.x:** Downsize · Cache · Script · Trim · Claude Code + Codex onboarding · MCP server · Web UI · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview
 
 **Up next:**
+- [ ] **[TokenJam Lens](https://github.com/Metabuilder-Labs/tokenjam/milestone/1)** — local dashboard rebrand: new Overview triage front-door, Optimize detail tab, real spend-over-time charts, cross-screen drill-through
+- [ ] **[Reuse analyzer](https://github.com/Metabuilder-Labs/tokenjam/milestone/2)** — fifth analyzer: detects clusters of sessions with repeated planning, exports reviewable skeleton templates you can convert into slash commands or scripts
 - [ ] `tj policy add | edit | apply` — unified rule surface
 - [ ] `tj replay` — replay captured sessions against new model versions
 - [ ] TypeScript framework patches (LangChain JS, OpenAI Agents SDK)

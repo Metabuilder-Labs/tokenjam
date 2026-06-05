@@ -85,6 +85,11 @@ class BloatPrompt:
     estimated_token_reduction: int = 0
 
 
+# Rough characters-per-token ratio for English prose. Used to convert the
+# char-denominated bloat measurement into a token-denominated estimate.
+CHARS_PER_TOKEN = 4
+
+
 @dataclass
 class PromptBloatFinding:
     """Aggregate findings + per-prompt details."""
@@ -96,6 +101,51 @@ class PromptBloatFinding:
     per_prompt:        list[BloatPrompt] = field(default_factory=list)
     confidence:        str = "structural"
     hint:              str | None = None
+    # Recoverable-savings contract (#111). See types.DowngradeFinding for field
+    # semantics. None when the analyzer is not ready (capture off, extra
+    # missing) or no bloat was found.
+    estimated_recoverable_usd:    float | None = None
+    estimated_recoverable_tokens: int | None   = None
+    estimate_basis:               str          = ""
+    estimate_confidence:          str          = "heuristic"
+
+
+def estimate_trim_recoverable(
+    low_sig_tokens: int, avg_input_rate_per_mtok: float
+) -> float:
+    """Price low-significance tokens at the window-average input rate."""
+    return round((low_sig_tokens / 1_000_000) * avg_input_rate_per_mtok, 6)
+
+
+def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
+    """Input-token-weighted average input rate ($/MTok) across the window's
+    model mix, used to price trimmable tokens."""
+    from tokenjam.core.pricing import get_rates
+
+    clauses = ["start_time >= $1", "start_time < $2",
+               "provider IS NOT NULL", "model IS NOT NULL"]
+    params: list[Any] = [since, until]
+    if agent_id:
+        clauses.append(f"agent_id = ${len(params) + 1}")
+        params.append(agent_id)
+    where = " AND ".join(clauses)
+    rows = conn.execute(
+        f"SELECT provider, model, COALESCE(SUM(input_tokens), 0) "
+        f"FROM spans WHERE {where} GROUP BY provider, model",
+        params,
+    ).fetchall()
+    weighted = 0.0
+    total = 0
+    for provider, model, in_tok in rows:
+        in_tok = int(in_tok or 0)
+        if in_tok <= 0:
+            continue
+        rates = get_rates(str(provider), str(model))
+        if rates is None:
+            continue
+        weighted += rates.input_per_mtok * in_tok
+        total += in_tok
+    return (weighted / total) if total > 0 else 0.0
 
 
 def _try_import_llmlingua():
@@ -340,6 +390,19 @@ def run(ctx: AnalyzerContext) -> None:
     # Sort by bloat absolute volume — biggest opportunities first.
     per_prompt.sort(key=lambda p: p.bloat_chars, reverse=True)
 
+    # Recoverable-savings estimate (#111): low-significance tokens across all
+    # scored prompts (not just the top-10 retained for display), priced at the
+    # window-average input rate. None when nothing was flagged.
+    low_sig_tokens = int(total_bloat / CHARS_PER_TOKEN) if total_bloat > 0 else 0
+    rec_usd: float | None = None
+    rec_tokens: int | None = None
+    if low_sig_tokens > 0:
+        avg_rate = _window_avg_input_rate(
+            ctx.conn, ctx.since, ctx.until, ctx.agent_id
+        )
+        rec_usd = estimate_trim_recoverable(low_sig_tokens, avg_rate)
+        rec_tokens = low_sig_tokens
+
     ctx.report.findings["trim"] = PromptBloatFinding(
         enabled=True,
         prompts_scored=prompts_scored,
@@ -347,4 +410,10 @@ def run(ctx: AnalyzerContext) -> None:
         total_bloat_chars=total_bloat,
         total_chars=total_chars,
         per_prompt=per_prompt[:10],
+        estimated_recoverable_usd=rec_usd,
+        estimated_recoverable_tokens=rec_tokens,
+        estimate_basis=(
+            "low-significance tokens (≈4 chars/token) predicted by LLMLingua-2 "
+            "× window input rate — review before editing prompts"
+        ),
     )

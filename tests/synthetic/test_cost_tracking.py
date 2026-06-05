@@ -115,7 +115,7 @@ def test_cost_engine_accumulates_across_multiple_spans(
     assert session_cost == pytest.approx(0.0048)
 
 
-def test_cost_engine_prices_cache_creation_tokens(
+def test_cost_engine_prices_cache_write_tokens(
     fake_db: FakeDB, engine: CostEngine,
 ) -> None:
     # claude-haiku-4-5 rates: input=0.80, output=4.00, cache_read=0.08,
@@ -124,8 +124,8 @@ def test_cost_engine_prices_cache_creation_tokens(
     span = make_llm_span(
         provider="anthropic", model="claude-haiku-4-5",
         input_tokens=1000, output_tokens=200,
-        cache_tokens=5000,            # reads  -> 5000/1e6 * 0.08 = 0.0004
-        cache_creation_tokens=10000,  # writes -> 10000/1e6 * 1.00 = 0.01
+        cache_tokens=5000,         # reads  -> 5000/1e6 * 0.08 = 0.0004
+        cache_write_tokens=10000,  # writes -> 10000/1e6 * 1.00 = 0.01
     )
     fake_db.insert_span_stub(span.span_id)
 
@@ -148,6 +148,127 @@ def test_cost_engine_no_op_when_tokens_missing(fake_db: FakeDB, engine: CostEngi
     db_cost = fake_db.get_span_cost(span.span_id)
     assert db_cost is None
     assert span.cost_usd is None
+
+
+def test_cost_engine_costs_cache_only_span(fake_db: FakeDB, engine: CostEngine) -> None:
+    # A span with no new input/output but cache-read tokens (a cache hit) still
+    # costs the cache-read rate and must be recorded, not dropped as a no-op.
+    # claude-haiku-4-5: cache_read=0.08 per MTok.
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=0, output_tokens=0, cache_tokens=1_000_000,
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    db_cost = fake_db.get_span_cost(span.span_id)
+    assert db_cost == pytest.approx(0.08)
+    assert span.cost_usd == pytest.approx(0.08)
+
+
+def test_cost_engine_cache_only_span_updates_session_total(
+    fake_db: FakeDB, engine: CostEngine,
+) -> None:
+    # The cache-only span's cost must also accumulate into the session total,
+    # not just the span row — dropping it previously under-reported the session.
+    session = make_session()
+    fake_db.insert_session_stub(session.session_id)
+
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=0, output_tokens=0, cache_tokens=1_000_000,
+        session_id=session.session_id,
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    session_cost = fake_db.get_session_cost(session.session_id)
+    assert session_cost == pytest.approx(0.08)
+
+
+def test_cost_engine_costs_cache_write_span(fake_db: FakeDB, engine: CostEngine) -> None:
+    # A span whose only tokens are cache-CREATION (cache write) must be costed at
+    # the cache-write rate, not dropped as a no-op and not charged the read rate.
+    # claude-haiku-4-5: cache_write=1.00 per MTok.
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=0, output_tokens=0, cache_write_tokens=1_000_000,
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    db_cost = fake_db.get_span_cost(span.span_id)
+    assert db_cost == pytest.approx(1.00)
+    assert span.cost_usd == pytest.approx(1.00)
+
+
+def test_cost_engine_costs_cache_read_and_write_together(
+    fake_db: FakeDB, engine: CostEngine,
+) -> None:
+    # Read and write cache tokens are priced at different rates and must both be
+    # charged. claude-haiku-4-5: cache_read=0.08, cache_write=1.00 per MTok.
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=0, output_tokens=0,
+        cache_tokens=1_000_000, cache_write_tokens=1_000_000,
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    db_cost = fake_db.get_span_cost(span.span_id)
+    assert db_cost == pytest.approx(1.08)
+    assert span.cost_usd == pytest.approx(1.08)
+
+
+def test_cost_engine_cache_write_span_updates_session_total(
+    fake_db: FakeDB, engine: CostEngine,
+) -> None:
+    # The cache-write span's cost must also accumulate into the session total.
+    session = make_session()
+    fake_db.insert_session_stub(session.session_id)
+
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=0, output_tokens=0, cache_write_tokens=1_000_000,
+        session_id=session.session_id,
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    session_cost = fake_db.get_session_cost(session.session_id)
+    assert session_cost == pytest.approx(1.00)
+
+
+def test_cost_engine_cache_write_pre_priced_does_not_double_count_session(
+    fake_db: FakeDB, engine: CostEngine,
+) -> None:
+    # A pre-priced span (cost_usd already set, e.g. from the parser) has its
+    # session cost handled by ingest's _build_or_update_session. process_span
+    # must still recompute the span cost but must NOT re-add to the session
+    # total, or cache-write spend would be double-counted.
+    session = make_session()
+    fake_db.conn.execute(
+        "INSERT INTO sessions (session_id, total_cost_usd) VALUES (?, ?)",
+        [session.session_id, 5.0],
+    )
+
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=0, output_tokens=0, cache_write_tokens=1_000_000,
+        session_id=session.session_id, cost_usd=1.00,
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    # Span cost recomputed, session total left untouched (no double-count).
+    assert fake_db.get_span_cost(span.span_id) == pytest.approx(1.00)
+    assert fake_db.get_session_cost(session.session_id) == pytest.approx(5.0)
 
 
 def test_cost_engine_no_op_when_provider_missing(fake_db: FakeDB, engine: CostEngine) -> None:

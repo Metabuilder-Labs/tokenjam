@@ -2,6 +2,8 @@
 from __future__ import annotations
 import logging
 
+import pytest
+
 from tokenjam.core.cost import calculate_cost
 from tokenjam.core.pricing import load_pricing_table, get_rates
 
@@ -36,18 +38,80 @@ def test_calculate_cost_with_cache_write_tokens():
         cache_read_tokens=0,
         cache_write_tokens=1_000_000,
     )
-    # Zero input/output but cache_write tokens present — still returns 0
-    # because input_tokens == 0 and output_tokens == 0 triggers early return
-    assert cost == 0.0
+    # Zero input/output but cache_write tokens present — the early return only
+    # fires when ALL token counts are zero, so cache_write cost is still charged.
+    # (1_000_000/1M * 1.00) = 1.00
+    assert cost == 1.0
+
+
+def test_calculate_cost_cache_read_only():
+    # claude-haiku-4-5: cache_read=0.08 per MTok. A pure cache hit (no new
+    # input/output) still costs the cache-read rate and must not be dropped.
+    cost = calculate_cost(
+        "anthropic", "claude-haiku-4-5",
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=1_000_000,
+    )
+    # (1_000_000/1M * 0.08) = 0.08
+    assert cost == 0.08
 
 
 def test_calculate_cost_unknown_model_uses_default(caplog):
+    # Use a unique provider/model so the dedupe set doesn't suppress this run.
     with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
-        cost = calculate_cost("unknown_provider", "unknown_model", 1_000_000, 1_000_000)
+        cost = calculate_cost("test_unknown_provider", "test_unknown_model", 1_000_000, 1_000_000)
     # Default rates: 0.50 input, 2.00 output per MTok
     # (1M/1M * 0.50) + (1M/1M * 2.00) = 2.50
     assert cost == 2.5
-    assert "No pricing data for unknown_provider/unknown_model" in caplog.text
+    assert "No pricing data for test_unknown_provider/test_unknown_model" in caplog.text
+
+
+def test_calculate_cost_unknown_model_warns_only_once_per_pair(caplog):
+    """Backfilling many spans of the same unknown model used to spam the
+    warning N times. Now it's emitted once per (provider, model) per
+    process. Issue #98."""
+    import tokenjam.core.cost as cost_mod
+    # Reset dedupe set so this test is isolated.
+    cost_mod._UNKNOWN_MODEL_WARNED.clear()
+
+    with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
+        for _ in range(5):
+            calculate_cost("test_provider_xyz", "test_model_xyz", 1000, 200)
+
+    # Exactly one warning, not five.
+    matching = [r for r in caplog.records if "test_provider_xyz/test_model_xyz" in r.message]
+    assert len(matching) == 1, f"expected 1 warning, got {len(matching)}"
+
+    # A DIFFERENT unknown model in the same process should still warn (once).
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
+        for _ in range(3):
+            calculate_cost("test_provider_xyz", "different_model", 1000, 200)
+    matching = [r for r in caplog.records if "different_model" in r.message]
+    assert len(matching) == 1
+
+
+def test_deprecated_anthropic_base_models_are_priced():
+    """Dated variants (claude-sonnet-4-20250514, etc.) resolve via the
+    YYYYMMDD-stripping fallback to the deprecated base entries we added in
+    pricing/models.toml. Issue #98 — was previously falling through to
+    defaults and spamming warnings."""
+    # Sonnet 4 (deprecated): $3 / $15 per MTok
+    cost = calculate_cost("anthropic", "claude-sonnet-4-20250514", 1_000_000, 1_000_000)
+    assert cost == pytest.approx(18.0)  # 3 + 15
+
+    # Opus 4 (deprecated): $15 / $75 per MTok
+    cost = calculate_cost("anthropic", "claude-opus-4-20250514", 1_000_000, 1_000_000)
+    assert cost == pytest.approx(90.0)  # 15 + 75
+
+    # Opus 4.1 (deprecated): $15 / $75 per MTok
+    cost = calculate_cost("anthropic", "claude-opus-4-1-20250805", 1_000_000, 1_000_000)
+    assert cost == pytest.approx(90.0)
+
+    # Haiku 3.5 (retired): $0.80 / $4 per MTok
+    cost = calculate_cost("anthropic", "claude-haiku-3-5-20241022", 1_000_000, 1_000_000)
+    assert cost == pytest.approx(4.8)  # 0.8 + 4
 
 
 def test_calculate_cost_zero_tokens_returns_zero_no_warning(caplog):

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenjam"
-version = "0.3.3"
+version = "0.3.5"
 description = "TokenJam — local-first OTel-native observability for Autonomous AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,11 @@ dependencies = [
     "httpx>=0.27",
     "apscheduler>=3.10",
     "websockets>=12.0",
+    # fastmcp ships in the base install (was in the [mcp] extra) so `tj mcp`
+    # works on a fresh `pipx install tokenjam` without requiring users to
+    # remember the extra. Claude Code's MCP integration is now a primary
+    # use case rather than an opt-in. Issue #101.
+    "fastmcp>=0.2",
 ]
 
 [project.urls]
@@ -54,7 +59,10 @@ crewai    = ["crewai>=0.28"]
 autogen   = ["pyautogen>=0.2"]
 litellm   = ["litellm>=1.40"]
 dev       = ["pytest", "pytest-asyncio", "httpx", "ruff", "mypy"]
-mcp       = ["fastmcp"]
+# Kept as a no-op extra for back-compat — `pipx install 'tokenjam[mcp]'` still
+# works, just installs the same fastmcp that's now in the base dependencies.
+# Documented in `docs/installation.md` so users know they no longer need it.
+mcp       = []
 # Trim analyzer (`tj optimize --finding prompt-bloat`). LLMLingua-2 pulls in
 # PyTorch and transformers, ~2GB total. Kept optional so the base install
 # stays small — most users don't run the bloat analyzer.

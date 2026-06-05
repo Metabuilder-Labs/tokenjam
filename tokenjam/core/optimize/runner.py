@@ -8,10 +8,11 @@ so downsize must run first when both are selected.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from tokenjam.core.config import TjConfig
+from tokenjam.utils.time_parse import utcnow
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
 from tokenjam.core.optimize.types import (
     AnalyzerContext,
@@ -32,6 +33,7 @@ ANALYZER_ORDER: list[str] = [
     "cache",
     "cache-recommend",
     "script",
+    "reuse",
     "trim",
 ]
 
@@ -39,7 +41,8 @@ THIN_DATA_DAYS = 7
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    # Canonical timezone-aware UTC (CLAUDE.md Rule 9).
+    return utcnow()
 
 
 def summarize_window(
@@ -209,8 +212,8 @@ def report_from_dict(d: dict) -> OptimizeReport:
 
     w = d.get("window") or {}
     window = WindowSummary(
-        since=_parse_dt(w.get("since")) or datetime.now(tz=timezone.utc),
-        until=_parse_dt(w.get("until")) or datetime.now(tz=timezone.utc),
+        since=_parse_dt(w.get("since")) or _utcnow(),
+        until=_parse_dt(w.get("until")) or _utcnow(),
         days=float(w.get("days", 0.0)),
         sessions=int(w.get("sessions", 0)),
         spans=int(w.get("spans", 0)),
@@ -247,6 +250,10 @@ def report_from_dict(d: dict) -> OptimizeReport:
             window_total_tokens=int(dd.get("window_total_tokens", 0)),
             percent_of_tokens=float(dd.get("percent_of_tokens", 0.0)),
             monthly_tokens_in_candidates=int(dd.get("monthly_tokens_in_candidates", 0)),
+            estimated_recoverable_usd=dd.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=dd.get("estimated_recoverable_tokens"),
+            estimate_basis=str(dd.get("estimate_basis", "")),
+            estimate_confidence=str(dd.get("estimate_confidence", "heuristic")),
         )
 
     budgets = []
@@ -256,8 +263,8 @@ def report_from_dict(d: dict) -> OptimizeReport:
             provider=str(bb.get("provider", "")),
             budget_usd=float(bb.get("budget_usd", 0.0)),
             cycle_start_day=int(bb.get("cycle_start_day", 1)),
-            cycle_start=_parse_dt(bb.get("cycle_start")) or datetime.now(tz=timezone.utc),
-            cycle_end=_parse_dt(bb.get("cycle_end")) or datetime.now(tz=timezone.utc),
+            cycle_start=_parse_dt(bb.get("cycle_start")) or _utcnow(),
+            cycle_end=_parse_dt(bb.get("cycle_end")) or _utcnow(),
             days_into_cycle=float(bb.get("days_into_cycle", 0.0)),
             days_remaining=float(bb.get("days_remaining", 0.0)),
             window_spend_usd=float(bb.get("window_spend_usd", 0.0)),
@@ -315,6 +322,7 @@ def _build_finding_constructors() -> dict:
         WorkflowCluster,
         WorkflowRestructureFinding,
     )
+    from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
         rows = [CacheEfficacyRow(**r) for r in d.get("rows") or []]
@@ -322,6 +330,11 @@ def _build_finding_constructors() -> dict:
         return CacheEfficacyFinding(
             rows=rows, flagged=flagged,
             confidence=d.get("confidence", "structural"),
+            efficacy_ceiling=d.get("efficacy_ceiling", 0.80),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
     def _cache_recommend(d: dict) -> CacheRecommendFinding:
@@ -344,6 +357,10 @@ def _build_finding_constructors() -> dict:
             degraded=bool(d.get("degraded", False)),
             confidence=d.get("confidence", "structural"),
             caveat=d.get("caveat", ""),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
     def _prompt_bloat(d: dict) -> PromptBloatFinding:
@@ -362,12 +379,35 @@ def _build_finding_constructors() -> dict:
             per_prompt=per_prompt,
             confidence=d.get("confidence", "structural"),
             hint=d.get("hint"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
+        )
+
+    def _reuse(d: dict) -> ReuseFinding:
+        clusters = []
+        for c in d.get("clusters") or []:
+            cc = dict(c)
+            # asdict() serialised the tuple to a list; restore the tuple so the
+            # dataclass field type holds across the round-trip.
+            cc["tool_signature"] = tuple(cc.get("tool_signature") or ())
+            clusters.append(ReuseCluster(**cc))
+        return ReuseFinding(
+            clusters=clusters,
+            capture_mode=d.get("capture_mode", "tool_sequence_only"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            confidence=d.get("confidence", "heuristic"),
+            hint=d.get("hint", ""),
         )
 
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
         "script": _workflow_restructure,
+        "reuse": _reuse,
         "trim": _prompt_bloat,
     }
 

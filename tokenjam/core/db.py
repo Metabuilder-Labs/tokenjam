@@ -120,7 +120,11 @@ CREATE TABLE IF NOT EXISTS spans (
     cost_usd            DOUBLE,
     request_type        TEXT,
     conversation_id     TEXT,
-    events              JSON DEFAULT '[]'
+    events              JSON DEFAULT '[]',
+    -- cache_write_tokens (cache-CREATION tokens) added by migration 5.
+    -- Kept separate from cache_tokens (cache-read) because they bill at
+    -- different rates. See models.py::NormalizedSpan for the read/write split.
+    cache_write_tokens  BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -196,29 +200,37 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS billing_account TEXT;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS plan_tier       TEXT DEFAULT 'unknown'"
     )),
-    # Migration 5: service_namespace on sessions — the OTel service.namespace
+    # Migration 5: cache_write_tokens on spans. Issue #94.
+    # NormalizedSpan and the cost engine started threading cache-write
+    # tokens through in PR #92 (live OTLP path) but the count was never
+    # persisted — only the resulting cost_usd landed. This column makes
+    # per-token-class reporting possible. NULL on backfilled rows; the
+    # _row_to_span helper coerces NULL -> None and ingest writes 0 for
+    # spans that don't carry the count.
+    (5, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT"),
+    # Migration 6: service_namespace on sessions — the OTel service.namespace
     # the session's service rolls up under (the dashboard's "project" grouping
     # key). Nullable; sessions whose telemetry carried no namespace stay NULL.
-    (5, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_namespace TEXT"),
-    # Migration 6: service_instance_id on sessions — the per-terminal label
+    (6, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_namespace TEXT"),
+    # Migration 7: service_instance_id on sessions — the per-terminal label
     # (OTel service.instance.id) used as the session's display name.
-    (6, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_instance_id TEXT"),
-    # Migration 7: run_id + parent_session_id on sessions — cross-session run
+    (7, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_instance_id TEXT"),
+    # Migration 8: run_id + parent_session_id on sessions — cross-session run
     # grouping declared by a fan-out harness (tokenjam.run_id /
     # tokenjam.parent_session_id resource attributes). Both nullable; existing
     # sessions stay NULL on upgrade.
-    (7, (
+    (8, (
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_id            TEXT;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_session_id TEXT"
     )),
-    # Migration 8: repair ended_at on already-closed sessions. A prior bug in
+    # Migration 9: repair ended_at on already-closed sessions. A prior bug in
     # close_session(s) advanced ended_at to the close time, so a session closed
     # days after its last span showed a "Last seen" of the close moment instead
     # of its real last activity. Recompute ended_at from the session's actual
     # spans (max of end_time / start_time), but only LOWER it — never touch
     # sessions whose ended_at already matches or precedes their last span.
     # Idempotent: re-running finds nothing left to correct.
-    (8, (
+    (9, (
         "UPDATE sessions AS s "
         "SET ended_at = sub.max_ts "
         "FROM (SELECT session_id, MAX(COALESCE(end_time, start_time)) AS max_ts "
@@ -228,14 +240,14 @@ MIGRATIONS: list[tuple[int, str]] = [
         "  AND sub.max_ts IS NOT NULL "
         "  AND (s.ended_at IS NULL OR s.ended_at > sub.max_ts)"
     )),
-    # Migration 9: cache_creation_tokens on spans + sessions. Previously cache
-    # *write*/creation tokens were dropped at ingest (only cache reads landed in
-    # cache_tokens). Now tracked in their own column so the dashboard can show
-    # total cache activity (reads + writes) and the cost engine can price writes
-    # at the higher cache-write rate. Both nullable; existing rows default 0.
-    (9, (
-        "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS cache_creation_tokens BIGINT DEFAULT 0;\n"
-        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cache_creation_tokens BIGINT DEFAULT 0"
+    # Migration 10: cache_write_tokens on sessions — the session-level rollup of
+    # the span-level cache-write column added in migration 5. Lets the dashboard
+    # show total cache activity (reads + writes) per session. The spans ALTER is
+    # defensive: a no-op on DBs that already applied migration 5, but it repairs
+    # any DB whose version-5 slot was consumed by an unreleased parallel branch.
+    (10, (
+        "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT;\n"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0"
     )),
 ]
 
@@ -295,7 +307,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         input_tokens=_int_or_none(d.get("input_tokens")),
         output_tokens=_int_or_none(d.get("output_tokens")),
         cache_tokens=_int_or_none(d.get("cache_tokens")),
-        cache_creation_tokens=_int_or_none(d.get("cache_creation_tokens")),
+        cache_write_tokens=_int_or_none(d.get("cache_write_tokens")),
         cost_usd=d.get("cost_usd"),
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
@@ -316,7 +328,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         input_tokens=d.get("input_tokens") or 0,
         output_tokens=d.get("output_tokens") or 0,
         cache_tokens=d.get("cache_tokens") or 0,
-        cache_creation_tokens=d.get("cache_creation_tokens") or 0,
+        cache_write_tokens=d.get("cache_write_tokens") or 0,
         tool_call_count=d.get("tool_call_count") or 0,
         error_count=d.get("error_count") or 0,
         plan_tier=d.get("plan_tier") or "unknown",
@@ -425,7 +437,7 @@ class DuckDBBackend:
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
             "request_type, conversation_id, events, billing_account, "
-            "cache_creation_tokens"
+            "cache_write_tokens"
             ") VALUES "
             "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
             [
@@ -435,7 +447,7 @@ class DuckDBBackend:
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account, span.cache_creation_tokens,
+                span.billing_account, span.cache_write_tokens,
             ],
         )
 
@@ -471,7 +483,7 @@ class DuckDBBackend:
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                 tool_call_count, error_count, plan_tier, service_namespace,
-                service_instance_id, run_id, parent_session_id, cache_creation_tokens
+                service_instance_id, run_id, parent_session_id, cache_write_tokens
             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
@@ -480,7 +492,7 @@ class DuckDBBackend:
                 input_tokens = EXCLUDED.input_tokens,
                 output_tokens = EXCLUDED.output_tokens,
                 cache_tokens = EXCLUDED.cache_tokens,
-                cache_creation_tokens = EXCLUDED.cache_creation_tokens,
+                cache_write_tokens = EXCLUDED.cache_write_tokens,
                 tool_call_count = EXCLUDED.tool_call_count,
                 error_count = EXCLUDED.error_count,
                 plan_tier = EXCLUDED.plan_tier,
@@ -496,7 +508,7 @@ class DuckDBBackend:
                 session.cache_tokens, session.tool_call_count, session.error_count,
                 session.plan_tier, session.service_namespace,
                 session.service_instance_id, session.run_id,
-                session.parent_session_id, session.cache_creation_tokens,
+                session.parent_session_id, session.cache_write_tokens,
             ],
         )
 
@@ -705,24 +717,28 @@ class DuckDBBackend:
             idx += 1
         where = " AND ".join(clauses)
 
+        # Cache-read + cache-write are summed alongside in/out so callers can
+        # show the full token picture (cache-write is often the dominant cost
+        # driver yet was invisible above the DB — issue #17).
+        token_cols = (
+            "COALESCE(SUM(input_tokens), 0), "
+            "COALESCE(SUM(output_tokens), 0), "
+            "COALESCE(SUM(cache_tokens), 0), "
+            "COALESCE(SUM(cache_write_tokens), 0), "
+            "COALESCE(SUM(cost_usd), 0.0) "
+        )
         if filters.group_by in ("agent", "model"):
             sql = (
-                f"SELECT {group_expr} AS grp, agent_id, model, "
-                f"COALESCE(SUM(input_tokens), 0), "
-                f"COALESCE(SUM(output_tokens), 0), "
-                f"COALESCE(SUM(cost_usd), 0.0) "
-                f"FROM spans WHERE {where} "
+                f"SELECT {group_expr} AS grp, agent_id, model, " + token_cols
+                + f"FROM spans WHERE {where} "
                 f"GROUP BY grp, agent_id, model "
                 f"ORDER BY grp DESC"
             )
         else:
             # day / tool: group only by the primary expression to avoid cross-product
             sql = (
-                f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, "
-                f"COALESCE(SUM(input_tokens), 0), "
-                f"COALESCE(SUM(output_tokens), 0), "
-                f"COALESCE(SUM(cost_usd), 0.0) "
-                f"FROM spans WHERE {where} "
+                f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, " + token_cols
+                + f"FROM spans WHERE {where} "
                 f"GROUP BY grp "
                 f"ORDER BY grp DESC"
             )
@@ -730,7 +746,9 @@ class DuckDBBackend:
         return [
             CostRow(
                 group=str(r[0]), agent_id=r[1], model=r[2],
-                input_tokens=r[3] or 0, output_tokens=r[4] or 0, cost_usd=r[5] or 0.0,
+                input_tokens=r[3] or 0, output_tokens=r[4] or 0,
+                cache_tokens=r[5] or 0, cache_write_tokens=r[6] or 0,
+                cost_usd=r[7] or 0.0,
             )
             for r in rows
         ]

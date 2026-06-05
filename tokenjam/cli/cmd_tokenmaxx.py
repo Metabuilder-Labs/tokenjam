@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import click
 
+from tokenjam.core.framing import PLAN_LABEL_AND_FEE, config_declared_plan
 from tokenjam.utils.formatting import console, format_cost  # noqa: F401  (kept for back-compat imports)
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -40,18 +41,19 @@ class Tier:
 
 
 _TIERS: list[Tier] = [
-    Tier(0,  "TokenSipper",     "💧",   "Are you even using AI?"),
-    Tier(1,  "TokenModerator",  "🥱",   "Mostly reasonable. Try harder."),
-    Tier(4,  "TokenMaxxer",     "💸",   "You're paying Anthropic's rent."),
-    Tier(10, "TokenChad",       "🔥",   "You're paying their interns' rent too."),
-    Tier(20, "TokenGigaChad",   "🔥🔥", "Touch grass. Then run `tj optimize`."),
+    Tier(0,  "TokenSipper",      "💧",      "Are you even using AI?"),
+    Tier(1,  "TokenModerator",   "🥱",      "Mostly reasonable. Try harder."),
+    Tier(4,  "TokenMaxxer",      "💸",      "You're paying Anthropic's rent."),
+    Tier(10, "TokenSuperMaxxer", "🔥",      "You're paying their interns' rent too."),
+    Tier(20, "TokenMegaMaxxer",  "🔥🔥",    "Touch grass. Then run `tj optimize`."),
+    Tier(50, "TokenGigaMaxxer",  "🔥🔥🔥",  "Anthropic's CFO knows your name."),
 ]
 
 # Absolute USD/mo fallback for users without a subscription plan (API users).
 # Calibrated against Max-5x = $100/mo: each threshold is the multiplier × $100.
 # This way a $400/mo API user and a 4× Pro/Max-5x/Max-20x user both end up
 # in TokenMaxxer — the tier name reflects "shocking spend" in either world.
-_SPEND_TIER_THRESHOLDS_USD: list[float] = [0, 100, 400, 1000, 2000]
+_SPEND_TIER_THRESHOLDS_USD: list[float] = [0, 100, 400, 1000, 2000, 5000]
 
 
 def _classify(monthly_spend: float, multiplier: float | None = None) -> Tier:
@@ -100,8 +102,8 @@ def cmd_tokenmaxx(ctx: click.Context, since: str, output_json: bool) -> None:
     monthly_spend = spend_usd * (30.0 / window_days)
 
     # Plan multiplier — only for subscription users with a declared plan.
-    declared_plan = _config_declared_plan(config)
-    plan_info = _plan_label_and_fee(declared_plan)
+    declared_plan = config_declared_plan(config)
+    plan_info = PLAN_LABEL_AND_FEE.get(declared_plan) if declared_plan else None
     multiplier = None
     if plan_info and plan_info[1]:
         multiplier = monthly_spend / plan_info[1]
@@ -190,34 +192,6 @@ def _fetch(db, config, since_dt, until_dt, since_str) -> tuple[float, float, int
 
 
 # ───────────────────────────── helpers ────────────────────────────────────
-
-def _config_declared_plan(config) -> str | None:
-    """Mirror cmd_optimize._config_declared_plan."""
-    budgets = getattr(config, "budgets", None) or {}
-    for provider in sorted(budgets.keys()):
-        plan = getattr(budgets[provider], "plan", None)
-        if plan:
-            return str(plan)
-    return None
-
-
-def _plan_label_and_fee(plan_tier: str | None) -> tuple[str, float | None] | None:
-    """
-    Mirror cmd_optimize._PLAN_LABEL_AND_FEE without importing it (avoid
-    circular import risk and keep tokenmaxx independently testable).
-    """
-    if plan_tier is None:
-        return None
-    table: dict[str, tuple[str, float | None]] = {
-        "pro":        ("Pro plan",          20.0),
-        "max_5x":     ("Max 5x plan",      100.0),
-        "max_20x":    ("Max 20x plan",     200.0),
-        "plus":       ("ChatGPT Plus",      20.0),
-        "team":       ("ChatGPT Team",       None),
-        "enterprise": ("ChatGPT Enterprise", None),
-    }
-    return table.get(plan_tier)
-
 
 # ───────────────────────────── rendering ──────────────────────────────────
 

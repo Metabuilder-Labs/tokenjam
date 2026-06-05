@@ -174,7 +174,7 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
         input_tokens=safe_int(attrs.get(GenAIAttributes.INPUT_TOKENS)),
         output_tokens=safe_int(attrs.get(GenAIAttributes.OUTPUT_TOKENS)),
         cache_tokens=safe_int(attrs.get(GenAIAttributes.CACHE_READ_TOKENS)),
-        cache_creation_tokens=safe_int(attrs.get(GenAIAttributes.CACHE_CREATE_TOKENS)),
+        cache_write_tokens=safe_int(attrs.get(GenAIAttributes.CACHE_CREATE_TOKENS)),
         cost_usd=safe_float(attrs.get(TjAttributes.COST_USD)),
         request_type=attrs.get(GenAIAttributes.REQUEST_TYPE),
         conversation_id=attrs.get(GenAIAttributes.CONVERSATION_ID),
