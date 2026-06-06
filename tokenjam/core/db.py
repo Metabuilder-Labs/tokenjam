@@ -520,6 +520,45 @@ class DuckDBBackend:
             ],
         )
 
+    def recompute_session_totals_from_spans(self, session_ids: list[str]) -> None:
+        """Reconcile the given session rows' token + cost aggregates to the SUM
+        of their spans (the source of truth).
+
+        Backfill upserts a session row once per on-disk file, but a Claude Code
+        session is split across files that share one session_id (the main-thread
+        transcript plus each subagents/agent-<id>.jsonl). Because upsert_session
+        uses replace semantics, the per-file upserts would otherwise leave the
+        row holding only the last-processed file's totals. Scoped to the given
+        ids so it never touches live-ingested sessions. Idempotent.
+        """
+        if not session_ids:
+            return
+        self.conn.execute(
+            """
+            UPDATE sessions AS s SET
+                input_tokens       = agg.input_tokens,
+                output_tokens      = agg.output_tokens,
+                cache_tokens       = agg.cache_tokens,
+                cache_write_tokens = agg.cache_write_tokens,
+                total_cost_usd     = agg.total_cost_usd,
+                tool_call_count    = agg.tool_call_count
+            FROM (
+                SELECT session_id,
+                       COALESCE(SUM(input_tokens), 0)       AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0)      AS output_tokens,
+                       COALESCE(SUM(cache_tokens), 0)       AS cache_tokens,
+                       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                       COALESCE(SUM(cost_usd), 0.0)         AS total_cost_usd,
+                       COUNT(*) FILTER (WHERE tool_name IS NOT NULL) AS tool_call_count
+                FROM spans
+                WHERE session_id IN (SELECT unnest($1))
+                GROUP BY session_id
+            ) AS agg
+            WHERE s.session_id = agg.session_id
+            """,
+            [list(session_ids)],
+        )
+
     def upsert_agent(self, agent: AgentRecord) -> None:
         self.conn.execute(
             """
