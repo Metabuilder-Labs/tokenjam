@@ -301,3 +301,49 @@ def test_ingest_session_row_totals_include_subagents(tmp_path):
         assert sess2.input_tokens == 9000
     finally:
         db.close()
+
+
+def test_reingest_retags_existing_spans(tmp_path):
+    """--reingest re-populates sub_agent_id on spans an older backfill ingested
+    before the column existed; a plain idempotent re-run leaves them NULL."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-rt", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-rt", proj,
+        )],
+    )
+    sub_dir = tmp_path / proj.replace("/", "-") / "sess-rt" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-rt1.jsonl").write_text(json.dumps(_assistant_record(
+        "m-rt1", "claude-haiku-4-5", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-rt", proj,
+        tool_uses=[("tu-rt", "Read")], is_sidechain=True, agent_id="rt1",
+    )))
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        # Simulate a pre-column backfill: blank the tags.
+        db.conn.execute("UPDATE spans SET sub_agent_id = NULL")
+
+        # Plain re-run is idempotent -> existing spans skipped -> still NULL.
+        r_plain = ingest_claude_code(db, root=tmp_path)
+        assert r_plain.spans_ingested == 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id IS NOT NULL"
+        ).fetchone()[0] == 0
+
+        # --reingest re-tags in place: no new rows, no duplicates.
+        before = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+        r_re = ingest_claude_code(db, root=tmp_path, reingest=True)
+        assert r_re.spans_ingested == 0
+        assert r_re.spans_retagged > 0
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before
+        # The subagent's LLM span + its tool span are both re-tagged.
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id = 'rt1'"
+        ).fetchone()[0] == 2
+    finally:
+        db.close()
