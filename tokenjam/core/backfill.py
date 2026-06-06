@@ -493,6 +493,14 @@ def ingest_claude_code(
             except Exception:
                 pass
 
+    # A Claude Code session is split across files that share one session_id
+    # (main thread + subagents/agent-*.jsonl). The per-file upsert above uses
+    # replace semantics, so each touched session row must be reconciled to the
+    # SUM of its spans -- otherwise it holds only the last file's totals.
+    # Idempotent: a re-run also repairs rows written by an earlier backfill.
+    recompute = getattr(db, "recompute_session_totals_from_spans", None)
+    if recompute is not None and result.seen_session_ids:
+        recompute(sorted(result.seen_session_ids))
     result.project_count = len(projects_seen)
     return result
 

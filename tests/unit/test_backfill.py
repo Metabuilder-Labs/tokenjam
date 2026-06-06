@@ -29,6 +29,8 @@ def _make_session_file(tmp_path: Path, session_id: str, cwd: str,
 def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: int,
                        timestamp: str, session_id: str, cwd: str,
                        tool_uses: list[tuple[str, str]] | None = None,
+                       is_sidechain: bool = False,
+                       agent_id: str | None = None,
                        cache_read: int = 0, cache_creation: int = 0,
                        message_id: str | None = None) -> dict:
     content: list[dict] = [{"type": "text", "text": "ok"}]
@@ -49,7 +51,7 @@ def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: i
     # notwithstanding (#294). Optional so existing tests use the uuid fallback.
     if message_id is not None:
         message["id"] = message_id
-    return {
+    record: dict = {
         "type": "assistant",
         "uuid": uuid,
         "timestamp": timestamp,
@@ -57,6 +59,14 @@ def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: i
         "cwd": cwd,
         "message": message,
     }
+    # Records in a session's subagents/agent-<id>.jsonl carry isSidechain=true
+    # and an agentId; both share the parent sessionId so backfill folds them
+    # into one session row.
+    if is_sidechain:
+        record["isSidechain"] = True
+    if agent_id is not None:
+        record["agentId"] = agent_id
+    return record
 
 
 def test_parse_extracts_assistant_turns_and_tool_uses(tmp_path):
@@ -654,5 +664,47 @@ def test_ingest_resumed_session_writes_one_span_per_call(tmp_path):
         sess = db.get_session("sess-e2e")
         assert sess is not None
         assert sess.output_tokens == 280
+    finally:
+        db.close()
+
+
+def test_ingest_session_row_totals_include_subagents(tmp_path):
+    """Regression: the sessions table row must reflect main + ALL subagent files,
+    not just the last-processed one. Backfill upserts the row once per file with
+    replace semantics, so without reconciliation the row held only one file's
+    totals. Two subagents make the bug unambiguous (replace would leave 3000)."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-tot", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-tot", proj,
+        )],
+    )
+    sub_dir = tmp_path / proj.replace("/", "-") / "sess-tot" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-s1.jsonl").write_text(json.dumps(_assistant_record(
+        "m-s1", "claude-haiku-4-5", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-tot", proj, is_sidechain=True, agent_id="s1",
+    )))
+    (sub_dir / "agent-s2.jsonl").write_text(json.dumps(_assistant_record(
+        "m-s2", "claude-haiku-4-5", 3000, 300,
+        "2026-04-01T10:00:02.000Z", "sess-tot", proj, is_sidechain=True, agent_id="s2",
+    )))
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        sess = db.get_session("sess-tot")
+        assert sess is not None
+        assert sess.input_tokens == 1000 + 5000 + 3000   # main + both subagents
+        assert sess.output_tokens == 200 + 500 + 300
+        # The stored row total now matches the span-derived total (both include
+        # every subagent), and a second ingest is idempotent (no double-count).
+        assert abs((sess.total_cost_usd or 0) - db.get_session_cost("sess-tot")) < 1e-9
+        ingest_claude_code(db, root=tmp_path)
+        sess2 = db.get_session("sess-tot")
+        assert sess2 is not None
+        assert sess2.input_tokens == 9000
     finally:
         db.close()
