@@ -1561,6 +1561,7 @@ function SessionDetailView({ sessionId }) {
   const drift = data.drift;
   const modelMix = data.model_mix || [];
   const contextSeries = data.context_series || [];
+  const subagents = data.subagents || { rows: [], total: 0, cost_usd: 0, tokens: 0, flagged: 0 };
   const ctxMax = contextSeries.reduce((m, p) => Math.max(m, p.input_tokens || 0), 0);
   const isSub = s.pricing_mode === 'subscription';
   const isLocal = s.pricing_mode === 'local';
@@ -1608,6 +1609,7 @@ function SessionDetailView({ sessionId }) {
     <div class="tab-bar" role="tablist">
       <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Timeline</button>
       <button class="tab ${tab === 'models' ? 'active' : ''}" role="tab" aria-selected=${tab === 'models'} onClick=${() => setTab('models')}>Models & context</button>
+      ${subagents.total > 0 ? html`<button class="tab ${tab === 'subagents' ? 'active' : ''}" role="tab" aria-selected=${tab === 'subagents'} onClick=${() => setTab('subagents')}>Subagents${subagents.flagged ? ' (' + subagents.flagged + ')' : ''}</button>` : null}
       <button class="tab ${tab === 'alerts' ? 'active' : ''}" role="tab" aria-selected=${tab === 'alerts'} onClick=${() => setTab('alerts')}>Alerts</button>
       <button class="tab ${tab === 'traces' ? 'active' : ''}" role="tab" aria-selected=${tab === 'traces'} onClick=${() => setTab('traces')}>Traces</button>
     </div>
@@ -1666,6 +1668,32 @@ function SessionDetailView({ sessionId }) {
         </tbody>
       </table></div>
     ` : null}
+    ` : null}
+
+    ${tab === 'subagents' ? html`
+    <div class="page-title" style="font-size:14px;margin-top:24px">Subagents</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">${subagents.total} subagent${subagents.total === 1 ? '' : 's'}${s.total_cost_usd > 0 ? ' · ' + Math.round(subagents.cost_usd / s.total_cost_usd * 100) + '% of session ' + (isSub ? 'implied value' : 'cost') : ''}${subagents.flagged ? ' · ' + subagents.flagged + ' flagged for right-sizing' : ''}</div>
+    ${subagents.rows.length > 0 ? html`
+      <div class="table-wrap"><table>
+        <thead><tr><th>Subagent</th><th>Model</th><th>Calls</th><th>Tools</th><th>Input</th><th>Cache</th><th>Output</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Right-sizing</th></tr></thead>
+        <tbody>
+          ${subagents.rows.map(r => html`
+            <tr style=${r.flags.length ? 'background:rgba(245,166,35,0.06)' : ''}>
+              <td class="mono">${r.sub_agent_id.slice(0, 12)}</td>
+              <td class="mono">${r.model}</td>
+              <td>${r.llm_calls}</td>
+              <td>${r.tool_calls}</td>
+              <td>${fmtTokens(r.input_tokens)}</td>
+              <td>${(r.cache_tokens + r.cache_write_tokens) ? fmtTokens(r.cache_tokens + r.cache_write_tokens) : '-'}</td>
+              <td>${fmtTokens(r.output_tokens)}</td>
+              <td>${fmtCost(r.cost_usd)}</td>
+              <td>${r.flags.length ? r.flags.map(f => html`<span style="color:#f5a623;font-size:11px;white-space:nowrap;margin-right:6px">${f.replace(/_/g, '-')}</span>`) : html`<span style="color:var(--text-dim)">-</span>`}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Candidate-flagging heuristic, not a quality judgment — review before changing how subagents are dispatched.</div>
+    ` : html`<div class="empty">No subagents in this session.</div>`}
     ` : null}
 
     ${tab === 'alerts' ? html`
