@@ -206,6 +206,13 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
         trace_id = _trace_id_for(sid_str, message_uuid)
         span_id = _span_id_for_assistant(sid_str, message_uuid)
 
+        # Subagent attribution: Claude Code marks Task-tool (sidechain) turns
+        # with a top-level `isSidechain` flag plus the subagent's own `agentId`.
+        # Records in <session>/subagents/agent-<id>.jsonl carry these; main-thread
+        # records don't. Stamp every span from this turn so a session's cost can
+        # be broken down per subagent. None on the main thread.
+        sub_agent_id = record.get("agentId") if record.get("isSidechain") else None
+
         provider = _provider_for_model(model)
         cost = calculate_cost(
             provider=provider,
@@ -230,6 +237,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                 end_time=start_time,
                 duration_ms=None,
                 agent_id=agent_id,
+                sub_agent_id=sub_agent_id,
                 session_id=sid_str,
                 provider=provider,
                 model=model,
@@ -275,6 +283,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                         end_time=start_time,
                         duration_ms=None,
                         agent_id=agent_id,
+                        sub_agent_id=sub_agent_id,
                         session_id=sid_str,
                         tool_name=tool_name,
                         conversation_id=sid_str,
@@ -438,9 +447,9 @@ def _insert_session_idempotent(db, parsed: ParsedSession) -> int:
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
             "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens"
+            "cache_write_tokens, sub_agent_id"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -448,7 +457,7 @@ def _insert_session_idempotent(db, parsed: ParsedSession) -> int:
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account, span.cache_write_tokens,
+                span.billing_account, span.cache_write_tokens, span.sub_agent_id,
             ],
         )
         inserted += 1

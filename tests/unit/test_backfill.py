@@ -26,12 +26,14 @@ def _make_session_file(tmp_path: Path, session_id: str, cwd: str,
 
 def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: int,
                        timestamp: str, session_id: str, cwd: str,
-                       tool_uses: list[tuple[str, str]] | None = None) -> dict:
+                       tool_uses: list[tuple[str, str]] | None = None,
+                       is_sidechain: bool = False,
+                       agent_id: str | None = None) -> dict:
     content: list[dict] = [{"type": "text", "text": "ok"}]
     if tool_uses:
         for tu_id, tu_name in tool_uses:
             content.append({"type": "tool_use", "id": tu_id, "name": tu_name})
-    return {
+    record = {
         "type": "assistant",
         "uuid": uuid,
         "timestamp": timestamp,
@@ -48,6 +50,14 @@ def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: i
             },
         },
     }
+    # Claude Code marks subagent (Task-tool) turns with these top-level fields;
+    # records in a session's subagents/agent-<id>.jsonl carry isSidechain=true
+    # plus the subagent's own agentId.
+    if is_sidechain:
+        record["isSidechain"] = True
+    if agent_id is not None:
+        record["agentId"] = agent_id
+    return record
 
 
 def test_parse_extracts_assistant_turns_and_tool_uses(tmp_path):
@@ -177,3 +187,75 @@ def test_iter_skips_files_before_since(tmp_path):
     cutoff = datetime(2025, 1, 1, tzinfo=timezone.utc)
     sessions = list(iter_claude_code_sessions(root=tmp_path, since=cutoff))
     assert sessions == []
+
+
+def test_parse_tags_subagent_spans_with_sub_agent_id(tmp_path):
+    """Spans from a sidechain (Task-tool) turn carry the subagent's agentId;
+    main-thread spans carry None. This is what lets a session's cost be broken
+    down per subagent."""
+    path = _make_session_file(
+        tmp_path,
+        session_id="sess-sa",
+        cwd="/Users/me/proj",
+        records=[
+            _assistant_record(
+                "m-main", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-sa", "/Users/me/proj",
+            ),
+            _assistant_record(
+                "m-sub", "claude-haiku-4-5", 5000, 500,
+                "2026-04-01T10:00:01.000Z", "sess-sa", "/Users/me/proj",
+                tool_uses=[("tu-s", "Read")], is_sidechain=True, agent_id="ag-1",
+            ),
+        ],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    # Main-thread LLM span -> no subagent id
+    main_llm = [s for s in parsed.spans
+                if s.name == "gen_ai.llm.call" and s.sub_agent_id is None]
+    assert len(main_llm) == 1
+    # Subagent LLM span + its tool span -> tagged with the subagent's agentId
+    sub_spans = [s for s in parsed.spans if s.sub_agent_id == "ag-1"]
+    assert len(sub_spans) == 2
+    assert {s.name for s in sub_spans} == {"gen_ai.llm.call", "gen_ai.tool.call"}
+
+
+def test_ingest_attributes_tokens_per_subagent(tmp_path):
+    """End-to-end: a session whose subagent lives in subagents/agent-*.jsonl
+    gets its tokens folded under the parent session_id AND remains attributable
+    per subagent via sub_agent_id."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path,
+        session_id="sess-x",
+        cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-x", proj,
+        )],
+    )
+    # Subagent transcript: <project>/<sid>/subagents/agent-<id>.jsonl
+    sub_dir = tmp_path / proj.replace("/", "-") / "sess-x" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-ag1.jsonl").write_text(json.dumps(_assistant_record(
+        "m-sub", "claude-haiku-4-5", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-x", proj,
+        is_sidechain=True, agent_id="ag1",
+    )))
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        rows = db.conn.execute(
+            "SELECT sub_agent_id, SUM(input_tokens) FROM spans "
+            "WHERE session_id = $1 AND name = $2 GROUP BY sub_agent_id",
+            ["sess-x", "gen_ai.llm.call"],
+        ).fetchall()
+        per_subagent = {r[0]: r[1] for r in rows}
+        assert per_subagent.get(None) == 1000     # main thread
+        assert per_subagent.get("ag1") == 5000     # subagent, attributable
+        # Span-derived session cost includes the subagent's spend (fold-in).
+        assert db.get_session_cost("sess-x") > 0
+    finally:
+        db.close()

@@ -249,6 +249,13 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0"
     )),
+    # Migration 11: sub_agent_id on spans — the Claude Code subagent (Task-tool
+    # / sidechain) that issued the span. NULL for main-thread spans and all
+    # non-Claude-Code telemetry. A single research session can spawn 12-20
+    # subagents whose spans all fold under the parent session_id; this column
+    # keeps them attributable per subagent. Populated by the backfill parser
+    # from each record's top-level agentId when isSidechain is true.
+    (11, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_id TEXT"),
 ]
 
 
@@ -296,6 +303,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         parent_span_id=d.get("parent_span_id"),
         session_id=d.get("session_id"),
         agent_id=d.get("agent_id"),
+        sub_agent_id=d.get("sub_agent_id"),
         end_time=d.get("end_time"),
         duration_ms=d.get("duration_ms"),
         status_message=d.get("status_message"),
@@ -437,9 +445,9 @@ class DuckDBBackend:
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
             "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens"
+            "cache_write_tokens, sub_agent_id"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -447,7 +455,7 @@ class DuckDBBackend:
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account, span.cache_write_tokens,
+                span.billing_account, span.cache_write_tokens, span.sub_agent_id,
             ],
         )
 
