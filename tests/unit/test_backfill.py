@@ -738,3 +738,91 @@ def test_ingest_attributes_tokens_per_subagent(tmp_path):
         assert db.get_session_cost("sess-x") > 0
     finally:
         db.close()
+
+
+def test_ingest_session_row_totals_include_subagents(tmp_path):
+    """Regression: the sessions table row must reflect main + ALL subagent files,
+    not just the last-processed one. Backfill upserts the row once per file with
+    replace semantics, so without reconciliation the row held only one file's
+    totals. Two subagents make the bug unambiguous (replace would leave 3000)."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-tot", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-tot", proj,
+        )],
+    )
+    sub_dir = tmp_path / proj.replace("/", "-") / "sess-tot" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-s1.jsonl").write_text(json.dumps(_assistant_record(
+        "m-s1", "claude-haiku-4-5", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-tot", proj, is_sidechain=True, agent_id="s1",
+    )))
+    (sub_dir / "agent-s2.jsonl").write_text(json.dumps(_assistant_record(
+        "m-s2", "claude-haiku-4-5", 3000, 300,
+        "2026-04-01T10:00:02.000Z", "sess-tot", proj, is_sidechain=True, agent_id="s2",
+    )))
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        sess = db.get_session("sess-tot")
+        assert sess is not None
+        assert sess.input_tokens == 1000 + 5000 + 3000   # main + both subagents
+        assert sess.output_tokens == 200 + 500 + 300
+        # The stored row total now matches the span-derived total (both include
+        # every subagent), and a second ingest is idempotent (no double-count).
+        assert abs((sess.total_cost_usd or 0) - db.get_session_cost("sess-tot")) < 1e-9
+        ingest_claude_code(db, root=tmp_path)
+        sess2 = db.get_session("sess-tot")
+        assert sess2 is not None
+        assert sess2.input_tokens == 9000
+    finally:
+        db.close()
+
+
+def test_reingest_retags_existing_spans(tmp_path):
+    """--reingest re-populates sub_agent_id on spans an older backfill ingested
+    before the column existed; a plain idempotent re-run leaves them NULL."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-rt", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-rt", proj,
+        )],
+    )
+    sub_dir = tmp_path / proj.replace("/", "-") / "sess-rt" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-rt1.jsonl").write_text(json.dumps(_assistant_record(
+        "m-rt1", "claude-haiku-4-5", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-rt", proj,
+        tool_uses=[("tu-rt", "Read")], is_sidechain=True, agent_id="rt1",
+    )))
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        # Simulate a pre-column backfill: blank the tags.
+        db.conn.execute("UPDATE spans SET sub_agent_id = NULL")
+
+        # Plain re-run is idempotent -> existing spans skipped -> still NULL.
+        r_plain = ingest_claude_code(db, root=tmp_path)
+        assert r_plain.spans_ingested == 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id IS NOT NULL"
+        ).fetchone()[0] == 0
+
+        # --reingest re-tags in place: no new rows, no duplicates.
+        before = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+        r_re = ingest_claude_code(db, root=tmp_path, reingest=True)
+        assert r_re.spans_ingested == 0
+        assert r_re.spans_retagged > 0
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before
+        # The subagent's LLM span + its tool span are both re-tagged.
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id = 'rt1'"
+        ).fetchone()[0] == 2
+    finally:
+        db.close()

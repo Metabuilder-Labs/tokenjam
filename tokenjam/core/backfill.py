@@ -73,6 +73,7 @@ class BackfillResult:
     sessions_ingested: int = 0
     spans_ingested: int = 0
     spans_skipped_existing: int = 0
+    spans_retagged: int = 0
     files_failed: int = 0
     earliest: datetime | None = None
     latest: datetime | None = None
@@ -452,6 +453,7 @@ def ingest_claude_code(
     since: datetime | None = None,
     progress=None,
     config=None,
+    reingest: bool = False,
 ) -> BackfillResult:
     """
     Ingest Claude Code sessions into the storage backend.
@@ -474,7 +476,9 @@ def ingest_claude_code(
         if parsed.cwd:
             projects_seen.add(parsed.cwd)
         try:
-            inserted = _insert_session_idempotent(db, parsed, plan_tier=plan_tier)
+            inserted, retagged = _insert_session_idempotent(
+                db, parsed, plan_tier=plan_tier, reingest=reingest
+            )
         except Exception as exc:
             result.files_failed += 1
             if len(result.sample_errors) < 5:
@@ -482,7 +486,8 @@ def ingest_claude_code(
             continue
 
         result.spans_ingested += inserted
-        result.spans_skipped_existing += len(parsed.spans) - inserted
+        result.spans_retagged += retagged
+        result.spans_skipped_existing += len(parsed.spans) - inserted - retagged
         if inserted > 0:
             result.sessions_ingested += 1
             result.new_session_ids.add(parsed.session_id)
@@ -507,14 +512,20 @@ def ingest_claude_code(
 
 
 def _insert_session_idempotent(
-    db, parsed: ParsedSession, plan_tier: str = "unknown",
-) -> int:
+    db, parsed: ParsedSession, plan_tier: str = "unknown", reingest: bool = False
+) -> tuple[int, int]:
     """
     Insert spans + session record; skip spans already present.
-    Returns the number of newly-inserted spans.
+    Returns (newly_inserted, retagged).
+
+    When `reingest` is True, spans that already exist are UPDATEd to refresh
+    `sub_agent_id` instead of being skipped — this re-tags history ingested by
+    an older backfill that predates the column. Other span fields are left
+    untouched.
     """
     conn = getattr(db, "conn", None)
     inserted = 0
+    retagged = 0
     if conn is None:
         # Fall back to plain inserts when running against a backend that has no conn
         for span in parsed.spans:
@@ -524,7 +535,7 @@ def _insert_session_idempotent(
             except Exception:
                 continue
         db.upsert_session(session_record_from_parsed(parsed, plan_tier))
-        return inserted
+        return inserted, retagged
 
     for span in parsed.spans:
         # PRIMARY KEY conflicts on (span_id) mean a previous backfill (or live ingest)
@@ -534,6 +545,13 @@ def _insert_session_idempotent(
             "SELECT 1 FROM spans WHERE span_id = $1", [span.span_id]
         ).fetchone()
         if exists:
+            if reingest:
+                # Re-tag history from before the sub_agent_id column existed.
+                conn.execute(
+                    "UPDATE spans SET sub_agent_id = $1 WHERE span_id = $2",
+                    [span.sub_agent_id, span.span_id],
+                )
+                retagged += 1
             continue
         conn.execute(
             "INSERT INTO spans ("
@@ -558,7 +576,7 @@ def _insert_session_idempotent(
         inserted += 1
 
     db.upsert_session(session_record_from_parsed(parsed, plan_tier))
-    return inserted
+    return inserted, retagged
 
 
 __all__ = [
