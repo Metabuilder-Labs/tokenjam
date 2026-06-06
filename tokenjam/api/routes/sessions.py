@@ -20,9 +20,11 @@ for a session (the dashboard's right-click rename). API-key gated.
 
 GET /api/v1/sessions/{session_id} — per-session detail rollup for the dashboard
 Session Detail view. Read-only; guarded by `require_api_key` like other GET
-endpoints. Returns honestly-computable rollups only (Claude Code OTLP is a
-flat 2-level tree — no subagent identity/cost/tokens — so this view does not
-attempt to reconstruct an agent tree).
+endpoints. Includes a per-subagent cost/token breakdown (`subagents`) for
+Claude Code sessions backfilled with sub_agent_id; the live OTLP path is a
+flat 2-level tree carrying no subagent identity, so those sessions show an
+empty breakdown (re-run `tj backfill claude-code --reingest` to populate
+history ingested before the column existed).
 """
 from __future__ import annotations
 
@@ -319,6 +321,70 @@ def _session_model_mix(db: Any, session_id: str) -> list[dict]:
     ]
 
 
+def _session_subagents(db: Any, session_id: str) -> dict:
+    """Per-subagent (Task-tool) cost/token breakdown for the session.
+
+    Groups the session's spans by ``sub_agent_id`` and tags each subagent with
+    the same structural right-sizing flags the ``subagent`` optimize analyzer
+    uses (over_powered / over_provisioned) — imported from there so the
+    heuristic has a single source of truth. Returns an empty breakdown for
+    sessions with no subagent spans (SDK/live sessions, or history ingested
+    before the column existed — re-run backfill with ``--reingest``).
+    """
+    if not hasattr(db, "conn"):
+        return {"rows": [], "total": 0, "cost_usd": 0.0, "tokens": 0, "flagged": 0}
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import _flags_for
+
+    rows = db.conn.execute(
+        "SELECT sub_agent_id, "
+        "arg_max(model, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS model, "
+        "COUNT(*) FILTER (WHERE name = $2) AS llm_calls, "
+        "COUNT(*) FILTER (WHERE tool_name IS NOT NULL) AS tool_calls, "
+        "SUM(COALESCE(input_tokens, 0)) AS input_tokens, "
+        "SUM(COALESCE(output_tokens, 0)) AS output_tokens, "
+        "SUM(COALESCE(cache_tokens, 0)) AS cache_tokens, "
+        "SUM(COALESCE(cache_write_tokens, 0)) AS cache_write_tokens, "
+        "SUM(COALESCE(cost_usd, 0)) AS cost_usd "
+        "FROM spans WHERE session_id = $1 AND sub_agent_id IS NOT NULL "
+        "GROUP BY sub_agent_id ORDER BY cost_usd DESC",
+        [session_id, GenAIAttributes.SPAN_LLM_CALL],
+    ).fetchall()
+
+    out: list[dict] = []
+    for r in rows:
+        in_t, out_t = int(r[4] or 0), int(r[5] or 0)
+        cache_t, cw_t = int(r[6] or 0), int(r[7] or 0)
+        cost = float(r[8] or 0.0)
+        model = str(r[1] or "unknown")
+        tool_calls = int(r[3] or 0)
+        out.append({
+            "sub_agent_id": str(r[0]),
+            "model": model,
+            "llm_calls": int(r[2] or 0),
+            "tool_calls": tool_calls,
+            "input_tokens": in_t,
+            "output_tokens": out_t,
+            "cache_tokens": cache_t,
+            "cache_write_tokens": cw_t,
+            "cost_usd": cost,
+            "flags": _flags_for(
+                model=model, output_tokens=out_t, tool_calls=tool_calls,
+                input_tokens=in_t, cache_tokens=cache_t, cost_usd=cost,
+            ),
+        })
+    return {
+        "rows": out,
+        "total": len(out),
+        "cost_usd": sum(x["cost_usd"] for x in out),
+        "tokens": sum(
+            x["input_tokens"] + x["output_tokens"]
+            + x["cache_tokens"] + x["cache_write_tokens"]
+            for x in out
+        ),
+        "flagged": sum(1 for x in out if x["flags"]),
+    }
+
+
 def _session_context_series(db: Any, session_id: str) -> list[dict]:
     """Time-ordered per-turn context (input) tokens for the session's LLM calls.
 
@@ -396,6 +462,7 @@ async def get_session_detail(request: Request, session_id: str):
     turn_count = _session_turn_count(db, session_id)
     model_mix = _session_model_mix(db, session_id)
     context_series = _session_context_series(db, session_id)
+    subagents = _session_subagents(db, session_id)
 
     return {
         "session": {
@@ -429,6 +496,7 @@ async def get_session_detail(request: Request, session_id: str):
         },
         "turn_count": turn_count,
         "model_mix": model_mix,
+        "subagents": subagents,
         "context_series": context_series,
         "tools": tools,
         "alerts": [
