@@ -60,6 +60,11 @@ class NormalizedSpan:
     parent_span_id: str | None     = None
     session_id:     str | None     = None
     agent_id:       str | None     = None
+    # Claude Code subagent (Task-tool / sidechain) identity. Set during backfill
+    # from a record's top-level `agentId` when `isSidechain` is true; None for
+    # main-thread spans and non-Claude-Code telemetry. Lets a session's cost be
+    # broken down per subagent.
+    sub_agent_id:   str | None     = None
     end_time:       datetime | None = None
     duration_ms:    float | None   = None
     status_message: str | None     = None
