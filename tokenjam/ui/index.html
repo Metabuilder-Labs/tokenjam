@@ -962,6 +962,14 @@ function fmtTokens(n) {
   if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
   return String(n);
 }
+// Shorten a long file path to its last two segments ("…/dir/file.ext") for
+// readable display; the full path goes in a hover title. URLs and non-path
+// strings (search queries, etc.) are returned unchanged.
+function shortPath(s) {
+  if (typeof s !== 'string' || s.indexOf('/') < 0 || s.indexOf('://') >= 0) return s;
+  const parts = s.split('/').filter(Boolean);
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : s;
+}
 function fmtDur(ms) {
   if (ms == null) return '-';
   if (ms < 1000) return ms.toFixed(0) + 'ms';
@@ -1587,7 +1595,7 @@ function WorkMapNode({ node }) {
         <div class="wm-detail" style=${'padding-left:' + (pad + 26) + 'px'}>
           ${node.task ? html`<div><span class="k">task</span>${node.task}</div>` : null}
           ${node.outcome ? html`<div><span class="k">outcome</span>${node.outcome}</div>` : null}
-          ${files.length ? html`<div><span class="k">files</span>${files.join(', ')}${a.file_count > files.length ? ' +' + (a.file_count - files.length) + ' more' : ''}</div>` : null}
+          ${files.length ? html`<div><span class="k">files</span>${files.map((f, i) => html`<span title=${f}>${shortPath(f)}</span>${i < files.length - 1 ? ', ' : ''}`)}${a.file_count > files.length ? ' +' + (a.file_count - files.length) + ' more' : ''}</div>` : null}
         </div>
       ` : null}
       ${(node.children || []).map(c => html`<${WorkMapNode} node=${c} />`)}
