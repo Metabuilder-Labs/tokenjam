@@ -1074,6 +1074,13 @@ def test_work_map_node_metric_is_tokens_not_dollars(html):
     assert ">${fmtCost(node.cost_usd)}</span>" not in html  # no bare $ in the row
 
 
+def test_work_map_files_shortened_for_readability(html):
+    # Long absolute file paths are shortened to "…/dir/file" with the full path
+    # on hover, so the files list is readable.
+    assert "function shortPath" in html
+    assert "shortPath(f)" in html
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).
