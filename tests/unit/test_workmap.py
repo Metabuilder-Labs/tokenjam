@@ -113,7 +113,7 @@ def test_unmapped_subagents_reported_not_dropped():
     story = {"task": "x", "outcome": "y", "steps": [_step([_tool("Read", "f.py")])]}
     subagents = {"rows": [{
         "sub_agent_id": "Z", "model": "m",
-        "input_tokens": 0, "output_tokens": 0,
+        "input_tokens": 4000, "output_tokens": 1000,
         "cache_tokens": 0, "cache_write_tokens": 0,
         "cost_usd": 2.0, "flags": [],
     }]}
@@ -122,6 +122,7 @@ def test_unmapped_subagents_reported_not_dropped():
     assert m["subagent_count"] == 0
     assert m["unmapped_count"] == 1
     assert m["unmapped_cost_usd"] == 2.0
+    assert m["unmapped_tokens"] == 5000
 
 
 def test_empty_story_is_root_only():
