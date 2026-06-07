@@ -14,6 +14,7 @@ from tokenjam.core.transcript import (
     MAX_STORY_STEPS,
     MAX_SUBAGENT_DEPTH,
     MAX_TOOL_LABEL_CHARS,
+    _first_user_prompt,
     build_session_story,
 )
 
@@ -520,3 +521,47 @@ def test_subagent_privacy_no_full_io_at_any_depth(tmp_path):
     sub = story["steps"][0]["subagent"]
     bash_label = sub["steps"][0]["tools"][0]["label"]
     assert len(bash_label) <= MAX_TOOL_LABEL_CHARS + 1
+
+
+# --- First-prompt cleaning: strip the Claude Code harness wrapper ------------ #
+
+def test_first_prompt_strips_system_reminder():
+    records = [_user_prompt(
+        "<system-reminder>\n# claudeMd\nbig CLAUDE.md dump here\n</system-reminder>\n"
+        "Build me a parser for the config file."
+    )]
+    assert _first_user_prompt(records) == "Build me a parser for the config file."
+
+
+def test_first_prompt_surfaces_slash_command_when_only_wrapper():
+    records = [_user_prompt(
+        "<command-name>/review</command-name>"
+        "<command-message>review</command-message>"
+        "<command-args>PR 152</command-args>"
+    )]
+    assert _first_user_prompt(records) == "/review PR 152"
+
+
+def test_first_prompt_strips_local_command_caveat_and_stdout():
+    records = [_user_prompt(
+        "<local-command-caveat>Caveat: generated while running local commands.</local-command-caveat>"
+        "<command-name>/compact</command-name>"
+        "<command-message>compact</command-message>"
+        "<command-args></command-args>"
+        "<local-command-stdout>Compacted.</local-command-stdout>"
+    )]
+    assert _first_user_prompt(records) == "/compact"
+
+
+def test_first_prompt_skips_wrapper_only_message():
+    records = [
+        _user_prompt("<system-reminder>session init</system-reminder>"),
+        _user_prompt("<system-reminder>x</system-reminder>\nThe actual question."),
+    ]
+    assert _first_user_prompt(records) == "The actual question."
+
+
+def test_first_prompt_leaves_clean_text_unchanged():
+    # No wrapper -> returned verbatim (no regression for normal prompts).
+    records = [_user_prompt("Just do the thing.")]
+    assert _first_user_prompt(records) == "Just do the thing."

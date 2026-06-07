@@ -76,6 +76,25 @@ _AGENT_ID_RE = re.compile(r"[0-9a-f]{16,17}")
 #: Default Claude Code projects root.
 DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 
+#: Claude Code injects harness context ahead of the user's first words: one or
+#: more ``<system-reminder>`` blocks (CLAUDE.md, environment, date) plus, for
+#: slash commands, ``<command-*>`` / ``<local-command-*>`` tag wrappers. These
+#: are stripped from the first-prompt extraction (``_strip_harness_wrapper``) so
+#: a session's surfaced "task" is the human's actual ask, not the boilerplate.
+_SYSTEM_REMINDER_RE = re.compile(
+    r"<system-reminder>.*?</system-reminder>", re.DOTALL | re.IGNORECASE
+)
+_COMMAND_BLOCK_RE = re.compile(
+    r"<((?:local-)?command-[a-z]+)>.*?</\1>", re.DOTALL | re.IGNORECASE
+)
+_COMMAND_TAG_RE = re.compile(r"</?(?:local-)?command-[a-z]+>", re.IGNORECASE)
+_COMMAND_NAME_RE = re.compile(
+    r"<command-name>(.*?)</command-name>", re.DOTALL | re.IGNORECASE
+)
+_COMMAND_ARGS_RE = re.compile(
+    r"<command-args>(.*?)</command-args>", re.DOTALL | re.IGNORECASE
+)
+
 #: Per-tool preference for which single ``input`` arg makes the most useful
 #: label. The first key present wins; falls back to the generic order below.
 _TOOL_LABEL_ARGS: dict[str, tuple[str, ...]] = {
@@ -317,11 +336,48 @@ def _subagent_display_name(
     return f"agent-{agent_id[:8]}"
 
 
-def _first_user_prompt(records: list[dict[str, Any]]) -> str:
-    """Text of the first real ``user`` message (the initial prompt / ticket).
+def _slash_command_label(text: str) -> str:
+    """Build a ``/cmd args`` label from Claude Code's ``<command-*>`` wrapper.
 
-    Skips ``isMeta`` records and tool-result-only user records — those are not
-    the human's prompt.
+    Returns "" when the text carries no ``<command-name>``.
+    """
+    name_match = _COMMAND_NAME_RE.search(text)
+    if not name_match:
+        return ""
+    name = name_match.group(1).strip()
+    if not name:
+        return ""
+    args_match = _COMMAND_ARGS_RE.search(text)
+    args = args_match.group(1).strip() if args_match else ""
+    label = name if name.startswith("/") else "/" + name
+    return f"{label} {args}".strip()
+
+
+def _strip_harness_wrapper(text: str) -> str:
+    """Strip Claude Code's injected wrappers from a first-user message.
+
+    Claude Code prepends the human's first words with one or more
+    ``<system-reminder>`` blocks (CLAUDE.md, environment, date) and, for slash
+    commands, ``<command-*>`` / ``<local-command-*>`` tag wrappers. Removing them
+    leaves the actual ask. If only a slash command remains, return a ``/cmd
+    args`` label so a command-only message still yields a meaningful task.
+    Returns "" when nothing meaningful is left.
+    """
+    command = _slash_command_label(text)
+    cleaned = _SYSTEM_REMINDER_RE.sub("", text)
+    cleaned = _COMMAND_BLOCK_RE.sub("", cleaned)
+    cleaned = _COMMAND_TAG_RE.sub("", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned or command
+
+
+def _first_user_prompt(records: list[dict[str, Any]]) -> str:
+    """The human's first real ``user`` message (the initial prompt / ticket).
+
+    Skips ``isMeta`` records and tool-result-only user records, and strips the
+    Claude Code harness wrapper (``<system-reminder>`` / ``<command-*>`` tags)
+    so the result is the actual ask, not the injected context. Falls through to
+    the next user message when one is pure wrapper.
     """
     for record in records:
         if record.get("type") != "user" or record.get("isMeta"):
@@ -329,7 +385,7 @@ def _first_user_prompt(records: list[dict[str, Any]]) -> str:
         message = record.get("message")
         if not isinstance(message, dict):
             continue
-        text = _block_text(message.get("content"))
+        text = _strip_harness_wrapper(_block_text(message.get("content")))
         if text.strip():
             return text
     return ""
