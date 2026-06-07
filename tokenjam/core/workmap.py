@@ -303,6 +303,7 @@ def build_work_map(
     unmapped_cost = sum(
         float(r["cost_usd"]) for r in unmapped if r.get("cost_usd") is not None
     )
+    unmapped_tokens = sum(_row_tokens(r) for r in unmapped)
 
     return {
         "root": root,
@@ -314,6 +315,7 @@ def build_work_map(
         "truncated": stats["truncated"],
         "unmapped_count": len(unmapped),
         "unmapped_cost_usd": unmapped_cost,
+        "unmapped_tokens": unmapped_tokens,
     }
 
 

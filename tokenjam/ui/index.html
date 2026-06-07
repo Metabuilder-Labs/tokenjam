@@ -1130,7 +1130,7 @@ a.health-tile.attn { border-color: var(--warn); }
 .wm-model { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; }
 .wm-summary { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; }
 .wm-spacer { margin-left: auto; }
-.wm-cost { font-family: 'Geist Mono', monospace; font-size: 12px; }
+.wm-tokens { font-family: 'Geist Mono', monospace; font-size: 12px; }
 .wm-flag { color: #f5a623; font-size: 11px; white-space: nowrap; }
 .wm-detail { font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; margin: 1px 0 3px; padding: 4px 0; }
 .wm-detail div { margin: 1px 0; }
@@ -2416,7 +2416,7 @@ function WorkMapNode({ node }) {
         ${model ? html`<span class="wm-model">${model}</span>` : null}
         <span class="wm-summary">${node.summary}</span>
         <span class="wm-spacer"></span>
-        ${node.cost_usd != null ? html`<span class="wm-cost">${fmtCost(node.cost_usd)}</span>` : null}
+        ${node.tokens != null ? html`<span class="wm-tokens" title=${node.cost_usd != null ? ('est. ' + fmtCost(node.cost_usd)) : ''}>${fmtTokens(node.tokens)} tok</span>` : null}
         ${flagged ? node.flags.map(f => html`<span class="wm-flag">${f.replace(/_/g, '-')}</span>`) : null}
       </div>
       ${open && hasDetail ? html`
@@ -2467,7 +2467,7 @@ function WorkMapSection({ sessionId }) {
     <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What the agent did — ${meta}</div>
     <div class="wm-tree"><${WorkMapNode} node=${root} /></div>
-    ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded cost not shown in the tree (deep/budget-capped)${map.unmapped_cost_usd ? ' · ' + fmtCost(map.unmapped_cost_usd) : ''}.</div>` : null}
+    ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not shown in the tree (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
     <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Structure + activity from the on-disk transcript; cost from recorded spans. Descriptive only — tj reports what happened, you judge the approach.</div>
   `;
 }

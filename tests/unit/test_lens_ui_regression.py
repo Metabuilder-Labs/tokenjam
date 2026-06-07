@@ -1066,6 +1066,14 @@ def test_work_map_is_descriptive_not_evaluative(html):
     assert "you judge the approach" in html
 
 
+def test_work_map_node_metric_is_tokens_not_dollars(html):
+    # User preference: the visible per-node metric is tokens; the dollar figure
+    # moved to a hover title only.
+    assert "fmtTokens(node.tokens)" in html
+    assert 'class="wm-tokens"' in html
+    assert ">${fmtCost(node.cost_usd)}</span>" not in html  # no bare $ in the row
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).
