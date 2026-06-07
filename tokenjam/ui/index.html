@@ -1107,6 +1107,34 @@ a.health-tile.attn { border-color: var(--warn); }
   padding-left: 12px;
   border-left: 2px solid var(--border);
 }
+/* Work map (the "Map" tab): the nested main + subagent tree. Indent comes from
+   per-row padding (node.depth) so the DOM can nest without compounding margins. */
+.wm-tree { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+.wm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.wm-row.flagged { background: rgba(245,166,35,0.06); border-color: rgba(245,166,35,0.35); }
+.wm-row.clickable { cursor: pointer; }
+.wm-row.clickable:hover { background: var(--surface2); }
+.wm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
+.wm-dot.root { background: var(--brand); }
+.wm-dot.capped { background: transparent; border: 1px solid var(--text-dim); }
+.wm-name { font-weight: 600; }
+.wm-model { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; }
+.wm-summary { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; }
+.wm-spacer { margin-left: auto; }
+.wm-cost { font-family: 'Geist Mono', monospace; font-size: 12px; }
+.wm-flag { color: #f5a623; font-size: 11px; white-space: nowrap; }
+.wm-detail { font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; margin: 1px 0 3px; padding: 4px 0; }
+.wm-detail div { margin: 1px 0; }
+.wm-detail .k { color: var(--brand); margin-right: 6px; }
 </style>
 <script>
   // Apply theme before paint to prevent flash of incorrect theme
@@ -2369,10 +2397,85 @@ function StorySection({ sessionId }) {
   `;
 }
 
+// One node in the work map. Expands (root open by default) to reveal the node's
+// own task/outcome narration + the files it touched. Indent is per-row padding
+// off node.depth, so recursive DOM nesting doesn't compound the offset.
+function WorkMapNode({ node }) {
+  const a = node.activity || {};
+  const files = a.files || [];
+  const hasDetail = !!(node.task || node.outcome || files.length);
+  const [open, setOpen] = useState(!!node.is_root);
+  const flagged = node.flags && node.flags.length;
+  const pad = (node.depth || 0) * 16;
+  const model = (node.model || '').replace('claude-', '');
+  return html`
+    <div class="wm-node">
+      <div class="wm-row ${flagged ? 'flagged' : ''} ${hasDetail ? 'clickable' : ''}" style=${'padding-left:' + (pad + 10) + 'px'} onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
+        <span class="wm-dot ${node.is_root ? 'root' : ''} ${node.capped ? 'capped' : ''}"></span>
+        <span class="wm-name">${node.name}</span>
+        ${model ? html`<span class="wm-model">${model}</span>` : null}
+        <span class="wm-summary">${node.summary}</span>
+        <span class="wm-spacer"></span>
+        ${node.cost_usd != null ? html`<span class="wm-cost">${fmtCost(node.cost_usd)}</span>` : null}
+        ${flagged ? node.flags.map(f => html`<span class="wm-flag">${f.replace(/_/g, '-')}</span>`) : null}
+      </div>
+      ${open && hasDetail ? html`
+        <div class="wm-detail" style=${'padding-left:' + (pad + 26) + 'px'}>
+          ${node.task ? html`<div><span class="k">task</span>${node.task}</div>` : null}
+          ${node.outcome ? html`<div><span class="k">outcome</span>${node.outcome}</div>` : null}
+          ${files.length ? html`<div><span class="k">files</span>${files.join(', ')}${a.file_count > files.length ? ' +' + (a.file_count - files.length) + ' more' : ''}</div>` : null}
+        </div>
+      ` : null}
+      ${(node.children || []).map(c => html`<${WorkMapNode} node=${c} />`)}
+    </div>
+  `;
+}
+
+function WorkMapSection({ sessionId }) {
+  const [map, setMap] = useState(null);
+
+  // Poll like the Timeline so a live session's map fills in as it runs. On a
+  // transient failure keep the last good map; only fall back to unavailable on
+  // the first load.
+  const load = useCallback(() => {
+    api('/sessions/' + sessionId + '/workmap')
+      .then(d => setMap(d))
+      .catch(() => setMap(prev => prev || { available: false }));
+  }, [sessionId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  if (!map) return null;
+
+  if (!map.available) {
+    return html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
+      <div class="story-unavailable">No transcript on disk — the work map is available for Claude Code sessions.</div>
+    `;
+  }
+
+  const root = map.root;
+  if (!root) return html`<div class="story-unavailable">No work map for this session.</div>`;
+
+  const sub = map.subagent_count || 0;
+  const meta = 'main thread + ' + sub + ' subagent' + (sub === 1 ? '' : 's')
+    + (map.max_depth ? ' · ' + map.max_depth + ' level' + (map.max_depth === 1 ? '' : 's') + ' deep' : '')
+    + (map.flagged ? ' · ' + map.flagged + ' flagged for right-sizing' : '')
+    + (map.capped ? ' · ' + map.capped + ' not expanded (depth/budget cap)' : '');
+
+  return html`
+    <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What the agent did — ${meta}</div>
+    <div class="wm-tree"><${WorkMapNode} node=${root} /></div>
+    ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded cost not shown in the tree (deep/budget-capped)${map.unmapped_cost_usd ? ' · ' + fmtCost(map.unmapped_cost_usd) : ''}.</div>` : null}
+    <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Structure + activity from the on-disk transcript; cost from recorded spans. Descriptive only — tj reports what happened, you judge the approach.</div>
+  `;
+}
+
 function SessionDetailView({ sessionId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
-  const [tab, setTab] = useState('story');
+  const [tab, setTab] = useState('map');
 
   const load = useCallback(async () => {
     try {
@@ -2444,12 +2547,15 @@ function SessionDetailView({ sessionId }) {
     </div>
 
     <div class="tab-bar" role="tablist">
+      <button class="tab ${tab === 'map' ? 'active' : ''}" role="tab" aria-selected=${tab === 'map'} onClick=${() => setTab('map')}>Map</button>
       <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Timeline</button>
       <button class="tab ${tab === 'models' ? 'active' : ''}" role="tab" aria-selected=${tab === 'models'} onClick=${() => setTab('models')}>Models & context</button>
       ${subagents.total > 0 ? html`<button class="tab ${tab === 'subagents' ? 'active' : ''}" role="tab" aria-selected=${tab === 'subagents'} onClick=${() => setTab('subagents')}>Subagents${subagents.flagged ? ' (' + subagents.flagged + ')' : ''}</button>` : null}
       <button class="tab ${tab === 'alerts' ? 'active' : ''}" role="tab" aria-selected=${tab === 'alerts'} onClick=${() => setTab('alerts')}>Alerts</button>
       <button class="tab ${tab === 'traces' ? 'active' : ''}" role="tab" aria-selected=${tab === 'traces'} onClick=${() => setTab('traces')}>Traces</button>
     </div>
+
+    ${tab === 'map' ? html`<${WorkMapSection} sessionId=${sessionId} />` : null}
 
     ${tab === 'story' ? html`<${StorySection} sessionId=${sessionId} />` : null}
 

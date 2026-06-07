@@ -1940,3 +1940,41 @@ async def test_get_session_story_subagents_false_is_flat(config, db, tmp_path):
     body = resp.json()
     assert body["available"] is True
     assert "subagent" not in body["steps"][0]
+
+
+@pytest.mark.asyncio
+async def test_get_session_workmap_tree(config, db, tmp_path):
+    _write_story_with_subagent(tmp_path, "wm-parent")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/wm-parent/workmap")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    root = body["root"]
+    assert root["name"] == "Main agent"
+    assert root["is_root"] is True
+    assert body["subagent_count"] == 1
+    assert body["max_depth"] == 1
+    child = root["children"][0]
+    assert child["name"] == "build-it"
+    assert child["activity"]["steps"] == 1   # the worker's one narrated turn
+
+
+@pytest.mark.asyncio
+async def test_get_session_workmap_unavailable(config, db, tmp_path):
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/nope-sess/workmap")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "reason" in body

@@ -1046,3 +1046,27 @@ def test_status_card_right_click_rename_wiring(html):
     assert "apiPost('/sessions/' + encodeURIComponent(a.session_id) + '/label'" in view
     # Discoverability affordance on the title.
     assert "or right-click to rename" in view
+
+
+# --- Work map: graphical "what did my agent do" tab ------------------------ #
+def test_work_map_tab_present_and_default(html):
+    # Map is the default session tab and renders before Timeline.
+    assert "function WorkMapSection" in html
+    assert "function WorkMapNode" in html
+    assert "useState('map')" in html
+    assert "/sessions/' + sessionId + '/workmap'" in html
+    # Tab order: the Map button must appear before the Timeline button.
+    map_btn = html.index("setTab('map')")
+    story_btn = html.index("setTab('story')")
+    assert map_btn < story_btn, "Map tab must render before Timeline"
+
+
+def test_work_map_is_descriptive_not_evaluative(html):
+    # Honesty discipline: the map reports, it does not judge the approach.
+    assert "you judge the approach" in html
+
+
+def test_index_html_has_no_nul_bytes():
+    # Guards the NUL-byte corruption fixed alongside the work map (it broke
+    # `node --check` and made `file` mis-detect the SPA as binary).
+    assert b"\x00" not in _UI.read_bytes()
