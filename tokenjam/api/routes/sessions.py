@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.models import AlertFilters
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
+from tokenjam.core.workmap import build_work_map
 from tokenjam.otel.semconv import GenAIAttributes
 
 router = APIRouter()
@@ -452,3 +453,50 @@ async def get_session_story(
         return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
 
     return {"available": True, **story}
+
+
+@router.get(
+    "/sessions/{session_id}/workmap",
+    response_model=None,
+    dependencies=[Depends(require_api_key)],
+)
+async def get_session_workmap(request: Request, session_id: str):
+    """Graphical "work map" of a session: the nested main + subagent tree, each
+    node annotated with a deterministic activity rollup (files touched, web
+    sources, searches, shell commands, subagents spawned, errors/retries)
+    joined to its cost / tokens / right-sizing flags.
+
+    Composes the pure transcript Story (structure + the agent's own labels) with
+    the span-derived per-subagent breakdown (cost). No LLM, no interpretation —
+    it reports what happened so a human can judge it. No transcript on disk ->
+    ``{"available": false, ...}`` with HTTP 200 (a normal state for SDK / live
+    sessions), the same contract as ``/story``.
+    """
+    override = getattr(request.app.state, "claude_projects_root", None)
+    projects_root = resolve_projects_root(override)
+
+    story = build_session_story(
+        session_id, projects_root=projects_root, include_subagents=True
+    )
+    if story is None:
+        return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
+
+    db = request.app.state.db
+    subagents = _session_subagents(db, session_id)
+    session = db.get_session(session_id)
+    root_cost = (
+        float(session.total_cost_usd)
+        if session and session.total_cost_usd is not None
+        else None
+    )
+    root_tokens = (
+        session.input_tokens + session.output_tokens
+        + session.cache_tokens + session.cache_write_tokens
+        if session is not None
+        else None
+    )
+
+    workmap = build_work_map(
+        story, subagents, root_cost_usd=root_cost, root_tokens=root_tokens
+    )
+    return {"available": True, **workmap}
