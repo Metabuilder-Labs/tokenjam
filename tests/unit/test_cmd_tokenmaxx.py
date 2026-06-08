@@ -28,8 +28,8 @@ def test_classify_walks_tiers_correctly():
         (499.99,  "TokenMaxxer"),
         (500.0,   "TokenChad"),
         (1499.99, "TokenChad"),
-        (1500.0,  "Wallet on Fire"),
-        (50_000,  "Wallet on Fire"),
+        (1500.0,  "TokenGigaChad"),
+        (50_000,  "TokenGigaChad"),
     ]
     for spend, expected in cases:
         assert _classify(spend).label == expected, f"failed at ${spend}"
