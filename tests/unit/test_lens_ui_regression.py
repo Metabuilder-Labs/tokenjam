@@ -1089,6 +1089,15 @@ def test_work_map_is_ask_segmented(html):
     assert "not one task" in html
 
 
+def test_user_prompts_visually_marked_on_both_views(html):
+    # Timeline surfaces user prompts as distinct "You" blocks, grouped by ask;
+    # the Map ask rows carry the same brand left-border accent.
+    assert "function StoryAsk" in html
+    assert "story-ask-badge" in html
+    assert "step.ask" in html
+    assert ".wm-ask { border: 1px solid var(--border); border-left: 3px solid var(--brand)" in html
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).

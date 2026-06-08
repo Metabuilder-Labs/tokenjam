@@ -974,6 +974,12 @@ a.health-tile.attn { border-color: var(--warn); }
   word-break: break-word;
 }
 .story-steps { display: flex; flex-direction: column; gap: 2px; }
+/* User prompt marker in the Timeline — brand accent so human asks stand out
+   from the agent's steps. Same visual language as the Map ask rows. */
+.story-ask { display: flex; gap: 9px; align-items: baseline; margin: 12px 0 4px; padding: 8px 11px; border-radius: 7px; background: rgba(61,142,255,0.10); border: 1px solid rgba(61,142,255,0.30); border-left: 3px solid var(--brand); }
+.story-ask.clickable { cursor: pointer; }
+.story-ask-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--brand); flex: 0 0 auto; font-family: 'Geist Mono', monospace; padding-top: 1px; }
+.story-ask-text { font-size: 13px; font-weight: 600; color: var(--text); white-space: pre-wrap; }
 /* Compact single-line row (356 steps must stay scannable, not a wall of cards) */
 .story-step {
   border: 1px solid transparent;
@@ -1110,7 +1116,7 @@ a.health-tile.attn { border-color: var(--warn); }
 /* Work map (the "Map" tab): the nested main + subagent tree. Indent comes from
    per-row padding (node.depth) so the DOM can nest without compounding margins. */
 .wm-asks { display: flex; flex-direction: column; gap: 6px; }
-.wm-ask { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.wm-ask { border: 1px solid var(--border); border-left: 3px solid var(--brand); border-radius: 8px; background: var(--surface); overflow: hidden; }
 .wm-ask-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; font-size: 13px; }
 .wm-ask-row.clickable { cursor: pointer; }
 .wm-ask-row.clickable:hover { background: var(--surface2); }
@@ -2313,19 +2319,51 @@ function firstLine(text) {
 // render only). prevModel is the chronologically-previous step's model so the
 // "model changed" dim tag tracks the real timeline, not the reversed order.
 function renderStepsNewestFirst(steps) {
-  const out = [];
-  let prevModel = null;
+  // Partition into ask-groups: a new group starts at a step carrying `ask` (the
+  // user prompt). Steps before the first ask form a leading, header-less group.
+  const groups = [];
+  let cur = null;
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
-    if (step.omitted != null) {
-      out.push(html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`);
-    } else {
-      out.push(html`<${StoryStep} step=${step} prevModel=${prevModel} key=${step.n} />`);
-      prevModel = step.model || prevModel;
+    if (cur === null || step.ask != null) {
+      cur = { ask: step.ask != null ? step.ask : null, items: [] };
+      groups.push(cur);
     }
+    cur.items.push({ step, i });
   }
-  out.reverse();
+  // Newest ask first; within a group, the ask header on top then its steps
+  // newest-first (so each exchange reads: prompt, then its work).
+  const out = [];
+  for (let g = groups.length - 1; g >= 0; g--) {
+    const grp = groups[g];
+    if (grp.ask != null) out.push(html`<${StoryAsk} prompt=${grp.ask} key=${'ask' + g} />`);
+    const rendered = [];
+    let prevModel = null;
+    for (const { step, i } of grp.items) {
+      if (step.omitted != null) {
+        rendered.push(html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`);
+      } else {
+        rendered.push(html`<${StoryStep} step=${step} prevModel=${prevModel} key=${step.n} />`);
+        prevModel = step.model || prevModel;
+      }
+    }
+    rendered.reverse();
+    for (const r of rendered) out.push(r);
+  }
   return out;
+}
+
+// A user prompt marker in the Timeline — the human ask that began an exchange.
+function StoryAsk({ prompt }) {
+  const [expanded, setExpanded] = useState(false);
+  const long = prompt.length > 200;
+  const short = long ? prompt.slice(0, 200) + '…' : prompt;
+  return html`
+    <div class=${'story-ask' + (long ? ' clickable' : '')} onClick=${long ? (() => setExpanded(e => !e)) : null}>
+      <span class="story-ask-badge">You</span>
+      <span class="story-ask-text">${expanded ? prompt : short}</span>
+    </div>
+  `;
 }
 
 function StoryStep({ step, prevModel }) {
