@@ -15,6 +15,7 @@ from tokenjam.core.transcript import (
     MAX_SUBAGENT_DEPTH,
     MAX_TOOL_LABEL_CHARS,
     _first_user_prompt,
+    build_session_asks,
     build_session_story,
 )
 
@@ -565,3 +566,89 @@ def test_first_prompt_leaves_clean_text_unchanged():
     # No wrapper -> returned verbatim (no regression for normal prompts).
     records = [_user_prompt("Just do the thing.")]
     assert _first_user_prompt(records) == "Just do the thing."
+
+
+# --- Ask segmentation: a session is a sequence of exchanges, not one task --- #
+
+def test_asks_segment_by_user_prompt(tmp_path):
+    sid = "asks-1"
+    records = [
+        _user_prompt("First question: read the file."),
+        _assistant("Reading.",
+                   tools=[{"id": "a1", "name": "Read", "input": {"file_path": "a.py"}}]),
+        _tool_result("a1"),
+        _assistant("Done with first."),
+        _user_prompt("Second question: run the tests."),
+        _assistant("Running.",
+                   tools=[{"id": "b1", "name": "Bash", "input": {"command": "pytest"}}]),
+        _tool_result("b1"),
+        _assistant("Tests pass."),
+    ]
+    _write_transcript(tmp_path, sid, records)
+    payload = build_session_asks(sid, projects_root=tmp_path)
+    assert payload is not None
+    asks = payload["asks"]
+    assert len(asks) == 2
+    assert asks[0]["n"] == 1
+    assert asks[0]["prompt"] == "First question: read the file."
+    assert asks[0]["step_count"] == 2          # "Reading." + "Done with first."
+    assert asks[1]["prompt"] == "Second question: run the tests."
+    assert asks[1]["step_count"] == 2
+    assert asks[1]["outcome"] == "Tests pass."
+
+
+def test_asks_skip_meta_and_tool_result_turns(tmp_path):
+    sid = "asks-2"
+    records = [
+        _user_prompt("meta noise", is_meta=True),
+        _user_prompt("The only real ask."),
+        _assistant("Working.",
+                   tools=[{"id": "x", "name": "Read", "input": {"file_path": "f.py"}}]),
+        _tool_result("x"),       # tool-result-only user record -> not an ask
+        _assistant("Done."),
+    ]
+    _write_transcript(tmp_path, sid, records)
+    payload = build_session_asks(sid, projects_root=tmp_path)
+    assert [a["prompt"] for a in payload["asks"]] == ["The only real ask."]
+
+
+def test_asks_strip_harness_wrapper_per_prompt(tmp_path):
+    sid = "asks-3"
+    records = [
+        _user_prompt("First."),
+        _assistant("ok"),
+        _user_prompt("<system-reminder>ctx</system-reminder>\nSecond real ask."),
+        _assistant("ok2"),
+    ]
+    _write_transcript(tmp_path, sid, records)
+    payload = build_session_asks(sid, projects_root=tmp_path)
+    assert [a["prompt"] for a in payload["asks"]] == ["First.", "Second real ask."]
+
+
+def test_asks_attribute_subagent_to_its_ask(tmp_path):
+    sid = "asks-sub"
+    child = "abc123def456abc78"
+    records = [
+        _user_prompt("Ask one: just read."),
+        _assistant("reading",
+                   tools=[{"id": "r1", "name": "Read", "input": {"file_path": "a.py"}}]),
+        _tool_result("r1"),
+        _user_prompt("Ask two: orchestrate a worker."),
+        _task_turn("Spawning.", "tt1", name="worker"),
+        _agent_tool_result("tt1", child),
+        _assistant("worker done"),
+    ]
+    _write_transcript(tmp_path, sid, records)
+    _write_subagent(tmp_path, sid, child,
+                    [_user_prompt("Build it."), _assistant("built")], name="worker")
+    payload = build_session_asks(sid, projects_root=tmp_path)
+    asks = payload["asks"]
+    assert len(asks) == 2
+    # ask 1 spawned nothing
+    assert all("subagent" not in s and "subagents" not in s for s in asks[0]["steps"])
+    # ask 2's Task step carries the subagent
+    task_step = next(
+        s for s in asks[1]["steps"]
+        if any(t["name"] == "Task" for t in s.get("tools", []))
+    )
+    assert task_step["subagent"]["name"] == "worker"

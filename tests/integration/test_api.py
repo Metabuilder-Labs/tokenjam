@@ -1943,7 +1943,7 @@ async def test_get_session_story_subagents_false_is_flat(config, db, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_session_workmap_tree(config, db, tmp_path):
+async def test_get_session_workmap_asks(config, db, tmp_path):
     _write_story_with_subagent(tmp_path, "wm-parent")
     pipeline = IngestPipeline(db=db, config=config)
     app = create_app(config=config, db=db, ingest_pipeline=pipeline)
@@ -1955,14 +1955,14 @@ async def test_get_session_workmap_tree(config, db, tmp_path):
     assert resp.status_code == 200
     body = resp.json()
     assert body["available"] is True
-    root = body["root"]
-    assert root["name"] == "Main agent"
-    assert root["is_root"] is True
+    assert body["ask_count"] == 1
+    ask = body["asks"][0]
+    assert ask["prompt"] == "Orchestrate."        # the one human ask
+    assert ask["subagent_count"] == 1
     assert body["subagent_count"] == 1
-    assert body["max_depth"] == 1
-    child = root["children"][0]
+    child = ask["subagents"][0]
     assert child["name"] == "build-it"
-    assert child["activity"]["steps"] == 1   # the worker's one narrated turn
+    assert child["activity"]["steps"] == 1        # the worker's one narrated turn
 
 
 @pytest.mark.asyncio

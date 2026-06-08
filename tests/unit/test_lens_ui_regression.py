@@ -1081,6 +1081,14 @@ def test_work_map_files_shortened_for_readability(html):
     assert "shortPath(f)" in html
 
 
+def test_work_map_is_ask_segmented(html):
+    # A session is a sequence of asks (exchanges), not one task: the Map renders
+    # map.asks via a per-ask component, newest first.
+    assert "function WorkMapAsk" in html
+    assert "map.asks" in html
+    assert "not one task" in html
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).

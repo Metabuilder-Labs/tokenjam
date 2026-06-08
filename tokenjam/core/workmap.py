@@ -1,25 +1,26 @@
-"""Agent work map: a compact, render-ready tree of what a Claude Code session
-and its subagents actually did.
+"""Agent work map: a render-ready view of what a Claude Code session did.
 
-This module is a PURE TRANSFORM. It folds two already-computed inputs into one
-annotated tree:
+A session is NOT one task — it's a sequence of human *asks* (exchanges) fired
+into the same terminal until the context window fills. So the work map is a list
+of asks (newest first), each annotated with a deterministic activity rollup
+(files touched, web sources, searches, shell commands, subagents spawned,
+errors/retries) plus the subagent subtree that ask spawned, joined to each
+subagent's cost / tokens / right-sizing flags.
 
-  * the deterministic session *story* (``core.transcript.build_session_story``),
-    which carries the nested subagent tree with human names + per-step tool
-    labels straight from the on-disk transcript, and
+This module is a PURE TRANSFORM. It folds two already-computed inputs:
+
+  * the ask-segmented session story (``core.transcript.build_session_asks``),
+    which carries each ask's prompt + steps + nested subagents with human names
+    and per-step tool labels straight from the on-disk transcript, and
   * the per-subagent cost/token/flag breakdown (the API's ``_session_subagents``)
-    derived from spans.
+    derived from spans, plus per-ask token/cost totals bucketed by the caller.
 
-For each node it emits a deterministic activity rollup — files touched, web
-sources, code searches, shell commands, subagents spawned, errors/retries —
-joined to that node's cost / tokens / right-sizing flags.
-
-There is NO interpretation here. Every field is a count, a label the agent
-itself produced, or a cost summed from real spans. It never groups steps into
-"approaches" or judges quality: it reports structure + activity so a human can
-see, at a glance, what a long run actually did. Caps the story applied
-(depth / step-budget / cycle) are surfaced as node markers, and subagents that
-have recorded cost but never made it into the (bounded) tree are reported as an
+There is NO interpretation: every field is a count, a label the agent itself
+produced, or a value summed from real spans. It never groups asks into inferred
+"tasks" or judges quality — it reports structure + activity so a human can see,
+at a glance, what a long run actually did. Caps the story applied
+(depth / step-budget / cycle) surface as node markers, and subagents with
+recorded cost that never made it into the (bounded) tree are reported as an
 ``unmapped`` tail — never silently dropped.
 
 Pure module: no I/O; never imports ``tokenjam.api`` / ``tokenjam.cli``.
@@ -162,39 +163,44 @@ def _row_tokens(row: dict[str, Any]) -> int:
     )
 
 
+def _children_from_steps(
+    steps: list[dict[str, Any]],
+    depth: int,
+    sub_index: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Subagent child nodes attached to a node's steps (one level down)."""
+    children: list[dict[str, Any]] = []
+    for step in steps:
+        if "omitted" in step:
+            continue
+        if isinstance(step.get("subagent"), dict):
+            children.append(_child_node(step["subagent"], depth=depth,
+                                        sub_index=sub_index))
+        for sub in step.get("subagents") or []:
+            if isinstance(sub, dict):
+                children.append(_child_node(sub, depth=depth, sub_index=sub_index))
+    return children
+
+
 def _node_from_story(
     story: dict[str, Any],
     *,
     node_id: str,
     name: str,
     depth: int,
-    is_root: bool,
     sub_index: dict[str, dict[str, Any]],
     cost_usd: float | None,
     tokens: int | None,
     flags: list[str],
 ) -> dict[str, Any]:
-    """Build one node from a story-shaped dict and recurse into its subagents."""
+    """Build one subagent node from a story-shaped dict, recursing into its own
+    subagents."""
     steps = story.get("steps") or []
     activity, model = _rollup_steps(steps)
-
-    children: list[dict[str, Any]] = []
-    for step in steps:
-        if "omitted" in step:
-            continue
-        if isinstance(step.get("subagent"), dict):
-            children.append(_child_node(step["subagent"], depth=depth + 1,
-                                        sub_index=sub_index))
-        for sub in step.get("subagents") or []:
-            if isinstance(sub, dict):
-                children.append(_child_node(sub, depth=depth + 1,
-                                            sub_index=sub_index))
-
     return {
         "id": node_id,
         "name": name,
         "depth": depth,
-        "is_root": is_root,
         "model": model,
         "task": story.get("task") or "",
         "outcome": story.get("outcome") or "",
@@ -205,7 +211,7 @@ def _node_from_story(
         "flags": flags,
         "capped": None,
         "truncated": bool(story.get("truncated")),
-        "children": children,
+        "children": _children_from_steps(steps, depth + 1, sub_index),
     }
 
 
@@ -230,92 +236,132 @@ def _child_node(
     cap = next((label for marker, label in _CAP_MARKERS.items() if sub.get(marker)), None)
     if cap is not None:
         return {
-            "id": agent_id, "name": name, "depth": depth, "is_root": False,
-            "model": (row.get("model") if row else None),
-            "task": "", "outcome": "",
-            "activity": _empty_activity(), "summary": _CAP_SUMMARY[cap],
+            "id": agent_id, "name": name, "depth": depth, "model": row.get("model") if row else None,
+            "task": "", "outcome": "", "activity": _empty_activity(), "summary": _CAP_SUMMARY[cap],
             "cost_usd": cost_usd, "tokens": tokens, "flags": flags,
             "capped": cap, "truncated": False, "children": [],
         }
 
     return _node_from_story(
-        sub, node_id=agent_id, name=name, depth=depth, is_root=False,
-        sub_index=sub_index, cost_usd=cost_usd, tokens=tokens, flags=flags,
+        sub, node_id=agent_id, name=name, depth=depth, sub_index=sub_index,
+        cost_usd=cost_usd, tokens=tokens, flags=flags,
     )
+
+
+def _ask_node(
+    ask: dict[str, Any],
+    sub_index: dict[str, dict[str, Any]],
+    tokens: int | None,
+    cost: float | None,
+) -> dict[str, Any]:
+    """Build a top-level ask node: the exchange's own activity + its subtree."""
+    steps = ask.get("steps") or []
+    activity, model = _rollup_steps(steps)
+    return {
+        "n": ask.get("n"),
+        "prompt": ask.get("prompt") or "",
+        "ts": ask.get("ts"),
+        "model": model,
+        "activity": activity,
+        "summary": _summary(activity),
+        "outcome": ask.get("outcome") or "",
+        "tokens": tokens,
+        "cost_usd": cost,
+        "truncated": bool(ask.get("truncated")),
+        "subagents": _children_from_steps(steps, depth=1, sub_index=sub_index),
+    }
+
+
+def _accumulate(node: dict[str, Any], acc: dict[str, Any]) -> None:
+    """Walk a subagent node + descendants into an accumulator dict."""
+    acc["count"] += 1
+    if node["id"]:
+        acc["seen"].add(node["id"])
+    acc["max_depth"] = max(acc["max_depth"], node["depth"])
+    if node["flags"]:
+        acc["flagged"] += 1
+    if node["capped"]:
+        acc["capped"] += 1
+    if node["truncated"]:
+        acc["truncated"] = True
+    for child in node["children"]:
+        _accumulate(child, acc)
 
 
 def build_work_map(
-    story: dict[str, Any],
+    asks_payload: dict[str, Any],
     subagents: dict[str, Any] | None,
     *,
-    root_cost_usd: float | None = None,
-    root_tokens: int | None = None,
-    root_label: str = "Main agent",
+    ask_tokens: dict[int, int] | None = None,
+    ask_costs: dict[int, float] | None = None,
+    session_tokens: int | None = None,
+    session_cost_usd: float | None = None,
 ) -> dict[str, Any]:
-    """Fold a session ``story`` + per-subagent ``subagents`` breakdown into a
-    render-ready work-map tree.
+    """Fold ask-segmented story + per-subagent breakdown into a render-ready list
+    of ask nodes (newest first), each with its subagent subtree.
 
-    ``story`` is the dict from ``build_session_story`` (the main-thread story
-    with nested ``subagent``/``subagents`` objects). ``subagents`` is the
-    ``_session_subagents`` breakdown (``{"rows": [...]}`` keyed by
-    ``sub_agent_id``) used to annotate each node with cost / tokens / flags;
-    the root carries the session totals passed via ``root_cost_usd`` /
-    ``root_tokens``.
+    ``asks_payload`` is the dict from ``build_session_asks`` (``{"asks": [...]}``
+    in chronological order). ``subagents`` is the ``_session_subagents`` breakdown
+    used to annotate each subagent node with cost / tokens / flags by
+    ``sub_agent_id``. ``ask_tokens`` / ``ask_costs`` map an ask's ``n`` to its
+    bucketed token/cost total (computed by the caller from span timestamps).
 
-    Returns ``{root, node_count, subagent_count, max_depth, flagged, capped,
-    truncated, unmapped_count, unmapped_cost_usd}``. ``unmapped_*`` reports
-    subagents that have recorded cost but never appeared in the (bounded) tree
-    — surfaced so the map never under-represents a deep/wide run silently.
+    Returns ``{asks (newest first), ask_count, subagent_count, max_depth,
+    flagged, capped, truncated, unmapped_count, unmapped_tokens,
+    unmapped_cost_usd, session_tokens, session_cost_usd}``. ``unmapped_*``
+    reports subagents that have recorded cost but never appeared in the (bounded)
+    tree — surfaced so the map never under-represents a deep/wide run silently.
     """
     rows = (subagents or {}).get("rows") or []
-    sub_index = {
-        str(r["sub_agent_id"]): r for r in rows if r.get("sub_agent_id")
-    }
+    sub_index = {str(r["sub_agent_id"]): r for r in rows if r.get("sub_agent_id")}
+    ask_tokens = ask_tokens or {}
+    ask_costs = ask_costs or {}
 
-    root = _node_from_story(
-        story, node_id="main", name=root_label, depth=0, is_root=True,
-        sub_index=sub_index, cost_usd=root_cost_usd, tokens=root_tokens, flags=[],
-    )
+    nodes: list[dict[str, Any]] = []
+    g: dict[str, Any] = {"count": 0, "flagged": 0, "capped": 0,
+                         "max_depth": 0, "truncated": False, "seen": set()}
 
-    seen: set[str] = set()
-    stats = {"node_count": 0, "subagent_count": 0, "max_depth": 0,
-             "flagged": 0, "capped": 0, "truncated": False}
+    for ask in asks_payload.get("asks") or []:
+        n = ask.get("n")
+        node = _ask_node(ask, sub_index, ask_tokens.get(n), ask_costs.get(n))
 
-    def _walk(node: dict[str, Any]) -> None:
-        stats["node_count"] += 1
-        if not node["is_root"]:
-            stats["subagent_count"] += 1
-            if node["id"]:
-                seen.add(node["id"])
-        stats["max_depth"] = max(stats["max_depth"], node["depth"])
-        if node["flags"]:
-            stats["flagged"] += 1
-        if node["capped"]:
-            stats["capped"] += 1
-        if node["truncated"]:
-            stats["truncated"] = True
-        for child in node["children"]:
-            _walk(child)
+        local: dict[str, Any] = {"count": 0, "flagged": 0, "capped": 0,
+                                 "max_depth": 0, "truncated": False, "seen": set()}
+        for child in node["subagents"]:
+            _accumulate(child, local)
+        node["subagent_count"] = local["count"]
+        node["flagged"] = local["flagged"]
 
-    _walk(root)
+        g["count"] += local["count"]
+        g["flagged"] += local["flagged"]
+        g["capped"] += local["capped"]
+        g["max_depth"] = max(g["max_depth"], local["max_depth"])
+        g["seen"] |= local["seen"]
+        if local["truncated"] or node["truncated"]:
+            g["truncated"] = True
+        nodes.append(node)
 
-    unmapped = [r for sid, r in sub_index.items() if sid not in seen]
+    nodes.reverse()  # newest ask first
+
+    unmapped = [r for sid, r in sub_index.items() if sid not in g["seen"]]
+    unmapped_tokens = sum(_row_tokens(r) for r in unmapped)
     unmapped_cost = sum(
         float(r["cost_usd"]) for r in unmapped if r.get("cost_usd") is not None
     )
-    unmapped_tokens = sum(_row_tokens(r) for r in unmapped)
 
     return {
-        "root": root,
-        "node_count": stats["node_count"],
-        "subagent_count": stats["subagent_count"],
-        "max_depth": stats["max_depth"],
-        "flagged": stats["flagged"],
-        "capped": stats["capped"],
-        "truncated": stats["truncated"],
+        "asks": nodes,
+        "ask_count": len(nodes),
+        "subagent_count": g["count"],
+        "max_depth": g["max_depth"],
+        "flagged": g["flagged"],
+        "capped": g["capped"],
+        "truncated": g["truncated"],
         "unmapped_count": len(unmapped),
-        "unmapped_cost_usd": unmapped_cost,
         "unmapped_tokens": unmapped_tokens,
+        "unmapped_cost_usd": unmapped_cost,
+        "session_tokens": session_tokens,
+        "session_cost_usd": session_cost_usd,
     }
 
 
