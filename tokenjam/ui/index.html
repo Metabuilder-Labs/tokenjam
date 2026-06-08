@@ -740,6 +740,15 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 
 /* Work map (the "Map" tab): the nested main + subagent tree. Indent comes from
    per-row padding (node.depth) so the DOM can nest without compounding margins. */
+.wm-asks { display: flex; flex-direction: column; gap: 6px; }
+.wm-ask { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.wm-ask-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; font-size: 13px; }
+.wm-ask-row.clickable { cursor: pointer; }
+.wm-ask-row.clickable:hover { background: var(--surface2); }
+.wm-ask-n { color: var(--brand); font-family: 'Geist Mono', monospace; font-size: 12px; font-weight: 600; flex: 0 0 auto; white-space: nowrap; }
+.wm-ask-prompt { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wm-ask-body { padding: 4px 12px 10px; border-top: 1px solid var(--border); }
+.wm-ask-body .wm-tree { margin-top: 6px; }
 .wm-tree { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
 .wm-row {
   display: flex;
@@ -1569,21 +1578,21 @@ function StorySection({ sessionId }) {
   `;
 }
 
-// One node in the work map. Expands (root open by default) to reveal the node's
-// own task/outcome narration + the files it touched. Indent is per-row padding
-// off node.depth, so recursive DOM nesting doesn't compound the offset.
+// One subagent node in an ask's subtree. Collapsed by default; expands to show
+// its own task/outcome + files. Indent is per-row padding off node.depth so
+// recursive DOM nesting doesn't compound the offset.
 function WorkMapNode({ node }) {
   const a = node.activity || {};
   const files = a.files || [];
   const hasDetail = !!(node.task || node.outcome || files.length);
-  const [open, setOpen] = useState(!!node.is_root);
+  const [open, setOpen] = useState(false);
   const flagged = node.flags && node.flags.length;
-  const pad = (node.depth || 0) * 16;
+  const pad = (node.depth || 1) * 16;
   const model = (node.model || '').replace('claude-', '');
   return html`
     <div class="wm-node">
       <div class="wm-row ${flagged ? 'flagged' : ''} ${hasDetail ? 'clickable' : ''}" style=${'padding-left:' + (pad + 10) + 'px'} onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
-        <span class="wm-dot ${node.is_root ? 'root' : ''} ${node.capped ? 'capped' : ''}"></span>
+        <span class="wm-dot ${node.capped ? 'capped' : ''}"></span>
         <span class="wm-name">${node.name}</span>
         ${model ? html`<span class="wm-model">${model}</span>` : null}
         <span class="wm-summary">${node.summary}</span>
@@ -1599,6 +1608,37 @@ function WorkMapNode({ node }) {
         </div>
       ` : null}
       ${(node.children || []).map(c => html`<${WorkMapNode} node=${c} />`)}
+    </div>
+  `;
+}
+
+// One ask (exchange): a human prompt + the work it triggered. Collapsed by
+// default; expand to see the outcome, files, and the subagent subtree it spawned.
+function WorkMapAsk({ ask }) {
+  const a = ask.activity || {};
+  const files = a.files || [];
+  const subs = ask.subagents || [];
+  const hasDetail = !!(ask.outcome || files.length || subs.length);
+  const [open, setOpen] = useState(false);
+  const prompt = ask.prompt || '(no prompt text)';
+  const promptShort = prompt.length > 140 ? prompt.slice(0, 140) + '…' : prompt;
+  return html`
+    <div class="wm-ask">
+      <div class="wm-ask-row ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
+        <span class="wm-ask-n">${hasDetail ? (open ? '▾' : '▸') : '·'} ${ask.n}</span>
+        <span class="wm-ask-prompt" title=${prompt}>${promptShort}</span>
+        <span class="wm-spacer"></span>
+        ${ask.summary && ask.summary !== 'no tool activity' ? html`<span class="wm-summary">${ask.summary}</span>` : null}
+        ${ask.tokens != null ? html`<span class="wm-tokens" title=${ask.cost_usd != null ? ('est. ' + fmtCost(ask.cost_usd)) : ''}>${fmtTokens(ask.tokens)} tok</span>` : null}
+        ${ask.flagged ? html`<span class="wm-flag">${ask.flagged} flagged</span>` : null}
+      </div>
+      ${open && hasDetail ? html`
+        <div class="wm-ask-body">
+          ${ask.outcome ? html`<div class="wm-detail" style="padding-left:10px"><span class="k">outcome</span>${ask.outcome}</div>` : null}
+          ${files.length ? html`<div class="wm-detail" style="padding-left:10px"><span class="k">files</span>${files.map((f, i) => html`<span title=${f}>${shortPath(f)}</span>${i < files.length - 1 ? ', ' : ''}`)}${a.file_count > files.length ? ' +' + (a.file_count - files.length) + ' more' : ''}</div>` : null}
+          ${subs.length ? html`<div class="wm-tree">${subs.map(c => html`<${WorkMapNode} node=${c} />`)}</div>` : null}
+        </div>
+      ` : null}
     </div>
   `;
 }
@@ -1626,21 +1666,22 @@ function WorkMapSection({ sessionId }) {
     `;
   }
 
-  const root = map.root;
-  if (!root) return html`<div class="story-unavailable">No work map for this session.</div>`;
-
+  const asks = map.asks || [];
+  const n = map.ask_count != null ? map.ask_count : asks.length;
   const sub = map.subagent_count || 0;
-  const meta = 'main thread + ' + sub + ' subagent' + (sub === 1 ? '' : 's')
-    + (map.max_depth ? ' · ' + map.max_depth + ' level' + (map.max_depth === 1 ? '' : 's') + ' deep' : '')
+  const meta = n + ' ask' + (n === 1 ? '' : 's')
+    + ' · ' + sub + ' subagent' + (sub === 1 ? '' : 's')
     + (map.flagged ? ' · ' + map.flagged + ' flagged for right-sizing' : '')
-    + (map.capped ? ' · ' + map.capped + ' not expanded (depth/budget cap)' : '');
+    + (map.session_tokens != null ? ' · ' + fmtTokens(map.session_tokens) + ' tok total' : '');
 
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What the agent did — ${meta}</div>
-    <div class="wm-tree"><${WorkMapNode} node=${root} /></div>
-    ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not shown in the tree (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
-    <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Structure + activity from the on-disk transcript; cost from recorded spans. Descriptive only — tj reports what happened, you judge the approach.</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">A session is a sequence of asks, not one task — ${meta}. Newest first; expand one to see what it did.</div>
+    ${asks.length === 0
+      ? html`<div class="story-unavailable">Transcript found but no asks.</div>`
+      : html`<div class="wm-asks">${asks.map(ask => html`<${WorkMapAsk} ask=${ask} />`)}</div>`}
+    ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not attributed to an ask (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
+    <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Each ask is one thing you asked; structure + activity from the transcript, tokens from spans. Descriptive only — tj reports what happened, you judge the approach.</div>
   `;
 }
 

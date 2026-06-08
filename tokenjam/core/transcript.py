@@ -371,6 +371,21 @@ def _strip_harness_wrapper(text: str) -> str:
     return cleaned or command
 
 
+def _is_user_ask(record: dict[str, Any]) -> bool:
+    """True if a record is a genuine human ask — an exchange boundary.
+
+    Excludes ``isMeta`` records and tool-result-only user turns, and requires
+    non-empty text once the harness wrapper is stripped, so an injected
+    system-reminder / command-only turn doesn't start a new ask.
+    """
+    if record.get("type") != "user" or record.get("isMeta"):
+        return False
+    message = record.get("message")
+    if not isinstance(message, dict):
+        return False
+    return bool(_strip_harness_wrapper(_block_text(message.get("content"))).strip())
+
+
 def _first_user_prompt(records: list[dict[str, Any]]) -> str:
     """The human's first real ``user`` message (the initial prompt / ticket).
 
@@ -588,6 +603,87 @@ def build_session_story(
     return _build_story_from_path(path, subagents_dir, None, budget, 0, seen)
 
 
+def build_session_asks(
+    session_id: str,
+    projects_root: Path | str | None = None,
+    include_subagents: bool = True,
+) -> dict[str, Any] | None:
+    """Segment a Claude Code session into *asks* (exchanges), or None if absent.
+
+    A session is not one task — it's a sequence of human asks fired into the
+    same terminal until the context window fills. This splits the transcript at
+    each genuine user message (``_is_user_ask``) and, for each segment, builds
+    the assistant steps + nested subagents that ask triggered — reusing the same
+    machinery as ``build_session_story`` and sharing one step budget + cycle
+    guard across the whole session so the payload stays bounded.
+
+    Returns ``{"asks": [{n, prompt, ts, step_count, truncated, steps, outcome},
+    ...]}`` in chronological order (``n`` is the 1-based chronological index),
+    or None when no transcript exists.
+    """
+    root = DEFAULT_PROJECTS_ROOT if projects_root is None else Path(projects_root)
+    path = _locate_transcript(session_id, root)
+    if path is None:
+        return None
+
+    records = _read_records(path)
+    tool_status = _build_tool_status(records)
+    boundaries = [i for i, r in enumerate(records) if _is_user_ask(r)]
+
+    subagents_dir = (
+        path.parent / session_id / "subagents" if include_subagents else None
+    )
+    budget = _Budget(TOTAL_STEP_BUDGET)
+    seen: set[str] = {session_id}
+
+    asks: list[dict[str, Any]] = []
+    for k, start in enumerate(boundaries):
+        end = boundaries[k + 1] if k + 1 < len(boundaries) else len(records)
+        segment = records[start:end]
+
+        steps = _build_steps(segment, tool_status)
+        budget.take(len(steps))
+        if subagents_dir is not None:
+            _attach_subagents(steps, segment, subagents_dir, budget, 0, seen)
+        else:
+            _strip_spawn_markers(steps)
+
+        boundary_msg = records[start].get("message")
+        raw = (
+            _block_text(boundary_msg.get("content"))
+            if isinstance(boundary_msg, dict) else ""
+        )
+        prompt, _ = _trim(_strip_harness_wrapper(raw), MAX_TASK_OUTCOME_CHARS)
+
+        outcome_raw = ""
+        for step in reversed(steps):
+            if "omitted" in step:
+                continue
+            if step.get("text"):
+                outcome_raw = step["text"]
+                break
+        outcome, _ = _trim(outcome_raw, MAX_TASK_OUTCOME_CHARS)
+
+        # Ask start time: the boundary record's own timestamp, else the first
+        # assistant step's (the response) — user records don't always carry one.
+        ts = records[start].get("timestamp")
+        if not ts and steps:
+            ts = steps[0].get("ts")
+
+        capped_steps, truncated = _cap_steps(steps)
+        asks.append({
+            "n": k + 1,
+            "prompt": prompt,
+            "ts": ts,
+            "step_count": len(steps),
+            "truncated": truncated,
+            "steps": capped_steps,
+            "outcome": outcome,
+        })
+
+    return {"asks": asks}
+
+
 def _build_story_from_path(
     path: Path,
     subagents_dir: Path | None,
@@ -794,6 +890,7 @@ def resolve_projects_root(override: Path | str | None = None) -> Path:
 
 __all__ = [
     "build_session_story",
+    "build_session_asks",
     "resolve_projects_root",
     "DEFAULT_PROJECTS_ROOT",
     "MAX_STORY_STEPS",

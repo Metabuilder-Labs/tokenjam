@@ -18,6 +18,8 @@ GET /api/v1/sessions/{session_id} — per-session detail rollup for the dashboar
 """
 from __future__ import annotations
 
+import bisect
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -25,7 +27,11 @@ from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.models import AlertFilters
-from tokenjam.core.transcript import build_session_story, resolve_projects_root
+from tokenjam.core.transcript import (
+    build_session_asks,
+    build_session_story,
+    resolve_projects_root,
+)
 from tokenjam.core.workmap import build_work_map
 from tokenjam.otel.semconv import GenAIAttributes
 
@@ -455,48 +461,106 @@ async def get_session_story(
     return {"available": True, **story}
 
 
+def _parse_iso(ts: Any) -> datetime | None:
+    """Parse a transcript ISO-8601 timestamp to a tz-aware datetime, or None."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _bucket_tokens_by_ask(
+    db: Any, session_id: str, asks: list[dict]
+) -> tuple[dict[int, int], dict[int, float]]:
+    """Sum each ask's tokens/cost from LLM-call spans, bucketed by start_time.
+
+    Each ask carries a start ``ts`` (the exchange boundary). A span belongs to
+    the latest ask whose ts precedes it (spans before the first ask fall to it).
+    Returns ``({ask_n: tokens}, {ask_n: cost_usd})``; empty when timestamps or
+    spans are unavailable.
+    """
+    tokens: dict[int, int] = {}
+    costs: dict[int, float] = {}
+    if not hasattr(db, "conn") or not asks:
+        return tokens, costs
+
+    bounds = sorted(
+        ((a["n"], dt) for a in asks if (dt := _parse_iso(a.get("ts"))) is not None),
+        key=lambda b: b[1],
+    )
+    if not bounds:
+        return tokens, costs
+    bound_times = [b[1] for b in bounds]
+    bound_ns = [b[0] for b in bounds]
+
+    rows = db.conn.execute(
+        "SELECT start_time, "
+        "COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) "
+        "+ COALESCE(cache_tokens, 0) + COALESCE(cache_write_tokens, 0) AS toks, "
+        "COALESCE(cost_usd, 0) AS cost "
+        "FROM spans WHERE session_id = $1 AND name = $2 ORDER BY start_time",
+        [session_id, GenAIAttributes.SPAN_LLM_CALL],
+    ).fetchall()
+
+    for start_time, toks, cost in rows:
+        if start_time is None:
+            continue
+        idx = bisect.bisect_right(bound_times, start_time) - 1
+        if idx < 0:
+            idx = 0
+        n = bound_ns[idx]
+        tokens[n] = tokens.get(n, 0) + int(toks or 0)
+        costs[n] = costs.get(n, 0.0) + float(cost or 0.0)
+    return tokens, costs
+
+
 @router.get(
     "/sessions/{session_id}/workmap",
     response_model=None,
     dependencies=[Depends(require_api_key)],
 )
 async def get_session_workmap(request: Request, session_id: str):
-    """Graphical "work map" of a session: the nested main + subagent tree, each
-    node annotated with a deterministic activity rollup (files touched, web
-    sources, searches, shell commands, subagents spawned, errors/retries)
-    joined to its cost / tokens / right-sizing flags.
+    """Graphical "work map" of a session as a list of *asks* (exchanges).
 
-    Composes the pure transcript Story (structure + the agent's own labels) with
-    the span-derived per-subagent breakdown (cost). No LLM, no interpretation —
-    it reports what happened so a human can judge it. No transcript on disk ->
-    ``{"available": false, ...}`` with HTTP 200 (a normal state for SDK / live
-    sessions), the same contract as ``/story``.
+    A session isn't one task — it's a sequence of human asks fired into the same
+    terminal until the context window fills. This returns each ask (newest first)
+    with its activity rollup, its bucketed token/cost total, and the subagent
+    subtree it spawned (joined to the span-derived per-subagent cost/flags). No
+    LLM, no interpretation — it reports what happened so a human can judge it. No
+    transcript on disk -> ``{"available": false, ...}`` with HTTP 200 (the same
+    contract as ``/story``).
     """
     override = getattr(request.app.state, "claude_projects_root", None)
     projects_root = resolve_projects_root(override)
 
-    story = build_session_story(
+    asks_payload = build_session_asks(
         session_id, projects_root=projects_root, include_subagents=True
     )
-    if story is None:
+    if asks_payload is None:
         return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
 
     db = request.app.state.db
     subagents = _session_subagents(db, session_id)
-    session = db.get_session(session_id)
-    root_cost = (
-        float(session.total_cost_usd)
-        if session and session.total_cost_usd is not None
-        else None
+    ask_tokens, ask_costs = _bucket_tokens_by_ask(
+        db, session_id, asks_payload["asks"]
     )
-    root_tokens = (
+
+    session = db.get_session(session_id)
+    session_tokens = (
         session.input_tokens + session.output_tokens
         + session.cache_tokens + session.cache_write_tokens
-        if session is not None
-        else None
+        if session is not None else None
+    )
+    session_cost = (
+        float(session.total_cost_usd)
+        if session and session.total_cost_usd is not None else None
     )
 
     workmap = build_work_map(
-        story, subagents, root_cost_usd=root_cost, root_tokens=root_tokens
+        asks_payload, subagents,
+        ask_tokens=ask_tokens, ask_costs=ask_costs,
+        session_tokens=session_tokens, session_cost_usd=session_cost,
     )
     return {"available": True, **workmap}
