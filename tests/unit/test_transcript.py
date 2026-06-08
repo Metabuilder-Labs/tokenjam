@@ -683,3 +683,42 @@ def test_first_prompt_strips_task_notification():
         _user_prompt("The real first ask."),
     ]
     assert _first_user_prompt(records) == "The real first ask."
+
+
+def test_story_marks_ask_boundaries_on_main_thread(tmp_path):
+    # The Timeline story tags the first step after each human ask with the
+    # prompt so the UI can mark where each exchange begins.
+    sid = "story-asks"
+    records = [
+        _user_prompt("First ask."),
+        _assistant("doing first",
+                   tools=[{"id": "a", "name": "Read", "input": {"file_path": "a.py"}}]),
+        _tool_result("a"),
+        _assistant("more first work"),
+        _user_prompt("Second ask."),
+        _assistant("doing second"),
+    ]
+    _write_transcript(tmp_path, sid, records)
+    story = build_session_story(sid, projects_root=tmp_path)
+    steps = story["steps"]
+    assert steps[0]["ask"] == "First ask."
+    assert "ask" not in steps[1]          # continuation of the first ask
+    second = next(s for s in steps if s.get("ask") == "Second ask.")
+    assert second["text"] == "doing second"
+
+
+def test_subagent_story_has_no_ask_markers(tmp_path):
+    sid = "sa-noask"
+    child = "abc123def456abc78"
+    records = [
+        _user_prompt("Spawn a worker."),
+        _task_turn("spawning", "tt1", name="worker"),
+        _agent_tool_result("tt1", child),
+        _assistant("done"),
+    ]
+    _write_transcript(tmp_path, sid, records)
+    _write_subagent(tmp_path, sid, child,
+                    [_user_prompt("Build."), _assistant("built")], name="worker")
+    story = build_session_story(sid, projects_root=tmp_path)
+    sub = story["steps"][0]["subagent"]
+    assert all("ask" not in s for s in sub["steps"])

@@ -417,6 +417,7 @@ def _first_user_prompt(records: list[dict[str, Any]]) -> str:
 def _build_steps(
     records: list[dict[str, Any]],
     tool_status: dict[str, bool],
+    include_asks: bool = False,
 ) -> list[dict[str, Any]]:
     """One step per ``assistant`` turn, in record order.
 
@@ -424,12 +425,25 @@ def _build_steps(
     short label + ok/error status), and small flags (is_error, is_retry, model).
     Assistant turns that have neither narration nor a tool call are skipped
     (e.g. thinking-only or empty turns) so the story stays meaningful.
+
+    When ``include_asks`` is True, the first step after each genuine human ask
+    carries an ``ask`` field (the cleaned prompt) so the Timeline can mark where
+    each exchange begins. Off by default (subagent stories + the per-ask Map
+    path don't want it).
     """
     steps: list[dict[str, Any]] = []
     prev_signature: tuple[tuple[str, str], ...] | None = None
     n = 0
+    pending_ask: str | None = None
 
     for record in records:
+        if include_asks and _is_user_ask(record):
+            msg = record.get("message")
+            raw = _block_text(msg.get("content")) if isinstance(msg, dict) else ""
+            ask, _ = _trim(_strip_harness_wrapper(raw), MAX_TASK_OUTCOME_CHARS)
+            if ask:
+                pending_ask = ask
+            continue
         if record.get("type") != "assistant":
             continue
         message = record.get("message")
@@ -489,6 +503,9 @@ def _build_steps(
             "is_retry": is_retry,
             "model": model if isinstance(model, str) else None,
         }
+        if pending_ask is not None:
+            step["ask"] = pending_ask
+            pending_ask = None
         if spawns:
             # Internal-only: consumed by the subagent attach pass, removed before
             # the step is returned. Carries the Task/Agent tool_use_ids + a
@@ -705,7 +722,9 @@ def _build_story_from_path(
     records = _read_records(path)
 
     tool_status = _build_tool_status(records)
-    steps = _build_steps(records, tool_status)
+    # Mark ask boundaries on the main thread (depth 0) so the Timeline can show
+    # each user prompt; subagent stories have no human asks.
+    steps = _build_steps(records, tool_status, include_asks=(depth == 0))
     step_count = len(steps)
     budget.take(step_count)
 
