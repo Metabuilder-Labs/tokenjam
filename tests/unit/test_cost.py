@@ -93,9 +93,24 @@ def test_get_rates_returns_model_rates_for_known():
 
 
 def test_calculate_cost_opus_model():
-    # claude-opus-4-6: input=15.00, output=75.00
+    # claude-opus-4-6: input=5.00, output=25.00
     cost = calculate_cost("anthropic", "claude-opus-4-6", 1_000_000, 1_000_000)
-    assert cost == 90.0
+    assert cost == 30.0
+
+
+def test_calculate_cost_opus_4_8_model():
+    # claude-opus-4-8: input=5.00, output=25.00
+    cost = calculate_cost("anthropic", "claude-opus-4-8", 1_000_000, 1_000_000)
+    assert cost == 30.0
+
+
+def test_get_rates_opus_4_8():
+    rates = get_rates("anthropic", "claude-opus-4-8")
+    assert rates is not None
+    assert rates.input_per_mtok == 5.00
+    assert rates.output_per_mtok == 25.00
+    assert rates.cache_read_per_mtok == 0.50
+    assert rates.cache_write_per_mtok == 6.25
 
 
 def test_calculate_cost_openai_model():
