@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenjam"
-version = "0.3.1"
+version = "0.3.2"
 description = "TokenJam — local-first OTel-native observability for Autonomous AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
