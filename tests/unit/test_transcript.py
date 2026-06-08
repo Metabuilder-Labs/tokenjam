@@ -652,3 +652,34 @@ def test_asks_attribute_subagent_to_its_ask(tmp_path):
         if any(t["name"] == "Task" for t in s.get("tools", []))
     )
     assert task_step["subagent"]["name"] == "worker"
+
+
+def test_asks_skip_task_notification_turns(tmp_path):
+    # Background-task completion notices are injected as user messages but are
+    # not human asks: they must not start a new ask, and the work that follows
+    # folds into the preceding ask's segment.
+    sid = "asks-tn"
+    records = [
+        _user_prompt("Real ask: do the work."),
+        _assistant("working"),
+        _user_prompt("<task-notification>\n<task-id>abc</task-id>\n"
+                     "<status>completed</status>\n</task-notification>"),
+        _assistant("got it, continuing"),
+        _user_prompt("Second real ask."),
+        _assistant("done"),
+    ]
+    _write_transcript(tmp_path, sid, records)
+    payload = build_session_asks(sid, projects_root=tmp_path)
+    assert [a["prompt"] for a in payload["asks"]] == [
+        "Real ask: do the work.", "Second real ask."
+    ]
+    # the post-notification turn folds into the first ask
+    assert payload["asks"][0]["step_count"] == 2
+
+
+def test_first_prompt_strips_task_notification():
+    records = [
+        _user_prompt("<task-notification>done</task-notification>"),
+        _user_prompt("The real first ask."),
+    ]
+    assert _first_user_prompt(records) == "The real first ask."

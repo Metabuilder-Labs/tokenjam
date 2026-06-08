@@ -94,6 +94,12 @@ _COMMAND_NAME_RE = re.compile(
 _COMMAND_ARGS_RE = re.compile(
     r"<command-args>(.*?)</command-args>", re.DOTALL | re.IGNORECASE
 )
+#: Background-task completion notices Claude Code injects as user-role messages
+#: when an async Task/Agent finishes — system events, not human asks, so a
+#: notification-only turn must not be read as a prompt or start a new ask.
+_TASK_NOTIFICATION_RE = re.compile(
+    r"<task-notification>.*?</task-notification>", re.DOTALL | re.IGNORECASE
+)
 
 #: Per-tool preference for which single ``input`` arg makes the most useful
 #: label. The first key present wins; falls back to the generic order below.
@@ -357,14 +363,16 @@ def _strip_harness_wrapper(text: str) -> str:
     """Strip Claude Code's injected wrappers from a first-user message.
 
     Claude Code prepends the human's first words with one or more
-    ``<system-reminder>`` blocks (CLAUDE.md, environment, date) and, for slash
-    commands, ``<command-*>`` / ``<local-command-*>`` tag wrappers. Removing them
-    leaves the actual ask. If only a slash command remains, return a ``/cmd
-    args`` label so a command-only message still yields a meaningful task.
-    Returns "" when nothing meaningful is left.
+    ``<system-reminder>`` blocks (CLAUDE.md, environment, date), injects
+    ``<task-notification>`` blocks when background tasks finish, and wraps slash
+    commands in ``<command-*>`` / ``<local-command-*>`` tags. Removing all of
+    these leaves the actual ask. If only a slash command remains, return a
+    ``/cmd args`` label so a command-only message still yields a meaningful
+    task. Returns "" when nothing meaningful is left.
     """
     command = _slash_command_label(text)
     cleaned = _SYSTEM_REMINDER_RE.sub("", text)
+    cleaned = _TASK_NOTIFICATION_RE.sub("", cleaned)
     cleaned = _COMMAND_BLOCK_RE.sub("", cleaned)
     cleaned = _COMMAND_TAG_RE.sub("", cleaned)
     cleaned = cleaned.strip()
