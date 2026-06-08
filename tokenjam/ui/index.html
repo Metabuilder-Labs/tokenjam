@@ -604,12 +604,10 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   word-break: break-word;
 }
 .story-steps { display: flex; flex-direction: column; gap: 2px; }
-/* User prompt marker in the Timeline — brand accent so human asks stand out
-   from the agent's steps. Same visual language as the Map ask rows. */
-.story-ask { display: flex; gap: 9px; align-items: baseline; margin: 12px 0 4px; padding: 8px 11px; border-radius: 7px; background: rgba(61,142,255,0.10); border: 1px solid rgba(61,142,255,0.30); border-left: 3px solid var(--brand); }
+/* User prompt in the Timeline — just a distinct color (brand) so human asks
+   stand out from the agent's steps. No box, no label. */
+.story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand); white-space: pre-wrap; }
 .story-ask.clickable { cursor: pointer; }
-.story-ask-badge { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--brand); flex: 0 0 auto; font-family: 'Geist Mono', monospace; padding-top: 1px; }
-.story-ask-text { font-size: 13px; font-weight: 600; color: var(--text); white-space: pre-wrap; }
 /* Compact single-line row (356 steps must stay scannable, not a wall of cards) */
 .story-step {
   border: 1px solid transparent;
@@ -1517,17 +1515,13 @@ function renderStepsNewestFirst(steps) {
   return out;
 }
 
-// A user prompt marker in the Timeline — the human ask that began an exchange.
+// A user prompt in the Timeline — the human ask that began an exchange, shown
+// in a distinct color (no box/label) so it reads as a section marker.
 function StoryAsk({ prompt }) {
   const [expanded, setExpanded] = useState(false);
   const long = prompt.length > 200;
   const short = long ? prompt.slice(0, 200) + '…' : prompt;
-  return html`
-    <div class=${'story-ask' + (long ? ' clickable' : '')} onClick=${long ? (() => setExpanded(e => !e)) : null}>
-      <span class="story-ask-badge">You</span>
-      <span class="story-ask-text">${expanded ? prompt : short}</span>
-    </div>
-  `;
+  return html`<div class=${'story-ask' + (long ? ' clickable' : '')} onClick=${long ? (() => setExpanded(e => !e)) : null}>${expanded ? prompt : short}</div>`;
 }
 
 function StoryStep({ step, prevModel }) {
