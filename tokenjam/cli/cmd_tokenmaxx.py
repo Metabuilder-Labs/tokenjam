@@ -40,7 +40,7 @@ _TIERS: list[Tier] = [
     Tier(50,   "TokenModerator",  "🥱", "Mostly reasonable. Try harder."),
     Tier(200,  "TokenMaxxer",     "💸", "You're paying Anthropic's rent."),
     Tier(500,  "TokenChad",       "🔥", "You're paying their interns' rent too."),
-    Tier(1500, "Wallet on Fire",  "🚨", "Touch grass. Then run `tj optimize`."),
+    Tier(1500, "TokenGigaChad",   "🔥🔥", "Touch grass. Then run `tj optimize`."),
 ]
 
 
