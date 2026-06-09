@@ -745,7 +745,19 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 /* Work map (the "Map" tab): the nested main + subagent tree. Indent comes from
    per-row padding (node.depth) so the DOM can nest without compounding margins. */
 .wm-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); margin: -6px 0 12px; flex-wrap: wrap; }
+/* Summary band: the 5-second read above the asks list — totals + biggest
+   fan-outs. Subtle bordered panel, mono/dim like the other wm-* meta. */
+.wm-summary-band { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
+.wm-summary-stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text); }
+.wm-summary-stats span { color: var(--text-dim); }
+.wm-summary-fanouts { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
+.wm-summary-fanout { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wm-asks { display: flex; flex-direction: column; gap: 6px; }
+/* Collapsed run of quick chat exchanges: a single clickable dim divider that
+   expands into the individual chat rows. */
+.wm-chat-divider { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); padding: 5px 12px; cursor: pointer; border: 1px dashed var(--border); border-radius: 8px; background: transparent; opacity: 0.7; }
+.wm-chat-divider:hover { opacity: 1; background: var(--surface2); }
+.wm-chat-run { display: flex; flex-direction: column; gap: 6px; }
 /* Each ask is a storyline row: status icon · dim prompt (context) over the
    bold "what the agent did" (outcome) · token/subagent meta. Left border + icon
    are colored by deterministic status; no-work chat asks recede (idle). */
@@ -1001,6 +1013,34 @@ function shortPath(s) {
   if (typeof s !== 'string' || s.indexOf('/') < 0 || s.indexOf('://') >= 0) return s;
   const parts = s.split('/').filter(Boolean);
   return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : s;
+}
+// Reduce a multi-sentence, markdown-flecked outcome to one glanceable headline:
+// strip leading bullet/heading/quote markers and the inline marker characters of
+// **/__/`/##/---, collapse whitespace, then return the first sentence (cut at
+// '.'/'!'/'?' + space or end). Hard-cap at ~90 chars on a word boundary. Append
+// '…' whenever the text was cut. Pure/defensive — non-strings yield ''.
+const FIRST_SENTENCE_MAX = 90;
+function firstSentence(text) {
+  if (typeof text !== 'string') return '';
+  let s = text
+    .replace(/^[\s>#*\-]+/, '')   // leading bullets / headings / quotes
+    .replace(/##+|---+/g, '')     // heading / rule runs
+    .replace(/[*_`]+/g, '')       // emphasis/code markers (single or double)
+    .replace(/\s+/g, ' ')         // collapse all whitespace
+    .trim();
+  if (!s) return '';
+  const m = s.match(/^.*?[.!?](?=\s|$)/);
+  let out = m ? m[0] : s;
+  let cut = out.length < s.length;
+  if (out.length > FIRST_SENTENCE_MAX) {
+    const slice = out.slice(0, FIRST_SENTENCE_MAX);
+    const sp = slice.lastIndexOf(' ');
+    out = (sp > 0 ? slice.slice(0, sp) : slice).replace(/[.!?,;:]+$/, '');
+    cut = true;
+  } else {
+    out = out.replace(/[.!?]+$/, '');
+  }
+  return cut ? out + '…' : out;
 }
 function fmtDur(ms) {
   if (ms == null) return '-';
@@ -1674,16 +1714,20 @@ function askStatus(ask) {
 // One ask (exchange) as a storyline row: the bold line is WHAT THE AGENT DID
 // (its own outcome narration), the dim line is your prompt as context. No-work
 // chat asks recede to a single dim line. Expand → files + the subagent subtree.
-function WorkMapAsk({ ask }) {
+function WorkMapAsk({ ask, sessionSubs }) {
   const a = ask.activity || {};
   const files = a.files || [];
   const subs = ask.subagents || [];
   const { cls, icon, hasWork, subCount } = askStatus(ask);
+  // A per-ask fan-out can never exceed the session total; ask.subagent_count is
+  // an upstream estimate that can drift slightly above it, so clamp for display.
+  const subShown = sessionSubs != null ? Math.min(subCount, sessionSubs) : subCount;
   const hasDetail = !!(files.length || subs.length || (ask.outcome && ask.outcome.length > 120));
   const [open, setOpen] = useState(false);
   const prompt = (ask.prompt || '(no prompt)').replace(/\s+/g, ' ');
   const promptShort = prompt.length > 100 ? prompt.slice(0, 100) + '…' : prompt;
   const outcome = (ask.outcome || ask.summary || '').replace(/\s+/g, ' ');
+  const headline = firstSentence(ask.outcome || ask.summary || '');
   const tokenTag = ask.tokens != null
     ? html`<span class="wm-tokens" title=${ask.cost_usd != null ? ('est. ' + fmtCost(ask.cost_usd)) : ''}>${fmtTokens(ask.tokens)} tok</span>`
     : null;
@@ -1694,7 +1738,7 @@ function WorkMapAsk({ ask }) {
       <div class="wm-ask idle">
         <div class="wm-ask-row ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
           <span class="wm-ico idle">·</span>
-          <span class="wm-chat" title=${prompt}>you: ${promptShort}${outcome ? ' — ' + (outcome.length > 70 ? outcome.slice(0, 70) + '…' : outcome) : ''}</span>
+          <span class="wm-chat" title=${prompt}>you: ${promptShort}${headline ? ' — ' + headline : ''}</span>
           <span class="wm-ask-meta">${tokenTag}</span>
         </div>
         ${open && hasDetail ? html`<div class="wm-ask-body"><div class="wm-detail" style="padding-left:10px"><span class="k">full</span>${ask.outcome}</div></div>` : null}
@@ -1702,7 +1746,7 @@ function WorkMapAsk({ ask }) {
     `;
   }
 
-  const outcomeShort = outcome.length > 160 ? outcome.slice(0, 160) + '…' : (outcome || '(did work — no narration)');
+  const outcomeShort = headline || '(did work — no narration)';
   return html`
     <div class="wm-ask ${cls}">
       <div class="wm-ask-row ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
@@ -1713,7 +1757,7 @@ function WorkMapAsk({ ask }) {
         </div>
         <span class="wm-ask-meta">
           ${tokenTag}
-          ${subCount ? html`<span class="wm-subs">${subCount} sub${subCount === 1 ? '' : 's'}</span>` : null}
+          ${subCount ? html`<span class="wm-subs">${subShown} sub${subShown === 1 ? '' : 's'}</span>` : null}
           ${ask.flagged ? html`<span class="wm-flag">${ask.flagged} flagged</span>` : null}
         </span>
         <span class="wm-ask-caret">${hasDetail ? (open ? '▾' : '▸') : ''}</span>
@@ -1727,6 +1771,41 @@ function WorkMapAsk({ ask }) {
       ` : null}
     </div>
   `;
+}
+
+// A run of 2+ consecutive no-work "chat" asks, collapsed to a single divider so
+// the storyline isn't drowned by quick exchanges. Click to expand into the
+// individual chat rows. (A lone chat ask renders as a normal WorkMapAsk.)
+function WorkMapChatRun({ asks, sessionSubs }) {
+  const [open, setOpen] = useState(false);
+  if (open) {
+    return html`
+      <div class="wm-chat-run">
+        <div class="wm-chat-divider" onClick=${() => setOpen(false)}>▾ hide ${asks.length} quick exchanges</div>
+        ${asks.map(ask => html`<${WorkMapAsk} ask=${ask} sessionSubs=${sessionSubs} />`)}
+      </div>
+    `;
+  }
+  return html`<div class="wm-chat-divider" onClick=${() => setOpen(true)}>⋯ ${asks.length} quick exchanges</div>`;
+}
+
+// Group a chronological asks list into render segments: each work ask stays on
+// its own; a run of 2+ consecutive no-work chat asks collapses into one
+// WorkMapChatRun; a lone chat ask renders as a normal WorkMapAsk.
+function groupAsks(asks) {
+  const out = [];
+  let run = [];
+  const flushRun = () => {
+    if (run.length >= 2) out.push({ kind: 'chat-run', asks: run });
+    else run.forEach(a => out.push({ kind: 'ask', ask: a }));
+    run = [];
+  };
+  asks.forEach(ask => {
+    if (askStatus(ask).hasWork) { flushRun(); out.push({ kind: 'ask', ask }); }
+    else run.push(ask);
+  });
+  flushRun();
+  return out;
 }
 
 function WorkMapSection({ sessionId }) {
@@ -1757,18 +1836,41 @@ function WorkMapSection({ sessionId }) {
   const asks = (map.asks || []).slice().reverse();
   const n = map.ask_count != null ? map.ask_count : asks.length;
   const sub = map.subagent_count || 0;
+  const flagged = map.flagged || 0;
   const meta = n + ' ask' + (n === 1 ? '' : 's')
     + ' · ' + sub + ' subagent' + (sub === 1 ? '' : 's')
-    + (map.flagged ? ' · ' + map.flagged + ' flagged for right-sizing' : '')
+    + (flagged ? ' · ' + flagged + ' flagged for right-sizing' : '')
     + (map.session_tokens != null ? ' · ' + fmtTokens(map.session_tokens) + ' tok total' : '');
+
+  // 5-second read: totals + the biggest fan-outs (asks that spawned the most
+  // subagents). Sort a copy by subagent_count desc; keep the top 2 with any subs.
+  const topFanouts = asks.slice()
+    .sort((x, y) => askStatus(y).subCount - askStatus(x).subCount)
+    .filter(a => askStatus(a).subCount > 0)
+    .slice(0, 2);
 
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first) — bold line is what the agent did, dim line is your prompt. ${meta}.</div>
+    ${asks.length === 0 ? null : html`
+      <div class="wm-summary-band">
+        <div class="wm-summary-stats">
+          <span>${map.session_tokens != null ? fmtTokens(map.session_tokens) : '-'} tok</span>
+          <span>${n} ask${n === 1 ? '' : 's'}</span>
+          <span>${sub} subagent${sub === 1 ? '' : 's'}</span>
+          <span>${flagged} flagged</span>
+        </div>
+        ${topFanouts.length ? html`<div class="wm-summary-fanouts">
+          ${topFanouts.map(a => html`<div class="wm-summary-fanout" title=${a.outcome || ''}>${Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)}×: ${firstSentence(a.outcome || a.summary || '') || '(did work — no narration)'}</div>`)}
+        </div>` : null}
+      </div>
+    `}
     <div class="wm-legend"><span><span style="color:var(--brand)">●</span> did work</span><span><span style="color:#f5a623">⚠</span> flagged</span><span><span style="color:var(--error)">✗</span> error</span><span>· chat</span></div>
     ${asks.length === 0
       ? html`<div class="story-unavailable">Transcript found but no asks.</div>`
-      : html`<div class="wm-asks">${asks.map(ask => html`<${WorkMapAsk} ask=${ask} />`)}</div>`}
+      : html`<div class="wm-asks">${groupAsks(asks).map(seg => seg.kind === 'chat-run'
+          ? html`<${WorkMapChatRun} asks=${seg.asks} sessionSubs=${sub} />`
+          : html`<${WorkMapAsk} ask=${seg.ask} sessionSubs=${sub} />`)}</div>`}
     ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not attributed to an ask (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
     <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Each ask is one thing you asked; structure + activity from the transcript, tokens from spans. Descriptive only — tj reports what happened, you judge the approach.</div>
   `;

@@ -184,6 +184,53 @@ def test_user_prompts_visually_marked_on_both_views(html):
     assert ".wm-ask.work { border-left-color: var(--brand)" in html
 
 
+# --- Map v1.1: glanceable storyline (first-sentence, chat collapse, summary) - #
+def test_work_map_headlines_use_first_sentence(html):
+    # Verbose run-on outcomes are reduced to one clean sentence for the headline;
+    # the old raw 160-char truncation of the outcome is gone.
+    assert "function firstSentence" in html
+    assert "firstSentence(ask.outcome || ask.summary || '')" in html
+    assert "outcome.slice(0, 160)" not in html  # the old raw truncation is gone
+
+
+def test_work_map_collapses_chat_runs(html):
+    # Runs of 2+ consecutive no-work chat asks collapse into one clickable
+    # divider that expands into the individual rows.
+    assert "function WorkMapChatRun" in html
+    assert "function groupAsks" in html
+    assert 'class="wm-chat-divider"' in html
+    assert "quick exchanges" in html
+    # The collapse decision keys off askStatus(...).hasWork being false.
+    assert "askStatus(ask).hasWork" in html
+
+
+def test_work_map_has_summary_band(html):
+    # A 5-second-read summary band sits above the asks list: totals + the top
+    # fan-outs (biggest subagent counts).
+    assert 'class="wm-summary-band"' in html
+    assert ".wm-summary-band {" in html
+    assert ".wm-chat-divider {" in html
+
+
+def test_first_sentence_strips_single_and_double_emphasis(html):
+    # firstSentence must strip single AND double * / _ plus backticks anywhere,
+    # so no stray emphasis markers leak into a headline (e.g. "*cheaper*"). The
+    # old strip that only removed the paired forms (\*\*|__) is gone.
+    assert r".replace(/[*_`]+/g, '')" in html
+    assert r".replace(/\*\*|__|`|##+|---+/g, '')" not in html
+
+
+def test_work_map_subagent_count_clamped_to_session_total(html):
+    # A per-ask fan-out can never exceed the session total; both the ask row and
+    # the summary fan-out clamp the displayed number with Math.min(..., session).
+    # The ask row threads the session total down as the sessionSubs prop.
+    assert "sessionSubs" in html
+    assert "Math.min(subCount, sessionSubs)" in html
+    assert "Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)" in html
+    # The row's displayed count uses the clamped value, not the raw subCount.
+    assert "${subShown} sub${subShown === 1 ? '' : 's'}" in html
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).
