@@ -20,13 +20,17 @@ from dataclasses import dataclass
 
 import click
 
-from tokenjam.utils.formatting import console, format_cost
+from tokenjam.utils.formatting import console, format_cost  # noqa: F401  (kept for back-compat imports)
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 
-# Tier table — monthly USD spend thresholds → (label, one-liner).
-# Calibrated for individual coding-agent users. Order matters: walked
-# bottom-up, first matching threshold wins.
+# Tier table — multiplier thresholds (×plan-fee) → (label, one-liner).
+# The `threshold` field is interpreted as a multiplier when the user has a
+# subscription plan declared, or as an absolute USD/mo amount when they
+# don't (API users, no plan set). The fallback thresholds in _SPEND_TIERS
+# below mirror the multiplier ladder calibrated against the Max-5x plan
+# ($100/mo) so the tier names mean roughly the same thing across paths.
+# Order matters: classify walks high-to-low; first match wins.
 @dataclass(frozen=True)
 class Tier:
     threshold: float
@@ -36,18 +40,34 @@ class Tier:
 
 
 _TIERS: list[Tier] = [
-    Tier(0,    "TokenSipper",     "💧", "Are you even using AI?"),
-    Tier(50,   "TokenModerator",  "🥱", "Mostly reasonable. Try harder."),
-    Tier(200,  "TokenMaxxer",     "💸", "You're paying Anthropic's rent."),
-    Tier(500,  "TokenChad",       "🔥", "You're paying their interns' rent too."),
-    Tier(1500, "TokenGigaChad",   "🔥🔥", "Touch grass. Then run `tj optimize`."),
+    Tier(0,  "TokenSipper",     "💧",   "Are you even using AI?"),
+    Tier(1,  "TokenModerator",  "🥱",   "Mostly reasonable. Try harder."),
+    Tier(4,  "TokenMaxxer",     "💸",   "You're paying Anthropic's rent."),
+    Tier(10, "TokenChad",       "🔥",   "You're paying their interns' rent too."),
+    Tier(20, "TokenGigaChad",   "🔥🔥", "Touch grass. Then run `tj optimize`."),
 ]
 
+# Absolute USD/mo fallback for users without a subscription plan (API users).
+# Calibrated against Max-5x = $100/mo: each threshold is the multiplier × $100.
+# This way a $400/mo API user and a 4× Pro/Max-5x/Max-20x user both end up
+# in TokenMaxxer — the tier name reflects "shocking spend" in either world.
+_SPEND_TIER_THRESHOLDS_USD: list[float] = [0, 100, 400, 1000, 2000]
 
-def _classify(monthly_spend: float) -> Tier:
-    """Walk tiers high-to-low; first threshold the spend exceeds wins."""
-    for tier in reversed(_TIERS):
-        if monthly_spend >= tier.threshold:
+
+def _classify(monthly_spend: float, multiplier: float | None = None) -> Tier:
+    """
+    Pick a tier. Prefer the multiplier path when the user has a subscription
+    plan with a declared fee; fall back to absolute monthly spend when not.
+    Walks tiers high-to-low; first matching threshold wins.
+    """
+    if multiplier is not None:
+        for tier in reversed(_TIERS):
+            if multiplier >= tier.threshold:
+                return tier
+        return _TIERS[0]
+    # API / no-plan path — map onto the same tier labels via absolute USD.
+    for tier, threshold_usd in zip(reversed(_TIERS), reversed(_SPEND_TIER_THRESHOLDS_USD)):
+        if monthly_spend >= threshold_usd:
             return tier
     return _TIERS[0]
 
@@ -86,7 +106,7 @@ def cmd_tokenmaxx(ctx: click.Context, since: str, output_json: bool) -> None:
     if plan_info and plan_info[1]:
         multiplier = monthly_spend / plan_info[1]
 
-    tier = _classify(monthly_spend)
+    tier = _classify(monthly_spend, multiplier)
 
     if output_json:
         click.echo(json.dumps({
@@ -201,6 +221,28 @@ def _plan_label_and_fee(plan_tier: str | None) -> tuple[str, float | None] | Non
 
 # ───────────────────────────── rendering ──────────────────────────────────
 
+def _fmt_spend(usd: float) -> str:
+    """Spend / savings: always 2 decimals — readable, screenshot-friendly.
+
+    The default `format_cost` helper uses 4 decimals (precision for the cost
+    engine internals); for the tokenmaxx social artifact we want $4044.57,
+    not $4044.5774.
+    """
+    return f"${usd:.2f}"
+
+
+def _fmt_fee(usd: float) -> str:
+    """Plan fee: drop the decimals when the fee is a round dollar.
+
+    Anthropic / OpenAI subscription tiers (Pro $20, Max-5x $100, Max-20x $200)
+    are all whole-dollar — `$100.00` reads worse than `$100`. Falls back to
+    2 decimals for anything fractional.
+    """
+    if usd == int(usd):
+        return f"${int(usd)}"
+    return f"${usd:.2f}"
+
+
 def _render(
     *, tier: Tier, spend_usd: float, monthly_spend: float,
     window_days: int, sessions: int,
@@ -208,7 +250,12 @@ def _render(
     multiplier: float | None,
     savings_usd: float,
 ) -> None:
-    """Big-headline render. Designed to be a clean screenshot artifact."""
+    """
+    Big-headline render. Designed to be a clean screenshot artifact:
+    bordered Panel with a heading, the tier callout up top, the spend
+    breakdown in the middle, the action line at the bottom, and the
+    share prompt OUTSIDE the panel.
+    """
     if sessions == 0:
         console.print(
             "\n[yellow]No usage data found.[/yellow]\n"
@@ -217,54 +264,96 @@ def _render(
         )
         return
 
-    # Banner — the headline shareable line.
-    console.print()
-    console.print(f"  {tier.emoji} [bold]You're a {tier.label}.[/bold]")
-    console.print(f"     [dim italic]\"{tier.quip}\"[/dim italic]")
-    console.print()
+    # Build the inside-the-panel content as one rich Text/markup string.
+    # Rich Panel doesn't have native sub-spacing primitives, so we hand-pad
+    # with newlines to get the visual rhythm we want in the screenshot.
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.align import Align
 
-    # Spend breakdown — what produced the tier.
+    # Tier callout — the headline, plus a larger non-dim quip (no quotes)
+    # with `tj optimize` highlighted green-bold when it appears in the quip.
+    headline = Text()
+    headline.append(f"{tier.emoji} ", style="")
+    headline.append("You're a ", style="bold")
+    headline.append(tier.label, style="bold")
+    headline.append(".", style="bold")
+
+    quip_text = Text()
+    # Walk the quip and recolor any `tj optimize` backtick-wrapped token green.
+    # Rich doesn't auto-parse backticks, so we do it manually with split.
+    parts = tier.quip.split("`tj optimize`")
+    for i, p in enumerate(parts):
+        if p:
+            quip_text.append(p, style="")
+        if i < len(parts) - 1:
+            quip_text.append("tj optimize", style="bold green")
+
+    # The spend / multiplier block — same content as before but with the
+    # cleaner formatters and a slightly tighter line structure.
+    body = Text()
     actual_label = f"last {window_days}d" if window_days < 30 else "last 30d"
-    if window_days == 30:
-        console.print(
-            f"  [bold]{format_cost(spend_usd)}[/bold] in {actual_label} "
-            f"across [bold]{sessions}[/bold] sessions."
-        )
-    else:
-        console.print(
-            f"  [bold]{format_cost(spend_usd)}[/bold] in {actual_label} "
-            f"across [bold]{sessions}[/bold] sessions "
-            f"(≈ [bold]{format_cost(monthly_spend)}/mo[/bold] at this rate)."
-        )
+    body.append(_fmt_spend(spend_usd), style="bold")
+    body.append(f" in {actual_label} across ")
+    body.append(str(sessions), style="bold")
+    body.append(" sessions.")
+    if window_days != 30:
+        body.append("  (≈ ", style="dim")
+        body.append(_fmt_spend(monthly_spend), style="bold")
+        body.append("/mo at this rate)", style="dim")
 
-    # Plan multiplier — the punchline.
     if plan_info and multiplier:
         plan_label, fee = plan_info
-        console.print(
-            f"  That's [bold]{multiplier:.1f}×[/bold] your "
-            f"[bold]{plan_label}[/bold] cost ({format_cost(fee)}/mo flat)."
-        )
+        body.append("\nThat's ")
+        body.append(f"{multiplier:.1f}×", style="bold")
+        body.append(" your ")
+        body.append(plan_label, style="bold")
+        body.append(f" cost ({_fmt_fee(fee)}/mo flat).")
     elif plan_info:
         plan_label, _ = plan_info
-        console.print(f"  Plan: [bold]{plan_label}[/bold].")
+        body.append("\nPlan: ")
+        body.append(plan_label, style="bold")
+        body.append(".")
 
-    console.print()
-
-    # The action — the part that makes this a tool, not a flex.
+    # Action line — savings recoverable, or fall through to "no obvious
+    # savings yet". `tj optimize` rendered green-bold either way so the
+    # eye lands on the verb.
+    action = Text("💡 ")
     if savings_usd > 0:
-        console.print(
-            f"  💡 [bold]{format_cost(savings_usd)}/mo[/bold] of that looks "
-            f"recoverable. Run [bold]tj optimize[/bold] to see candidates."
-        )
+        action.append(_fmt_spend(savings_usd) + "/mo", style="bold")
+        action.append(" of that looks recoverable. Run ")
+        action.append("tj optimize", style="bold green")
+        action.append(" to see candidates.")
     else:
-        console.print(
-            "  💡 No obvious savings flagged yet — run [bold]tj optimize[/bold] "
-            "for the full report once you have more data."
-        )
-    console.print()
+        action.append("No obvious savings flagged yet — run ")
+        action.append("tj optimize", style="bold green")
+        action.append(" for the full report once you have more data.")
 
-    # Subtle share prompt.
+    # Compose with deliberate vertical spacing.
+    panel_body = Group(
+        headline,
+        Text(""),            # blank line under headline
+        Align.left(quip_text),
+        Text(""),            # blank line under quip
+        body,
+        Text(""),            # blank line before action
+        action,
+    )
+
+    console.print()
+    console.print(Panel(
+        panel_body,
+        title="[bold]TokenJam TokenMaxxing Report[/bold]",
+        title_align="left",
+        border_style="dim",
+        padding=(1, 2),
+    ))
+
+    # Share prompt — outside the panel, teal, points at the brand handle so
+    # the social mechanic routes to a real account we can amplify from.
     console.print(
-        "  [dim]Share your tier: screenshot the above and post with #tokenmaxx[/dim]"
+        "  [cyan]Share your tier: screenshot the above and tag "
+        "[bold]@tokenjamdev[/bold][/cyan]"
     )
     console.print()

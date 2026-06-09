@@ -14,25 +14,52 @@ from tokenjam.core.config import ProviderBudget, TjConfig
 # ───────────────────────────── classification ─────────────────────────────
 
 def test_classify_zero_spend_is_sipper():
-    t = _classify(0.0)
-    assert t.label == "TokenSipper"
+    # Zero spend → Sipper, regardless of which path.
+    assert _classify(0.0).label == "TokenSipper"
+    assert _classify(0.0, multiplier=0.0).label == "TokenSipper"
 
 
-def test_classify_walks_tiers_correctly():
-    # Each threshold should map into the next tier exactly at the boundary.
+def test_classify_multiplier_path_walks_tier_boundaries():
+    # Multiplier-based classification — the primary path for subscription users.
+    # Boundaries are 1× / 4× / 10× / 20× per the launch-tier spec.
     cases = [
-        (49.99,   "TokenSipper"),
-        (50.0,    "TokenModerator"),
-        (199.99,  "TokenModerator"),
-        (200.0,   "TokenMaxxer"),
-        (499.99,  "TokenMaxxer"),
-        (500.0,   "TokenChad"),
-        (1499.99, "TokenChad"),
-        (1500.0,  "TokenGigaChad"),
+        (0.99,  "TokenSipper"),
+        (1.0,   "TokenModerator"),
+        (3.99,  "TokenModerator"),
+        (4.0,   "TokenMaxxer"),
+        (9.99,  "TokenMaxxer"),
+        (10.0,  "TokenChad"),
+        (19.99, "TokenChad"),
+        (20.0,  "TokenGigaChad"),
+        (200.0, "TokenGigaChad"),
+    ]
+    for mult, expected in cases:
+        assert _classify(0.0, multiplier=mult).label == expected, f"failed at {mult}×"
+
+
+def test_classify_absolute_path_for_api_users_walks_tier_boundaries():
+    # Absolute USD/mo fallback — calibrated against Max-5x = $100/mo so the
+    # tier names mean roughly the same thing in both paths.
+    cases = [
+        (99.99,   "TokenSipper"),
+        (100.0,   "TokenModerator"),
+        (399.99,  "TokenModerator"),
+        (400.0,   "TokenMaxxer"),
+        (999.99,  "TokenMaxxer"),
+        (1000.0,  "TokenChad"),
+        (1999.99, "TokenChad"),
+        (2000.0,  "TokenGigaChad"),
         (50_000,  "TokenGigaChad"),
     ]
     for spend, expected in cases:
         assert _classify(spend).label == expected, f"failed at ${spend}"
+
+
+def test_classify_multiplier_overrides_absolute_when_both_provided():
+    # A subscription user at $50/mo on a $20 Pro plan (2.5× their plan) is
+    # a TokenModerator, NOT a TokenSipper — the multiplier path wins.
+    t = _classify(50.0, multiplier=2.5)
+    assert t.label == "TokenModerator"
 
 
 def test_every_tier_has_emoji_and_quip():
@@ -95,3 +122,19 @@ def test_plan_label_and_fee_returns_none_for_unknown_or_api():
     assert _plan_label_and_fee("local") is None
     assert _plan_label_and_fee(None) is None
     assert _plan_label_and_fee("not_a_plan") is None
+
+
+def test_all_anthropic_subscription_plans_produce_a_multiplier():
+    # Every Anthropic subscription plan in the onboard wizard must produce
+    # a finite multiplier, otherwise the tokenmaxx tweet hook ("Nx your
+    # plan") doesn't render for those users. This guards against the table
+    # diverging from `cmd_onboard.py::_ANTHROPIC_PLAN_CHOICES`.
+    for plan in ("pro", "max_5x", "max_20x"):
+        info = _plan_label_and_fee(plan)
+        assert info is not None, f"{plan!r} not in plan-fee table"
+        label, fee = info
+        assert label, f"{plan!r} missing a display label"
+        assert fee and fee > 0, f"{plan!r} missing a numeric monthly fee"
+        # Sanity-check the multiplier math the renderer does.
+        spend = 1000.0
+        assert spend / fee > 0
