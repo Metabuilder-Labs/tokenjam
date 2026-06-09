@@ -191,9 +191,9 @@ The Agent Incident Library at `incidents/` is separate: each scenario is a `scen
 
 ## Pricing
 
-Model pricing lives in `pricing/models.toml` (USD per million tokens). Structure: `[provider.model_name]` with `input_per_mtok`, `output_per_mtok`, and optional `cache_read_per_mtok`/`cache_write_per_mtok`. Unknown models fall back to default rates ($0.50/$2.00 per MTok) with a logged warning. The pricing table is LRU-cached at process startup — restart to pick up changes.
+Model pricing lives in `tokenjam/pricing/models.toml` (USD per million tokens) — the packaged file `core/pricing.py` loads via `PRICING_FILE = Path(__file__).parent.parent / "pricing" / "models.toml"`. There is no repo-root `pricing/` copy (it was moved into the package in v0.1.x so it ships in the wheel; editing a repo-root file would have no runtime effect). Structure: `[provider.model_name]` with `input_per_mtok`, `output_per_mtok`, and optional `cache_read_per_mtok`/`cache_write_per_mtok`. Unknown models fall back to default rates ($0.50/$2.00 per MTok) with a logged warning. The pricing table is LRU-cached at process startup — restart to pick up changes.
 
-Pricing is community-maintained: submit a PR editing `pricing/models.toml` when provider prices change. No code changes needed — the file is loaded at runtime.
+Pricing is community-maintained: submit a PR editing `tokenjam/pricing/models.toml` when provider prices change. No code changes needed — the file is loaded at runtime.
 
 ## CI
 

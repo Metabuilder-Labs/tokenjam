@@ -43,7 +43,7 @@ tokenjam/sdk/               @watch() decorator and provider/framework patches
 tokenjam/otel/              OTel TracerProvider and span exporter wiring
 tokenjam/utils/             Formatting, time parsing, ID generation
 sdk-ts/src/            TypeScript SDK (@tokenjam/sdk)
-pricing/models.toml    Community-maintained model pricing — PRs welcome here
+tokenjam/pricing/models.toml  Community-maintained model pricing — PRs welcome here
 tests/factories.py     Span factory — use this in all synthetic tests, never
                        construct NormalizedSpan directly
 ```
@@ -57,7 +57,7 @@ This project was built using parallel Claude Code agents. The `.claude/` directo
 
 ## Pricing table contributions
 
-The file `pricing/models.toml` is intentionally community-maintained. If a model is missing or prices have changed, open a PR with the update — no issue needed, just update the TOML and verify the format matches existing entries.
+The file `tokenjam/pricing/models.toml` is intentionally community-maintained. If a model is missing or prices have changed, open a PR with the update — no issue needed, just update the TOML and verify the format matches existing entries. (This is the file the cost engine loads at runtime; there is no separate repo-root copy.)
 
 ## Reporting issues
 
