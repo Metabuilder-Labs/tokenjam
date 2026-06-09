@@ -1458,7 +1458,7 @@ function SubagentBlock({ subagent }) {
               <div class="story-callout-label">Task</div>
               <div class="story-callout-body">${subagent.task}</div>
             </div>` : null}
-          <div class="story-steps">${renderStepsInOrder(steps)}</div>
+          <div class="story-steps">${renderTimelineSteps(steps)}</div>
           ${subagent.outcome ? html`
             <div class="story-callout" style="margin-top:8px">
               <div class="story-callout-label">Outcome</div>
@@ -1480,22 +1480,32 @@ function firstLine(text) {
 // Render a step list NEWEST-FIRST (data is canonical oldest-first; we reverse in
 // render only). prevModel is the chronologically-previous step's model so the
 // "model changed" dim tag tracks the real timeline, not the reversed order.
-function renderStepsInOrder(steps) {
-  // Chronological, like the terminal: each user prompt, then its responses in
-  // order, then the next prompt. (The Map is the newest-first summary; the
-  // Timeline is the faithful replay.)
-  const out = [];
-  let prevModel = null;
+function renderTimelineSteps(steps) {
+  // Newest ask on top (like an inbox), but each ask reads top-down in order —
+  // the prompt, then its responses chronologically — so input/output pair the
+  // way the terminal shows them.
+  const groups = [];
+  let cur = null;
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
-    if (step.ask != null) {
-      out.push(html`<${StoryAsk} prompt=${step.ask} key=${'ask' + i} />`);
+    if (cur === null || step.ask != null) {
+      cur = { ask: step.ask != null ? step.ask : null, items: [] };
+      groups.push(cur);
     }
-    if (step.omitted != null) {
-      out.push(html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`);
-    } else {
-      out.push(html`<${StoryStep} step=${step} prevModel=${prevModel} key=${step.n} />`);
-      prevModel = step.model || prevModel;
+    cur.items.push({ step, i });
+  }
+  const out = [];
+  for (let g = groups.length - 1; g >= 0; g--) {
+    const grp = groups[g];
+    if (grp.ask != null) out.push(html`<${StoryAsk} prompt=${grp.ask} key=${'ask' + g} />`);
+    let prevModel = null;
+    for (const { step, i } of grp.items) {
+      if (step.omitted != null) {
+        out.push(html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`);
+      } else {
+        out.push(html`<${StoryStep} step=${step} prevModel=${prevModel} key=${step.n} />`);
+        prevModel = step.model || prevModel;
+      }
     }
   }
   return out;
@@ -1585,14 +1595,14 @@ function StorySection({ sessionId }) {
 
   // No pinned Task/Outcome summary: in a long-running session the first prompt
   // and last narration go stale (new prompts get sent, work continues). The
-  // steps below show everything in chronological order, like the terminal.
+  // newest ask on top; within each ask the steps read in order (prompt first).
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, in order — like your terminal${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest ask first — each reads in order${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
 
     ${steps.length === 0
       ? html`<div class="story-unavailable">Transcript found but no narrated steps.</div>`
-      : html`<div class="story-steps">${renderStepsInOrder(steps)}</div>`}
+      : html`<div class="story-steps">${renderTimelineSteps(steps)}</div>`}
   `;
 }
 
