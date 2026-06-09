@@ -32,7 +32,7 @@ def calculate_cost(
     if rates is None:
         logger.warning(
             "No pricing data for %s/%s — using default rates. "
-            "Add to pricing/models.toml to get accurate costs.",
+            "Add to tokenjam/pricing/models.toml to get accurate costs.",
             provider, model,
         )
         rates = ModelRates(
