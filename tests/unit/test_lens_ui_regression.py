@@ -1082,20 +1082,31 @@ def test_work_map_files_shortened_for_readability(html):
 
 
 def test_work_map_is_ask_segmented(html):
-    # A session is a sequence of asks (exchanges), not one task: the Map renders
-    # map.asks via a per-ask component, newest first.
+    # A session is a sequence of asks (exchanges): the Map renders map.asks via a
+    # per-ask component, read as a story ("ask by ask").
     assert "function WorkMapAsk" in html
     assert "map.asks" in html
-    assert "not one task" in html
+    assert "ask by ask" in html
+
+
+def test_work_map_is_a_storyline(html):
+    # The Map headlines each ask by WHAT THE AGENT DID (its outcome) with a
+    # deterministic status icon, and reads chronologically (oldest first) so it
+    # tells the session's story rather than a reverse-time log.
+    assert "function askStatus" in html
+    assert "wm-ask-did" in html                       # bold "what it did" headline
+    assert "wm-ask-ctx" in html                       # dim prompt-as-context line
+    assert "(map.asks || []).slice().reverse()" in html  # chronological order
 
 
 def test_user_prompts_visually_marked_on_both_views(html):
     # Timeline marks user prompts (grouped by ask) in a distinct brand color —
-    # no box/label; the Map ask rows carry a brand left-border accent.
+    # no box/label; the Map's work-asks carry a brand left-border accent (other
+    # statuses recolor it: amber flagged, red error, dim chat).
     assert "function StoryAsk" in html
     assert "step.ask" in html
     assert ".story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand)" in html
-    assert ".wm-ask { border: 1px solid var(--border); border-left: 3px solid var(--brand)" in html
+    assert ".wm-ask.work { border-left-color: var(--brand)" in html
 
 
 def test_index_html_has_no_nul_bytes():
