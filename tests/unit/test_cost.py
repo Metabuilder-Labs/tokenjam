@@ -113,6 +113,21 @@ def test_get_rates_opus_4_8():
     assert rates.cache_write_per_mtok == 6.25
 
 
+def test_calculate_cost_opus_4_5_model():
+    # claude-opus-4-5: input=5.00, output=25.00 (same tier as 4.6/4.7/4.8)
+    cost = calculate_cost("anthropic", "claude-opus-4-5", 1_000_000, 1_000_000)
+    assert cost == 30.0
+
+
+def test_get_rates_opus_4_5():
+    rates = get_rates("anthropic", "claude-opus-4-5")
+    assert rates is not None
+    assert rates.input_per_mtok == 5.00
+    assert rates.output_per_mtok == 25.00
+    assert rates.cache_read_per_mtok == 0.50
+    assert rates.cache_write_per_mtok == 6.25
+
+
 def test_calculate_cost_openai_model():
     # gpt-4o: input=2.50, output=10.00
     cost = calculate_cost("openai", "gpt-4o", 500_000, 100_000)
