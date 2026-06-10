@@ -1185,6 +1185,17 @@ def test_work_map_subagent_count_clamped_to_session_total(html):
     assert "${subShown} sub${subShown === 1 ? '' : 's'}" in html
 
 
+# --- Map: on-demand LLM-distilled titles ----------------------------------- #
+def test_work_map_has_distill_control(html):
+    # The Map carries a "Distill titles" button that calls /distill and threads
+    # the result into the ask headlines (prefer distilled[n] over firstSentence).
+    assert "Distill titles" in html
+    assert "setDistilled" in html
+    assert "/distill" in html
+    # The distilled title is preferred over the deterministic first sentence.
+    assert "distilled[String(ask.n)]" in html
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).

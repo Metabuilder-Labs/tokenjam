@@ -1978,3 +1978,48 @@ async def test_get_session_workmap_unavailable(config, db, tmp_path):
     body = resp.json()
     assert body["available"] is False
     assert "reason" in body
+
+
+# --- Session Distill endpoint ------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_session_distill(config, db, tmp_path, monkeypatch):
+    """/distill returns LLM-distilled titles keyed by ask number.
+
+    The distiller is monkeypatched so no real ``claude`` runs — the route maps
+    its ``{int: title}`` result to ``{str: title}`` under a stable envelope.
+    """
+    # Patch the name as imported into the route module (it calls the bare name).
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.distill_titles_cached",
+        lambda *a, **k: {3: "did a thing"},
+    )
+    _write_story_transcript(tmp_path, "distill-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/distill-sess/distill")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["model"] == "haiku"
+    assert body["titles"] == {"3": "did a thing"}
+
+
+@pytest.mark.asyncio
+async def test_get_session_distill_unavailable(config, db, tmp_path):
+    # No transcript on disk -> available:false with HTTP 200 (no CLI call).
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/unknown-sess/distill")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "reason" in body

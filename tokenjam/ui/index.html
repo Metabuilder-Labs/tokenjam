@@ -1113,6 +1113,12 @@ a.health-tile.attn { border-color: var(--warn); }
 }
 /* Work map (the "Map" tab): the nested main + subagent tree. Indent comes from
    per-row padding (node.depth) so the DOM can nest without compounding margins. */
+/* Map header: title on the left, the Distill-titles button on the right. */
+.wm-map-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.wm-distill-btn { margin-top: 24px; white-space: nowrap; }
+.wm-distill-btn:disabled { opacity: 0.6; cursor: default; }
+.wm-distill-btn:disabled:hover { border-color: var(--border); color: var(--text); }
+.wm-distill-note { color: var(--text-dim); opacity: 0.8; }
 .wm-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); margin: -6px 0 12px; flex-wrap: wrap; }
 /* Summary band: the 5-second read above the asks list — totals + biggest
    fan-outs. Subtle bordered panel, mono/dim like the other wm-* meta. */
@@ -2562,7 +2568,7 @@ function askStatus(ask) {
 // dim line is your prompt as context, and fan-outs list inline in a branch block
 // (top 5 always visible). No-work chat asks recede to a single dim line. The
 // deeper subagent subtree stays expandable.
-function WorkMapAsk({ ask, sessionSubs }) {
+function WorkMapAsk({ ask, sessionSubs, distilled }) {
   const a = ask.activity || {};
   const files = a.files || [];
   const subs = ask.subagents || [];
@@ -2578,7 +2584,10 @@ function WorkMapAsk({ ask, sessionSubs }) {
   const [open, setOpen] = useState(false);
   const prompt = (ask.prompt || '(no prompt)').replace(/\s+/g, ' ');
   const promptShort = prompt.length > 100 ? prompt.slice(0, 100) + '…' : prompt;
-  const headline = firstSentence(ask.outcome || ask.summary || '');
+  // Prefer an LLM-distilled title when present (Distill titles button); else the
+  // deterministic first sentence of the outcome.
+  const headline = (distilled && distilled[String(ask.n)])
+    || firstSentence(ask.outcome || ask.summary || '');
   const tokenTag = ask.tokens != null
     ? html`<span class="wm-tokens" title=${ask.cost_usd != null ? ('est. ' + fmtCost(ask.cost_usd)) : ''}>${fmtTokens(ask.tokens)} tok</span>`
     : null;
@@ -2636,7 +2645,7 @@ function WorkMapAsk({ ask, sessionSubs }) {
 // the storyline isn't drowned by quick exchanges. Sits as a dim milestone on the
 // spine; click to expand into the individual chat-ask milestones. (A lone chat
 // ask renders as a normal WorkMapAsk.)
-function WorkMapChatRun({ asks, sessionSubs }) {
+function WorkMapChatRun({ asks, sessionSubs, distilled }) {
   const [open, setOpen] = useState(false);
   if (open) {
     return html`
@@ -2645,7 +2654,7 @@ function WorkMapChatRun({ asks, sessionSubs }) {
           <span class="wm-dot-spine idle">·</span>
           <div class="wm-chat-divider" onClick=${() => setOpen(false)}>▾ hide ${asks.length} quick exchanges</div>
         </div>
-        ${asks.map(ask => html`<${WorkMapAsk} ask=${ask} sessionSubs=${sessionSubs} />`)}
+        ${asks.map(ask => html`<${WorkMapAsk} ask=${ask} sessionSubs=${sessionSubs} distilled=${distilled} />`)}
       </${Fragment}>
     `;
   }
@@ -2678,6 +2687,10 @@ function groupAsks(asks) {
 
 function WorkMapSection({ sessionId }) {
   const [map, setMap] = useState(null);
+  // On-demand LLM-distilled titles (the Distill titles button). null = not run
+  // yet; an object (possibly empty) once /distill has returned.
+  const [distilled, setDistilled] = useState(null);
+  const [distilling, setDistilling] = useState(false);
 
   // Poll like the Timeline so a live session's map fills in as it runs. On a
   // transient failure keep the last good map; only fall back to unavailable on
@@ -2689,6 +2702,16 @@ function WorkMapSection({ sessionId }) {
   }, [sessionId]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  // Distill crisp titles via the user's local claude CLI (15-40s; cached). An
+  // empty result means claude was unreachable — keep the deterministic titles.
+  const distill = useCallback(() => {
+    setDistilling(true);
+    api('/sessions/' + sessionId + '/distill')
+      .then(r => { setDistilled(r && r.titles ? r.titles : {}); })
+      .catch(() => setDistilled({}))
+      .finally(() => setDistilling(false));
+  }, [sessionId]);
 
   if (!map) return null;
 
@@ -2717,9 +2740,21 @@ function WorkMapSection({ sessionId }) {
     .filter(a => askStatus(a).subCount > 0)
     .slice(0, 2);
 
+  // Notes under the button: distilled titles in use, or a couldn't-reach hint.
+  const distilledCount = distilled ? Object.keys(distilled).length : 0;
+  const distillNote = distilled == null ? null
+    : distilledCount
+      ? html`<span class="wm-distill-note">titles distilled by your local Claude · haiku · cached</span>`
+      : html`<span class="wm-distill-note">couldn't reach your local claude — showing raw titles</span>`;
+
   return html`
-    <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first) — bold line is what the agent did, dim line is your prompt. ${meta}.</div>
+    <div class="wm-map-head">
+      <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
+      <button class="btn wm-distill-btn" onClick=${distill} disabled=${distilling}>
+        ${distilling ? '✨ Distilling…' : '✨ Distill titles'}
+      </button>
+    </div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first) — bold line is what the agent did, dim line is your prompt. ${meta}.${distillNote ? html` ${distillNote}` : null}</div>
     ${asks.length === 0 ? null : html`
       <div class="wm-summary-band">
         <div class="wm-summary-stats">
@@ -2737,8 +2772,8 @@ function WorkMapSection({ sessionId }) {
     ${asks.length === 0
       ? html`<div class="story-unavailable">Transcript found but no asks.</div>`
       : html`<div class="wm-spine">${groupAsks(asks).map(seg => seg.kind === 'chat-run'
-          ? html`<${WorkMapChatRun} asks=${seg.asks} sessionSubs=${sub} />`
-          : html`<${WorkMapAsk} ask=${seg.ask} sessionSubs=${sub} />`)}</div>`}
+          ? html`<${WorkMapChatRun} asks=${seg.asks} sessionSubs=${sub} distilled=${distilled} />`
+          : html`<${WorkMapAsk} ask=${seg.ask} sessionSubs=${sub} distilled=${distilled} />`)}</div>`}
     ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not attributed to an ask (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
     <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Each ask is one thing you asked; structure + activity from the transcript, tokens from spans. Descriptive only — tj reports what happened, you judge the approach.</div>
   `;
