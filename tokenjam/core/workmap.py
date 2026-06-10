@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from tokenjam.core.phases import segment_phases
+
 # Tool-name -> activity category. Mirrors the label args the story already
 # extracts (core/transcript._TOOL_LABEL_ARGS) so the rollup and the Timeline
 # agree on what each tool "is".
@@ -268,6 +270,10 @@ def _ask_node(
         "tokens": tokens,
         "cost_usd": cost,
         "truncated": bool(ask.get("truncated")),
+        # Full pre-cap step count (activity["steps"] counts only the capped list)
+        # and the descriptive phase breakdown of a long ask (Task E).
+        "step_count": ask.get("step_count"),
+        "phases": segment_phases(steps),
         "subagents": _children_from_steps(steps, depth=1, sub_index=sub_index),
     }
 
