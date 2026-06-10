@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.distill import distill_titles_cached
 from tokenjam.core.models import AlertFilters
 from tokenjam.core.transcript import (
     build_session_asks,
@@ -564,3 +565,53 @@ async def get_session_workmap(request: Request, session_id: str):
         session_tokens=session_tokens, session_cost_usd=session_cost,
     )
     return {"available": True, **workmap}
+
+
+# Min outcome length (chars) before an ask is worth distilling a title for. Short
+# outcomes already read as a title; sending them just burns a CLI round-trip.
+DISTILL_MIN_OUTCOME_CHARS = 40
+
+
+@router.get(
+    "/sessions/{session_id}/distill",
+    response_model=None,
+    dependencies=[Depends(require_api_key)],
+)
+def get_session_distill(request: Request, session_id: str):
+    """On-demand LLM-distilled crisp titles for a session's ask outcomes.
+
+    The Map's deterministic headlines (the first sentence of each ask outcome)
+    are faithful but often long. This shells to the user's local ``claude`` CLI
+    (via ``core.distill``) to crunch each long outcome into a <=6-word title,
+    cached per session. It holds no API key — it reuses the user's CLI.
+
+    Defined as a **sync** ``def`` on purpose: the ``claude`` subprocess can take
+    15-40s, so FastAPI runs this in its threadpool and the event loop stays
+    free (an ``async def`` would block it for the whole call).
+
+    No transcript on disk -> ``{"available": false, "reason": ...}`` (the same
+    contract as ``/story`` / ``/workmap``). Otherwise
+    ``{"available": true, "model": "haiku", "titles": {"<n>": "<title>"}}``.
+    An empty ``titles`` map is a valid success — it means ``claude`` was
+    unreachable or nothing distilled, and the UI keeps its deterministic titles.
+    """
+    override = getattr(request.app.state, "claude_projects_root", None)
+    projects_root = resolve_projects_root(override)
+
+    asks_payload = build_session_asks(session_id, projects_root=projects_root)
+    if asks_payload is None:
+        return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
+
+    # Only distill asks whose outcome is long enough to be worth crunching.
+    candidates = [
+        {"n": a["n"], "outcome": a["outcome"]}
+        for a in (asks_payload.get("asks") or [])
+        if (a.get("outcome") or "").strip()
+        and len((a["outcome"]).strip()) >= DISTILL_MIN_OUTCOME_CHARS
+    ]
+    titles = distill_titles_cached(session_id, candidates)
+    return {
+        "available": True,
+        "model": "haiku",
+        "titles": {str(n): t for n, t in titles.items()},
+    }
