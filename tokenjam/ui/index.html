@@ -1121,37 +1121,47 @@ a.health-tile.attn { border-color: var(--warn); }
 .wm-summary-stats span { color: var(--text-dim); }
 .wm-summary-fanouts { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
 .wm-summary-fanout { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.wm-asks { display: flex; flex-direction: column; gap: 6px; }
-/* Collapsed run of quick chat exchanges: a single clickable dim divider that
-   expands into the individual chat rows. */
-.wm-chat-divider { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); padding: 5px 12px; cursor: pointer; border: 1px dashed var(--border); border-radius: 8px; background: transparent; opacity: 0.7; }
-.wm-chat-divider:hover { opacity: 1; background: var(--surface2); }
-.wm-chat-run { display: flex; flex-direction: column; gap: 6px; }
-/* Each ask is a storyline row: status icon · dim prompt (context) over the
-   bold "what the agent did" (outcome) · token/subagent meta. Left border + icon
-   are colored by deterministic status; no-work chat asks recede (idle). */
-.wm-ask { border: 1px solid var(--border); border-left: 3px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
-.wm-ask.work { border-left-color: var(--brand); }
-.wm-ask.flag { border-left-color: #f5a623; }
-.wm-ask.err  { border-left-color: var(--error); }
-.wm-ask.idle { background: transparent; opacity: 0.7; }
-.wm-ask-row { display: flex; align-items: center; gap: 10px; padding: 9px 12px; font-size: 13px; }
-.wm-ask.idle .wm-ask-row { padding: 5px 12px; }
-.wm-ask-row.clickable { cursor: pointer; }
-.wm-ask-row.clickable:hover { background: var(--surface2); }
-.wm-ico { font-family: 'Geist Mono', monospace; font-size: 13px; flex: 0 0 auto; width: 14px; text-align: center; }
-.wm-ico.work { color: var(--brand); }
-.wm-ico.flag { color: #f5a623; }
-.wm-ico.err  { color: var(--error); }
-.wm-ico.idle { color: var(--text-dim); }
-.wm-ask-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
-.wm-ask-ctx { color: var(--brand); font-family: 'Geist Mono', monospace; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: 0.85; }
-.wm-ask-did { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The asks render as a STORYLINE on a continuous vertical spine (see the
+   approved Option-A mock): a left border line runs the height of the list and
+   each ask is a milestone with a status dot sitting ON the spine. No bordered
+   cards — the spine + dots + generous spacing carry the structure. */
+.wm-spine { border-left: 2px solid var(--border); margin-left: 7px; padding-left: 22px; }
+/* Each milestone is position:relative so its dot can be absolutely placed back
+   onto the spine. Generous vertical rhythm gives the story breathing room. */
+.wm-milestone { position: relative; margin-bottom: 16px; }
+.wm-milestone:last-child { margin-bottom: 0; }
+.wm-milestone.idle { opacity: 0.7; }
+/* The status dot sits on the spine (left:-30px lands it over the border line).
+   Color comes from deterministic status; the glyph is the status icon. */
+.wm-dot-spine { position: absolute; left: -30px; top: -1px; font-family: 'Geist Mono', monospace; font-size: 14px; width: 16px; text-align: center; }
+.wm-dot-spine.work { color: var(--brand); }
+.wm-dot-spine.flag { color: #f5a623; }
+.wm-dot-spine.err  { color: var(--error); }
+.wm-dot-spine.idle { color: var(--text-dim); }
+/* Headline row: bold "what the agent did" on the left, right-aligned meta. */
+.wm-milestone-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.wm-milestone-head.clickable { cursor: pointer; }
+.wm-milestone-head.clickable:hover .wm-ask-did { color: var(--brand); }
+.wm-ask-did { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.wm-ask-ctx { color: var(--text-dim); font-size: 12.5px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wm-chat { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
-.wm-ask-meta { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.wm-ask-meta { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
 .wm-subs { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; white-space: nowrap; }
 .wm-ask-caret { color: var(--text-dim); font-size: 11px; flex: 0 0 auto; width: 10px; }
-.wm-ask-body { padding: 4px 12px 10px; border-top: 1px solid var(--border); }
+/* Inline branch block: an indented, dashed-bordered list of the fan-out
+   subagents, shown inline (not behind a click) — mirrors the mock's branch box. */
+.wm-branch { margin-top: 8px; padding: 8px 12px; border-left: 2px dashed var(--border); background: var(--surface2); border-radius: 0 6px 6px 0; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text-dim); line-height: 1.8; }
+.wm-branch-row { display: flex; justify-content: space-between; gap: 10px; }
+.wm-branch-row.flagged { color: #f5a623; }
+.wm-branch-row .wm-branch-tok { color: var(--text-dim); flex: 0 0 auto; }
+.wm-branch-row.flagged .wm-branch-tok { color: #f5a623; }
+.wm-branch-more { color: var(--text-dim); cursor: pointer; opacity: 0.85; }
+.wm-branch-more:hover { opacity: 1; color: var(--brand); }
+/* Collapsed run of quick chat exchanges: a single clickable dim divider that
+   expands into the individual chat rows. Sits as its own milestone on the spine. */
+.wm-chat-divider { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); cursor: pointer; opacity: 0.7; }
+.wm-chat-divider:hover { opacity: 1; color: var(--brand); }
+.wm-ask-body { margin-top: 6px; }
 .wm-ask-body .wm-tree { margin-top: 6px; }
 .wm-tree { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
 .wm-row {
@@ -1218,7 +1228,7 @@ a.health-tile.attn { border-color: var(--warn); }
 // Source code is unchanged from when it was loaded from esm.sh — the
 // importmap just redirects the bare specifiers to vendored local files
 // under /ui/vendor/ so the dashboard works fully offline. (Issue #87.)
-import { h, render, Component } from 'preact';
+import { h, render, Component, Fragment } from 'preact';
 import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'preact/hooks';
 import htm from 'htm';
 
@@ -2547,9 +2557,11 @@ function askStatus(ask) {
   return { cls: 'idle', icon: '·', hasWork, subCount };
 }
 
-// One ask (exchange) as a storyline row: the bold line is WHAT THE AGENT DID
-// (its own outcome narration), the dim line is your prompt as context. No-work
-// chat asks recede to a single dim line. Expand → files + the subagent subtree.
+// One ask (exchange) as a milestone on the storyline spine: a status dot sits on
+// the spine, the bold line is WHAT THE AGENT DID (its own outcome narration), the
+// dim line is your prompt as context, and fan-outs list inline in a branch block
+// (top 5 always visible). No-work chat asks recede to a single dim line. The
+// deeper subagent subtree stays expandable.
 function WorkMapAsk({ ask, sessionSubs }) {
   const a = ask.activity || {};
   const files = a.files || [];
@@ -2558,50 +2570,61 @@ function WorkMapAsk({ ask, sessionSubs }) {
   // A per-ask fan-out can never exceed the session total; ask.subagent_count is
   // an upstream estimate that can drift slightly above it, so clamp for display.
   const subShown = sessionSubs != null ? Math.min(subCount, sessionSubs) : subCount;
-  const hasDetail = !!(files.length || subs.length || (ask.outcome && ask.outcome.length > 120));
+  // The inline branch lists the top 5 subagents; deeper subtree expands on click.
+  const branchTop = subs.slice(0, 5);
+  const branchMore = (ask.subagent_count != null ? ask.subagent_count : subs.length) - branchTop.length;
+  const hasSubtree = subs.some(s => (s.children || []).length);
+  const hasDetail = !!(files.length || hasSubtree || (ask.outcome && ask.outcome.length > 120));
   const [open, setOpen] = useState(false);
   const prompt = (ask.prompt || '(no prompt)').replace(/\s+/g, ' ');
   const promptShort = prompt.length > 100 ? prompt.slice(0, 100) + '…' : prompt;
-  const outcome = (ask.outcome || ask.summary || '').replace(/\s+/g, ' ');
   const headline = firstSentence(ask.outcome || ask.summary || '');
   const tokenTag = ask.tokens != null
     ? html`<span class="wm-tokens" title=${ask.cost_usd != null ? ('est. ' + fmtCost(ask.cost_usd)) : ''}>${fmtTokens(ask.tokens)} tok</span>`
     : null;
 
-  // Conversational ask (no work): one compact dim line.
+  // Conversational ask (no work): one compact dim line on the spine.
   if (!hasWork) {
     return html`
-      <div class="wm-ask idle">
-        <div class="wm-ask-row ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
-          <span class="wm-ico idle">·</span>
+      <div class="wm-milestone idle">
+        <span class="wm-dot-spine idle">·</span>
+        <div class="wm-milestone-head ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
           <span class="wm-chat" title=${prompt}>you: ${promptShort}${headline ? ' — ' + headline : ''}</span>
           <span class="wm-ask-meta">${tokenTag}</span>
         </div>
-        ${open && hasDetail ? html`<div class="wm-ask-body"><div class="wm-detail" style="padding-left:10px"><span class="k">full</span>${ask.outcome}</div></div>` : null}
+        ${open && hasDetail ? html`<div class="wm-ask-body"><div class="wm-detail"><span class="k">full</span>${ask.outcome}</div></div>` : null}
       </div>
     `;
   }
 
   const outcomeShort = headline || '(did work — no narration)';
   return html`
-    <div class="wm-ask ${cls}">
-      <div class="wm-ask-row ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
-        <span class="wm-ico ${cls}">${icon}</span>
-        <div class="wm-ask-main">
-          <div class="wm-ask-ctx" title=${prompt}>you: ${promptShort}</div>
-          <div class="wm-ask-did" title=${ask.outcome || ''}>${outcomeShort}</div>
-        </div>
+    <div class="wm-milestone ${cls}">
+      <span class="wm-dot-spine ${cls}">${icon}</span>
+      <div class="wm-milestone-head ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
+        <span class="wm-ask-did" title=${ask.outcome || ''}>${outcomeShort}</span>
         <span class="wm-ask-meta">
           ${tokenTag}
           ${subCount ? html`<span class="wm-subs">${subShown} sub${subShown === 1 ? '' : 's'}</span>` : null}
           ${ask.flagged ? html`<span class="wm-flag">${ask.flagged} flagged</span>` : null}
+          ${hasDetail ? html`<span class="wm-ask-caret">${open ? '▾' : '▸'}</span>` : null}
         </span>
-        <span class="wm-ask-caret">${hasDetail ? (open ? '▾' : '▸') : ''}</span>
       </div>
+      <div class="wm-ask-ctx" title=${prompt}>you: ${promptShort}</div>
+      ${branchTop.length ? html`
+        <div class="wm-branch">
+          ${branchTop.map((s, i) => {
+            const flagged = s.flags && s.flags.length;
+            const lead = i === branchTop.length - 1 && branchMore <= 0 ? '└ ' : '├ ';
+            return html`<div class="wm-branch-row ${flagged ? 'flagged' : ''}"><span>${lead}${flagged ? '⚠ ' : ''}${s.name}</span>${s.tokens != null ? html`<span class="wm-branch-tok">${fmtTokens(s.tokens)} tok</span>` : null}</div>`;
+          })}
+          ${branchMore > 0 ? html`<div class="wm-branch-row"><span class="wm-branch-more" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>└ +${branchMore} more</span></div>` : null}
+        </div>
+      ` : null}
       ${open && hasDetail ? html`
         <div class="wm-ask-body">
-          ${ask.outcome && ask.outcome.length > 160 ? html`<div class="wm-detail" style="padding-left:10px"><span class="k">outcome</span>${ask.outcome}</div>` : null}
-          ${files.length ? html`<div class="wm-detail" style="padding-left:10px"><span class="k">files</span>${files.map((f, i) => html`<span title=${f}>${shortPath(f)}</span>${i < files.length - 1 ? ', ' : ''}`)}${a.file_count > files.length ? ' +' + (a.file_count - files.length) + ' more' : ''}</div>` : null}
+          ${ask.outcome && ask.outcome.length > 160 ? html`<div class="wm-detail"><span class="k">outcome</span>${ask.outcome}</div>` : null}
+          ${files.length ? html`<div class="wm-detail"><span class="k">files</span>${files.map((f, i) => html`<span title=${f}>${shortPath(f)}</span>${i < files.length - 1 ? ', ' : ''}`)}${a.file_count > files.length ? ' +' + (a.file_count - files.length) + ' more' : ''}</div>` : null}
           ${subs.length ? html`<div class="wm-tree">${subs.map(c => html`<${WorkMapNode} node=${c} />`)}</div>` : null}
         </div>
       ` : null}
@@ -2610,19 +2633,28 @@ function WorkMapAsk({ ask, sessionSubs }) {
 }
 
 // A run of 2+ consecutive no-work "chat" asks, collapsed to a single divider so
-// the storyline isn't drowned by quick exchanges. Click to expand into the
-// individual chat rows. (A lone chat ask renders as a normal WorkMapAsk.)
+// the storyline isn't drowned by quick exchanges. Sits as a dim milestone on the
+// spine; click to expand into the individual chat-ask milestones. (A lone chat
+// ask renders as a normal WorkMapAsk.)
 function WorkMapChatRun({ asks, sessionSubs }) {
   const [open, setOpen] = useState(false);
   if (open) {
     return html`
-      <div class="wm-chat-run">
-        <div class="wm-chat-divider" onClick=${() => setOpen(false)}>▾ hide ${asks.length} quick exchanges</div>
+      <${Fragment}>
+        <div class="wm-milestone idle">
+          <span class="wm-dot-spine idle">·</span>
+          <div class="wm-chat-divider" onClick=${() => setOpen(false)}>▾ hide ${asks.length} quick exchanges</div>
+        </div>
         ${asks.map(ask => html`<${WorkMapAsk} ask=${ask} sessionSubs=${sessionSubs} />`)}
-      </div>
+      </${Fragment}>
     `;
   }
-  return html`<div class="wm-chat-divider" onClick=${() => setOpen(true)}>⋯ ${asks.length} quick exchanges</div>`;
+  return html`
+    <div class="wm-milestone idle">
+      <span class="wm-dot-spine idle">·</span>
+      <div class="wm-chat-divider" onClick=${() => setOpen(true)}>⋯ ${asks.length} quick exchanges</div>
+    </div>
+  `;
 }
 
 // Group a chronological asks list into render segments: each work ask stays on
@@ -2704,7 +2736,7 @@ function WorkMapSection({ sessionId }) {
     <div class="wm-legend"><span><span style="color:var(--brand)">●</span> did work</span><span><span style="color:#f5a623">⚠</span> flagged</span><span><span style="color:var(--error)">✗</span> error</span><span>· chat</span></div>
     ${asks.length === 0
       ? html`<div class="story-unavailable">Transcript found but no asks.</div>`
-      : html`<div class="wm-asks">${groupAsks(asks).map(seg => seg.kind === 'chat-run'
+      : html`<div class="wm-spine">${groupAsks(asks).map(seg => seg.kind === 'chat-run'
           ? html`<${WorkMapChatRun} asks=${seg.asks} sessionSubs=${sub} />`
           : html`<${WorkMapAsk} ask=${seg.ask} sessionSubs=${sub} />`)}</div>`}
     ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not attributed to an ask (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
