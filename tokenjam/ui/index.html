@@ -1127,6 +1127,20 @@ a.health-tile.attn { border-color: var(--warn); }
 .wm-summary-stats span { color: var(--text-dim); }
 .wm-summary-fanouts { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
 .wm-summary-fanout { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Launcher -> run card: when a session spawned (or belongs to) a multi-session
+   run, surface a breadcrumb to the run + its worker sessions. */
+.wm-run-card { border: 1px solid var(--brand); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
+.wm-run-card.inferred { border-style: dashed; }
+.wm-run-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.wm-run-title { font-size: 13px; color: var(--text); }
+.wm-run-title .wm-run-id { color: var(--brand); }
+.wm-run-src { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-left: 6px; }
+.wm-run-meta { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.wm-run-workers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.wm-run-chip { font-size: 11px; color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 2px 9px; cursor: pointer; background: var(--bg); }
+.wm-run-chip:hover { border-color: var(--brand); }
+.wm-run-chip.self { border-color: var(--brand); color: var(--brand); cursor: default; }
+.wm-run-view { font-size: 12px; color: var(--brand); cursor: pointer; white-space: nowrap; }
 /* The asks render as a STORYLINE on a continuous vertical spine (see the
    approved Option-A mock): a left border line runs the height of the list and
    each ask is a milestone with a status dot sitting ON the spine. No bordered
@@ -1150,6 +1164,16 @@ a.health-tile.attn { border-color: var(--warn); }
 .wm-milestone-head.clickable:hover .wm-ask-did { color: var(--brand); }
 .wm-ask-did { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .wm-ask-ctx { color: var(--text-dim); font-size: 12.5px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Phases: the agent's own narrated arc within a long ask (the journey, not just
+   the destination). A light inner storyline under the milestone headline. */
+.wm-phases { margin-top: 6px; padding-left: 4px; display: flex; flex-direction: column; gap: 2px; }
+.wm-phase { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--text); line-height: 1.5; }
+.wm-phase-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+.wm-phase-tools { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 10.5px; flex: 0 0 auto; }
+.wm-phase-err { color: var(--error); font-family: 'Geist Mono', monospace; font-size: 10.5px; flex: 0 0 auto; }
+.wm-phase-omitted { color: var(--text-dim); font-style: italic; }
+.wm-phase-toggle { color: var(--text-dim); cursor: pointer; opacity: 0.85; }
+.wm-phase-toggle:hover { opacity: 1; color: var(--brand); }
 .wm-chat { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
 .wm-ask-meta { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
 .wm-subs { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; white-space: nowrap; }
@@ -2568,6 +2592,14 @@ function askStatus(ask) {
 // dim line is your prompt as context, and fan-outs list inline in a branch block
 // (top 5 always visible). No-work chat asks recede to a single dim line. The
 // deeper subagent subtree stays expandable.
+// How many phases of a long ask to show before the "show all" toggle.
+const PHASE_PREVIEW = 6;
+
+// "Bash, Read ×3" — a phase's tool tally, ordered by first use.
+function phaseTools(p) {
+  return (p.tools || []).map(t => t.name + (t.count > 1 ? ' ×' + t.count : '')).join(', ');
+}
+
 function WorkMapAsk({ ask, sessionSubs, distilled }) {
   const a = ask.activity || {};
   const files = a.files || [];
@@ -2581,6 +2613,15 @@ function WorkMapAsk({ ask, sessionSubs, distilled }) {
   const branchMore = (ask.subagent_count != null ? ask.subagent_count : subs.length) - branchTop.length;
   const hasSubtree = subs.some(s => (s.children || []).length);
   const hasDetail = !!(files.length || hasSubtree || (ask.outcome && ask.outcome.length > 120));
+  // Phases: the descriptive arc within a long ask (Task E). Server returns the
+  // agent's own narrated phases (capped head+tail with an {omitted} marker).
+  // Show a short preview by default; expand to the full arc on click.
+  const phases = ask.phases || [];
+  const [phasesOpen, setPhasesOpen] = useState(false);
+  // "show all N phases" counts the phases the toggle actually reveals (the
+  // real phase rows in the payload); any {omitted} middle is surfaced by its
+  // own marker, not promised by this label.
+  const phaseTotalLabel = phases.filter(p => !p.omitted).length;
   const [open, setOpen] = useState(false);
   const prompt = (ask.prompt || '(no prompt)').replace(/\s+/g, ' ');
   const promptShort = prompt.length > 100 ? prompt.slice(0, 100) + '…' : prompt;
@@ -2620,6 +2661,14 @@ function WorkMapAsk({ ask, sessionSubs, distilled }) {
         </span>
       </div>
       <div class="wm-ask-ctx" title=${prompt}>you: ${promptShort}</div>
+      ${phases.length ? html`
+        <div class="wm-phases">
+          ${(phasesOpen ? phases : phases.slice(0, PHASE_PREVIEW)).map(p => p.omitted
+            ? html`<div class="wm-phase wm-phase-omitted">⋯ ${p.omitted} more phase${p.omitted === 1 ? '' : 's'}</div>`
+            : html`<div class="wm-phase"><span class="wm-phase-title" title=${p.title}>↳ ${p.title || '(tool step)'}</span>${p.tool_count ? html`<span class="wm-phase-tools">${phaseTools(p)}</span>` : null}${p.error_count ? html`<span class="wm-phase-err" title=${p.error_count + ' failed'}>${p.error_count}✗</span>` : null}</div>`)}
+          ${phases.length > PHASE_PREVIEW ? html`<div class="wm-phase wm-phase-toggle" onClick=${() => setPhasesOpen(o => !o)}>${phasesOpen ? '▾ fewer phases' : '▸ show all ' + phaseTotalLabel + ' phases'}</div>` : null}
+        </div>
+      ` : null}
       ${branchTop.length ? html`
         <div class="wm-branch">
           ${branchTop.map((s, i) => {
@@ -2683,6 +2732,39 @@ function groupAsks(asks) {
   });
   flushRun();
   return out;
+}
+
+// Glyph for a worker session's status in the run card (descriptive only).
+function runWorkerGlyph(status) {
+  if (status === 'active') return '⏳';
+  if (status === 'closed' || status === 'completed') return '✓';
+  return '·';  // idle / stale
+}
+
+// Launcher -> run breadcrumb. `run` is the workmap's `launched_run` block:
+// { run_id, source, session_count, total_cost_usd, tool_call_count,
+//   sessions: [{session_id, label, status, is_self}] }. `source: "inferred"`
+// is marked as a best-effort guess (honesty — it was scraped from the
+// transcript, not declared by the harness).
+function WorkMapRunCard({ run }) {
+  if (!run || !run.run_id) return null;
+  const inferred = run.source === 'inferred';
+  const count = run.session_count || (run.sessions ? run.sessions.length : 0);
+  const goRun = () => { location.hash = '#/runs/' + run.run_id; };
+  return html`
+    <div class="wm-run-card ${inferred ? 'inferred' : ''}">
+      <div class="wm-run-head">
+        <div class="wm-run-title">↳ Launched run <span class="wm-run-id">${run.run_id}</span>${inferred ? html`<span class="wm-run-src" title="Scraped from this session's transcript and matched to a real run — best-effort, not declared by the harness.">inferred</span>` : null}</div>
+        <span class="wm-run-view" onClick=${goRun}>View run →</span>
+      </div>
+      <div class="wm-run-meta">${count} worker${count === 1 ? '' : 's'} · ${fmtCost(run.total_cost_usd)} · ${run.tool_call_count || 0} tool calls</div>
+      <div class="wm-run-workers">
+        ${(run.sessions || []).map(s => s.is_self
+          ? html`<span class="wm-run-chip self" title="this session">${runWorkerGlyph(s.status)} ${s.label || s.session_id.slice(0, 8)}</span>`
+          : html`<span class="wm-run-chip" title=${'Open ' + s.session_id} onClick=${() => { location.hash = '#/sessions/' + s.session_id; }}>${runWorkerGlyph(s.status)} ${s.label || s.session_id.slice(0, 8)}</span>`)}
+      </div>
+    </div>
+  `;
 }
 
 function WorkMapSection({ sessionId }) {
@@ -2755,6 +2837,7 @@ function WorkMapSection({ sessionId }) {
       </button>
     </div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first) — bold line is what the agent did, dim line is your prompt. ${meta}.${distillNote ? html` ${distillNote}` : null}</div>
+    ${map.launched_run ? html`<${WorkMapRunCard} run=${map.launched_run} />` : null}
     ${asks.length === 0 ? null : html`
       <div class="wm-summary-band">
         <div class="wm-summary-stats">

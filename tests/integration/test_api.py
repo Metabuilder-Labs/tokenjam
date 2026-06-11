@@ -838,6 +838,43 @@ async def test_status_shows_live_session_over_empty_marker(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_status_live_transcript_rescues_stale_cc_session(tmp_path):
+    """A Claude Code session whose backfilled spans went stale but whose
+    transcript is still being written shows 'active', not 'idle' — while a
+    look-alike session with no transcript stays 'idle' (Task D)."""
+    from tokenjam.utils.time_parse import utcnow
+    from datetime import timedelta
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        now = utcnow()
+        # Both look identical to the span signal: active, last span 10 min ago
+        # (past the 5-min stale window, well within the 4h idle window -> idle).
+        for sid in ("cc-live", "cc-dead"):
+            db.upsert_session(make_session(
+                agent_id="cc", session_id=sid, status="active",
+                started_at=now - timedelta(hours=1),
+                ended_at=now - timedelta(minutes=10)))
+        # Only cc-live has a (freshly written) transcript on disk.
+        _write_story_transcript(tmp_path, "cc-live")
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            status = await c.get("/api/v1/status")
+            live_detail = await c.get("/api/v1/sessions/cc-live")
+            dead_detail = await c.get("/api/v1/sessions/cc-dead")
+
+        tiles = {a["session_id"]: a for a in status.json()["agents"]}
+        assert tiles["cc-live"]["status"] == "active"   # rescued by transcript
+        assert tiles["cc-dead"]["status"] == "idle"     # no transcript -> unchanged
+        assert live_detail.json()["session"]["status"] == "active"
+        assert dead_detail.json()["session"]["status"] == "idle"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_status_returns_service_namespace(tmp_path):
     """The status tile carries service.namespace so the dashboard groups by project."""
     from tokenjam.core.db import DuckDBBackend
@@ -1978,6 +2015,173 @@ async def test_get_session_workmap_unavailable(config, db, tmp_path):
     body = resp.json()
     assert body["available"] is False
     assert "reason" in body
+
+
+def _write_long_ask_transcript(projects_root, session_id: str) -> None:
+    """One human ask followed by a long narrated work sequence (for phases)."""
+    import json as _json
+
+    project_dir = projects_root / "-Users-test-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    records = [{"type": "user", "message": {"role": "user", "content": "Fix and validate it."}}]
+    narrations = [
+        ("Explored the adapter.", "Bash"),
+        ("Read the SSH client.", "Read"),
+        ("Researched the auth model.", "Read"),
+        ("Wrote the fix.", "Edit"),
+        ("Ran end-to-end validation.", "Bash"),
+        ("Cleaned up and verified.", "Bash"),
+    ]
+    for text, tool in narrations:
+        records.append({
+            "type": "assistant", "timestamp": "2026-06-23T09:00:00.000Z",
+            "message": {"role": "assistant", "model": "claude-opus-4-8", "content": [
+                {"type": "text", "text": text},
+                {"type": "tool_use", "id": "x" + tool + text[:3], "name": tool, "input": {}},
+            ]},
+        })
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in records), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workmap_long_ask_has_phases(config, db, tmp_path):
+    """A long single ask is segmented into descriptive phases (Task E)."""
+    _write_long_ask_transcript(tmp_path, "long-ask")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/long-ask/workmap")
+
+    assert resp.status_code == 200
+    ask = resp.json()["asks"][0]
+    assert ask["step_count"] == 6
+    titles = [p["title"] for p in ask["phases"]]
+    assert titles[0] == "Explored the adapter."
+    assert "Cleaned up and verified." in titles
+    assert ask["phases"][0]["tools"] == [{"name": "Bash", "count": 1}]
+
+
+# --- Launcher -> Run linkage on the workmap (Task A) -------------------------
+
+def _write_launcher_transcript(projects_root, session_id: str, announce: str) -> None:
+    """A launcher transcript whose narration announces a run id string."""
+    import json as _json
+
+    project_dir = projects_root / "-Users-test-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "Drive the backlog."}},
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-23T09:34:00.000Z",
+            "message": {"role": "assistant", "model": "claude-opus-4-8", "content": [
+                {"type": "text", "text": f"TokenJam run id: `{announce}` — monitoring."},
+            ]},
+        },
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in records), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workmap_launched_run_inferred(tmp_path):
+    """A launcher that only ANNOUNCES a run id (not tagged with it) gets a run
+    card on its Map, inferred from the transcript + confirmed against real run
+    data. Mirrors the governor session 155755fa."""
+    run_id = "gov-20260623T093359Z-11694"
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        # The launcher session: exists in the DB but carries NO run_id of its own.
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="gov-sess", status="active", plan_tier="api"))
+        _write_launcher_transcript(tmp_path, "gov-sess", run_id)
+        # Three worker sessions tagged with the announced run id.
+        for sid, cost, tools in (("ticket-137", 5.0, 100),
+                                 ("ticket-138", 6.0, 120),
+                                 ("ticket-144", 5.86, 142)):
+            db.upsert_session(make_session(
+                agent_id="cc", session_id=sid, run_id=run_id,
+                total_cost_usd=cost, tool_call_count=tools,
+                status="active", plan_tier="api"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/gov-sess/workmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        run = body["launched_run"]
+        assert run["run_id"] == run_id
+        assert run["source"] == "inferred"
+        assert run["session_count"] == 3
+        assert round(run["total_cost_usd"], 2) == 16.86
+        assert run["tool_call_count"] == 362
+        member_ids = {s["session_id"] for s in run["sessions"]}
+        assert member_ids == {"ticket-137", "ticket-138", "ticket-144"}
+        # The launcher is not itself a member of the run roster.
+        assert all(s["is_self"] is False for s in run["sessions"])
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_workmap_launched_run_tagged(tmp_path):
+    """A worker session that carries tokenjam.run_id sees its siblings as a run
+    card (source 'tagged'), with itself flagged is_self."""
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="w1", run_id="run-x",
+            status="active", plan_tier="api"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="w2", run_id="run-x",
+            status="active", plan_tier="api"))
+        # w1 needs a transcript so /workmap is available; no announcement in it.
+        _write_story_transcript(tmp_path, "w1")
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/w1/workmap")
+
+        assert resp.status_code == 200
+        run = resp.json()["launched_run"]
+        assert run["source"] == "tagged"
+        assert run["run_id"] == "run-x"
+        assert run["session_count"] == 2
+        self_entry = next(s for s in run["sessions"] if s["session_id"] == "w1")
+        assert self_entry["is_self"] is True
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_workmap_no_launched_run_when_solo(tmp_path):
+    """A run with no OTHER member sessions is not surfaced as a card."""
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="solo", run_id="run-solo",
+            status="active", plan_tier="api"))
+        _write_story_transcript(tmp_path, "solo")
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/solo/workmap")
+
+        assert resp.status_code == 200
+        assert "launched_run" not in resp.json()
+    finally:
+        db.close()
 
 
 # --- Session Distill endpoint ------------------------------------------------
