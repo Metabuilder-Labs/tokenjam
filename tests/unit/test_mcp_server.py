@@ -381,6 +381,48 @@ def test_setup_project_no_config():
     assert "error" in result
 
 
+# --- setup_harness (run-linkage instrumentation) ---
+
+from tokenjam.mcp.server import _tool_setup_harness
+
+
+def test_setup_harness_instrument_writes_helper(tmp_path):
+    (tmp_path / "run-loop.sh").write_text(
+        "#!/bin/bash\nclaude -p \"$ticket\" &\n", encoding="utf-8"
+    )
+    result = _tool_setup_harness(
+        mode="instrument", project_path=str(tmp_path), runs_lookup=lambda: [],
+    )
+    assert result["mode"] == "instrument"
+    assert result["attribute"] == "tokenjam.run_id"
+    helper = tmp_path / ".tj" / "run-env.sh"
+    assert helper.exists()
+    assert "tokenjam.run_id=" in helper.read_text()
+    # It located the spawn point and gives concrete wiring + the honest boundary.
+    assert any(h["file"] == "run-loop.sh" for h in result["spawn_points"])
+    assert result["shell_wiring"] == "source .tj/run-env.sh"
+    assert result["next_steps"] and "boundary" in result
+
+
+def test_setup_harness_map_makes_no_changes(tmp_path):
+    runs = [{"run_id": "gov-1", "session_count": 3}]
+    result = _tool_setup_harness(
+        mode="map", project_path=str(tmp_path), runs_lookup=lambda: runs,
+    )
+    assert result["mode"] == "map"
+    assert result["runs_visible"] == runs
+    # map never writes the helper.
+    assert not (tmp_path / ".tj" / "run-env.sh").exists()
+    assert "recommendation" in result
+
+
+def test_setup_harness_rejects_bad_mode(tmp_path):
+    result = _tool_setup_harness(
+        mode="nope", project_path=str(tmp_path), runs_lookup=lambda: [],
+    )
+    assert "error" in result
+
+
 # --- open_dashboard ---
 
 from unittest.mock import patch, MagicMock

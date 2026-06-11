@@ -784,6 +784,92 @@ def _tool_setup_project(
     return result
 
 
+def _tool_setup_harness(
+    mode: str,
+    project_path: str | None,
+    runs_lookup,
+) -> dict:
+    """Wire (or map) a fan-out harness into tj's run grouping.
+
+    ``mode='instrument'`` writes the run-linkage helper into the repo and reports
+    the spawn points + exact wiring so Claude can drop ``source .tj/run-env.sh``
+    into the launcher — future runs then group automatically. ``mode='map'`` makes
+    no code changes: it scans the harness structure and reports how tj already
+    groups its sessions (existing runs) plus a recommendation. ``runs_lookup`` is
+    a no-arg callable returning the visible runs (injected so the handler stays
+    testable without a DB/HTTP connection).
+    """
+    from pathlib import Path
+
+    from tokenjam.core.harness_setup import (
+        HELPER_RELPATH,
+        build_run_env_helper,
+        python_launcher_snippet,
+        scan_spawn_points,
+    )
+    from tokenjam.otel.semconv import TjAttributes
+
+    if mode not in ("instrument", "map"):
+        return {"error": "mode must be 'instrument' or 'map'"}
+
+    repo_root = Path(project_path) if project_path else Path.cwd()
+    if not repo_root.is_dir():
+        return {"error": f"Not a directory: {repo_root}"}
+
+    spawn_points = scan_spawn_points(repo_root)
+    boundary = (
+        "tj groups a run only from work that is recorded AND correlated: a shared "
+        f"{TjAttributes.RUN_ID} on the launcher + every worker. Sessions that are "
+        "never tagged stay ungrouped — no method recovers untagged, uninstrumented "
+        "work."
+    )
+
+    if mode == "map":
+        runs = runs_lookup() if runs_lookup else []
+        return {
+            "mode": "map",
+            "spawn_points": spawn_points,
+            "runs_visible": runs,
+            "recommendation": (
+                "These are the runs tj can already see. To group a harness whose "
+                "workers aren't tagged yet, run setup_harness(mode='instrument') "
+                "and wire the helper into the launcher."
+            ),
+            "boundary": boundary,
+        }
+
+    # instrument: write the drop-in helper, report where to wire it.
+    helper_path = repo_root / HELPER_RELPATH
+    try:
+        helper_path.parent.mkdir(parents=True, exist_ok=True)
+        helper_path.write_text(build_run_env_helper(), encoding="utf-8")
+    except OSError as exc:
+        return {"error": f"Could not write {helper_path}: {exc}"}
+
+    return {
+        "mode": "instrument",
+        "attribute": TjAttributes.RUN_ID,
+        "helper_path": str(helper_path),
+        "helper_relpath": HELPER_RELPATH,
+        "shell_wiring": f"source {HELPER_RELPATH}",
+        "python_wiring": python_launcher_snippet(),
+        "spawn_points": spawn_points,
+        "next_steps": [
+            f"Add `source {HELPER_RELPATH}` at the top of the launcher script, "
+            "BEFORE it spawns any worker (or call the python_wiring snippet once "
+            "at launcher startup).",
+            "Ensure spawned workers inherit the environment (they do by default "
+            "via subprocess/exec) — that carries TJ_RUN_ID to each one.",
+            "If a worker's .claude/settings.json hard-sets OTEL_RESOURCE_ATTRIBUTES, "
+            f"append {TjAttributes.RUN_ID}=${{TJ_RUN_ID}} there too so it isn't "
+            "overwritten.",
+            "Launch a run, then check the dashboard's Runs view (or setup_harness "
+            "mode='map') to confirm the workers grouped.",
+        ],
+        "boundary": boundary,
+    }
+
+
 def _tool_open_dashboard(config) -> dict:
     """Start tj serve in the background if not running, return the dashboard URL."""
     if config is None:
@@ -1061,6 +1147,57 @@ def setup_project(agent_id: str | None = None, project_path: str | None = None) 
             config_path=str(cp) if cp else None,
             agent_id=agent_id,
             project_path=project_path,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _visible_runs(limit: int = 50) -> list[dict]:
+    """Runs tj can currently see (newest first), via HTTP or the read-only DB."""
+    if _serve_url is not None:
+        try:
+            return (_http_get("/api/v1/runs").get("runs") or [])[:limit]
+        except Exception:
+            return []
+    if _ro_conn is not None:
+        try:
+            rows = _ro_conn.execute(
+                "SELECT run_id, COUNT(*) AS session_count, "
+                "MAX(COALESCE(ended_at, started_at)) AS last_activity "
+                "FROM sessions WHERE run_id IS NOT NULL "
+                "GROUP BY run_id ORDER BY last_activity DESC LIMIT ?",
+                [limit],
+            ).fetchall()
+            return [
+                {"run_id": r[0], "session_count": int(r[1]),
+                 "last_activity": r[2].isoformat() if r[2] else None}
+                for r in rows
+            ]
+        except Exception:
+            return []
+    return []
+
+
+@mcp.tool()
+def setup_harness(mode: str = "instrument", project_path: str | None = None) -> dict:
+    """
+    Wire a fan-out harness (a governor/launcher that spawns many `claude` worker
+    sessions) into TokenJam's run grouping, so a whole run shows up linked on the
+    dashboard instead of as scattered, disconnected sessions. Run this from inside
+    the harness repo.
+
+    mode='instrument' (default): writes a drop-in helper (.tj/run-env.sh) that
+    mints one run id per launch and exports tokenjam.run_id, and reports the spawn
+    points + the exact one-line wiring to add to the launcher. After you wire it
+    in, every future run's workers group automatically. mode='map': makes NO code
+    changes — it scans the harness structure and reports how tj already groups its
+    sessions (existing runs) plus a recommendation. project_path defaults to the
+    current directory. The result is descriptive: it tells you what to change; it
+    never edits your harness's own code.
+    """
+    try:
+        return _tool_setup_harness(
+            mode=mode, project_path=project_path, runs_lookup=_visible_runs,
         )
     except Exception as e:
         return {"error": str(e)}
