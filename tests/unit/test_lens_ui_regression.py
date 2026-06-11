@@ -271,6 +271,31 @@ def test_work_map_has_distill_control(html):
     assert "distilled[String(ask.n)]" in html
 
 
+# --- Map: launcher -> run linkage card (Task A) ---------------------------- #
+def test_work_map_has_run_card(html):
+    # The Map renders a run card from the workmap's `launched_run` block with a
+    # working "View run" link into #/runs/<id> and clickable worker chips.
+    assert "function WorkMapRunCard" in html
+    assert "map.launched_run" in html
+    assert "Launched run" in html
+    assert "#/runs/' + run.run_id" in html
+    assert "#/sessions/' + s.session_id" in html
+    # Inferred (transcript-scraped) runs are visibly marked as a best-effort guess.
+    assert "run.source === 'inferred'" in html
+
+
+# --- Map: per-ask phase breakdown (Task E) --------------------------------- #
+def test_work_map_renders_phases(html):
+    # A long ask's journey renders as the agent's narrated phases under the
+    # milestone, with a tool tally and a show-all toggle past the preview.
+    assert "function phaseTools" in html
+    assert "ask.phases || []" in html
+    assert 'class="wm-phases"' in html
+    assert "PHASE_PREVIEW" in html
+    # The honest omitted marker (no silent drop) is rendered.
+    assert "more phase" in html
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).

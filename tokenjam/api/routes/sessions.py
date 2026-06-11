@@ -26,12 +26,15 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.api.routes.runs import _run_sessions
 from tokenjam.core.distill import distill_titles_cached
-from tokenjam.core.models import AlertFilters
+from tokenjam.core.models import AlertFilters, SessionRecord
+from tokenjam.core.runlink import scan_transcript_run_ids
 from tokenjam.core.transcript import (
     build_session_asks,
     build_session_story,
     resolve_projects_root,
+    session_transcript_mtime,
 )
 from tokenjam.core.workmap import build_work_map
 from tokenjam.otel.semconv import GenAIAttributes
@@ -370,6 +373,12 @@ async def get_session_detail(request: Request, session_id: str):
     context_series = _session_context_series(db, session_id)
     subagents = _session_subagents(db, session_id)
 
+    # CC session liveness: a fresh transcript mtime rescues a live session whose
+    # backfilled spans have gone stale (see _transcript_aware_status).
+    override = getattr(request.app.state, "claude_projects_root", None)
+    projects_root = resolve_projects_root(override)
+    status = _transcript_aware_status(session, projects_root)
+
     return {
         "session": {
             "session_id": session.session_id,
@@ -378,7 +387,7 @@ async def get_session_detail(request: Request, session_id: str):
             "namespace": session.service_namespace,
             "run_id": session.run_id,
             "parent_session_id": session.parent_session_id,
-            "status": session.effective_status,
+            "status": status,
             "plan_tier": session.plan_tier,
             "pricing_mode": session.pricing_mode,
             "started_at": (
@@ -517,6 +526,84 @@ def _bucket_tokens_by_ask(
     return tokens, costs
 
 
+def _run_card(
+    run_id: str, source: str, members: list[SessionRecord], self_id: str
+) -> dict[str, Any]:
+    """Render-ready run card from a run's member sessions.
+
+    ``source`` is ``"tagged"`` (the viewed session carries ``tokenjam.run_id``)
+    or ``"inferred"`` (the run id was scraped from the launcher's transcript and
+    confirmed against real run data). Totals come straight off the session
+    records — no extra DB round-trips per member.
+    """
+    sessions = [
+        {
+            "session_id": s.session_id,
+            "label": s.service_instance_id,
+            "status": s.effective_status,
+            "is_self": s.session_id == self_id,
+        }
+        for s in members
+    ]
+    starts = [s.started_at for s in members if s.started_at]
+    ends = [s.ended_at or s.started_at for s in members if (s.ended_at or s.started_at)]
+    return {
+        "run_id": run_id,
+        "source": source,
+        "session_count": len(members),
+        "total_cost_usd": sum(
+            float(s.total_cost_usd) for s in members if s.total_cost_usd is not None
+        ),
+        "tool_call_count": sum(s.tool_call_count for s in members),
+        "started_at": min(starts).isoformat() if starts else None,
+        "last_activity": max(ends).isoformat() if ends else None,
+        "sessions": sessions,
+    }
+
+
+def _launched_run(
+    db: Any, session: SessionRecord, projects_root: Any
+) -> dict[str, Any] | None:
+    """Best-effort run this session launched or belongs to, for the Map card.
+
+    Tries, in order: the session's own ``run_id`` (tagged), then any run ids its
+    transcript announced (inferred). A candidate becomes a card only when its
+    run has at least one OTHER member session — a run of just this session isn't
+    a fan-out worth surfacing. Returns ``None`` when nothing qualifies.
+    """
+    candidates: list[tuple[str, str]] = []
+    if session.run_id:
+        candidates.append((session.run_id, "tagged"))
+    for rid in scan_transcript_run_ids(session.session_id, projects_root):
+        if rid != session.run_id:
+            candidates.append((rid, "inferred"))
+
+    for run_id, source in candidates:
+        members = _run_sessions(db, run_id)
+        others = [s for s in members if s.session_id != session.session_id]
+        if not others:
+            continue
+        return _run_card(run_id, source, members, session.session_id)
+    return None
+
+
+def _transcript_aware_status(session: SessionRecord, projects_root: Any) -> str:
+    """Session status, rescued from a stale span signal by transcript activity.
+
+    Claude Code spans are backfilled periodically, so a live CC session can read
+    ``idle``/``stale`` once its last backfilled span ages past the threshold —
+    even while its transcript is still being written. When the deterministic
+    status is idle/stale but the transcript was touched within the active
+    window, report ``active``. Only stats the transcript when needed (the base
+    status is idle/stale), so active and non-CC sessions cost nothing extra.
+    """
+    base = session.effective_status
+    if base not in ("idle", "stale"):
+        return base
+    mtime = session_transcript_mtime(session.session_id, projects_root)
+    return session.status_with_transcript_mtime(mtime)
+
+
 @router.get(
     "/sessions/{session_id}/workmap",
     response_model=None,
@@ -564,7 +651,12 @@ async def get_session_workmap(request: Request, session_id: str):
         ask_tokens=ask_tokens, ask_costs=ask_costs,
         session_tokens=session_tokens, session_cost_usd=session_cost,
     )
-    return {"available": True, **workmap}
+    result: dict[str, Any] = {"available": True, **workmap}
+    if session is not None:
+        launched = _launched_run(db, session, projects_root)
+        if launched is not None:
+            result["launched_run"] = launched
+    return result
 
 
 # Min outcome length (chars) before an ask is worth distilling a title for. Short
