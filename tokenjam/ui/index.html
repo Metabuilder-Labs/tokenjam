@@ -1031,6 +1031,9 @@ a.health-tile.attn { border-color: var(--warn); }
   color: var(--text);
 }
 .story-line.dim { color: var(--text-dim); font-style: italic; }
+/* A pure tool step (no narration) shows the tool's command/path inline instead
+   of a dim "(no narration)" — rendered monospace so it reads as the action. */
+.story-line.tool { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 12px; }
 /* Expanded body */
 .story-step-body {
   padding: 2px 8px 10px 26px;
@@ -2463,7 +2466,14 @@ function StoryStep({ step, prevModel }) {
   // Show the model only when it CHANGES from the previous step (noise on every row otherwise).
   const showModel = step.model && step.model !== prevModel;
   const preview = firstLine(text);
-  const hasMore = subagents.length > 0 || (text && (step.text_truncated || text.indexOf('\n') !== -1 || text.length > preview.length || tools.length > 0));
+  // When a step is a pure tool action (no narration), surface the tool's
+  // command/path inline instead of a dim "(no narration)" — the thing you'd
+  // otherwise have to expand to see. Joins each tool's label (or its name when
+  // unlabelled); the inline chips still carry the tool name + ok/error status.
+  const toolLine = !preview && tools.length
+    ? tools.map(t => (t.label || t.name || '').trim()).filter(Boolean).join(' · ')
+    : '';
+  const hasMore = subagents.length > 0 || tools.length > 0 || (text && (step.text_truncated || text.indexOf('\n') !== -1 || text.length > preview.length));
   return html`
     <div class=${'story-step' + (step.is_error ? ' error' : '')}>
       <div class="story-step-row" onClick=${() => setExpanded(e => !e)}>
@@ -2478,7 +2488,7 @@ function StoryStep({ step, prevModel }) {
           </span>
         `)}
         ${showModel ? html`<span class="story-model-tag" title=${step.model}>${step.model}</span>` : null}
-        <span class=${'story-line' + (preview ? '' : ' dim')}>${preview || '(no narration)'}</span>
+        <span class=${'story-line' + (preview ? '' : (toolLine ? ' tool' : ' dim'))} title=${toolLine || ''}>${preview || toolLine || '(no narration)'}</span>
       </div>
       ${expanded ? html`
         <div class="story-step-body">
