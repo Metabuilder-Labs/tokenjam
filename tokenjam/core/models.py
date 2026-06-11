@@ -183,6 +183,30 @@ class SessionRecord:
             return "idle"
         return "stale"
 
+    def status_with_transcript_mtime(
+        self,
+        transcript_mtime: datetime | None,
+        idle_threshold: timedelta = SESSION_IDLE_THRESHOLD,
+    ) -> str:
+        """status_at, but rescued to 'active' by a fresh transcript mtime.
+
+        Claude Code spans are backfilled periodically, so a *live* CC session
+        can drift to ``idle``/``stale`` once its last backfilled span ages past
+        the stale threshold — even though its on-disk transcript is still being
+        appended to. When the deterministic status is idle/stale and the
+        transcript was modified within ``SESSION_STALE_THRESHOLD``, report
+        ``active`` instead. Terminal states (closed/completed) and genuinely
+        active sessions pass through untouched, so non-CC sessions (which have
+        no transcript: ``transcript_mtime is None``) are unaffected.
+        """
+        base = self.status_at(idle_threshold)
+        if base not in ("idle", "stale") or transcript_mtime is None:
+            return base
+        from tokenjam.utils.time_parse import utcnow
+        if utcnow() - transcript_mtime <= SESSION_STALE_THRESHOLD:
+            return "active"
+        return base
+
     @property
     def pricing_mode(self) -> str:
         """

@@ -118,6 +118,50 @@ class TestSessionRecord:
             assert session.status_at(timedelta(minutes=10)) == "stale"
             assert session.status_at(timedelta(hours=4)) == "idle"
 
+    def _idle_session(self, now):
+        """An 'active' session whose spans went quiet 30 min ago (-> stale at a
+        10-min idle window, idle at the default)."""
+        return SessionRecord(
+            session_id="s1",
+            agent_id="a1",
+            started_at=now - timedelta(hours=1),
+            ended_at=now - timedelta(minutes=30),
+            status="active",
+        )
+
+    def test_transcript_mtime_rescues_idle_to_active(self):
+        now = datetime(2026, 3, 28, 12, 30, 0, tzinfo=timezone.utc)
+        session = self._idle_session(now)
+        fresh = now - timedelta(minutes=1)  # transcript touched 1 min ago
+        with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
+            # Spans are stale, but the transcript is fresh -> live.
+            assert session.status_with_transcript_mtime(fresh) == "active"
+
+    def test_transcript_mtime_stale_does_not_rescue(self):
+        now = datetime(2026, 3, 28, 12, 30, 0, tzinfo=timezone.utc)
+        session = self._idle_session(now)
+        old = now - timedelta(minutes=20)  # transcript also went quiet
+        with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
+            assert session.status_with_transcript_mtime(old) == "idle"
+
+    def test_transcript_mtime_none_is_unaffected(self):
+        # Non-CC sessions (no transcript) pass through the span-derived status.
+        now = datetime(2026, 3, 28, 12, 30, 0, tzinfo=timezone.utc)
+        session = self._idle_session(now)
+        with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
+            assert session.status_with_transcript_mtime(None) == "idle"
+
+    def test_transcript_mtime_never_revives_closed(self):
+        # A fresh transcript must not resurrect an explicitly-closed session.
+        now = datetime(2026, 3, 28, 12, 30, 0, tzinfo=timezone.utc)
+        session = SessionRecord(
+            session_id="s1", agent_id="a1",
+            started_at=now - timedelta(hours=1), status="closed",
+        )
+        fresh = now - timedelta(minutes=1)
+        with patch("tokenjam.utils.time_parse.utcnow", return_value=now):
+            assert session.status_with_transcript_mtime(fresh) == "closed"
+
 
 class TestEnums:
     def test_severity_values(self):

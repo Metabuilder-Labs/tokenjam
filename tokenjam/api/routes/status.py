@@ -12,6 +12,7 @@ from tokenjam.core.models import (
     AlertFilters,
     SessionRecord,
 )
+from tokenjam.core.transcript import resolve_projects_root, session_transcript_mtime
 from tokenjam.utils.time_parse import utcnow
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
@@ -49,6 +50,23 @@ def _idle_threshold(config) -> timedelta:
     if config is not None:
         return timedelta(minutes=config.session_idle_minutes)
     return SESSION_IDLE_THRESHOLD
+
+
+def _live_status(
+    session: SessionRecord, idle_threshold: timedelta, projects_root
+) -> str:
+    """Tile status, rescued from a stale span signal by transcript activity.
+
+    A live Claude Code session can read idle/stale once its periodically
+    backfilled spans age out, even while its transcript is still being written.
+    Only stats the transcript when the base status is idle/stale, so active and
+    non-CC sessions cost nothing extra.
+    """
+    base = session.status_at(idle_threshold)
+    if base not in ("idle", "stale"):
+        return base
+    mtime = session_transcript_mtime(session.session_id, projects_root)
+    return session.status_with_transcript_mtime(mtime, idle_threshold)
 
 
 def _project_for(config, agent_id: str) -> str | None:
@@ -123,6 +141,9 @@ async def get_status(
     config = getattr(request.app.state, "config", None)
     session_labels = dict(config.session_labels) if config else {}
     idle_threshold = _idle_threshold(config)
+    projects_root = resolve_projects_root(
+        getattr(request.app.state, "claude_projects_root", None)
+    )
     now = utcnow()
     # Sessions whose last activity is newer than this are "current" (active or
     # idle) and get a tile; older active sessions are stale -> archive only.
@@ -192,7 +213,7 @@ async def get_status(
             agents_data.append({
                 "agent_id": aid,
                 "namespace": namespace,
-                "status": session.status_at(idle_threshold),
+                "status": _live_status(session, idle_threshold, projects_root),
                 "session_id": session.session_id,
                 "label": _session_label(
                     session.session_id, session.service_instance_id, session_labels

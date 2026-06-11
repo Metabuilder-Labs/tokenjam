@@ -35,6 +35,7 @@ import glob
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -901,6 +902,42 @@ def _build_subagent(
     return ref
 
 
+def session_transcript_path(
+    session_id: str, projects_root: Path | str | None = None
+) -> Path | None:
+    """Locate a session's on-disk CC transcript, or ``None`` if there isn't one.
+
+    Public wrapper over the internal locator so other ``core`` modules (and the
+    API) can find a session's transcript without reaching into a private. The
+    projects root resolves the same way as everywhere else (override -> env ->
+    default).
+    """
+    root = resolve_projects_root(projects_root)
+    return _locate_transcript(session_id, root)
+
+
+def session_transcript_mtime(
+    session_id: str, projects_root: Path | str | None = None
+) -> datetime | None:
+    """Last-modified time (tz-aware UTC) of a session's CC transcript, or None.
+
+    Claude Code keeps appending to ``<session_id>.jsonl`` while the terminal is
+    live, so a recent mtime is direct evidence the session is *still running* —
+    independent of how stale its periodically-backfilled spans are. Used to
+    rescue a live CC session from a misleading ``idle``/``stale`` status (the
+    span-recency signal lags the real activity). Returns ``None`` when no
+    transcript exists (SDK sessions) or the file can't be stat'd.
+    """
+    path = session_transcript_path(session_id, projects_root)
+    if path is None:
+        return None
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(mtime, tz=timezone.utc)
+
+
 def resolve_projects_root(override: Path | str | None = None) -> Path:
     """Resolve the projects root: explicit override -> env -> default.
 
@@ -919,6 +956,8 @@ __all__ = [
     "build_session_story",
     "build_session_asks",
     "resolve_projects_root",
+    "session_transcript_path",
+    "session_transcript_mtime",
     "DEFAULT_PROJECTS_ROOT",
     "MAX_STORY_STEPS",
     "MAX_STEP_TEXT_CHARS",
