@@ -296,6 +296,15 @@ def test_work_map_renders_phases(html):
     assert "more phase" in html
 
 
+# --- Timeline: tool-only steps show the command inline ---------------------- #
+def test_timeline_tool_step_shows_command_inline(html):
+    # A step with no narration but a tool call surfaces the tool's label/command
+    # inline instead of a bare "(no narration)".
+    assert "const toolLine = !preview && tools.length" in html
+    assert "preview || toolLine || '(no narration)'" in html
+    assert ".story-line.tool" in html
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).
