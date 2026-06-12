@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _run_sessions
-from tokenjam.core.distill import distill_titles_cached
+from tokenjam.core.distill import distill_titles_cached, peek_cached_titles
 from tokenjam.core.models import AlertFilters, SessionRecord
 from tokenjam.core.runlink import scan_transcript_run_ids
 from tokenjam.core.transcript import (
@@ -669,7 +669,9 @@ DISTILL_MIN_OUTCOME_CHARS = 40
     response_model=None,
     dependencies=[Depends(require_api_key)],
 )
-def get_session_distill(request: Request, session_id: str):
+def get_session_distill(
+    request: Request, session_id: str, cached_only: bool = False
+):
     """On-demand LLM-distilled crisp titles for a session's ask outcomes.
 
     The Map's deterministic headlines (the first sentence of each ask outcome)
@@ -677,15 +679,18 @@ def get_session_distill(request: Request, session_id: str):
     (via ``core.distill``) to crunch each long outcome into a <=6-word title,
     cached per session. It holds no API key — it reuses the user's CLI.
 
+    ``cached_only=true`` returns titles **only if already cached** and never calls
+    ``claude`` (used to auto-apply a distilled session on load, at zero cost).
+
     Defined as a **sync** ``def`` on purpose: the ``claude`` subprocess can take
     15-40s, so FastAPI runs this in its threadpool and the event loop stays
     free (an ``async def`` would block it for the whole call).
 
-    No transcript on disk -> ``{"available": false, "reason": ...}`` (the same
-    contract as ``/story`` / ``/workmap``). Otherwise
-    ``{"available": true, "model": "haiku", "titles": {"<n>": "<title>"}}``.
-    An empty ``titles`` map is a valid success — it means ``claude`` was
-    unreachable or nothing distilled, and the UI keeps its deterministic titles.
+    No transcript on disk -> ``{"available": false, "reason": ...}``. Otherwise
+    ``{"available": true, "model": "haiku", "titles": {...}, "candidate_count":
+    N, "cached": bool}``. ``candidate_count`` lets the UI tell "nothing long
+    enough to distill" (N==0, a success) apart from "claude was unreachable"
+    (N>0 but ``titles`` empty), instead of conflating the two.
     """
     override = getattr(request.app.state, "claude_projects_root", None)
     projects_root = resolve_projects_root(override)
@@ -701,9 +706,14 @@ def get_session_distill(request: Request, session_id: str):
         if (a.get("outcome") or "").strip()
         and len((a["outcome"]).strip()) >= DISTILL_MIN_OUTCOME_CHARS
     ]
-    titles = distill_titles_cached(session_id, candidates)
+    if cached_only:
+        titles = peek_cached_titles(session_id, candidates)
+    else:
+        titles = distill_titles_cached(session_id, candidates)
     return {
         "available": True,
         "model": "haiku",
         "titles": {str(n): t for n, t in titles.items()},
+        "candidate_count": len(candidates),
+        "cached": cached_only,
     }

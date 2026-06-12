@@ -1955,6 +1955,61 @@ async def test_get_session_distill(config, db, tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_session_distill_cached_only_never_calls_claude(
+    config, db, tmp_path, monkeypatch
+):
+    """cached_only=true serves from the cache-peek and never shells to claude."""
+    calls = {"distill": 0}
+
+    def _count(*a, **k):
+        calls["distill"] += 1
+        return {9: "x"}
+
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.distill_titles_cached", _count)
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.peek_cached_titles",
+        lambda *a, **k: {2: "cached title"})
+    _write_story_transcript(tmp_path, "peek-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/peek-sess/distill?cached_only=true")
+    body = resp.json()
+    assert body["cached"] is True
+    assert body["titles"] == {"2": "cached title"}
+    assert calls["distill"] == 0  # the CLI path was never taken
+
+
+@pytest.mark.asyncio
+async def test_get_session_distill_reports_candidate_count(
+    config, db, tmp_path, monkeypatch
+):
+    """candidate_count lets the UI tell a real failure from 'nothing to distill'.
+
+    The short story transcript's only outcome is under the distill length gate,
+    so candidate_count is 0 even though claude (mocked here) returned nothing.
+    """
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.distill_titles_cached", lambda *a, **k: {})
+    _write_story_transcript(tmp_path, "cc-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/cc-sess/distill")
+    body = resp.json()
+    assert body["titles"] == {}
+    assert body["candidate_count"] == 0  # short outcome -> nothing eligible
+    assert body["cached"] is False
+
+
+@pytest.mark.asyncio
 async def test_get_session_distill_unavailable(config, db, tmp_path):
     # No transcript on disk -> available:false with HTTP 200 (no CLI call).
     pipeline = IngestPipeline(db=db, config=config)

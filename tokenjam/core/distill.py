@@ -258,6 +258,30 @@ def distill_titles_cached(
     return titles
 
 
+def peek_cached_titles(
+    session_id: str,
+    asks: list[dict],
+    *,
+    model: str = "haiku",
+    cache_dir: Path | None = None,
+) -> dict[int, str]:
+    """Return cached titles for these asks **without** ever calling the CLI.
+
+    Like :func:`distill_titles_cached` but cache-only: on a hash match it returns
+    the cached titles, and on a miss (no cache, stale cache, or unreadable) it
+    returns ``{}`` — it never shells out to ``claude``. Used to auto-apply an
+    already-distilled session on load, so the user presses the button once and it
+    sticks, at zero cost. Never raises.
+    """
+    if cache_dir is None:
+        cache_dir = _default_cache_dir()
+    signature = _cache_signature(asks, model)
+    cached = _read_cache(cache_dir / f"{session_id}.json")
+    if cached is not None and cached.get("hash") == signature:
+        return _coerce_titles(cached.get("titles"))
+    return {}
+
+
 def _read_cache(cache_file: Path) -> dict | None:
     """Load a cache file, returning ``None`` on any read/parse failure."""
     try:
