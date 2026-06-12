@@ -122,15 +122,30 @@ def make_tool_span(
     output_tokens: int = 0,
     conversation_id: str | None = None,
     trace_id: str | None = None,
+    tool_input: dict | str | None = None,
+    name: str = "gen_ai.tool.call",
 ) -> NormalizedSpan:
-    """Create a NormalizedSpan representing a single tool call."""
+    """Create a NormalizedSpan representing a single tool call.
+
+    Pass ``tool_input`` to set the ``gen_ai.tool.input`` attribute — retry-loop
+    detection needs an argument signature to tell a genuine repeat from normal
+    repeated tool use. ``name`` overrides the span name (e.g. to model a
+    non-execution ``claude_code.tool_decision`` event span).
+    """
+    import json as _json
+
     now = utcnow()
     end = now + timedelta(milliseconds=duration_ms)
+    attrs: dict = {}
+    if tool_input is not None:
+        attrs[GenAIAttributes.TOOL_INPUT] = (
+            tool_input if isinstance(tool_input, str) else _json.dumps(tool_input)
+        )
 
     return NormalizedSpan(
         span_id=new_span_id(),
         trace_id=trace_id or new_trace_id(),
-        name="gen_ai.tool.call",
+        name=name,
         kind=SpanKind.INTERNAL,
         status_code=SpanStatus(status),
         start_time=now,
@@ -141,6 +156,7 @@ def make_tool_span(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         conversation_id=conversation_id,
+        attributes=attrs,
     )
 
 

@@ -107,31 +107,83 @@ def test_sensitive_action_uses_configured_severity():
 # ── Retry loop ─────────────────────────────────────────────────────────────
 
 def test_retry_loop_fires_at_4_calls_not_3():
+    # A genuine loop = the SAME tool with IDENTICAL arguments repeated.
     config = _make_config()
     engine, db = _make_engine(config)
     session_id = new_uuid()
     trace_id = "a" * 32
+    same = {"url": "http://x"}
 
-    # 3 calls — no alert
+    # 3 identical calls — no alert
     three_spans = [
-        make_tool_span(tool_name="fetch_url", trace_id=trace_id)
+        make_tool_span(tool_name="fetch_url", trace_id=trace_id, tool_input=same)
         for _ in range(3)
     ]
     db.get_recent_spans.return_value = three_spans
-    span3 = make_tool_span(tool_name="fetch_url", trace_id=trace_id)
+    span3 = make_tool_span(tool_name="fetch_url", trace_id=trace_id, tool_input=same)
     span3.session_id = session_id
     engine.evaluate(span3)
     db.insert_alert.assert_not_called()
 
-    # 4th call — should fire
-    four_spans = three_spans + [make_tool_span(tool_name="fetch_url", trace_id=trace_id)]
+    # 4th identical call — should fire
+    four_spans = three_spans + [
+        make_tool_span(tool_name="fetch_url", trace_id=trace_id, tool_input=same)]
     db.get_recent_spans.return_value = four_spans
-    span4 = make_tool_span(tool_name="fetch_url", trace_id=trace_id)
+    span4 = make_tool_span(tool_name="fetch_url", trace_id=trace_id, tool_input=same)
     span4.session_id = session_id
     engine.evaluate(span4)
     db.insert_alert.assert_called_once()
     alert: Alert = db.insert_alert.call_args[0][0]
     assert alert.type == AlertType.RETRY_LOOP
+
+
+def test_retry_loop_ignores_different_arguments():
+    # 4 calls to the SAME tool with DIFFERENT args is normal work, not a loop.
+    config = _make_config()
+    engine, db = _make_engine(config)
+    session_id = new_uuid()
+    spans = [
+        make_tool_span(tool_name="Bash", tool_input={"cmd": f"echo {i}"})
+        for i in range(4)
+    ]
+    db.get_recent_spans.return_value = spans
+    span = make_tool_span(tool_name="Bash", tool_input={"cmd": "echo 5"})
+    span.session_id = session_id
+    engine.evaluate(span)
+    db.insert_alert.assert_not_called()
+
+
+def test_retry_loop_skipped_without_tool_arguments():
+    # Telemetry with no tool args (Claude Code over OTLP) can't prove a repeat.
+    config = _make_config()
+    engine, db = _make_engine(config)
+    session_id = new_uuid()
+    spans = [make_tool_span(tool_name="Read") for _ in range(5)]  # no tool_input
+    db.get_recent_spans.return_value = spans
+    span = make_tool_span(tool_name="Read")
+    span.session_id = session_id
+    engine.evaluate(span)
+    db.insert_alert.assert_not_called()
+
+
+def test_retry_loop_ignores_decision_event_spans():
+    # Non-execution spans (claude_code.tool_decision) must not count, even with
+    # identical args — only real gen_ai.tool.call executions do.
+    config = _make_config()
+    engine, db = _make_engine(config)
+    session_id = new_uuid()
+    same = {"cmd": "ls"}
+    spans = [
+        make_tool_span(tool_name="Bash", tool_input=same,
+                       name="claude_code.tool_decision")
+        for _ in range(5)
+    ]
+    db.get_recent_spans.return_value = spans
+    span = make_tool_span(tool_name="Bash", tool_input=same,
+                          name="claude_code.tool_decision")
+    span.session_id = session_id
+    engine.evaluate(span)
+    db.insert_alert.assert_not_called()
 
 
 def test_retry_loop_ignores_spans_without_session():
