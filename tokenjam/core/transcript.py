@@ -56,6 +56,8 @@ TAIL_STEPS = 50
 MAX_STEP_TEXT_CHARS = 100_000
 MAX_TASK_OUTCOME_CHARS = 600
 MAX_TOOL_LABEL_CHARS = 120
+#: Cap on a failed tool's surfaced error message (the why-it-failed text).
+MAX_ERROR_TEXT_CHARS = 600
 
 #: Subagent recursion guards (a 4h fan-out run can spawn a deep, wide tree).
 #: ``MAX_SUBAGENT_DEPTH`` caps how many levels of nesting we descend; beyond it
@@ -217,13 +219,15 @@ def _tool_label(name: str, tool_input: Any) -> str:
     return ""
 
 
-def _build_tool_status(records: list[dict[str, Any]]) -> dict[str, bool]:
-    """Map ``tool_use_id -> is_error`` from the ``user`` records' tool_results.
+def _build_tool_status(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Map ``tool_use_id -> {is_error, error_text}`` from the tool_results.
 
     A tool is marked errored iff its ``tool_result`` block carries
-    ``is_error == true``. Missing entries are treated as "ok" by the caller.
+    ``is_error == true``; for those, the result's text (the failure message, e.g.
+    a ``<tool_use_error>…`` block) is captured, wrapper-stripped and length-capped,
+    so the UI can show *why* a step failed. Missing entries are "ok" to the caller.
     """
-    status: dict[str, bool] = {}
+    status: dict[str, dict[str, Any]] = {}
     for record in records:
         if record.get("type") != "user":
             continue
@@ -239,8 +243,24 @@ def _build_tool_status(records: list[dict[str, Any]]) -> dict[str, bool]:
             tool_use_id = block.get("tool_use_id")
             if not isinstance(tool_use_id, str):
                 continue
-            status[tool_use_id] = bool(block.get("is_error"))
+            is_error = bool(block.get("is_error"))
+            error_text = ""
+            if is_error:
+                raw = _tool_result_text(block).strip()
+                raw = _strip_tool_error_wrapper(raw)
+                error_text, _ = _trim(raw, MAX_ERROR_TEXT_CHARS)
+            status[tool_use_id] = {"is_error": is_error, "error_text": error_text}
     return status
+
+
+def _strip_tool_error_wrapper(text: str) -> str:
+    """Drop the ``<tool_use_error>…</tool_use_error>`` wrapper if present."""
+    inner = text.strip()
+    if inner.startswith("<tool_use_error>"):
+        inner = inner[len("<tool_use_error>"):]
+    if inner.endswith("</tool_use_error>"):
+        inner = inner[: -len("</tool_use_error>")]
+    return inner.strip()
 
 
 def _tool_result_text(block: dict[str, Any]) -> str:
@@ -417,7 +437,7 @@ def _first_user_prompt(records: list[dict[str, Any]]) -> str:
 
 def _build_steps(
     records: list[dict[str, Any]],
-    tool_status: dict[str, bool],
+    tool_status: dict[str, dict[str, Any]],
     include_asks: bool = False,
 ) -> list[dict[str, Any]]:
     """One step per ``assistant`` turn, in record order.
@@ -466,18 +486,20 @@ def _build_steps(
                 tool_input = block.get("input")
                 label = _tool_label(name, tool_input)
                 tool_use_id = block.get("id")
-                is_error = (
-                    bool(tool_status.get(tool_use_id))
+                entry = (
+                    tool_status.get(tool_use_id)
                     if isinstance(tool_use_id, str)
-                    else False
+                    else None
                 )
-                tools.append(
-                    {
-                        "name": name,
-                        "label": label,
-                        "status": "error" if is_error else "ok",
-                    }
-                )
+                is_error = bool(entry and entry.get("is_error"))
+                tool: dict[str, Any] = {
+                    "name": name,
+                    "label": label,
+                    "status": "error" if is_error else "ok",
+                }
+                if is_error and entry and entry.get("error_text"):
+                    tool["error"] = entry["error_text"]
+                tools.append(tool)
                 if name in _SUBAGENT_TOOL_NAMES and isinstance(tool_use_id, str):
                     spawns.append((tool_use_id, _spawn_fallback_name(tool_input)))
 

@@ -142,6 +142,34 @@ def test_error_step_flagged(tmp_path):
     assert bash_step["tools"][0]["name"] == "Bash"
     assert bash_step["tools"][0]["status"] == "error"
     assert bash_step["is_error"] is True
+    # The failed tool also carries the transcript's error message.
+    assert bash_step["tools"][0]["error"] == "(omitted)"
+
+
+def test_error_message_wrapper_is_stripped(tmp_path):
+    records = [
+        _user_prompt("do it"),
+        _assistant("Running.", tools=[{"id": "e1", "name": "Bash",
+                                       "input": {"command": "x"}}]),
+        {"type": "user", "message": {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "e1", "is_error": True,
+            "content": "<tool_use_error>Blocked: foreground sleep</tool_use_error>",
+        }]}},
+        _assistant("Pivoting."),
+    ]
+    _write_transcript(tmp_path, "err-sess", records)
+    story = build_session_story("err-sess", projects_root=tmp_path)
+    tool = story["steps"][0]["tools"][0]
+    assert tool["status"] == "error"
+    assert tool["error"] == "Blocked: foreground sleep"  # wrapper tags removed
+
+
+def test_ok_tool_has_no_error_field(tmp_path):
+    _make_fixture(tmp_path)
+    story = build_session_story("sess-1", projects_root=tmp_path)
+    ok_step = story["steps"][0]  # first Bash, is_error=False
+    assert ok_step["tools"][0]["status"] == "ok"
+    assert "error" not in ok_step["tools"][0]
 
 
 def test_retry_step_flagged(tmp_path):
