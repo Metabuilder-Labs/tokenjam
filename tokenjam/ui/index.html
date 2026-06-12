@@ -4,10 +4,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>TokenJam</title>
-<link rel="icon" type="image/svg+xml" href="https://tokenjam.dev/icon.svg">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap" rel="stylesheet">
+<!-- Favicon: inlined as a data: URL so the dashboard works fully offline.
+     If you change the brand mark, also update the inline <svg class="brand-mark">
+     in the sidebar below so the two stay in visual sync. Issue #87. -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='54 32 132 132' fill='none' stroke='%23ffffff' stroke-width='10' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='74' y='44' width='92' height='20' rx='6' ry='6'/%3E%3Cpath d='M 104 72 L 74 72 L 74 152 L 104 152'/%3E%3Cpath d='M 136 72 L 166 72 L 166 152 L 136 152'/%3E%3C/svg%3E">
+<!-- Fonts: dashboard intentionally does NOT load Google Fonts so it works
+     offline. Every font-family declaration below carries a system-font
+     fallback (-apple-system / monospace). Issue #87. -->
+<!-- Importmap: resolves the bare ESM specifiers used in the inline
+     <script type="module"> below to the vendored copies of Preact + htm
+     under /ui/vendor/. Keeps the dashboard fully offline-functional
+     while the JS source stays identical to the upstream ESM API. -->
+<script type="importmap">
+{
+  "imports": {
+    "preact":       "/ui/vendor/preact.js",
+    "preact/hooks": "/ui/vendor/preact-hooks.js",
+    "htm":          "/ui/vendor/htm.js"
+  }
+}
+</script>
 <style>
 :root {
   /* Dark theme (default) — Vercel-style monochrome, matches tokenjam.dev */
@@ -520,9 +536,13 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 <div class="main" id="app"></div>
 
 <script type="module">
-import { h, render, Component } from 'https://esm.sh/preact@10.25.4';
-import { useState, useEffect, useCallback } from 'https://esm.sh/preact@10.25.4/hooks';
-import htm from 'https://esm.sh/htm@3.1.1';
+// Imports resolve via the <script type="importmap"> block in <head>.
+// Source code is unchanged from when it was loaded from esm.sh — the
+// importmap just redirects the bare specifiers to vendored local files
+// under /ui/vendor/ so the dashboard works fully offline. (Issue #87.)
+import { h, render, Component } from 'preact';
+import { useState, useEffect, useCallback } from 'preact/hooks';
+import htm from 'htm';
 
 const html = htm.bind(h);
 

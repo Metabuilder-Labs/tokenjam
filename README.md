@@ -16,8 +16,10 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 [![OTel](https://img.shields.io/badge/OTel-GenAI%20SemConv-3d8eff?labelColor=0d1117)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ```
-pip install tokenjam
+pipx install tokenjam
 ```
+
+<sub>Don't have pipx? `brew install pipx` on macOS, `apt install pipx` on Debian/Ubuntu, or see [docs/installation.md](docs/installation.md). `pip install tokenjam` also works in a clean venv.</sub>
 
 **No cloud · No signup · No vendor lock-in**
 
@@ -89,7 +91,7 @@ Run all four with `tj optimize`. Run several with `tj optimize downsize cache tr
 For **Claude Code** users — zero code, auto-backfills your last 30 days:
 
 ```bash
-pip install "tokenjam[mcp]"
+pipx install 'tokenjam[mcp]'
 tj onboard --claude-code
 tj optimize          # cost-saving candidates from your actual usage
 ```
