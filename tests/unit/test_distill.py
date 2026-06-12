@@ -225,6 +225,35 @@ def test_cache_hit_avoids_second_call(monkeypatch, tmp_path):
     assert (tmp_path / "sess-1.json").exists()
 
 
+def test_peek_returns_cached_without_calling_claude(monkeypatch, tmp_path):
+    calls = {"n": 0}
+
+    def fake_distill(asks, *, model="haiku", timeout=distill.DEFAULT_TIMEOUT):
+        calls["n"] += 1
+        return {1: "set up auth"}
+
+    monkeypatch.setattr(distill, "distill_titles", fake_distill)
+    asks = [{"n": 1, "outcome": "added auth"}]
+
+    # Nothing cached yet -> peek returns {} and never calls claude.
+    assert distill.peek_cached_titles("s", asks, cache_dir=tmp_path) == {}
+    assert calls["n"] == 0
+
+    # Populate the cache, then peek hits it (still zero extra claude calls).
+    distill.distill_titles_cached("s", asks, cache_dir=tmp_path)
+    assert calls["n"] == 1
+    assert distill.peek_cached_titles("s", asks, cache_dir=tmp_path) == {1: "set up auth"}
+    assert calls["n"] == 1
+
+
+def test_peek_miss_on_changed_outcome(monkeypatch, tmp_path):
+    monkeypatch.setattr(distill, "distill_titles", lambda *a, **k: {1: "t"})
+    distill.distill_titles_cached("s", [{"n": 1, "outcome": "original"}], cache_dir=tmp_path)
+    # A changed outcome no longer matches the cache hash -> peek returns {}.
+    assert distill.peek_cached_titles(
+        "s", [{"n": 1, "outcome": "CHANGED"}], cache_dir=tmp_path) == {}
+
+
 def test_cache_miss_on_changed_outcome_reinvokes(monkeypatch, tmp_path):
     # Arrange
     calls = {"n": 0}

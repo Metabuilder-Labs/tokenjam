@@ -1107,7 +1107,7 @@ def test_work_map_renders_spine_with_milestone_dots(html):
     assert "border-left: 2px solid var(--border)" in html  # the spine line
     assert ".wm-milestone {" in html
     assert "position: relative" in html
-    assert 'class="wm-spine"' in html
+    assert 'class="wm-spine' in html
     # The dot sits on the spine (negative offset lands it over the border line).
     assert ".wm-dot-spine {" in html
     assert "left: -30px" in html
@@ -1237,6 +1237,18 @@ def test_timeline_error_step_shows_message_not_red_box(html):
     assert ".story-step.error { border-color: var(--error)" not in html
     assert "tools.filter(t => t.error)" in html
     assert "story-error" in html
+
+
+# --- Map: distill UX (auto-apply cached, honest note, feedback) ------------- #
+def test_distill_auto_applies_cached_and_has_honest_states(html):
+    # Cache-only auto-apply on load (press once, sticks; zero cost).
+    assert "cached_only: 1" in html
+    # The note distinguishes failure from "nothing to distill" (no longer lies).
+    assert "nothing to distill" in html
+    assert "candidate_count === 0" in html
+    # A visible post-distill flash so a successful run is obvious.
+    assert "wm-flash" in html
+    assert "@keyframes wmDistillFlash" in html
 
 
 def test_index_html_has_no_nul_bytes():

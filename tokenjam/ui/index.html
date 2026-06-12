@@ -1126,6 +1126,10 @@ a.health-tile.attn { border-color: var(--warn); }
 .wm-distill-btn:disabled { opacity: 0.6; cursor: default; }
 .wm-distill-btn:disabled:hover { border-color: var(--border); color: var(--text); }
 .wm-distill-note { color: var(--text-dim); opacity: 0.8; }
+/* Brief highlight on the headlines right after a successful distill, so the
+   swap is visible (otherwise an 11s call can look like nothing happened). */
+@keyframes wmDistillFlash { 0% { background: rgba(61,142,255,0.22); } 100% { background: transparent; } }
+.wm-flash .wm-ask-did { animation: wmDistillFlash 1.3s ease-out; border-radius: 4px; }
 .wm-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); margin: -6px 0 12px; flex-wrap: wrap; }
 /* Summary band: the 5-second read above the asks list — totals + biggest
    fan-outs. Subtle bordered panel, mono/dim like the other wm-* meta. */
@@ -2786,10 +2790,12 @@ function WorkMapRunCard({ run }) {
 
 function WorkMapSection({ sessionId }) {
   const [map, setMap] = useState(null);
-  // On-demand LLM-distilled titles (the Distill titles button). null = not run
-  // yet; an object (possibly empty) once /distill has returned.
+  // On-demand LLM-distilled titles (the Distill titles button). `distilled` is
+  // the applied titles map (or null = deterministic titles in use). `distillState`
+  // drives the button + note: idle | running | applied | nothing | failed.
   const [distilled, setDistilled] = useState(null);
-  const [distilling, setDistilling] = useState(false);
+  const [distillState, setDistillState] = useState('idle');
+  const [distillFlash, setDistillFlash] = useState(false);
 
   // Poll like the Timeline so a live session's map fills in as it runs. On a
   // transient failure keep the last good map; only fall back to unavailable on
@@ -2802,14 +2808,40 @@ function WorkMapSection({ sessionId }) {
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
-  // Distill crisp titles via the user's local claude CLI (15-40s; cached). An
-  // empty result means claude was unreachable — keep the deterministic titles.
+  // Auto-apply an already-distilled session on load (cache-only — never calls
+  // claude, zero cost), so a press sticks across reloads/navigation.
+  useEffect(() => {
+    let cancelled = false;
+    setDistilled(null); setDistillState('idle');
+    api('/sessions/' + sessionId + '/distill', { cached_only: 1 })
+      .then(r => {
+        if (cancelled) return;
+        if (r && r.titles && Object.keys(r.titles).length) {
+          setDistilled(r.titles); setDistillState('applied');
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
+  // Distill crisp titles via the user's local claude CLI (~10-40s; cached).
+  // Distinguish a real failure from "nothing long enough to distill" so the note
+  // never lies. A successful apply briefly flashes the headlines.
   const distill = useCallback(() => {
-    setDistilling(true);
+    setDistillState('running');
     api('/sessions/' + sessionId + '/distill')
-      .then(r => { setDistilled(r && r.titles ? r.titles : {}); })
-      .catch(() => setDistilled({}))
-      .finally(() => setDistilling(false));
+      .then(r => {
+        const titles = (r && r.titles) || {};
+        if (Object.keys(titles).length) {
+          setDistilled(titles); setDistillState('applied');
+          setDistillFlash(true); setTimeout(() => setDistillFlash(false), 1300);
+        } else if (r && r.candidate_count === 0) {
+          setDistillState('nothing');
+        } else {
+          setDistillState('failed');
+        }
+      })
+      .catch(() => setDistillState('failed'));
   }, [sessionId]);
 
   if (!map) return null;
@@ -2839,18 +2871,23 @@ function WorkMapSection({ sessionId }) {
     .filter(a => askStatus(a).subCount > 0)
     .slice(0, 2);
 
-  // Notes under the button: distilled titles in use, or a couldn't-reach hint.
-  const distilledCount = distilled ? Object.keys(distilled).length : 0;
-  const distillNote = distilled == null ? null
-    : distilledCount
-      ? html`<span class="wm-distill-note">titles distilled by your local Claude · haiku · cached</span>`
-      : html`<span class="wm-distill-note">couldn't reach your local claude — showing raw titles</span>`;
+  // Note under the button — distinct states so it never conflates failure with
+  // "nothing to distill".
+  const distillNote =
+    distillState === 'running' ? html`<span class="wm-distill-note">✨ distilling with your local Claude… (~10s)</span>`
+    : distillState === 'applied' ? html`<span class="wm-distill-note">titles distilled by your local Claude · haiku · cached</span>`
+    : distillState === 'nothing' ? html`<span class="wm-distill-note">titles already concise — nothing to distill</span>`
+    : distillState === 'failed' ? html`<span class="wm-distill-note">couldn't reach your local claude — showing raw titles</span>`
+    : null;
+  const distillBusy = distillState === 'running';
+  const distillBtnLabel = distillBusy ? '✨ Distilling…'
+    : distillState === 'applied' ? '✨ Distilled ✓' : '✨ Distill titles';
 
   return html`
     <div class="wm-map-head">
       <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
-      <button class="btn wm-distill-btn" onClick=${distill} disabled=${distilling}>
-        ${distilling ? '✨ Distilling…' : '✨ Distill titles'}
+      <button class="btn wm-distill-btn" onClick=${distill} disabled=${distillBusy} title="Crunch each headline into a crisp title via your local Claude (cached).">
+        ${distillBtnLabel}
       </button>
     </div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first) — bold line is what the agent did, dim line is your prompt. ${meta}.${distillNote ? html` ${distillNote}` : null}</div>
@@ -2871,7 +2908,7 @@ function WorkMapSection({ sessionId }) {
     <div class="wm-legend"><span><span style="color:var(--brand)">●</span> did work</span><span><span style="color:#f5a623">⚠</span> flagged</span><span><span style="color:var(--error)">✗</span> error</span><span>· chat</span></div>
     ${asks.length === 0
       ? html`<div class="story-unavailable">Transcript found but no asks.</div>`
-      : html`<div class="wm-spine">${groupAsks(asks).map(seg => seg.kind === 'chat-run'
+      : html`<div class="wm-spine ${distillFlash ? 'wm-flash' : ''}">${groupAsks(asks).map(seg => seg.kind === 'chat-run'
           ? html`<${WorkMapChatRun} asks=${seg.asks} sessionSubs=${sub} distilled=${distilled} />`
           : html`<${WorkMapAsk} ask=${seg.ask} sessionSubs=${sub} distilled=${distilled} />`)}</div>`}
     ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not attributed to an ask (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
