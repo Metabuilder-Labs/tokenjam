@@ -984,7 +984,8 @@ a.health-tile.attn { border-color: var(--warn); }
   border-radius: 6px;
   background: transparent;
 }
-.story-step.error { border-color: var(--error); background: rgba(238,0,0,0.04); }
+/* Errored steps aren't boxed in red — the ✗ chip carries the signal, and the
+   error message is shown in the expanded body (click to see why it failed). */
 .story-step-row {
   display: flex;
   align-items: center;
@@ -1078,6 +1079,9 @@ a.health-tile.attn { border-color: var(--warn); }
 .story-chip-status { margin-left: 2px; }
 .story-chip-status.ok { color: var(--info); }
 .story-chip-status.error { color: var(--error); }
+/* The transcript error message for a failed tool, shown in the expanded body. */
+.story-error { margin-top: 8px; padding: 8px 10px; border-left: 2px solid var(--error); background: rgba(238,0,0,0.05); border-radius: 0 6px 6px 0; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.story-error-tool { display: block; color: var(--error); font-weight: 600; margin-bottom: 3px; }
 .story-omitted {
   text-align: center;
   font-size: 11px;
@@ -2504,6 +2508,9 @@ function StoryStep({ step, prevModel }) {
               `)}
             </div>
           ` : null}
+          ${tools.filter(t => t.error).map(t => html`
+            <div class="story-error"><span class="story-error-tool">${t.name} failed</span>${t.error}</div>
+          `)}
           ${subagents.map((sa, i) => html`<${SubagentBlock} subagent=${sa} key=${'sa' + (sa.agent_id || i)} />`)}
         </div>
       ` : null}

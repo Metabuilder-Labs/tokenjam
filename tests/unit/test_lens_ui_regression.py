@@ -1230,6 +1230,15 @@ def test_timeline_tool_step_shows_command_inline(html):
     assert ".story-line.tool" in html
 
 
+# --- Timeline: failed steps show the error, not a red box ------------------- #
+def test_timeline_error_step_shows_message_not_red_box(html):
+    # The red border around an errored step is gone; the expanded body surfaces
+    # the transcript error message instead.
+    assert ".story-step.error { border-color: var(--error)" not in html
+    assert "tools.filter(t => t.error)" in html
+    assert "story-error" in html
+
+
 def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).
