@@ -22,7 +22,7 @@ LLMLingua-2 pulls in PyTorch and transformers (~2GB). Kept out of the
 base install:
 
 ```bash
-pip install "tokenjam[bloat]"
+pipx install 'tokenjam[bloat]'
 ```
 
 The base `pip install tokenjam` does NOT pull torch. Trim shows up in

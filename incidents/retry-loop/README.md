@@ -1,6 +1,6 @@
 # Your agent isn't flaky. You're blind.
 
-**Run it:** `pip install tokenjam && tj demo retry-loop`
+**Run it:** `pipx install tokenjam && tj demo retry-loop`
 
 ---
 
@@ -57,7 +57,7 @@ The loop was visible from span #4. Your logs didn't surface it until a user comp
 ## Try it yourself
 
 ```bash
-pip install tokenjam
+pipx install tokenjam
 tj demo retry-loop
 ```
 
@@ -72,4 +72,4 @@ To catch this in your real agent, wire up the TokenJam SDK (`@watch()` + `patch_
 
 ---
 
-[TokenJam](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pip install tokenjam` and start seeing what your agent actually does.
+[TokenJam](https://github.com/Metabuilder-Labs/TokenJam) is a local-first, zero-signup observability CLI for AI agents. No cloud. No account. Just `pipx install tokenjam` and start seeing what your agent actually does.

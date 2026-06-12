@@ -5,7 +5,7 @@ This is a config-only integration — no Python code needed. OpenClaw's built-in
 ## Step 1: Start TokenJam
 
 ```bash
-pip install tokenjam
+pipx install tokenjam
 tj onboard
 tj serve &
 ```
