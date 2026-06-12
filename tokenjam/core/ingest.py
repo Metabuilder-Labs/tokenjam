@@ -8,6 +8,7 @@ from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.ids import new_uuid
+from tokenjam.utils.signatures import tool_arg_signature
 
 if TYPE_CHECKING:
     from tokenjam.core.db import StorageBackend
@@ -94,8 +95,18 @@ def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
     capture rides through the same gate: sampling parameters are gated with the
     request `prompts` toggle, and the tools/tool_choice payload (tool-definition
     content) is gated with `tool_inputs`.
+
+    Before dropping the raw tool input, derive a privacy-safe argument signature
+    (``tokenjam.tool_arg_sig``) and keep it — this is what retry-loop detection
+    uses to tell an identical repeated call from normal repeated tool use, so the
+    raw (possibly sensitive) input never has to be retained.
     """
     stripped = dict(attributes)
+    # Compute the arg signature from whatever input is present, regardless of the
+    # capture toggle, and persist it (the hash is non-sensitive).
+    sig = tool_arg_signature(stripped.get(GenAIAttributes.TOOL_INPUT))
+    if sig is not None:
+        stripped[TjAttributes.TOOL_ARG_SIG] = sig
     if not capture.prompts:
         stripped.pop(GenAIAttributes.PROMPT_CONTENT, None)
         for key in _REQUEST_PARAM_ATTRS:

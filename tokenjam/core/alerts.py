@@ -14,9 +14,10 @@ import httpx
 
 from tokenjam.core.config import AlertChannelConfig, TjConfig, resolve_effective_budget
 from tokenjam.core.models import Alert, AlertType, Severity
-from tokenjam.otel.semconv import TjAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.formatting import console, severity_colour
 from tokenjam.utils.ids import new_uuid
+from tokenjam.utils.signatures import tool_arg_signature
 from tokenjam.utils.time_parse import utcnow
 
 if TYPE_CHECKING:
@@ -44,6 +45,52 @@ _FAILURE_RATE_WINDOW = 20
 _FAILURE_RATE_THRESHOLD = 0.20
 _FAILURE_RATE_CHECK_INTERVAL = 5
 _SESSION_DURATION_DEFAULT = 3600  # seconds
+
+# Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex).
+# Their sessions have no stable, repeatable workload and their OTLP carries no
+# tool arguments — so drift (assumes a stable baseline) and the default
+# session-duration ceiling (assumes short sessions) produce noise, not signal.
+# These checks are gated off for such agents and stay fully active for SDK /
+# production agents. retry_loop self-gates on the presence of an argument
+# signature, so it needs no prefix gate.
+_INTERACTIVE_AGENT_PREFIXES = ("claude-code", "codex")
+
+
+def is_interactive_coding_agent(agent_id: str | None) -> bool:
+    """True for Claude Code / Codex agents (interactive, heterogeneous, no args).
+
+    Shared by the alert engine and the drift detector to skip checks that assume
+    a stable, instrumented, repeatable workload.
+    """
+    if not agent_id:
+        return False
+    return any(agent_id.startswith(p) for p in _INTERACTIVE_AGENT_PREFIXES)
+
+
+def _is_tool_execution(span: NormalizedSpan) -> bool:
+    """True only for real tool-execution spans (``gen_ai.tool.call``).
+
+    Excludes permission/decision and result *event* spans (e.g.
+    ``claude_code.tool_decision``) that also carry ``tool_name`` and would
+    otherwise inflate the retry-loop window.
+    """
+    return span.name == GenAIAttributes.SPAN_TOOL_CALL
+
+
+def _tool_arg_signature(span: NormalizedSpan) -> str | None:
+    """A stable signature of a tool call's arguments, or None when unknown.
+
+    A genuine retry loop is the *same tool with the same arguments* fired over
+    and over. Prefer the ingest-computed ``tokenjam.tool_arg_sig`` (survives
+    content stripping); fall back to hashing the raw input when present. When
+    neither exists (e.g. Claude Code over OTLP carries no tool args) we return
+    None and the caller declines to fire — a real repeat can't be proven from a
+    tool name alone.
+    """
+    sig = span.attributes.get(TjAttributes.TOOL_ARG_SIG)
+    if isinstance(sig, str) and sig:
+        return sig
+    return tool_arg_signature(span.attributes.get(GenAIAttributes.TOOL_INPUT))
 
 
 # ── Cooldown tracker ───────────────────────────────────────────────────────
@@ -171,18 +218,32 @@ class AlertEngine:
                 return
 
     def _check_retry_loop(self, span: NormalizedSpan) -> None:
-        """
-        Fetch last 6 spans for this session. If same tool_name appears 4+ times,
-        fire RETRY_LOOP.
+        """Fire RETRY_LOOP only on a genuine stuck loop: the SAME tool with the
+        SAME arguments fired 4+ times in the last 6 tool-execution spans.
+
+        Keying on the tool *name* alone (the old behaviour) flagged normal work —
+        four different ``Bash`` commands or ``Read``s in a row — as a loop, which
+        flooded false positives (especially for Claude Code). We now (1) count
+        only real ``gen_ai.tool.call`` spans, never decision/event spans that
+        also carry a tool_name, and (2) require an argument signature so only an
+        *identical* call counts. Telemetry without tool arguments (Claude Code
+        over OTLP) yields no signature and never trips this — genuine repeats are
+        still visible in the Map/Timeline (transcript-derived ``is_retry``).
         """
         if not span.session_id or not span.tool_name:
             return
+        if not _is_tool_execution(span):
+            return
+        sig = _tool_arg_signature(span)
+        if sig is None:
+            return
         recent = self.db.get_recent_spans(span.session_id, _RETRY_LOOP_WINDOW)
-        tool_counts: dict[str, int] = {}
-        for s in recent:
-            if s.tool_name:
-                tool_counts[s.tool_name] = tool_counts.get(s.tool_name, 0) + 1
-        count = tool_counts.get(span.tool_name, 0)
+        count = sum(
+            1 for s in recent
+            if _is_tool_execution(s)
+            and s.tool_name == span.tool_name
+            and _tool_arg_signature(s) == sig
+        )
         if count >= _RETRY_LOOP_THRESHOLD:
             alert = Alert(
                 alert_id=new_uuid(),
@@ -194,7 +255,10 @@ class AlertEngine:
                     "tool_name": span.tool_name,
                     "count": count,
                     "window": _RETRY_LOOP_WINDOW,
-                    "message": f"{span.tool_name} called {count} times in last {_RETRY_LOOP_WINDOW} spans",
+                    "message": (
+                        f"{span.tool_name} called with identical arguments "
+                        f"{count} times in last {_RETRY_LOOP_WINDOW} tool calls"
+                    ),
                 },
                 agent_id=span.agent_id,
                 session_id=span.session_id,
@@ -326,7 +390,14 @@ class AlertEngine:
                 self._fire(alert)
 
     def _check_session_duration(self, session: SessionRecord) -> None:
-        """Fire SESSION_DURATION if session wall time exceeds threshold."""
+        """Fire SESSION_DURATION if session wall time exceeds threshold.
+
+        Skipped for interactive coding agents (Claude Code / Codex): a governor
+        or long autonomous run legitimately lasts hours, so the SDK-era 3600s
+        default is a false alarm there. Stays active for SDK/production agents.
+        """
+        if is_interactive_coding_agent(session.agent_id):
+            return
         duration = session.duration_seconds
         if duration is None:
             return

@@ -182,6 +182,12 @@ class TjAttributes:
     POLICY_ESTIMATED_RECOVERABLE_USD = "tokenjam.policy.estimated_recoverable_usd"
     POLICY_REALIZED   = "tokenjam.policy.realized"        # always False (suggest mode)
 
+    # Privacy-safe hash of a tool call's arguments, computed at ingest BEFORE the
+    # raw `gen_ai.tool.input` is stripped per capture config. Lets retry-loop
+    # detection tell an identical repeated call from normal repeated tool use
+    # without retaining the (potentially sensitive) raw input.
+    TOOL_ARG_SIG      = "tokenjam.tool_arg_sig"
+
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"
     EGRESS_HOST      = "tokenjam.sandbox.egress_host"
