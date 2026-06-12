@@ -5,10 +5,27 @@ TokenJam ships as a Python package on PyPI and a TypeScript SDK on npm. Pick the
 ## Base install
 
 ```bash
+pipx install tokenjam
+```
+
+This is the recommended install path on **all platforms**. `pipx` automatically creates an isolated venv for the `tj` CLI, which means:
+
+- It works on macOS with Homebrew Python (which refuses `pip install` into its managed environment by default — [PEP 668](https://peps.python.org/pep-0668/)).
+- It works on Debian 12+ / Ubuntu 24+ (same PEP 668 enforcement).
+- It doesn't pollute your system Python or any project's venv.
+
+Don't have `pipx`? Install it with `brew install pipx` (macOS), `apt install pipx` (Debian/Ubuntu), or `python3 -m pip install --user pipx` (anywhere else). Then ensure pipx's bin dir is on your `PATH` with `pipx ensurepath`.
+
+### Alternative: pip in a venv
+
+If you prefer plain pip (or need to install into an existing project venv):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install tokenjam
 ```
 
-This is enough for the CLI (`tj`), local REST API (`tj serve`), the four out-of-box optimize analyzers that don't need ML models, and every native SDK integration except LLMLingua-based Trim. Requires Python ≥ 3.10.
+Either path is enough for the CLI (`tj`), local REST API (`tj serve`), the four out-of-box optimize analyzers that don't need ML models, and every native SDK integration except LLMLingua-based Trim. Requires Python ≥ 3.10.
 
 After install, run:
 
@@ -37,7 +54,7 @@ TokenJam keeps heavyweight ML dependencies, framework adapters, and the MCP serv
 Combine multiple extras:
 
 ```bash
-pip install "tokenjam[mcp,bloat]"
+pipx install 'tokenjam[mcp,bloat]'
 ```
 
 ### Bloat extra details

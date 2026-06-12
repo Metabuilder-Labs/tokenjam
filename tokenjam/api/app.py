@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, AsyncContextManager, Callable
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 
 from tokenjam.api.middleware import IngestAuthMiddleware
 from tokenjam.core.config import TjConfig
@@ -103,6 +104,19 @@ def create_app(
                 f'<meta name="tj-api-key" content="{html_escape(config.api.auth.api_key, quote=True)}">\n</head>',
             )
         return HTMLResponse(html)
+
+    # Vendored JS modules (Preact + htm) served as static files so the
+    # dashboard works fully offline — see issue #87. Mounted FIRST so the
+    # /ui/{path} catchall below doesn't shadow it. Must include the
+    # `name="ui-vendor"` so the StaticFiles 404s cleanly when a vendor
+    # path doesn't exist, instead of falling through to the SPA catchall.
+    _vendor_dir = _UI_DIR / "vendor"
+    if _vendor_dir.exists():
+        app.mount(
+            "/ui/vendor",
+            StaticFiles(directory=str(_vendor_dir)),
+            name="ui-vendor",
+        )
 
     @app.get("/", include_in_schema=False)
     async def ui_root():
