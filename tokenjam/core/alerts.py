@@ -131,9 +131,11 @@ class AlertEngine:
         self.config = config
         self.cooldown = CooldownTracker(config.alerts.cooldown_seconds)
         self.dispatcher = AlertDispatcher(config)
-        # Tracks the error_count value at which the failure-rate check last fired per session.
-        # Prevents non-deterministic re-firing when the sliding-window count oscillates.
-        self._last_failure_rate_check: dict[str, int] = {}
+        # Sessions that have already fired a failure-rate alert. One struggling
+        # session = one alert: without this, every additional error past the
+        # threshold re-fired (5/20, 6/20, 7/20 …), turning a few incidents into a
+        # cascade of near-identical alerts. In-memory (resets per process).
+        self._failure_rate_fired: set[str] = set()
 
     def evaluate(self, span: NormalizedSpan) -> None:
         """Evaluate all per-span alert rules against this span."""
@@ -269,24 +271,26 @@ class AlertEngine:
     def _check_failure_rate(self, span: NormalizedSpan) -> None:
         """
         In a rolling window of last 20 spans, fire FAILURE_RATE if error rate > 20%.
-        Only check when error_count reaches a new multiple of the check interval to
-        avoid firing on every single error and to avoid re-firing when the sliding
-        window count oscillates.
+
+        Fires at most ONCE per session: a session that crosses the threshold is a
+        single incident, so re-firing on every further error (5/20, 6/20, 7/20 …)
+        just floods near-identical alerts. The first crossing alerts; subsequent
+        errors in that session are ignored.
         """
         if not span.session_id or span.status_code.value != "error":
+            return
+        if span.session_id in self._failure_rate_fired:
             return
         recent = self.db.get_recent_spans(span.session_id, _FAILURE_RATE_WINDOW)
         total = len(recent)
         if total < _FAILURE_RATE_CHECK_INTERVAL:
             return
         error_count = sum(1 for s in recent if s.status_code.value == "error")
-        session_key = span.session_id
-        last_checked = self._last_failure_rate_check.get(session_key, 0)
-        if error_count < _FAILURE_RATE_CHECK_INTERVAL or error_count <= last_checked:
+        if error_count < _FAILURE_RATE_CHECK_INTERVAL:
             return
-        self._last_failure_rate_check[session_key] = error_count
         rate = error_count / total
         if rate > _FAILURE_RATE_THRESHOLD:
+            self._failure_rate_fired.add(span.session_id)
             alert = Alert(
                 alert_id=new_uuid(),
                 fired_at=utcnow(),
