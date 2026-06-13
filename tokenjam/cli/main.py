@@ -96,6 +96,7 @@ from tokenjam.cli.cmd_report import cmd_report  # noqa: E402
 from tokenjam.cli.cmd_policy import cmd_policy  # noqa: E402
 from tokenjam.cli.cmd_otel import cmd_otel_resource_attrs  # noqa: E402
 from tokenjam.cli.cmd_session_end import cmd_session_end  # noqa: E402
+from tokenjam.cli.cmd_context import cmd_context  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 cli.add_command(cmd_status, name="status")
@@ -118,6 +119,7 @@ cli.add_command(cmd_report, name="report")
 cli.add_command(cmd_policy, name="policy")
 cli.add_command(cmd_otel_resource_attrs, name="otel-resource-attrs")
 cli.add_command(cmd_session_end, name="session-end")
+cli.add_command(cmd_context, name="context")
 
 # cmd_drift is provided by task 05 — register if available
 try:
