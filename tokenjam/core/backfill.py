@@ -27,12 +27,15 @@ from pathlib import Path
 from typing import Iterator
 
 from tokenjam.core.cost import calculate_cost
+from tokenjam.core.config import CaptureConfig
 from tokenjam.core.models import (
     NormalizedSpan,
     SessionRecord,
     SpanKind,
     SpanStatus,
 )
+from tokenjam.core.transcript import _block_text
+from tokenjam.otel.semconv import GenAIAttributes
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +140,21 @@ def _parse_ts(value: str | None) -> datetime | None:
         return None
 
 
+def _user_prompt_text(record: dict) -> str:
+    """Extract the human prompt text from a Claude Code ``user`` record.
+
+    A ``user`` record's ``message.content`` is either a plain string (the
+    prompt) or a list of ``tool_result`` blocks (a tool turn, no prompt). We
+    surface only the former — ``_block_text`` returns the string as-is and the
+    empty string for a tool-result-only turn. Used to attach the triggering
+    prompt to the next assistant span when ``capture.prompts`` is on.
+    """
+    msg = record.get("message")
+    if not isinstance(msg, dict):
+        return ""
+    return _block_text(msg.get("content"))
+
+
 def _provider_for_model(model: str) -> str:
     """Best-effort provider inference from a Claude Code model name."""
     if model.startswith("claude"):
@@ -150,14 +168,34 @@ def _provider_for_model(model: str) -> str:
 
 # --- Claude Code parser ------------------------------------------------------
 
-def parse_claude_code_session(path: Path) -> ParsedSession | None:
+def parse_claude_code_session(
+    path: Path, capture: CaptureConfig | None = None,
+) -> ParsedSession | None:
     """
     Parse a single Claude Code JSONL session file.
 
     Returns None when the file contains no assistant turns (e.g. session
     ended before the first model call). Returns a ParsedSession with
     spans ready to be inserted.
+
+    ``capture`` gates per-message content extraction (#3), honoring the same
+    four ``[capture]`` toggles the live ingest path enforces via
+    ``strip_captured_content``. Default ``None`` (and the all-False default)
+    leaves every span's ``attributes`` exactly as before — content extraction
+    is strictly opt-in and stays 100% local:
+      - ``capture.prompts``     -> ``gen_ai.prompt.content`` (the triggering
+                                   human prompt) on the assistant LLM span.
+      - ``capture.completions`` -> ``gen_ai.completion.content`` (the agent's
+                                   narration text) on the assistant LLM span.
+      - ``capture.tool_inputs`` -> ``gen_ai.tool.input`` (the raw tool args)
+                                   on each tool span.
+    The transcript carries no per-call tool *output*, so ``capture.tool_outputs``
+    has nothing to extract on the backfill path.
     """
+    capture = capture or CaptureConfig()
+    # The user prompt that triggered the next assistant turn; reset after it is
+    # consumed so a prompt is attributed to exactly one assistant span.
+    pending_prompt: str = ""
     session_id: str | None = None
     cwd: str | None = None
     earliest: datetime | None = None
@@ -195,6 +233,13 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
             cwd = record.get("cwd")
 
         rtype = record.get("type")
+        if rtype == "user" and capture.prompts and not record.get("isMeta"):
+            # Remember the latest genuine human prompt so the next assistant
+            # span can carry it. Tool-result-only user turns yield "" and are
+            # ignored (no prompt to attribute).
+            prompt_text = _user_prompt_text(record)
+            if prompt_text.strip():
+                pending_prompt = prompt_text
         if rtype != "assistant":
             continue
 
@@ -249,6 +294,21 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
 
         agent_id = _agent_id_from_cwd(cwd)
         start_time = ts or datetime.now(tz=timezone.utc)
+
+        # Per-message content (opt-in, gated by [capture]). Default-off leaves
+        # llm_attrs == {"source": ...} so existing behavior is byte-for-byte
+        # unchanged. Keys match GenAIAttributes so downstream consumers (and
+        # alert content-stripping) treat backfilled content like live content.
+        llm_attrs: dict = {"source": "backfill.claude_code"}
+        if capture.prompts and pending_prompt.strip():
+            llm_attrs[GenAIAttributes.PROMPT_CONTENT] = pending_prompt
+        if capture.completions:
+            completion_text = _block_text(msg.get("content"))
+            if completion_text.strip():
+                llm_attrs[GenAIAttributes.COMPLETION_CONTENT] = completion_text
+        # The prompt is consumed by exactly one assistant span.
+        pending_prompt = ""
+
         # Duration unknown from on-disk format; leave None
         spans.append(
             NormalizedSpan(
@@ -272,7 +332,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                 cost_usd=cost,
                 request_type="completion",
                 conversation_id=sid_str,
-                attributes={"source": "backfill.claude_code"},
+                attributes=llm_attrs,
                 billing_account="anthropic",
             )
         )
@@ -295,6 +355,15 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                 )
                 tool_span_id = _span_id_for_tool(sid_str, tool_use_id)
                 tool_name = item.get("name") or "unknown"
+
+                tool_attrs: dict = {"source": "backfill.claude_code"}
+                if capture.tool_inputs:
+                    tool_input = item.get("input")
+                    # Persist whatever shape CC emitted (usually a dict);
+                    # None/absent inputs add nothing.
+                    if tool_input is not None:
+                        tool_attrs[GenAIAttributes.TOOL_INPUT] = tool_input
+
                 spans.append(
                     NormalizedSpan(
                         span_id=tool_span_id,
@@ -311,7 +380,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                         session_id=sid_str,
                         tool_name=tool_name,
                         conversation_id=sid_str,
-                        attributes={"source": "backfill.claude_code"},
+                        attributes=tool_attrs,
                     )
                 )
                 tool_count += 1
@@ -342,12 +411,16 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
 def iter_claude_code_sessions(
     root: Path | None = None,
     since: datetime | None = None,
+    capture: CaptureConfig | None = None,
 ) -> Iterator[ParsedSession]:
     """
     Walk a Claude Code projects directory and yield ParsedSession objects.
 
     `since` filters out files whose mtime is before the cutoff (cheap pre-filter);
     the actual session start_time is checked again per-file.
+
+    `capture` is forwarded to `parse_claude_code_session` to gate per-message
+    content extraction (#3); None/all-False means no content is extracted.
     """
     base = root or CLAUDE_CODE_PROJECTS_ROOT
     if not base.exists() or not base.is_dir():
@@ -360,7 +433,7 @@ def iter_claude_code_sessions(
                     continue
         except OSError:
             continue
-        parsed = parse_claude_code_session(jsonl_path)
+        parsed = parse_claude_code_session(jsonl_path, capture=capture)
         if parsed is None:
             continue
         if since is not None and parsed.ended_at < since:
@@ -409,13 +482,19 @@ def ingest_claude_code(
     carry the same `plan_tier` the live ingest path would set (#176). When None
     or no plan is configured, sessions fall back to "unknown" (prior behavior).
 
+    `config.capture` also gates per-message content extraction (#3): the same
+    four `[capture]` toggles the live ingest path honors. Default-off (the
+    config default, and when `config` is None) extracts no content, so a
+    default backfill is byte-for-byte unchanged.
+
     `progress(parsed_session, result)` is called once per session if provided.
     """
     result = BackfillResult()
     projects_seen: set[str] = set()
     seen_session_ids: set[str] = set()
     plan_tier = _plan_tier_for_provider(config, _CLAUDE_CODE_PROVIDER)
-    for parsed in iter_claude_code_sessions(root=root, since=since):
+    capture = getattr(config, "capture", None) if config is not None else None
+    for parsed in iter_claude_code_sessions(root=root, since=since, capture=capture):
         result.sessions_seen += 1
         if parsed.cwd:
             projects_seen.add(parsed.cwd)
