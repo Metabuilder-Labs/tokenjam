@@ -5,7 +5,7 @@ For any Python agent — Anthropic, OpenAI, Gemini, Bedrock, LangChain, CrewAI, 
 ## Install
 
 ```bash
-pip install tokenjam
+pipx install tokenjam
 tj onboard    # creates config, generates ingest secret
 tj doctor     # verify your setup
 ```

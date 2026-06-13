@@ -3,7 +3,7 @@
 Monitor every Claude Code session — costs, tool calls, API requests, errors — with two commands:
 
 ```bash
-pip install "tokenjam[mcp]"
+pipx install 'tokenjam[mcp]'
 tj onboard --claude-code
 # Restart Claude Code, then:
 tj status --agent claude-code-<project>

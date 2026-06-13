@@ -14,7 +14,16 @@ This is the recommended install path on **all platforms**. `pipx` automatically 
 - It works on Debian 12+ / Ubuntu 24+ (same PEP 668 enforcement).
 - It doesn't pollute your system Python or any project's venv.
 
-Don't have `pipx`? Install it with `brew install pipx` (macOS), `apt install pipx` (Debian/Ubuntu), or `python3 -m pip install --user pipx` (anywhere else). Then ensure pipx's bin dir is on your `PATH` with `pipx ensurepath`.
+Don't have `pipx`? Install it with one of:
+
+| Platform | Command |
+|---|---|
+| macOS | `brew install pipx` |
+| Debian / Ubuntu | `apt install pipx` |
+| Windows | `py -m pip install --user pipx` |
+| Anywhere else | `python3 -m pip install --user pipx` |
+
+Then ensure pipx's bin dir is on your `PATH` with `pipx ensurepath`.
 
 ### Alternative: pip in a venv
 
