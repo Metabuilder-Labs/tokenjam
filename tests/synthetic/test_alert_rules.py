@@ -449,6 +449,36 @@ def test_failure_rate_fires_when_threshold_exceeded():
     assert alert.type == AlertType.FAILURE_RATE
 
 
+def test_failure_rate_fires_once_per_session():
+    # A struggling session is one incident — further errors must not re-fire.
+    engine, db = _make_engine()
+    session_id = new_uuid()
+
+    def errored_window(n_errors):
+        spans = []
+        for i in range(20):
+            status = "error" if i < n_errors else "ok"
+            spans.append(make_tool_span(agent_id="test-agent",
+                                        tool_name=f"t{i}", status=status))
+        return spans
+
+    def fire(n_errors):
+        db.get_recent_spans.return_value = errored_window(n_errors)
+        s = make_tool_span(agent_id="test-agent", tool_name="boom", status="error")
+        s.session_id = session_id
+        s.status_code = SpanStatus.ERROR
+        engine.evaluate(s)
+
+    fire(5)   # crosses 20% -> one alert
+    fire(8)   # worse, same session -> must NOT re-fire
+    fire(12)  # worse still -> must NOT re-fire
+    failure_alerts = [
+        c.args[0] for c in db.insert_alert.call_args_list
+        if c.args[0].type == AlertType.FAILURE_RATE
+    ]
+    assert len(failure_alerts) == 1
+
+
 # ── External fire() entry point ───────────���────────────────────────────────
 
 def test_fire_external_creates_alert_from_span():
