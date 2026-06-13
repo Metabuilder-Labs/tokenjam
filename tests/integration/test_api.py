@@ -1,6 +1,8 @@
 """Integration tests for the REST API using httpx.AsyncClient + ASGITransport."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import httpx
 
@@ -304,6 +306,185 @@ async def test_cost_response_includes_framing_block(client):
     assert _FRAMING_KEYS <= set(framing)
 
 
+# --- #187: /traces + trace-detail carry a framing block so the web UI can ---- #
+# --- suppress / reframe raw dollar costs for subscription / local users. ----- #
+def _seed_trace_with_plan(db, plan_tier, *, trace_id, session_id="sess-187"):
+    """Insert a session (carrying plan_tier) + a matching LLM span so the trace
+    surfaces in /traces and the framing query has a session to read."""
+    db.upsert_session(make_session(session_id=session_id, plan_tier=plan_tier))
+    db.insert_span(make_llm_span(
+        session_id=session_id, trace_id=trace_id, cost_usd=1.23,
+        billing_account="anthropic",
+    ))
+
+
+async def test_traces_response_includes_framing_block(db, client):
+    _seed_trace_with_plan(db, "api", trace_id="aa" * 16)
+    framing = (await client.get("/api/v1/traces")).json()["framing"]
+    assert _FRAMING_KEYS <= set(framing)
+
+
+async def test_trace_detail_includes_framing_block(db, client):
+    tid = "bb" * 16
+    _seed_trace_with_plan(db, "max_5x", trace_id=tid)
+    body = (await client.get(f"/api/v1/traces/{tid}")).json()
+    assert _FRAMING_KEYS <= set(body["framing"])
+    # Detail scopes the plan determination to the trace's agent → subscription.
+    assert body["framing"]["pricing_mode"] == "subscription"
+
+
+@pytest.mark.parametrize("plan_tier,expected_mode", [
+    ("max_5x", "subscription"),
+    ("api", "api"),
+    ("local", "local"),
+    ("unknown", "unknown"),
+])
+async def test_traces_framing_reflects_plan_tier(
+    db, client, monkeypatch, tmp_path, plan_tier, expected_mode,
+):
+    """The /traces framing pricing_mode tracks the session plan tier across the
+    full matrix (#187). HOME is isolated so the unknown case can't pick up this
+    dev machine's global ~/.config/tj plan via compute_framing's fallback."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _seed_trace_with_plan(db, plan_tier, trace_id="cc" * 16)
+    framing = (await client.get("/api/v1/traces")).json()["framing"]
+    assert framing["pricing_mode"] == expected_mode
+
+
+# --- #191: /status carries a framing block so the agent cards' "Cost today" -- #
+# --- figure can suppress / reframe raw dollars for subscription / local. ----- #
+async def test_status_response_includes_framing_block(db, client):
+    _seed_trace_with_plan(db, "api", trace_id="dd" * 16, session_id="sess-191")
+    data = (await client.get("/api/v1/status")).json()
+    assert _FRAMING_KEYS <= set(data["framing"])
+
+
+@pytest.mark.parametrize("plan_tier,expected_mode", [
+    ("max_5x", "subscription"),
+    ("api", "api"),
+    ("local", "local"),
+    ("unknown", "unknown"),
+])
+async def test_status_framing_reflects_plan_tier(
+    db, client, monkeypatch, tmp_path, plan_tier, expected_mode,
+):
+    """The /status framing pricing_mode tracks the session plan tier (#191).
+    HOME is isolated so the unknown case can't pick up this machine's global
+    ~/.config/tj plan via compute_framing's config fallback."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _seed_trace_with_plan(db, plan_tier, trace_id="ee" * 16, session_id="sess-191")
+    framing = (await client.get("/api/v1/status")).json()["framing"]
+    assert framing["pricing_mode"] == expected_mode
+
+
+async def test_cost_cycle_block_defaults_to_calendar_month(client):
+    """With no [budget.<provider>] cycle configured, the run-rate cycle falls
+    back to the calendar month (start_day=1) (#138)."""
+    cycle = (await client.get("/api/v1/cost")).json()["cycle"]
+    assert cycle["start_day"] == 1
+    assert {"start", "end", "days_remaining"} <= set(cycle)
+    assert cycle["end"] > cycle["start"]
+    assert cycle["days_remaining"] >= 1
+
+
+async def test_cost_cycle_block_honors_provider_cycle_start_day(db):
+    """A configured [budget.<provider>] cycle_start_day is surfaced on the cost
+    response so the UI projects to the real cycle end, not the calendar month."""
+    from tokenjam.core.config import ProviderBudget
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    cfg.budgets["anthropic"] = ProviderBudget(cycle_start_day=15)
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        cycle = (await c.get("/api/v1/cost")).json()["cycle"]
+    assert cycle["start_day"] == 15
+
+
+async def test_overview_endpoint_set_survives_concurrent_requests(client):
+    """#124: the daemon's sync (`def`) read routes (`/optimize`,
+    `/cost/compare`) run in Starlette's threadpool, so concurrent requests reach
+    DuckDB from several threads at once. A single shared connection aborts the
+    process under that load; per-thread cursors (DuckDBBackend.conn) make it
+    safe. Fire the Overview's endpoint set concurrently, repeatedly, and assert
+    every response is 200 — the issue's acceptance criterion."""
+    await _ingest_sample_span(client)
+    endpoints = [
+        "/api/v1/cost?since=7d",
+        "/api/v1/optimize?fast=true&since=30d",
+        "/api/v1/cost/compare?since=7d&compare=previous",
+        "/api/v1/traces",
+        "/api/v1/budget",
+    ]
+    for _ in range(5):  # several rounds so threadpool overlap is likely
+        results = await asyncio.gather(*(client.get(u) for u in endpoints * 3))
+        bad = [(str(r.url), r.status_code) for r in results if r.status_code != 200]
+        assert not bad, bad
+
+
+def _seed_reuse_cluster(db, *, count: int = 3, completions: bool = True):
+    """Seed `count` sessions sharing a planning skeleton + tool sequence."""
+    from datetime import timedelta
+
+    from tokenjam.otel.semconv import GenAIAttributes
+    from tokenjam.utils.time_parse import utcnow
+    from tests.factories import make_session
+
+    base = utcnow() - timedelta(days=2)
+    for i in range(count):
+        sid = f"reuse-{i}"
+        db.upsert_session(make_session(agent_id="a", session_id=sid))
+        t0 = base + timedelta(minutes=i)
+        attrs = (
+            {GenAIAttributes.COMPLETION_CONTENT: f"Cut release v0.{i} then run tests"}
+            if completions else None
+        )
+        db.insert_span(make_llm_span(
+            agent_id="a", session_id=sid, start_time=t0,
+            cost_usd=0.20, input_tokens=1000, output_tokens=300,
+            extra_attributes=attrs,
+        ))
+        for j, tn in enumerate(["read_file", "run_test"]):
+            ts = make_tool_span(tool_name=tn)
+            ts.session_id = sid
+            ts.start_time = t0 + timedelta(seconds=j + 1)
+            db.insert_span(ts)
+
+
+async def test_reuse_clusters_endpoint_returns_finding_and_skeleton_text(db):
+    """#154: /api/v1/reuse/clusters returns the Reuse finding (so the CLI can
+    reconstruct it via report_from_dict) PLUS the skeleton-rendering extras
+    (planning_texts + pricing_mode) that the report renderer needs — letting
+    `tj report --reuse` render without a direct DB connection."""
+    from tokenjam.core.config import CaptureConfig
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        capture=CaptureConfig(completions=True),
+    )
+    _seed_reuse_cluster(db, count=3, completions=True)
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/reuse/clusters", params={"since": "30d"})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    clusters = data["findings"]["reuse"]["clusters"]
+    assert clusters, data  # the seeded cluster is detected
+    # Skeleton text travels with the finding, and at least one example resolves.
+    assert "planning_texts" in data
+    assert any(v for v in data["planning_texts"].values())
+    assert data["pricing_mode"] in ("api", "subscription", "local", "unknown")
+
+
 async def test_optimize_response_includes_framing_block(client):
     await _ingest_sample_span(client)
     resp = await client.get("/api/v1/optimize?since=30d")
@@ -497,6 +678,36 @@ async def test_status_and_traces_agree_on_agent_ids(client):
     )
     trace_agents = {t["agent_id"] for t in traces.json()["traces"]}
     assert trace_agents == status_agents
+
+
+async def test_status_exposes_active_seconds(client, db):
+    """Status payload carries active (compute) time alongside wall-clock (#147).
+
+    The status payload surfaces current (active/idle) sessions as tiles, so the
+    session must be active with recent activity to carry active_seconds.
+    """
+    from datetime import timedelta
+
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+    db.upsert_session(make_session(
+        agent_id="a1", session_id="s1", status="active",
+        started_at=now - timedelta(minutes=2), ended_at=now - timedelta(minutes=1)))
+    for ms in (1000.0, 2000.0, 3000.0):
+        sp = make_llm_span(agent_id="a1", duration_ms=ms)
+        sp.session_id = "s1"
+        db.insert_span(sp)
+
+    resp = await client.get("/api/v1/status")
+    assert resp.status_code == 200
+    agents = {a["agent_id"]: a for a in resp.json()["agents"]}
+    assert "a1" in agents
+    a = agents["a1"]
+    assert "active_seconds" in a and "duration_seconds" in a
+    # 6000 ms of spans → 6.0 s active; distinct from wall-clock duration_seconds.
+    assert a["active_seconds"] == pytest.approx(6.0)
 
 
 # ── Budget ─────────────────────────────────────────────────────────────────

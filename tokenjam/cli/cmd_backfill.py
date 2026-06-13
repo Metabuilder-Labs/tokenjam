@@ -69,8 +69,10 @@ def claude_code(ctx: click.Context, root_path: str | None, since_days: int | Non
             state["last_print"] = result.sessions_seen
 
     console.print(f"Backfilling Claude Code sessions from {root} …")
+    # Pass config so backfilled sessions carry the declared plan tier (#176).
     result = ingest_claude_code(
-        db, root=root, since=since, progress=progress, reingest=reingest
+        db, root=root, since=since, progress=progress, reingest=reingest,
+        config=ctx.obj.get("config"),
     )
 
     if not quiet:

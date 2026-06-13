@@ -5,10 +5,35 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.framing import (
+    WindowSummary,
+    compute_framing,
+    plan_determination_mix,
+)
 from tokenjam.core.models import TraceFilters
 from tokenjam.utils.time_parse import parse_since
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
+
+
+def _traces_framing(request: Request, agent_id: str | None) -> dict:
+    """Plan-tier framing block for trace cost figures (#187).
+
+    Traces and trace-detail are not window-scoped views, so the plan is derived
+    from a window-INDEPENDENT session mix (`plan_determination_mix`) — the same
+    helper `/cost` uses. The web UI consumes this block to suppress / reframe raw
+    dollar costs for subscription / local users (honesty discipline, Rule 14)
+    instead of re-deriving the suppression rules in JS (single compute path).
+    """
+    db = request.app.state.db
+    config = request.app.state.config
+    conn = getattr(db, "conn", None)
+    mix = plan_determination_mix(conn, agent_id) if conn is not None else {}
+    framing = compute_framing(
+        config,
+        WindowSummary(plan_tier_mix=mix, sessions=sum(mix.values())),
+    )
+    return framing.to_dict()
 
 
 @router.get("/traces")
@@ -48,6 +73,7 @@ async def list_traces(
             for t in traces
         ],
         "count": len(traces),
+        "framing": _traces_framing(request, agent_id),
     }
 
 
@@ -55,10 +81,15 @@ async def list_traces(
 async def get_trace(request: Request, trace_id: str) -> dict:
     db = request.app.state.db
     spans = db.get_trace_spans(trace_id)
+    # Scope the plan determination to this trace's agent when known (falls back
+    # to the whole install) so subscription / local cost suppression matches the
+    # Traces list and Cost screen.
+    agent_id = next((s.agent_id for s in spans if getattr(s, "agent_id", None)), None)
     return {
         "trace_id": trace_id,
         "spans": [_span_to_dict(s) for s in spans],
         "span_count": len(spans),
+        "framing": _traces_framing(request, agent_id),
     }
 
 

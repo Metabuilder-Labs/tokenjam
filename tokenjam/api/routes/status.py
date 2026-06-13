@@ -6,7 +6,12 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.core.db import _row_to_session
+from tokenjam.core.db import _row_to_session, session_active_seconds
+from tokenjam.core.framing import (
+    WindowSummary,
+    compute_framing,
+    plan_determination_mix,
+)
 from tokenjam.core.models import (
     SESSION_IDLE_THRESHOLD,
     AlertFilters,
@@ -210,6 +215,12 @@ async def get_status(
                 )
             else:
                 sess_alerts = len(active_alerts)
+            # Active (compute) time = sum of span durations for the session.
+            # Distinct from the wall-clock duration_seconds below — see #147.
+            active_seconds = (
+                session_active_seconds(db.conn, session.session_id)
+                if hasattr(db, "conn") else None
+            )
             agents_data.append({
                 "agent_id": aid,
                 "namespace": namespace,
@@ -229,6 +240,7 @@ async def get_status(
                 "error_count": session.error_count,
                 "active_alerts": sess_alerts,
                 "duration_seconds": session.duration_seconds,
+                "active_seconds": active_seconds,
                 "started_at": (
                     session.started_at.isoformat() if session.started_at else None
                 ),
@@ -243,8 +255,21 @@ async def get_status(
         db, config, session_labels, idle_threshold, current_cutoff, agent_id
     )
 
+    # Plan-tier framing block so the agent cards' "Cost today" figure suppresses
+    # / reframes raw dollars for subscription / local users (#191) — the web UI
+    # consumes this rather than re-deriving the rules in JS (single compute
+    # path). Window-INDEPENDENT mix (`plan_determination_mix`), as on /traces.
+    config = request.app.state.config
+    conn = getattr(db, "conn", None)
+    mix = plan_determination_mix(conn, agent_id) if conn is not None else {}
+    framing = compute_framing(
+        config,
+        WindowSummary(plan_tier_mix=mix, sessions=sum(mix.values())),
+    )
+
     return {
         "agents": agents_data,
         "archived": archived,
         "has_active_alerts": has_active_alerts,
+        "framing": framing.to_dict(),
     }

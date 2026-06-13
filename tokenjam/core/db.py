@@ -5,6 +5,7 @@ and migration runner. DuckDB only — never import sqlite3.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -347,6 +348,26 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
     )
 
 
+def session_active_seconds(conn, session_id: str) -> float | None:
+    """
+    Active (compute) time for a session: the sum of its span durations, in
+    seconds. Distinct from `SessionRecord.duration_seconds`, which is wall-clock
+    (`ended_at - started_at`) and can span days for resumed Claude Code sessions.
+
+    Returns None when the session has no spans with a recorded duration (so
+    callers can omit the field rather than show a misleading 0).
+    """
+    if session_id is None:
+        return None
+    row = conn.execute(
+        "SELECT SUM(duration_ms) FROM spans WHERE session_id = $1",
+        [session_id],
+    ).fetchone()
+    if not row or row[0] is None:
+        return None
+    return float(row[0]) / 1000.0
+
+
 def _int_or_none(val: object) -> int | None:
     if val is None:
         return None
@@ -429,8 +450,32 @@ class DuckDBBackend:
     def __init__(self, config: StorageConfig) -> None:
         db_path = Path(config.path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = duckdb.connect(str(db_path))
-        run_migrations(self.conn)
+        self._conn = duckdb.connect(str(db_path))
+        run_migrations(self._conn)
+        self._local = threading.local()
+
+    @property
+    def conn(self) -> duckdb.DuckDBPyConnection:
+        """A per-thread DuckDB cursor over the shared database (#124).
+
+        The daemon's sync (`def`) read routes (`/optimize`, `/cost/compare`)
+        run in Starlette's threadpool, so concurrent requests can reach the DB
+        from several threads at once. A single DuckDB *connection object* is NOT
+        safe for concurrent use — overlapping `execute()` calls abort the
+        process (SIGABRT). Cursors created via `connect().cursor()` are
+        independent connections over the *same* database that ARE safe to use
+        concurrently from different threads (the DuckDB-recommended pattern), so
+        each thread lazily gets and reuses its own cursor. All cursors share one
+        database, so a write on one thread is visible to reads on another.
+
+        Single-threaded callers (tests, the CLI) always see the same cursor, so
+        behavior is unchanged for them.
+        """
+        cur = getattr(self._local, "cursor", None)
+        if cur is None:
+            cur = self._conn.cursor()
+            self._local.cursor = cur
+        return cur
 
     # -- writes --
 
@@ -479,12 +524,9 @@ class DuckDBBackend:
         )
 
     def upsert_session(self, session: SessionRecord) -> None:
-        # Named-column INSERT for migration safety (plan_tier added in migration 4).
-        # plan_tier is updated on conflict because IngestPipeline late-resolves
-        # it: a session that started with billing_account=None (e.g. tool span
-        # first) can be promoted from 'unknown' to a real plan_tier when a
-        # later LLM span carries billing_account. The Python side never demotes
-        # a known plan_tier back to 'unknown', so always copying EXCLUDED is safe.
+        # plan_tier: promote unknown → known on conflict; never overwrite a
+        # session that already has a known tier (backfill re-runs must not
+        # clobber historical tiers when config plan changes).
         self.conn.execute(
             """
             INSERT INTO sessions (
@@ -503,7 +545,11 @@ class DuckDBBackend:
                 cache_write_tokens = EXCLUDED.cache_write_tokens,
                 tool_call_count = EXCLUDED.tool_call_count,
                 error_count = EXCLUDED.error_count,
-                plan_tier = EXCLUDED.plan_tier,
+                plan_tier = CASE
+                    WHEN COALESCE(sessions.plan_tier, 'unknown') != 'unknown'
+                    THEN sessions.plan_tier
+                    ELSE EXCLUDED.plan_tier
+                END,
                 service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
                 service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
                 run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
@@ -971,7 +1017,8 @@ class DuckDBBackend:
         return count
 
     def close(self) -> None:
-        self.conn.close()
+        # Closing the root connection tears down the database and all cursors.
+        self._conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -982,9 +1029,13 @@ class InMemoryBackend(DuckDBBackend):
     """In-memory DuckDB backend for tests. Same implementation, no disk I/O."""
 
     def __init__(self) -> None:
-        # Bypass DuckDBBackend.__init__ to use :memory:
-        self.conn = duckdb.connect(":memory:")
-        run_migrations(self.conn)
+        # Bypass DuckDBBackend.__init__ to use :memory:. Cursors of an in-memory
+        # connection share the same in-memory database, so the per-thread cursor
+        # property (#124) works identically here — including cross-thread
+        # visibility, which the threadpool-backed integration tests rely on.
+        self._conn = duckdb.connect(":memory:")
+        run_migrations(self._conn)
+        self._local = threading.local()
 
 
 # ---------------------------------------------------------------------------

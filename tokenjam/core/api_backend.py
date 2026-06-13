@@ -91,10 +91,32 @@ class ApiBackend:
                 model=r["model"],
                 input_tokens=r.get("input_tokens", 0),
                 output_tokens=r.get("output_tokens", 0),
+                # Cache fields added in #149; the API serializes them but this
+                # shim was missed, so `tj cost` silently showed 0s in the cache
+                # columns whenever the daemon was up. Mirror the wider contract.
+                cache_tokens=r.get("cache_tokens", 0),
+                cache_write_tokens=r.get("cache_write_tokens", 0),
                 cost_usd=r.get("cost_usd", 0.0),
             )
             for r in data.get("rows", [])
         ]
+
+    def fetch_cost_framing(
+        self, *, since: str = "7d", agent_id: str | None = None,
+    ) -> dict | None:
+        """Return the plan-tier `framing` block from /api/v1/cost.
+
+        `tj cost` renders the COST column plan-tier-aware (#175). When the
+        daemon holds the DB lock the CLI can't compute framing locally, so it
+        reuses the block the API already emits (`Framing.to_dict()`); the CLI
+        reconstructs a `Framing` from it. Returns None if the response carries
+        no framing.
+        """
+        params: dict[str, str] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        data = self._get("/api/v1/cost", params)
+        return data.get("framing")
 
     def get_alerts(self, filters: AlertFilters) -> list[Alert]:
         params: dict[str, str | int | bool] = {}
@@ -291,6 +313,26 @@ class ApiBackend:
         if budget_usd is not None:
             params["budget_usd"] = budget_usd
         return self._get("/api/v1/optimize", params)
+
+    def fetch_reuse_clusters(
+        self,
+        *,
+        since: str = "30d",
+        agent_id: str | None = None,
+    ) -> dict:
+        """
+        Fetch the Reuse finding + skeleton-rendering data from `tj serve`.
+
+        Used by `tj report --reuse` when the local DuckDB connection is
+        unavailable (daemon holds the write lock). The response is
+        `report_to_dict(report)` plus `planning_texts` ({session_id: completion
+        text or null}) and `pricing_mode`; the CLI reconstructs the finding via
+        `report_from_dict` and renders without direct DB access. See issue #154.
+        """
+        params: dict[str, Any] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        return self._get("/api/v1/reuse/clusters", params)
 
     def close(self) -> None:
         self.client.close()

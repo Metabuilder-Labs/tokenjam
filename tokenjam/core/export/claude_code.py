@@ -65,7 +65,7 @@ def render_claude_code_snippet(
             else:
                 figure_line = (
                     '      "note": "configure plan tier with '
-                    '`tj onboard --reconfigure` to see savings projections"'
+                    '`tj onboard --claude-code --reconfigure` to see savings projections"'
                 )
 
             rules_blocks.append(

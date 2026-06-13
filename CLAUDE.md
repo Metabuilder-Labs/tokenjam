@@ -58,6 +58,86 @@ Symptom of a missed worktree: `git log` shows a commit on a branch you didn't in
 `.tj/config.toml` is intentionally untracked (see PR #145 + Critical Rule 20) and gets mutated at runtime by `tj onboard` / `tj serve` regenerating the local `ingest_secret`. Don't `git add` it back. The CI test `tests/unit/test_no_tracked_dev_secrets.py` guards against this.
 
 
+## PR and commit conventions (for any agent producing a PR)
+
+These conventions apply to any agent — feature work, bug fixes, docs, content. Briefs may add task-specific structure but should not contradict these.
+
+### Branch + PR titles
+
+- **Branch names** are slash-separated, kebab-case, prefixed by type:
+  - `fix/<issue-or-area>` — bug fixes (e.g. `fix/175-176-cost-framing-backfill-plan`)
+  - `feat/<area>` — new features (e.g. `feat/reuse-analyzer-115`)
+  - `docs/<area>` — documentation (e.g. `docs/readme-cleanup-v0.4.1`)
+  - `chore/<area>` — refactors, renames, infra
+  - `release/<X.Y.Z>` — release-cut PRs
+- **PR titles** lead with the verb / type and reference issues by number when applicable:
+  - `Fix #175, #176: tj cost framing + backfill plan_tier propagation (v0.4.2)` (bug fixes)
+  - `[feature] Add Reuse analyzer (#115)` (features)
+  - `docs: drop stale CHANGELOG.md + add maintainer contact` (docs)
+  - `Bump version to 0.4.1` (release-cut PRs — keep these terse)
+- Use **`Closes #N`** in the PR body (not just title) when fixing an issue, so GitHub auto-closes the issue on merge. Multiple `Closes` lines if you're closing several. Do not use the comma form `Closes #1, #2` — GitHub only catches the first; use separate lines.
+
+### Commit messages
+
+- **Subject line** (first line, ≤72 chars): one-line summary in active voice. Reference issues with `#N` when applicable.
+- **Body** (after blank line): explain *why* the change is needed, not *what* it changes (the diff shows that). Use full sentences, paragraphs, bullet lists.
+- **Trailers** (after another blank line, at the very end):
+  - Always include: `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` (or the appropriate model identifier)
+  - When fixing an externally-reported bug: also include `Co-Authored-By: <reporter-handle> <noreply@github.com>` (e.g. `ashwmu` for the external contributor's reports)
+- Use **HEREDOC for multi-line messages** to preserve formatting: `git commit -m "$(cat <<'EOF' ... EOF)"`
+
+### PR body structure
+
+```markdown
+[1-2 sentence framing of why this exists]
+
+## Summary
+- [bullet — what changed at a high level]
+- [bullet — another high-level change]
+
+## [Per-issue or per-feature section, repeated as needed]
+[Detail per issue, including the symptom, root cause, fix]
+
+## Tests / Verification
+- [test files added or modified, what they cover]
+- [any live verification: workflow run URL, screenshot, command output]
+
+## What's NOT in this PR (if scope was deliberately limited)
+- [out-of-scope item 1 — explain why deferred]
+- [out-of-scope item 2]
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: <reporter-handle> <noreply@github.com>   # if applicable
+```
+
+The "What's NOT in this PR" section is load-bearing — it makes the reviewer's job 10x easier when the agent explicitly named what they decided to defer. Use it whenever scope is non-obvious.
+
+### Self-review checklist before requesting review
+
+Run through this before pushing the PR:
+
+1. **Tests pass locally.** `pytest tests/unit/ tests/integration/` (or `tests/unit/<file>.py` if narrow).
+2. **`ruff check tokenjam/` and `mypy tokenjam/` clean** for any files you touched.
+3. **CI on the branch is green** for at least the test-ts job (Python jobs may still be running when you push).
+4. **Acceptance criteria from the issue are met** — go through them one by one and verify.
+5. **No accidental files in the diff** — `.tj/config.toml`, `.tj-test-data/`, screenshots that were just for debugging, etc.
+6. **PR body explains the WHY** — symptom + root cause + fix, not just "fixes the bug."
+7. **Honesty discipline preserved.** If the change touches any user-facing string ("recoverable," "estimated," "savings"), verify it matches existing analyzer caveat language. Never silently strengthen claims.
+
+### Scope discipline
+
+- **Do what the brief / issue says, no more.** If you notice an adjacent issue, file it as a separate issue rather than expanding the PR. Reviewers should never have to mentally separate "the fix" from "drive-by cleanup."
+- **Exception:** when an adjacent change is functionally required to make the primary fix work (e.g., updating a caller of a function you changed). Note it explicitly in the PR body under "What's also in this PR."
+- **When in doubt about scope, ask the master agent before expanding.** A 30-second clarification beats a 30-minute scope review.
+
+### Worker vs master
+
+- **Worker agents do not merge their own PRs.** Open the PR, request review, the master + Anil handle merge.
+- **Worker agents do not file follow-up issues unprompted.** If you notice something during your work that's out of scope, mention it in the PR body and let the master decide whether to file.
+- **Worker agents do not bump versions.** Release-cut PRs are a separate concern handled by the master / Anil.
+
+
 ## Architecture
 
 ### Data Flow
@@ -91,16 +171,17 @@ Post-ingest hooks run synchronously after each span is written to DB:
   - `cache_efficacy.py` → `@register("cache")` — current cache-read efficacy per (provider, model)
   - `cache_recommend.py` → `@register("cache-recommend")` — Anthropic-only structural prefix detection for `cache_control` placement
   - `workflow_restructure.py` → `@register("script")` — `(tool_name, arg_shape)` cluster detection for deterministic-script candidates
+  - `plan_reuse.py` → `@register("reuse")` — repeated-planning cluster detection; a savings analyzer (carries `estimated_recoverable_usd`). Has a dedicated endpoint/report path (`GET /api/v1/reuse/clusters`, `tj report --reuse`) because its per-cluster planner text can be many KB — see the routes/report bullets below
   - `prompt_bloat.py` → `@register("trim")` — LLMLingua-2 token-significance classification (requires `tokenjam[bloat]` extra)
   Analyzers receive an `AnalyzerContext` and operate on `db.conn` directly. To add a new analyzer: drop a file under `analyzers/`, decorate with `@register("name")`, append to `ANALYZER_ORDER` if ordering matters — `cmd_optimize`'s positional `findings` Click choices auto-derive from the registry.
   **Recoverable-savings contract** (issues #111/#122): every *savings* analyzer's result dataclass carries `estimated_recoverable_usd` / `estimated_recoverable_tokens` / `estimate_basis` / `estimate_confidence` (`"heuristic"`). All four are on **one time basis — recoverable over the analyzed window** (`downsize` keeps a separate `monthly_savings_usd` for its CLI projection line, but `estimated_recoverable_usd` is the window figure so Overview tiles are comparable). `cache-recommend` and `budget-projection` deliberately carry **no** recoverable field (not savings analyzers); the Overview waste band is registry-driven off the presence of `estimated_recoverable_usd`, so a future analyzer (e.g. reuse) appears with no UI change. `report_to_dict`/`report_from_dict` round-trip these fields. Honesty discipline (Critical Rule 14) is mandatory — every estimate is "estimated recoverable", never "saves you".
 - **`tokenjam/core/ingest_adapters/`**: Third-party trace-export adapters that normalize external payloads (`langfuse.py`, `helicone.py`, `otlp.py`) into `NormalizedSpan` for ingest. Each is reachable as a `tj backfill <name>` subcommand and accepts `--source-url` (live API) or `--source-file` (offline JSON dump). Adapters write deterministic span IDs derived from the source's identifiers so re-runs are idempotent. `otlp.py` shares span-mapping logic with the live `POST /api/v1/spans` route via `tokenjam/otel/otlp_parsing.py`.
 - **`tokenjam/core/export/`**: Routing-config snippet generators for `tj optimize --export-config`. Currently `claude_code.py` emits a JSONC fragment under a `tokenjam.routing_recommendations` namespace with honest-framing caveat comments baked in. Writes to `~/.config/tokenjam/exports/`; never touches `~/.claude/settings.json` or other external configs (no `--apply` flag — Claude Code doesn't currently honor TokenJam routing keys, so auto-writing would change nothing and erode trust).
-- **`tokenjam/core/backfill.py`**: Parses Claude Code on-disk session JSONL files into `NormalizedSpan`s. Cost is recomputed from `pricing/models.toml` because the on-disk format has no `cost_usd`. The parser tolerates the dated `claude-<family>-<ver>-YYYYMMDD` model-name suffixes Anthropic ships (handled by `core/pricing.py.get_rates()`, which strips the trailing 8-digit date suffix when no exact pricing match exists). Idempotency relies on deterministic span IDs derived from `(session_id, message uuid)` / `(session_id, tool_use id)`.
+- **`tokenjam/core/backfill.py`**: Parses Claude Code on-disk session JSONL files into `NormalizedSpan`s. Cost is recomputed from `pricing/models.toml` because the on-disk format has no `cost_usd`. The parser tolerates the dated `claude-<family>-<ver>-YYYYMMDD` model-name suffixes Anthropic ships (handled by `core/pricing.py.get_rates()`, which strips the trailing 8-digit date suffix when no exact pricing match exists). Idempotency relies on deterministic span IDs derived from `(session_id, message uuid)` / `(session_id, tool_use id)`. **Plan tier:** `ingest_claude_code(db, …, config=…)` resolves `plan_tier` from `config.budgets["anthropic"].plan` (Claude Code is always Anthropic) and stamps it on each `SessionRecord` — mirroring the live `IngestPipeline._resolve_plan_tier` so backfilled sessions aren't all `"unknown"` (#176). Pass `config` from callers (`cmd_backfill`, `tj onboard`). The Langfuse/Helicone/OTLP adapters create **no** `SessionRecord` (spans only), so there's no plan tier to propagate there.
 - **`tokenjam/core/schema_validator.py`**: Validates tool outputs against declared or genson-inferred JSON Schema. Only fires on `gen_ai.tool.call` spans with `gen_ai.tool.output` in attributes. Schema priority: 1) declared file from agent config `output_schema`, 2) inferred schema from `DriftBaseline.output_schema_inferred`. Caches schemas in-memory per agent.
 - **`tokenjam/core/models.py`**: All domain dataclasses — `NormalizedSpan`, `SessionRecord`, `Alert`, `DriftBaseline`, filter types, etc. `NormalizedSpan` carries `billing_account` (provider-only: `anthropic` / `openai` / `google` / `bedrock` / `local.ollama`). `SessionRecord` carries `plan_tier` (api / pro / max_5x / max_20x / plus / team / enterprise / local / unknown) plus a derived `pricing_mode` property (`local` / `subscription` / `api` / `unknown`). Spans inherit plan via the session FK — analyzers JOIN through `SessionRecord` when they need plan context. See [`docs/architecture.md`](docs/architecture.md) → "OTel semconv extensions" for the full derivation rules.
 - **`tokenjam/core/config.py`**: `TjConfig` dataclass tree, TOML loading/writing, config file discovery. `ProviderBudget` carries an optional `plan` field (set by `tj onboard`'s plan-tier prompt) that `IngestPipeline._build_or_update_session` reads to populate `SessionRecord.plan_tier` at session creation. `CaptureConfig` has four fine-grained content-capture toggles (`prompts` / `completions` / `tool_inputs` / `tool_outputs`); `strip_captured_content()` in `core/ingest.py` enforces them at the single ingest-pipeline gate.
-- **`tokenjam/core/framing.py`**: **Single source of truth for plan-tier-aware rendering** (issue #110). `compute_framing(config, window_summary, by_provider_breakdown) -> Framing` decides whether dollar figures are shown verbatim (`api`), suppressed for token-share framing (`subscription`), shown as tokens-only (`local`), or shown with an "may overstate" qualifier (`unknown`). Plus `render_dollar()` / `render_savings()` (UI-facing compact formatters), and the shared helpers `pricing_mode_for` / `dominant_plan` / `config_declared_plan` (with the #106 global-config fallback) / `plan_tier_mix`. **Consumed by both the CLI (`cmd_optimize`, `cmd_tokenmaxx`) and the REST API** (which emits `Framing.to_dict()` as the `framing` block) — neither re-derives the rules. This module *reads* plan-tier/pricing-mode; the canonical derivation still lives on `SessionRecord.pricing_mode` + `SUBSCRIPTION_PLAN_TIERS` (semconv). When adding a dollar-bearing surface, consume this — do not re-implement the suppression rules.
+- **`tokenjam/core/framing.py`**: **Single source of truth for plan-tier-aware rendering** (issue #110). `compute_framing(config, window_summary, by_provider_breakdown) -> Framing` decides whether dollar figures are shown verbatim (`api`), suppressed for token-share framing (`subscription`), shown as tokens-only (`local`), or shown with an "may overstate" qualifier (`unknown`). Plus `render_dollar()` / `render_savings()` (UI-facing compact formatters), and the shared helpers `pricing_mode_for` / `dominant_plan` / `config_declared_plan` (with the #106 global-config fallback) / `plan_tier_mix`. **Consumed by both the CLI (`cmd_optimize`, `cmd_tokenmaxx`, `cmd_cost` — both the `--compare` diff and the bare cost table, #175) and the REST API** (which emits `Framing.to_dict()` as the `framing` block) — neither re-derives the rules. The bare `tj cost` table renders COST cells via `render_dollar()` (subscription → "% of cycle", local → "—", api/unknown → `format_cost`) with the qualifier surfaced above; under the daemon it reuses the `framing` block from `/api/v1/cost` via `ApiBackend.fetch_cost_framing`. This module *reads* plan-tier/pricing-mode; the canonical derivation still lives on `SessionRecord.pricing_mode` + `SUBSCRIPTION_PLAN_TIERS` (semconv). When adding a dollar-bearing surface, consume this — do not re-implement the suppression rules.
 - **`tokenjam/sdk/agent.py`**: `@watch()` decorator creates session spans only. `record_llm_call()` and `record_tool_call()` create child spans for manual instrumentation. LLM call spans from provider clients require `patch_anthropic()`, `patch_openai()`, etc.
 - **`tokenjam/sdk/transport.py`**: `HttpTransport` — buffers up to 1000 spans, retries with exponential backoff (3 attempts, 2s base). Used when `tj serve` runs as a separate process.
 - **`tokenjam/sdk/bootstrap.py`**: `ensure_initialised()` — lazy, thread-safe, idempotent bootstrap of config -> DB -> IngestPipeline -> TracerProvider. Called automatically by `@watch()` and all `patch_*()` functions. Registers atexit flush.
@@ -112,7 +193,7 @@ Post-ingest hooks run synchronously after each span is written to DB:
 - **`tokenjam/api/app.py`**: FastAPI app factory (OpenAPI title `"TokenJam Lens"`). `tj serve` starts it with uvicorn. Accepts `db`, `config`, `ingest_pipeline` for testability. Registers all routers under `/api/v1` plus `/metrics`, `/health`, and the SPA at `/`. **`index.html` is read into a module string once at `create_app()` time** (`_index_html`) — so editing `tokenjam/ui/index.html` requires a `tj serve` restart to take effect; tests read the file from disk directly and aren't affected. Mounts `/ui/vendor` as `StaticFiles`.
 - **`tokenjam/api/middleware.py`**: `IngestAuthMiddleware` — protects `POST /api/v1/spans` with Bearer token. Returns `JSONResponse(401)` directly (not `HTTPException`, which doesn't propagate from `BaseHTTPMiddleware.dispatch`).
 - **`tokenjam/api/deps.py`**: `require_api_key` — FastAPI dependency for optional API key auth on GET endpoints. Only enforced when `api.auth.enabled = true` in config.
-- **`tokenjam/api/routes/`**: One file per resource — `spans.py` (OTLP JSON ingest), `traces.py`, `cost.py`, `cost_compare.py`, `tools.py`, `alerts.py`, `drift.py`, `optimize.py`, `budget.py`, `status.py`, `agents.py`, `metrics.py` (Prometheus text format from DB queries), `version.py` (unauthenticated `GET /health` → `{"status":"ok","version":...}` mounted with no prefix, plus `GET /api/v1/version`; the version is derived at runtime via `importlib.metadata.version("tokenjam")` — no hardcoded literal). **The dollar-bearing read routes (`/cost`, `/cost/compare`, `/optimize`, `/budget`) each return a `framing` block** (see `core/framing.py`) so the web UI renders plan-tier-aware figures without re-deriving the rules in JS. `/optimize` takes `?fast=true` to skip the expensive Trim analyzer (returns `skipped_analyzers`) for the polling Overview; `/cost` returns a window-bucketed `series` for the chart (see Web UI below). **Concurrency caveat:** the sync (`def`) read routes run in Starlette's threadpool and share the daemon's single DuckDB connection, which is not safe for concurrent use — fan-out callers (the Overview) must fetch sequentially. See issue #124.
+- **`tokenjam/api/routes/`**: One file per resource — `spans.py` (OTLP JSON ingest), `traces.py`, `cost.py`, `cost_compare.py`, `tools.py`, `alerts.py`, `drift.py`, `optimize.py`, `reuse.py` (`GET /api/v1/reuse/clusters` — the Reuse finding plus skeleton-rendering extras `planning_texts` + `pricing_mode`; a dedicated endpoint (not bolted onto `/optimize`) so the per-cluster planner text, which can be many KB, isn't paid for on every Overview poll — #154), `budget.py`, `status.py`, `agents.py`, `metrics.py` (Prometheus text format from DB queries), `version.py` (unauthenticated `GET /health` → `{"status":"ok","version":...}` mounted with no prefix, plus `GET /api/v1/version`; the version is derived at runtime via `importlib.metadata.version("tokenjam")` — no hardcoded literal). **The dollar-bearing read routes (`/cost`, `/cost/compare`, `/optimize`, `/budget`) each return a `framing` block** (see `core/framing.py`) so the web UI renders plan-tier-aware figures without re-deriving the rules in JS. `/optimize` takes `?fast=true` to skip the expensive Trim analyzer (returns `skipped_analyzers`) for the polling Overview; `/cost` returns a window-bucketed `series` for the chart (see Web UI below). **Concurrency:** the sync (`def`) read routes (`/optimize`, `/cost/compare`) run in Starlette's threadpool, so concurrent requests reach the DB from multiple threads. `DuckDBBackend.conn` is a **per-thread DuckDB cursor** (`threading.local`) over one shared database — cursors are independent connections safe for concurrent use, so fan-out callers (the Overview) can fetch in parallel. Fixed in #124 (was a single shared connection that aborted under concurrent access); do not collapse `conn` back to one shared connection object.
 - **`tokenjam/mcp/server.py`**: FastMCP stdio server exposing observability data to Claude Code. Uses either a read-only DuckDB connection or HTTP proxy to `tj serve`. Initialized via `init()` from `cmd_mcp.py`.
 - **`tokenjam/cli/main.py`**: Root Click group with global options (`--config`, `--json`, `--no-color`, `--db`, `--agent`, `-v`). Registers all subcommands.
 
@@ -122,12 +203,12 @@ Post-ingest hooks run synchronously after each span is written to DB:
 
 - **`tj demo [scenario]`** (`cmd_demo.py`) — runs Agent Incident Library scenarios (zero-config, no API keys). `tj demo` lists all; `tj demo retry-loop` runs one.
 - **`tj doctor`** (`cmd_doctor.py`) — health checks (config, DB, secrets, webhooks, drift readiness, schema-vs-capture consistency). Exit 0 = ok, 1 = warnings, 2 = errors.
-- **`tj optimize`** (`cmd_optimize.py`) — six analyzers, registry-driven. **Analyzers are positional args** (not `--finding <name>`): `tj optimize downsize cache trim` runs three; bare `tj optimize` runs all. Registered names: `downsize`, `cache`, `cache-recommend`, `script`, `trim`, `budget-projection`. Flags: `--since 30d`, `--budget <provider>`, `--budget-usd <amount>`, `--compare <period>` (window-cost diff vs prior period; accepts `previous` / `last-week` / `last-month` / `last-7d` / `last-30d` / `YYYY-MM-DD:YYYY-MM-DD`), `--export-config <target>` (writes a routing snippet — currently `claude-code` — under `~/.config/tokenjam/exports/`; no `--apply` flag by design). Plan-tier-aware rendering: subscription users see "implied API value" framing and token-share savings (never dollar "spend"); local users see token-only framing; unknown-plan users see dollar figures suppressed with a `tj onboard --reconfigure` hint. Works alongside a running `tj serve` via the `/api/v1/optimize` HTTP fallback when the DuckDB write lock is held by the daemon.
+- **`tj optimize`** (`cmd_optimize.py`) — seven analyzers, registry-driven. **Analyzers are positional args** (not `--finding <name>`): `tj optimize downsize cache trim` runs three; bare `tj optimize` runs all. Registered names: `downsize`, `cache`, `cache-recommend`, `script`, `reuse`, `trim`, `budget-projection`. Flags: `--since 30d`, `--budget <provider>`, `--budget-usd <amount>`, `--compare <period>` (window-cost diff vs prior period; accepts `previous` / `last-week` / `last-month` / `last-7d` / `last-30d` / `YYYY-MM-DD:YYYY-MM-DD`), `--export-config <target>` (writes a routing snippet — currently `claude-code` — under `~/.config/tokenjam/exports/`; no `--apply` flag by design). Plan-tier-aware rendering: subscription users see "implied API value" framing and token-share savings (never dollar "spend"); local users see token-only framing; unknown-plan users see dollar figures suppressed with a `tj onboard --reconfigure` hint. Works alongside a running `tj serve` via the `/api/v1/optimize` HTTP fallback when the DuckDB write lock is held by the daemon.
 - **`tj tokenmaxx`** (`cmd_tokenmaxx.py`) — shareable spend-tier command. Reads last 30 days of usage, classifies into a 6-tier ladder (Sipper / Moderator / Maxxer / SuperMaxxer / MegaMaxxer / GigaMaxxer) using the multiplier vs the user's declared subscription plan as the primary classifier, with absolute USD/mo thresholds as the API-user fallback. Output is a bordered Panel designed for screenshotting. Plan-aware: shows the multiplier line only when the user has `[budget.<provider>] plan = "max_5x"` (or pro / max_20x / plus) configured — the declared-plan lookup uses `core/framing.config_declared_plan`, which falls back to the global `~/.config/tj/config.toml` when the active project config has no `[budget]` section (issue #106). The companion landing page is `tokenjam.dev/tokenmaxxing`. Designed to never exit without an actionable next step — pairs the tier callout with the downsize savings figure inline.
 - **`tj cost`** (`cmd_cost.py`) — cost breakdown by `--group-by agent|model|day|tool`. Same `--compare <period>` flag as `tj optimize` for window-over-window diffs (▲/▼ indicators, per-agent and per-model top-shifts, dollar + token deltas).
 - **`tj backfill <source>`** (`cmd_backfill.py`) — ingest historical telemetry from external sources. Subcommands: `claude-code` (parses `~/.claude/projects/*.jsonl`, auto-invoked at the end of `tj onboard --claude-code`), `langfuse` (live API or JSON dump), `helicone` (live API or JSON dump), `otlp` (raw OTLP JSON via URL or file — reuses the same parser as the live `POST /api/v1/spans` route). All idempotent via deterministic span IDs.
 - **`tj onboard`** (`cmd_onboard.py`) — `--claude-code` and `--codex` flags trigger integration-specific flows (writing to the **global** config). All paths — including plain `tj onboard` — prompt for plan tier (api / pro / max_5x / max_20x for Anthropic; api / plus / team / enterprise for OpenAI) and write it to `[budget.<provider>] plan = "..."`; `--plan <tier>` sets it non-interactively (issue #4). The plain path is Claude-first: its interactive prompt offers the Anthropic tiers, and an OpenAI-only `--plan` (plus/team/enterprise) is routed to `[budget.openai]`. Supports `--reconfigure` to re-prompt against an existing config. Does NOT auto-write a default `usd = 200` cycle ceiling — subscription users get only the `plan` field; API users are explicitly asked whether they want a self-imposed ceiling.
-- **`tj report`** (`cmd_report.py`) — generates standalone HTML visualizations of analyzer findings. Currently `tj report --trim [<agent_id>]` renders the Trim analyzer's per-token significance (was `--bloat` pre-0.3.1, renamed alongside the analyzer's registry string). Writes to `~/.cache/tokenjam/reports/` (override via `TOKENJAM_REPORT_DIR`) and opens in the default browser.
+- **`tj report`** (`cmd_report.py`) — generates standalone HTML visualizations of analyzer findings. `tj report --trim [<agent_id>]` renders the Trim analyzer's per-token significance (was `--bloat` pre-0.3.1, renamed alongside the analyzer's registry string); `tj report --reuse [<agent_id>]` renders the Reuse analyzer's per-cluster planning skeleton (HTML + Markdown sidecars). Writes to `~/.cache/tokenjam/reports/` (override via `TOKENJAM_REPORT_DIR`) and opens in the default browser. `--reuse` works when the daemon holds the DB lock: like `tj optimize`, it dispatches to `ApiBackend.fetch_reuse_clusters` (`GET /api/v1/reuse/clusters`) and renders from the HTTP payload (`write_reuse_report(..., planning_texts=...)`) instead of a direct DB connection (#154). `--trim` remains DB-direct only.
 - **`tj policy list`** (`cmd_policy.py`) — read-only preview of the unified policy surface. Consolidates existing `[alerts]`, `[alerts.channels]`, `[defaults.budget]`, `[budget.<provider>]`, per-agent `budget`/`drift`/`sensitive_actions`/`output_schema`, and `[capture]` config into one table; each row carries its source TOML section. Supports `--json`. `tj policy add | edit | apply | remove | test` are intentionally absent this sprint — the unified config migration is next sprint's work. `policy` is in `no_db_commands` in `cli/main.py` so it doesn't open the DB. Rich source-section strings (`[budget.anthropic]`, `[[alerts.channels]]`) must be passed through `rich.markup.escape()` before rendering — otherwise Rich consumes them as style tags.
 
 All commands support `--json` for machine-readable output. Commands that query alerts use exit code 1 if active (unacknowledged, unsuppressed) alerts exist.
@@ -161,7 +242,7 @@ Integration tests use `httpx.AsyncClient` with `httpx.ASGITransport(app=app)` ag
 - **URL is the source of truth for filters:** state lives in the hash + query params (`#/cost?since=7d&group_by=model`); `getRoute()` parses it, `navigate()` writes it back omitting defaults. Window vocabulary matches the CLI (`1h`/`24h`/`7d`/`30d`/`90d` + `YYYY-MM-DD:YYYY-MM-DD`). The default landing route is Overview (empty hash → `getRoute()` returns `overview`; do **not** re-introduce a render-time `location.hash = ...` redirect — it raced the first render, issue #132).
 - **Charts:** `SpendChart` wraps uPlot, reads CSS custom properties (`--chart-1..5`) so it re-themes, and has a cursor tooltip. The spend chart spans the **full selected window** with zero-fill: `/api/v1/cost` returns a window-bucketed `series` (hourly buckets for ≤2-day windows, daily otherwise; epoch-second `bucket` keys) plus `series_bucket` + `window_start`/`window_end`, and the UI builds a continuous grid + pins the x-scale to the window (issues #133/#136).
 - **Run-rate** is a single linear figure projected to the end of the current calendar cycle (`daily_rate × days-remaining`), captioned "not a forecast". The forecasting boundary is deliberate: linear run-rate only — no EWMA, seasonality, or anomaly detection.
-- **Polling:** the Overview auto-refreshes every 30s only while the tab is visible (`document.visibilityState`) and **fetches its endpoints sequentially** (the daemon's single DuckDB connection isn't concurrency-safe — see the REST API caveat / #124). Detail screens refresh on user action.
+- **Polling:** the Overview auto-refreshes every 30s only while the tab is visible (`document.visibilityState`) and **fetches its endpoints in parallel** via `Promise.all` (the daemon DB layer is concurrency-safe since #124 — per-thread cursors). The error handling is deliberately asymmetric: `/cost` is load-bearing (no `.catch` — its failure surfaces the error state), while the other five panels each carry a `.catch` fallback so one failing panel renders empty rather than blanking the Overview. Don't unify them. Detail screens refresh on user action.
 - **Testing the UI (no JS runner in CI):** the Python `test` job can't run JS, so UI fixes are guarded by **static-grep regression tests** in `tests/unit/test_lens_ui_regression.py` (assert buggy patterns are *gone* and new helpers are present) plus `test_ui_offline.py`. When iterating locally, validate syntax with `node --check` on the extracted `<script type="module">` block, and verify visually by running `tj serve` (or a seeded `create_app` + uvicorn on an alt port) and screenshotting with headless Chrome — there is intentionally no Playwright/Cypress.
 
 ### Session Continuity
@@ -239,7 +320,18 @@ The Agent Incident Library at `incidents/` is separate: each scenario is a `scen
 
 Model pricing lives in `tokenjam/pricing/models.toml` (USD per million tokens) — the packaged file `core/pricing.py` loads via `PRICING_FILE = Path(__file__).parent.parent / "pricing" / "models.toml"`. There is no repo-root `pricing/` copy (it was moved into the package in v0.1.x so it ships in the wheel; editing a repo-root file would have no runtime effect). Structure: `[provider.model_name]` with `input_per_mtok`, `output_per_mtok`, and optional `cache_read_per_mtok`/`cache_write_per_mtok`. Unknown models fall back to default rates ($0.50/$2.00 per MTok) with a logged warning. The pricing table is LRU-cached at process startup — restart to pick up changes.
 
-Pricing is community-maintained: submit a PR editing `tokenjam/pricing/models.toml` when provider prices change. No code changes needed — the file is loaded at runtime.
+The packaged table is community-maintained: submit a PR editing `tokenjam/pricing/models.toml` when provider prices change. No code changes needed — the file is loaded at runtime.
+
+**Local user overrides (no PR needed)** — users correct or add rates *for their own install* via override layers that `core/pricing.py` merges over the packaged table. Two sources, two key forms (see `docs/configuration.md` → "Pricing overrides" for the user-facing version):
+
+- **Sources** (lowest priority first; later wins): the packaged `models.toml`, then a standalone file (`~/.config/tj/pricing.toml`, or `TJ_PRICING_FILE`), then a `[pricing]` section in the main config (`tj.toml`). The project-local config `[pricing]` wins over the global standalone file.
+- **Key forms** — told apart deterministically by section name in `_split_pricing_raw()` (the reserved `models` section vs everything-else-is-a-provider; no value-shape guessing, no ordering dependency):
+  - **Provider-keyed** (`[pricing.anthropic]` / `[anthropic]` whose values are model sub-tables) — merged per `(provider, model)` over the packaged table. This is the long-standing `[provider.model]` format.
+  - **Model-keyed** (the reserved `[pricing.models]` section in tj.toml, or `[models]` in the standalone file) — keyed by **bare model name**, applied **regardless of inferred provider**. This is the attribution-proof path: it prices a span even when the provider resolved to `"unknown"` (the #194 open-weight class). `models` is a reserved key (`MODEL_SECTION_KEY`), never a provider, so the forms never collide.
+- **`get_rates(provider, model)` lookup order** (first match wins): model-keyed override → provider-keyed table (user `[provider.model]` over packaged) → `None` (→ `calculate_cost` applies the `$0.50`/`$2.00` default and logs once). Each step tries an exact match, then strips a trailing `-YYYYMMDD` suffix.
+- Both layers are LRU-cached (`load_pricing_table` + `load_model_pricing_overrides`); call `clear_pricing_cache()` or **restart the daemon** to pick up an edit.
+
+The packaged table stays the zero-config default — the override is a *layer*, never a replacement; no user ever has to declare a rate to get started. (Follow-up not yet built: a `tj pricing set|list` CLI for editing overrides without hand-writing TOML.)
 
 ## CI
 
@@ -250,6 +342,19 @@ GitHub Actions workflow at `.github/workflows/ci.yml` runs on push/PR to `main`:
 All steps are blocking — lint, typecheck, and tests must pass for CI to go green.
 
 There is no pre-commit configuration in this repo; `ruff` and `mypy` only run in CI. Run them locally before pushing.
+
+## Growth instrumentation — weekly traffic archive
+
+A separate `.github/workflows/traffic-archive.yml` runs every Sunday at 12:00 UTC (also `workflow_dispatch`) and archives the GitHub Traffic API (views / clones / referrers / paths — the only sources with the 14-day retention problem) into a JSON file at `traffic/<year>-W<week>.json`. **The archive lives on its own orphan branch `traffic-data`, not on `main`** — code and telemetry are deliberately separated, and `main`'s branch protection stays intact.
+
+Key facts:
+- The workflow uses `${{ secrets.TRAFFIC_PAT }}` (fine-grained PAT, resource owner = `Metabuilder-Labs` org, `Administration: Read` on this repo) for the Traffic API read — the default `GITHUB_TOKEN` returns 403 there. The push step uses the default `GITHUB_TOKEN` since `traffic-data` is unprotected.
+- The orphan-branch design was the close-out after several other paths (PAT-as-owner push, classic-protection bypass, rulesets bot-bypass) hit GitHub UI / API limitations. See PRs #171 / #172 / #173 for the trail. Don't try to move the archive back onto `main` — that path was explored and dead-ended.
+- The archive is the only growth-instrumentation surface in this repo. Health-check + spreadsheet-fill workflows were considered but descoped (Cowork sandbox couldn't reach external APIs, and GH Actions for the same was deemed overkill for a solo project). Manual review is the current model — fetch the JSON when wanted, hand it to an agent for analysis.
+- `growth/README.md` documents the schema + read-it-manually flow.
+- TRAFFIC_PAT expires Jun 20 2027 — renew before then.
+
+When adding any new automation that needs to *write* to the repo on a schedule, follow the same pattern: data on its own unprotected ref, code on `main`. Don't try to make `main` accept bot commits.
 
 ## Releases
 
@@ -271,7 +376,7 @@ Key runtime dependency: `pytz` is required by DuckDB for `TIMESTAMPTZ` column ha
 - `tokenjam[bloat]` — `llmlingua>=0.2`, used by the Trim analyzer. Pulls PyTorch + transformers (~2GB). Kept out of base install. The analyzer self-registers without the extra installed; the deferred `import llmlingua` inside the analysis function body raises a typed message pointing the user at the install command.
 - Framework extras `[langchain]`, `[crewai]`, `[autogen]`, `[litellm]` for SDK patches.
 - `[dev]` for local development (`pytest`, `ruff`, `mypy`, `httpx`).
-- `[mcp]` for the FastMCP stdio server.
+- `[mcp]` — empty no-op alias. `fastmcp` moved into the base install in v0.3.5 (#101), so the FastMCP stdio server (`tj mcp`) works on a plain `pipx install tokenjam`. The extra is kept so old `tokenjam[mcp]` install commands still succeed; it pulls nothing extra.
 
 ## Further Reading
 

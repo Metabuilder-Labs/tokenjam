@@ -51,6 +51,9 @@ def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
     spans_stats_check = _check_spans_stats(ctx.obj["db"])
     checks.append(spans_stats_check)
 
+    # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
+    checks.append(_check_span_staleness(ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -240,6 +243,73 @@ def _check_spans_stats(db: object) -> dict:
         }
     return {"name": "Spans column statistics", "level": "ok",
             "message": "Column statistics are consistent."}
+
+
+# Spans older than this are treated as a stalled connection. Claude Code /
+# Codex flush their OTLP exporter on a short interval while running, so during
+# any active session the newest span is minutes old at most. A 6h gap means
+# either nothing has run (benign) or — the issue #179 failure mode — a running
+# agent is still exporting to a stale endpoint after `tj onboard` rewrote it.
+# 6h is wide enough to not nag overnight/weekend gaps, tight enough to catch a
+# same-day reconfigure-then-keep-working session.
+_SPAN_STALENESS_THRESHOLD_HOURS = 6
+
+
+def _check_span_staleness(db: object) -> dict:
+    """Warn when telemetry has stopped flowing despite spans existing (#179).
+
+    After `tj onboard --claude-code` rewrites the OTLP endpoint/secret, an
+    already-running Claude Code (or Codex) instance keeps exporting to the old
+    endpoint, so today's spans silently never arrive. The user sees a flat
+    chart and concludes "TokenJam isn't tracking anything." This check compares
+    the newest span's `start_time` to wall-clock and nudges a restart when the
+    gap exceeds the threshold.
+
+    Queries `db.conn` directly with parameterised SQL — `StorageBackend` has no
+    "newest span time" method, and `cmd_doctor` already accesses `db.conn` for
+    the spans-stats canary.
+    """
+    from datetime import timezone
+
+    from tokenjam.utils.time_parse import utcnow
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Live-span freshness", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        row = conn.execute("SELECT MAX(start_time) FROM spans").fetchone()
+    except duckdb.Error as e:
+        return {"name": "Live-span freshness", "level": "info",
+                "message": f"Skipped — could not query span timestamps: {e}"}
+
+    newest = row[0] if row else None
+    if newest is None:
+        # No spans at all — nothing to be stale. A genuinely empty DB is a
+        # pre-onboard state, not a stalled connection; don't false-warn.
+        return {"name": "Live-span freshness", "level": "info",
+                "message": "No spans recorded yet — nothing to check."}
+
+    # DuckDB TIMESTAMPTZ normally yields a tz-aware datetime; guard the naive
+    # case (assume UTC) so the subtraction never raises.
+    if newest.tzinfo is None:
+        newest = newest.replace(tzinfo=timezone.utc)
+
+    age_hours = (utcnow() - newest).total_seconds() / 3600.0
+    if age_hours > _SPAN_STALENESS_THRESHOLD_HOURS:
+        return {
+            "name": "Live-span freshness",
+            "level": "warning",
+            "message": (
+                f"Latest span is {age_hours:.1f}h old (threshold "
+                f"{_SPAN_STALENESS_THRESHOLD_HOURS}h) — if Claude Code or Codex "
+                "is running, restart it so it picks up the current OTLP endpoint "
+                "(or check your OTLP endpoint / `tj serve`)."
+            ),
+        }
+    return {"name": "Live-span freshness", "level": "ok",
+            "message": f"Most recent span is {age_hours:.1f}h old."}
 
 
 def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:

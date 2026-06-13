@@ -97,6 +97,21 @@ def test_status_exits_1_when_active_alerts(runner, db, config):
     assert data["has_active_alerts"] is True
 
 
+def test_status_json_includes_active_and_elapsed(runner, db, config):
+    """Status JSON carries active (compute) time + wall-clock elapsed (#147)."""
+    session = _seed_agent_and_session(db)
+    for ms in (1500.0, 2500.0):
+        sp = make_llm_span(agent_id="test-agent", duration_ms=ms)
+        sp.session_id = session.session_id
+        db.insert_span(sp)
+
+    result = _invoke(runner, db, config, ["status", "--json"])
+    assert result.exit_code == 0
+    a = json.loads(result.output)["agents"][0]
+    assert "active_seconds" in a and "duration_seconds" in a
+    assert a["active_seconds"] == 4.0   # 4000 ms of spans
+
+
 # -- traces tests --
 
 def test_traces_json_output_is_valid_json(runner, db, config):
@@ -191,6 +206,60 @@ def test_doctor_exits_2_when_errors_present(runner, db, config):
     with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=None):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 2
+
+
+def _clean_doctor_config(config, tmp_path):
+    """Configure `config` so only the check under test can produce a warning."""
+    config.storage.path = str(tmp_path / "test.duckdb")
+    config.security.ingest_secret = "test-secret"
+    config.agents["test-agent"].drift.enabled = False
+
+
+def test_doctor_no_staleness_warning_with_fresh_spans(runner, db, config, tmp_path):
+    """A just-recorded span keeps the freshness check green (no false alarm)."""
+    _clean_doctor_config(config, tmp_path)
+    span = make_llm_span(agent_id="test-agent", start_time=utcnow())
+    db.insert_span(span)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 0
+    checks = json.loads(result.output)
+    freshness = [c for c in checks if c["name"] == "Live-span freshness"]
+    assert freshness and freshness[0]["level"] == "ok"
+
+
+def test_doctor_warns_on_stale_spans(runner, db, config, tmp_path):
+    """A newest span older than the 6h threshold warns (exit 1) with a restart hint."""
+    from datetime import timedelta
+
+    _clean_doctor_config(config, tmp_path)
+    span = make_llm_span(agent_id="test-agent", start_time=utcnow() - timedelta(hours=10))
+    db.insert_span(span)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 1
+    checks = json.loads(result.output)
+    freshness = [c for c in checks if c["name"] == "Live-span freshness"]
+    assert freshness and freshness[0]["level"] == "warning"
+    assert "restart" in freshness[0]["message"].lower()
+
+
+def test_doctor_no_staleness_warning_when_no_spans(runner, db, config, tmp_path):
+    """An empty DB (pre-onboard) must not be mistaken for a stalled connection."""
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 0
+    checks = json.loads(result.output)
+    freshness = [c for c in checks if c["name"] == "Live-span freshness"]
+    assert freshness and freshness[0]["level"] == "info"
+    assert not any(c["level"] == "warning" for c in checks)
 
 
 def test_doctor_warns_on_schema_without_capture(runner, db, config, tmp_path):
@@ -1192,3 +1261,46 @@ def test_optimize_export_templates_writes_markdown(runner, db, tmp_path, monkeyp
     assert "Reuse skeleton" in result.output
     assert len(list(tmp_path.glob("reuse-*.md"))) == 1
     assert list(tmp_path.glob("reuse-*.html")) == []   # markdown only, no HTML
+
+
+def test_report_reuse_api_mode_writes_artifacts(runner, db, tmp_path, monkeypatch):
+    """#154: with the daemon holding the DB lock, `tj report --reuse` fetches
+    the finding + skeleton text from /api/v1/reuse/clusters via ApiBackend and
+    still writes the HTML + Markdown — instead of erroring with 'needs direct
+    database access'."""
+    import asyncio
+
+    import httpx
+
+    from tokenjam.api.app import create_app
+    from tokenjam.core.api_backend import ApiBackend
+    from tokenjam.core.ingest import IngestPipeline
+
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+    cfg = _reuse_config(completions=True)
+    _seed_reuse_cluster(db, count=3, completions=True)
+
+    # Capture the real endpoint payload (exercises the route handler).
+    app = create_app(config=cfg, db=db, ingest_pipeline=IngestPipeline(db=db, config=cfg))
+
+    async def _fetch():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.get("/api/v1/reuse/clusters", params={"since": "30d"})
+            assert r.status_code == 200, r.text
+            return r.json()
+
+    payload = asyncio.run(_fetch())
+
+    # An ApiBackend has no `.conn`, so cmd_report takes the HTTP path. Stub the
+    # network call with the captured payload (sync httpx can't drive ASGI).
+    backend = ApiBackend("http://test")
+    monkeypatch.setattr(backend, "fetch_reuse_clusters", lambda **kw: payload)
+    assert getattr(backend, "conn", None) is None
+
+    result = _invoke(runner, backend, cfg, ["report", "--reuse", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "Reuse report written" in result.output
+    assert "needs direct database access" not in result.output
+    assert len(list(tmp_path.glob("reuse-*.html"))) == 1
+    assert len(list(tmp_path.glob("reuse-*.md"))) == 1   # skeleton text → sidecar

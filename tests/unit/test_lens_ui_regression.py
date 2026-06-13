@@ -60,6 +60,26 @@ def test_overview_chart_is_not_a_click_target(html):
     assert "View Cost details" in html
 
 
+# --- #178 / #188: chart x-axis tick timezone handling --------------------- #
+def test_axis_time_ticks_timezone_split(html):
+    # #178: HOURLY ticks localize — they format the UTC epoch-second buckets in
+    # the viewer's local zone (a US-Pacific user sees their noon, not UTC's 7pm).
+    # #188: DAILY date labels stay UTC, because the buckets are UTC-day-aligned;
+    # localizing a UTC-midnight key would print the previous local day for
+    # west-of-UTC users and no longer match the bucket span.
+    import re
+
+    m = re.search(r"function fmtAxisTime\(epoch, bucket\) \{.*?\n\}", html, re.DOTALL)
+    assert m, "fmtAxisTime helper not found"
+    body = m.group(0)
+    hour_line = next(line for line in body.splitlines() if "toLocaleTimeString" in line)
+    date_line = next(line for line in body.splitlines() if "toLocaleDateString" in line)
+    # Hourly localizes (must NOT force UTC).
+    assert "timeZone: 'UTC'" not in hour_line, "hourly ticks must localize (#178)"
+    # Daily stays UTC-aligned (must force UTC).
+    assert "timeZone: 'UTC'" in date_line, "daily date labels stay UTC-aligned (#188)"
+
+
 # --- #129: run-rate denominator + caption + $ axis ------------------------- #
 def test_run_rate_uses_window_length_not_data_range(html):
     assert "function windowDays" in html
@@ -104,8 +124,20 @@ def test_axis_time_labels_consistent(html):
 # --- #134: run-rate is cycle-relative, not a fixed ×30 --------------------- #
 def test_run_rate_is_cycle_relative(html):
     assert "function cycleRemaining" in html
-    assert "by end of ${cyc.label}" in html
+    assert "by ${cyc.label}" in html
     assert "over 30 days" not in html  # the circular/undershooting framing is gone
+
+
+# --- #138: run-rate cycle honors [budget.<provider>] cycle_start_day -------- #
+def test_run_rate_cycle_honors_server_bounds(html):
+    # cycleRemaining now reads server-provided cycle bounds (cycle_start_day
+    # aware) instead of always assuming the calendar month.
+    assert "function cycleRemaining(cycle)" in html
+    assert "cycle.days_remaining" in html
+    assert "cycle.start_day" in html
+    # Both run-rate call sites pass the response's cycle block through.
+    assert "cycleRemaining(cost.cycle)" in html
+    assert "cycleRemaining(costResp && costResp.cycle)" in html
 
 
 # --- #135: cache at_ceiling not gated on input volume --------------------- #
@@ -330,3 +362,444 @@ def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).
     assert b"\x00" not in _UI.read_bytes()
+
+
+# --- #139: buildCostSeries coarsens instead of silently emptying ----------- #
+def test_cost_series_coarsens_not_silently_empty(html):
+    # The silent "too many buckets -> null" guard is gone; the chart coarsens up
+    # a bucket ladder (hour->day->week) and flags it instead of rendering empty.
+    assert "xs.length > 5000) return null" not in html  # the silent-empty guard
+    assert "const MAX_BUCKETS = 5000" in html
+    assert "_BUCKET_LADDER" in html
+    assert "['week', 604800]" in html
+    # The coarsening is surfaced to the user, not silent (CLAUDE.md spirit).
+    assert "coarsened" in html
+    assert "Showing ${series.bucket} buckets" in html
+
+
+# --- #124 follow-up: Overview fetches in parallel, asymmetric error handling- #
+def test_overview_fetches_in_parallel(html):
+    # The #114 serial-fetch workaround is gone now that the DB layer is
+    # concurrency-safe (#124); the Overview fans out via Promise.all.
+    assert "Fetch sequentially, not in parallel" not in html
+    assert "await Promise.all([" in html
+
+
+def test_overview_error_handling_is_asymmetric(html):
+    # /cost is load-bearing: NO .catch, so its failure surfaces the error state.
+    # The other five panels keep .catch fallbacks so one failing panel renders
+    # empty instead of blanking the Overview. Don't unify these (#124 review).
+    assert "api('/cost', { since, group_by: 'day' }).catch" not in html  # no catch on /cost
+    assert "api('/cost', { since, group_by: 'day' })," in html           # bare, inside Promise.all
+    assert "api('/cost/compare', { since, compare: 'previous' }).catch(() => null)" in html
+    assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" in html
+    assert "api('/drift').catch(() => ({ agents: [] }))" in html
+
+
+# --- #147: status tile shows Active (compute) time + relabeled Elapsed ----- #
+def test_status_tile_shows_active_and_elapsed(html):
+    # A coarse formatter for multi-day wall-clock spans, so "3087m" reads "2d 3h".
+    assert "function fmtDurLong" in html
+    # Active time is sourced from the new status payload field.
+    assert "a.active_seconds" in html
+    # The wall-clock row is relabeled Elapsed and uses the coarse formatter;
+    # Active is a distinct row using the fine-grained one.
+    assert "fmtDurLong(a.duration_seconds" in html
+    assert 'Active <span class="info-btn"' in html
+    assert 'Elapsed <span class="info-btn"' in html
+    # The misleading bare "Duration" label is gone from the status tile.
+    assert '<span class="label">Duration</span>' not in html
+
+
+# --- #162: Recoverable Waste tiles render consistently --------------------- #
+def test_reuse_tile_title_is_title_cased(html):
+    # reuse was missing from ANALYZER_META and slipped through lowercase.
+    assert "reuse:    { title: 'Reuse'" in html
+    # Capitalization is centralized so a future 6th analyzer auto-title-cases
+    # instead of rendering its raw lowercase registry key.
+    assert "function capitalize" in html
+    assert "capitalize(t.name)" in html
+    # The old raw-lowercase fallback is gone.
+    assert "{ title: t.name, hint: '' }" not in html
+
+
+def test_not_ready_tile_drops_em_dash(html):
+    # Trim's not_ready content line read "— not ready"; the em-dash prefix is
+    # dropped so the three states share a prefix-free scheme.
+    assert "— not ready" not in html
+    assert ">Not ready<" in html
+
+
+def test_recoverable_tile_titles_share_one_weight(html):
+    # All non-actionable tiles use the identical bare .rec-name title element,
+    # so the at_ceiling (Cache) tile can't bold its title differently. The
+    # positive emphasis lives only on the content line (.rec-amount.ok), which
+    # is the intended #127 design and must stay.
+    assert html.count('<div class="rec-name">${meta.title}</div>') >= 3
+    assert ".rec-amount.ok" in html          # green content line preserved (AC #4)
+    # No state-specific rule bolds the title for the at_ceiling tile.
+    assert ".rec-tile.ok .rec-name" not in html
+
+
+# --- #187: suppress raw $ for subscription/local on table & trace surfaces --- #
+def test_cost_table_cells_route_through_framing(html):
+    # The per-row + footer COST cells must reframe like the hero (useTokens /
+    # fmtFramedDollar), not render raw fmtCost. The bug was bare fmtCost cells.
+    assert "<td>${fmtCost(r.cost_usd)}</td>" not in html
+    assert "<td>${fmtCost(total)}</td>" not in html
+    assert "${useTokens ? fmtTokens(_costVal(r, true)) : fmtFramedDollar(r.cost_usd, framing)}" in html
+    assert "${useTokens ? fmtTokens(totalTokens) : fmtFramedDollar(total, framing)}" in html
+
+
+def test_traces_list_cost_routes_through_framing(html):
+    # Traces list COST column must consume the framing block, not raw fmtCost.
+    assert "<td>${fmtCost(t.cost_usd)}</td>" not in html
+    assert "${fmtFramedDollar(t.cost_usd, framing)}" in html
+    # The screen actually pulls the framing block off the /traces response.
+    assert "setFraming(td.framing || null)" in html
+
+
+def test_trace_detail_costs_route_through_framing(html):
+    # Waterfall bar label, tooltip line, and the span-detail panel all reframe —
+    # no bare per-span fmtCost (the bar label + tooltip both used s.cost_usd).
+    assert "fmtCost(s.cost_usd)" not in html
+    assert "${fmtCost(sel.cost_usd)}" not in html
+    assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
+    assert "${fmtFramedDollar(sel.cost_usd, framing)}" in html
+    # Trace detail pulls the framing block off the /traces/{id} response.
+    assert "setFraming(d.framing || null)" in html
+
+
+# --- #191: suppress raw $ on Status, Optimize & Reuse/script surfaces -------- #
+def test_status_card_cost_today_routes_through_framing(html):
+    # Status agent cards' "Cost today" must consume the /status framing block,
+    # not render raw fmtCost(a.cost_today).
+    assert "${fmtCost(a.cost_today)}" not in html
+    assert "${fmtFramedDollar(a.cost_today, data.framing)}" in html
+
+
+def test_optimize_window_comparison_routes_through_framing(html):
+    # The window-comparison cost delta must reframe for subscription/local.
+    assert "${fmtCost(Math.abs(st.cmp.cost_delta_usd))}" not in html
+    assert "${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)}" in html
+
+
+def test_optimize_budget_projection_routes_through_framing(html):
+    # Budget-projection run-rate / ceiling / overage must reframe, not raw $.
+    assert "${fmtCost(b.monthly_run_rate_usd)}" not in html
+    assert "${fmtCost(b.budget_usd)}" not in html
+    assert "${fmtCost(b.projected_overage_usd)}" not in html
+    assert "${fmtFramedDollar(b.monthly_run_rate_usd, framing)}" in html
+    assert "${fmtFramedDollar(b.budget_usd, framing)}" in html
+    assert "${fmtFramedDollar(b.projected_overage_usd, framing)}" in html
+
+
+def test_optimize_cluster_avg_cost_routes_through_framing(html):
+    # The script/reuse cluster table "Avg cost" cell must reframe, not raw $.
+    assert "${fmtCost(c.avg_cost_usd)}" not in html
+    assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" in html
+
+
+# --- Lens Visualizations Wave 1: cost charts (#211–#213) ------------------- #
+def test_stacked_bar_chart_present(html):
+    # #213: cost-by-model/agent renders a STACKED bar chart, not overlapping
+    # lines. The component + the cumulative back-to-front stacking must exist.
+    assert "function StackedBarChart" in html
+    assert "uPlot.paths.bars" in html
+    # CostView routes model/agent group_by to the stacked chart (total stays line).
+    assert "${StackedBarChart}" in html
+    assert "groupBy === 'total' ?" in html
+
+
+def test_stacked_bar_chart_uses_framing_tokens(html):
+    # Stacked chart respects plan-tier framing: subscription/local -> tokens.
+    assert "fmtY=${fmtY}" in html  # fmtY = useTokens ? fmtTokens : fmtCost
+    assert "const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
+
+
+def test_cache_savings_chart_present(html):
+    # #212: cache hit-rate + cumulative captured-vs-recoverable chart.
+    assert "function CacheSavingsChart" in html
+    assert "function buildCacheSeries" in html
+    assert "${CacheSavingsChart}" in html
+    # fetched from the dedicated endpoint
+    assert "/cost/cache" in html
+
+
+def test_cache_savings_honesty_framing(html):
+    # Rule 14: "captured" is measured; the recoverable gap is "estimated", never
+    # "saved". The caption must say estimated/recoverable and not claim "saved".
+    assert "estimated recoverable" in html.lower()
+    assert "not saved" in html.lower()
+    # recoverable dollar figure routes through framing (subscription -> tokens)
+    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" in html
+
+
+def test_cache_savings_chart_is_best_effort(html):
+    # A failing /cost/cache must not blank the cost screen.
+    assert "cacheResp = await api('/cost/cache'" in html
+    assert "} catch (_) { cacheResp = null; }" in html
+
+
+# --- #211: cost-by-component + recoverable-waste overlay ------------------- #
+def _component_waste_card(html: str) -> str:
+    """Extract the #211 chart card markup so honesty asserts are scoped to it."""
+    start = html.index("Cost by component + recoverable waste")
+    return html[start:start + 1800]
+
+
+def test_component_waste_chart_present(html):
+    assert "function ComponentWasteChart" in html
+    assert "function buildComponentWaste" in html
+    assert "function componentWasteTooltip" in html
+    assert "${ComponentWasteChart}" in html
+    assert "uPlot.paths.bars" in html  # uPlot stacked bars, not a new lib
+
+
+def test_component_waste_fetches_dedicated_endpoint(html):
+    assert "/cost/components" in html
+    # best-effort: a failed fetch must not blank the Optimize screen
+    assert "api('/cost/components'" in html
+    assert ".catch(() => null)" in html
+
+
+def test_component_waste_is_registry_driven(html):
+    # The overlay is built from the response's `recoverable` list (server-side
+    # registry iteration), not a hard-coded analyzer array in the UI.
+    assert "resp.recoverable" in html
+    # no hard-coded per-analyzer overlay list like ['downsize','cache',...] in
+    # buildComponentWaste — it maps over whatever the server returned
+    card = html[html.index("function buildComponentWaste"):html.index("function buildComponentWaste") + 700]
+    assert "resp.recoverable" in card
+    assert "['downsize'" not in card
+
+
+def test_component_waste_honesty_estimated_not_saved(html):
+    card = _component_waste_card(html)
+    # Positive honesty language present…
+    assert "estimated recoverable" in card.lower()
+    assert "not a realized cost reduction" in card
+    # …and the word "saved" never appears on THIS surface (Rule 14).
+    assert "saved" not in card.lower()
+    assert "savings you got" not in card.lower()
+
+
+def test_component_waste_recoverable_routes_through_framing(html):
+    # Per-analyzer recoverable must reframe (subscription/local → token-share),
+    # mirroring the existing recoverable band — not raw fmtCost.
+    assert "fmtFramedSavings(r.usd, r.tokens, compFraming)" in html
+    # the measured-cost total uses the dollar framing helper, not raw fmtCost
+    assert "fmtFramedDollar(st.comp.total_cost_usd" in html
+    # plan-tier toggle drives tokens-vs-dollars for the whole surface
+    assert "compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local'" in html
+
+
+# --- #210: Analytics pivot explorer (subsumes #214 leaderboard + #216) ----- #
+def test_analytics_screen_registered(html):
+    assert "function AnalyticsView" in html
+    assert "case 'analytics': return html`<${AnalyticsView}" in html
+    assert 'href="#/analytics"' in html  # sidebar nav link
+
+
+def test_analytics_metric_dimension_chart_controls(html):
+    # metric × group_by × stack × chart-type controls, driven off shared vocab.
+    assert "const ANALYTICS_METRICS" in html
+    assert "const ANALYTICS_DIMENSIONS" in html
+    assert "const ANALYTICS_CHARTS" in html
+    for ctl in ("'metric'", "'group_by'", "'stack'", "'chart'"):
+        assert ctl in html, f"missing control {ctl}"
+    # the three uPlot/leaderboard chart types
+    for ch in ("'bar'", "'line'", "'hbar'"):
+        assert ch in html
+
+
+def test_analytics_presets_and_csv_export(html):
+    assert "const ANALYTICS_PRESETS" in html
+    assert "function analyticsCsv" in html
+    assert "function downloadCsv" in html
+    assert "Export CSV" in html
+    # the leaderboard preset closes #214; spend-by-model line closes #216
+    assert "'leaderboard'" in html
+    assert "'spend-by-model'" in html
+
+
+def test_analytics_url_is_source_of_truth(html):
+    # state read from URL params with validators, written back via navigate()
+    assert "navigate('analytics'" in html
+    assert "readParam(params, 'metric'" in html
+    assert "readParam(params, 'group_by'" in html
+    assert "readParam(params, 'chart'" in html
+
+
+def test_analytics_consumes_endpoint_not_reimplements(html):
+    # single compute path: fetches /analytics and renders from the response
+    assert "api('/analytics'" in html
+    assert "resp.groups" in html
+    assert "resp.rows" in html
+
+
+def test_analytics_respects_plan_tier_framing(html):
+    # spend metric switches to token volume for subscription/local (dollars
+    # suppressed); never re-derives the suppression rule — reads framing.
+    assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
+    assert "fmtFramedDollar(kpis.spend, framing)" in html
+
+
+def test_analytics_leaderboard_has_inline_bars(html):
+    # #214: sorted leaderboard with inline magnitude bars (CSS, no chart lib).
+    assert "function buildLeaderboard" in html
+    assert "lb-fill" in html
+    assert ".lb-bar" in html
+
+
+# --- #215: cost-annotated trace waterfall ---------------------------------- #
+def test_trace_waterfall_cost_summary(html):
+    # A cost-first trace summary header (total cost + tokens + duration + spans).
+    assert "wf-summary" in html
+    assert "Total cost" in html
+    assert "wfTotalCostFramed" in html
+    # the total cost routes through the framing helper (not raw fmtCost)
+    assert "const wfTotalCostFramed = fmtFramedDollar(wfTotalCost, framing)" in html
+
+
+def test_trace_waterfall_per_span_cost_token_annotation(html):
+    # Per-span cost + tokens annotation column with a magnitude bar (not just the
+    # hover tooltip), so the timeline reads cost-first.
+    assert "wf-cost-bar" in html
+    assert "wf-cost-fill" in html
+    assert 'class="wf-cost-val"' in html
+    assert 'class="wf-cost-tok"' in html
+    # tokens summed per span and shown in the annotation
+    assert "const spanTokens = s =>" in html
+    assert "wf-cost-tok\">${sTok ? fmtTokens(sTok)" in html
+
+
+def test_trace_waterfall_magnitude_respects_framing(html):
+    # The magnitude bar (and summary) read on TOKEN volume when dollars are
+    # suppressed (subscription/local) — the suppression decision comes from the
+    # server framing block, never re-derived in JS.
+    assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
+    assert "const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0)" in html
+
+
+# --- #217: KPI tiles → sparkline + period-over-period delta ----------------- #
+def test_kpi_tiles_have_sparkline_and_delta(html):
+    # KPI tiles gain a trend sparkline + a signed period-over-period delta chip.
+    assert "function Sparkline(" in html
+    assert "function DeltaChip(" in html
+    assert "function KpiTile(" in html
+
+
+def test_kpi_sparkline_is_inline_svg_not_uplot(html):
+    # The sparkline is a lightweight inline SVG (offline, no per-tile uPlot
+    # instance) — so #218's offline guarantee + render cost both hold.
+    assert '<svg class="spark"' in html
+    assert "<polyline points=" in html
+
+
+def test_kpi_series_is_server_computed_not_client_aggregated(html):
+    # Single compute path: the sparkline reads the server's `kpi_series` through
+    # the shared window grid; the UI never buckets/aggregates per-span in JS.
+    assert "function kpiSparkValues(" in html
+    assert "_windowGrid({ ...resp, series: resp.kpi_series })" in html
+    assert "resp.kpi_deltas" in html
+
+
+def test_kpi_spend_tile_respects_framing(html):
+    # The Spend tile's value, sparkline, AND delta read on TOKEN volume when
+    # dollars are suppressed (subscription/local) — decided once from the server
+    # framing block, never re-derived. Volume tiles stay plan-independent.
+    assert "const spendSuppressed = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
+    assert "kpiSparkValues(resp, spendSuppressed ? 'tokens' : 'spend')" in html
+    assert "delta: spendSuppressed ? deltas.tokens : deltas.spend" in html
+
+
+# --- #228: shared series→color map + colored leaderboard ------------------- #
+def test_shared_colorfor_helper_exists(html):
+    # ONE name-keyed color map, hashed into the shared --chart-1..5 palette, so a
+    # series is the same hue everywhere (not a per-chart positional palette).
+    assert "function colorFor(name)" in html
+    assert "h = (h * 31 + s.charCodeAt(i))" in html
+
+
+def test_leaderboard_bars_use_shared_colorfor(html):
+    # Leaderboard .lb-fill colored by the shared map, keyed by the group name.
+    assert "background:' + colorFor(e.group)" in html
+
+
+def test_dimension_charts_color_by_name(html):
+    # SpendChart + StackedBarChart color multi-series via colorFor(name), not by
+    # draw-order index — same map the leaderboard uses (ComponentWasteChart keeps
+    # its own component palette; different namespace, out of scope).
+    assert html.count("single ? (palette[0] || '#3d8eff') : colorFor(lab)") >= 2
+    # the stacked-bar tooltip dots match the bars (also via the shared map)
+    assert "colorFor(labels[k] || ('s' + k))" in html
+
+
+# --- #227: don't color by the time dimension ------------------------------- #
+def test_time_dimension_renders_single_series(html):
+    # group_by=Day with no stack must be ONE series (tokens/day, one color), not
+    # one-per-day-bucket → no raw-epoch rainbow legend.
+    assert "const timeGroup = resp.group_by === 'day'" in html
+    assert "return { data: [xs, ys], labels: ['Total']" in html
+    # the time dimension feeds the x-axis; series come from stack_by instead
+    assert "const seriesKeys = timeGroup ? (resp.stacks || []) : (resp.groups || [])" in html
+
+
+def test_time_dimension_labels_formatted_as_dates(html):
+    # A time-dimension group key renders as a date, never a raw epoch second.
+    assert "function formatGroupLabel" in html
+    assert "formatGroupLabel(e.group, groupBy)" in html
+
+
+# --- #234: expanded chart palette (12 hues) reduces colorFor() collisions --- #
+def test_colorfor_palette_expanded_to_twelve(html):
+    # colorFor hashes into a 12-hue palette (was 5) so distinct series rarely
+    # collide on real data; the stable-hash mapping itself is unchanged.
+    assert "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(i => cssVar('--chart-' + i))" in html
+
+
+def test_chart_palette_defines_twelve_hues_both_themes(html):
+    # --chart-1..12 must be defined for BOTH the dark (:root) and light themes,
+    # so charts re-theme correctly.
+    for n in range(1, 13):
+        assert html.count(f"--chart-{n}:") >= 2, f"--chart-{n} not defined in both themes"
+
+
+def test_colorfor_neutral_bucket_not_a_palette_hue(html):
+    # 'other'/'(none)'/'' still map to the neutral grey, never a palette color.
+    assert "if (s === 'other' || s === '(none)' || s === '') return cssVar('--text-dim')" in html
+
+
+# --- #229: Overview tiles/headline deep-link into Analytics (pre-filtered) --- #
+def test_overview_recoverable_tiles_deeplink_into_analytics(html):
+    # Each recoverable-waste analyzer maps to an Analytics slice, and the tiles
+    # render that deep-link via analyzerSliceHref (not the old Optimize finding
+    # link). The route honors metric/group_by/chart/since, so these are just
+    # well-formed Analytics URLs — no new state machine.
+    assert "const ANALYZER_ANALYTICS_SLICE = {" in html
+    for analyzer in ("downsize", "cache", "script", "reuse", "trim"):
+        assert f"{analyzer}:" in html  # each analyzer has a slice mapping
+    assert "function analyzerSliceHref(name, since)" in html
+    assert "const href = analyzerSliceHref(t.name, since);" in html
+    # the tiles no longer point at the Optimize finding screen
+    assert "'#/optimize?finding=' + t.name" not in html
+
+
+def test_overview_spend_headline_deeplinks_into_analytics(html):
+    # The spend headline is an <a> deep-linking into Analytics spend-over-time.
+    assert "<a class=\"chart-title\" href=${analyticsHref({ metric: 'spend', group_by: 'day', chart: 'bar', since })}" in html
+
+
+def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
+    # The deep-link helper builds #/analytics?... URLs (offline hash links, no
+    # fetch) from a query object, dropping empty values.
+    assert "function analyticsHref(q)" in html
+    assert "return '#/analytics' + (s ? '?' + s : '');" in html
+
+
+def test_overview_remains_default_landing_no_render_time_redirect(html):
+    # #132 guard must hold: empty hash → Overview via getRoute, and there is no
+    # render-time location.hash assignment that would race the first render.
+    assert "(qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'overview'" in html
+    assert "location.hash = '#/overview'" not in html

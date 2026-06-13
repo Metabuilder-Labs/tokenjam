@@ -3,7 +3,7 @@
 Monitor every Claude Code session — costs, tool calls, API requests, errors — with two commands:
 
 ```bash
-pipx install 'tokenjam[mcp]'
+pipx install tokenjam
 tj onboard --claude-code
 # Restart Claude Code, then:
 tj status --agent claude-code-<project>
@@ -35,7 +35,7 @@ Claude Code emits OTLP log events which `tj serve` converts into spans — every
 
 ## MCP server
 
-The MCP server is included in the `[mcp]` extra and registered automatically by `tj onboard --claude-code`. It gives Claude Code direct access to your observability data inside the session itself. After restarting Claude Code you have 13 tools available in every session:
+The MCP server ships in the base install (`pipx install tokenjam` — no extra needed) and is registered automatically by `tj onboard --claude-code`. It gives Claude Code direct access to your observability data inside the session itself. After restarting Claude Code you have 13 tools available in every session:
 
 | Tool | What it does |
 |---|---|

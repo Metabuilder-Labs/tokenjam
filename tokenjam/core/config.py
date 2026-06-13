@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 import sys
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -280,9 +281,20 @@ def load_config(path: str | None = None) -> TjConfig:
     """
     Load config from file, merge with defaults, return TjConfig.
 
+    When no explicit ``path`` is given, honor the ``TJ_CONFIG`` environment
+    variable before falling back to the search-path discovery order. This keeps
+    SDK-bootstrapped processes (``ensure_initialised`` and the SDK integrations,
+    which call ``load_config()`` with no argument) consistent with the CLI — the
+    CLI already resolves ``TJ_CONFIG`` via Click's ``envvar`` and passes the
+    path in, so without this the SDK silently wrote spans to the global DB even
+    when ``TJ_CONFIG`` pointed elsewhere (#196). An explicit ``path`` argument
+    still wins over the env var.
+
     IMPORTANT: tomllib requires binary mode "rb" -- not text mode "r".
     Using "r" raises TypeError at runtime.
     """
+    if path is None:
+        path = os.environ.get("TJ_CONFIG") or None
     config_path = find_config_file(path)
     if config_path is None:
         return TjConfig(version="1")

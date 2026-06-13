@@ -39,6 +39,29 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_CODE_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 
+# Claude Code always bills Anthropic — its plan tier lives under
+# [budget.anthropic] in config.
+_CLAUDE_CODE_PROVIDER = "anthropic"
+
+
+def _plan_tier_for_provider(config, provider: str) -> str:
+    """Resolve plan_tier from config the same way the live ingest path does
+    (`IngestPipeline._resolve_plan_tier`): `config.budgets[provider].plan`,
+    falling back to "unknown".
+
+    The Claude Code backfill bypasses `IngestPipeline`, so before #176 it
+    created every session with the default `plan_tier="unknown"` even when
+    config declared a plan — a split-brain state where `tj tokenmaxx` (reads
+    config) and `tj optimize` (reads sessions) disagreed.
+    """
+    if config is None:
+        return "unknown"
+    budgets = getattr(config, "budgets", None) or {}
+    bcfg = budgets.get(provider)
+    if bcfg is None or not getattr(bcfg, "plan", None):
+        return "unknown"
+    return bcfg.plan
+
 
 @dataclass
 class BackfillResult:
@@ -345,7 +368,9 @@ def iter_claude_code_sessions(
         yield parsed
 
 
-def session_record_from_parsed(parsed: ParsedSession) -> SessionRecord:
+def session_record_from_parsed(
+    parsed: ParsedSession, plan_tier: str = "unknown",
+) -> SessionRecord:
     return SessionRecord(
         session_id=parsed.session_id,
         agent_id=parsed.agent_id,
@@ -360,6 +385,7 @@ def session_record_from_parsed(parsed: ParsedSession) -> SessionRecord:
         cache_write_tokens=parsed.total_cache_write_tokens,
         tool_call_count=parsed.tool_call_count,
         error_count=0,
+        plan_tier=plan_tier,
     )
 
 
@@ -371,6 +397,7 @@ def ingest_claude_code(
     since: datetime | None = None,
     progress=None,
     reingest: bool = False,
+    config=None,
 ) -> BackfillResult:
     """
     Ingest Claude Code sessions into the storage backend.
@@ -378,18 +405,23 @@ def ingest_claude_code(
     `db` is a DuckDBBackend (or compatible). Writes are idempotent: spans whose
     span_id already exists are skipped via INSERT … ON CONFLICT DO NOTHING.
 
+    `config` (a TjConfig) supplies the declared plan tier so backfilled sessions
+    carry the same `plan_tier` the live ingest path would set (#176). When None
+    or no plan is configured, sessions fall back to "unknown" (prior behavior).
+
     `progress(parsed_session, result)` is called once per session if provided.
     """
     result = BackfillResult()
     projects_seen: set[str] = set()
     seen_session_ids: set[str] = set()
+    plan_tier = _plan_tier_for_provider(config, _CLAUDE_CODE_PROVIDER)
     for parsed in iter_claude_code_sessions(root=root, since=since):
         result.sessions_seen += 1
         if parsed.cwd:
             projects_seen.add(parsed.cwd)
         try:
             inserted, retagged = _insert_session_idempotent(
-                db, parsed, reingest=reingest
+                db, parsed, reingest=reingest, plan_tier=plan_tier
             )
         except Exception as exc:
             result.files_failed += 1
@@ -429,7 +461,7 @@ def ingest_claude_code(
 
 
 def _insert_session_idempotent(
-    db, parsed: ParsedSession, reingest: bool = False
+    db, parsed: ParsedSession, reingest: bool = False, plan_tier: str = "unknown",
 ) -> tuple[int, int]:
     """
     Insert spans + session record; skip spans already present.
@@ -451,7 +483,7 @@ def _insert_session_idempotent(
                 inserted += 1
             except Exception:
                 continue
-        db.upsert_session(session_record_from_parsed(parsed))
+        db.upsert_session(session_record_from_parsed(parsed, plan_tier))
         return inserted, retagged
 
     for span in parsed.spans:
@@ -492,7 +524,7 @@ def _insert_session_idempotent(
         )
         inserted += 1
 
-    db.upsert_session(session_record_from_parsed(parsed))
+    db.upsert_session(session_record_from_parsed(parsed, plan_tier))
     return inserted, retagged
 
 

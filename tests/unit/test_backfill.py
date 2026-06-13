@@ -5,8 +5,6 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from tokenjam.core.backfill import (
     ingest_claude_code,
     iter_claude_code_sessions,
@@ -166,6 +164,60 @@ def test_ingest_writes_session_record(tmp_path):
         assert sess is not None
         assert sess.agent_id == "claude-code-proj"
         assert sess.input_tokens == 800
+    finally:
+        db.close()
+
+
+# --- #176: backfill propagates the config plan tier to SessionRecord -------- #
+
+def _plan_session_file(tmp_path, sid: str):
+    _make_session_file(
+        tmp_path, session_id=sid, cwd="/Users/me/proj",
+        records=[_assistant_record(
+            f"msg-{sid}", "claude-haiku-4-5", 500, 100,
+            "2026-04-01T10:00:00.000Z", sid, "/Users/me/proj",
+        )],
+    )
+
+
+def test_backfill_propagates_config_plan_tier(tmp_path):
+    # Acceptance #1/#2: config declares max_5x -> sessions get plan_tier=max_5x,
+    # not the "unknown" default (the live ingest path already does this).
+    from tokenjam.core.config import ProviderBudget, TjConfig
+
+    _plan_session_file(tmp_path, "sess-plan")
+    cfg = TjConfig(version="1")
+    cfg.budgets["anthropic"] = ProviderBudget(plan="max_5x")
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path, config=cfg)
+        assert db.get_session("sess-plan").plan_tier == "max_5x"
+    finally:
+        db.close()
+
+
+def test_backfill_plan_tier_unknown_without_config(tmp_path):
+    # Acceptance #3: no config -> "unknown" fallback preserved (defensive).
+    _plan_session_file(tmp_path, "sess-noconfig")
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)  # config=None
+        assert db.get_session("sess-noconfig").plan_tier == "unknown"
+    finally:
+        db.close()
+
+
+def test_backfill_plan_tier_unknown_when_config_has_no_plan(tmp_path):
+    # Config present but no plan set under [budget.anthropic] -> still "unknown".
+    from tokenjam.core.config import ProviderBudget, TjConfig
+
+    _plan_session_file(tmp_path, "sess-noplan")
+    cfg = TjConfig(version="1")
+    cfg.budgets["anthropic"] = ProviderBudget()  # no plan
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path, config=cfg)
+        assert db.get_session("sess-noplan").plan_tier == "unknown"
     finally:
         db.close()
 

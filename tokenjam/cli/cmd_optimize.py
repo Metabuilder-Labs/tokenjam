@@ -264,6 +264,7 @@ def cmd_optimize(
         report, agent=agent, plan_mix=plan_mix,
         dominant_plan=dominant, pricing_mode=pricing_mode,
         declared_plan=declared_plan,
+        requested=list(findings) if findings else None,
     )
     if cost_diff is not None:
         from tokenjam.cli.cmd_cost import _render_diff
@@ -286,6 +287,7 @@ def _render_report(
     dominant_plan: str = "unknown",
     pricing_mode: str = "unknown",
     declared_plan: str | None = None,
+    requested: list[str] | None = None,
 ) -> None:
     w = report.window
     scope_tag = f", {agent}" if agent else ""
@@ -302,7 +304,8 @@ def _render_report(
             f"[bold]{format_tokens(w.total_tokens)}[/bold] tokens "
             f"(last {days_int}d{scope_tag})\n"
             f"[dim]All sessions have unknown plan tier; dollar figures suppressed. "
-            f"Run [bold]tj onboard --reconfigure[/bold] to set your plan.[/dim]\n"
+            f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
+            f"(or [bold]--codex[/bold]) to set your plan.[/dim]\n"
         )
     elif pricing_mode == "subscription":
         label, fee = PLAN_LABEL_AND_FEE.get(dominant_plan, (dominant_plan, None))
@@ -344,7 +347,8 @@ def _render_report(
             console.print(
                 f"[dim]Note: {unknown_count} of {total_sessions} sessions have "
                 f"unknown plan tier; dollar figures may overstate actual cost "
-                f"for those. Run [bold]tj onboard --reconfigure[/bold] to "
+                f"for those. Run [bold]tj onboard --claude-code --reconfigure[/bold] "
+                f"(or [bold]--codex[/bold]) to "
                 f"resolve.[/dim]\n"
             )
 
@@ -375,10 +379,24 @@ def _render_report(
         console.print()
 
     # ----- Model-downgrade body -----
+    # Render an explicit "no candidates" empty state when the analyzer ran
+    # but found nothing — the Optimize web tab does this (PR #130 / issue
+    # #126) and the CLI used to silently skip the section, which makes
+    # reviewers think the analyzer didn't run. Skip the empty state when
+    # the user asked for a different positional subset (`tj optimize cache`
+    # shouldn't mention downsize at all).
+    downsize_was_requested = (not requested) or ("downsize" in requested)
     if report.downgrade is not None:
         _render_downgrade(
             report.downgrade,
             pricing_mode=("unknown" if all_unknown else pricing_mode),
+        )
+        console.print()
+    elif downsize_was_requested:
+        console.print(
+            "  [bold]① Downsize:[/bold] "
+            "[dim]no candidates in this window — sessions don't match the "
+            "smaller-model shape (small input/output, few tool calls).[/dim]"
         )
         console.print()
 
@@ -411,6 +429,7 @@ def _render_report(
     # falling into "No candidates flagged" (issue #68 §15).
     rendered_any = (
         report.downgrade is not None
+        or downsize_was_requested  # we emit a "no candidates" empty state
         or (pricing_mode == "api" and bool(report.budgets))
         or rendered_any_wave2
     )
@@ -937,7 +956,8 @@ def _render_reuse(finding, *, pricing_mode: str = "api") -> None:
         if pricing_mode == "unknown":
             console.print(
                 "          [dim]figures may overstate — run "
-                "[bold]tj onboard --reconfigure[/bold][/dim]"
+                "[bold]tj onboard --claude-code --reconfigure[/bold] "
+                "(or [bold]--codex[/bold])[/dim]"
             )
 
     if finding.estimate_basis:

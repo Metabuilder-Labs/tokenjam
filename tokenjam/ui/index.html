@@ -49,12 +49,21 @@
   --success: #0ce490;
   --info: #3d8eff;
   /* Chart series palette (issue #113). Re-read by uPlot at draw time so charts
-     re-theme. Series colors must read in both light and dark. */
+     re-theme. Series colors must read in both light and dark. Expanded to 12
+     hues (#234) so colorFor()'s name-hash rarely collides on real data; spaced
+     ~30 deg around the wheel for visual separation. */
   --chart-1: #3d8eff;
   --chart-2: #0ce490;
   --chart-3: #f5a623;
   --chart-4: #b36bff;
   --chart-5: #ff6b9d;
+  --chart-6: #2dd4bf;
+  --chart-7: #ff5c5c;
+  --chart-8: #a3e635;
+  --chart-9: #818cf8;
+  --chart-10: #fb923c;
+  --chart-11: #e879f9;
+  --chart-12: #38bdf8;
 }
 [data-theme="light"] {
   --bg: #fff;
@@ -77,6 +86,13 @@
   --chart-3: #c47e0c;
   --chart-4: #8b3dff;
   --chart-5: #d6336c;
+  --chart-6: #0d9488;
+  --chart-7: #dc2626;
+  --chart-8: #65a30d;
+  --chart-9: #4f46e5;
+  --chart-10: #ea580c;
+  --chart-11: #c026d3;
+  --chart-12: #0284c7;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -346,6 +362,27 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   font-size: 12px;
 }
 .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
+/* Analytics explorer (#210) — labelled controls, KPI tiles, leaderboard. */
+.ctl { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; }
+.preset-row { margin-top: -6px; }
+.preset-btn { font-size: 11px; padding: 4px 9px; }
+.kpi-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.kpi-tile { flex: 1 1 140px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.kpi-tile.kpi-active { border-color: var(--accent); }
+.kpi-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.kpi-num { min-width: 0; }
+.spark { display: block; flex-shrink: 0; }
+.spark-empty { flex-shrink: 0; }
+.kpi-tile .delta-chip { font-family: 'Geist Mono', monospace; font-size: 11px; margin-top: 6px; display: inline-block; }
+.kpi-val { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 600; }
+.kpi-lab { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.leaderboard { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
+.lb-row { display: grid; grid-template-columns: 24px minmax(80px, 160px) 1fr auto; align-items: center; gap: 10px; font-size: 13px; }
+.lb-rank { color: var(--text-faint); font-family: 'Geist Mono', monospace; text-align: right; }
+.lb-name { font-family: 'Geist Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-bar { height: 14px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.lb-fill { display: block; height: 100%; background: var(--accent); }
+.lb-val { font-family: 'Geist Mono', monospace; font-weight: 600; white-space: nowrap; }
 .btn {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -480,6 +517,29 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .wf-bar.llm { background: var(--brand); }
 .wf-bar.tool { background: var(--warn); color: var(--bg); }
 .wf-bar.other { background: var(--text-dim); }
+
+/* Cost-annotated waterfall (#215): trace cost summary + a per-span cost/token
+   annotation column with a magnitude bar so the timeline reads cost-first. */
+.wf-summary {
+  display: flex; gap: 18px; flex-wrap: wrap;
+  margin: 0 0 14px; padding: 10px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim);
+}
+.wf-summary b { color: var(--text); font-weight: 600; }
+.wf-head { display: flex; align-items: center; font-size: 10px; color: var(--text-faint);
+  font-family: 'Geist Mono', monospace; text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 4px; }
+.wf-head .wf-cost { color: var(--text-faint); }
+.wf-cost {
+  flex-shrink: 0; width: 156px; display: flex; align-items: center; gap: 8px;
+  padding-left: 12px; font-family: 'Geist Mono', monospace; font-size: 11px;
+}
+.wf-cost-bar { width: 34px; height: 8px; background: var(--border); border-radius: 2px;
+  overflow: hidden; flex-shrink: 0; }
+.wf-cost-fill { display: block; height: 100%; background: var(--accent); }
+.wf-cost-val { color: var(--text); min-width: 50px; text-align: right; }
+.wf-cost-tok { color: var(--text-dim); min-width: 46px; text-align: right; }
 
 /* Span detail */
 .span-detail {
@@ -877,6 +937,10 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   color: var(--text-dim);
   margin-bottom: 10px;
 }
+/* The spend headline deep-links into Analytics (#229); keep the heading look,
+   add a clickable affordance. */
+a.chart-title { text-decoration: none; cursor: pointer; }
+a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .chart { width: 100%; }
 .u-tooltip, .uplot { font-family: 'Geist Mono', monospace; }
 .chart-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; gap: 12px; }
@@ -885,6 +949,12 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .trend-chip { font-family: 'Geist Mono', monospace; font-size: 12px; }
 .chart-foot { margin-top: 10px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
 .chart-foot .dim { color: var(--text-faint); }
+/* Per-analyzer recoverable-waste list under the #211 component chart. */
+.waste-list { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
+.waste-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; }
+.waste-name { font-family: 'Geist Mono', monospace; }
+.waste-rec { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.waste-caveat { font-size: 11px; color: var(--text-faint); margin: 0 0 6px; max-width: 70ch; }
 .drill-link { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; white-space: nowrap; }
 .drill-link:hover { text-decoration: underline; }
 /* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
@@ -911,6 +981,18 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   font-family: 'Geist Mono', monospace;
   font-size: 12px;
   color: var(--text-dim);
+}
+.plan-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 9px;
+  letter-spacing: 0.02em;
 }
 /* Low-key loading shimmer (no full-page loader). */
 .shimmer {
@@ -993,6 +1075,7 @@ a.health-tile.attn { border-color: var(--warn); }
   <a href="#/status" class="nav-link" data-view="status"><span class="icon">&bull;</span> Status</a>
   <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Cost</a>
+  <a href="#/analytics" class="nav-link" data-view="analytics"><span class="icon">&#9636;</span> Analytics</a>
   <a href="#/alerts" class="nav-link" data-view="alerts"><span class="icon">!</span> Alerts</a>
   <a href="#/drift" class="nav-link" data-view="drift"><span class="icon">~</span> Drift</a>
   <a href="#/optimize" class="nav-link" data-view="optimize"><span class="icon">&#9889;</span> Optimize</a>
@@ -1101,6 +1184,19 @@ function fmtDur(ms) {
   const s = Math.round((ms % 60000)/1000);
   return m + 'm ' + s + 's';
 }
+// Coarse formatter for long wall-clock spans (resumed sessions run for days).
+// fmtDur tops out at minutes — "3087m" reads as a runaway; this shows "2d 3h".
+function fmtDurLong(ms) {
+  if (ms == null) return '-';
+  if (ms < 60000) return fmtDur(ms);
+  const totalMin = Math.floor(ms/60000);
+  const d = Math.floor(totalMin/1440);
+  const h = Math.floor((totalMin % 1440)/60);
+  const m = totalMin % 60;
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
 function fmtAgo(iso) {
   if (!iso) return '-';
   const d = new Date(iso);
@@ -1196,9 +1292,56 @@ function navigate(view, filters, defaults, param) {
   location.hash = '#/' + view + (param ? '/' + param : '') + (q ? '?' + q : '');
 }
 
+// Build an Analytics deep-link URL from a query object (#229). Overview tiles
+// and the spend headline flow INTO the Analytics explorer pre-filtered to the
+// relevant slice — these are just well-formed Analytics URLs, no new state
+// machine. The Analytics route already honors every param used here (metric,
+// group_by, stack, chart, since, and the agent_id/provider/model/tool dimension
+// filters — see AnalyticsView). Empty values are dropped so URLs stay clean.
+function analyticsHref(q) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(q || {})) {
+    if (v != null && v !== '') sp.set(k, v);
+  }
+  const s = sp.toString();
+  return '#/analytics' + (s ? '?' + s : '');
+}
+
 // --- Charts (uPlot, issue #112) ---
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// Shared series→color map (#228). ONE place that turns a series NAME (model /
+// agent / tool-category / …) into a stable hue from the --chart-1..12 palette,
+// so a given series is the SAME color on every chart and screen — never a
+// per-chart palette indexed by draw order. Every colored surface (leaderboard,
+// stacked bars, multi-series spend) must route through this; do not introduce a
+// second palette. 'other'/'(none)' buckets read as a neutral grey so the
+// catch-all never masquerades as a real series.
+// The palette is 12 hues (#234) so the name-hash rarely collides on real data
+// (~4+ series/chart); the stable-hash mapping is unchanged, only the size grew.
+function colorFor(name) {
+  const s = String(name == null ? '' : name);
+  if (s === 'other' || s === '(none)' || s === '') return cssVar('--text-dim') || '#a1a1a1';
+  const palette = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(i => cssVar('--chart-' + i)).filter(Boolean);
+  if (!palette.length) return '#3d8eff';
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return palette[h % palette.length];
+}
+
+// Format a group/series key for display. A TIME dimension (Day) carries raw
+// epoch-second keys; render them as dates, never the raw integer (#227). Other
+// dimensions pass through unchanged.
+function formatGroupLabel(name, dim) {
+  if (dim === 'day') {
+    const n = Number(name);
+    if (Number.isFinite(n) && n > 1e9) {
+      return new Date(n * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    }
+  }
+  return name;
 }
 
 // Minimal time-series line/area chart over the vendored uPlot global. `data`
@@ -1228,15 +1371,32 @@ function runRateProjection(windowTotal, since, days = 1) {
   return (windowTotal / Math.max(windowDays(since), 1 / 24)) * days;
 }
 
-// Days left in the current calendar cycle (this month) + its name. The run-rate
+// Days left in the current billing cycle + a caption label. The run-rate
 // projection is cycle-relative ("~$X by end of June") rather than a fixed ×30,
 // which was circular at a 30d window and undershot at 90d (#134, matches
-// lens-architecture §10).
-function cycleRemaining() {
+// lens-architecture §10). Honors the server-provided cycle bounds, which
+// respect [budget.<provider>] cycle_start_day (#138) — so a non-calendar
+// cycle (e.g. start_day=15) reads "by Jul 15", not "by end of June". Falls
+// back to the calendar month when the cost response carries no cycle block.
+function cycleRemaining(cycle) {
+  if (cycle && typeof cycle.end === 'number') {
+    const days = Math.max(1, cycle.days_remaining || 1);
+    let label;
+    if ((cycle.start_day || 1) === 1) {
+      // Calendar month: name the month that's ending. cycle.end is 00:00 on the
+      // 1st of the next month, so step back a day to land in the ending month.
+      const m = new Date((cycle.end - 86400) * 1000);
+      label = 'end of ' + m.toLocaleString(undefined, { month: 'long', timeZone: 'UTC' });
+    } else {
+      // Custom cycle: a dated form ("Jul 15"); "end of <month>" would mislead.
+      label = new Date(cycle.end * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    }
+    return { days, label };
+  }
   const now = new Date();
   const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);  // last day of month
   const days = Math.max(1, Math.ceil((end - now) / 86400000));
-  return { days, label: now.toLocaleString(undefined, { month: 'long' }) };
+  return { days, label: 'end of ' + now.toLocaleString(undefined, { month: 'long' }) };
 }
 
 // Compact $-prefixed axis tick formatter (#129): "$0", "$25", "$1.5k" — no
@@ -1250,11 +1410,18 @@ function fmtAxisUsd(v) {
 }
 
 // Consistent time-axis labels (#136). Hourly buckets → "6 PM"; daily → "Jun 15"
-// — one format across every tick, no "6/15/26" mixed with "6/16". Formatted in
-// UTC to match the UTC-aligned buckets.
+// — one format across every tick, no "6/15/26" mixed with "6/16". The server
+// sends UTC epoch-second buckets.
+// Hourly ticks render in the browser's LOCAL timezone (#178) — a US-Pacific
+// user sees "12 PM", not UTC's "7 PM" — since an hour label is meaningful in
+// the viewer's zone. Daily labels, however, stay UTC (#188): the buckets are
+// UTC-day-aligned server-side, so localizing a UTC-midnight key would print
+// the PREVIOUS local day for west-of-UTC users and no longer match the bucket's
+// span. (True local-day labels would require local-day bucketing server-side —
+// deferred; see #188.)
 function fmtAxisTime(epoch, bucket) {
   const d = new Date(epoch * 1000);
-  if (bucket === 'hour') return d.toLocaleTimeString(undefined, { hour: 'numeric', timeZone: 'UTC' });
+  if (bucket === 'hour') return d.toLocaleTimeString(undefined, { hour: 'numeric' });
   return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
@@ -1309,7 +1476,10 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ax
     const axisFmt = axisFmtY || fmtY;
     const series = [{}];
     labels.forEach((lab, i) => {
-      const c = palette[i % palette.length] || '#3d8eff';
+      // Single-series charts (e.g. a "Total" line) keep the primary chart hue;
+      // multi-series color by NAME via the shared map (#228) so a model is the
+      // same color here and on every other chart.
+      const c = single ? (palette[0] || '#3d8eff') : colorFor(lab);
       series.push({
         label: lab, stroke: c, width: 2,
         points: { show: data[0].length < 30 },
@@ -1417,6 +1587,270 @@ function RestoreButton({ sessionId }) {
   </button>`;
 }
 
+// Tooltip for the stacked bar chart (#213): maps the cursor back to each
+// segment's ORIGINAL (non-cumulative) value, since the plotted series carry
+// cumulative totals for the back-to-front stacking trick.
+function stackedTooltip(segs, labels, fmtFn) {
+  let tip;
+  return { hooks: {
+    init: (u) => {
+      tip = document.createElement('div'); tip.className = 'u-tip'; tip.style.display = 'none';
+      u.over.appendChild(tip);
+      u.over.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+    },
+    setCursor: (u) => {
+      const idx = u.cursor.idx;
+      if (idx == null) { tip.style.display = 'none'; return; }
+      const d = new Date(u.data[0][idx] * 1000);
+      const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+      const single = labels.length === 1;
+      let rows = '';
+      for (let k = 0; k < segs.length; k++) {
+        const val = segs[k][idx];
+        if (!val) continue;
+        // Match the bar color exactly: shared color map by name (#228), primary
+        // hue for a lone series.
+        const c = single ? (palette[0] || '#3d8eff') : colorFor(labels[k] || ('s' + k));
+        rows += `<div class="u-tip-row"><span class="u-tip-dot" style="background:${c}"></span>${labels[k] || ('s' + k)}: ${fmtFn(val)}</div>`;
+      }
+      tip.innerHTML = `<div class="u-tip-date">${dateStr}</div>${rows || '<div class="u-tip-row">—</div>'}`;
+      tip.style.display = 'block';
+      tip.style.left = u.cursor.left + 'px'; tip.style.top = u.cursor.top + 'px';
+    },
+  } };
+}
+
+// Stacked bar chart over the vendored uPlot global (#213). `data` is the uPlot
+// tuple [xs, ys1..ysN] where each ys is an INDEPENDENT (non-stacked) series.
+// We stack by drawing cumulative totals as bars from tallest to shortest, so
+// each shorter bar paints over the taller one's base — a stacked look without
+// uPlot bands (cheap, offline). Used for cost-by-model / cost-by-agent.
+function StackedBarChart({ data, labels = [], height = 200, fmtY = fmtCost, axisFmtY = null, bucket = 'day', showLegend = true }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
+    const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+    const grid = cssVar('--border') || '#1f1f1f';
+    const tick = cssVar('--text-dim') || '#a1a1a1';
+    const width = ref.current.clientWidth || 600;
+    const axisFmt = axisFmtY || fmtY;
+    const xs = data[0];
+    const segs = data.slice(1);                 // original per-series values
+    const n = segs.length;
+    const cum = segs.map(() => xs.map(() => 0)); // cumulative totals
+    for (let i = 0; i < xs.length; i++) {
+      let acc = 0;
+      for (let k = 0; k < n; k++) { acc += (segs[k][i] || 0); cum[k][i] = acc; }
+    }
+    // Draw tallest cumulative first so shorter bars paint on top.
+    const order = []; for (let k = n - 1; k >= 0; k--) order.push(k);
+    const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
+      ? window.uPlot.paths.bars({ size: [0.86, Infinity] }) : undefined;
+    const chartData = [xs, ...order.map(k => cum[k])];
+    const single = labels.length === 1;
+    const series = [{}];
+    order.forEach(k => {
+      const lab = labels[k] || ('s' + k);
+      // Color by series NAME via the shared map (#228); a lone series keeps the
+      // primary hue. Same map the spend line + leaderboard use.
+      const c = single ? (palette[0] || '#3d8eff') : colorFor(lab);
+      series.push({ label: lab, stroke: c, fill: c, width: 0,
+        paths: barsPath, points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) });
+    });
+    const opts = {
+      width, height, legend: { show: showLegend },
+      cursor: { y: false, points: { show: false } },
+      plugins: [stackedTooltip(segs, labels, fmtY)],
+      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] } },
+      axes: [
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, space: 70,
+          incrs: bucket === 'hour'
+            ? [3600, 2 * 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400]
+            : [86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400],
+          values: (u, splits) => splits.map(s => fmtAxisTime(s, bucket)) },
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, size: 60,
+          values: (u, vals) => vals.map(v => axisFmt(v)) },
+      ],
+      series,
+    };
+    const plot = new window.uPlot(opts, chartData, ref.current);
+    const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
+  }, [data, labels, height, bucket]);
+  return html`<div class="chart" ref=${ref}></div>`;
+}
+
+// Cache-savings chart (#212): cumulative CAPTURED savings (measured, area, left
+// axis) + per-bucket cache HIT-RATE (%, right axis). An optional dashed
+// "achievable" envelope = cumulative captured + estimated recoverable shows the
+// gap the cache analyzer says is still on the table — framed as "estimated
+// recoverable", never "saved" (Critical Rule 14). Plan-tier framing: captured
+// is rendered in tokens for subscription/local (dollars suppressed).
+function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.uPlot || !cache || !cache[0] || cache[0].length === 0) return;
+    const grid = cssVar('--border') || '#1f1f1f';
+    const tick = cssVar('--text-dim') || '#a1a1a1';
+    const c1 = cssVar('--chart-1') || '#3d8eff';
+    const c2 = cssVar('--chart-2') || '#22c55e';
+    const width = ref.current.clientWidth || 600;
+    const axisFmt = axisFmtY || fmtY;
+    const xs = cache[0];
+    const chartData = [xs, cache[1], hit, env || xs.map(() => null)];
+    const series = [
+      {},
+      { label: 'Captured', stroke: c1, width: 2, fill: c1 + '22',
+        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
+      { label: 'Hit-rate', stroke: c2, width: 2, scale: 'rate', dash: [],
+        points: { show: false }, value: (u, v) => (v == null ? '-' : v.toFixed(0) + '%') },
+      { label: 'Recoverable (est.)', stroke: tick, width: 1, dash: [6, 4], _isRunRate: true,
+        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
+    ];
+    const opts = {
+      width, height, legend: { show: true },
+      cursor: { y: false, focus: { prox: 16 }, points: { size: 5 } },
+      plugins: [chartTooltipPlugin(fmtY)],
+      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] }, rate: { range: [0, 100] } },
+      axes: [
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, space: 70,
+          incrs: bucket === 'hour'
+            ? [3600, 2 * 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400]
+            : [86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400],
+          values: (u, splits) => splits.map(s => fmtAxisTime(s, bucket)) },
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
+          size: 60, values: (u, vals) => vals.map(v => axisFmt(v)) },
+        { scale: 'rate', side: 1, stroke: tick, grid: { show: false },
+          size: 50, values: (u, vals) => vals.map(v => v + '%') },
+      ],
+      series,
+    };
+    const plot = new window.uPlot(opts, chartData, ref.current);
+    const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
+  }, [cache, hit, env, height, bucket]);
+  return html`<div class="chart" ref=${ref}></div>`;
+}
+
+// Cost-by-component + recoverable-waste overlay (#211, the differentiator).
+// TWO ordinal columns: "Cost" stacked by the four token components (measured
+// spend) and "Recoverable (est.)" stacked by analyzer (estimated waste). They
+// are SEPARATE bars — recoverable is never subtracted from cost and never
+// called "saved" (Critical Rule 14). `costSegs` = [{label,value,color}],
+// `recSegs` = [{title,value,...}] already framed ($ or tokens) by the caller.
+// Stacking reuses the back-to-front cumulative-bars trick; each series is
+// non-zero in only ONE column, so per-column stacks stay independent.
+function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.uPlot) return;
+    const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+    const grid = cssVar('--border') || '#1f1f1f';
+    const tick = cssVar('--text-dim') || '#a1a1a1';
+    const width = ref.current.clientWidth || 600;
+    const xs = [0, 1];                          // Cost | Recoverable (est.)
+    // Per-column cumulative (within-column) so the back-to-front bars stack
+    // independently; 0 in the other column → invisible there.
+    const series = [{}];
+    const cols = [];                            // data columns (cumulative)
+    const meta = [];                            // {label, color, raw, col}
+    let accC = 0;
+    costSegs.forEach((s, i) => {
+      accC += (s.value || 0);
+      cols.push([accC, 0]);
+      meta.push({ label: s.label, color: s.color || palette[i % palette.length], raw: s.value || 0, col: 0 });
+    });
+    let accR = 0;
+    recSegs.forEach((s, i) => {
+      accR += (s.value || 0);
+      cols.push([0, accR]);
+      meta.push({ label: s.title, color: palette[(costSegs.length + i) % palette.length], raw: s.value || 0, col: 1 });
+    });
+    // Draw tallest cumulative first (within each column) so shorter bars paint
+    // on top. Sort indices by cumulative descending; cross-column order is moot.
+    const order = meta.map((_, i) => i).sort((a, b) => {
+      const ca = cols[a][meta[a].col], cb = cols[b][meta[b].col];
+      return cb - ca;
+    });
+    const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
+      ? window.uPlot.paths.bars({ size: [0.5, 80] }) : undefined;
+    const chartData = [xs, ...order.map(k => cols[k])];
+    order.forEach(k => {
+      series.push({ label: meta[k].label, stroke: meta[k].color, fill: meta[k].color,
+        width: 0, paths: barsPath, points: { show: false },
+        value: (u, v) => (v == null ? '-' : fmtY(v)) });
+    });
+    const opts = {
+      width, height, legend: { show: false },
+      cursor: { x: false, y: false, points: { show: false } },
+      plugins: [componentWasteTooltip(meta, fmtY)],
+      scales: { x: { time: false, range: [-0.5, 1.5] } },
+      axes: [
+        { stroke: tick, grid: { show: false }, ticks: { stroke: grid },
+          splits: [0, 1], values: () => ['Cost', 'Recoverable (est.)'] },
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
+          size: 60, values: (u, vals) => vals.map(v => fmtY(v)) },
+      ],
+      series,
+    };
+    const plot = new window.uPlot(opts, chartData, ref.current);
+    const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
+  }, [costSegs, recSegs, height]);
+  return html`<div class="chart" ref=${ref}></div>`;
+}
+
+// Tooltip for the component-waste chart: lists the segments of the hovered
+// column with their raw (un-cumulated) framed values.
+function componentWasteTooltip(meta, fmtFn) {
+  let tip;
+  return { hooks: {
+    init: (u) => {
+      tip = document.createElement('div'); tip.className = 'u-tip'; tip.style.display = 'none';
+      u.over.appendChild(tip);
+      u.over.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+    },
+    setCursor: (u) => {
+      const idx = u.cursor.idx;
+      if (idx == null) { tip.style.display = 'none'; return; }
+      const col = u.data[0][idx];               // 0 = Cost, 1 = Recoverable
+      const title = col === 0 ? 'Cost by component' : 'Estimated recoverable';
+      let rows = '';
+      meta.forEach(m => {
+        if (m.col !== col || !m.raw) return;
+        rows += `<div class="u-tip-row"><span class="u-tip-dot" style="background:${m.color}"></span>${m.label}: ${fmtFn(m.raw)}</div>`;
+      });
+      tip.innerHTML = `<div class="u-tip-date">${title}</div>${rows || '<div class="u-tip-row">—</div>'}`;
+      tip.style.display = 'block';
+      tip.style.left = u.cursor.left + 'px'; tip.style.top = u.cursor.top + 'px';
+    },
+  } };
+}
+
+// Build the cost-by-component + recoverable overlay from a /cost/components
+// response. `useTokens` (subscription/local) swaps measured cost $ → token
+// volume and recoverable $ → recoverable tokens, so the whole surface respects
+// plan-tier framing. Returns null when there's nothing to show.
+function buildComponentWaste(resp, useTokens) {
+  if (!resp || !resp.components) return null;
+  const costSegs = resp.components.map(c => ({
+    label: c.label, value: useTokens ? (c.tokens || 0) : (c.cost_usd || 0),
+  }));
+  const recSegs = (resp.recoverable || []).map(r => ({
+    title: r.title, component: r.component,
+    value: useTokens ? (r.estimated_recoverable_tokens || 0) : (r.estimated_recoverable_usd || 0),
+    usd: r.estimated_recoverable_usd, tokens: r.estimated_recoverable_tokens,
+    basis: r.estimate_basis || '', caveat: r.caveat || '',
+  })).filter(r => r.value > 0);
+  const totalCost = costSegs.reduce((s, c) => s + c.value, 0);
+  if (totalCost <= 0 && recSegs.length === 0) return null;
+  return { costSegs, recSegs };
+}
+
 // ============================
 // Status View
 // ============================
@@ -1478,10 +1912,11 @@ function StatusView({ params }) {
           </div>
           ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
           ${a.session_id ? html`<div class="card-row"><span class="label">Session</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.session_id.slice(0, 8)}</span></div>` : null}
-          <div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(a.total_cost_usd)}</span></div>
+          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtFramedDollar(a.cost_today, data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
-          ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(a.duration_seconds * 1000)}</span></div>` : null}
+          ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
+          ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
         </div>`;
@@ -2113,6 +2548,10 @@ function SessionDetailView({ sessionId }) {
   const ctxMax = contextSeries.reduce((m, p) => Math.max(m, p.input_tokens || 0), 0);
   const isSub = s.pricing_mode === 'subscription';
   const isLocal = s.pricing_mode === 'local';
+  // Plan-tier framing for this session's cost cells. The /sessions/<id> payload
+  // may not carry a framing block yet, in which case fmtFramedDollar falls back
+  // to raw fmtCost — never re-derive the suppression rules in JS (#191).
+  const framing = data.framing || null;
   const title = s.label || s.agent_id;
 
   return html`
@@ -2134,7 +2573,7 @@ function SessionDetailView({ sessionId }) {
         ${s.namespace ? html`<div class="card-row"><span class="label">Project</span><span class="value">${s.namespace}</span></div>` : null}
         ${s.run_id ? html`<div class="card-row"><span class="label">Run</span><span class="value clickable" onClick=${() => location.hash = '#/runs/' + s.run_id} title=${'Run ' + s.run_id} style="cursor:pointer;color:var(--brand);font-family:'Geist Mono',monospace;font-size:12px">${s.run_id.slice(0, 12)} →</span></div>` : null}
         <div class="card-row"><span class="label">Plan</span><span class="value">${s.plan_tier}</span></div>
-        ${s.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(s.duration_seconds * 1000)}</span></div>` : null}
+        ${s.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed</span><span class="value">${fmtDurLong(s.duration_seconds * 1000)}</span></div>` : null}
         ${s.started_at ? html`<div class="card-row"><span class="label">Started</span><span class="value">${fmtAgo(s.started_at)}</span></div>` : null}
         ${s.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(s.last_span_time)}</span></div>` : null}
         <div class="card-row"><span class="label">Conversations</span><span class="value">${s.conversation_count}</span></div>
@@ -2237,7 +2676,7 @@ function SessionDetailView({ sessionId }) {
               <td>${fmtTokens(r.input_tokens)}</td>
               <td>${(r.cache_tokens + r.cache_write_tokens) ? fmtTokens(r.cache_tokens + r.cache_write_tokens) : '-'}</td>
               <td>${fmtTokens(r.output_tokens)}</td>
-              <td>${fmtCost(r.cost_usd)}</td>
+              <td>${fmtFramedDollar(r.cost_usd, framing)}</td>
               <td>${r.flags.length ? r.flags.map(f => html`<span style="color:#f5a623;font-size:11px;white-space:nowrap;margin-right:6px">${f.replace(/_/g, '-')}</span>`) : html`<span style="color:var(--text-dim)">-</span>`}</td>
             </tr>
           `)}
@@ -2292,7 +2731,7 @@ function SessionDetailView({ sessionId }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtCost(t.cost_usd)}</td>
+              <td>${fmtFramedDollar(t.cost_usd, framing)}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${t.span_count}</td>
               <td class="chevron">→</td>
@@ -2419,6 +2858,7 @@ function TracesListView({ params }) {
   const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, [k]: v }, DEFAULTS);
 
   const [traces, setTraces] = useState([]);
+  const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
 
   const load = useCallback(async () => {
@@ -2427,6 +2867,7 @@ function TracesListView({ params }) {
       api('/status'),
     ]);
     setTraces(td.traces || []);
+    setFraming(td.framing || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
@@ -2463,7 +2904,7 @@ function TracesListView({ params }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtCost(t.cost_usd)}</td>
+              <td>${fmtFramedDollar(t.cost_usd, framing)}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${st ? html`<span class="status-dot ${st}" style="margin-right:5px"></span><span class="badge badge-${st}">${st}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
               <td>${t.span_count}</td>
@@ -2490,12 +2931,13 @@ function dedup(traces) {
 // ============================
 function TraceDetailView({ traceId }) {
   const [spans, setSpans] = useState([]);
+  const [framing, setFraming] = useState(null);
   const [selected, setSelected] = useState(null);
 
   // Poll so a live trace's spans appear without re-navigating. Selection is
   // tracked by span_id, so replacing the spans array preserves it.
   const load = useCallback(() => {
-    api('/traces/' + traceId).then(d => setSpans(d.spans || [])).catch(() => {});
+    api('/traces/' + traceId).then(d => { setSpans(d.spans || []); setFraming(d.framing || null); }).catch(() => {});
   }, [traceId]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
@@ -2532,6 +2974,18 @@ function TraceDetailView({ traceId }) {
   const rows = flatten(roots, 0);
   const labelW = 100;
 
+  // Cost-first annotation (#215). Plan-tier framing: when dollars are suppressed
+  // (subscription/local), the magnitude bar + summary read on TOKEN volume, never
+  // raw spend — the suppression decision comes from the server framing block, not
+  // re-derived here. Tokens are never suppressed, so they always annotate.
+  const spanTokens = s => (s.input_tokens || 0) + (s.output_tokens || 0) + (s.cache_tokens || 0) + (s.cache_write_tokens || 0);
+  const wfUseTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0);
+  const wfMaxMag = Math.max(0, ...rows.map(r => wfMagOf(r.span)));
+  const wfTotalCost = spans.reduce((a, s) => a + (s.cost_usd || 0), 0);
+  const wfTotalTokens = spans.reduce((a, s) => a + spanTokens(s), 0);
+  const wfTotalCostFramed = fmtFramedDollar(wfTotalCost, framing);
+
   const sel = selected ? spans.find(s => s.span_id === selected) : null;
 
   // Determine agent name from root span
@@ -2542,6 +2996,17 @@ function TraceDetailView({ traceId }) {
     <button class="btn btn-back" onClick=${() => location.hash = '#/traces'}>\u2190 Back to traces</button>
     <div class="page-title">Trace details for ${agentName}</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
+    <div class="wf-summary">
+      <span>Total cost <b>${wfTotalCostFramed}</b></span>
+      <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
+      <span>Duration <b>${fmtDur(traceDur)}</b></span>
+      <span><b>${spans.length}</b> spans</span>
+    </div>
+    <div class="wf-head">
+      <div class="wf-label" style="width:${labelW}px;padding-left:8px">Span</div>
+      <div class="wf-track">Timeline</div>
+      <div class="wf-cost">Cost / tokens</div>
+    </div>
     <div class="waterfall">
       ${rows.map(({ span: s, depth }) => {
         const st = new Date(s.start_time).getTime() - traceStart;
@@ -2552,10 +3017,17 @@ function TraceDetailView({ traceId }) {
         const friendly = friendlySpanName(s.name);
         const isAgent = kind === 'agent';
         const detail = s.model || s.tool_name || '';
-        const costStr = s.cost_usd != null && s.cost_usd > 0 ? ' \u2014 ' + fmtCost(s.cost_usd) : '';
+        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local \u2192 "\u2014"
+        // (suppressed; omitted from the compact bar label), api/unknown \u2192 "$X".
+        const costFramed = fmtFramedDollar(s.cost_usd, framing);
+        // Cost now lives in the dedicated annotation column (#215); the bar label
+        // stays focused on what/how-long so the two reads don't compete.
         const barLabel = isAgent
-          ? fmtDur(s.duration_ms) + costStr
-          : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms) + costStr;
+          ? fmtDur(s.duration_ms)
+          : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms);
+        const sTok = spanTokens(s);
+        const costShown = s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
+        const wfFrac = wfMaxMag > 0 ? (wfMagOf(s) / wfMaxMag * 100) : 0;
         const tipLines = [friendly];
         tipLines.push('Duration: ' + fmtDur(s.duration_ms));
         if (s.provider) tipLines.push('Provider: ' + s.provider);
@@ -2565,7 +3037,7 @@ function TraceDetailView({ traceId }) {
         if (s.output_tokens != null) tipLines.push('Output tokens: ' + fmtTokens(s.output_tokens));
         if (s.cache_tokens) tipLines.push('Cache read: ' + fmtTokens(s.cache_tokens));
         if (s.cache_write_tokens) tipLines.push('Cache write: ' + fmtTokens(s.cache_write_tokens));
-        if (s.cost_usd != null) tipLines.push('Cost: ' + fmtCost(s.cost_usd));
+        if (s.cost_usd != null && costFramed !== '—') tipLines.push('Cost: ' + costFramed);
         const tooltip = tipLines.join('\n');
         return html`
           <div class="wf-row ${selected === s.span_id ? 'selected' : ''}" onClick=${() => setSelected(s.span_id)}>
@@ -2575,6 +3047,11 @@ function TraceDetailView({ traceId }) {
                 <div class="wf-bar ${kind}" style="width:100%">${barLabel}</div>
                 <div class="wf-tip">${tooltip}</div>
               </div>
+            </div>
+            <div class="wf-cost">
+              <div class="wf-cost-bar"><div class="wf-cost-fill" style="width:${wfFrac.toFixed(1)}%"></div></div>
+              <span class="wf-cost-val">${costShown ? costFramed : ''}</span>
+              <span class="wf-cost-tok">${sTok ? fmtTokens(sTok) : ''}</span>
             </div>
           </div>
         `;
@@ -2595,7 +3072,7 @@ function TraceDetailView({ traceId }) {
           ${sel.output_tokens != null ? html`<span class="dk">Output tokens</span><span class="dv">${fmtTokens(sel.output_tokens)}</span>` : null}
           ${sel.cache_tokens ? html`<span class="dk">Cache read</span><span class="dv">${fmtTokens(sel.cache_tokens)}</span>` : null}
           ${sel.cache_write_tokens ? html`<span class="dk">Cache write</span><span class="dv">${fmtTokens(sel.cache_write_tokens)}</span>` : null}
-          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtCost(sel.cost_usd)}</span>` : null}
+          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtFramedDollar(sel.cost_usd, framing)}</span>` : null}
           ${sel.agent_id ? html`<span class="dk">Agent</span><span class="dv">${sel.agent_id}</span>` : null}
           ${sel.conversation_id ? html`<span class="dk">Conversation</span><span class="dv">${sel.conversation_id}</span>` : null}
           ${sel.session_id ? html`<span class="dk">Session</span><span class="dv">${sel.session_id}</span>` : null}
@@ -2625,6 +3102,19 @@ function fmtFramedDollar(v, framing) {
   return fmtCost(v); // api / unknown
 }
 
+// Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
+// the warning `qualifier` banner — confirms api / subscription / local mode.
+function PlanBadge({ framing }) {
+  if (!framing || framing.pricing_mode === 'unknown') return null;
+  const labels = (framing.plan_labels && framing.plan_labels.length)
+    ? framing.plan_labels
+    : (framing.plan_label ? [framing.plan_label] : []);
+  if (!labels.length) return null;
+  return html`${labels.map(l => html`
+    <span class="plan-badge" title="Billing mode from your tj config">${l}</span>
+  `)}`;
+}
+
 // Trend chip: ▲ (up, red) / ▼ (down, green) with a percentage.
 function TrendChip({ pct }) {
   if (pct == null) return null;
@@ -2632,6 +3122,68 @@ function TrendChip({ pct }) {
   const arrow = pct === 0 ? '·' : up ? '▲' : '▼';
   const color = pct === 0 ? 'var(--text-dim)' : up ? 'var(--error)' : 'var(--success)';
   return html`<span class="trend-chip" style="color:${color}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev</span>`;
+}
+
+// Signed period-over-period delta chip for KPI tiles (#217). `cost`=true uses
+// the spend semantic (up = red/attention, down = green); volume metrics
+// (tokens/sessions/events) stay neutral — more isn't inherently "bad".
+function DeltaChip({ pct, cost }) {
+  if (pct == null) return null;
+  const up = pct > 0;
+  const arrow = pct === 0 ? '·' : up ? '▲' : '▼';
+  const color = cost
+    ? (pct === 0 ? 'var(--text-dim)' : up ? 'var(--error)' : 'var(--success)')
+    : 'var(--text-dim)';
+  return html`<span class="delta-chip" style="color:${color}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev</span>`;
+}
+
+// Inline-SVG sparkline (#217) — lightweight + offline; avoids spinning up a
+// uPlot instance per KPI tile. `values` is a numeric series (already in the
+// plan-tier-appropriate unit chosen by the caller). Draws a normalized polyline
+// over a faint area fill.
+function Sparkline({ values, color = 'var(--accent)', width = 92, height = 26 }) {
+  const vs = (values || []).filter(v => typeof v === 'number' && !isNaN(v));
+  if (vs.length < 2) return html`<div class="spark-empty" style=${'width:' + width + 'px;height:' + height + 'px'}></div>`;
+  const max = Math.max(...vs), min = Math.min(...vs);
+  const span = (max - min) || 1;
+  const n = vs.length;
+  const px = i => (i / (n - 1)) * width;
+  const py = v => height - ((v - min) / span) * (height - 4) - 2;
+  const line = vs.map((v, i) => px(i).toFixed(1) + ',' + py(v).toFixed(1)).join(' ');
+  const area = 'M0,' + height + ' L' + vs.map((v, i) => px(i).toFixed(1) + ',' + py(v).toFixed(1)).join(' L') + ' L' + width.toFixed(1) + ',' + height + ' Z';
+  return html`<svg class="spark" width=${width} height=${height} viewBox=${'0 0 ' + width + ' ' + height} preserveAspectRatio="none">
+    <path d=${area} fill=${color} opacity="0.13"></path>
+    <polyline points=${line} fill="none" stroke=${color} stroke-width="1.5"></polyline>
+  </svg>`;
+}
+
+// A trend-aware KPI tile (#217): value + sparkline + signed delta. The caller
+// passes series/delta already in the right unit (token-share for a suppressed
+// Spend tile), so framing is decided once upstream — never re-derived here.
+function KpiTile({ label, value, active, series, delta, cost }) {
+  return html`<div class=${'kpi-tile' + (active ? ' kpi-active' : '')}>
+    <div class="kpi-top">
+      <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div></div>
+      <${Sparkline} values=${series} />
+    </div>
+    <${DeltaChip} pct=${delta} cost=${cost} />
+  </div>`;
+}
+
+// Zero-filled per-bucket values for one KPI metric from the analytics
+// `kpi_series` (server-computed; the UI never aggregates per-bucket — single
+// compute path). Spans the full window via the shared grid so the sparkline
+// shape matches the chart's window.
+function kpiSparkValues(resp, metric) {
+  const grid = _windowGrid({ ...resp, series: resp.kpi_series });
+  if (!grid) return (resp.kpi_series || []).map(b => b[metric] || 0);
+  const { xs, idx, step } = grid;
+  const ys = xs.map(() => 0);
+  (resp.kpi_series || []).forEach(b => {
+    const t = Math.floor(b.bucket / step) * step;
+    if (t in idx) ys[idx[t]] += (b[metric] || 0);
+  });
+  return ys;
 }
 
 // Build a uPlot [xs, ys...] series from day-grouped cost rows. `mode` is
@@ -2646,30 +3198,48 @@ function _costVal(r, useTokens) {
 // FULL selected window (zero-filled across empty buckets) so 7d/30d/90d look
 // distinct and idle periods show as $0 (#133). `resp` carries epoch-second
 // `series` buckets, `series_bucket` ('hour'|'day'), and `window_start/end`.
+// Upper bound on grid points handed to uPlot. Past this the chart coarsens its
+// bucket (hour->day->week) rather than returning null and rendering an empty
+// state (#139) — graceful degradation, never silent truncation.
+const MAX_BUCKETS = 5000;
+const _BUCKET_LADDER = [['hour', 3600], ['day', 86400], ['week', 604800]];
+
 function buildCostSeries(resp, mode, useTokens) {
   const rows = (resp && resp.series) || [];
-  const bucket = (resp && resp.series_bucket) || 'day';
-  const step = bucket === 'hour' ? 3600 : 86400;
+  const reqBucket = (resp && resp.series_bucket) || 'day';
   let start = resp && resp.window_start;
   let end = resp && resp.window_end;
   if (start == null || end == null) {
-    if (!rows.length) return null;
+    if (!rows.length) return null;  // genuinely no data -> "No spend" empty state
     const bs = rows.map(r => r.bucket);
     start = Math.min(...bs); end = Math.max(...bs);
   }
+  if (!(end >= start)) return null;
+  // Pick the FINEST bucket (starting from the server-requested one) whose grid
+  // stays within MAX_BUCKETS. Long windows (or future finer bucketing) coarsen
+  // up the ladder instead of silently emptying the chart (#139). Counting is
+  // closed-form so we never build an oversized array just to discard it.
+  let reqIdx = _BUCKET_LADDER.findIndex(b => b[0] === reqBucket);
+  if (reqIdx < 0) reqIdx = 1;  // unknown bucket name -> treat as daily
+  let bucket = _BUCKET_LADDER[reqIdx][0], step = _BUCKET_LADDER[reqIdx][1];
+  for (let i = reqIdx; i < _BUCKET_LADDER.length; i++) {
+    const s = _BUCKET_LADDER[i][1];
+    const count = (Math.floor(end / s) - Math.floor(start / s)) + 1;
+    bucket = _BUCKET_LADDER[i][0]; step = s;
+    if (count <= MAX_BUCKETS) break;  // fits; coarsest is kept if none do
+  }
+  const coarsened = bucket !== reqBucket;
   // Align bounds to bucket boundaries and build the full grid.
   start = Math.floor(start / step) * step;
   end = Math.floor(end / step) * step;
-  if (!(end >= start)) return null;
   const xs = [];
   for (let t = start; t <= end; t += step) xs.push(t);
-  if (!xs.length || xs.length > 5000) return null;  // guard pathological ranges
   const idx = {}; xs.forEach((t, i) => { idx[t] = i; });
   const bucketOf = r => Math.floor(r.bucket / step) * step;
   if (mode === 'total') {
     const ys = xs.map(() => 0);
     rows.forEach(r => { const b = bucketOf(r); if (b in idx) ys[idx[b]] += _costVal(r, useTokens); });
-    return { data: [xs, ys], labels: ['Total'], bucket };
+    return { data: [xs, ys], labels: ['Total'], bucket, coarsened, requestedBucket: reqBucket };
   }
   const keyOf = mode === 'model' ? (r => r.model || '(none)') : (r => r.agent_id || '(none)');
   const totals = {};
@@ -2685,7 +3255,61 @@ function buildCostSeries(resp, mode, useTokens) {
     const li = topSet.has(k) ? labels.indexOf(k) : (hasOther ? labels.length - 1 : -1);
     if (li >= 0) yss[li][idx[b]] += _costVal(r, useTokens);
   });
-  return { data: [xs, ...yss], labels, bucket };
+  return { data: [xs, ...yss], labels, bucket, coarsened, requestedBucket: reqBucket };
+}
+
+// Shared window grid from a series response (epoch `window_start/end` +
+// `series_bucket`). Returns the zero-filled bucket xs + an index map, coarsening
+// up the bucket ladder past MAX_BUCKETS (#139). Used by the cache-savings chart
+// (#212); buildCostSeries keeps its own inline copy for the stacked cost chart.
+function _windowGrid(resp) {
+  const rows = (resp && resp.series) || [];
+  const reqBucket = (resp && resp.series_bucket) || 'day';
+  let start = resp && resp.window_start, end = resp && resp.window_end;
+  if (start == null || end == null) {
+    if (!rows.length) return null;
+    const bs = rows.map(r => r.bucket); start = Math.min(...bs); end = Math.max(...bs);
+  }
+  if (!(end >= start)) return null;
+  let reqIdx = _BUCKET_LADDER.findIndex(b => b[0] === reqBucket); if (reqIdx < 0) reqIdx = 1;
+  let bucket = _BUCKET_LADDER[reqIdx][0], step = _BUCKET_LADDER[reqIdx][1];
+  for (let i = reqIdx; i < _BUCKET_LADDER.length; i++) {
+    const s = _BUCKET_LADDER[i][1];
+    const count = (Math.floor(end / s) - Math.floor(start / s)) + 1;
+    bucket = _BUCKET_LADDER[i][0]; step = s;
+    if (count <= MAX_BUCKETS) break;
+  }
+  const coarsened = bucket !== reqBucket;
+  start = Math.floor(start / step) * step; end = Math.floor(end / step) * step;
+  const xs = []; for (let t = start; t <= end; t += step) xs.push(t);
+  const idx = {}; xs.forEach((t, i) => { idx[t] = i; });
+  return { xs, idx, step, bucket, coarsened, reqBucket };
+}
+
+// Build the cache-savings chart series (#212) from a /cost/cache response.
+// `useTokens` swaps captured dollars for captured tokens (subscription/local
+// framing). Returns cumulative captured, per-bucket hit-rate (%), and an
+// "achievable" envelope = cumulative captured + estimated recoverable (or null
+// when the analyzer surfaced nothing). Hit-rate is a token ratio, always shown.
+function buildCacheSeries(resp, useTokens) {
+  const grid = _windowGrid(resp); if (!grid) return null;
+  const { xs, idx, step, bucket } = grid;
+  const rows = (resp && resp.series) || [];
+  const cap = xs.map(() => 0), read = xs.map(() => 0), inp = xs.map(() => 0);
+  rows.forEach(r => {
+    const b = Math.floor(r.bucket / step) * step; if (!(b in idx)) return;
+    const i = idx[b];
+    cap[i] += useTokens ? (r.captured_tokens || 0) : (r.captured_usd || 0);
+    read[i] += r.cache_read_tokens || 0; inp[i] += r.input_tokens || 0;
+  });
+  const cum = xs.map(() => 0); let acc = 0;
+  for (let i = 0; i < xs.length; i++) { acc += cap[i]; cum[i] = acc; }
+  const hit = xs.map((_, i) => { const d = read[i] + inp[i]; return d > 0 ? (100 * read[i] / d) : 0; });
+  const recoverable = useTokens
+    ? (resp.estimated_recoverable_tokens || 0)
+    : (resp.estimated_recoverable_usd || 0);
+  const env = recoverable > 0 ? cum.map(v => v + recoverable) : null;
+  return { data: [xs, cum], hit, env, recoverable, bucket, coarsened: grid.coarsened };
 }
 
 function CostView({ params }) {
@@ -2697,7 +3321,7 @@ function CostView({ params }) {
   const setFilter = (k, v) => navigate('cost', { since, group_by: groupBy, agent_id: agentId, [k]: v }, DEFAULTS);
 
   const [st, setSt] = useState({ loading: true, error: null, rows: [], total: 0,
-    totalTokens: 0, framing: null, costResp: null, compare: null });
+    totalTokens: 0, framing: null, costResp: null, compare: null, cacheResp: null });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: s.rows.length === 0, error: null }));
@@ -2710,11 +3334,17 @@ function CostView({ params }) {
       try {
         compare = await api('/cost/compare', { since, compare: 'previous', agent_id: agentId || undefined });
       } catch (_) { compare = null; }
+      // Cache-savings series (#212). Best-effort: a failure here must not blank
+      // the cost screen, so it falls back to null (card renders nothing).
+      let cacheResp = null;
+      try {
+        cacheResp = await api('/cost/cache', { since, agent_id: agentId || undefined });
+      } catch (_) { cacheResp = null; }
       const totalTokens = d.total_tokens != null
         ? d.total_tokens
         : (d.rows || []).reduce((s, r) => s + (r.input_tokens || 0) + (r.output_tokens || 0), 0);
       setSt({ loading: false, error: null, rows: d.rows || [], total: d.total_cost_usd || 0,
-        totalTokens, framing: d.framing || null, costResp: d, compare });
+        totalTokens, framing: d.framing || null, costResp: d, compare, cacheResp });
     } catch (e) {
       setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -2722,15 +3352,16 @@ function CostView({ params }) {
 
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
-  const { loading, error, rows, total, totalTokens, framing, costResp, compare } = st;
+  const { loading, error, rows, total, totalTokens, framing, costResp, compare, cacheResp } = st;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   const series = buildCostSeries(costResp, groupBy, useTokens);
   const fmtY = useTokens ? fmtTokens : fmtCost;
+  const cacheSeries = buildCacheSeries(cacheResp, useTokens);
 
   // Run-rate (total view only): per-day average over the FULL window length
-  // (not the data range — #129), projected to the end of the calendar cycle
-  // (#134), drawn as a dashed line. Single linear figure, no forecasting.
-  const cyc = cycleRemaining();
+  // (not the data range — #129), projected to the end of the billing cycle
+  // (#134/#138), drawn as a dashed line. Single linear figure, no forecasting.
+  const cyc = cycleRemaining(costResp && costResp.cycle);
   let runRate = null, projection = null;
   if (groupBy === 'total' && series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? totalTokens : total;
@@ -2746,7 +3377,9 @@ function CostView({ params }) {
   const totalOut = rows.reduce((s, r) => s + (r.output_tokens || 0), 0);
 
   return html`
-    <div class="page-title">Cost</div>
+    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      Cost <${PlanBadge} framing=${framing} />
+    </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="24h">Last 24h</option>
@@ -2775,19 +3408,44 @@ function CostView({ params }) {
     ${!error ? html`
       <div class="chart-card">
         <div class="chart-head">
-          <div class="chart-title">Spend over time ${useTokens ? '(tokens)' : ''}</div>
+          <div class="chart-title">Spend over time ${groupBy === 'model' ? 'by model' : groupBy === 'agent' ? 'by agent' : ''} ${useTokens ? '(tokens)' : ''}</div>
           <div class="chart-meta">
             <span class="chart-total">${totalDisplay}</span>
             <${TrendChip} pct=${trendPct} />
           </div>
         </div>
         ${loading ? html`<div class="shimmer" style="height:160px"></div>`
-          : series ? html`
+          : series ? (groupBy === 'total' ? html`
             <${SpendChart} data=${series.data} labels=${series.labels} height=${160}
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate}
-              showLegend=${groupBy !== 'total'} bucket=${series.bucket} />
-            ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by end of ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
-          ` : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
+              showLegend=${false} bucket=${series.bucket} />
+            ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+          ` : html`
+            <${StackedBarChart} data=${series.data} labels=${series.labels} height=${200}
+              fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} bucket=${series.bucket} />
+            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+          `) : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
+      </div>
+    ` : null}
+
+    ${!error && cacheSeries ? html`
+      <div class="chart-card">
+        <div class="chart-head">
+          <div class="chart-title">Cache savings over time</div>
+          <div class="chart-meta">
+            <span class="chart-total">${useTokens ? (fmtTokens(cacheResp.total_captured_tokens || 0) + ' tokens captured') : (fmtCost(cacheResp.total_captured_usd || 0) + ' captured')}</span>
+          </div>
+        </div>
+        ${loading ? html`<div class="shimmer" style="height:200px"></div>` : html`
+          <${CacheSavingsChart} cache=${cacheSeries.data} hit=${cacheSeries.hit} env=${cacheSeries.env}
+            height=${200} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd}
+            bucket=${cacheSeries.bucket} />
+          <div class="chart-foot">
+            <span class="dim">Cumulative <b>captured</b> savings (measured) + cache <b>hit-rate</b>.</span>
+            ${cacheSeries.recoverable > 0 ? html` <span class="dim">Dashed line = estimated recoverable: ~${useTokens ? (fmtTokens(cacheResp.estimated_recoverable_tokens || 0) + ' more tokens') : fmtFramedDollar(cacheResp.estimated_recoverable_usd || 0, framing)} more with better caching (estimated, not saved).</span>` : null}
+          </div>
+        `}
       </div>
     ` : null}
 
@@ -2797,7 +3455,7 @@ function CostView({ params }) {
           <th>${tableMode === 'day' ? 'Date' : tableMode === 'agent' ? 'Agent' : 'Model'}</th>
           ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
           ${tableMode !== 'model' ? html`<th>Model</th>` : null}
-          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
+          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
         </tr></thead>
         <tbody>
           ${rows.map(r => html`
@@ -2809,7 +3467,7 @@ function CostView({ params }) {
               <td>${fmtTokens(r.output_tokens)}</td>
               <td>${fmtTokens(r.cache_tokens || 0)}</td>
               <td>${fmtTokens(r.cache_write_tokens || 0)}</td>
-              <td>${fmtCost(r.cost_usd)}</td>
+              <td>${useTokens ? fmtTokens(_costVal(r, true)) : fmtFramedDollar(r.cost_usd, framing)}</td>
             </tr>
           `)}
           <tr style="font-weight:600;border-top:2px solid var(--border)">
@@ -2818,7 +3476,7 @@ function CostView({ params }) {
             <td>${fmtTokens(totalOut)}</td>
             <td>${fmtTokens(rows.reduce((s, r) => s + (r.cache_tokens || 0), 0))}</td>
             <td>${fmtTokens(rows.reduce((s, r) => s + (r.cache_write_tokens || 0), 0))}</td>
-            <td>${fmtCost(total)}</td>
+            <td>${useTokens ? fmtTokens(totalTokens) : fmtFramedDollar(total, framing)}</td>
           </tr>
         </tbody>
       </table></div>
@@ -3137,9 +3795,34 @@ const ANALYZER_META = {
   cache:    { title: 'Cache',    hint: 'Raise cache-read efficacy toward the 80% ceiling' },
   script:   { title: 'Script',   hint: 'Replace a deterministic call-pattern with a script' },
   trim:     { title: 'Trim',     hint: 'Trim low-significance tokens from prompt templates' },
+  reuse:    { title: 'Reuse',    hint: 'Reuse a repeated planning skeleton instead of re-planning' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
+
+// The Analytics slice each recoverable-waste analyzer opens into (#229). A
+// leaderboard (hbar) on the dimension the analyzer reasons over — so a Downsize
+// tile lands on "spend by model", Reuse/Trim on the per-agent view, Script on
+// per-tool. Unknown analyzers fall back to spend-by-model. Values are validated
+// by the Analytics route against ANALYTICS_METRICS / ANALYTICS_DIMENSIONS.
+const ANALYZER_ANALYTICS_SLICE = {
+  downsize: { metric: 'spend',    group_by: 'model', chart: 'hbar' },
+  cache:    { metric: 'tokens',   group_by: 'model', chart: 'hbar' },
+  script:   { metric: 'events',   group_by: 'tool',  chart: 'hbar' },
+  reuse:    { metric: 'sessions', group_by: 'agent', chart: 'hbar' },
+  trim:     { metric: 'tokens',   group_by: 'agent', chart: 'hbar' },
+};
+function analyzerSliceHref(name, since) {
+  const slice = ANALYZER_ANALYTICS_SLICE[name] || { metric: 'spend', group_by: 'model', chart: 'hbar' };
+  return analyticsHref({ ...slice, since });
+}
+
+// Title-case a registry key for display. Centralizes capitalization so a tile
+// for a not-yet-known analyzer still renders title-case instead of the raw
+// lowercase key (#162) — registry keys are lowercase by convention.
+function capitalize(name) {
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
+}
 
 // Mirror core/framing.render_savings: api/unknown → dollars; subscription →
 // token-share of the cycle; local → token count. The mode is server-decided.
@@ -3264,16 +3947,23 @@ function OverviewView({ params }) {
         setD({ loading: false, empty: true, error: null });
         return;
       }
-      // Fetch sequentially, not in parallel: the daemon's single DuckDB
-      // connection isn't safe for concurrent access across the sync routes'
-      // threadpool, and a 6-at-once burst can 500. Six local reads in series
-      // are still well under a frame on a 30s-poll surface.
-      const cost = await api('/cost', { since, group_by: 'day' });
-      const compare = await api('/cost/compare', { since, compare: 'previous' }).catch(() => null);
-      const opt = await api('/optimize', { since, fast: 'true' }).catch(() => null);
-      const al = await api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] }));
-      const drift = await api('/drift').catch(() => ({ agents: [] }));
-      const traces = await api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] }));
+      // Fetch the Overview's panels in PARALLEL: the daemon DB layer is now
+      // concurrency-safe (#124 — per-thread DuckDB cursors), so the #114
+      // serial-fetch workaround is gone. The error handling is deliberately
+      // ASYMMETRIC and must NOT be unified (#124 review):
+      //   - /cost is load-bearing — NO .catch, so its failure rejects the
+      //     Promise.all and surfaces the error state (the page can't render
+      //     without spend data).
+      //   - the other five panels each carry a .catch fallback so one failing
+      //     panel renders empty rather than blanking the whole Overview.
+      const [cost, compare, opt, al, drift, traces] = await Promise.all([
+        api('/cost', { since, group_by: 'day' }),
+        api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
+        api('/optimize', { since, fast: 'true' }).catch(() => null),
+        api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
+        api('/drift').catch(() => ({ agents: [] })),
+        api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
+      ]);
       setD({ loading: false, empty: false, error: null, cost, compare, opt,
         alerts: al.alerts || [], drift, traces: traces.traces || [] });
     } catch (e) {
@@ -3335,7 +4025,7 @@ function OverviewView({ params }) {
   const series = buildCostSeries(cost, 'total', useTokens);
   const totalDisplay = useTokens ? (fmtTokens(cost.total_tokens || 0) + ' tokens') : fmtFramedDollar(cost.total_cost_usd || 0, framing);
   const trendPct = d.compare ? (useTokens ? d.compare.tokens_delta_pct : d.compare.cost_delta_pct) : null;
-  const cyc = cycleRemaining();
+  const cyc = cycleRemaining(cost.cycle);
   let runRate = null, projection = null;
   if (series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
@@ -3352,7 +4042,10 @@ function OverviewView({ params }) {
 
   return html`
     <div class="ov-head">
-      <div class="page-title" style="margin:0">Overview</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="page-title" style="margin:0">Overview</div>
+        <${PlanBadge} framing=${framing} />
+      </div>
       <div class="filters" style="margin:0">${winPicker}</div>
     </div>
     ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
@@ -3361,7 +4054,8 @@ function OverviewView({ params }) {
          the tooltip, #128); drill-through is an explicit link in the header. -->
     <div class="chart-card">
       <div class="chart-head">
-        <div class="chart-title">Spend ${useTokens ? '(tokens) ' : ''}· last ${since}</div>
+        <a class="chart-title" href=${analyticsHref({ metric: 'spend', group_by: 'day', chart: 'bar', since })}
+           title="Explore spend over time in Analytics">Spend ${useTokens ? '(tokens) ' : ''}· last ${since} →</a>
         <div class="chart-meta">
           <span class="chart-total">${totalDisplay}</span>
           <${TrendChip} pct=${trendPct} />
@@ -3370,7 +4064,8 @@ function OverviewView({ params }) {
       </div>
       ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} bucket=${series.bucket} />`
         : html`<div class="empty" style="padding:24px 0">No spend in this window.</div>`}
-      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by end of ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+      ${series && series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
     </div>
 
     <!-- Band 2: Recoverable waste -->
@@ -3378,8 +4073,10 @@ function OverviewView({ params }) {
     <div class="tile-grid">
       ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates in this window.</div>`
         : tiles.map(t => {
-          const meta = ANALYZER_META[t.name] || { title: t.name, hint: '' };
-          const href = '#/optimize?finding=' + t.name + '&since=' + since;
+          const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
+          // Deep-link into the Analytics explorer on this analyzer's slice (#229),
+          // carrying the Overview's current window. The route honors every param.
+          const href = analyzerSliceHref(t.name, since);
           // Four honest states (#127): actionable / at_ceiling / no_findings / not_ready.
           if (t.state === 'actionable') return html`
             <a class="rec-tile" href=${href}>
@@ -3399,13 +4096,14 @@ function OverviewView({ params }) {
               <div class="rec-amount dim">No candidates</div>
               <div class="rec-hint">Nothing actionable in the last ${since}.</div>
             </a>`;
-          // not_ready — the only state that uses the "not ready" framing + hint.
+          // not_ready — the analyzer hasn't run, but its underlying data slice is
+          // still explorable, so the tile stays a deep-link for consistency.
           return html`
-            <div class="rec-tile muted">
+            <a class="rec-tile muted" href=${href}>
               <div class="rec-name">${meta.title}</div>
-              <div class="rec-amount dim">— not ready</div>
+              <div class="rec-amount dim">Not ready</div>
               <div class="rec-hint">${t.hint || meta.hint}</div>
-            </div>`;
+            </a>`;
         })}
     </div>
 
@@ -3426,7 +4124,7 @@ function OverviewView({ params }) {
 
 // ---- Optimize detail screen ----
 function OptimizeFinding({ name, opt, framing }) {
-  const meta = ANALYZER_META[name] || { title: name };
+  const meta = ANALYZER_META[name] || { title: capitalize(name) };
   let body = null;
   if (name === 'downsize') {
     const dg = opt.downgrade;
@@ -3461,7 +4159,7 @@ function OptimizeFinding({ name, opt, framing }) {
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
         <table class="opt-table"><thead><tr><th>Instances</th><th>Signature</th><th>Avg cost</th></tr></thead>
-          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtCost(c.avg_cost_usd)}</td></tr>`)}</tbody></table>
+          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtFramedDollar(c.avg_cost_usd, framing)}</td></tr>`)}</tbody></table>
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
         : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
     } else if (name === 'trim') {
@@ -3495,7 +4193,7 @@ function OptimizeView({ params }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -3503,7 +4201,10 @@ function OptimizeView({ params }) {
       const opt = await api('/optimize', { since, agent_id: agentId || undefined });
       let cmp = null;
       if (compare) cmp = await api('/cost/compare', { since, compare, agent_id: agentId || undefined }).catch(() => null);
-      setSt({ loading: false, error: null, opt, cmp });
+      // Cost-by-component + recoverable-waste overlay (#211). Best-effort: a
+      // failure must not blank the Optimize screen.
+      const comp = await api('/cost/components', { since, agent_id: agentId || undefined }).catch(() => null);
+      setSt({ loading: false, error: null, opt, cmp, comp });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
@@ -3518,9 +4219,15 @@ function OptimizeView({ params }) {
 
   const framing = st.opt ? st.opt.framing : null;
   const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim'];
+  const compFraming = st.comp ? st.comp.framing : framing;
+  const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
+  const waste = buildComponentWaste(st.comp, useTokens);
+  const wasteFmtY = useTokens ? fmtTokens : fmtCost;
 
   return html`
-    <div class="page-title">Optimize</div>
+    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      Optimize <${PlanBadge} framing=${framing} />
+    </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="7d">Last 7d</option>
@@ -3542,13 +4249,280 @@ function OptimizeView({ params }) {
 
     ${!st.loading && st.opt ? html`
       ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+      ${waste ? html`
+        <div class="chart-card">
+          <div class="chart-head">
+            <div class="chart-title">Cost by component + recoverable waste ${useTokens ? '(tokens)' : ''}</div>
+            <div class="chart-meta">
+              <span class="chart-total">${useTokens ? (fmtTokens(st.comp.total_tokens || 0) + ' tokens') : fmtFramedDollar(st.comp.total_cost_usd || 0, compFraming)}</span>
+            </div>
+          </div>
+          <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} height=${220} />
+          <div class="chart-foot">
+            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>estimated recoverable</b> waste, stacked by analyzer — a heuristic estimate to review before acting, not a realized cost reduction.</span>
+          </div>
+          ${waste.recSegs.length ? html`
+            <div class="waste-list">
+              ${waste.recSegs.map(r => html`
+                <div class="waste-row">
+                  <span class="waste-name">${r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
+                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)} <span class="estimated-tag" title=${r.caveat || r.basis}>estimated recoverable</span></span>
+                </div>
+                ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
+              `)}
+            </div>` : html`<div class="chart-foot"><span class="dim">No recoverable waste estimated in this window.</span></div>`}
+        </div>` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
-        <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtCost(Math.abs(st.cmp.cost_delta_usd))} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
+        <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section"><div class="opt-title">Budget projection</div>
-        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtCost(b.monthly_run_rate_usd)}/mo vs ${fmtCost(b.budget_usd)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtCost(b.projected_overage_usd)}</span>` : '— within budget'}</div>`)}
+        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtFramedDollar(b.projected_overage_usd, framing)}</span>` : '— within budget'}</div>`)}
       </section>` : null}
     ` : null}
+  `;
+}
+
+// ============================
+// Analytics explorer (#210)
+// ============================
+// The single explorable pivot: metric × group_by × optional stack × chart-type,
+// filters, KPI tiles, presets, URL state, CSV export. Renders entirely from the
+// /api/v1/analytics response + its framing block (single compute path — the UI
+// never re-derives plan-tier rules). Subsumes the cost-by-model / spend-over-
+// time / leaderboard charts as presets (#214/#216).
+const ANALYTICS_METRICS = [
+  ['spend', 'Spend'], ['tokens', 'Tokens'], ['sessions', 'Sessions'], ['events', 'Events'],
+];
+const ANALYTICS_DIMENSIONS = [
+  ['model', 'Model'], ['agent', 'Agent'], ['provider', 'Provider'], ['tool', 'Tool'],
+  ['tool_category', 'Tool category'], ['kind', 'Span kind'], ['request_type', 'Request type'],
+  ['day', 'Day'],
+];
+const ANALYTICS_CHARTS = [['bar', 'Bars'], ['line', 'Lines'], ['hbar', 'Leaderboard']];
+// Built-in presets (close #214 leaderboard + #216 multi-series as preset views).
+const ANALYTICS_PRESETS = [
+  { id: 'spend-by-model', label: 'Spend by model', q: { metric: 'spend', group_by: 'model', chart: 'line', stack: '' } },
+  { id: 'leaderboard', label: 'Cost leaderboard', q: { metric: 'spend', group_by: 'model', chart: 'hbar', stack: '' } },
+  { id: 'tokens-over-time', label: 'Tokens over time', q: { metric: 'tokens', group_by: 'day', chart: 'bar', stack: '' } },
+  { id: 'tool-usage', label: 'Tool usage', q: { metric: 'events', group_by: 'tool_category', chart: 'hbar', stack: '' } },
+];
+
+// Pivot the analytics rows into a uPlot [xs, ...ys] time-series, one ys per
+// top-N group (+ "other"), zero-filled across the window (reuses _windowGrid so
+// the x-axis spans the full selected window, #133). `valueOf` picks cost vs
+// tokens per plan-tier framing.
+function buildAnalyticsSeries(resp, useTokens) {
+  if (!resp || !resp.rows) return null;
+  const grid = _windowGrid({ ...resp, series: resp.rows });
+  if (!grid) return null;
+  const { xs, idx, step, bucket, coarsened } = grid;
+  const valueOf = r => (useTokens ? (r.tokens || 0) : (r.value || 0));
+  // When group_by IS the time dimension (Day), time is already the x-axis, so
+  // coloring by the day-bucket key produces a meaningless rainbow with raw epoch
+  // legend labels (#227). The colored SERIES then come from stack_by (g2) if
+  // present, otherwise a SINGLE series — never one-per-day-bucket.
+  const timeGroup = resp.group_by === 'day';
+  const keyOf = timeGroup ? (r => r.stack) : (r => r.group);
+  const seriesKeys = timeGroup ? (resp.stacks || []) : (resp.groups || []);
+  if (!seriesKeys.length) {
+    const ys = xs.map(() => 0);
+    resp.rows.forEach(r => {
+      const b = Math.floor(r.bucket / step) * step;
+      if (b in idx) ys[idx[b]] += valueOf(r);
+    });
+    return { data: [xs, ys], labels: ['Total'], bucket, coarsened, requestedBucket: grid.reqBucket };
+  }
+  const top = seriesKeys.slice(0, 5);
+  const topSet = new Set(top);
+  const hasOther = seriesKeys.length > top.length;
+  const labels = hasOther ? [...top, 'other'] : [...top];
+  const yss = labels.map(() => xs.map(() => 0));
+  resp.rows.forEach(r => {
+    const b = Math.floor(r.bucket / step) * step; if (!(b in idx)) return;
+    const k = keyOf(r);
+    const li = topSet.has(k) ? labels.indexOf(k) : (hasOther ? labels.length - 1 : -1);
+    if (li >= 0) yss[li][idx[b]] += valueOf(r);
+  });
+  return { data: [xs, ...yss], labels, bucket, coarsened, requestedBucket: grid.reqBucket };
+}
+
+// Collapse the time dimension into per-group totals for the leaderboard (#214):
+// sorted desc, each with a fraction-of-max for the inline magnitude bar.
+function buildLeaderboard(resp, useTokens) {
+  if (!resp || !resp.rows) return null;
+  const totals = {};
+  resp.rows.forEach(r => { totals[r.group] = (totals[r.group] || 0) + (useTokens ? (r.tokens || 0) : (r.value || 0)); });
+  const entries = Object.keys(totals).map(g => ({ group: g, value: totals[g] }))
+    .sort((a, b) => b.value - a.value);
+  const max = entries.length ? Math.max(...entries.map(e => e.value), 0) : 0;
+  entries.forEach(e => { e.frac = max > 0 ? e.value / max : 0; });
+  return entries;
+}
+
+// CSV from the current pivot — built client-side from the response (offline,
+// no server round-trip), downloaded via a Blob object URL.
+function analyticsCsv(resp) {
+  const head = ['bucket_epoch', 'bucket_iso', resp.group_by, resp.stack_by || 'stack', resp.metric, 'tokens'];
+  const lines = [head.join(',')];
+  (resp.rows || []).forEach(r => {
+    const iso = new Date(r.bucket * 1000).toISOString();
+    const cell = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    lines.push([r.bucket, iso, cell(r.group), cell(r.stack), r.value, r.tokens].join(','));
+  });
+  return lines.join('\n');
+}
+
+function downloadCsv(filename, text) {
+  const blob = new Blob([text], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+function AnalyticsView({ params }) {
+  const DEFAULTS = { since: '30d', metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
+    agent_id: '', provider: '', model: '', tool: '' };
+  const since = readParam(params, 'since', DEFAULTS.since, validSince);
+  const metric = readParam(params, 'metric', DEFAULTS.metric, v => ANALYTICS_METRICS.some(m => m[0] === v));
+  const groupBy = readParam(params, 'group_by', DEFAULTS.group_by, v => ANALYTICS_DIMENSIONS.some(d => d[0] === v));
+  const stack = readParam(params, 'stack', DEFAULTS.stack, v => v === '' || ANALYTICS_DIMENSIONS.some(d => d[0] === v));
+  const chart = readParam(params, 'chart', DEFAULTS.chart, v => ANALYTICS_CHARTS.some(c => c[0] === v));
+  const fAgent = readParam(params, 'agent_id', '');
+  const fProvider = readParam(params, 'provider', '');
+  const fModel = readParam(params, 'model', '');
+  const fTool = readParam(params, 'tool', '');
+  const cur = { since, metric, group_by: groupBy, stack, chart, agent_id: fAgent, provider: fProvider, model: fModel, tool: fTool };
+  const setFilter = (k, v) => navigate('analytics', { ...cur, [k]: v }, DEFAULTS);
+  const applyPreset = (q) => navigate('analytics', { ...cur, ...q }, DEFAULTS);
+
+  const [st, setSt] = useState({ loading: true, error: null, resp: null });
+
+  const load = useCallback(async () => {
+    setSt(s => ({ ...s, loading: !s.resp, error: null }));
+    try {
+      const resp = await api('/analytics', {
+        metric, group_by: groupBy, stack_by: stack || undefined, since,
+        agent_id: fAgent || undefined, provider: fProvider || undefined,
+        model: fModel || undefined, tool: fTool || undefined,
+      });
+      setSt({ loading: false, error: null, resp });
+    } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
+  }, [metric, groupBy, stack, chart, since, fAgent, fProvider, fModel, fTool]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const { loading, error, resp } = st;
+  const framing = resp ? resp.framing : null;
+  // Plan-tier framing: the spend metric switches to token volume for
+  // subscription/local (dollars suppressed) — single source, never re-derived.
+  const isSpend = metric === 'spend';
+  const useTokens = isSpend && !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const valueIsDollars = isSpend && !useTokens;
+  const fmtV = valueIsDollars ? fmtCost : fmtTokens;
+  const fmtVal = v => (metric === 'sessions' || metric === 'events') ? fmtTokens(v).replace(/ tokens$/, '') : fmtV(v);
+  const axisFmt = valueIsDollars ? fmtAxisUsd : fmtTokens;
+
+  const series = (chart === 'line' || chart === 'bar') ? buildAnalyticsSeries(resp, useTokens) : null;
+  const board = chart === 'hbar' ? buildLeaderboard(resp, useTokens) : null;
+  const kpis = resp ? resp.kpis : null;
+  const filterChips = [['agent_id', fAgent], ['provider', fProvider], ['model', fModel], ['tool', fTool]].filter(x => x[1]);
+
+  const metricSuffix = isSpend ? (useTokens ? ' (tokens)' : '') : '';
+
+  return html`
+    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      Analytics <${PlanBadge} framing=${framing} />
+    </div>
+
+    <div class="filters">
+      <label class="ctl">Metric
+        <select value=${metric} onChange=${e => setFilter('metric', e.target.value)}>
+          ${ANALYTICS_METRICS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+        </select></label>
+      <label class="ctl">By
+        <select value=${groupBy} onChange=${e => setFilter('group_by', e.target.value)}>
+          ${ANALYTICS_DIMENSIONS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+        </select></label>
+      <label class="ctl">Stack
+        <select value=${stack} onChange=${e => setFilter('stack', e.target.value)}>
+          <option value="">none</option>
+          ${ANALYTICS_DIMENSIONS.filter(d => d[0] !== groupBy).map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+        </select></label>
+      <label class="ctl">Chart
+        <select value=${chart} onChange=${e => setFilter('chart', e.target.value)}>
+          ${ANALYTICS_CHARTS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+        </select></label>
+      <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
+        <option value="24h">Last 24h</option><option value="7d">Last 7d</option>
+        <option value="30d">Last 30d</option><option value="90d">Last 90d</option>
+      </select>
+      <button class="btn" onClick=${load}>Refresh</button>
+      <button class="btn" onClick=${() => resp && downloadCsv('tokenjam-analytics.csv', analyticsCsv(resp))}>Export CSV</button>
+    </div>
+
+    <div class="filters preset-row">
+      <span class="dim" style="font-size:12px">Presets:</span>
+      ${ANALYTICS_PRESETS.map(p => html`<button class="btn preset-btn" onClick=${() => applyPreset(p.q)}>${p.label}</button>`)}
+      ${filterChips.map(([k, v]) => html`<button class="btn" onClick=${() => setFilter(k, '')}>${k.replace('_id', '')}: ${v} ✕</button>`)}
+    </div>
+
+    ${error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load analytics: ${error}</div><button class="btn" onClick=${load}>Retry</button></div>` : null}
+
+    ${!error && framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+
+    ${!error && kpis ? (() => {
+      // The Spend tile follows the server framing block: subscription/local
+      // suppress dollars, so its value + sparkline + delta read on TOKEN volume,
+      // never raw $ — decided here once, not re-derived per render path. Token /
+      // session / event tiles are plan-independent counts.
+      const spendSuppressed = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+      const deltas = resp.kpi_deltas || {};
+      const tiles = [
+        { key: 'spend', label: 'Spend', cost: true,
+          value: spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok') : fmtFramedDollar(kpis.spend, framing),
+          series: kpiSparkValues(resp, spendSuppressed ? 'tokens' : 'spend'),
+          delta: spendSuppressed ? deltas.tokens : deltas.spend },
+        { key: 'tokens', label: 'Tokens', cost: false, value: fmtTokens(kpis.tokens),
+          series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens },
+        { key: 'sessions', label: 'Sessions', cost: false, value: String(kpis.sessions),
+          series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions },
+        { key: 'events', label: 'Events', cost: false, value: String(kpis.events),
+          series: kpiSparkValues(resp, 'events'), delta: deltas.events },
+      ];
+      return html`<div class="kpi-row">
+        ${tiles.map(t => html`<${KpiTile} label=${t.label} value=${t.value} active=${t.key === metric}
+            series=${t.series} delta=${t.delta == null ? null : t.delta} cost=${t.cost} />`)}
+      </div>`;
+    })() : null}
+
+    ${!error ? html`
+      <div class="chart-card">
+        <div class="chart-head">
+          <div class="chart-title">${(ANALYTICS_METRICS.find(m => m[0] === metric) || [, metric])[1]} by ${(ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1]}${metricSuffix}</div>
+        </div>
+        ${loading ? html`<div class="shimmer" style="height:200px"></div>`
+          : chart === 'hbar'
+            ? (board && board.length ? html`
+              <div class="leaderboard">
+                ${board.map((e, i) => {
+                  const label = formatGroupLabel(e.group, groupBy);
+                  return html`
+                  <div class="lb-row">
+                    <span class="lb-rank">${i + 1}</span>
+                    <span class="lb-name" title=${label}>${label}</span>
+                    <span class="lb-bar"><span class="lb-fill" style=${'width:' + (e.frac * 100).toFixed(1) + '%;background:' + colorFor(e.group)}></span></span>
+                    <span class="lb-val">${fmtVal(e.value)}</span>
+                  </div>`;
+                })}
+              </div>` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
+            : (series ? html`
+              ${chart === 'line'
+                ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} showLegend=${series.labels.length > 1} bucket=${series.bucket} />`
+                : html`<${StackedBarChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} bucket=${series.bucket} />`}
+              ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+            ` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)}
+      </div>` : null}
   `;
 }
 
@@ -3595,6 +4569,7 @@ function App() {
       if (route.param) return html`<${RunDetailView} runId=${route.param} />`;
       return html`<${StatusView} params=${p} />`;
     case 'cost': return html`<${CostView} params=${p} />`;
+    case 'analytics': return html`<${AnalyticsView} params=${p} />`;
     case 'alerts': return html`<${AlertsView} params=${p} />`;
     case 'drift': return html`<${DriftView} params=${p} />`;
     case 'optimize': return html`<${OptimizeView} params=${p} />`;
