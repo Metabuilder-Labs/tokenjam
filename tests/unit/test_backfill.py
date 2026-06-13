@@ -782,6 +782,150 @@ def test_ingest_session_row_totals_include_subagents(tmp_path):
         db.close()
 
 
+# --- #3: capture-gated per-message content + tool_input on backfill --------- #
+
+from tokenjam.core.config import CaptureConfig  # noqa: E402
+from tokenjam.otel.semconv import GenAIAttributes  # noqa: E402
+
+
+def _content_session_file(tmp_path: Path) -> Path:
+    """A session with a human prompt, an assistant narration + a tool_use with
+    real input args — exactly what the context-cost diagnostic (#4) needs."""
+    return _make_session_file(
+        tmp_path,
+        session_id="sess-cap",
+        cwd="/Users/me/proj",
+        records=[
+            {"type": "user", "message": {"role": "user",
+                                         "content": "please read the config"}},
+            {
+                "type": "assistant",
+                "uuid": "msg-cap",
+                "timestamp": "2026-04-01T10:00:00.000Z",
+                "sessionId": "sess-cap",
+                "cwd": "/Users/me/proj",
+                "message": {
+                    "model": "claude-opus-4-7",
+                    "content": [
+                        {"type": "text", "text": "Reading the config file now."},
+                        {"type": "tool_use", "id": "tu-cap", "name": "Read",
+                         "input": {"file_path": "/etc/app/config.toml"}},
+                    ],
+                    "usage": {
+                        "input_tokens": 1000, "output_tokens": 200,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            },
+        ],
+    )
+
+
+def _llm_and_tool(parsed):
+    llm = next(s for s in parsed.spans if s.name == "gen_ai.llm.call")
+    tool = next(s for s in parsed.spans if s.name == "gen_ai.tool.call")
+    return llm, tool
+
+
+def test_capture_off_leaves_attributes_unchanged(tmp_path):
+    """Default (no capture / all-False) extracts NO content — attributes stay
+    exactly {"source": ...} on both the LLM and tool span (#3 default-off)."""
+    path = _content_session_file(tmp_path)
+
+    # Both the explicit None default and an all-False CaptureConfig.
+    for capture in (None, CaptureConfig()):
+        parsed = parse_claude_code_session(path, capture=capture)
+        assert parsed is not None
+        llm, tool = _llm_and_tool(parsed)
+        assert llm.attributes == {"source": "backfill.claude_code"}
+        assert tool.attributes == {"source": "backfill.claude_code"}
+
+
+def test_capture_on_populates_prompt_completion_and_tool_input(tmp_path):
+    """With every toggle on, a backfilled span carries the human prompt, the
+    agent narration, and the raw tool_input — the data #4 needs for per-message
+    / per-inclusion token attribution."""
+    path = _content_session_file(tmp_path)
+    parsed = parse_claude_code_session(
+        path,
+        capture=CaptureConfig(
+            prompts=True, completions=True, tool_inputs=True, tool_outputs=True,
+        ),
+    )
+    assert parsed is not None
+    llm, tool = _llm_and_tool(parsed)
+    assert llm.attributes[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+    assert llm.attributes[GenAIAttributes.COMPLETION_CONTENT] == \
+        "Reading the config file now."
+    assert tool.attributes[GenAIAttributes.TOOL_INPUT] == \
+        {"file_path": "/etc/app/config.toml"}
+
+
+def test_capture_flags_are_independent(tmp_path):
+    """Each toggle gates only its own field — flipping one never leaks another."""
+    path = _content_session_file(tmp_path)
+
+    parsed = parse_claude_code_session(path, capture=CaptureConfig(tool_inputs=True))
+    llm, tool = _llm_and_tool(parsed)
+    assert GenAIAttributes.TOOL_INPUT in tool.attributes
+    assert GenAIAttributes.PROMPT_CONTENT not in llm.attributes
+    assert GenAIAttributes.COMPLETION_CONTENT not in llm.attributes
+
+    parsed = parse_claude_code_session(path, capture=CaptureConfig(completions=True))
+    llm, tool = _llm_and_tool(parsed)
+    assert GenAIAttributes.COMPLETION_CONTENT in llm.attributes
+    assert GenAIAttributes.PROMPT_CONTENT not in llm.attributes
+    assert GenAIAttributes.TOOL_INPUT not in tool.attributes
+
+
+def test_ingest_persists_captured_content_when_config_enables_it(tmp_path):
+    """End-to-end through ingest: with config.capture enabled, the stored span's
+    attributes column carries the content; default config stores nothing."""
+    from tokenjam.core.config import TjConfig
+
+    _content_session_file(tmp_path)
+
+    # Default config -> capture all-False -> no content persisted.
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"))
+        attrs = db.conn.execute(
+            "SELECT attributes FROM spans WHERE name = $1",
+            ["gen_ai.llm.call"],
+        ).fetchone()[0]
+        parsed_attrs = json.loads(attrs) if isinstance(attrs, str) else attrs
+        assert GenAIAttributes.PROMPT_CONTENT not in parsed_attrs
+        assert GenAIAttributes.COMPLETION_CONTENT not in parsed_attrs
+    finally:
+        db.close()
+
+    # Capture-enabled config -> content persisted on the backfilled span.
+    cfg = TjConfig(version="1")
+    cfg.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path, config=cfg)
+        llm_attrs = db.conn.execute(
+            "SELECT attributes FROM spans WHERE name = $1",
+            ["gen_ai.llm.call"],
+        ).fetchone()[0]
+        llm_attrs = json.loads(llm_attrs) if isinstance(llm_attrs, str) else llm_attrs
+        assert llm_attrs[GenAIAttributes.COMPLETION_CONTENT] == \
+            "Reading the config file now."
+        assert llm_attrs[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+
+        tool_attrs = db.conn.execute(
+            "SELECT attributes FROM spans WHERE name = $1",
+            ["gen_ai.tool.call"],
+        ).fetchone()[0]
+        tool_attrs = json.loads(tool_attrs) if isinstance(tool_attrs, str) else tool_attrs
+        assert tool_attrs[GenAIAttributes.TOOL_INPUT] == \
+            {"file_path": "/etc/app/config.toml"}
+    finally:
+        db.close()
+
+
 def test_reingest_retags_existing_spans(tmp_path):
     """--reingest re-populates sub_agent_id on spans an older backfill ingested
     before the column existed; a plain idempotent re-run leaves them NULL."""
