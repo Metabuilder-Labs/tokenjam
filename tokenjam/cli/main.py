@@ -106,6 +106,7 @@ from tokenjam.cli.cmd_policy import cmd_policy  # noqa: E402
 from tokenjam.cli.cmd_pricing import cmd_pricing  # noqa: E402
 from tokenjam.cli.cmd_proxy import cmd_proxy  # noqa: E402
 from tokenjam.cli.cmd_context import cmd_context  # noqa: E402
+from tokenjam.cli.cmd_quota_audit import cmd_quota_audit  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 cli.add_command(cmd_status, name="status")
@@ -129,6 +130,7 @@ cli.add_command(cmd_policy, name="policy")
 cli.add_command(cmd_pricing, name="pricing")
 cli.add_command(cmd_proxy, name="proxy")
 cli.add_command(cmd_context, name="context")
+cli.add_command(cmd_quota_audit, name="quota-audit")
 
 # cmd_drift is provided by task 05 — register if available
 try:
