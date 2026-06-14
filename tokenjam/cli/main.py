@@ -26,7 +26,10 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     ctx.ensure_object(dict)
 
     # Bare `tj` (no subcommand) → branded home screen (#240): banner +
-    # next-best-action. Reads only config presence, never opens the DB.
+    # next-best-action. Reads only config presence, never opens the DB. The
+    # zero-install first run (`tj quickstart`, #6) is what `npx tokenjam` routes
+    # to via the npm wrapper — bare local `tj` (an installed CLI) keeps the home
+    # screen.
     if ctx.invoked_subcommand is None:
         if no_color:
             from rich import reconfigure
@@ -40,8 +43,9 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         config.storage.path = db_path
 
     # Commands that don't need a database connection
-    no_db_commands = {"stop", "uninstall", "onboard", "mcp", "demo", "policy", "proxy", "summarize", "pricing"}
+    no_db_commands = {"stop", "uninstall", "onboard", "mcp", "demo", "policy", "proxy", "summarize", "pricing", "quickstart"}
     invoked = ctx.invoked_subcommand
+
     if invoked in no_db_commands:
         ctx.obj["config"] = config
         ctx.obj["db"] = None
@@ -107,6 +111,7 @@ from tokenjam.cli.cmd_pricing import cmd_pricing  # noqa: E402
 from tokenjam.cli.cmd_proxy import cmd_proxy  # noqa: E402
 from tokenjam.cli.cmd_context import cmd_context  # noqa: E402
 from tokenjam.cli.cmd_quota_audit import cmd_quota_audit  # noqa: E402
+from tokenjam.cli.cmd_quickstart import cmd_quickstart  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 cli.add_command(cmd_status, name="status")
@@ -131,6 +136,7 @@ cli.add_command(cmd_pricing, name="pricing")
 cli.add_command(cmd_proxy, name="proxy")
 cli.add_command(cmd_context, name="context")
 cli.add_command(cmd_quota_audit, name="quota-audit")
+cli.add_command(cmd_quickstart, name="quickstart")
 
 # cmd_drift is provided by task 05 — register if available
 try:
