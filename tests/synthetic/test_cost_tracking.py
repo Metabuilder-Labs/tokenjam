@@ -129,6 +129,44 @@ def test_cost_engine_no_op_when_tokens_missing(fake_db: FakeDB, engine: CostEngi
     assert span.cost_usd is None
 
 
+def test_cost_engine_costs_cache_only_span(fake_db: FakeDB, engine: CostEngine) -> None:
+    # A span with no new input/output but cache-read tokens (a cache hit) still
+    # costs the cache-read rate and must be recorded, not dropped as a no-op.
+    # claude-haiku-4-5: cache_read=0.08 per MTok.
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=0, output_tokens=0, cache_tokens=1_000_000,
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    db_cost = fake_db.get_span_cost(span.span_id)
+    assert db_cost == pytest.approx(0.08)
+    assert span.cost_usd == pytest.approx(0.08)
+
+
+def test_cost_engine_cache_only_span_updates_session_total(
+    fake_db: FakeDB, engine: CostEngine,
+) -> None:
+    # The cache-only span's cost must also accumulate into the session total,
+    # not just the span row — dropping it previously under-reported the session.
+    session = make_session()
+    fake_db.insert_session_stub(session.session_id)
+
+    span = make_llm_span(
+        provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=0, output_tokens=0, cache_tokens=1_000_000,
+        session_id=session.session_id,
+    )
+    fake_db.insert_span_stub(span.span_id)
+
+    engine.process_span(span)
+
+    session_cost = fake_db.get_session_cost(session.session_id)
+    assert session_cost == pytest.approx(0.08)
+
+
 def test_cost_engine_no_op_when_provider_missing(fake_db: FakeDB, engine: CostEngine) -> None:
     span = make_llm_span(input_tokens=1000, output_tokens=200)
     span.provider = None

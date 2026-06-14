@@ -25,7 +25,12 @@ def calculate_cost(
     Logs a warning on fallback so developers know to add the model.
     Zero tokens -> zero cost (no warning).
     """
-    if input_tokens == 0 and output_tokens == 0:
+    if (
+        input_tokens == 0
+        and output_tokens == 0
+        and cache_read_tokens == 0
+        and cache_write_tokens == 0
+    ):
         return 0.0
 
     rates = get_rates(provider, model)
@@ -68,10 +73,9 @@ class CostEngine:
             return
         input_tokens = span.input_tokens or 0
         output_tokens = span.output_tokens or 0
-        if input_tokens == 0 and output_tokens == 0:
-            return
-
         cache_read_tokens = span.cache_tokens or 0
+        if input_tokens == 0 and output_tokens == 0 and cache_read_tokens == 0:
+            return
 
         # Record whether the span was already pre-priced before we compute.
         # Pre-priced spans have their session cost handled by _build_or_update_session
