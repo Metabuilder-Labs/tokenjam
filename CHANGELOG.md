@@ -57,6 +57,7 @@ This release pivots TokenJam toward cost-optimization for autonomous agents. Fou
 
 ### Fixed
 - **Cache-only spans were costed at $0.** A prompt-cache hit (0 new input/output tokens but non-zero cache-read tokens) bills the cache-read rate, but both `calculate_cost` and `CostEngine.process_span` short-circuited on input/output alone, dropping the span as a no-op and under-reporting spend. The early-return guards now fire only when *all* token counts are zero, so cache-read (and cache-write) costs are charged correctly.
+- **Cache-write (cache-creation) tokens were dropped on the live ingest path.** The SDK integrations emit `gen_ai.usage.cache_creation_tokens`, the pricing table carries a `cache_write_per_mtok` rate, and `calculate_cost` already priced it — but the OTLP span parser and provider reader only read cache-read tokens, so cache-creation tokens never reached `CostEngine.process_span` and their (higher-rate) cost was never charged. `NormalizedSpan` now carries `cache_write_tokens`, both parsers populate it, and `process_span` charges it. Only the backfill path costed cache-write before; the live path now matches.
 
 ### Internal
 - **Registry-driven optimize analyzers.** `tokenjam/core/optimize.py` split into `tokenjam/core/optimize/` package with `registry.py`, `runner.py`, `types.py`, and `analyzers/` subpackage using `pkgutil` auto-discovery. New analyzers drop a file under `analyzers/` with a `@register("name")` decorator — nothing else needs editing. See `tokenjam/core/optimize/README.md`.

@@ -74,7 +74,13 @@ class CostEngine:
         input_tokens = span.input_tokens or 0
         output_tokens = span.output_tokens or 0
         cache_read_tokens = span.cache_tokens or 0
-        if input_tokens == 0 and output_tokens == 0 and cache_read_tokens == 0:
+        cache_write_tokens = span.cache_write_tokens or 0
+        if (
+            input_tokens == 0
+            and output_tokens == 0
+            and cache_read_tokens == 0
+            and cache_write_tokens == 0
+        ):
             return
 
         # Record whether the span was already pre-priced before we compute.
@@ -88,6 +94,7 @@ class CostEngine:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
         )
 
         span.cost_usd = cost
