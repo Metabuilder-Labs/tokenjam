@@ -55,6 +55,9 @@ This release pivots TokenJam toward cost-optimization for autonomous agents. Fou
 - **`tj optimize` plan-tier-aware rendering.** When every session in the window has `plan_tier = 'unknown'`, dollar figures are suppressed and a header note explains why. Mixed / partial-unknown windows render normally with an advisory note.
 - **MCP `get_optimize_report` tool.** Now accepts `findings: list[str]` (was `only: str`). Docstring surfaces for both API-billing and subscription-plan-efficiency phrasings.
 
+### Fixed
+- **Cache-only spans were costed at $0.** A prompt-cache hit (0 new input/output tokens but non-zero cache-read tokens) bills the cache-read rate, but both `calculate_cost` and `CostEngine.process_span` short-circuited on input/output alone, dropping the span as a no-op and under-reporting spend. The early-return guards now fire only when *all* token counts are zero, so cache-read (and cache-write) costs are charged correctly.
+
 ### Internal
 - **Registry-driven optimize analyzers.** `tokenjam/core/optimize.py` split into `tokenjam/core/optimize/` package with `registry.py`, `runner.py`, `types.py`, and `analyzers/` subpackage using `pkgutil` auto-discovery. New analyzers drop a file under `analyzers/` with a `@register("name")` decorator — nothing else needs editing. See `tokenjam/core/optimize/README.md`.
 - **`OptimizeReport.findings` generic dict.** Wave 2 analyzers attach their results here keyed by registration name. Adding a new analyzer no longer requires a typed slot on `OptimizeReport`. The existing typed slots (`downgrade`, `budgets`) stay for backwards compatibility with `cmd_optimize` and the MCP server.

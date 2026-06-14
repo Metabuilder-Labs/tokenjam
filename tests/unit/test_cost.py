@@ -36,9 +36,23 @@ def test_calculate_cost_with_cache_write_tokens():
         cache_read_tokens=0,
         cache_write_tokens=1_000_000,
     )
-    # Zero input/output but cache_write tokens present — still returns 0
-    # because input_tokens == 0 and output_tokens == 0 triggers early return
-    assert cost == 0.0
+    # Zero input/output but cache_write tokens present — the early return only
+    # fires when ALL token counts are zero, so cache_write cost is still charged.
+    # (1_000_000/1M * 1.00) = 1.00
+    assert cost == 1.0
+
+
+def test_calculate_cost_cache_read_only():
+    # claude-haiku-4-5: cache_read=0.08 per MTok. A pure cache hit (no new
+    # input/output) still costs the cache-read rate and must not be dropped.
+    cost = calculate_cost(
+        "anthropic", "claude-haiku-4-5",
+        input_tokens=0,
+        output_tokens=0,
+        cache_read_tokens=1_000_000,
+    )
+    # (1_000_000/1M * 0.08) = 0.08
+    assert cost == 0.08
 
 
 def test_calculate_cost_unknown_model_uses_default(caplog):
