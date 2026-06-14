@@ -39,6 +39,11 @@ from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _run_sessions
 from tokenjam.core.db import delete_session_label, set_session_label
 from tokenjam.core.distill import distill_titles_cached, peek_cached_titles
+from tokenjam.core.framing import (
+    WindowSummary,
+    compute_framing,
+    plan_determination_mix,
+)
 from tokenjam.core.models import AlertFilters, SessionRecord
 from tokenjam.core.runlink import scan_transcript_run_ids
 from tokenjam.core.transcript import (
@@ -437,6 +442,39 @@ def _session_context_series(db: Any, session_id: str) -> list[dict]:
     ]
 
 
+def _session_framing(db: Any, config: Any, session: SessionRecord) -> dict:
+    """Plan-tier framing block for the session detail view (#191).
+
+    SessionDetailView routes its Overview / subagents / traces cost cells
+    through ``fmtFramedDollar(..., framing)``; without this block the UI silently
+    falls back to raw dollars — the exact honesty issue #191 closed on every
+    other dollar-bearing read route. Reuses ``compute_framing`` (single source of
+    truth, ``core/framing.py``) with a window-INDEPENDENT plan mix scoped to this
+    session's agent (``plan_determination_mix``, as ``/status`` and ``/traces``
+    do). Window totals are this session's own tokens/cost so the subscription
+    token-share ("% of cycle") math has a denominator.
+    """
+    conn = getattr(db, "conn", None)
+    mix = plan_determination_mix(conn, session.agent_id) if conn is not None else {}
+    total_tokens = (
+        session.input_tokens + session.output_tokens
+        + session.cache_tokens + session.cache_write_tokens
+    )
+    total_cost = (
+        float(session.total_cost_usd)
+        if session.total_cost_usd is not None else 0.0
+    )
+    return compute_framing(
+        config,
+        WindowSummary(
+            total_cost_usd=total_cost,
+            total_tokens=total_tokens,
+            sessions=sum(mix.values()),
+            plan_tier_mix=mix,
+        ),
+    ).to_dict()
+
+
 @router.get(
     "/sessions/{session_id}",
     response_model=None,
@@ -474,6 +512,8 @@ async def get_session_detail(request: Request, session_id: str):
     model_mix = _session_model_mix(db, session_id)
     context_series = _session_context_series(db, session_id)
     subagents = _session_subagents(db, session_id)
+    config = getattr(request.app.state, "config", None)
+    framing = _session_framing(db, config, session)
 
     # CC session liveness: a fresh transcript mtime rescues a live session whose
     # backfilled spans have gone stale (see _transcript_aware_status).
@@ -527,6 +567,7 @@ async def get_session_detail(request: Request, session_id: str):
         ],
         "drift": drift,
         "traces": traces,
+        "framing": framing,
     }
 
 
