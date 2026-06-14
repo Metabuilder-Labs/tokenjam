@@ -377,6 +377,34 @@ async def test_status_framing_reflects_plan_tier(
     assert framing["pricing_mode"] == expected_mode
 
 
+# --- #2: /sessions/{id} carries a framing block so SessionDetailView's ------- #
+# --- Overview / subagents / traces cost cells reframe subscription/local. ----- #
+async def test_session_detail_includes_framing_block(db, client):
+    db.upsert_session(make_session(session_id="sess-2", plan_tier="api"))
+    db.insert_span(make_llm_span(
+        session_id="sess-2", trace_id="ff" * 16, cost_usd=1.23,
+        billing_account="anthropic",
+    ))
+    body = (await client.get("/api/v1/sessions/sess-2")).json()
+    assert _FRAMING_KEYS <= set(body["framing"])
+
+
+async def test_session_detail_framing_reframes_subscription(db, client, monkeypatch, tmp_path):
+    """A subscription-plan session's detail framing suppresses raw dollars
+    (display_rule != show_dollars) so the UI's fmtFramedDollar reframes the
+    Overview / subagents / traces cost cells (#2). HOME isolated so the config
+    fallback can't pull this machine's global plan."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    db.upsert_session(make_session(session_id="sess-2-sub", plan_tier="max_5x"))
+    db.insert_span(make_llm_span(
+        session_id="sess-2-sub", trace_id="ab" * 16, cost_usd=4.56,
+        billing_account="anthropic",
+    ))
+    framing = (await client.get("/api/v1/sessions/sess-2-sub")).json()["framing"]
+    assert framing["pricing_mode"] == "subscription"
+    assert framing["display_rule"] != "show_dollars"
+
+
 async def test_cost_cycle_block_defaults_to_calendar_month(client):
     """With no [budget.<provider>] cycle configured, the run-rate cycle falls
     back to the calendar month (start_day=1) (#138)."""
