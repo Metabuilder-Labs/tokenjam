@@ -79,6 +79,10 @@ class BackfillResult:
     total_cost_usd: float = 0.0
     project_count: int = 0
     sample_errors: list[str] = field(default_factory=list)
+    # True when a `max_sessions` cap was hit, so callers know more sessions exist
+    # on disk than were ingested (the #13 quickstart first-run cap). The full
+    # `tj backfill claude-code` path passes no cap, so this stays False there.
+    limit_reached: bool = False
 
 
 @dataclass
@@ -412,6 +416,7 @@ def iter_claude_code_sessions(
     root: Path | None = None,
     since: datetime | None = None,
     capture: CaptureConfig | None = None,
+    max_sessions: int | None = None,
 ) -> Iterator[ParsedSession]:
     """
     Walk a Claude Code projects directory and yield ParsedSession objects.
@@ -421,11 +426,40 @@ def iter_claude_code_sessions(
 
     `capture` is forwarded to `parse_claude_code_session` to gate per-message
     content extraction (#3); None/all-False means no content is extracted.
+
+    `max_sessions` caps how many sessions are parsed+yielded. When set, files are
+    walked **most-recent first** (by mtime) and parsing stops once `max_sessions`
+    sessions have been yielded — so the work this generator does (and the inserts
+    its caller performs) is bounded regardless of how large `~/.claude` is. This
+    powers the `tj quickstart` first-run cap (#13): a brand-new user with
+    thousands of sessions sees the headline over their most-recent N sessions in
+    bounded time, with the full picture available on demand. `None` (the default)
+    keeps the original deterministic path-sorted, unbounded walk so the full
+    `tj backfill claude-code` ingest is byte-for-byte unchanged.
     """
     base = root or CLAUDE_CODE_PROJECTS_ROOT
     if not base.exists() or not base.is_dir():
         return
-    for jsonl_path in sorted(base.rglob("*.jsonl")):
+
+    paths = list(base.rglob("*.jsonl"))
+    if max_sessions is not None:
+        # Most-recent first so the cap keeps the freshest sessions. We sort by
+        # mtime (cheap, no parse) and read the stat once, reusing it for the
+        # `since` pre-filter below.
+        def _mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        paths = sorted(paths, key=_mtime, reverse=True)
+    else:
+        paths = sorted(paths)
+
+    yielded = 0
+    for jsonl_path in paths:
+        if max_sessions is not None and yielded >= max_sessions:
+            return
         try:
             if since is not None:
                 mtime = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=timezone.utc)
@@ -439,6 +473,7 @@ def iter_claude_code_sessions(
         if since is not None and parsed.ended_at < since:
             continue
         yield parsed
+        yielded += 1
 
 
 def session_record_from_parsed(
@@ -471,6 +506,7 @@ def ingest_claude_code(
     progress=None,
     reingest: bool = False,
     config=None,
+    max_sessions: int | None = None,
 ) -> BackfillResult:
     """
     Ingest Claude Code sessions into the storage backend.
@@ -487,6 +523,12 @@ def ingest_claude_code(
     config default, and when `config` is None) extracts no content, so a
     default backfill is byte-for-byte unchanged.
 
+    `max_sessions` caps the number of (most-recent) sessions ingested so the
+    work is bounded on a large `~/.claude` history — the #13 quickstart first-run
+    cap. When the cap is hit, `result.limit_reached` is set True. `None` (the
+    default, used by the full `tj backfill claude-code` path) ingests everything
+    in window, unchanged.
+
     `progress(parsed_session, result)` is called once per session if provided.
     """
     result = BackfillResult()
@@ -494,7 +536,9 @@ def ingest_claude_code(
     seen_session_ids: set[str] = set()
     plan_tier = _plan_tier_for_provider(config, _CLAUDE_CODE_PROVIDER)
     capture = getattr(config, "capture", None) if config is not None else None
-    for parsed in iter_claude_code_sessions(root=root, since=since, capture=capture):
+    for parsed in iter_claude_code_sessions(
+        root=root, since=since, capture=capture, max_sessions=max_sessions,
+    ):
         result.sessions_seen += 1
         if parsed.cwd:
             projects_seen.add(parsed.cwd)
@@ -536,6 +580,10 @@ def ingest_claude_code(
     if recompute is not None and seen_session_ids:
         recompute(sorted(seen_session_ids))
     result.project_count = len(projects_seen)
+    # The iterator stops yielding once the cap is reached, so seeing exactly
+    # `max_sessions` means there may be older sessions on disk we skipped.
+    if max_sessions is not None and result.sessions_seen >= max_sessions:
+        result.limit_reached = True
     return result
 
 

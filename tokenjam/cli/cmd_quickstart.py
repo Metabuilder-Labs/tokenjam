@@ -46,22 +46,34 @@ from tokenjam.core.session_timeline import (
 from tokenjam.utils.formatting import console, format_cost, format_tokens
 from tokenjam.utils.time_parse import parse_since, utcnow
 
+# First-run cap (#13): on a large ~/.claude history a full backfill into the
+# transient DB blows past the <30s time-to-first-value goal. We cap the headline
+# to the most-recent N sessions (bounded work, well under 30s even on thousands
+# of sessions) and disclose the cap; `--full` lifts it for the complete picture.
+# ~300 sessions keeps the slowest plausible session shapes comfortably in budget.
+DEFAULT_MAX_SESSIONS = 300
+
 
 @click.command("quickstart")
 @click.option("--since", default="30d",
               help="Window for analysis (e.g. 7d, 30d, 2026-03-01). Default 30d.")
 @click.option("--root", "root_path", default=None,
               help=f"Override Claude Code projects root (default {CLAUDE_CODE_PROJECTS_ROOT}).")
+@click.option("--full", is_flag=True,
+              help=f"Process the full history (default caps at the most-recent "
+                   f"{DEFAULT_MAX_SESSIONS} sessions for a fast first run).")
 @click.option("--json", "output_json", is_flag=True,
               help="Emit machine-readable JSON.")
 @click.pass_context
 def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
-                   output_json: bool) -> None:
+                   full: bool, output_json: bool) -> None:
     """Zero-setup first run: where your Claude Code quota actually goes.
 
     Reads the same ~/.claude/projects/*.jsonl files ccusage does — no pip env,
-    no daemon, no onboarding. Run `tj onboard` afterwards to go deeper (live
-    capture, the dashboard, and the MCP server for Claude Code).
+    no daemon, no onboarding. On a large history the first run caps at the
+    most-recent sessions for speed (use `--full` for everything). Run
+    `tj onboard` afterwards to go deeper (live capture, the dashboard, and the
+    MCP server for Claude Code).
     """
     from pathlib import Path
 
@@ -77,8 +89,10 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     until_dt = utcnow()
 
     # Transient in-memory DB — nothing persisted, no config, no daemon.
+    max_sessions = None if full else DEFAULT_MAX_SESSIONS
     db = InMemoryBackend()
-    result = ingest_claude_code(db, root=root, since=since_dt)
+    result = ingest_claude_code(db, root=root, since=since_dt,
+                                max_sessions=max_sessions)
 
     if result.sessions_ingested == 0:
         _render_no_sessions(result, since, output_json)
@@ -97,12 +111,15 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
                 "spans_ingested": result.spans_ingested,
                 "project_count": result.project_count,
                 "total_cost_usd": round(result.total_cost_usd, 6),
+                "limit_reached": result.limit_reached,
+                "max_sessions": max_sessions,
             },
         }
         click.echo(_json.dumps(payload, default=str))
         return
 
-    _render(diag, timeline, since=since)
+    _render(diag, timeline, since=since,
+            limit_reached=result.limit_reached, max_sessions=max_sessions)
 
 
 # ───────────────────────────── rendering ──────────────────────────────────
@@ -133,7 +150,8 @@ def _render_no_sessions(result, since: str, output_json: bool) -> None:
     )
 
 
-def _render(diag, timeline, *, since: str) -> None:
+def _render(diag, timeline, *, since: str,
+            limit_reached: bool = False, max_sessions: int | None = None) -> None:
     from rich.console import Group
     from rich.panel import Panel
     from rich.table import Table
@@ -150,12 +168,28 @@ def _render(diag, timeline, *, since: str) -> None:
     lead.append(".", style="dim")
     console.print(lead)
 
+    # Honest disclosure when the first-run cap truncated the history (#13). This
+    # must read as scoping, NOT as "this is your whole history" — so we say so up
+    # front and point at the full-picture escape hatches.
+    if limit_reached and max_sessions is not None:
+        note = Text()
+        note.append("Showing your most-recent ", style="yellow")
+        note.append(f"{max_sessions} sessions", style="bold yellow")
+        note.append(" for a fast first run — run ", style="yellow")
+        note.append("tj quickstart --full", style="bold")
+        note.append(" (or ", style="yellow")
+        note.append("tj context", style="bold")
+        note.append(") for your full history.", style="yellow")
+        console.print(note)
+
     # ── Quota composition (reuses the issue-#4 diagnostic engine). ──
     sections: list = []
     head = Text()
     head.append("Quota composition", style="bold")
+    scope = "most-recent " if limit_reached else "last "
     head.append(f"  ·  {diag.sessions} sessions, {diag.turns} turns "
-                f"(last {since})", style="dim")
+                f"({scope}{since if not limit_reached else f'{max_sessions}'})",
+                style="dim")
     sections.append(head)
     sections.append(Text(""))
 
