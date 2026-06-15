@@ -74,6 +74,21 @@ If you run `tj optimize trim` without the extra installed, the analyzer self-reg
 
 See [`docs/optimize/trim.md`](optimize/trim.md) for performance numbers, capture requirements, and what the analyzer actually reports.
 
+## Upgrading
+
+```bash
+pipx upgrade tokenjam          # if you installed via pipx (recommended)
+pip install --upgrade tokenjam # if you're in a pip + venv setup
+```
+
+After upgrading:
+
+1. Restart the daemon to pick up the new code: `tj stop && tj serve &`
+2. DB migrations apply automatically on the next `tj` invocation — no manual step required
+3. Verify with `tj --version`
+
+PyPI's CDN occasionally lags ~1–2 min after a release. If `pipx upgrade` reports "already at the latest version" but the reported `tj --version` is older than what's on the [releases page](https://github.com/Metabuilder-Labs/tokenjam/releases), wait a minute and retry.
+
 ## TypeScript SDK
 
 ```bash
