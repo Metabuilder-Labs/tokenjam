@@ -96,6 +96,8 @@ tj onboard --claude-code
 tj optimize          # cost-saving candidates from your actual usage
 ```
 
+To upgrade later: `pipx upgrade tokenjam` (then `tj stop && tj serve &` to reload the daemon, and `tj --version` to verify). See [docs/installation.md](docs/installation.md#upgrading).
+
 For any Python agent:
 
 ```python

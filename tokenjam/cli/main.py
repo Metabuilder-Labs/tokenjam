@@ -3,7 +3,11 @@ from tokenjam.core.config import load_config
 from tokenjam.core.db import open_db
 
 
-@click.group()
+@click.group(
+    epilog="Upgrade with: pipx upgrade tokenjam "
+           "(then `tj stop && tj serve &` to reload the daemon). "
+           "Verify with `tj --version`.",
+)
 @click.version_option(package_name="tokenjam")
 @click.option("--config", "config_path", default=None, envvar="TJ_CONFIG",
               help="Config file path (default: auto-discover)")
