@@ -174,6 +174,136 @@ def test_quickstart_no_logs_is_graceful(tmp_path):
     assert "No Claude Code logs" in result.output
 
 
+def _large_fixture_root(tmp_path: Path, n_sessions: int) -> Path:
+    """A synthetic history with `n_sessions` sessions, two turns each, recent.
+
+    Mtimes are staggered so the most-recent-first cap is deterministic: higher
+    session index = newer file. This lets the cap tests assert *which* sessions
+    survive without depending on filesystem write ordering.
+    """
+    import os
+
+    root = tmp_path / "projects"
+    base_ts = 1_900_000_000  # arbitrary recent epoch
+    for i in range(n_sessions):
+        sid = f"sess-{i:05d}"
+        cwd = f"/Users/me/proj{i % 5}"
+        path = _make_session_file(root, sid, cwd, [
+            _assistant(f"{sid}-a", sid, cwd, "2026-06-20T10:00:00.000Z"),
+            _assistant(f"{sid}-b", sid, cwd, "2026-06-20T10:05:00.000Z"),
+        ])
+        # Newer index => newer mtime, so the cap keeps the highest indices.
+        os.utime(path, (base_ts + i, base_ts + i))
+    return root
+
+
+# ── First-run cap on a large history (#13) ───────────────────────────────────
+
+def test_quickstart_caps_sessions_on_large_history(tmp_path):
+    """The first-run path bounds its work: only `max_sessions` are ingested even
+    when far more exist on disk, and the cap is flagged."""
+    from tokenjam.core.backfill import ingest_claude_code
+
+    root = _large_fixture_root(tmp_path, n_sessions=120)
+    db = InMemoryBackend()
+    result = ingest_claude_code(db, root=root, max_sessions=25)
+
+    # Bounded work: exactly the cap was ingested, not the full 120.
+    assert result.sessions_ingested == 25
+    assert result.sessions_seen == 25
+    assert result.limit_reached is True
+    # The transient DB holds only the capped sessions' rows.
+    (session_rows,) = db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
+    assert session_rows == 25
+
+
+def test_quickstart_cap_keeps_most_recent_sessions(tmp_path):
+    """The cap retains the freshest sessions (by mtime), not arbitrary ones."""
+    from tokenjam.core.backfill import ingest_claude_code
+
+    root = _large_fixture_root(tmp_path, n_sessions=50)
+    db = InMemoryBackend()
+    ingest_claude_code(db, root=root, max_sessions=10)
+
+    kept = {
+        r[0] for r in db.conn.execute("SELECT session_id FROM sessions").fetchall()
+    }
+    # The 10 highest indices (newest mtimes) survive; older ones are dropped.
+    assert kept == {f"sess-{i:05d}" for i in range(40, 50)}
+
+
+def test_quickstart_no_cap_ingests_everything(tmp_path):
+    """`max_sessions=None` (the full `tj backfill claude-code` path) is unbounded
+    and never sets the limit flag — the cap is opt-in, not a regression."""
+    from tokenjam.core.backfill import ingest_claude_code
+
+    root = _large_fixture_root(tmp_path, n_sessions=40)
+    db = InMemoryBackend()
+    result = ingest_claude_code(db, root=root, max_sessions=None)
+
+    assert result.sessions_ingested == 40
+    assert result.limit_reached is False
+
+
+def test_quickstart_below_cap_does_not_flag_limit(tmp_path):
+    """A small history under the cap is not falsely reported as truncated."""
+    from tokenjam.core.backfill import ingest_claude_code
+
+    root = _large_fixture_root(tmp_path, n_sessions=5)
+    db = InMemoryBackend()
+    result = ingest_claude_code(db, root=root, max_sessions=300)
+
+    assert result.sessions_ingested == 5
+    assert result.limit_reached is False
+
+
+def test_quickstart_cli_discloses_truncation(tmp_path, monkeypatch):
+    """When the cap truncates, the CLI says so honestly and points at the full
+    picture — no silent truncation that reads as 'this is everything'."""
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "DEFAULT_MAX_SESSIONS", 8)
+    root = _large_fixture_root(tmp_path, n_sessions=30)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    # The disclosure names the cap and both escape hatches.
+    assert "most-recent" in result.output
+    assert "--full" in result.output
+    assert "tj context" in result.output
+
+
+def test_quickstart_cli_full_flag_lifts_cap(tmp_path, monkeypatch):
+    """`--full` processes the whole history and emits no truncation note."""
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "DEFAULT_MAX_SESSIONS", 3)
+    root = _large_fixture_root(tmp_path, n_sessions=12)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d",
+                                 "--full", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload["backfill"]["sessions_ingested"] == 12
+    assert payload["backfill"]["limit_reached"] is False
+    assert payload["backfill"]["max_sessions"] is None
+
+
+def test_quickstart_json_reports_cap_metadata(tmp_path, monkeypatch):
+    """JSON output exposes the cap state so machine consumers see the scoping."""
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "DEFAULT_MAX_SESSIONS", 6)
+    root = _large_fixture_root(tmp_path, n_sessions=20)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output.strip().splitlines()[-1])
+    assert payload["backfill"]["sessions_ingested"] == 6
+    assert payload["backfill"]["limit_reached"] is True
+    assert payload["backfill"]["max_sessions"] == 6
+
+
 def test_bare_tj_routes_to_quickstart(tmp_path, monkeypatch):
     """`tj` with no subcommand IS the zero-install first run (one command)."""
     import unittest.mock as mock
