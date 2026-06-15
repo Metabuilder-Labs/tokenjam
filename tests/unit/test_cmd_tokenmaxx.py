@@ -21,17 +21,19 @@ def test_classify_zero_spend_is_sipper():
 
 def test_classify_multiplier_path_walks_tier_boundaries():
     # Multiplier-based classification — the primary path for subscription users.
-    # Boundaries are 1× / 4× / 10× / 20× per the launch-tier spec.
+    # Six tiers, boundaries at 1× / 4× / 10× / 20× / 50×.
     cases = [
         (0.99,  "TokenSipper"),
         (1.0,   "TokenModerator"),
         (3.99,  "TokenModerator"),
         (4.0,   "TokenMaxxer"),
         (9.99,  "TokenMaxxer"),
-        (10.0,  "TokenChad"),
-        (19.99, "TokenChad"),
-        (20.0,  "TokenGigaChad"),
-        (200.0, "TokenGigaChad"),
+        (10.0,  "TokenSuperMaxxer"),
+        (19.99, "TokenSuperMaxxer"),
+        (20.0,  "TokenMegaMaxxer"),
+        (49.99, "TokenMegaMaxxer"),
+        (50.0,  "TokenGigaMaxxer"),
+        (200.0, "TokenGigaMaxxer"),
     ]
     for mult, expected in cases:
         assert _classify(0.0, multiplier=mult).label == expected, f"failed at {mult}×"
@@ -46,10 +48,12 @@ def test_classify_absolute_path_for_api_users_walks_tier_boundaries():
         (399.99,  "TokenModerator"),
         (400.0,   "TokenMaxxer"),
         (999.99,  "TokenMaxxer"),
-        (1000.0,  "TokenChad"),
-        (1999.99, "TokenChad"),
-        (2000.0,  "TokenGigaChad"),
-        (50_000,  "TokenGigaChad"),
+        (1000.0,  "TokenSuperMaxxer"),
+        (1999.99, "TokenSuperMaxxer"),
+        (2000.0,  "TokenMegaMaxxer"),
+        (4999.99, "TokenMegaMaxxer"),
+        (5000.0,  "TokenGigaMaxxer"),
+        (50_000,  "TokenGigaMaxxer"),
     ]
     for spend, expected in cases:
         assert _classify(spend).label == expected, f"failed at ${spend}"
