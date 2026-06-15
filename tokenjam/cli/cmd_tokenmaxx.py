@@ -44,8 +44,8 @@ _TIERS: list[Tier] = [
     Tier(1,  "TokenModerator",   "🥱",      "Mostly reasonable. Try harder."),
     Tier(4,  "TokenMaxxer",      "💸",      "You're paying Anthropic's rent."),
     Tier(10, "TokenSuperMaxxer", "🔥",      "You're paying their interns' rent too."),
-    Tier(20, "TokenMegaMaxxer",  "🔥🔥",    "Anthropic's CFO knows your name."),
-    Tier(50, "TokenGigaMaxxer",  "🔥🔥🔥",  "Touch grass. Then run `tj optimize`."),
+    Tier(20, "TokenMegaMaxxer",  "🔥🔥",    "Touch grass. Then run `tj optimize`."),
+    Tier(50, "TokenGigaMaxxer",  "🔥🔥🔥",  "Anthropic's CFO knows your name."),
 ]
 
 # Absolute USD/mo fallback for users without a subscription plan (API users).
