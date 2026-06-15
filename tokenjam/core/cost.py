@@ -8,6 +8,12 @@ from tokenjam.core.pricing import get_rates, ModelRates, DEFAULT_INPUT_PER_MTOK,
 
 logger = logging.getLogger(__name__)
 
+# Dedupe the "No pricing data" warning to one log line per (provider, model)
+# pair per process. Backfilling a 247-session Claude Code project used to
+# emit the same warning hundreds of times in a row (issue #98). Now it
+# emits exactly once and stays out of the way.
+_UNKNOWN_MODEL_WARNED: set[tuple[str, str]] = set()
+
 
 def calculate_cost(
     provider: str,
@@ -35,11 +41,15 @@ def calculate_cost(
 
     rates = get_rates(provider, model)
     if rates is None:
-        logger.warning(
-            "No pricing data for %s/%s — using default rates. "
-            "Add to tokenjam/pricing/models.toml to get accurate costs.",
-            provider, model,
-        )
+        # Warn once per (provider, model) per process — see _UNKNOWN_MODEL_WARNED.
+        key = (provider, model)
+        if key not in _UNKNOWN_MODEL_WARNED:
+            _UNKNOWN_MODEL_WARNED.add(key)
+            logger.warning(
+                "No pricing data for %s/%s — using default rates. "
+                "Add to tokenjam/pricing/models.toml to get accurate costs.",
+                provider, model,
+            )
         rates = ModelRates(
             input_per_mtok=DEFAULT_INPUT_PER_MTOK,
             output_per_mtok=DEFAULT_OUTPUT_PER_MTOK,
