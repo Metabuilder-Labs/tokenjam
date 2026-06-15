@@ -38,6 +38,42 @@ output_per_mtok = 4.00
 cache_read_per_mtok = 0.08
 cache_write_per_mtok = 1.00
 
+# ─── Deprecated Anthropic base models ──────────────────────────────────────
+# These rows exist so dated variants (e.g. `claude-sonnet-4-20250514`,
+# `claude-opus-4-20250514`) resolve via the YYYYMMDD-stripping fallback in
+# `get_rates`. Without these entries, dated names from the deprecated tier
+# fall through to default rates and spam the "No pricing data" warning. See
+# https://docs.anthropic.com/en/docs/about-claude/pricing for the rates.
+# Issue #98.
+
+# Claude Sonnet 4 (deprecated — superseded by Sonnet 4.5/4.6)
+[anthropic.claude-sonnet-4]
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+cache_read_per_mtok = 0.30
+cache_write_per_mtok = 3.75
+
+# Claude Opus 4 (deprecated — superseded by Opus 4.5/4.6/4.7/4.8)
+[anthropic.claude-opus-4]
+input_per_mtok = 15.00
+output_per_mtok = 75.00
+cache_read_per_mtok = 1.50
+cache_write_per_mtok = 18.75
+
+# Claude Opus 4.1 (deprecated — superseded by Opus 4.5/4.6/4.7/4.8)
+[anthropic.claude-opus-4-1]
+input_per_mtok = 15.00
+output_per_mtok = 75.00
+cache_read_per_mtok = 1.50
+cache_write_per_mtok = 18.75
+
+# Claude Haiku 3.5 (retired except on Bedrock and Vertex)
+[anthropic.claude-haiku-3-5]
+input_per_mtok = 0.80
+output_per_mtok = 4.00
+cache_read_per_mtok = 0.08
+cache_write_per_mtok = 1.00
+
 [openai.gpt-4o]
 input_per_mtok = 2.50
 output_per_mtok = 10.00

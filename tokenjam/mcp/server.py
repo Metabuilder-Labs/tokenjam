@@ -1,7 +1,20 @@
 """TokenJam MCP server — exposes observability data to Claude Code via stdio."""
 from __future__ import annotations
 
-from fastmcp import FastMCP
+try:
+    from fastmcp import FastMCP
+except ImportError as _import_err:  # pragma: no cover - defensive
+    # fastmcp moved into the base dependencies in v0.3.5 (issue #101). This
+    # fallback only triggers if a user manually uninstalled fastmcp or
+    # installed via an unusual route that excluded base deps. Surface a
+    # clean error pointing at the fix instead of the raw ImportError that
+    # Claude Code surfaces as "MCP server failed to start".
+    raise ImportError(
+        "tokenjam.mcp requires fastmcp, but it is not installed. "
+        "Reinstall TokenJam with `pipx install --force tokenjam` "
+        "(or `pip install --upgrade tokenjam` in a venv) — fastmcp is "
+        "shipped in the base install as of v0.3.5."
+    ) from _import_err
 
 mcp = FastMCP("tj")
 
