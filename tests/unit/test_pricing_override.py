@@ -284,3 +284,54 @@ def test_config_pricing_merges_with_user_file_and_wins(tmp_path, monkeypatch):
     # Each source's unique entries survive the merge.
     assert pricing.get_rates("unknown", "file-only-model").input_per_mtok == 2.0
     assert pricing.get_rates("unknown", "config-only-model").input_per_mtok == 3.0
+
+
+# --- Packaged current-Anthropic-model coverage (issue #8) -------------------
+#
+# Real Claude Code backfills carry the current Anthropic model ids. Each must
+# resolve to an explicit packaged rate, NOT the $0.50/$2.00 default fallback —
+# otherwise calculate_cost mis-prices the API-plan dollar calibration line and
+# spams the "No pricing data" warning. The _isolate_pricing fixture points HOME
+# and the cwd at empty dirs, so get_rates reads ONLY the packaged models.toml.
+
+# Published per-MTok rates, https://platform.claude.com/docs/en/pricing
+# (cache_write_per_mtok = the 5-minute cache write column).
+_CURRENT_ANTHROPIC_RATES = {
+    "claude-fable-5": (10.00, 50.00, 1.00, 12.50),
+    "claude-opus-4-8": (5.00, 25.00, 0.50, 6.25),
+    "claude-sonnet-4-6": (3.00, 15.00, 0.30, 3.75),
+    "claude-sonnet-4-5": (3.00, 15.00, 0.30, 3.75),
+}
+
+
+@pytest.mark.parametrize("model, expected", _CURRENT_ANTHROPIC_RATES.items())
+def test_current_anthropic_models_have_packaged_rates(model, expected):
+    """Each current Anthropic model resolves to its published packaged rate."""
+    rates = pricing.get_rates("anthropic", model)
+    assert rates is not None, f"{model} fell through to default rates"
+    in_, out, cache_read, cache_write = expected
+    assert rates.input_per_mtok == in_
+    assert rates.output_per_mtok == out
+    assert rates.cache_read_per_mtok == cache_read
+    assert rates.cache_write_per_mtok == cache_write
+
+
+@pytest.mark.parametrize("model", list(_CURRENT_ANTHROPIC_RATES))
+def test_current_anthropic_models_are_not_default_priced(model):
+    """Regression for #8: these must never silently use the default fallback
+    rate ($0.50/$2.00 per MTok), which would mis-price the calibration line."""
+    rates = pricing.get_rates("anthropic", model)
+    assert rates is not None
+    assert (rates.input_per_mtok, rates.output_per_mtok) != (
+        pricing.DEFAULT_INPUT_PER_MTOK,
+        pricing.DEFAULT_OUTPUT_PER_MTOK,
+    )
+
+
+def test_dated_current_anthropic_model_resolves_via_suffix_strip():
+    """The YYYYMMDD-suffixed variant Claude Code may ship resolves to the same
+    packaged rate via get_rates's date-suffix fallback (no default warning)."""
+    bare = pricing.get_rates("anthropic", "claude-fable-5")
+    dated = pricing.get_rates("anthropic", "claude-fable-5-20260601")
+    assert dated is not None
+    assert dated == bare
