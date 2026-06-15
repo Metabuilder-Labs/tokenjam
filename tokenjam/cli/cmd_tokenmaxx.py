@@ -40,18 +40,19 @@ class Tier:
 
 
 _TIERS: list[Tier] = [
-    Tier(0,  "TokenSipper",     "💧",   "Are you even using AI?"),
-    Tier(1,  "TokenModerator",  "🥱",   "Mostly reasonable. Try harder."),
-    Tier(4,  "TokenMaxxer",     "💸",   "You're paying Anthropic's rent."),
-    Tier(10, "TokenChad",       "🔥",   "You're paying their interns' rent too."),
-    Tier(20, "TokenGigaChad",   "🔥🔥", "Touch grass. Then run `tj optimize`."),
+    Tier(0,  "TokenSipper",      "💧",      "Are you even using AI?"),
+    Tier(1,  "TokenModerator",   "🥱",      "Mostly reasonable. Try harder."),
+    Tier(4,  "TokenMaxxer",      "💸",      "You're paying Anthropic's rent."),
+    Tier(10, "TokenSuperMaxxer", "🔥",      "You're paying their interns' rent too."),
+    Tier(20, "TokenMegaMaxxer",  "🔥🔥",    "Anthropic's CFO knows your name."),
+    Tier(50, "TokenGigaMaxxer",  "🔥🔥🔥",  "Touch grass. Then run `tj optimize`."),
 ]
 
 # Absolute USD/mo fallback for users without a subscription plan (API users).
 # Calibrated against Max-5x = $100/mo: each threshold is the multiplier × $100.
 # This way a $400/mo API user and a 4× Pro/Max-5x/Max-20x user both end up
 # in TokenMaxxer — the tier name reflects "shocking spend" in either world.
-_SPEND_TIER_THRESHOLDS_USD: list[float] = [0, 100, 400, 1000, 2000]
+_SPEND_TIER_THRESHOLDS_USD: list[float] = [0, 100, 400, 1000, 2000, 5000]
 
 
 def _classify(monthly_spend: float, multiplier: float | None = None) -> Tier:
