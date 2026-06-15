@@ -121,6 +121,14 @@ def _observation_to_span(obs: dict[str, Any]) -> NormalizedSpan | None:
         or usage_details.get("cacheReadInputTokens")
         or None
     )
+    # Anthropic-via-Langfuse exposes cache-CREATION tokens under a parallel
+    # set of keys. Threading the count through so the cache-write side of
+    # cost reporting matches the live OTLP path (issue #93).
+    cache_write = (
+        usage_details.get("input_cache_creation")
+        or usage_details.get("cacheCreationInputTokens")
+        or None
+    )
 
     model = obs.get("model")
     provider, billing_account = _model_to_provider(model)
@@ -169,6 +177,7 @@ def _observation_to_span(obs: dict[str, Any]) -> NormalizedSpan | None:
         input_tokens=int(input_tokens) if input_tokens is not None else None,
         output_tokens=int(output_tokens) if output_tokens is not None else None,
         cache_tokens=int(cache_read) if cache_read is not None else None,
+        cache_write_tokens=int(cache_write) if cache_write is not None else None,
         cost_usd=float(cost) if cost is not None else None,
         request_type=("completion" if obs_type == "GENERATION" else None),
         conversation_id=str(conversation_id),
