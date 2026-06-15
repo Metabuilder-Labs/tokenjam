@@ -176,6 +176,33 @@ tj optimize --json | python3 -c \
   "import json,sys;r=json.load(sys.stdin);assert 'plan' in r and 'pricing_mode' in r;print('ok: plan-tier metadata present')"
 ```
 
+### 6f. TokenMaxx (v0.3.4 — six-tier ladder)
+
+```bash
+tj tokenmaxx
+# [ ] Bordered "TokenJam TokenMaxxing Report" panel renders
+# [ ] On api plan: shows absolute spend; no multiplier line
+# [ ] `tj optimize` reference in the action line renders in green bold
+# [ ] Share-line is teal, mentions @tokenjamdev (NOT #tokenmaxx)
+
+# Tier label must be one of the v0.3.4 six.
+tj tokenmaxx --json | python3 -c \
+  "import json,sys;d=json.load(sys.stdin);ok={'TokenSipper','TokenModerator','TokenMaxxer','TokenSuperMaxxer','TokenMegaMaxxer','TokenGigaMaxxer'};assert d['tier'] in ok,d['tier'];print('ok:',d['tier'])"
+
+# Force a different tier by exercising a subscription plan (use whatever
+# plan matches your test data — heavy usage on a Pro plan will land you
+# higher up the ladder than the same usage on a Max-20x plan).
+tj onboard --claude-code --reconfigure --plan max_5x
+tj tokenmaxx
+# [ ] Output now shows "That's N× your Max 5x plan cost ($100/mo flat)."
+# [ ] Tier name follows the v0.3.4 ladder (Sipper / Moderator / Maxxer /
+#     SuperMaxxer / MegaMaxxer / GigaMaxxer)
+# [ ] At thresholds: 1× / 4× / 10× / 20× / 50× crosses tier boundaries
+
+# Reset to api before continuing
+tj onboard --claude-code --reconfigure --plan api
+```
+
 ## 7. Plan-tier-aware rendering
 
 Reconfigure to a subscription plan and re-run `tj optimize` — output should reframe.
@@ -317,6 +344,41 @@ Spot-check (don't repeat every theme/typography detail — those are one-time UI
 
 If any UI element regresses *visibly broken* relative to main, dig in. Otherwise move on.
 
+### Offline-UI verification (v0.3.4 — issue #87 / PR #88)
+
+The dashboard must work fully offline. The "local-first, no data egress" pitch breaks the moment a render-time external load happens.
+
+Open Chrome DevTools (or your browser's equivalent) → **Network tab** → reload `http://127.0.0.1:7391/`.
+
+- [ ] **Zero failed requests** to `fonts.googleapis.com`, `fonts.gstatic.com`, `esm.sh`, or `tokenjam.dev`
+- [ ] Dashboard interactivity works (sidebar nav, tab switches) — proves the vendored Preact / htm under `/ui/vendor/` is serving correctly
+- [ ] Favicon renders (data: URL, no external fetch)
+
+The `tests/unit/test_ui_offline.py` regression test pins this contract in CI, but a manual eyeball catches anything the regex assertions miss (e.g. background-image URLs in CSS, inline `fetch()` calls in JS).
+
+### Cache cost-correctness (v0.3.4 — PRs #90 + #92)
+
+```bash
+# Spans table has cache_write_tokens (migration 5).
+duckdb ~/.tj/telemetry.duckdb "PRAGMA table_info(spans)" 2>/dev/null \
+  | grep cache_write_tokens \
+  && echo "ok: cache_write_tokens column present"
+
+# Any Anthropic cache-hit span (cache_read>0, no input/output) is now
+# costed. Pre-0.3.4 these were dropped as no-ops and silently $0.
+duckdb ~/.tj/telemetry.duckdb "
+  SELECT COUNT(*) AS hits, MIN(cost_usd) AS min_cost
+  FROM spans
+  WHERE cache_tokens > 0
+    AND (input_tokens = 0 OR input_tokens IS NULL)
+    AND (output_tokens = 0 OR output_tokens IS NULL)
+" 2>/dev/null
+# [ ] If hits > 0: min_cost > 0
+# [ ] If hits = 0: this run didn't trigger a pure cache-only span — fine
+```
+
+If `duckdb` CLI isn't installed, skip — the unit + synthetic tests covering these paths run in CI.
+
 ## 14. Clean up
 
 ```bash
@@ -402,6 +464,7 @@ tj status && tj traces && tj cost --since 1h
 tj optimize           # all analyzers
 tj optimize downsize
 tj optimize cache
+tj tokenmaxx          # six-tier ladder
 tj backfill langfuse --source-file tests/fixtures/langfuse_real_response.json
 tj backfill helicone --source-file tests/fixtures/helicone_real_response.json
 tj backfill otlp --source-file tests/fixtures/otlp_sample.json

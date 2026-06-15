@@ -13,8 +13,15 @@ Run this after a new release publishes to PyPI to verify it works end-to-end. Th
 tj uninstall --yes 2>/dev/null
 rm -rf ~/.tj ~/.config/tj .tj
 
-pip3 install --upgrade tokenjam
+# Recommended install path (PEP 668-safe on Homebrew Python and
+# Debian 12+/Ubuntu 24+). `--force` so we reinstall even if a prior
+# version is present.
+pipx install --force tokenjam
 tj --version
+
+# Older `pip3 install --upgrade tokenjam` path still works inside
+# a clean venv but fails on system Python — that's the bug pipx
+# solves, and verifying pipx is what we ship docs telling users to do.
 ```
 
 **Pass criteria:** version matches the release being tested.
@@ -65,6 +72,32 @@ tj optimize --json | python3 -c \
 ```
 
 **Pass criteria:** every positional analyzer name runs without crashing. Optional analyzers (`cache-recommend`, `trim`) surface clear hints when their prereqs aren't met instead of erroring.
+
+## 4b. TokenMaxx tier classification
+
+```bash
+tj tokenmaxx
+# [ ] Bordered "TokenJam TokenMaxxing Report" panel renders
+# [ ] On api plan: shows absolute spend; no multiplier line
+# [ ] Action line surfaces either downsize savings or "no obvious
+#     savings flagged yet" (both are valid)
+
+# Verify the JSON tier label is one of the six valid v0.3.4 tiers.
+tj tokenmaxx --json | python3 -c \
+  "import json,sys;d=json.load(sys.stdin);ok={'TokenSipper','TokenModerator','TokenMaxxer','TokenSuperMaxxer','TokenMegaMaxxer','TokenGigaMaxxer'};assert d['tier'] in ok,d['tier'];print('ok:',d['tier'])"
+
+# Reconfigure to a subscription plan and re-run — the multiplier line
+# should appear. Pick whichever plan matches your test config.
+tj onboard --claude-code --reconfigure --plan max_5x
+tj tokenmaxx
+# [ ] Multiplier line "That's N× your Max 5x plan cost ($100/mo flat)."
+# [ ] Tier may shift if the multiplier crosses a boundary
+
+# Flip back to api so subsequent steps render dollar figures.
+tj onboard --claude-code --reconfigure --plan api
+```
+
+**Pass criteria:** the report renders without crashing, the JSON `tier` field carries one of the 6 v0.3.4 tier names, and the multiplier line appears under a subscription plan.
 
 ## 5. Backfill adapters (smoke against committed fixtures)
 
@@ -123,9 +156,44 @@ Spot-check:
 - [ ] Cost page shows non-zero USD values
 - [ ] Sidebar theme toggle works
 
+### Offline-UI verification (v0.3.4 — PR #88)
+
+Open Chrome DevTools (or your browser's equivalent) → **Network tab** → reload `http://127.0.0.1:7391/`.
+
+- [ ] **Zero failed requests** to `fonts.googleapis.com`, `fonts.gstatic.com`, `esm.sh`, or `tokenjam.dev`
+- [ ] Dashboard interactivity works (sidebar nav, tab switches) — proves the vendored Preact / htm under `/ui/vendor/` is being served, not loading from the CDN
+- [ ] Favicon renders (data: URL, no external fetch)
+
+Bonus: turn off wifi entirely, hard-refresh, and confirm the page still renders + the JS still hydrates. The whole dashboard must work air-gapped.
+
 ```bash
 tj stop
 ```
+
+## 9. Cache cost-correctness (v0.3.4 — PRs #90 + #92)
+
+Cache-only spans (cache_read > 0, input/output = 0) used to be costed at $0. Cache-creation tokens on the live OTLP path used to be silently dropped. Both fixed in v0.3.4.
+
+```bash
+# Spans table now has cache_write_tokens (migration 5).
+duckdb ~/.tj/telemetry.duckdb "PRAGMA table_info(spans)" 2>/dev/null \
+  | grep cache_write_tokens \
+  && echo "ok: cache_write_tokens column present"
+
+# Any captured Anthropic cache-hit span should have non-zero cost_usd.
+duckdb ~/.tj/telemetry.duckdb "
+  SELECT COUNT(*) AS hits,
+         MIN(cost_usd) AS min_cost
+  FROM spans
+  WHERE cache_tokens > 0
+    AND (input_tokens = 0 OR input_tokens IS NULL)
+    AND (output_tokens = 0 OR output_tokens IS NULL)
+" 2>/dev/null
+# [ ] If hits > 0: min_cost > 0 (cache hits ARE being costed; was $0 pre-0.3.4)
+# [ ] If hits = 0: this release's runs didn't trigger a pure cache-only span — fine, unit tests cover the path
+```
+
+If you don't have `duckdb` CLI installed, skip the SQL checks — the unit + synthetic tests covering these paths run in CI and are the canonical verification.
 
 ---
 
@@ -166,14 +234,16 @@ tj stop
 
 | Step | Pass criteria |
 |------|--------------|
-| 1 | `pip install --upgrade tokenjam` succeeds, version matches release |
+| 1 | `pipx install --force tokenjam` succeeds, version matches release |
 | 2 | Onboard prompts for plan tier; config records it; no auto `usd = 200` written |
 | 3 | Example runs without DB-lock errors; CLI shows real USD values |
-| 4 | All four optimize analyzers run; caveat appears in downgrade JSON; `plan` + `pricing_mode` in JSON output |
+| 4 | All optimize analyzers run; caveat appears in downgrade JSON; `plan` + `pricing_mode` in JSON output |
+| 4b | `tj tokenmaxx` renders the bordered report panel; JSON `tier` is one of the 6 v0.3.4 tier names; subscription plan shows multiplier line |
 | 5 | All three backfill adapters ingest from fixtures; re-runs are idempotent |
 | 6 | `--compare previous` produces a diff report; `--export-config` writes a snippet with caveat comments |
 | 7 | `tj policy list` renders the unified table |
-| 8 | `tj serve` starts, web UI loads, HTTP fallback works while server holds lock |
+| 8 | `tj serve` starts, web UI loads, HTTP fallback works while server holds lock; **zero external requests in DevTools Network tab** (offline-UI fix shipped in v0.3.4) |
+| 9 | `cache_write_tokens` column present on the spans table (migration 5); cache-hit spans show non-zero cost_usd |
 | Claude Code | Onboard writes settings.json + projects.json; re-run is a no-op |
 | Codex | Onboard writes `[otel]` + `[mcp_servers.tj]` to codex config; secret synced |
 
