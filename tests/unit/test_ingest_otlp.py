@@ -9,6 +9,8 @@ import pytest
 
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest_adapters.otlp import ingest_otlp
+from tokenjam.otel.otlp_parsing import parse_otlp_span
+from tokenjam.otel.semconv import GenAIAttributes
 
 
 FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "otlp_sample.json"
@@ -63,6 +65,26 @@ def test_ingest_fixture_extracts_indexed_fields(db):
     assert row[1] == 1500
     assert row[2] == 320
     assert row[3] == pytest.approx(0.00513)
+
+
+def test_parse_otlp_span_extracts_cache_read_and_write_tokens():
+    """Both cache-read and cache-creation token attributes are indexed.
+
+    Regression: the live parser previously read only CACHE_READ_TOKENS and
+    dropped CACHE_CREATE_TOKENS, so cache-write tokens emitted by the SDK were
+    never costed.
+    """
+    raw = {
+        "name": "gen_ai.llm.call",
+        "attributes": [
+            {"key": GenAIAttributes.REQUEST_MODEL, "value": {"stringValue": "claude-haiku-4-5"}},
+            {"key": GenAIAttributes.CACHE_READ_TOKENS, "value": {"intValue": "1000"}},
+            {"key": GenAIAttributes.CACHE_CREATE_TOKENS, "value": {"intValue": "2000"}},
+        ],
+    }
+    span = parse_otlp_span(raw, {})
+    assert span.cache_tokens == 1000
+    assert span.cache_write_tokens == 2000
 
 
 def test_ingest_fixture_extracts_service_name_as_agent(db):

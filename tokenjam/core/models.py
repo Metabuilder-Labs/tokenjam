@@ -67,6 +67,10 @@ class NormalizedSpan:
     input_tokens:   int | None     = None
     output_tokens:  int | None     = None
     cache_tokens:   int | None     = None
+    # cache_tokens counts cache-READ tokens; cache_write_tokens counts
+    # cache-CREATION tokens, which are priced at a higher rate. They are kept
+    # separate so cost can charge each at its own rate (see calculate_cost).
+    cache_write_tokens: int | None = None
     cost_usd:       float | None   = None
     request_type:   str | None     = None
     conversation_id: str | None    = None

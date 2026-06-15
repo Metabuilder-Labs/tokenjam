@@ -34,7 +34,7 @@ from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.core.models import AgentRecord, NormalizedSpan, SpanKind, SpanStatus
 from tokenjam.core.schema_validator import SchemaValidator
-from tokenjam.otel.provider import TjSpanExporter
+from tokenjam.otel.provider import TjSpanExporter, convert_otel_span
 from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.sdk.agent import watch, AgentSession, record_llm_call, record_tool_call
 from tokenjam.utils.time_parse import utcnow
@@ -157,6 +157,40 @@ def full_stack():
 
     provider.shutdown()
     db.close()
+
+
+# ── OTel ReadableSpan -> NormalizedSpan ──────────────────────────────────
+
+
+def test_convert_otel_span_extracts_cache_read_and_write_tokens():
+    """convert_otel_span indexes both cache-read and cache-creation tokens.
+
+    Regression: provider previously read only CACHE_READ_TOKENS, dropping
+    cache-creation tokens so cache-write cost was never charged on this path.
+    """
+    collected: list[ReadableSpan] = []
+
+    class _Collector(SpanExporter):
+        def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
+            collected.extend(spans)
+            return SpanExportResult.SUCCESS
+
+        def shutdown(self) -> None:
+            pass
+
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(_Collector()))
+    tracer = provider.get_tracer("test")
+
+    with tracer.start_as_current_span("gen_ai.llm.call") as span:
+        span.set_attribute(GenAIAttributes.REQUEST_MODEL, "claude-haiku-4-5")
+        span.set_attribute(GenAIAttributes.CACHE_READ_TOKENS, 1000)
+        span.set_attribute(GenAIAttributes.CACHE_CREATE_TOKENS, 2000)
+
+    assert len(collected) == 1
+    normalized = convert_otel_span(collected[0])
+    assert normalized.cache_tokens == 1000
+    assert normalized.cache_write_tokens == 2000
 
 
 # ── SDK -> Pipeline -> DB ─────────────────────────────────────────────────
