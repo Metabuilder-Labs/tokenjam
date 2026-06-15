@@ -30,9 +30,11 @@ def cmd_backfill() -> None:
               help="Only ingest sessions whose end time is within the last N days.")
 @click.option("--quiet", is_flag=True, help="Suppress per-session progress output.")
 @click.option("--reingest", is_flag=True,
-              help="Re-tag spans already in the DB (e.g. populate sub_agent_id "
-                   "on history ingested before that column existed). Existing "
-                   "spans are updated in place, never duplicated.")
+              help="Update spans already in the DB in place (never duplicated): "
+                   "re-tags sub_agent_id on pre-column history AND backfills "
+                   "captured content (message text / tool_input) onto existing "
+                   "spans when [capture] was enabled after they were first "
+                   "ingested. Run this after turning on [capture].")
 @click.pass_context
 def claude_code(ctx: click.Context, root_path: str | None, since_days: int | None,
                 quiet: bool, reingest: bool) -> None:

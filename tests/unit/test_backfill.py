@@ -543,3 +543,91 @@ def test_reingest_retags_existing_spans(tmp_path):
         ).fetchone()[0] == 2
     finally:
         db.close()
+
+
+def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
+    """#10: enabling [capture] AFTER a session is already ingested, then
+    re-running backfill with --reingest, populates content / tool_input onto the
+    EXISTING spans — no fresh DB required. Without this, #4's recurring-inclusion
+    detection (which reads that content) only worked against a fresh DB."""
+    from tokenjam.core.config import TjConfig
+
+    _content_session_file(tmp_path)
+
+    db = InMemoryBackend()
+    try:
+        # 1. First ingest with capture OFF (default config) — spans land with
+        #    NO content, exactly the pre-#10 already-ingested state.
+        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"))
+
+        def _attrs(name: str) -> dict:
+            raw = db.conn.execute(
+                "SELECT attributes FROM spans WHERE name = $1", [name],
+            ).fetchone()[0]
+            return json.loads(raw) if isinstance(raw, str) else raw
+
+        llm_before = _attrs("gen_ai.llm.call")
+        tool_before = _attrs("gen_ai.tool.call")
+        assert GenAIAttributes.PROMPT_CONTENT not in llm_before
+        assert GenAIAttributes.COMPLETION_CONTENT not in llm_before
+        assert GenAIAttributes.TOOL_INPUT not in tool_before
+
+        # 2. A plain (non-reingest) re-run with capture ON still does NOT touch
+        #    existing rows — the conflict path skips them. This is the gap #10
+        #    fixes: --reingest is required.
+        cfg = TjConfig(version="1")
+        cfg.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
+        r_plain = ingest_claude_code(db, root=tmp_path, config=cfg)
+        assert r_plain.spans_ingested == 0
+        assert GenAIAttributes.PROMPT_CONTENT not in _attrs("gen_ai.llm.call")
+
+        before_rows = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+
+        # 3. --reingest WITH capture on backfills content in place: no new rows.
+        r_re = ingest_claude_code(db, root=tmp_path, config=cfg, reingest=True)
+        assert r_re.spans_ingested == 0
+        assert r_re.spans_retagged > 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans"
+        ).fetchone()[0] == before_rows
+
+        llm_after = _attrs("gen_ai.llm.call")
+        tool_after = _attrs("gen_ai.tool.call")
+        assert llm_after[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+        assert llm_after[GenAIAttributes.COMPLETION_CONTENT] == \
+            "Reading the config file now."
+        assert tool_after[GenAIAttributes.TOOL_INPUT] == \
+            {"file_path": "/etc/app/config.toml"}
+        # The pre-existing "source" key is preserved through the merge.
+        assert llm_after["source"] == "backfill.claude_code"
+    finally:
+        db.close()
+
+
+def test_reingest_capture_off_does_not_wipe_existing_content(tmp_path):
+    """#10 safety: a --reingest run with capture OFF must NOT delete content a
+    prior capture-on backfill already stored — the merge overlays parsed keys,
+    it never blanks the stored attributes."""
+    from tokenjam.core.config import TjConfig
+
+    _content_session_file(tmp_path)
+
+    db = InMemoryBackend()
+    try:
+        # Seed with capture ON so the stored spans already carry content.
+        cfg_on = TjConfig(version="1")
+        cfg_on.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
+        ingest_claude_code(db, root=tmp_path, config=cfg_on)
+
+        # Reingest with capture OFF (default config): content must survive.
+        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"), reingest=True)
+
+        raw = db.conn.execute(
+            "SELECT attributes FROM spans WHERE name = $1", ["gen_ai.llm.call"],
+        ).fetchone()[0]
+        attrs = json.loads(raw) if isinstance(raw, str) else raw
+        assert attrs[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+        assert attrs[GenAIAttributes.COMPLETION_CONTENT] == \
+            "Reading the config file now."
+    finally:
+        db.close()

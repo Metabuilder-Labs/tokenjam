@@ -539,6 +539,40 @@ def ingest_claude_code(
     return result
 
 
+def _load_attrs(conn, span_id: str) -> dict:
+    """Read a stored span's `attributes` column as a dict.
+
+    DuckDB may hand the JSON column back as a string or an already-parsed
+    object depending on backend; normalize both to a dict. Malformed/missing
+    attributes degrade to an empty dict so a reingest never raises.
+    """
+    row = conn.execute(
+        "SELECT attributes FROM spans WHERE span_id = $1", [span_id]
+    ).fetchone()
+    if not row or row[0] is None:
+        return {}
+    value = row[0]
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _merge_attributes(exists_attributes: dict, parsed_attributes: dict) -> dict:
+    """Overlay freshly-parsed attributes over the stored ones (parsed wins
+    per key), returning a NEW dict (the stored row is never mutated in place).
+
+    This is the #10 backfill: when `[capture]` is enabled after a span was
+    first ingested, the parsed span now carries content keys
+    (`gen_ai.prompt.content` etc.) the stored row lacks. Merging ADDS those
+    without dropping any keys the stored row already had. Capture-off reingest
+    is a no-op because the parsed attributes are just `{"source": ...}`.
+    """
+    return {**exists_attributes, **parsed_attributes}
+
+
 def _insert_session_idempotent(
     db, parsed: ParsedSession, reingest: bool = False, plan_tier: str = "unknown",
 ) -> tuple[int, int]:
@@ -546,10 +580,24 @@ def _insert_session_idempotent(
     Insert spans + session record; skip spans already present.
     Returns (newly_inserted, retagged).
 
-    When `reingest` is True, spans that already exist are UPDATEd to refresh
-    `sub_agent_id` instead of being skipped — this re-tags history ingested by
-    an older backfill that predates the column. Other span fields are left
-    untouched.
+    When `reingest` is True, spans that already exist are UPDATEd instead of
+    being skipped — this backfills two things onto rows an older/leaner backfill
+    wrote:
+      - `sub_agent_id` — re-tags history ingested before that column existed.
+      - `attributes`   — overlays freshly-parsed captured content
+        (`gen_ai.prompt.content` / `gen_ai.completion.content` /
+        `gen_ai.tool.input`) onto the stored row when `[capture]` was enabled
+        AFTER the span was first ingested (#10). Without this, enabling capture
+        later never lands content on already-ingested spans, so the
+        recurring-inclusion detection #4 needs (which reads that content) only
+        worked against a fresh DB.
+
+    The overlay is a per-key merge of the parsed span's attributes over the
+    stored attributes (parsed wins per key) — so it ADDS content keys without
+    discarding any keys the stored row already carried (e.g. from live ingest).
+    Capture-off reingest is a no-op: the parsed span's attributes are just
+    `{"source": ...}`, which the stored row already has, so nothing changes.
+    Other span fields are left untouched.
     """
     conn = getattr(db, "conn", None)
     inserted = 0
@@ -574,10 +622,17 @@ def _insert_session_idempotent(
         ).fetchone()
         if exists:
             if reingest:
-                # Re-tag history from before the sub_agent_id column existed.
+                # Re-tag history from before the sub_agent_id column existed AND
+                # overlay any freshly-parsed captured content (#10) so enabling
+                # [capture] later backfills onto already-ingested spans.
+                merged_attrs = _merge_attributes(
+                    exists_attributes=_load_attrs(conn, span.span_id),
+                    parsed_attributes=span.attributes,
+                )
                 conn.execute(
-                    "UPDATE spans SET sub_agent_id = $1 WHERE span_id = $2",
-                    [span.sub_agent_id, span.span_id],
+                    "UPDATE spans SET sub_agent_id = $1, attributes = $2 "
+                    "WHERE span_id = $3",
+                    [span.sub_agent_id, json.dumps(merged_attrs), span.span_id],
                 )
                 retagged += 1
             continue
