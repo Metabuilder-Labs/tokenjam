@@ -165,3 +165,70 @@ def test_ingest_rejects_neither_source(db):
     """Passing neither raises."""
     with pytest.raises(ValueError, match="exactly one"):
         ingest_langfuse(db)
+
+
+# -- Cache token threading (issue #93) --
+
+def test_observation_to_span_threads_cache_write_tokens():
+    """Cache-creation tokens (modern `usageDetails.input_cache_creation` key)
+    flow through to `NormalizedSpan.cache_write_tokens`. Without this, the
+    higher-rate cache-write cost was never charged on the Langfuse backfill
+    path."""
+    obs = {
+        "id": "obs-cw",
+        "traceId": "trace-cw",
+        "type": "GENERATION",
+        "startTime": "2026-04-01T10:00:00Z",
+        "endTime": "2026-04-01T10:00:01Z",
+        "model": "claude-haiku-4-5",
+        "usageDetails": {
+            "input": 100,
+            "output": 20,
+            "input_cache_read": 800,
+            "input_cache_creation": 1500,
+        },
+        "calculatedTotalCost": 0.001,
+    }
+    span = _observation_to_span(obs)
+    assert span is not None
+    assert span.input_tokens == 100
+    assert span.cache_tokens == 800
+    assert span.cache_write_tokens == 1500
+
+
+def test_observation_to_span_threads_cache_write_camelcase_key():
+    """The legacy camelCase variant (`cacheCreationInputTokens`) is also
+    recognised, mirroring the cacheReadInputTokens fallback."""
+    obs = {
+        "id": "obs-cw2",
+        "traceId": "trace-cw2",
+        "type": "GENERATION",
+        "startTime": "2026-04-01T10:00:00Z",
+        "endTime": "2026-04-01T10:00:01Z",
+        "model": "claude-haiku-4-5",
+        "usageDetails": {
+            "cacheReadInputTokens": 800,
+            "cacheCreationInputTokens": 1500,
+        },
+    }
+    span = _observation_to_span(obs)
+    assert span is not None
+    assert span.cache_tokens == 800
+    assert span.cache_write_tokens == 1500
+
+
+def test_observation_to_span_cache_write_absent_leaves_field_none():
+    """When the source doesn't carry cache-creation, the field stays None —
+    not silently zero, so downstream can tell 'no data' from 'genuinely 0'."""
+    obs = {
+        "id": "obs-no-cw",
+        "traceId": "trace-no-cw",
+        "type": "GENERATION",
+        "startTime": "2026-04-01T10:00:00Z",
+        "endTime": "2026-04-01T10:00:01Z",
+        "model": "claude-haiku-4-5",
+        "usageDetails": {"input": 100, "output": 20},
+    }
+    span = _observation_to_span(obs)
+    assert span is not None
+    assert span.cache_write_tokens is None

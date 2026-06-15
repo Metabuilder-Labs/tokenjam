@@ -118,7 +118,11 @@ CREATE TABLE IF NOT EXISTS spans (
     cost_usd            DOUBLE,
     request_type        TEXT,
     conversation_id     TEXT,
-    events              JSON DEFAULT '[]'
+    events              JSON DEFAULT '[]',
+    -- cache_write_tokens (cache-CREATION tokens) added by migration 5.
+    -- Kept separate from cache_tokens (cache-read) because they bill at
+    -- different rates. See models.py::NormalizedSpan for the read/write split.
+    cache_write_tokens  BIGINT
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -194,6 +198,14 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS billing_account TEXT;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS plan_tier       TEXT DEFAULT 'unknown'"
     )),
+    # Migration 5: cache_write_tokens on spans. Issue #94.
+    # NormalizedSpan and the cost engine started threading cache-write
+    # tokens through in PR #92 (live OTLP path) but the count was never
+    # persisted — only the resulting cost_usd landed. This column makes
+    # per-token-class reporting possible. NULL on backfilled rows; the
+    # _row_to_span helper coerces NULL -> None and ingest writes 0 for
+    # spans that don't carry the count.
+    (5, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT"),
 ]
 
 
@@ -252,6 +264,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         input_tokens=_int_or_none(d.get("input_tokens")),
         output_tokens=_int_or_none(d.get("output_tokens")),
         cache_tokens=_int_or_none(d.get("cache_tokens")),
+        cache_write_tokens=_int_or_none(d.get("cache_write_tokens")),
         cost_usd=d.get("cost_usd"),
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
@@ -375,9 +388,10 @@ class DuckDBBackend:
             "name, kind, status_code, status_message, start_time, end_time, "
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account"
+            "request_type, conversation_id, events, billing_account, "
+            "cache_write_tokens"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -385,7 +399,7 @@ class DuckDBBackend:
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account,
+                span.billing_account, span.cache_write_tokens,
             ],
         )
 

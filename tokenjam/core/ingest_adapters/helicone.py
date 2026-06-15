@@ -149,6 +149,13 @@ def _record_to_span(record: dict[str, Any]) -> NormalizedSpan | None:
         response.get("cache_read_input_tokens")
         or record.get("cache_read_input_tokens")
     )
+    # Anthropic-via-Helicone surfaces cache-creation tokens on the response
+    # object alongside cache-read. Threading the count through so cache-write
+    # cost reporting matches the live OTLP path (issue #93).
+    cache_write = (
+        response.get("cache_creation_input_tokens")
+        or record.get("cache_creation_input_tokens")
+    )
 
     cost = (
         record.get("cost_usd")
@@ -205,6 +212,7 @@ def _record_to_span(record: dict[str, Any]) -> NormalizedSpan | None:
         input_tokens=int(input_tokens) if input_tokens is not None else None,
         output_tokens=int(output_tokens) if output_tokens is not None else None,
         cache_tokens=int(cache_read) if cache_read is not None else None,
+        cache_write_tokens=int(cache_write) if cache_write is not None else None,
         cost_usd=float(cost) if cost is not None else None,
         request_type="completion",
         conversation_id=conversation_id,
