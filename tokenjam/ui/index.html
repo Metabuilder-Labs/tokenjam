@@ -529,7 +529,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
     <a href="https://github.com/Metabuilder-Labs/tokenjam" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
     <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme"><span class="icon" id="theme-icon">&#x2299;</span> <span id="theme-label">System</span></button>
-    <div class="version">v0.1.4</div>
+    <div class="version" id="tj-version">…</div>
   </div>
 </nav>
 
@@ -1281,6 +1281,15 @@ function App() {
 }
 
 render(html`<${App} />`, document.getElementById('app'));
+
+// Footer version — fetched from /api/v1/version (same-origin, offline-safe).
+fetch('/api/v1/version')
+  .then(r => r.ok ? r.json() : null)
+  .then(d => {
+    const el = document.getElementById('tj-version');
+    if (el && d && d.version) el.textContent = 'v' + d.version;
+  })
+  .catch(() => {});
 </script>
 <script>
   // Theme toggle: cycles dark → light → system
