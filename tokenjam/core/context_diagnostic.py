@@ -14,8 +14,31 @@ It reports three things over a window of CC sessions:
 
 1. **Per-turn context composition** — for every assistant turn, how many tokens
    were spent *re-reading* prior context (cache-read tokens: conversation
-   history, CLAUDE.md, tool-output accumulation) versus doing *net-new work*
-   (uncached input + output). The headline is the re-read share.
+   history, CLAUDE.md, tool-output accumulation) versus *cache-miss* overhead
+   (cache-creation tokens — uncached input that missed the cache and had to be
+   written to it, billed at a premium) versus doing *net-new work* (uncached
+   input + output). The headline is the re-read share; cache-miss is broken out
+   as its own named overhead source (#11).
+
+   **Named overhead sources (#11).** #4 named re-read overhead (cache reads).
+   #11 asked to additionally attribute two large, specific overhead sources as
+   their own named categories:
+     * **prompt-cache MISS** (cache-creation tokens) — *derivable*: the
+       on-disk usage block carries ``cache_creation_input_tokens`` separately,
+       mapped to ``NormalizedSpan.cache_write_tokens``. These are input that
+       missed the cache and had to be written to it (Anthropic bills cache
+       writes at a premium over base input), so they are genuine, nameable
+       overhead distinct from both re-read and net-new work. Surfaced as the
+       ``cache_miss`` category below.
+     * **MCP schema-injection** (~25K tok/call) — *NOT derivable from current
+       data and deliberately parked.* See ``MCP_INJECTION_PARK_NOTE``: neither
+       the Claude Code on-disk transcript nor live spans carry per-tool /
+       per-schema token attribution. Tool-definition / system-prompt tokens are
+       folded indistinguishably into ``input_tokens`` / ``cache_creation``;
+       ``mcp__``-prefixed names appear only on tool-*invocation* spans (which
+       carry no schema-injection token count). Attributing it would require a
+       new capture path (a per-request tool-schema token delta), so this half
+       is parked rather than faked.
 
 2. **Recurring inclusions** — content re-pasted across many sessions/turns,
    frequency-counted, each with a concrete structural fix. Four kinds, all
@@ -59,8 +82,21 @@ from tokenjam.otel.semconv import GenAIAttributes
 # Honesty caveat surfaced verbatim next to the headline (CLAUDE.md Rule 14).
 CONTEXT_HONESTY_CAVEAT = (
     "Re-read tokens are cache reads (billed at a reduced rate, not free) — real "
-    "quota. Figures are measured shares and structural candidates, not "
-    "guaranteed savings. Review before restructuring."
+    "quota. Cache-miss tokens are cache writes (billed at a premium). Figures "
+    "are measured shares and structural candidates, not guaranteed savings. "
+    "Review before restructuring."
+)
+
+# Parked half of #11: MCP schema-injection attribution is not derivable from
+# the data we currently capture. Surfaced as a note (not a fabricated number)
+# so the gap is honest and the follow-up is precise (CLAUDE.md Rule 14).
+MCP_INJECTION_PARK_NOTE = (
+    "MCP tool-schema injection (~25K tokens/call when MCP servers are attached) "
+    "is not yet broken out: the on-disk transcript and live spans carry no "
+    "per-tool / per-schema token attribution — tool-definition tokens are folded "
+    "into input/cache-creation, and `mcp__`-prefixed names appear only on "
+    "tool-invocation spans (no schema-injection token count). Capturing a "
+    "per-request tool-schema token delta would let `tj context` attribute it."
 )
 
 # A re-read share at or above this fraction is "context-heavy" and worth a
@@ -137,9 +173,21 @@ class TurnComposition:
         return self.new_input_tokens + self.output_tokens
 
     @property
+    def cache_miss_tokens(self) -> int:
+        """Cache-MISS overhead: cache-creation tokens (input that missed the
+        cache and had to be written to it, billed at a premium). A named
+        overhead source distinct from re-read and net-new work (#11)."""
+        return self.cache_write_tokens
+
+    @property
     def reread_share(self) -> float:
         total = self.total_tokens
         return (self.reread_tokens / total) if total else 0.0
+
+    @property
+    def cache_miss_share(self) -> float:
+        total = self.total_tokens
+        return (self.cache_miss_tokens / total) if total else 0.0
 
 
 @dataclass
@@ -210,9 +258,24 @@ class ContextDiagnostic:
         return self.total_new_input_tokens + self.total_output_tokens
 
     @property
+    def total_cache_miss_tokens(self) -> int:
+        """Cache-MISS overhead across the window: cache-creation tokens (#11).
+
+        Aliases ``total_cache_write_tokens`` under the named-overhead framing —
+        cache writes are input that missed the cache and were written to it,
+        billed at a premium, so they're a nameable overhead source distinct
+        from re-read (cache reads) and net-new work."""
+        return self.total_cache_write_tokens
+
+    @property
     def reread_share(self) -> float:
         total = self.total_tokens
         return (self.total_reread_tokens / total) if total else 0.0
+
+    @property
+    def cache_miss_share(self) -> float:
+        total = self.total_tokens
+        return (self.total_cache_miss_tokens / total) if total else 0.0
 
     @property
     def has_data(self) -> bool:
@@ -397,6 +460,10 @@ def compute_context_diagnostic(
             "`tj context --help`). Tool outputs are only captured on the live "
             "ingest path, not the on-disk transcript."
         )
+
+    # Parked half of #11 — only worth surfacing once there are turns to attribute
+    # against. Honest gap, not a fabricated figure (CLAUDE.md Rule 14).
+    result.notes.append(MCP_INJECTION_PARK_NOTE)
     return result
 
 
@@ -654,9 +721,12 @@ def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
         "total_new_input_tokens": diag.total_new_input_tokens,
         "total_output_tokens": diag.total_output_tokens,
         "total_cache_write_tokens": diag.total_cache_write_tokens,
+        # Named overhead source: prompt-cache MISS (cache-creation), #11.
+        "total_cache_miss_tokens": diag.total_cache_miss_tokens,
         "total_work_tokens": diag.total_work_tokens,
         "total_tokens": diag.total_tokens,
         "reread_share": round(diag.reread_share, 4),
+        "cache_miss_share": round(diag.cache_miss_share, 4),
         "total_cost_usd": round(diag.total_cost_usd, 6),
         "heaviest_turns": [
             {
@@ -666,7 +736,9 @@ def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
                 "reread_tokens": t.reread_tokens,
                 "new_input_tokens": t.new_input_tokens,
                 "output_tokens": t.output_tokens,
+                "cache_miss_tokens": t.cache_miss_tokens,
                 "reread_share": round(t.reread_share, 4),
+                "cache_miss_share": round(t.cache_miss_share, 4),
             }
             for t in diag.heaviest_turns
         ],
@@ -695,6 +767,8 @@ def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
         "tool_inputs_captured": diag.tool_inputs_captured,
         "prompts_captured": diag.prompts_captured,
         "tool_outputs_captured": diag.tool_outputs_captured,
+        # Parked #11 half — surfaced as an honest gap, not a fabricated number.
+        "mcp_injection_parked": MCP_INJECTION_PARK_NOTE,
         "notes": diag.notes,
         "caveat": diag.caveat,
     }
