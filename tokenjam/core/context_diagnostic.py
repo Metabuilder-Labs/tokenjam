@@ -17,10 +17,21 @@ It reports three things over a window of CC sessions:
    history, CLAUDE.md, tool-output accumulation) versus doing *net-new work*
    (uncached input + output). The headline is the re-read share.
 
-2. **Recurring inclusions** — the same file read (Read tool, identical
-   ``file_path``) repeated across many sessions, frequency-counted, each with a
-   concrete structural fix (``@file`` reference / a CLAUDE.md entry). Requires
-   ``[capture] tool_inputs = true``.
+2. **Recurring inclusions** — content re-pasted across many sessions/turns,
+   frequency-counted, each with a concrete structural fix. Four kinds, all
+   capture-gated:
+     * **file reads** — the same file (Read tool, identical ``file_path``)
+       re-read across sessions → ``@file`` / a CLAUDE.md entry
+       (needs ``[capture] tool_inputs = true``);
+     * **searches** — the same Grep / Glob / Search query re-run across sessions
+       → pin the result / capture it once (needs ``[capture] tool_inputs``);
+     * **prompts** — the same user prompt re-sent across turns/sessions
+       → save it as a slash-command / CLAUDE.md note
+       (needs ``[capture] prompts``);
+     * **large tool outputs** — the same large tool output re-pasted across
+       turns/sessions → reference the artifact instead of re-running
+       (needs ``[capture] tool_outputs``; only the live ingest path captures
+       tool output — the on-disk transcript carries none).
 
 3. **Compact candidates** — sessions whose re-read share and accumulated
    context are high enough that a mid-session ``/compact`` (or a fresh session)
@@ -65,12 +76,37 @@ COMPACT_MIN_CACHE_TOKENS = 200_000
 # before we flag it — a file read in one session isn't "recurring".
 RECURRING_MIN_SESSIONS = 3
 
+# Repeated PROMPTS and repeated tool OUTPUTS re-paste WITHIN a session (across
+# turns) too, not only across sessions — so they're flagged on an occurrence
+# count rather than a distinct-session count. A prompt/output seen at least this
+# many times (anywhere in the window) is "recurring".
+RECURRING_MIN_OCCURRENCES = 3
+
+# Only LARGE tool outputs are worth flagging — a tiny repeated output (a status
+# string, a short JSON) costs almost no quota to re-paste. Gate on the captured
+# output's character length as a cheap proxy for token weight.
+LARGE_OUTPUT_MIN_CHARS = 2_000
+
 # Cap on rows carried in the finding payload; aggregates are over ALL rows.
 TOP_N = 10
+
+# Inclusion-type tags carried on each RecurringInclusion. Stable strings — the
+# JSON payload and the renderer key off these.
+INCLUSION_FILE_READ = "file_read"
+INCLUSION_SEARCH = "search"
+INCLUSION_PROMPT = "prompt"
+INCLUSION_TOOL_OUTPUT = "tool_output"
 
 # Tools whose identical input across sessions is a structural-fix candidate.
 # Read re-pastes a file every session → `@file` / CLAUDE.md is the fix.
 _FILE_READ_TOOLS = {"read", "view", "cat"}
+
+# Search/query tools: re-running the SAME query across sessions re-pastes its
+# result every time → pin / capture the result instead.
+_SEARCH_TOOLS = {"grep", "glob", "search", "ripgrep", "rg"}
+
+# Tool-input keys that hold a search query/pattern, in priority order.
+_SEARCH_QUERY_KEYS = ("pattern", "query", "regex", "q", "search")
 
 
 @dataclass
@@ -108,14 +144,20 @@ class TurnComposition:
 
 @dataclass
 class RecurringInclusion:
-    """A file/blob re-included across many sessions, with a structural fix."""
+    """A blob re-included across many sessions/turns, with a structural fix.
+
+    ``inclusion_type`` distinguishes the four detected kinds (file read, search,
+    prompt, large tool output) so the renderer and JSON payload can group and
+    label them. ``tool_name`` is empty for prompt inclusions (no tool span).
+    """
 
     label: str  # human label, e.g. "Read /path/to/db/schema.prisma"
     tool_name: str
-    target: str  # the file_path / identifier re-included
+    target: str  # the file_path / query / prompt-excerpt / output-excerpt
     sessions: int  # distinct sessions it appears in
-    occurrences: int  # total times across all sessions
+    occurrences: int  # total times across all sessions/turns
     fix: str  # the structural-fix suggestion
+    inclusion_type: str = INCLUSION_FILE_READ
 
 
 @dataclass
@@ -149,6 +191,8 @@ class ContextDiagnostic:
     compact_candidates: list[CompactCandidate] = field(default_factory=list)
     # Capture state — drives the "enable [capture] and re-run backfill" nudge.
     tool_inputs_captured: bool = False
+    prompts_captured: bool = False
+    tool_outputs_captured: bool = False
     notes: list[str] = field(default_factory=list)
     caveat: str = CONTEXT_HONESTY_CAVEAT
 
@@ -188,36 +232,96 @@ def _parse_attrs(raw: Any) -> dict:
     return {}
 
 
-def _file_target(tool_name: str, tool_input: Any) -> str | None:
-    """Extract a recurring-inclusion target from a tool's input.
+def _coerce_input(tool_input: Any) -> dict | None:
+    """Coerce a tool input (dict or JSON string) into a dict, else ``None``.
 
-    ``tool_input`` may itself be a dict or a JSON string (the test factory
-    double-encodes it; real backfill stores the raw dict). We flag file reads
-    by their ``file_path`` — the classic "re-paste the same file every session"
-    pattern from #24147 — which structurally maps to an ``@file`` / CLAUDE.md
-    fix. Other tools are skipped in v1 (named as a follow-up, not faked).
+    The test factory double-encodes the input as a JSON string; real backfill
+    stores the raw dict. Both must work.
     """
-    if tool_name.lower() not in _FILE_READ_TOOLS:
-        return None
     if isinstance(tool_input, str):
         try:
             tool_input = json.loads(tool_input)
         except Exception:  # noqa: BLE001
             return None
-    if not isinstance(tool_input, dict):
+    return tool_input if isinstance(tool_input, dict) else None
+
+
+def _file_target(tool_name: str, tool_input: Any) -> str | None:
+    """Extract a file-read recurring-inclusion target from a tool's input.
+
+    Flags file reads by their ``file_path`` — the classic "re-paste the same
+    file every session" pattern from #24147 — which structurally maps to an
+    ``@file`` / CLAUDE.md fix.
+    """
+    if tool_name.lower() not in _FILE_READ_TOOLS:
         return None
-    path = tool_input.get("file_path") or tool_input.get("path")
+    data = _coerce_input(tool_input)
+    if data is None:
+        return None
+    path = data.get("file_path") or data.get("path")
     if not path or not isinstance(path, str):
         return None
     return path
 
 
-def _fix_for(target: str) -> str:
-    """Structural-fix suggestion for a recurring file inclusion."""
-    return (
-        f"Reference {target} as `@{target}` in your prompt or add it to "
-        f"CLAUDE.md instead of re-reading it every session."
-    )
+def _search_target(tool_name: str, tool_input: Any) -> str | None:
+    """Extract a search-query recurring-inclusion target from a tool's input.
+
+    Re-running the SAME Grep/Glob/Search query across sessions re-pastes its
+    result every time — keying on the query/pattern (the tool *input*, present
+    on the backfill path too) makes this detectable without the output.
+    """
+    if tool_name.lower() not in _SEARCH_TOOLS:
+        return None
+    data = _coerce_input(tool_input)
+    if data is None:
+        return None
+    for key in _SEARCH_QUERY_KEYS:
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def _normalize_blob(text: str) -> str:
+    """Collapse whitespace so trivially-different copies hash to one signature.
+
+    Repeated prompts/outputs that differ only in trailing whitespace or line
+    endings are the same inclusion for our purposes.
+    """
+    return " ".join(text.split())
+
+
+def _excerpt(text: str, limit: int = 80) -> str:
+    """A short single-line label for a long blob."""
+    flat = _normalize_blob(text)
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def _fix_for(inclusion_type: str, target: str) -> str:
+    """Structural-fix suggestion for a recurring inclusion, per kind."""
+    if inclusion_type == INCLUSION_FILE_READ:
+        return (
+            f"Reference {target} as `@{target}` in your prompt or add it to "
+            f"CLAUDE.md instead of re-reading it every session."
+        )
+    if inclusion_type == INCLUSION_SEARCH:
+        return (
+            f"Pin the result of this search (`{target}`) — capture it once into "
+            f"CLAUDE.md or an `@file` note instead of re-running it every session."
+        )
+    if inclusion_type == INCLUSION_PROMPT:
+        return (
+            "Save this repeated prompt as a slash-command (or a CLAUDE.md note) "
+            "and reference it, instead of re-typing the full text each turn."
+        )
+    if inclusion_type == INCLUSION_TOOL_OUTPUT:
+        return (
+            "This large output re-pastes across turns — write it to a file once "
+            "and reference the artifact (`@file`) instead of re-running the tool "
+            "and re-feeding its output."
+        )
+    return "Capture this once and reference it instead of re-including it."
 
 
 def compute_context_diagnostic(
@@ -227,14 +331,24 @@ def compute_context_diagnostic(
     *,
     agent_id: str | None = None,
     tool_inputs_captured: bool = False,
+    prompts_captured: bool = False,
+    tool_outputs_captured: bool = False,
 ) -> ContextDiagnostic:
     """Run the context-cost diagnostic over a window of spans.
 
     ``conn`` is a direct DuckDB connection (the diagnostic needs the raw
     ``attributes`` column, not exposed over the API shim). Reads aggregate
-    token counts for composition (no content capture required) and the tool
-    ``attributes`` for recurring-inclusion detection (needs
-    ``[capture] tool_inputs``).
+    token counts for composition (no content capture required) and the span
+    ``attributes`` for recurring-inclusion detection.
+
+    Recurring-inclusion detection is per-kind capture-gated, mirroring the four
+    ``[capture]`` toggles:
+      * file reads + searches need ``tool_inputs_captured`` (read the tool input);
+      * repeated prompts need ``prompts_captured`` (``gen_ai.prompt.content``);
+      * large repeated outputs need ``tool_outputs_captured``
+        (``gen_ai.tool.output`` — only the live ingest path captures it).
+    A kind whose capture flag is off is simply not detected; default-off
+    behavior (every flag False) is byte-for-byte unchanged.
     """
     result = ContextDiagnostic(
         since=since,
@@ -242,6 +356,8 @@ def compute_context_diagnostic(
         sessions=0,
         turns=0,
         tool_inputs_captured=tool_inputs_captured,
+        prompts_captured=prompts_captured,
+        tool_outputs_captured=tool_outputs_captured,
     )
 
     turns = _load_turns(conn, since, until, agent_id)
@@ -261,13 +377,25 @@ def compute_context_diagnostic(
     )[:TOP_N]
 
     result.compact_candidates = _compact_candidates(turns)
-    result.recurring = _recurring_inclusions(conn, since, until, agent_id)
+    result.recurring = _recurring_inclusions(
+        conn,
+        since,
+        until,
+        agent_id,
+        tool_inputs_captured=tool_inputs_captured,
+        prompts_captured=prompts_captured,
+        tool_outputs_captured=tool_outputs_captured,
+    )
 
-    if not tool_inputs_captured:
+    if not (tool_inputs_captured or prompts_captured or tool_outputs_captured):
         result.notes.append(
-            "Recurring-inclusion detection needs `[capture] tool_inputs = true` "
-            "in tj.toml, then `tj backfill claude-code` re-run on a fresh DB "
-            "(re-ingest skips already-stored spans — see `tj context --help`)."
+            "Recurring-inclusion detection needs content capture: "
+            "`[capture] tool_inputs = true` (repeated file reads / searches), "
+            "`prompts = true` (repeated prompts), `tool_outputs = true` (large "
+            "repeated outputs) in tj.toml, then `tj backfill claude-code "
+            "--reingest` (re-ingest backfills content onto stored spans — see "
+            "`tj context --help`). Tool outputs are only captured on the live "
+            "ingest path, not the on-disk transcript."
         )
     return result
 
@@ -346,15 +474,149 @@ def _recurring_inclusions(
     since: datetime,
     until: datetime,
     agent_id: str | None,
+    *,
+    tool_inputs_captured: bool,
+    prompts_captured: bool,
+    tool_outputs_captured: bool,
 ) -> list[RecurringInclusion]:
-    """Files re-read across many sessions (capture-gated, structural fix each)."""
+    """All recurring inclusions across the window, generalized over kind.
+
+    Every kind aggregates into one ``(inclusion_type, tool_name, signature)``
+    bucket carrying a distinct-session set + an occurrence count, then is
+    frequency-filtered and turned into a :class:`RecurringInclusion` with a
+    type-appropriate structural fix. Each kind is gated on its capture flag so a
+    flag-off kind contributes nothing.
+    """
+    # key -> {sessions: set, occurrences: int, target: str, label: str}
+    agg: dict[tuple[str, str, str], dict[str, Any]] = defaultdict(
+        lambda: {"sessions": set(), "occurrences": 0, "target": "", "label": ""}
+    )
+
+    def _add(
+        itype: str,
+        tool_name: str,
+        signature: str,
+        sid: Any,
+        *,
+        target: str | None = None,
+        label: str | None = None,
+    ) -> None:
+        key = (itype, tool_name, signature)
+        bucket = agg[key]
+        bucket["sessions"].add(str(sid) if sid is not None else "unknown")
+        bucket["occurrences"] += 1
+        if not bucket["target"]:
+            bucket["target"] = target if target is not None else signature
+        if not bucket["label"]:
+            bucket["label"] = label or bucket["target"]
+
+    if tool_inputs_captured:
+        _collect_tool_inputs(conn, since, until, agent_id, _add)
+    if prompts_captured:
+        _collect_prompts(conn, since, until, agent_id, _add)
+    if tool_outputs_captured:
+        _collect_tool_outputs(conn, since, until, agent_id, _add)
+
+    inclusions: list[RecurringInclusion] = []
+    for (itype, tool_name, _sig), data in agg.items():
+        session_count = len(data["sessions"])
+        occurrences = int(data["occurrences"])
+        # File reads / searches must recur across DISTINCT sessions to count
+        # (a single session re-reading a file isn't structural). Prompts /
+        # large outputs re-paste across TURNS within a session too, so they gate
+        # on the raw occurrence count instead.
+        if itype in (INCLUSION_FILE_READ, INCLUSION_SEARCH):
+            if session_count < RECURRING_MIN_SESSIONS:
+                continue
+        elif occurrences < RECURRING_MIN_OCCURRENCES:
+            continue
+        inclusions.append(
+            RecurringInclusion(
+                label=str(data["label"]),
+                tool_name=tool_name,
+                target=str(data["target"]),
+                sessions=session_count,
+                occurrences=occurrences,
+                fix=_fix_for(itype, str(data["target"])),
+                inclusion_type=itype,
+            )
+        )
+    # Rank by occurrence then session spread, so the heaviest re-paste leads.
+    inclusions.sort(key=lambda r: (r.occurrences, r.sessions), reverse=True)
+    return inclusions[:TOP_N]
+
+
+def _collect_tool_inputs(conn, since, until, agent_id, add) -> None:
+    """File-read + search inclusions, both keyed off the tool *input*."""
+    rows = _tool_span_rows(
+        conn, since, until, agent_id, GenAIAttributes.TOOL_INPUT
+    )
+    for sid, tool_name, attrs in rows:
+        tool_input = attrs.get(GenAIAttributes.TOOL_INPUT)
+        if tool_input is None:
+            continue
+        name = str(tool_name or "")
+        path = _file_target(name, tool_input)
+        if path is not None:
+            add(INCLUSION_FILE_READ, str(tool_name), path, sid,
+                target=path, label=f"{tool_name} {path}")
+            continue
+        query = _search_target(name, tool_input)
+        if query is not None:
+            add(INCLUSION_SEARCH, str(tool_name), query, sid,
+                target=query, label=f"{tool_name} {query}")
+
+
+def _collect_prompts(conn, since, until, agent_id, add) -> None:
+    """Repeated identical user prompts across turns/sessions."""
+    rows = _llm_span_rows(
+        conn, since, until, agent_id, GenAIAttributes.PROMPT_CONTENT
+    )
+    for sid, _tool_name, attrs in rows:
+        content = attrs.get(GenAIAttributes.PROMPT_CONTENT)
+        if not isinstance(content, str) or not content.strip():
+            continue
+        sig = _normalize_blob(content)
+        if not sig:
+            continue
+        add(INCLUSION_PROMPT, "", sig, sid,
+            target=_excerpt(content), label=_excerpt(content))
+
+
+def _collect_tool_outputs(conn, since, until, agent_id, add) -> None:
+    """Large identical tool outputs re-pasted across turns/sessions."""
+    rows = _tool_span_rows(
+        conn, since, until, agent_id, GenAIAttributes.TOOL_OUTPUT
+    )
+    for sid, tool_name, attrs in rows:
+        output = attrs.get(GenAIAttributes.TOOL_OUTPUT)
+        if not isinstance(output, str):
+            continue
+        if len(output) < LARGE_OUTPUT_MIN_CHARS:
+            continue
+        sig = _normalize_blob(output)
+        if not sig:
+            continue
+        add(INCLUSION_TOOL_OUTPUT, str(tool_name or ""), sig, sid,
+            target=_excerpt(output), label=f"{tool_name} → {_excerpt(output)}")
+
+
+def _span_rows(
+    conn: Any,
+    span_name: str,
+    since: datetime,
+    until: datetime,
+    agent_id: str | None,
+    extra_clause: str,
+) -> list[tuple[Any, Any, dict]]:
+    """Shared SELECT of (session_id, tool_name, parsed-attributes) rows."""
     clauses = [
         "name = $1",
         "start_time >= $2",
         "start_time < $3",
-        "tool_name IS NOT NULL",
+        extra_clause,
     ]
-    params: list[Any] = [GenAIAttributes.SPAN_TOOL_CALL, since, until]
+    params: list[Any] = [span_name, since, until]
     if agent_id:
         clauses.append("agent_id = $" + str(len(params) + 1))
         params.append(agent_id)
@@ -363,40 +625,22 @@ def _recurring_inclusions(
         "SELECT session_id, tool_name, attributes FROM spans WHERE " + where,
         params,
     ).fetchall()
+    return [(sid, tool_name, _parse_attrs(attrs_raw))
+            for sid, tool_name, attrs_raw in rows]
 
-    # (tool_name, target) -> {sessions: set, occurrences: int}
-    agg: dict[tuple[str, str], dict[str, Any]] = defaultdict(
-        lambda: {"sessions": set(), "occurrences": 0}
+
+def _tool_span_rows(conn, since, until, agent_id, _attr):
+    return _span_rows(
+        conn, GenAIAttributes.SPAN_TOOL_CALL, since, until, agent_id,
+        "tool_name IS NOT NULL",
     )
-    for sid, tool_name, attrs_raw in rows:
-        attrs = _parse_attrs(attrs_raw)
-        tool_input = attrs.get(GenAIAttributes.TOOL_INPUT)
-        if tool_input is None:
-            continue
-        target = _file_target(str(tool_name or ""), tool_input)
-        if target is None:
-            continue
-        key = (str(tool_name), target)
-        agg[key]["sessions"].add(str(sid) if sid is not None else "unknown")
-        agg[key]["occurrences"] += 1
 
-    inclusions: list[RecurringInclusion] = []
-    for (tool_name, target), data in agg.items():
-        session_count = len(data["sessions"])
-        if session_count < RECURRING_MIN_SESSIONS:
-            continue
-        inclusions.append(
-            RecurringInclusion(
-                label=f"{tool_name} {target}",
-                tool_name=tool_name,
-                target=target,
-                sessions=session_count,
-                occurrences=int(data["occurrences"]),
-                fix=_fix_for(target),
-            )
-        )
-    inclusions.sort(key=lambda r: (r.sessions, r.occurrences), reverse=True)
-    return inclusions[:TOP_N]
+
+def _llm_span_rows(conn, since, until, agent_id, _attr):
+    return _span_rows(
+        conn, GenAIAttributes.SPAN_LLM_CALL, since, until, agent_id,
+        "model IS NOT NULL",
+    )
 
 
 def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
@@ -434,6 +678,7 @@ def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
                 "sessions": r.sessions,
                 "occurrences": r.occurrences,
                 "fix": r.fix,
+                "inclusion_type": r.inclusion_type,
             }
             for r in diag.recurring
         ],
@@ -448,6 +693,8 @@ def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
             for c in diag.compact_candidates
         ],
         "tool_inputs_captured": diag.tool_inputs_captured,
+        "prompts_captured": diag.prompts_captured,
+        "tool_outputs_captured": diag.tool_outputs_captured,
         "notes": diag.notes,
         "caveat": diag.caveat,
     }
