@@ -26,6 +26,10 @@ from typing import Any
 import click
 
 from tokenjam.core.context_diagnostic import (
+    INCLUSION_FILE_READ,
+    INCLUSION_PROMPT,
+    INCLUSION_SEARCH,
+    INCLUSION_TOOL_OUTPUT,
     ContextDiagnostic,
     compute_context_diagnostic,
     diagnostic_to_dict,
@@ -38,6 +42,14 @@ from tokenjam.core.framing import (
 )
 from tokenjam.utils.formatting import console, format_tokens
 from tokenjam.utils.time_parse import parse_since, utcnow
+
+# Short tags shown before each recurring inclusion so the kind is obvious.
+_INCLUSION_LABELS = {
+    INCLUSION_FILE_READ: "file",
+    INCLUSION_SEARCH: "search",
+    INCLUSION_PROMPT: "prompt",
+    INCLUSION_TOOL_OUTPUT: "output",
+}
 
 
 @click.command("context")
@@ -72,6 +84,8 @@ def cmd_context(ctx: click.Context, agent: str | None, since: str,
 
     capture = getattr(config, "capture", None)
     tool_inputs_captured = bool(getattr(capture, "tool_inputs", False))
+    prompts_captured = bool(getattr(capture, "prompts", False))
+    tool_outputs_captured = bool(getattr(capture, "tool_outputs", False))
 
     diag = compute_context_diagnostic(
         conn,
@@ -79,6 +93,8 @@ def cmd_context(ctx: click.Context, agent: str | None, since: str,
         until_dt,
         agent_id=agent,
         tool_inputs_captured=tool_inputs_captured,
+        prompts_captured=prompts_captured,
+        tool_outputs_captured=tool_outputs_captured,
     )
 
     framing = _framing_for(conn, config, diag, agent)
@@ -183,28 +199,36 @@ def _render(diag: ContextDiagnostic, framing: Framing, *, since: str) -> None:
 
     sections: list[Any] = [headline, Text(""), reread, work, breakdown]
 
-    # ── Recurring inclusions (capture-gated). ──
+    # ── Recurring inclusions (capture-gated, multi-kind). ──
     sections.append(Text(""))
     rec_header = Text("Recurring inclusions", style="bold")
     sections.append(rec_header)
+    any_capture = (
+        diag.tool_inputs_captured
+        or diag.prompts_captured
+        or diag.tool_outputs_captured
+    )
     if diag.recurring:
         for r in diag.recurring[:5]:
             line = Text("  · ", style="dim")
+            line.append(f"[{_INCLUSION_LABELS.get(r.inclusion_type, 'repeat')}] ",
+                        style="cyan")
             line.append(r.target, style="bold")
-            line.append(f"  re-read in {r.sessions} sessions "
-                        f"({r.occurrences}×)", style="dim")
+            line.append(f"  ×{r.occurrences} ({r.sessions} sessions)",
+                        style="dim")
             sections.append(line)
             fix = Text("    → ", style="green")
             fix.append(r.fix, style="dim")
             sections.append(fix)
-    elif not diag.tool_inputs_captured:
+    elif not any_capture:
         sections.append(Align.left(Text(
-            "  Needs `[capture] tool_inputs = true` — see note below.",
+            "  Needs content capture (`[capture] tool_inputs / prompts / "
+            "tool_outputs = true`) — see note below.",
             style="dim yellow",
         )))
     else:
         sections.append(Align.left(Text(
-            "  None recurring across enough sessions yet.", style="dim",
+            "  None recurring across enough sessions/turns yet.", style="dim",
         )))
 
     # ── Compact candidates. ──

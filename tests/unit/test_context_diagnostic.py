@@ -16,6 +16,12 @@ from click.testing import CliRunner
 from tokenjam.core.config import CaptureConfig, ProviderBudget, TjConfig
 from tokenjam.core.context_diagnostic import (
     COMPACT_MIN_CACHE_TOKENS,
+    INCLUSION_FILE_READ,
+    INCLUSION_PROMPT,
+    INCLUSION_SEARCH,
+    INCLUSION_TOOL_OUTPUT,
+    LARGE_OUTPUT_MIN_CHARS,
+    RECURRING_MIN_OCCURRENCES,
     RECURRING_MIN_SESSIONS,
     compute_context_diagnostic,
 )
@@ -99,7 +105,7 @@ def _seed_multi_session(db) -> None:
     span_c.start_time = BASE + timedelta(seconds=1)
     db.insert_span(span_c)
 
-    # Recurring inclusion: the SAME file Read across all three sessions —
+    # Recurring inclusion (file): the SAME file Read across all three sessions —
     # exactly the structural pattern a `@file` / CLAUDE.md fix resolves.
     for sid in ("sess-a", "sess-b", "sess-c"):
         tool = make_tool_span(tool_name="Read")
@@ -110,6 +116,43 @@ def _seed_multi_session(db) -> None:
         }
         db.insert_span(tool)
 
+    # Recurring inclusion (search): the SAME Grep query re-run across all three
+    # sessions — re-pastes its result every time → pin / capture once.
+    for sid in ("sess-a", "sess-b", "sess-c"):
+        grep = make_tool_span(tool_name="Grep")
+        grep.session_id = sid
+        grep.start_time = BASE + timedelta(seconds=3)
+        grep.attributes = {
+            GenAIAttributes.TOOL_INPUT: {"pattern": "TODO\\(perf\\)"}
+        }
+        db.insert_span(grep)
+
+    # Recurring inclusion (prompt): the SAME user prompt re-sent across turns —
+    # here re-pasted on three LLM turns (within and across sessions).
+    repeated_prompt = "Always follow the repo conventions in CLAUDE.md exactly."
+    for j, sid in enumerate(("sess-a", "sess-b", "sess-c")):
+        pspan = make_llm_span(
+            model="claude-sonnet-4-5",
+            input_tokens=100,
+            output_tokens=50,
+            cache_tokens=0,
+            cost_usd=0.01,
+            session_id=sid,
+            extra_attributes={GenAIAttributes.PROMPT_CONTENT: repeated_prompt},
+        )
+        pspan.start_time = BASE + timedelta(seconds=4 + j)
+        db.insert_span(pspan)
+
+    # Recurring inclusion (large tool output): the SAME big output re-pasted on
+    # three tool turns (the live-ingest-only `gen_ai.tool.output` path).
+    big_output = "X" * (LARGE_OUTPUT_MIN_CHARS + 500)
+    for j, sid in enumerate(("sess-a", "sess-b", "sess-c")):
+        ospan = make_tool_span(tool_name="Bash")
+        ospan.session_id = sid
+        ospan.start_time = BASE + timedelta(seconds=7 + j)
+        ospan.attributes = {GenAIAttributes.TOOL_OUTPUT: big_output}
+        db.insert_span(ospan)
+
 
 def test_per_turn_composition_separates_reread_from_work(db):
     _seed_multi_session(db)
@@ -117,14 +160,18 @@ def test_per_turn_composition_separates_reread_from_work(db):
         db.conn, SINCE, UNTIL, tool_inputs_captured=True
     )
 
-    # 4 assistant turns across 3 sessions.
-    assert diag.turns == 4
+    # 4 work turns + 3 prompt-carrying turns (one per session) = 7 LLM turns.
+    assert diag.turns == 7
     assert diag.sessions == 3
 
-    # Re-read tokens = sum of cache reads; work = uncached input + output.
+    # Re-read tokens = sum of cache reads (prompt turns carry zero cache).
     expected_reread = (COMPACT_MIN_CACHE_TOKENS + 50_000) + 2 * 30_000 + 1_000
     assert diag.total_reread_tokens == expected_reread
-    expected_work = (4_000 + 1_000) + 2 * (2_000 + 500) + (5_000 + 3_000)
+    # Work = uncached input + output, including the small prompt turns.
+    expected_work = (
+        (4_000 + 1_000) + 2 * (2_000 + 500) + (5_000 + 3_000)
+        + 3 * (100 + 50)
+    )
     assert diag.total_work_tokens == expected_work
 
     # The headline re-read share is the dominant fraction (heavy re-reading).
@@ -135,19 +182,121 @@ def test_per_turn_composition_separates_reread_from_work(db):
     assert diag.heaviest_turns[0].reread_tokens == COMPACT_MIN_CACHE_TOKENS + 50_000
 
 
-def test_recurring_inclusion_detected_with_structural_fix(db):
+def test_recurring_file_read_detected_with_structural_fix(db):
     _seed_multi_session(db)
     diag = compute_context_diagnostic(
         db.conn, SINCE, UNTIL, tool_inputs_captured=True
     )
 
-    assert len(diag.recurring) == 1
-    rec = diag.recurring[0]
+    by_type = {r.inclusion_type: r for r in diag.recurring}
+    rec = by_type[INCLUSION_FILE_READ]
     assert rec.target == "db/schema.prisma"
     assert rec.sessions == 3  # appears in all three sessions
     assert rec.sessions >= RECURRING_MIN_SESSIONS
     # The fix is the structural @file / CLAUDE.md recommendation.
     assert "@db/schema.prisma" in rec.fix or "CLAUDE.md" in rec.fix
+
+
+def test_recurring_search_detected_with_pin_fix(db):
+    """A repeated Grep query is flagged with a pin-the-result structural fix."""
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+
+    by_type = {r.inclusion_type: r for r in diag.recurring}
+    rec = by_type[INCLUSION_SEARCH]
+    assert rec.tool_name == "Grep"
+    assert rec.target == "TODO\\(perf\\)"
+    assert rec.sessions == 3
+    assert rec.occurrences == 3
+    assert "Pin" in rec.fix or "capture it once" in rec.fix
+
+
+def test_recurring_prompt_detected_with_slash_command_fix(db):
+    """An identical user prompt re-sent across turns is flagged with a
+    save-as-slash-command / CLAUDE.md structural fix. Gated on `prompts`."""
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, prompts_captured=True
+    )
+
+    by_type = {r.inclusion_type: r for r in diag.recurring}
+    rec = by_type[INCLUSION_PROMPT]
+    assert rec.occurrences == 3
+    assert rec.occurrences >= RECURRING_MIN_OCCURRENCES
+    assert "CLAUDE.md" in rec.target  # excerpt of the repeated prompt text
+    assert "slash-command" in rec.fix
+
+
+def test_recurring_large_output_detected_with_reference_fix(db):
+    """A large identical tool output re-pasted across turns is flagged with a
+    reference-the-artifact structural fix. Gated on `tool_outputs`."""
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_outputs_captured=True
+    )
+
+    by_type = {r.inclusion_type: r for r in diag.recurring}
+    rec = by_type[INCLUSION_TOOL_OUTPUT]
+    assert rec.tool_name == "Bash"
+    assert rec.occurrences == 3
+    assert "reference the artifact" in rec.fix
+
+
+def test_small_repeated_output_below_size_gate_not_flagged(db):
+    """A repeated but SMALL tool output isn't worth flagging — it costs almost
+    no quota to re-paste."""
+    for sid in ("sess-a", "sess-b", "sess-c"):
+        ospan = make_tool_span(tool_name="Bash")
+        ospan.session_id = sid
+        ospan.start_time = BASE
+        ospan.attributes = {GenAIAttributes.TOOL_OUTPUT: "ok"}
+        db.insert_span(ospan)
+
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_outputs_captured=True
+    )
+    assert not any(
+        r.inclusion_type == INCLUSION_TOOL_OUTPUT for r in diag.recurring
+    )
+
+
+def test_each_capture_flag_gates_its_own_inclusion_kind(db):
+    """tool_inputs → file+search only; prompts → prompt only; tool_outputs →
+    output only. Flags are independent."""
+    _seed_multi_session(db)
+
+    inputs_only = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+    assert {r.inclusion_type for r in inputs_only.recurring} == {
+        INCLUSION_FILE_READ, INCLUSION_SEARCH
+    }
+
+    prompts_only = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, prompts_captured=True
+    )
+    assert {r.inclusion_type for r in prompts_only.recurring} == {
+        INCLUSION_PROMPT
+    }
+
+    outputs_only = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_outputs_captured=True
+    )
+    assert {r.inclusion_type for r in outputs_only.recurring} == {
+        INCLUSION_TOOL_OUTPUT
+    }
+
+    all_on = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL,
+        tool_inputs_captured=True, prompts_captured=True,
+        tool_outputs_captured=True,
+    )
+    assert {r.inclusion_type for r in all_on.recurring} == {
+        INCLUSION_FILE_READ, INCLUSION_SEARCH, INCLUSION_PROMPT,
+        INCLUSION_TOOL_OUTPUT,
+    }
 
 
 def test_compact_candidate_flags_reread_heavy_session(db):
@@ -167,10 +316,14 @@ def test_compact_candidate_flags_reread_heavy_session(db):
 def test_capture_off_emits_nudge_and_no_recurring(db):
     _seed_multi_session(db)
     diag = compute_context_diagnostic(
-        db.conn, SINCE, UNTIL, tool_inputs_captured=False
+        db.conn, SINCE, UNTIL,
+        tool_inputs_captured=False, prompts_captured=False,
+        tool_outputs_captured=False,
     )
     # Composition still works (aggregate, no content needed)...
-    assert diag.turns == 4
+    assert diag.turns == 7
+    # ...no recurring inclusions are detected with every capture flag off...
+    assert diag.recurring == []
     # ...but the capture nudge is surfaced.
     assert any("tool_inputs" in n for n in diag.notes)
 
@@ -231,8 +384,11 @@ def test_cli_json_output(db, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["turns"] == 4
+    assert payload["turns"] == 7
     assert payload["sessions"] == 3
-    assert payload["recurring"][0]["target"] == "db/schema.prisma"
+    targets = {r["target"] for r in payload["recurring"]}
+    assert "db/schema.prisma" in targets
+    # Each recurring row is tagged with its inclusion type.
+    assert all("inclusion_type" in r for r in payload["recurring"])
     assert payload["compact_candidates"][0]["session_id"] == "sess-a"
     assert payload["framing"]["pricing_mode"] == "subscription"
