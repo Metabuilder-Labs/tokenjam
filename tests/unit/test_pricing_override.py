@@ -37,7 +37,7 @@ def _write(path: Path, body: str) -> None:
 def test_no_override_uses_packaged_rates():
     rates = pricing.get_rates("anthropic", "claude-haiku-4-5")
     assert rates is not None
-    assert rates.input_per_mtok == 0.80
+    assert rates.input_per_mtok == 1.00
 
 
 def test_env_override_adds_new_model(tmp_path, monkeypatch):
@@ -99,7 +99,7 @@ def test_missing_env_file_warns_and_falls_back(tmp_path, monkeypatch, caplog):
 
     # Packaged rates still load.
     assert rates is not None
-    assert rates.input_per_mtok == 0.80
+    assert rates.input_per_mtok == 1.00
     assert "not found" in caplog.text.lower()
 
 
@@ -113,7 +113,7 @@ def test_malformed_override_warns_and_falls_back(tmp_path, monkeypatch, caplog):
         rates = pricing.get_rates("anthropic", "claude-haiku-4-5")
 
     assert rates is not None
-    assert rates.input_per_mtok == 0.80
+    assert rates.input_per_mtok == 1.00
     assert "could not read" in caplog.text.lower()
 
 
@@ -185,7 +185,7 @@ def test_model_keyed_override_wins_over_packaged_provider_rate(tmp_path, monkeyp
 
     rates = pricing.get_rates("anthropic", "claude-haiku-4-5")
     assert rates is not None
-    assert rates.input_per_mtok == 0.01  # packaged is 0.80
+    assert rates.input_per_mtok == 0.01  # packaged is 1.00
 
 
 def test_model_keyed_override_honors_date_suffix(tmp_path, monkeypatch):
@@ -217,7 +217,7 @@ def test_precedence_model_keyed_then_provider_then_packaged(tmp_path, monkeypatc
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
     pricing.clear_pricing_cache()
 
-    # Known provider: model-keyed (1.0) beats provider-keyed (50.0) beats packaged (0.80).
+    # Known provider: model-keyed (1.0) beats provider-keyed (50.0) beats packaged (1.00).
     assert pricing.get_rates("anthropic", "claude-haiku-4-5").input_per_mtok == 1.0
     # Unknown provider: only the model-keyed entry can match.
     assert pricing.get_rates("unknown", "claude-haiku-4-5").input_per_mtok == 1.0
@@ -301,6 +301,7 @@ _CURRENT_ANTHROPIC_RATES = {
     "claude-opus-4-8": (5.00, 25.00, 0.50, 6.25),
     "claude-sonnet-4-6": (3.00, 15.00, 0.30, 3.75),
     "claude-sonnet-4-5": (3.00, 15.00, 0.30, 3.75),
+    "claude-haiku-4-5": (1.00, 5.00, 0.10, 1.25),
 }
 
 
@@ -326,6 +327,29 @@ def test_current_anthropic_models_are_not_default_priced(model):
         pricing.DEFAULT_INPUT_PER_MTOK,
         pricing.DEFAULT_OUTPUT_PER_MTOK,
     )
+
+
+def test_haiku_4_5_does_not_carry_retired_haiku_3_5_rates():
+    """Regression for #14: claude-haiku-4-5 was mistakenly priced at the
+    retired Haiku 3.5 figures (input 0.80 / output 4.00 / cache_read 0.08 /
+    cache_write 1.00). It must resolve to the current published Haiku 4.5
+    rates (1.00 / 5.00 / 0.10 / 1.25) — and Haiku 3.5 keeps its own old rates.
+    Source: https://platform.claude.com/docs/en/about-claude/pricing."""
+    h45 = pricing.get_rates("anthropic", "claude-haiku-4-5")
+    assert h45 is not None
+    assert (
+        h45.input_per_mtok,
+        h45.output_per_mtok,
+        h45.cache_read_per_mtok,
+        h45.cache_write_per_mtok,
+    ) == (1.00, 5.00, 0.10, 1.25)
+    # The retired 3.5 figures must NOT leak onto 4.5.
+    assert (h45.input_per_mtok, h45.output_per_mtok) != (0.80, 4.00)
+
+    # Haiku 3.5 (still listed for Bedrock/Vertex) retains its own old rates.
+    h35 = pricing.get_rates("anthropic", "claude-haiku-3-5")
+    assert h35 is not None
+    assert (h35.input_per_mtok, h35.output_per_mtok) == (0.80, 4.00)
 
 
 def test_dated_current_anthropic_model_resolves_via_suffix_strip():
