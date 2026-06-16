@@ -80,16 +80,16 @@ def test_parse_provider_prefix_still_works():
 def test_resolved_provider_gets_correct_haiku_pricing_not_default():
     """anthropic/claude-haiku-4-5 prices at Haiku rates; 'litellm' would not."""
     rates = get_rates("anthropic", "claude-haiku-4-5")
-    assert rates is not None and rates.input_per_mtok == 0.80
+    assert rates is not None and rates.input_per_mtok == 1.00
 
-    # 1M input tokens at the real Haiku rate = $0.80.
+    # 1M input tokens at the real Haiku 4.5 rate = $1.00.
     correct = calculate_cost("anthropic", "claude-haiku-4-5", 1_000_000, 0)
-    assert correct == pytest.approx(0.80)
+    assert correct == pytest.approx(1.00)
 
     # The old bogus provider had no pricing table -> default $0.50 fallback.
     bogus = calculate_cost("litellm", "claude-haiku-4-5", 1_000_000, 0)
     assert bogus == pytest.approx(0.50)
-    assert correct > bogus  # the ~42%-undercount the fix removes
+    assert correct > bogus  # the undercount the fix removes
 
 
 def test_billing_account_derives_for_resolved_provider():
