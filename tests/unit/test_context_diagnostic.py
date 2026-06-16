@@ -74,7 +74,8 @@ def _seed_multi_session(db) -> None:
     span_a.start_time = BASE
     db.insert_span(span_a)
 
-    # Session B — moderate re-reading across two turns.
+    # Session B — moderate re-reading across two turns, each paying a cache-MISS
+    # (cache-creation) premium — the named overhead source #11 breaks out.
     sess_b = make_session(session_id="sess-b", plan_tier="max_5x",
                           duration_seconds=90.0)
     db.upsert_session(sess_b)
@@ -84,6 +85,7 @@ def _seed_multi_session(db) -> None:
             input_tokens=2_000,
             output_tokens=500,
             cache_tokens=30_000,
+            cache_write_tokens=10_000,  # cache-MISS: written to cache (#11)
             cost_usd=0.4,
             session_id="sess-b",
         )
@@ -180,6 +182,60 @@ def test_per_turn_composition_separates_reread_from_work(db):
     # Heaviest turn is session A's big-cache turn, named with its overhead.
     assert diag.heaviest_turns[0].session_id == "sess-a"
     assert diag.heaviest_turns[0].reread_tokens == COMPACT_MIN_CACHE_TOKENS + 50_000
+
+
+def test_cache_miss_broken_out_as_named_overhead(db):
+    """#11: cache-creation tokens are surfaced as their own named overhead
+    category (prompt-cache MISS), distinct from re-read and net-new work."""
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+
+    # Two session-B turns each pay a 10K cache-creation (miss) premium.
+    expected_cache_miss = 2 * 10_000
+    assert diag.total_cache_miss_tokens == expected_cache_miss
+    assert diag.total_cache_miss_tokens == diag.total_cache_write_tokens
+    # It is a real, non-zero share of the window's tokens.
+    assert diag.cache_miss_share > 0.0
+    # And it is NOT double-counted into either re-read or net-new work.
+    assert diag.total_cache_miss_tokens not in (
+        diag.total_reread_tokens, diag.total_work_tokens
+    )
+
+
+def test_mcp_injection_half_is_parked_with_a_precise_note(db):
+    """#11: the MCP schema-injection half is parked (not fabricated) — the
+    diagnostic carries a precise note on what data would be needed."""
+    from tokenjam.core.context_diagnostic import MCP_INJECTION_PARK_NOTE
+
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+    assert MCP_INJECTION_PARK_NOTE in diag.notes
+    assert "MCP" in MCP_INJECTION_PARK_NOTE
+    # No invented attribution number — it names the missing data path instead.
+    assert "per-request tool-schema token delta" in MCP_INJECTION_PARK_NOTE
+
+
+def test_cache_miss_and_park_note_in_json_payload(db):
+    """The named cache-miss overhead + parked-MCP note round-trip into JSON."""
+    from tokenjam.core.context_diagnostic import (
+        MCP_INJECTION_PARK_NOTE,
+        diagnostic_to_dict,
+    )
+
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+    payload = diagnostic_to_dict(diag)
+    assert payload["total_cache_miss_tokens"] == 2 * 10_000
+    assert payload["cache_miss_share"] > 0.0
+    assert payload["mcp_injection_parked"] == MCP_INJECTION_PARK_NOTE
+    # Per-turn rows also carry the cache-miss attribution.
+    assert all("cache_miss_tokens" in t for t in payload["heaviest_turns"])
 
 
 def test_recurring_file_read_detected_with_structural_fix(db):
@@ -361,6 +417,8 @@ def test_cli_renders_quota_share_for_max_plan(db, monkeypatch):
     assert "of cycle tokens" in result.output
     assert "re-reading context" in result.output
     assert "schema.prisma" in result.output
+    # #11: the cache-MISS named overhead line renders (session B pays a premium).
+    assert "Cache-miss:" in result.output
 
 
 def test_cli_json_output(db, monkeypatch):

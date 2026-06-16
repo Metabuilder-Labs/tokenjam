@@ -182,11 +182,20 @@ def _render(diag: ContextDiagnostic, framing: Framing, *, since: str) -> None:
     work.append(" (uncached input + output)", style="dim")
 
     breakdown = Text()
-    breakdown.append("\nRe-read:   ", style="dim")
+    breakdown.append("\nRe-read:    ", style="dim")
     breakdown.append(_quota_share(diag.total_reread_tokens, framing), style="bold")
     breakdown.append(f"  ({format_tokens(diag.total_reread_tokens)} cache reads)",
                      style="dim")
-    breakdown.append("\nNew work:  ", style="dim")
+    # Named overhead source: prompt-cache MISS (cache-creation), #11. Shown only
+    # when present so default/zero-cache-write output stays clean.
+    if diag.total_cache_miss_tokens > 0:
+        breakdown.append("\nCache-miss: ", style="dim")
+        breakdown.append(_quota_share(diag.total_cache_miss_tokens, framing),
+                         style="bold yellow")
+        breakdown.append(
+            f"  ({format_tokens(diag.total_cache_miss_tokens)} cache writes, "
+            "billed at a premium)", style="dim")
+    breakdown.append("\nNew work:   ", style="dim")
     breakdown.append(_quota_share(diag.total_work_tokens, framing), style="bold")
     breakdown.append(f"  ({format_tokens(diag.total_work_tokens)} tokens)",
                      style="dim")
