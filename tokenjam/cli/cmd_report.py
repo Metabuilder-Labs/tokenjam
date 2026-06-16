@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import click
+from rich.markup import escape as _rich_escape
 
 from tokenjam.utils.formatting import console
 
@@ -82,7 +83,7 @@ def _render_trim_report(
 
     if not finding.enabled:
         # Show the hint inline rather than producing an empty HTML file.
-        console.print(f"[yellow]Trim analyzer not ready:[/yellow]\n{finding.hint}")
+        console.print(f"[yellow]Trim analyzer not ready:[/yellow]\n{_rich_escape(finding.hint)}")
         return
 
     if not finding.per_prompt:
