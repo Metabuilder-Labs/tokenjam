@@ -193,12 +193,41 @@ def _fetch(db, config, since_dt, until_dt, since_str) -> tuple[float, float, int
 # ───────────────────────────── helpers ────────────────────────────────────
 
 def _config_declared_plan(config) -> str | None:
-    """Mirror cmd_optimize._config_declared_plan."""
+    """Return the user's declared subscription plan tier.
+
+    Checks the active config first; if no `[budget.<provider>].plan` is set
+    (common when running from a project dir whose `.tj/config.toml` has no
+    `[budget]` section), falls back to peeking at the global config at
+    `~/.config/tj/config.toml`. Without this fallback, tokenmaxx silently
+    rendered api-pricing framing in subdirectories even when the user had
+    set their plan globally via `tj onboard`. Issue #106.
+    """
     budgets = getattr(config, "budgets", None) or {}
     for provider in sorted(budgets.keys()):
         plan = getattr(budgets[provider], "plan", None)
         if plan:
             return str(plan)
+
+    # Active config has no plan — peek at the global config file directly.
+    try:
+        import sys
+        from pathlib import Path
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            import tomli as tomllib  # type: ignore[no-redef]
+        global_path = Path.home() / ".config" / "tj" / "config.toml"
+        if not global_path.exists():
+            return None
+        with open(global_path, "rb") as f:
+            raw = tomllib.load(f)
+        budget_block = raw.get("budget") or {}
+        for provider in sorted(budget_block.keys()):
+            plan = (budget_block[provider] or {}).get("plan")
+            if plan:
+                return str(plan)
+    except (OSError, Exception):  # noqa: BLE001
+        return None
     return None
 
 
