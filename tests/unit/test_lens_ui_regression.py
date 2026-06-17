@@ -1255,3 +1255,23 @@ def test_index_html_has_no_nul_bytes():
     # Guards the NUL-byte corruption fixed alongside the work map (it broke
     # `node --check` and made `file` mis-detect the SPA as binary).
     assert b"\x00" not in _UI.read_bytes()
+
+
+# --- #17: #2 shipped incomplete — SessionDetailView + Status cost cells ----- #
+# Route the two dollar-bearing cells left on bare fmtCost through
+# fmtFramedDollar(value, framing) so subscription users see "% of cycle" and
+# only api-plan users see raw $ — matching Traces/Cost/Optimize.
+def test_session_detail_cost_cell_routes_through_framing(html):
+    # The "Cost & Tokens" / "Implied API value" panel must consume the
+    # /sessions/{id} framing block, not render raw fmtCost(s.total_cost_usd).
+    assert "<span class=\"value\">${fmtCost(s.total_cost_usd)}</span>" not in html
+    assert "<span class=\"value\">${fmtFramedDollar(s.total_cost_usd, framing)}</span>" in html
+    # The view actually pulls the framing block off the /sessions/{id} response.
+    assert "const framing = data.framing || null;" in html
+
+
+def test_status_archived_table_cost_routes_through_framing(html):
+    # The Status "Archived sessions" table cost column must consume the /status
+    # framing block (data.framing), not render raw fmtCost(s.total_cost_usd).
+    assert "<td>${fmtCost(s.total_cost_usd)}</td>" not in html
+    assert "<td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>" in html

@@ -2949,6 +2949,7 @@ function SessionDetailView({ sessionId }) {
   const ctxMax = contextSeries.reduce((m, p) => Math.max(m, p.input_tokens || 0), 0);
   const isSub = s.pricing_mode === 'subscription';
   const isLocal = s.pricing_mode === 'local';
+  const framing = data.framing || null;
   const title = s.label || s.agent_id;
 
   return html`
@@ -2982,7 +2983,7 @@ function SessionDetailView({ sessionId }) {
         <div class="card-header">Cost & Tokens</div>
         ${isLocal
           ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
-          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(s.total_cost_usd)}</span></div>`}
+          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtFramedDollar(s.total_cost_usd, framing)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(s.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(s.output_tokens)}</span></div>
         ${s.cache_tokens ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens(s.cache_tokens)}</span></div>` : null}
