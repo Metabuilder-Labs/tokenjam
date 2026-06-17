@@ -500,6 +500,28 @@ def test_optimize_cluster_avg_cost_routes_through_framing(html):
     assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" in html
 
 
+# --- #17: #2 shipped incomplete — SessionDetailView + Status cost cells ----- #
+# #2 added the /sessions/{id} framing block but left two dollar-bearing cells
+# still calling bare fmtCost, so a Max-subscription user saw raw "$198.9709"
+# under "Implied API value" and raw "$0.0000" in the Status table. Route both
+# through fmtFramedDollar(value, framing) so subscription users see "% of cycle"
+# and only api-plan users see raw $ — matching Traces/Cost/Optimize.
+def test_session_detail_cost_cell_routes_through_framing(html):
+    # The "Cost & Tokens" / "Implied API value" panel must consume the
+    # /sessions/{id} framing block, not render raw fmtCost(s.total_cost_usd).
+    assert "<span class=\"value\">${fmtCost(s.total_cost_usd)}</span>" not in html
+    assert "<span class=\"value\">${fmtFramedDollar(s.total_cost_usd, framing)}</span>" in html
+    # The view actually pulls the framing block off the /sessions/{id} response.
+    assert "const framing = data.framing || null;" in html
+
+
+def test_status_archived_table_cost_routes_through_framing(html):
+    # The Status "Archived sessions" table cost column must consume the /status
+    # framing block (data.framing), not render raw fmtCost(s.total_cost_usd).
+    assert "<td>${fmtCost(s.total_cost_usd)}</td>" not in html
+    assert "<td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>" in html
+
+
 # --- Lens Visualizations Wave 1: cost charts (#211–#213) ------------------- #
 def test_stacked_bar_chart_present(html):
     # #213: cost-by-model/agent renders a STACKED bar chart, not overlapping

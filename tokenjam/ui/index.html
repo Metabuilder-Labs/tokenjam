@@ -1947,7 +1947,7 @@ function StatusView({ params }) {
               <td><span class="status-dot ${s.status}" style="margin-right:5px"></span><span class="badge badge-${s.status}">${s.status}</span></td>
               <td>${fmtAgo(s.last_span_time || s.started_at)}</td>
               <td>${fmtTokens(s.input_tokens)} in / ${fmtTokens(s.output_tokens)} out</td>
-              <td>${fmtCost(s.total_cost_usd)}</td>
+              <td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
             </tr>
           `)}
         </tbody>
@@ -2585,7 +2585,7 @@ function SessionDetailView({ sessionId }) {
         <div class="card-header">Cost & Tokens</div>
         ${isLocal
           ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
-          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(s.total_cost_usd)}</span></div>`}
+          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtFramedDollar(s.total_cost_usd, framing)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(s.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(s.output_tokens)}</span></div>
         ${((s.cache_tokens || 0) + (s.cache_write_tokens || 0)) ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens((s.cache_tokens || 0) + (s.cache_write_tokens || 0))}</span></div>` : null}
