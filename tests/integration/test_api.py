@@ -421,6 +421,92 @@ async def test_session_detail_framing_reframes_subscription(db, client, monkeypa
     assert framing["display_rule"] != "show_dollars"
 
 
+# --- #18: per-session token/cost rollup joins trace-keyed cost spans onto the -- #
+# --- session, so Status + session-detail report real spend, not the marker's 0. - #
+def _seed_session_with_trace_keyed_cost(
+    db, *, session_id: str, agent_id: str, trace_id: str,
+    input_tokens: int, output_tokens: int, cost_usd: float, llm_calls: int = 2,
+):
+    """Reproduce the #18 fan-out-harness shape on the live OTLP path.
+
+    The session row + its `invoke_agent` marker span carry the session_id (and a
+    trace_id) but ZERO cost. The real cost-bearing `gen_ai.llm.call` spans carry
+    only the shared `trace_id` + agent_id with `session_id=None` — exactly what a
+    harness posting raw OTLP produces, where `session.id` is absent on the cost
+    spans (otlp_parsing reads `attrs.get("session.id")`). Spreads the spend across
+    `llm_calls` spans so the test asserts the SUM, not a single span."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    started = utcnow() - timedelta(hours=2)
+    # Marker session: closed (so it lands in the archive) with 0 aggregates.
+    db.upsert_session(make_session(
+        agent_id=agent_id, session_id=session_id, plan_tier="api",
+        status="closed", started_at=started, ended_at=started,
+    ))
+    # Zero-cost invoke_agent marker span — carries the session_id + shared trace.
+    marker = make_invoke_agent_span(
+        agent_id=agent_id, session_id=session_id, trace_id=trace_id,
+        start_time=started,
+    )
+    db.insert_span(marker)
+    # Real cost spans: only agent_id + the shared trace_id, NO session_id.
+    per_in = input_tokens // llm_calls
+    per_out = output_tokens // llm_calls
+    per_cost = cost_usd / llm_calls
+    for i in range(llm_calls):
+        db.insert_span(make_llm_span(
+            agent_id=agent_id, session_id=None, trace_id=trace_id,
+            input_tokens=per_in, output_tokens=per_out, cost_usd=per_cost,
+            billing_account="anthropic", start_time=started + timedelta(minutes=i),
+        ))
+
+
+async def test_session_detail_rolls_up_trace_keyed_cost(db, client):
+    """#18: a session whose cost lives on trace-keyed (session_id=None) spans
+    reports the real tokens/cost on /sessions/{id}, not the marker's 0."""
+    _seed_session_with_trace_keyed_cost(
+        db, session_id="sess-18", agent_id="claude-code-harness",
+        trace_id="18" * 16, input_tokens=300, output_tokens=120, cost_usd=2.40,
+    )
+    body = (await client.get("/api/v1/sessions/sess-18")).json()
+    sess = body["session"]
+    assert sess["input_tokens"] == 300
+    assert sess["output_tokens"] == 120
+    assert abs(sess["total_cost_usd"] - 2.40) < 1e-9
+
+
+async def test_status_archive_rolls_up_trace_keyed_cost(db, client):
+    """#18: the Status archived-sessions row reports the session's real spend by
+    joining the trace-keyed cost spans, not the zero-cost marker aggregate."""
+    _seed_session_with_trace_keyed_cost(
+        db, session_id="sess-18b", agent_id="claude-code-harness",
+        trace_id="2b" * 16, input_tokens=300, output_tokens=120, cost_usd=2.40,
+    )
+    archived = (await client.get("/api/v1/status")).json()["archived"]
+    row = next(r for r in archived if r["session_id"] == "sess-18b")
+    assert row["input_tokens"] == 300
+    assert row["output_tokens"] == 120
+    assert abs(row["total_cost_usd"] - 2.40) < 1e-9
+
+
+async def test_session_rollup_reconciles_with_cost_endpoint(db, client):
+    """#18: the rolled-up per-session cost reconciles with /api/v1/cost's total
+    for the same agent — the join attributes the SAME spans both surfaces see."""
+    _seed_session_with_trace_keyed_cost(
+        db, session_id="sess-18c", agent_id="claude-code-harness",
+        trace_id="3c" * 16, input_tokens=300, output_tokens=120, cost_usd=2.40,
+    )
+    sess = (await client.get("/api/v1/sessions/sess-18c")).json()["session"]
+    cost = (await client.get(
+        "/api/v1/cost", params={"agent_id": "claude-code-harness"}
+    )).json()
+    # The agent's only spend is this session's, so the per-session rollup must
+    # equal the cost endpoint's total (which keys by agent_id, never session_id).
+    assert abs(sess["total_cost_usd"] - cost["total_cost_usd"]) < 1e-9
+    assert sess["input_tokens"] + sess["output_tokens"] == cost["total_tokens"]
+
+
 async def test_cost_cycle_block_defaults_to_calendar_month(client):
     """With no [budget.<provider>] cycle configured, the run-rate cycle falls
     back to the calendar month (start_day=1) (#138)."""
