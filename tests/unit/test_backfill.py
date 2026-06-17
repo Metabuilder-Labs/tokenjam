@@ -631,3 +631,182 @@ def test_reingest_capture_off_does_not_wipe_existing_content(tmp_path):
             "Reading the config file now."
     finally:
         db.close()
+
+
+# --- #15: bulk insert/update path --------------------------------------------
+
+class _CountingConn:
+    """Wraps a DuckDB cursor and counts execute / executemany calls so a test
+    can assert the bulk path issues a BOUNDED number of statements for a large
+    session (not ~2 per span). Bind-param *rows* passed to executemany don't
+    each count as a statement — that's the whole point of the bulk path.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.execute_calls = 0
+        self.executemany_calls = 0
+
+    def execute(self, *args, **kwargs):
+        self.execute_calls += 1
+        return self._inner.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        self.executemany_calls += 1
+        return self._inner.executemany(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _CountingBackend(InMemoryBackend):
+    """InMemoryBackend whose `conn` property hands back a `_CountingConn` so a
+    test can count execute/executemany calls. `conn` is a data-descriptor
+    property on DuckDBBackend, so wrapping must be done at the property level —
+    setting an instance attribute would never be seen by `getattr(db, "conn")`.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._counting = _CountingConn(super().conn)
+
+    @property
+    def conn(self):  # type: ignore[override]
+        return self._counting
+
+
+def _big_session_file(tmp_path: Path, n_assistant: int, session_id: str = "sess-big",
+                      cwd: str = "/Users/me/big") -> Path:
+    """A single session with `n_assistant` assistant turns, each carrying one
+    tool_use — so 2*n spans land from one file."""
+    records = []
+    for i in range(n_assistant):
+        records.append(_assistant_record(
+            f"m-{i}", "claude-haiku-4-5", 1000 + i, 100 + i,
+            f"2026-04-01T10:{i // 60:02d}:{i % 60:02d}.000Z", session_id, cwd,
+            tool_uses=[(f"tu-{i}", "Read")],
+        ))
+    return _make_session_file(tmp_path, session_id=session_id, cwd=cwd, records=records)
+
+
+def test_bulk_insert_issues_bounded_statements_not_per_span(tmp_path):
+    """#15: a large session must NOT do a SELECT+INSERT round-trip per span.
+    The bulk path partitions existence in ONE query and inserts via a single
+    executemany, so the statement count is BOUNDED regardless of span count.
+    """
+    n = 200  # 200 assistant turns * (1 llm + 1 tool) = 400 spans
+    _big_session_file(tmp_path, n_assistant=n)
+
+    db = _CountingBackend()
+    try:
+        counting = db.conn
+        r = ingest_claude_code(db, root=tmp_path)
+        assert r.spans_ingested == 2 * n  # all spans inserted
+
+        # The per-span path would issue ~2*N execute() calls (one SELECT + one
+        # INSERT each). The bulk path issues a small bounded number: a handful of
+        # partition SELECTs + a SINGLE bulk-insert executemany. Assert we're FAR
+        # below per-span — well under N, and the insert went through executemany.
+        assert counting.executemany_calls >= 1
+        assert counting.execute_calls < n, (
+            f"expected bounded statements, got {counting.execute_calls} "
+            f"execute() calls for {2 * n} spans"
+        )
+    finally:
+        db.close()
+
+
+def test_bulk_path_new_spans_insert_correctly(tmp_path):
+    """#15: the bulk insert lands every new span with correct content."""
+    _big_session_file(tmp_path, n_assistant=50)
+    db = InMemoryBackend()
+    try:
+        r = ingest_claude_code(db, root=tmp_path)
+        assert r.spans_ingested == 100
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 100
+        # Spot-check a known row round-tripped.
+        row = db.conn.execute(
+            "SELECT input_tokens, output_tokens, tool_name FROM spans "
+            "WHERE name = 'gen_ai.tool.call' LIMIT 1"
+        ).fetchone()
+        assert row[2] == "Read"
+    finally:
+        db.close()
+
+
+def test_bulk_path_existing_spans_untouched_without_reingest(tmp_path):
+    """#15: existing spans are skipped (not re-inserted, not duplicated) on a
+    plain re-run — the bulk partition preserves the no-reingest skip contract."""
+    _big_session_file(tmp_path, n_assistant=30)
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        before = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+        # Blank sub_agent_id to prove a non-reingest re-run leaves rows untouched.
+        db.conn.execute("UPDATE spans SET sub_agent_id = 'sentinel'")
+
+        r2 = ingest_claude_code(db, root=tmp_path)
+        assert r2.spans_ingested == 0
+        assert r2.spans_skipped_existing == before
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before
+        # Untouched: the sentinel survives (no UPDATE ran without --reingest).
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id = 'sentinel'"
+        ).fetchone()[0] == before
+    finally:
+        db.close()
+
+
+def test_bulk_reingest_merges_attributes_and_updates_subagent(tmp_path):
+    """#15: the bulk UPDATE path preserves the #10 reingest contract — existing
+    spans get sub_agent_id updated AND attributes per-key merged (overlay, no
+    wipe) — and does so in batched executemany, not one UPDATE per span."""
+    from tokenjam.core.config import TjConfig
+
+    _content_session_file(tmp_path)
+    db = _CountingBackend()
+    counting = db.conn
+    try:
+        # 1. First ingest capture OFF -> spans land with no content.
+        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"))
+        # Simulate pre-column history: blank the tag, add a stored-only key that
+        # the merge must PRESERVE (parsed wins per-key, never wipes).
+        counting.execute("UPDATE spans SET sub_agent_id = NULL")
+        counting.execute(
+            "UPDATE spans SET attributes = $1 WHERE name = 'gen_ai.llm.call'",
+            [json.dumps({"source": "backfill.claude_code", "keepme": "yes"})],
+        )
+
+        before_rows = counting.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+
+        # 2. --reingest with capture ON; assert the UPDATEs are batched.
+        cfg = TjConfig(version="1")
+        cfg.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
+        counting.executemany_calls = 0  # reset; count only the reingest's writes
+
+        r = ingest_claude_code(db, root=tmp_path, config=cfg, reingest=True)
+        assert r.spans_ingested == 0
+        assert r.spans_retagged > 0
+        # No new rows.
+        assert counting.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before_rows
+        # The UPDATEs went through executemany (batched), not per-span execute().
+        assert counting.executemany_calls >= 1
+
+        def _attrs(name: str) -> dict:
+            raw = counting.execute(
+                "SELECT attributes FROM spans WHERE name = $1", [name]
+            ).fetchone()[0]
+            return json.loads(raw) if isinstance(raw, str) else raw
+
+        llm = _attrs("gen_ai.llm.call")
+        # Parsed content was overlaid...
+        assert llm[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+        assert llm[GenAIAttributes.COMPLETION_CONTENT] == "Reading the config file now."
+        # ...the stored-only key survived (overlay, never wipe)...
+        assert llm["keepme"] == "yes"
+        assert llm["source"] == "backfill.claude_code"
+        # ...and tool_input landed on the tool span.
+        assert _attrs("gen_ai.tool.call")[GenAIAttributes.TOOL_INPUT] == \
+            {"file_path": "/etc/app/config.toml"}
+    finally:
+        db.close()

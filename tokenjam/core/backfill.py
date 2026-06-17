@@ -587,27 +587,6 @@ def ingest_claude_code(
     return result
 
 
-def _load_attrs(conn, span_id: str) -> dict:
-    """Read a stored span's `attributes` column as a dict.
-
-    DuckDB may hand the JSON column back as a string or an already-parsed
-    object depending on backend; normalize both to a dict. Malformed/missing
-    attributes degrade to an empty dict so a reingest never raises.
-    """
-    row = conn.execute(
-        "SELECT attributes FROM spans WHERE span_id = $1", [span_id]
-    ).fetchone()
-    if not row or row[0] is None:
-        return {}
-    value = row[0]
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            return {}
-    return value if isinstance(value, dict) else {}
-
-
 def _merge_attributes(exists_attributes: dict, parsed_attributes: dict) -> dict:
     """Overlay freshly-parsed attributes over the stored ones (parsed wins
     per key), returning a NEW dict (the stored row is never mutated in place).
@@ -621,6 +600,84 @@ def _merge_attributes(exists_attributes: dict, parsed_attributes: dict) -> dict:
     return {**exists_attributes, **parsed_attributes}
 
 
+# Column order for the bulk span INSERT — kept in lock-step with the named-column
+# INSERT in `DuckDBBackend.insert_span`. A named-column list (not positional) so a
+# future migration adding a column at the end doesn't silently shift binding order.
+_SPAN_INSERT_SQL = (
+    "INSERT INTO spans ("
+    "span_id, trace_id, parent_span_id, session_id, agent_id, "
+    "name, kind, status_code, status_message, start_time, end_time, "
+    "duration_ms, attributes, provider, model, tool_name, "
+    "input_tokens, output_tokens, cache_tokens, cost_usd, "
+    "request_type, conversation_id, events, billing_account, "
+    "cache_write_tokens, sub_agent_id"
+    ") VALUES "
+    "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)"
+)
+
+
+def _span_insert_params(span: NormalizedSpan) -> list:
+    """Positional bind params for `_SPAN_INSERT_SQL`, in column order."""
+    return [
+        span.span_id, span.trace_id, span.parent_span_id, span.session_id,
+        span.agent_id, span.name, span.kind.value, span.status_code.value,
+        span.status_message, span.start_time, span.end_time, span.duration_ms,
+        json.dumps(span.attributes), span.provider, span.model, span.tool_name,
+        span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
+        span.request_type, span.conversation_id, json.dumps(span.events),
+        span.billing_account, span.cache_write_tokens, span.sub_agent_id,
+    ]
+
+
+def _existing_span_ids(conn, span_ids: list[str]) -> set[str]:
+    """Return the subset of `span_ids` that already exist in `spans`, in ONE
+    query (replacing the per-span existence SELECT). Chunked so an enormous
+    session can't blow past DuckDB's bind-parameter ceiling.
+    """
+    found: set[str] = set()
+    if not span_ids:
+        return found
+    chunk = 5000
+    for start in range(0, len(span_ids), chunk):
+        batch = span_ids[start:start + chunk]
+        placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
+        rows = conn.execute(
+            f"SELECT span_id FROM spans WHERE span_id IN ({placeholders})", batch
+        ).fetchall()
+        found.update(r[0] for r in rows)
+    return found
+
+
+def _load_attrs_bulk(conn, span_ids: list[str]) -> dict[str, dict]:
+    """Read stored `attributes` for many span_ids in chunked queries (replacing
+    the per-span existence SELECT on the reingest path). A missing/malformed/
+    non-dict value degrades to `{}` so a reingest never raises.
+    """
+    out: dict[str, dict] = {}
+    if not span_ids:
+        return out
+    chunk = 5000
+    for start in range(0, len(span_ids), chunk):
+        batch = span_ids[start:start + chunk]
+        placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
+        rows = conn.execute(
+            f"SELECT span_id, attributes FROM spans WHERE span_id IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for sid, value in rows:
+            if value is None:
+                out[sid] = {}
+                continue
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    out[sid] = {}
+                    continue
+            out[sid] = value if isinstance(value, dict) else {}
+    return out
+
+
 def _insert_session_idempotent(
     db, parsed: ParsedSession, reingest: bool = False, plan_tier: str = "unknown",
 ) -> tuple[int, int]:
@@ -628,24 +685,23 @@ def _insert_session_idempotent(
     Insert spans + session record; skip spans already present.
     Returns (newly_inserted, retagged).
 
-    When `reingest` is True, spans that already exist are UPDATEd instead of
-    being skipped — this backfills two things onto rows an older/leaner backfill
-    wrote:
-      - `sub_agent_id` — re-tags history ingested before that column existed.
-      - `attributes`   — overlays freshly-parsed captured content
-        (`gen_ai.prompt.content` / `gen_ai.completion.content` /
-        `gen_ai.tool.input`) onto the stored row when `[capture]` was enabled
-        AFTER the span was first ingested (#10). Without this, enabling capture
-        later never lands content on already-ingested spans, so the
-        recurring-inclusion detection #4 needs (which reads that content) only
-        worked against a fresh DB.
+    Bulk path (#15): instead of one SELECT + one INSERT per span (~2 round-trips
+    × N spans → ~100s over a large history), the whole session is processed in a
+    bounded number of statements regardless of span count:
+      1. ONE (chunked) `WHERE span_id IN (...)` partitions spans into new-vs-existing.
+      2. The new spans are inserted in a single `executemany`.
+      3. On `--reingest`, existing rows' attributes are loaded in ONE (chunked)
+         query, the per-key attribute merge is computed in Python, then the
+         updates are applied in a single `executemany`.
 
-    The overlay is a per-key merge of the parsed span's attributes over the
-    stored attributes (parsed wins per key) — so it ADDS content keys without
-    discarding any keys the stored row already carried (e.g. from live ingest).
-    Capture-off reingest is a no-op: the parsed span's attributes are just
-    `{"source": ...}`, which the stored row already has, so nothing changes.
-    Other span fields are left untouched.
+    The idempotency + `--reingest` contract (#10) is preserved EXACTLY:
+      - New spans: inserted.
+      - Existing spans, no `--reingest`: untouched (skipped).
+      - Existing spans, `--reingest`: `sub_agent_id` updated + `attributes`
+        per-key merged (overlay, parsed wins, never wipes a stored key).
+    The overlay is `{**stored, **parsed}`, so a capture-off reingest (parsed
+    attrs are just `{"source": ...}`) is a no-op that never drops content a
+    prior capture-on backfill stored. Other span fields are left untouched.
     """
     conn = getattr(db, "conn", None)
     inserted = 0
@@ -661,50 +717,35 @@ def _insert_session_idempotent(
         db.upsert_session(session_record_from_parsed(parsed, plan_tier))
         return inserted, retagged
 
-    for span in parsed.spans:
-        # PRIMARY KEY conflicts on (span_id) mean a previous backfill (or live ingest)
-        # has already covered this span. Skip silently — the row count returned by
-        # DuckDB's execute() isn't reliable for ON CONFLICT, so we pre-check.
-        exists = conn.execute(
-            "SELECT 1 FROM spans WHERE span_id = $1", [span.span_id]
-        ).fetchone()
-        if exists:
-            if reingest:
-                # Re-tag history from before the sub_agent_id column existed AND
-                # overlay any freshly-parsed captured content (#10) so enabling
-                # [capture] later backfills onto already-ingested spans.
-                merged_attrs = _merge_attributes(
-                    exists_attributes=_load_attrs(conn, span.span_id),
-                    parsed_attributes=span.attributes,
-                )
-                conn.execute(
-                    "UPDATE spans SET sub_agent_id = $1, attributes = $2 "
-                    "WHERE span_id = $3",
-                    [span.sub_agent_id, json.dumps(merged_attrs), span.span_id],
-                )
-                retagged += 1
-            continue
-        conn.execute(
-            "INSERT INTO spans ("
-            "span_id, trace_id, parent_span_id, session_id, agent_id, "
-            "name, kind, status_code, status_message, start_time, end_time, "
-            "duration_ms, attributes, provider, model, tool_name, "
-            "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens, sub_agent_id"
-            ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)",
-            [
-                span.span_id, span.trace_id, span.parent_span_id, span.session_id,
-                span.agent_id, span.name, span.kind.value, span.status_code.value,
-                span.status_message, span.start_time, span.end_time, span.duration_ms,
-                json.dumps(span.attributes), span.provider, span.model, span.tool_name,
-                span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
-                span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account, span.cache_write_tokens, span.sub_agent_id,
-            ],
+    span_ids = [s.span_id for s in parsed.spans]
+    existing = _existing_span_ids(conn, span_ids)
+
+    new_spans = [s for s in parsed.spans if s.span_id not in existing]
+    if new_spans:
+        conn.executemany(
+            _SPAN_INSERT_SQL, [_span_insert_params(s) for s in new_spans]
         )
-        inserted += 1
+        inserted = len(new_spans)
+
+    if reingest and existing:
+        # Re-tag history from before the sub_agent_id column existed AND overlay
+        # any freshly-parsed captured content (#10) onto already-ingested spans.
+        existing_spans = [s for s in parsed.spans if s.span_id in existing]
+        stored_attrs = _load_attrs_bulk(conn, [s.span_id for s in existing_spans])
+        update_params = []
+        for span in existing_spans:
+            merged_attrs = _merge_attributes(
+                exists_attributes=stored_attrs.get(span.span_id, {}),
+                parsed_attributes=span.attributes,
+            )
+            update_params.append(
+                [span.sub_agent_id, json.dumps(merged_attrs), span.span_id]
+            )
+        conn.executemany(
+            "UPDATE spans SET sub_agent_id = $1, attributes = $2 WHERE span_id = $3",
+            update_params,
+        )
+        retagged = len(existing_spans)
 
     db.upsert_session(session_record_from_parsed(parsed, plan_tier))
     return inserted, retagged
