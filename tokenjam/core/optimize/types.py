@@ -54,6 +54,16 @@ class DowngradeFinding:
     window_total_tokens:        int   = 0  # input + output + cache, all sessions
     percent_of_tokens:          float = 0.0
     monthly_tokens_in_candidates: int = 0  # projected to a 30-day month
+    # Recoverable-savings contract (#111). estimated_recoverable_usd is for
+    # api-billed framing; estimated_recoverable_tokens for subscription / local.
+    # None means "no estimate available for this finding state". estimate_basis
+    # is the one-line heuristic explanation surfaced behind the "estimated" tag.
+    # estimate_confidence is the estimate's confidence (distinct from any
+    # structural `confidence` on wave-2 findings); always "heuristic" in v1.
+    estimated_recoverable_usd:    float | None = None
+    estimated_recoverable_tokens: int | None   = None
+    estimate_basis:               str          = ""
+    estimate_confidence:          str          = "heuristic"
 
 
 @dataclass

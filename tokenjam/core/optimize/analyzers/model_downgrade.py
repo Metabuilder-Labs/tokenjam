@@ -201,6 +201,14 @@ def analyze_model_downgrade(
         window_total_tokens=window_total_tokens,
         percent_of_tokens=round(percent_tokens, 1),
         monthly_tokens_in_candidates=monthly_tokens_in_candidates,
+        # Recoverable-savings contract (#111): alias the existing monthly
+        # projection; tokens come from the candidate token total.
+        estimated_recoverable_usd=round(monthly_savings, 2),
+        estimated_recoverable_tokens=candidate_tokens,
+        estimate_basis=(
+            "candidate sessions routed to a cheaper model — structural fit "
+            "only, no quality validation"
+        ),
     )
 
 
