@@ -192,4 +192,5 @@ def test_trim_recoverable_none_when_capture_off(db):
     finding = report.findings["trim"]
     assert finding.enabled is False
     assert finding.estimated_recoverable_usd is None
-    assert finding.estimate_basis == "" or finding.estimate_basis is not None
+    # Not-ready path doesn't set a basis (default empty string).
+    assert finding.estimate_basis == ""
