@@ -247,6 +247,10 @@ def report_from_dict(d: dict) -> OptimizeReport:
             window_total_tokens=int(dd.get("window_total_tokens", 0)),
             percent_of_tokens=float(dd.get("percent_of_tokens", 0.0)),
             monthly_tokens_in_candidates=int(dd.get("monthly_tokens_in_candidates", 0)),
+            estimated_recoverable_usd=dd.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=dd.get("estimated_recoverable_tokens"),
+            estimate_basis=str(dd.get("estimate_basis", "")),
+            estimate_confidence=str(dd.get("estimate_confidence", "heuristic")),
         )
 
     budgets = []
@@ -322,6 +326,10 @@ def _build_finding_constructors() -> dict:
         return CacheEfficacyFinding(
             rows=rows, flagged=flagged,
             confidence=d.get("confidence", "structural"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
     def _cache_recommend(d: dict) -> CacheRecommendFinding:
@@ -344,6 +352,10 @@ def _build_finding_constructors() -> dict:
             degraded=bool(d.get("degraded", False)),
             confidence=d.get("confidence", "structural"),
             caveat=d.get("caveat", ""),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
     def _prompt_bloat(d: dict) -> PromptBloatFinding:
@@ -362,6 +374,10 @@ def _build_finding_constructors() -> dict:
             per_prompt=per_prompt,
             confidence=d.get("confidence", "structural"),
             hint=d.get("hint"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
     return {
