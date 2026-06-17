@@ -396,6 +396,25 @@ def test_overview_error_handling_is_asymmetric(html):
     assert "api('/drift').catch(() => ({ agents: [] }))" in html
 
 
+# --- #19: Overview empty-state gated on real has-data, not live agents ------ #
+def test_overview_empty_state_not_gated_on_live_agents_alone(html):
+    # The old gate showed the onboarding empty-state whenever the LIVE-agents
+    # list was empty, so an all-historical/backfilled DB (no live agents) read
+    # as "No data yet" while Cost/Analytics/Traces all showed real totals — a
+    # false data-loss scare on the front door (#19). The buggy gate is gone.
+    assert "if (!status.agents || status.agents.length === 0) {" not in html
+    # The decision now keys off whether ANY data exists: window totals (the same
+    # signal the other screens use) OR any historical/live session in /status.
+    assert "const hasWindowData =" in html
+    assert "cost.total_tokens" in html
+    assert "const hasAnySession =" in html
+    assert "status.archived" in html
+    assert "if (!hasWindowData && !hasAnySession) {" in html
+    # /status is fetched non-fatally inside the parallel fan-out (a failing
+    # /status must not blank the Overview).
+    assert "api('/status').catch(() => ({ agents: [], archived: [] }))" in html
+
+
 # --- #147: status tile shows Active (compute) time + relabeled Elapsed ----- #
 def test_status_tile_shows_active_and_elapsed(html):
     # A coarse formatter for multi-day wall-clock spans, so "3087m" reads "2d 3h".

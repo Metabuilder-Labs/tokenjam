@@ -491,6 +491,40 @@ async def test_session_rollup_reconciles_with_cost_endpoint(db, client):
     assert sess["input_tokens"] + sess["output_tokens"] == cost["total_tokens"]
 
 
+async def test_historical_only_db_reports_data_to_overview(db, client):
+    """#19: a DB with only historical/backfilled data (a closed session + its
+    cost-bearing spans, NO live agents) must report real data to the Overview —
+    /status returns NO live agents but a non-empty `archived`, and /cost reports
+    non-zero totals. This is the exact signal the Overview's empty-state gate now
+    keys off, so the onboarding empty-state stays reserved for a truly empty DB
+    (the old gate keyed off live agents alone and showed "No data yet" here)."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    started = utcnow() - timedelta(days=3)
+    # Closed session => archived, never a live tile.
+    db.upsert_session(make_session(
+        agent_id="claude-code", session_id="sess-hist", plan_tier="api",
+        status="closed", started_at=started, ended_at=started,
+    ))
+    db.insert_span(make_llm_span(
+        agent_id="claude-code", session_id="sess-hist",
+        input_tokens=500, output_tokens=200, cost_usd=1.50,
+        billing_account="anthropic", start_time=started,
+    ))
+
+    status = (await client.get("/api/v1/status")).json()
+    # No live agents (the old empty-state signal) ...
+    assert status["agents"] == []
+    # ... but the historical session IS surfaced, so the DB is clearly not empty.
+    assert any(s["session_id"] == "sess-hist" for s in status["archived"])
+
+    cost = (await client.get("/api/v1/cost", params={"since": "30d"})).json()
+    # /cost — the load-bearing signal the other screens use — sees the spend.
+    assert cost["total_tokens"] > 0
+    assert cost["total_cost_usd"] > 0
+
+
 async def test_cost_cycle_block_defaults_to_calendar_month(client):
     """With no [budget.<provider>] cycle configured, the run-rate cycle falls
     back to the calendar month (start_day=1) (#138)."""

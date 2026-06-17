@@ -3942,11 +3942,6 @@ function OverviewView({ params }) {
 
   const load = useCallback(async () => {
     try {
-      const status = await api('/status');
-      if (!status.agents || status.agents.length === 0) {
-        setD({ loading: false, empty: true, error: null });
-        return;
-      }
       // Fetch the Overview's panels in PARALLEL: the daemon DB layer is now
       // concurrency-safe (#124 — per-thread DuckDB cursors), so the #114
       // serial-fetch workaround is gone. The error handling is deliberately
@@ -3956,14 +3951,33 @@ function OverviewView({ params }) {
       //     without spend data).
       //   - the other five panels each carry a .catch fallback so one failing
       //     panel renders empty rather than blanking the whole Overview.
-      const [cost, compare, opt, al, drift, traces] = await Promise.all([
+      // /status is included for the onboarding empty-state decision below —
+      // its failure is non-fatal (one bad panel must not blank the Overview).
+      const [cost, compare, opt, al, drift, traces, status] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
         api('/optimize', { since, fast: 'true' }).catch(() => null),
         api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
         api('/drift').catch(() => ({ agents: [] })),
         api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
+        api('/status').catch(() => ({ agents: [], archived: [] })),
       ]);
+      // Onboarding empty-state is reserved for a GENUINELY empty DB — NOT a DB
+      // whose data is all historical/backfilled with no live agents (#19). The
+      // old gate keyed off `status.agents` alone (the LIVE-session tiles), so an
+      // all-historical DB read as "No data yet" while Cost/Analytics/Traces all
+      // showed real totals — a false data-loss scare on the front door. Gate on
+      // whether ANY data exists instead: window totals (the same signal the
+      // other screens use) OR any historical/live session in /status.
+      const hasWindowData = (cost.total_tokens || 0) > 0
+        || (cost.total_cost_usd || 0) > 0
+        || (cost.rows && cost.rows.length > 0);
+      const hasAnySession = (status.agents && status.agents.length > 0)
+        || (status.archived && status.archived.length > 0);
+      if (!hasWindowData && !hasAnySession) {
+        setD({ loading: false, empty: true, error: null });
+        return;
+      }
       setD({ loading: false, empty: false, error: null, cost, compare, opt,
         alerts: al.alerts || [], drift, traces: traces.traces || [] });
     } catch (e) {
