@@ -24,6 +24,12 @@
   }
 }
 </script>
+<!-- uPlot: vendored offline charting (issue #112). Ships as an IIFE that sets
+     the global `uPlot`; loaded as a plain script before the module below so the
+     global is available when components instantiate charts. CSS vendored too —
+     no CDN, per Critical Rule 18. -->
+<link rel="stylesheet" href="/ui/vendor/uplot.css">
+<script src="/ui/vendor/uplot.js"></script>
 <style>
 :root {
   /* Dark theme (default) — Vercel-style monochrome, matches tokenjam.dev */
@@ -504,6 +510,25 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   word-break: break-all;
   color: var(--text-dim);
 }
+
+/* Charts (uPlot, issue #112). The vendored uplot.css styles the canvas/cursor;
+   these style the container card and re-theme uPlot via CSS variables. */
+.chart-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.chart-title {
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.chart { width: 100%; }
+.chart .u-legend { display: none; }
+.u-tooltip, .uplot { font-family: 'Geist Mono', monospace; }
 </style>
 <script>
   // Apply theme before paint to prevent flash of incorrect theme
@@ -541,7 +566,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 // importmap just redirects the bare specifiers to vendored local files
 // under /ui/vendor/ so the dashboard works fully offline. (Issue #87.)
 import { h, render, Component } from 'preact';
-import { useState, useEffect, useCallback } from 'preact/hooks';
+import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
 import htm from 'htm';
 
 const html = htm.bind(h);
@@ -640,17 +665,104 @@ function friendlyAlertType(type) {
   return map[type] || type;
 }
 
-// --- Router ---
-function getView() {
-  const h = location.hash.replace('#/', '') || 'status';
-  const parts = h.split('/');
-  return { view: parts[0], param: parts[1] || null };
+// --- Router + URL filter state (issue #112) ---
+// The hash carries the screen, an optional path param, and filter state as
+// query params: `#/cost?since=7d&group_by=model`. The URL is the source of
+// truth for filters so Overview→detail drill-through round-trips through
+// reload + back/forward. Component state is fine for everything else.
+function getRoute() {
+  const raw = location.hash.replace(/^#\/?/, '');
+  const qIdx = raw.indexOf('?');
+  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'status';
+  const query = qIdx >= 0 ? raw.slice(qIdx + 1) : '';
+  const parts = path.split('/');
+  return { view: parts[0] || 'status', param: parts[1] || null, params: new URLSearchParams(query) };
+}
+
+// CLI-matching time-window vocabulary, plus explicit YYYY-MM-DD:YYYY-MM-DD ranges.
+const SINCE_VALUES = ['1h', '6h', '24h', '7d', '30d', '90d'];
+const _RANGE_RE = /^\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$/;
+function validSince(v) { return SINCE_VALUES.includes(v) || _RANGE_RE.test(v); }
+
+// Read a filter from URL params with a default + optional validator. Bad /
+// unparseable values fall back to the default with a console.warn, never throw.
+function readParam(params, key, def, validate) {
+  const v = params.get(key);
+  if (v == null || v === '') return def;
+  if (validate && !validate(v)) {
+    console.warn(`Lens: ignoring invalid ${key}=${JSON.stringify(v)}; using default ${JSON.stringify(def)}`);
+    return def;
+  }
+  return v;
+}
+
+// Navigate to a screen with a filter set, omitting any value equal to its
+// default so default URLs stay clean (`#/cost`, not `#/cost?since=7d`).
+// Assigning location.hash pushes a history entry (back/forward works) and
+// fires hashchange so the App re-renders.
+function navigate(view, filters, defaults, param) {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(filters || {})) {
+    if (v == null || v === '') continue;
+    if (defaults && String(v) === String(defaults[k])) continue;
+    qs.set(k, v);
+  }
+  const q = qs.toString();
+  location.hash = '#/' + view + (param ? '/' + param : '') + (q ? '?' + q : '');
+}
+
+// --- Charts (uPlot, issue #112) ---
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+// Minimal time-series line/area chart over the vendored uPlot global. `data`
+// is uPlot's [xs, ys] tuple (xs in unix seconds). Reads CSS custom properties
+// so it matches the active light/dark theme at creation.
+function LineChart({ data, height = 120, fmtY = fmtCost, area = true }) {
+  const ref = useRef(null);
+  const plotRef = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
+    const stroke = cssVar('--brand') || '#3d8eff';
+    const grid = cssVar('--border') || '#1f1f1f';
+    const tick = cssVar('--text-dim') || '#a1a1a1';
+    const width = ref.current.clientWidth || 600;
+    const opts = {
+      width, height,
+      legend: { show: false },
+      cursor: { y: false, points: { size: 5 } },
+      scales: { x: { time: true } },
+      axes: [
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid } },
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
+          size: 56, values: (u, vals) => vals.map(v => fmtY(v)) },
+      ],
+      series: [
+        {},
+        {
+          stroke, width: 2, points: { show: data[0].length < 30 },
+          fill: area ? (stroke + '22') : undefined,
+          value: (u, v) => (v == null ? '-' : fmtY(v)),
+        },
+      ],
+    };
+    const plot = new window.uPlot(opts, data, ref.current);
+    plotRef.current = plot;
+    const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); plot.destroy(); plotRef.current = null; };
+  }, [data, height]);
+  return html`<div class="chart" ref=${ref}></div>`;
 }
 
 // ============================
 // Status View
 // ============================
-function StatusView() {
+function StatusView({ params }) {
+  // Optional single-agent filter via URL (#112). Filtered client-side since
+  // /status returns every agent.
+  const agentId = readParam(params, 'agent_id', '');
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
 
@@ -668,11 +780,17 @@ function StatusView() {
   if (!data) return html`<div class="empty">Loading...</div>`;
   if (!data.agents.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
+  const agents = agentId ? data.agents.filter(a => a.agent_id === agentId) : data.agents;
+
   return html`
     <div class="page-title">Status</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on an agent tile for details</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">
+      ${agentId
+        ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/status" style="color:var(--brand)">show all</a>`
+        : 'Click on an agent tile for details'}
+    </div>
     <div class="cards">
-      ${data.agents.map(a => html`
+      ${agents.map(a => html`
         <div class="card clickable" onClick=${() => { location.hash = '#/traces'; }}>
           <div class="card-header">
             <span class="status-dot ${a.status}"></span>
@@ -709,22 +827,27 @@ function StatusView() {
 // ============================
 // Traces View
 // ============================
-function TracesListView() {
+function TracesListView({ params }) {
+  // Filters come from the URL (issue #112). `result` maps to the API's `status`.
+  const DEFAULTS = { since: '24h', result: '', agent_id: '' };
+  const since = readParam(params, 'since', DEFAULTS.since, validSince);
+  const result = readParam(params, 'result', DEFAULTS.result, v => ['ok', 'error'].includes(v));
+  const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
+  const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, [k]: v }, DEFAULTS);
+
   const [traces, setTraces] = useState([]);
   const [agentStatus, setAgentStatus] = useState({});
-  const [since, setSince] = useState('24h');
-  const [statusF, setStatusF] = useState('');
 
   const load = useCallback(async () => {
     const [td, sd] = await Promise.all([
-      api('/traces', { since, status: statusF || undefined, limit: 100 }),
+      api('/traces', { since, status: result || undefined, agent_id: agentId || undefined, limit: 100 }),
       api('/status'),
     ]);
     setTraces(td.traces || []);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
-  }, [since, statusF]);
+  }, [since, result, agentId]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
@@ -732,17 +855,18 @@ function TracesListView() {
     <div class="page-title">Traces</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on a trace row for details</div>
     <div class="filters">
-      <select value=${since} onChange=${e => setSince(e.target.value)}>
+      <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="1h">Last 1h</option>
         <option value="6h">Last 6h</option>
         <option value="24h">Last 24h</option>
         <option value="7d">Last 7d</option>
       </select>
-      <select value=${statusF} onChange=${e => setStatusF(e.target.value)}>
+      <select value=${result} onChange=${e => setFilter('result', e.target.value)}>
         <option value="">All results</option>
         <option value="ok">ok</option>
         <option value="error">error</option>
       </select>
+      ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
     </div>
     ${traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
@@ -898,17 +1022,45 @@ function TraceDetailView({ traceId }) {
 // ============================
 // Cost View
 // ============================
-function CostView() {
+// Aggregate cost rows into a uPlot [xs, ys] daily series (sum cost per date).
+function dailyCostSeries(rows) {
+  const byDate = {};
+  for (const r of (rows || [])) {
+    if (!r.group) continue;
+    byDate[r.group] = (byDate[r.group] || 0) + (r.cost_usd || 0);
+  }
+  const dates = Object.keys(byDate).sort();
+  if (!dates.length) return null;
+  const xs = dates.map(d => Math.floor(new Date(d + 'T00:00:00Z').getTime() / 1000));
+  const ys = dates.map(d => byDate[d]);
+  return xs.some(Number.isNaN) ? null : [xs, ys];
+}
+
+function CostView({ params }) {
+  const DEFAULTS = { since: '7d', group_by: 'day', agent_id: '' };
+  const since = readParam(params, 'since', DEFAULTS.since, validSince);
+  const groupBy = readParam(params, 'group_by', DEFAULTS.group_by,
+    v => ['day', 'agent', 'model', 'tool'].includes(v));
+  const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
+  const setFilter = (k, v) => navigate('cost', { since, group_by: groupBy, agent_id: agentId, [k]: v }, DEFAULTS);
+
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
-  const [since, setSince] = useState('7d');
-  const [groupBy, setGroupBy] = useState('day');
+  const [chartData, setChartData] = useState(null);
 
   const load = useCallback(async () => {
-    const d = await api('/cost', { since, group_by: groupBy });
+    const d = await api('/cost', { since, group_by: groupBy, agent_id: agentId || undefined });
     setRows(d.rows || []);
     setTotal(d.total_cost_usd || 0);
-  }, [since, groupBy]);
+    // Smoke sparkline (#112): always show daily spend, fetching a day-grouped
+    // series independent of the table's group-by.
+    if (groupBy === 'day') {
+      setChartData(dailyCostSeries(d.rows));
+    } else {
+      const dd = await api('/cost', { since, group_by: 'day', agent_id: agentId || undefined });
+      setChartData(dailyCostSeries(dd.rows));
+    }
+  }, [since, groupBy, agentId]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
@@ -918,21 +1070,29 @@ function CostView() {
   return html`
     <div class="page-title">Cost</div>
     <div class="filters">
-      <select value=${since} onChange=${e => setSince(e.target.value)}>
+      <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="1h">Last 1h</option>
         <option value="6h">Last 6h</option>
         <option value="24h">Last 24h</option>
         <option value="7d">Last 7d</option>
         <option value="30d">Last 30d</option>
+        <option value="90d">Last 90d</option>
       </select>
-      <select value=${groupBy} onChange=${e => setGroupBy(e.target.value)}>
+      <select value=${groupBy} onChange=${e => setFilter('group_by', e.target.value)}>
         <option value="day">By day</option>
         <option value="agent">By agent</option>
         <option value="model">By model</option>
         <option value="tool">By tool</option>
       </select>
+      ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
     </div>
+    ${chartData ? html`
+      <div class="chart-card">
+        <div class="chart-title">Spend per day</div>
+        <${LineChart} data=${chartData} height=${120} fmtY=${fmtCost} />
+      </div>
+    ` : null}
     <div class="summary">
       <div class="summary-item"><div class="summary-label">Total cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></div><div class="summary-value" style="color:var(--accent)">${fmtCost(total)}</div></div>
       <div class="summary-item"><div class="summary-label">Input tokens</div><div class="summary-value">${fmtTokens(totalIn)}</div></div>
@@ -972,27 +1132,45 @@ function CostView() {
 // ============================
 // Alerts View
 // ============================
-function AlertsView() {
+function AlertsView({ params }) {
+  const DEFAULTS = { severity: '', unread: '', agent_id: '', since: '' };
+  const severity = readParam(params, 'severity', DEFAULTS.severity,
+    v => ['critical', 'warning', 'info'].includes(v));
+  const unread = readParam(params, 'unread', DEFAULTS.unread, v => ['true', 'false'].includes(v));
+  const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
+  const since = readParam(params, 'since', DEFAULTS.since, validSince);
+  const setFilter = (k, v) =>
+    navigate('alerts', { severity, unread, agent_id: agentId, since, [k]: v }, DEFAULTS);
+
   const [alerts, setAlerts] = useState([]);
-  const [severity, setSeverity] = useState('');
   const [expanded, setExpanded] = useState(null);
 
   const load = useCallback(async () => {
-    const d = await api('/alerts', { severity: severity || undefined });
+    const d = await api('/alerts', {
+      severity: severity || undefined,
+      unread: unread === 'true' ? 'true' : undefined,
+      agent_id: agentId || undefined,
+      since: since || undefined,
+    });
     setAlerts(d.alerts || []);
-  }, [severity]);
+  }, [severity, unread, agentId, since]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
   return html`
     <div class="page-title">Alerts</div>
     <div class="filters">
-      <select value=${severity} onChange=${e => setSeverity(e.target.value)}>
+      <select value=${severity} onChange=${e => setFilter('severity', e.target.value)}>
         <option value="">All severities</option>
         <option value="critical">Critical</option>
         <option value="warning">Warning</option>
         <option value="info">Info</option>
       </select>
+      <select value=${unread} onChange=${e => setFilter('unread', e.target.value)}>
+        <option value="">All alerts</option>
+        <option value="true">Unread only</option>
+      </select>
+      ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
     </div>
     ${alerts.length === 0 ? html`<div class="empty">No alerts fired. Configure sensitive actions in ${'`tj.toml`'}.</div>` : html`
@@ -1019,18 +1197,21 @@ function AlertsView() {
 // ============================
 // Drift View
 // ============================
-function DriftView() {
+function DriftView({ params }) {
+  const agentId = readParam(params, 'agent_id', '');
   const [data, setData] = useState(null);
 
   useEffect(() => {
-    api('/drift').then(d => setData(d));
-    const t = setInterval(() => api('/drift').then(d => setData(d)), 10000);
+    const fetchDrift = () => api('/drift', { agent_id: agentId || undefined }).then(d => setData(d));
+    fetchDrift();
+    const t = setInterval(fetchDrift, 10000);
     return () => clearInterval(t);
-  }, []);
+  }, [agentId]);
 
   if (!data) return html`<div class="empty">Loading...</div>`;
 
-  const agents = data.agents || [];
+  // /drift returns a single-agent shape when agent_id is set; normalize to a list.
+  const agents = data.agents || (data.agent_id ? [data] : []);
   if (!agents.length) return html`<div class="empty">No baselines built yet. Run at least 10 sessions to establish a behavioral baseline.</div>`;
 
   const metrics = [
@@ -1142,7 +1323,12 @@ function BudgetRow({ scope, label, daily, session, effectiveDaily, effectiveSess
   `;
 }
 
-function BudgetView() {
+function BudgetView({ params }) {
+  // `provider` deep-link param (#112). The budget surface is per-agent today, so
+  // there's nothing to filter on yet — we preserve the param so the deep-link
+  // round-trips and surface it as a clearable chip. Provider-scoped budget
+  // content arrives with budget-projection surfacing (#114).
+  const provider = readParam(params, 'provider', '');
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
   const [error, setError] = useState(null);
@@ -1181,6 +1367,7 @@ function BudgetView() {
 
   return html`
     <div class="page-title">Budget</div>
+    ${provider ? html`<div class="filters"><button class="btn" onClick=${() => navigate('budget', {}, {})}>provider: ${provider} ✕</button></div>` : null}
 
     <div style="font-size:13px;font-weight:600;margin-bottom:8px">Budget limits</div>
     <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
@@ -1246,10 +1433,10 @@ function BudgetView() {
 // App Router
 // ============================
 function App() {
-  const [route, setRoute] = useState(getView());
+  const [route, setRoute] = useState(getRoute());
 
   useEffect(() => {
-    const handler = () => setRoute(getView());
+    const handler = () => setRoute(getRoute());
     window.addEventListener('hashchange', handler);
     return () => window.removeEventListener('hashchange', handler);
   }, []);
@@ -1267,15 +1454,16 @@ function App() {
     return null;
   }
 
+  const p = route.params;
   switch (route.view) {
-    case 'status': return html`<${StatusView} />`;
+    case 'status': return html`<${StatusView} params=${p} />`;
     case 'traces':
       if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;
-      return html`<${TracesListView} />`;
-    case 'cost': return html`<${CostView} />`;
-    case 'alerts': return html`<${AlertsView} />`;
-    case 'drift': return html`<${DriftView} />`;
-    case 'budget': return html`<${BudgetView} />`;
+      return html`<${TracesListView} params=${p} />`;
+    case 'cost': return html`<${CostView} params=${p} />`;
+    case 'alerts': return html`<${AlertsView} params=${p} />`;
+    case 'drift': return html`<${DriftView} params=${p} />`;
+    case 'budget': return html`<${BudgetView} params=${p} />`;
     default: return html`<div class="empty">Page not found.</div>`;
   }
 }
