@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
 from tokenjam.core.optimize import build_report, report_to_dict
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -84,21 +85,24 @@ def get_optimize(
     conn = getattr(db, "conn", None)
     if conn is not None:
         try:
-            clauses = ["started_at >= $1", "started_at < $2"]
-            params: list = [since_dt, until_dt]
-            if agent_id:
-                clauses.append(f"agent_id = ${len(params) + 1}")
-                params.append(agent_id)
-            where = " AND ".join(clauses)
-            rows = conn.execute(
-                f"SELECT COALESCE(plan_tier, 'unknown'), COUNT(*) FROM sessions "
-                f"WHERE {where} GROUP BY 1",
-                params,
-            ).fetchall()
-            payload["plan_tier_mix"] = {str(r[0]): int(r[1]) for r in rows}
+            payload["plan_tier_mix"] = plan_tier_mix(conn, since_dt, until_dt, agent_id)
         except Exception:
             payload["plan_tier_mix"] = {}
     else:
         payload["plan_tier_mix"] = {}
+
+    # Plan-tier framing block (#110) — built from the report window + the
+    # plan-tier mix above, so the local web UI frames recoverable-savings and
+    # spend figures identically to the CLI.
+    w = report.window
+    payload["framing"] = compute_framing(
+        config,
+        WindowSummary(
+            total_cost_usd=float(getattr(w, "total_cost_usd", 0.0) or 0.0),
+            total_tokens=int(getattr(w, "total_tokens", 0) or 0),
+            sessions=int(getattr(w, "sessions", 0) or 0),
+            plan_tier_mix=payload["plan_tier_mix"],
+        ),
+    ).to_dict()
 
     return payload

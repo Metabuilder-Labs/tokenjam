@@ -238,6 +238,54 @@ async def test_get_cost_returns_aggregated_rows(client):
     assert "total_cost_usd" in data
 
 
+_FRAMING_KEYS = {
+    "pricing_mode", "plan_tier", "plan_label", "plan_monthly_usd",
+    "subscription_share_pct", "api_share_pct", "display_rule", "qualifier_text",
+}
+
+
+async def test_cost_response_includes_framing_block(client):
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/cost")
+    assert resp.status_code == 200
+    framing = resp.json()["framing"]
+    assert _FRAMING_KEYS <= set(framing)
+
+
+async def test_optimize_response_includes_framing_block(client):
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/optimize?since=30d")
+    assert resp.status_code == 200
+    data = resp.json()
+    if data.get("error") == "no_data":
+        pytest.skip("no spans landed for optimize in this fixture")
+    assert _FRAMING_KEYS <= set(data["framing"])
+
+
+async def test_budget_framing_reflects_configured_subscription_plan(db):
+    """The budget surface has no window, so framing falls back to the
+    declared plan in config (#110)."""
+    from tokenjam.core.config import ProviderBudget
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    cfg.budgets["anthropic"] = ProviderBudget(plan="max_5x")
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/budget")
+    assert resp.status_code == 200
+    framing = resp.json()["framing"]
+    assert framing["pricing_mode"] == "subscription"
+    assert framing["plan_tier"] == "max_5x"
+    assert framing["plan_label"] == "Max 5x plan"
+    assert framing["display_rule"] == "suppress_dollars_for_subscription_share"
+
+
 async def test_get_alerts_returns_list(client):
     resp = await client.get("/api/v1/alerts")
     assert resp.status_code == 200
