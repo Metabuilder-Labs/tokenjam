@@ -433,6 +433,76 @@ def session_active_seconds(conn, session_id: str) -> float | None:
     return float(row[0]) / 1000.0
 
 
+# Token/cost rollup for a single session, joining cost spans onto the session via
+# the trace(s) the session's own spans carry. The keys mirror the denormalized
+# `sessions` aggregate columns so callers can splice the result straight in.
+_SESSION_ROLLUP_KEYS = (
+    "input_tokens", "output_tokens", "cache_tokens", "cache_write_tokens",
+    "total_cost_usd", "tool_call_count",
+)
+
+
+def session_token_cost_rollup(conn, session_id: str) -> dict | None:
+    """True per-session token/cost rollup, joining trace-keyed cost spans (#18).
+
+    The denormalized `sessions` aggregate columns are accumulated per span keyed
+    by `span.session_id` (see `IngestPipeline._build_or_update_session`). That is
+    correct for telemetry that stamps the session id on its cost spans (the
+    `/v1/logs` Claude Code/Codex path, and the on-disk backfill). But a fan-out
+    harness posting raw OTLP to `/api/v1/spans` can emit the zero-cost
+    `invoke_agent` marker span WITH `session.id` while its cost-bearing
+    `gen_ai.llm.call` spans carry only `agent_id` + `traceId` (no `session.id`).
+    Those cost spans never accumulate onto the marker's session row, so the
+    per-session rollup reads 0 even though the spend is real and surfaces fine on
+    Cost/Traces (which key by agent_id / trace, never session_id).
+
+    The defensible association is the **trace**: the marker span (which carries
+    the session_id) and the cost spans share a `trace_id`, exactly the join
+    `/traces` already uses to attribute the same spans. So this rolls up every
+    span whose `session_id` matches OR whose `trace_id` appears on a span that
+    carries this session_id. Each span is counted once (a span matching both
+    predicates isn't double-counted — the WHERE is a disjunction over distinct
+    rows, not a self-join). When the cost spans DO carry the session_id (the
+    common case), the trace clause is redundant and the result equals the plain
+    `session_id` sum, so this is a strict superset that never under- or
+    over-counts the already-correct paths.
+
+    Returns a dict keyed by `_SESSION_ROLLUP_KEYS`, or None when the session has
+    no spans at all (caller keeps the stored row's values).
+    """
+    if conn is None or session_id is None:
+        return None
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_tokens), 0),
+            COALESCE(SUM(cache_write_tokens), 0),
+            COALESCE(SUM(cost_usd), 0.0),
+            COUNT(*) FILTER (WHERE tool_name IS NOT NULL),
+            COUNT(*)
+        FROM spans
+        WHERE session_id = $1
+           OR trace_id IN (
+                SELECT DISTINCT trace_id FROM spans
+                WHERE session_id = $1 AND trace_id IS NOT NULL
+           )
+        """,
+        [session_id],
+    ).fetchone()
+    if not row or row[6] == 0:
+        return None
+    return {
+        "input_tokens": int(row[0] or 0),
+        "output_tokens": int(row[1] or 0),
+        "cache_tokens": int(row[2] or 0),
+        "cache_write_tokens": int(row[3] or 0),
+        "total_cost_usd": float(row[4] or 0.0),
+        "tool_call_count": int(row[5] or 0),
+    }
+
+
 def _int_or_none(val: object) -> int | None:
     if val is None:
         return None

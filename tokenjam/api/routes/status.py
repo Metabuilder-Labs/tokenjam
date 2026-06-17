@@ -4,7 +4,11 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.core.db import _row_to_session, session_active_seconds
+from tokenjam.core.db import (
+    _row_to_session,
+    session_active_seconds,
+    session_token_cost_rollup,
+)
 from tokenjam.core.framing import (
     WindowSummary,
     compute_framing,
@@ -65,6 +69,15 @@ async def get_status(
         if session is not None and hasattr(db, "conn"):
             active_seconds = session_active_seconds(db.conn, session.session_id)
 
+        # Roll up tokens/cost from the session's spans joined via shared trace
+        # (#18): a fan-out harness posting raw OTLP keeps the cost on agent/
+        # trace-keyed spans while the session row holds only a zero-cost marker,
+        # so the denormalized aggregate reads 0. Fall back to the stored row when
+        # the session has no spans at all.
+        roll = None
+        if session is not None and hasattr(db, "conn"):
+            roll = session_token_cost_rollup(db.conn, session.session_id)
+
         today_cost = db.get_daily_cost(aid, utcnow().date())
 
         # Active (unacknowledged, unsuppressed) alerts
@@ -78,15 +91,18 @@ async def get_status(
             "status": session.status if session else "idle",
             "session_id": session.session_id if session else None,
             "cost_today": today_cost,
-            "input_tokens": session.input_tokens if session else 0,
-            "output_tokens": session.output_tokens if session else 0,
-            "tool_call_count": session.tool_call_count if session else 0,
+            "input_tokens": roll["input_tokens"] if roll else (session.input_tokens if session else 0),
+            "output_tokens": roll["output_tokens"] if roll else (session.output_tokens if session else 0),
+            "tool_call_count": roll["tool_call_count"] if roll else (session.tool_call_count if session else 0),
             "error_count": session.error_count if session else 0,
             "active_alerts": len(active_alerts),
             "duration_seconds": session.duration_seconds if session else None,
             "active_seconds": active_seconds,
             "started_at": session.started_at.isoformat() if session and session.started_at else None,
-            "total_cost_usd": float(session.total_cost_usd) if session and session.total_cost_usd is not None else 0.0,
+            "total_cost_usd": (
+                roll["total_cost_usd"] if roll
+                else (float(session.total_cost_usd) if session and session.total_cost_usd is not None else 0.0)
+            ),
         }
         agents_data.append(agent_data)
 
