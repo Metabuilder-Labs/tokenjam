@@ -505,12 +505,68 @@ def ingest_claude_code(
     return result
 
 
+# Column order for the bulk span INSERT — kept in lock-step with the named-column
+# INSERT in `DuckDBBackend.insert_span`. A named-column list (not positional) so a
+# future migration adding a column at the end doesn't silently shift binding order.
+_SPAN_INSERT_SQL = (
+    "INSERT INTO spans ("
+    "span_id, trace_id, parent_span_id, session_id, agent_id, "
+    "name, kind, status_code, status_message, start_time, end_time, "
+    "duration_ms, attributes, provider, model, tool_name, "
+    "input_tokens, output_tokens, cache_tokens, cost_usd, "
+    "request_type, conversation_id, events, billing_account, "
+    "cache_write_tokens"
+    ") VALUES "
+    "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)"
+)
+
+
+def _span_insert_params(span: NormalizedSpan) -> list:
+    """Positional bind params for `_SPAN_INSERT_SQL`, in column order."""
+    return [
+        span.span_id, span.trace_id, span.parent_span_id, span.session_id,
+        span.agent_id, span.name, span.kind.value, span.status_code.value,
+        span.status_message, span.start_time, span.end_time, span.duration_ms,
+        json.dumps(span.attributes), span.provider, span.model, span.tool_name,
+        span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
+        span.request_type, span.conversation_id, json.dumps(span.events),
+        span.billing_account, span.cache_write_tokens,
+    ]
+
+
+def _existing_span_ids(conn, span_ids: list[str]) -> set[str]:
+    """Return the subset of `span_ids` that already exist in `spans`, in ONE
+    query (replacing the per-span existence SELECT). Chunked so an enormous
+    session can't blow past DuckDB's bind-parameter ceiling.
+    """
+    found: set[str] = set()
+    if not span_ids:
+        return found
+    chunk = 5000
+    for start in range(0, len(span_ids), chunk):
+        batch = span_ids[start:start + chunk]
+        placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
+        rows = conn.execute(
+            f"SELECT span_id FROM spans WHERE span_id IN ({placeholders})", batch
+        ).fetchall()
+        found.update(r[0] for r in rows)
+    return found
+
+
 def _insert_session_idempotent(
     db, parsed: ParsedSession, plan_tier: str = "unknown",
 ) -> int:
     """
     Insert spans + session record; skip spans already present.
     Returns the number of newly-inserted spans.
+
+    Bulk path (#15): instead of one SELECT + one INSERT per span (~2 round-trips
+    × N spans → ~100s over a large history), the whole session is processed in a
+    bounded number of statements regardless of span count — ONE (chunked)
+    `WHERE span_id IN (...)` partitions spans into new-vs-existing, then the new
+    spans are inserted in a single `executemany`. PRIMARY KEY conflicts on
+    (span_id) mean a previous backfill (or live ingest) already covered the span,
+    so it is skipped.
     """
     conn = getattr(db, "conn", None)
     inserted = 0
@@ -525,36 +581,14 @@ def _insert_session_idempotent(
         db.upsert_session(session_record_from_parsed(parsed, plan_tier))
         return inserted
 
-    for span in parsed.spans:
-        # PRIMARY KEY conflicts on (span_id) mean a previous backfill (or live ingest)
-        # has already covered this span. Skip silently — the row count returned by
-        # DuckDB's execute() isn't reliable for ON CONFLICT, so we pre-check.
-        exists = conn.execute(
-            "SELECT 1 FROM spans WHERE span_id = $1", [span.span_id]
-        ).fetchone()
-        if exists:
-            continue
-        conn.execute(
-            "INSERT INTO spans ("
-            "span_id, trace_id, parent_span_id, session_id, agent_id, "
-            "name, kind, status_code, status_message, start_time, end_time, "
-            "duration_ms, attributes, provider, model, tool_name, "
-            "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens"
-            ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
-            [
-                span.span_id, span.trace_id, span.parent_span_id, span.session_id,
-                span.agent_id, span.name, span.kind.value, span.status_code.value,
-                span.status_message, span.start_time, span.end_time, span.duration_ms,
-                json.dumps(span.attributes), span.provider, span.model, span.tool_name,
-                span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
-                span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account, span.cache_write_tokens,
-            ],
+    span_ids = [s.span_id for s in parsed.spans]
+    existing = _existing_span_ids(conn, span_ids)
+    new_spans = [s for s in parsed.spans if s.span_id not in existing]
+    if new_spans:
+        conn.executemany(
+            _SPAN_INSERT_SQL, [_span_insert_params(s) for s in new_spans]
         )
-        inserted += 1
+        inserted = len(new_spans)
 
     db.upsert_session(session_record_from_parsed(parsed, plan_tier))
     return inserted
