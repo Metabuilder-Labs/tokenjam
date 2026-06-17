@@ -6,7 +6,11 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.core.db import _row_to_session, session_active_seconds
+from tokenjam.core.db import (
+    _row_to_session,
+    session_active_seconds,
+    session_token_cost_rollup,
+)
 from tokenjam.core.framing import (
     WindowSummary,
     compute_framing,
@@ -117,6 +121,19 @@ def _build_archive(
     for r in rows:
         s = _row_to_session(r, cols)
         namespace = s.service_namespace or _project_for(config, s.agent_id)
+        # Roll up tokens/cost from the session's spans joined via shared trace
+        # (#18): a fan-out harness posting raw OTLP keeps the cost on agent/
+        # trace-keyed spans while the session row holds only a zero-cost marker,
+        # so the denormalized aggregate reads 0. Fall back to the stored row when
+        # the session has no spans at all.
+        roll = session_token_cost_rollup(db.conn, s.session_id)
+        input_tokens = roll["input_tokens"] if roll else s.input_tokens
+        output_tokens = roll["output_tokens"] if roll else s.output_tokens
+        tool_call_count = roll["tool_call_count"] if roll else s.tool_call_count
+        total_cost_usd = (
+            roll["total_cost_usd"] if roll
+            else (float(s.total_cost_usd) if s.total_cost_usd is not None else 0.0)
+        )
         archived.append({
             "agent_id": s.agent_id,
             "namespace": namespace,
@@ -125,12 +142,10 @@ def _build_archive(
                 s.session_id, s.service_instance_id, session_labels
             ),
             "status": s.status_at(idle_threshold),
-            "input_tokens": s.input_tokens,
-            "output_tokens": s.output_tokens,
-            "tool_call_count": s.tool_call_count,
-            "total_cost_usd": (
-                float(s.total_cost_usd) if s.total_cost_usd is not None else 0.0
-            ),
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "tool_call_count": tool_call_count,
+            "total_cost_usd": total_cost_usd,
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "last_span_time": s.ended_at.isoformat() if s.ended_at else None,
         })

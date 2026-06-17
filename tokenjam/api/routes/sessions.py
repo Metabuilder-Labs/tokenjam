@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _run_sessions
+from tokenjam.core.db import session_token_cost_rollup
 from tokenjam.core.distill import distill_titles_cached, peek_cached_titles
 from tokenjam.core.framing import (
     WindowSummary,
@@ -340,7 +341,9 @@ def _session_context_series(db: Any, session_id: str) -> list[dict]:
     ]
 
 
-def _session_framing(db: Any, config: Any, session: SessionRecord) -> dict:
+def _session_framing(
+    db: Any, config: Any, session: SessionRecord, totals: dict[str, Any],
+) -> dict:
     """Plan-tier framing block for the session detail view (#191).
 
     SessionDetailView routes its Overview / subagents / traces cost cells
@@ -349,19 +352,16 @@ def _session_framing(db: Any, config: Any, session: SessionRecord) -> dict:
     other dollar-bearing read route. Reuses ``compute_framing`` (single source of
     truth, ``core/framing.py``) with a window-INDEPENDENT plan mix scoped to this
     session's agent (``plan_determination_mix``, as ``/status`` and ``/traces``
-    do). Window totals are this session's own tokens/cost so the subscription
-    token-share ("% of cycle") math has a denominator.
+    do). Window totals are the session's true (trace-joined, #18) tokens/cost so
+    the subscription token-share ("% of cycle") math has a denominator.
     """
     conn = getattr(db, "conn", None)
     mix = plan_determination_mix(conn, session.agent_id) if conn is not None else {}
     total_tokens = (
-        session.input_tokens + session.output_tokens
-        + session.cache_tokens + session.cache_write_tokens
+        totals["input_tokens"] + totals["output_tokens"]
+        + totals["cache_tokens"] + totals["cache_write_tokens"]
     )
-    total_cost = (
-        float(session.total_cost_usd)
-        if session.total_cost_usd is not None else 0.0
-    )
+    total_cost = totals["total_cost_usd"]
     return compute_framing(
         config,
         WindowSummary(
@@ -411,7 +411,27 @@ async def get_session_detail(request: Request, session_id: str):
     context_series = _session_context_series(db, session_id)
     subagents = _session_subagents(db, session_id)
     config = getattr(request.app.state, "config", None)
-    framing = _session_framing(db, config, session)
+
+    # True per-session tokens/cost, joining cost spans onto the session via the
+    # trace(s) the session's own spans carry (#18). A fan-out harness posting raw
+    # OTLP keeps the cost on agent/trace-keyed spans while the session row holds
+    # only a zero-cost marker, so the denormalized aggregate reads 0; the rollup
+    # reconciles it with /cost + /traces. Falls back to the stored row when the
+    # session has no spans (the rollup returns None).
+    conn = getattr(db, "conn", None)
+    roll = session_token_cost_rollup(conn, session_id) if conn is not None else None
+    totals = roll or {
+        "input_tokens": session.input_tokens,
+        "output_tokens": session.output_tokens,
+        "cache_tokens": session.cache_tokens,
+        "cache_write_tokens": session.cache_write_tokens,
+        "total_cost_usd": (
+            float(session.total_cost_usd)
+            if session.total_cost_usd is not None else 0.0
+        ),
+        "tool_call_count": session.tool_call_count,
+    }
+    framing = _session_framing(db, config, session, totals)
 
     # CC session liveness: a fresh transcript mtime rescues a live session whose
     # backfilled spans have gone stale (see _transcript_aware_status).
@@ -437,15 +457,12 @@ async def get_session_detail(request: Request, session_id: str):
                 session.ended_at.isoformat() if session.ended_at else None
             ),
             "duration_seconds": session.duration_seconds,
-            "total_cost_usd": (
-                float(session.total_cost_usd)
-                if session.total_cost_usd is not None else 0.0
-            ),
-            "input_tokens": session.input_tokens,
-            "output_tokens": session.output_tokens,
-            "cache_tokens": session.cache_tokens,
-            "cache_write_tokens": session.cache_write_tokens,
-            "tool_call_count": session.tool_call_count,
+            "total_cost_usd": totals["total_cost_usd"],
+            "input_tokens": totals["input_tokens"],
+            "output_tokens": totals["output_tokens"],
+            "cache_tokens": totals["cache_tokens"],
+            "cache_write_tokens": totals["cache_write_tokens"],
+            "tool_call_count": totals["tool_call_count"],
             "error_count": session.error_count,
             "conversation_count": conversation_count,
             "active_alerts": len(active_alerts),
