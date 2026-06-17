@@ -309,21 +309,25 @@ def plan_tier_mix(
     Single home for the ``SELECT plan_tier, COUNT(*) FROM sessions`` query used
     by ``cmd_optimize`` and the ``/api/v1/optimize`` + ``/api/v1/cost`` routes.
     """
+    # Built by concatenating static fragments (never f-string SQL, per CLAUDE.md
+    # Critical Rule 7). Placeholder indices are appended as the params list grows;
+    # every value is bound through a $N parameter, never interpolated.
     clauses: list[str] = []
     params: list[Any] = []
     if since is not None:
         params.append(since)
-        clauses.append(f"started_at >= ${len(params)}")
+        clauses.append("started_at >= $" + str(len(params)))
     if until is not None:
         params.append(until)
-        clauses.append(f"started_at < ${len(params)}")
+        clauses.append("started_at < $" + str(len(params)))
     if agent_id:
         params.append(agent_id)
-        clauses.append(f"agent_id = ${len(params)}")
+        clauses.append("agent_id = $" + str(len(params)))
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-    rows = conn.execute(
-        f"SELECT COALESCE(plan_tier, 'unknown'), COUNT(*) FROM sessions{where} "
-        f"GROUP BY 1",
-        params,
-    ).fetchall()
+    sql = (
+        "SELECT COALESCE(plan_tier, 'unknown'), COUNT(*) FROM sessions"
+        + where
+        + " GROUP BY 1"
+    )
+    rows = conn.execute(sql, params).fetchall()
     return {str(r[0]): int(r[1]) for r in rows}
