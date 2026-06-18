@@ -413,7 +413,7 @@ def run(ctx: AnalyzerContext) -> None:
         estimated_recoverable_usd=rec_usd,
         estimated_recoverable_tokens=rec_tokens,
         estimate_basis=(
-            "low-significance tokens predicted by LLMLingua-2 × input rate — "
-            "review before editing prompts"
+            "low-significance tokens (≈4 chars/token) predicted by LLMLingua-2 "
+            "× window input rate — review before editing prompts"
         ),
     )
