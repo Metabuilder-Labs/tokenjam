@@ -203,6 +203,8 @@ tj serve               # start the web UI + REST API
 **Shipped in 0.3.x:** Downsize · Cache · Script · Trim · Claude Code + Codex onboarding · MCP server · Web UI · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview
 
 **Up next:**
+- [ ] **[TokenJam Lens](https://github.com/Metabuilder-Labs/tokenjam/milestone/1)** — local dashboard rebrand: new Overview triage front-door, Optimize detail tab, real spend-over-time charts, cross-screen drill-through
+- [ ] **[Reuse analyzer](https://github.com/Metabuilder-Labs/tokenjam/milestone/2)** — fifth analyzer: detects clusters of sessions with repeated planning, exports reviewable skeleton templates you can convert into slash commands or scripts
 - [ ] `tj policy add | edit | apply` — unified rule surface
 - [ ] `tj replay` — replay captured sessions against new model versions
 - [ ] TypeScript framework patches (LangChain JS, OpenAI Agents SDK)
