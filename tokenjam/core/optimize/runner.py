@@ -33,6 +33,7 @@ ANALYZER_ORDER: list[str] = [
     "cache",
     "cache-recommend",
     "script",
+    "reuse",
     "trim",
 ]
 
@@ -321,6 +322,7 @@ def _build_finding_constructors() -> dict:
         WorkflowCluster,
         WorkflowRestructureFinding,
     )
+    from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
         rows = [CacheEfficacyRow(**r) for r in d.get("rows") or []]
@@ -383,10 +385,29 @@ def _build_finding_constructors() -> dict:
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
+    def _reuse(d: dict) -> ReuseFinding:
+        clusters = []
+        for c in d.get("clusters") or []:
+            cc = dict(c)
+            # asdict() serialised the tuple to a list; restore the tuple so the
+            # dataclass field type holds across the round-trip.
+            cc["tool_signature"] = tuple(cc.get("tool_signature") or ())
+            clusters.append(ReuseCluster(**cc))
+        return ReuseFinding(
+            clusters=clusters,
+            capture_mode=d.get("capture_mode", "tool_sequence_only"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            confidence=d.get("confidence", "heuristic"),
+            hint=d.get("hint", ""),
+        )
+
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
         "script": _workflow_restructure,
+        "reuse": _reuse,
         "trim": _prompt_bloat,
     }
 

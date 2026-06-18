@@ -35,11 +35,14 @@ from tokenjam.core.optimize.runner import (
 )
 from tokenjam.core.optimize.types import (
     MODEL_DOWNGRADE_CAVEAT,
+    REUSE_HONESTY_CAVEAT,
     AnalyzerContext,
     BudgetProjection,
     DowngradeExample,
     DowngradeFinding,
     OptimizeReport,
+    ReuseCluster,
+    ReuseFinding,
     WindowSummary,
 )
 
@@ -63,7 +66,10 @@ __all__ = [
     "DowngradeExample",
     "DowngradeFinding",
     "MODEL_DOWNGRADE_CAVEAT",
+    "REUSE_HONESTY_CAVEAT",
     "OptimizeReport",
+    "ReuseCluster",
+    "ReuseFinding",
     "WindowSummary",
     "_cycle_bounds",
     "analyze_model_downgrade",
