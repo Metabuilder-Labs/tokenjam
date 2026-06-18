@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.framing import WindowSummary, compute_framing
 from tokenjam.core.config import (
     AgentConfig,
     BudgetConfig,
@@ -31,9 +32,15 @@ def _budget_payload(config, agent_ids: list[str]) -> dict:
         eff = _b(resolve_effective_budget(aid, config))
         agents[aid] = {"configured": raw, "effective": eff}
 
+    # Plan-tier framing block (#110). The budget surface has no time window, so
+    # framing falls back to the user's declared plan (compute_framing reads it
+    # from config when the window mix is empty).
+    framing = compute_framing(config, WindowSummary())
+
     return {
         "defaults": _b(config.defaults.budget),
         "agents": agents,
+        "framing": framing.to_dict(),
     }
 
 

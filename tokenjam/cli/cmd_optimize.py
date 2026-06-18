@@ -6,6 +6,13 @@ import json
 import click
 from rich.markup import escape as _rich_escape
 
+from tokenjam.core.framing import (
+    PLAN_LABEL_AND_FEE,
+    config_declared_plan,
+    dominant_plan,
+    plan_tier_mix,
+    pricing_mode_for,
+)
 from tokenjam.core.optimize import (
     ANALYZER_REGISTRY,
     MODEL_DOWNGRADE_CAVEAT,
@@ -16,7 +23,6 @@ from tokenjam.core.optimize import (
     report_from_dict,
     report_to_dict,
 )
-from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import (
     console,
     format_cost,
@@ -24,71 +30,10 @@ from tokenjam.utils.formatting import (
 )
 from tokenjam.utils.time_parse import parse_since, utcnow
 
-
-# Subscription plan label + flat monthly fee. Used in the implied-API-value
-# header line. Keys must match SessionRecord.plan_tier values. Plans whose
-# fee is contract-priced (enterprise, team variants) have no fee here — the
-# header line skips the multiplier in that case.
-_PLAN_LABEL_AND_FEE: dict[str, tuple[str, float | None]] = {
-    "pro":        ("Pro plan",         20.0),
-    "max_5x":     ("Max 5x plan",     100.0),
-    "max_20x":    ("Max 20x plan",    200.0),
-    "plus":       ("ChatGPT Plus",     20.0),
-    "team":       ("ChatGPT Team",      None),
-    "enterprise": ("ChatGPT Enterprise", None),
-}
-
-
-def _pricing_mode_for(plan_tier: str) -> str:
-    """Mirror SessionRecord.pricing_mode without needing an instance."""
-    if plan_tier == "local":
-        return "local"
-    if plan_tier in SUBSCRIPTION_PLAN_TIERS:
-        return "subscription"
-    if plan_tier == "api":
-        return "api"
-    return "unknown"
-
-
-def _dominant_plan(plan_mix: dict[str, int]) -> str:
-    """
-    Pick the rendering mode from the plan-tier mix.
-
-    - If plan_mix is empty (e.g. spans inserted without sessions in test
-      fixtures), default to 'api' — the historical rendering mode. Real
-      users always have a populated sessions table because IngestPipeline
-      creates sessions before writing spans.
-    - If any non-unknown plan_tier is present, return the most common one.
-    - Otherwise return 'unknown' (the caller handles dollar suppression).
-    """
-    if not plan_mix:
-        return "api"
-    known = {k: v for k, v in plan_mix.items() if k != "unknown"}
-    if not known:
-        return "unknown"
-    return max(known.items(), key=lambda kv: kv[1])[0]
-
-
-def _config_declared_plan(config) -> str | None:
-    """
-    Return the user's currently-declared plan tier from config.
-
-    Pulls from `[budget.<provider>].plan` — the field set by
-    `tj onboard --reconfigure`. When multiple providers declare a plan
-    we surface the first one in sorted order (deterministic). Returns
-    None when no provider has a plan declared.
-
-    This is used by the optimize renderer to surface a note when the
-    historical plan-tier mix disagrees with the user's currently-
-    declared plan (#71 finding 1) — without overriding the data-driven
-    rendering, which would be dishonest about what actually happened.
-    """
-    budgets = getattr(config, "budgets", None) or {}
-    for provider in sorted(budgets.keys()):
-        plan = getattr(budgets[provider], "plan", None)
-        if plan:
-            return str(plan)
-    return None
+# Plan-tier framing helpers (PLAN_LABEL_AND_FEE, pricing_mode_for,
+# dominant_plan, config_declared_plan, plan_tier_mix) live in
+# tokenjam.core.framing — the single source shared with cmd_tokenmaxx and the
+# REST API. See issue #110.
 
 
 @click.command("optimize")
@@ -233,11 +178,11 @@ def cmd_optimize(
             budget_usd_override=budget_usd,
         )
 
-        plan_mix = _plan_tier_mix(conn, since_dt, until_dt, agent)
+        plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
 
-    dominant = _dominant_plan(plan_mix)
-    pricing_mode = _pricing_mode_for(dominant)
-    declared_plan = _config_declared_plan(config)
+    dominant = dominant_plan(plan_mix)
+    pricing_mode = pricing_mode_for(dominant)
+    declared_plan = config_declared_plan(config)
 
     # --export-config branch: write the snippet to disk and exit. Skips
     # the normal rendering path. The user reads the snippet file and
@@ -319,22 +264,6 @@ def cmd_optimize(
         _render_diff_dict(cost_diff_dict)
 
 
-def _plan_tier_mix(conn, since, until, agent_id: str | None) -> dict[str, int]:
-    """Count sessions by plan_tier inside the analysis window."""
-    clauses = ["started_at >= $1", "started_at < $2"]
-    params: list = [since, until]
-    if agent_id:
-        clauses.append(f"agent_id = ${len(params) + 1}")
-        params.append(agent_id)
-    where = " AND ".join(clauses)
-    rows = conn.execute(
-        f"SELECT COALESCE(plan_tier, 'unknown'), COUNT(*) FROM sessions "
-        f"WHERE {where} GROUP BY 1",
-        params,
-    ).fetchall()
-    return {str(r[0]): int(r[1]) for r in rows}
-
-
 # ---------------------------------------------------------------------------
 # Human-readable renderer
 # ---------------------------------------------------------------------------
@@ -365,7 +294,7 @@ def _render_report(
             f"Run [bold]tj onboard --reconfigure[/bold] to set your plan.[/dim]\n"
         )
     elif pricing_mode == "subscription":
-        label, fee = _PLAN_LABEL_AND_FEE.get(dominant_plan, (dominant_plan, None))
+        label, fee = PLAN_LABEL_AND_FEE.get(dominant_plan, (dominant_plan, None))
         plan_suffix = f", ${fee:.0f}/mo flat" if fee else ""
         console.print(
             f"\nAnalyzing [bold]{w.sessions}[/bold] sessions, "
@@ -415,9 +344,9 @@ def _render_report(
     if (
         declared_plan
         and declared_plan != dominant_plan
-        and declared_plan in _PLAN_LABEL_AND_FEE  # only flag subscription deltas
+        and declared_plan in PLAN_LABEL_AND_FEE  # only flag subscription deltas
     ):
-        label, _ = _PLAN_LABEL_AND_FEE[declared_plan]
+        label, _ = PLAN_LABEL_AND_FEE[declared_plan]
         console.print(
             f"[dim]Note: your config declares "
             f"[bold]{label}[/bold] but historical sessions ran under "
