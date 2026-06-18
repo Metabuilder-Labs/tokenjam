@@ -717,7 +717,7 @@ function getRoute() {
 }
 
 // CLI-matching time-window vocabulary, plus explicit YYYY-MM-DD:YYYY-MM-DD ranges.
-const SINCE_VALUES = ['1h', '6h', '24h', '7d', '30d', '90d'];
+const SINCE_VALUES = ['1h', '24h', '7d', '30d', '90d'];
 const _RANGE_RE = /^\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$/;
 function validSince(v) { return SINCE_VALUES.includes(v) || _RANGE_RE.test(v); }
 
@@ -911,7 +911,6 @@ function TracesListView({ params }) {
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="1h">Last 1h</option>
-        <option value="6h">Last 6h</option>
         <option value="24h">Last 24h</option>
         <option value="7d">Last 7d</option>
       </select>
