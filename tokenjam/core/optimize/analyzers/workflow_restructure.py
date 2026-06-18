@@ -104,6 +104,12 @@ class WorkflowRestructureFinding:
         "Conservative cluster detection. Review each cluster before replacing "
         "with a script — value variation that the heuristic can't see may matter."
     )
+    # Recoverable-savings contract (#111). See types.DowngradeFinding for field
+    # semantics. None when no cluster cleared the threshold.
+    estimated_recoverable_usd:    float | None = None
+    estimated_recoverable_tokens: int | None   = None
+    estimate_basis:               str          = ""
+    estimate_confidence:          str          = "heuristic"
 
 
 def _extract_tool_input(attrs: Any) -> Any:
@@ -164,21 +170,29 @@ def run(ctx: AnalyzerContext) -> None:
 
     # Build the report rows. Only clusters above the threshold are surfaced.
     interesting: list[WorkflowCluster] = []
+    total_cluster_cost = 0.0   # recoverable USD: full cost of clustered sessions
+    total_cluster_tokens = 0   # recoverable tokens: replacing the call frees them
     for signature, members in cluster_members.items():
         if len(members) < MIN_CLUSTER_INSTANCES:
             continue
 
-        # Aggregate session-level cost + duration for the cluster.
+        # Aggregate session-level cost + tokens + duration for the cluster.
         placeholders = ",".join(f"${i + 1}" for i in range(len(members)))
         agg = ctx.conn.execute(
             f"SELECT "
             f"COALESCE(AVG(total_cost_usd), 0.0), "
-            f"COALESCE(AVG(EXTRACT(EPOCH FROM (ended_at - started_at))), 0.0) "
+            f"COALESCE(AVG(EXTRACT(EPOCH FROM (ended_at - started_at))), 0.0), "
+            f"COALESCE(SUM(total_cost_usd), 0.0), "
+            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens), 0) "
             f"FROM sessions WHERE session_id IN ({placeholders})",
             members,
         ).fetchone()
         avg_cost = float(agg[0] or 0.0) if agg else 0.0
         avg_duration = float(agg[1] or 0.0) if agg else 0.0
+        cluster_cost = float(agg[2] or 0.0) if agg else 0.0
+        cluster_tokens = int(agg[3] or 0) if agg else 0
+        total_cluster_cost += cluster_cost
+        total_cluster_tokens += cluster_tokens
 
         signature_repr: list[dict] = []
         for tool_name, arg_sig in signature:
@@ -199,8 +213,19 @@ def run(ctx: AnalyzerContext) -> None:
     # are the biggest savings opportunities.
     interesting.sort(key=lambda c: c.instances, reverse=True)
 
+    has_clusters = bool(interesting)
     ctx.report.findings["script"] = WorkflowRestructureFinding(
         clusters=interesting,
         sessions_examined=len(session_signatures),
         degraded=not has_tool_inputs,
+        estimated_recoverable_usd=(
+            round(total_cluster_cost, 6) if has_clusters else None
+        ),
+        estimated_recoverable_tokens=(
+            total_cluster_tokens if has_clusters else None
+        ),
+        estimate_basis=(
+            "total cost of sessions matching a deterministic call-pattern — "
+            "replacing the cluster with a script eliminates the LLM call entirely"
+        ),
     )
