@@ -882,7 +882,7 @@ function chartTooltipPlugin(fmtFn) {
         let rows = '';
         for (let si = 1; si < u.series.length; si++) {
           const ser = u.series[si];
-          if (ser.label === 'run-rate') continue;
+          if (ser._isRunRate) continue;  // skip the dashed run-rate reference line
           const val = u.data[si][idx];
           if (val == null) continue;
           const stroke = typeof ser.stroke === 'function' ? ser.stroke(u, si) : ser.stroke;
@@ -924,7 +924,7 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ax
       const flat = data[0].map(() => runRate);
       chartData = [...data, flat];
       series.push({
-        label: 'run-rate', stroke: tick, width: 1, dash: [6, 4],
+        label: 'run-rate', _isRunRate: true, stroke: tick, width: 1, dash: [6, 4],
         points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)),
       });
     }
@@ -1320,8 +1320,8 @@ function CostView({ params }) {
   let runRate = null, projection = null;
   if (groupBy === 'total' && series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? totalTokens : total;
-    runRate = windowTotal / Math.max(windowDays(since), 1 / 24);
-    const projected = runRateProjection(windowTotal, since);
+    runRate = runRateProjection(windowTotal, since, 1);  // per-day average (single windowDays source)
+    const projected = runRate * 30;
     projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
   }
 
@@ -1915,8 +1915,8 @@ function OverviewView({ params }) {
   let runRate = null, projection = null;
   if (series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
-    runRate = windowTotal / Math.max(windowDays(since), 1 / 24);  // window length, not data range (#129)
-    const projected = runRateProjection(windowTotal, since);
+    runRate = runRateProjection(windowTotal, since, 1);  // per-day average over window length (#129)
+    const projected = runRate * 30;
     projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
   }
 
