@@ -1,14 +1,33 @@
 """Unit tests for `tj tokenmaxx`."""
 from __future__ import annotations
 
+import pytest
+
 from tokenjam.cli.cmd_tokenmaxx import (
     Tier,
     _TIERS,
     _classify,
-    _config_declared_plan,
-    _plan_label_and_fee,
 )
 from tokenjam.core.config import ProviderBudget, TjConfig
+# Plan-tier helpers moved to the shared framing module (#110); tokenmaxx now
+# consumes them from there.
+from tokenjam.core.framing import PLAN_LABEL_AND_FEE
+from tokenjam.core.framing import config_declared_plan as _config_declared_plan
+
+
+def _plan_label_and_fee(plan_tier):
+    """Shim mirroring the old cmd_tokenmaxx helper's contract (returns None for
+    unknown / api / local / None) on top of the shared PLAN_LABEL_AND_FEE."""
+    if plan_tier is None:
+        return None
+    return PLAN_LABEL_AND_FEE.get(plan_tier)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_home(monkeypatch, tmp_path):
+    """Keep config_declared_plan's global fallback from reading this machine's
+    ~/.config/tj/config.toml during the no-budgets test."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
 
 # ───────────────────────────── classification ─────────────────────────────

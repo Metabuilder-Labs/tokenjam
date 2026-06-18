@@ -20,6 +20,7 @@ from dataclasses import dataclass
 
 import click
 
+from tokenjam.core.framing import PLAN_LABEL_AND_FEE, config_declared_plan
 from tokenjam.utils.formatting import console, format_cost  # noqa: F401  (kept for back-compat imports)
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -101,8 +102,8 @@ def cmd_tokenmaxx(ctx: click.Context, since: str, output_json: bool) -> None:
     monthly_spend = spend_usd * (30.0 / window_days)
 
     # Plan multiplier — only for subscription users with a declared plan.
-    declared_plan = _config_declared_plan(config)
-    plan_info = _plan_label_and_fee(declared_plan)
+    declared_plan = config_declared_plan(config)
+    plan_info = PLAN_LABEL_AND_FEE.get(declared_plan) if declared_plan else None
     multiplier = None
     if plan_info and plan_info[1]:
         multiplier = monthly_spend / plan_info[1]
@@ -191,63 +192,6 @@ def _fetch(db, config, since_dt, until_dt, since_str) -> tuple[float, float, int
 
 
 # ───────────────────────────── helpers ────────────────────────────────────
-
-def _config_declared_plan(config) -> str | None:
-    """Return the user's declared subscription plan tier.
-
-    Checks the active config first; if no `[budget.<provider>].plan` is set
-    (common when running from a project dir whose `.tj/config.toml` has no
-    `[budget]` section), falls back to peeking at the global config at
-    `~/.config/tj/config.toml`. Without this fallback, tokenmaxx silently
-    rendered api-pricing framing in subdirectories even when the user had
-    set their plan globally via `tj onboard`. Issue #106.
-    """
-    budgets = getattr(config, "budgets", None) or {}
-    for provider in sorted(budgets.keys()):
-        plan = getattr(budgets[provider], "plan", None)
-        if plan:
-            return str(plan)
-
-    # Active config has no plan — peek at the global config file directly.
-    try:
-        import sys
-        from pathlib import Path
-        if sys.version_info >= (3, 11):
-            import tomllib
-        else:
-            import tomli as tomllib  # type: ignore[no-redef]
-        global_path = Path.home() / ".config" / "tj" / "config.toml"
-        if not global_path.exists():
-            return None
-        with open(global_path, "rb") as f:
-            raw = tomllib.load(f)
-        budget_block = raw.get("budget") or {}
-        for provider in sorted(budget_block.keys()):
-            plan = (budget_block[provider] or {}).get("plan")
-            if plan:
-                return str(plan)
-    except (OSError, Exception):  # noqa: BLE001
-        return None
-    return None
-
-
-def _plan_label_and_fee(plan_tier: str | None) -> tuple[str, float | None] | None:
-    """
-    Mirror cmd_optimize._PLAN_LABEL_AND_FEE without importing it (avoid
-    circular import risk and keep tokenmaxx independently testable).
-    """
-    if plan_tier is None:
-        return None
-    table: dict[str, tuple[str, float | None]] = {
-        "pro":        ("Pro plan",          20.0),
-        "max_5x":     ("Max 5x plan",      100.0),
-        "max_20x":    ("Max 20x plan",     200.0),
-        "plus":       ("ChatGPT Plus",      20.0),
-        "team":       ("ChatGPT Team",       None),
-        "enterprise": ("ChatGPT Enterprise", None),
-    }
-    return table.get(plan_tier)
-
 
 # ───────────────────────────── rendering ──────────────────────────────────
 
