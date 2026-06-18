@@ -590,6 +590,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--text-dim); margin: 22px 0 10px;
   display: flex; align-items: center; gap: 8px;
 }
+.band-window { text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 400; }
 a.band-hero { display: block; text-decoration: none; color: inherit; transition: border-color 0.15s; }
 a.band-hero:hover { border-color: var(--accent); }
 .tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
@@ -2010,7 +2011,7 @@ function OverviewView({ params }) {
     </div>
 
     <!-- Band 2: Recoverable waste -->
-    <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></div>
+    <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span> <span class="band-window">· over the last ${since}</span></div>
     <div class="tile-grid">
       ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates in this window.</div>`
         : tiles.map(t => {

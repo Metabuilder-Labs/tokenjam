@@ -47,16 +47,29 @@ def _insert_small_opus_session(db, session_id="a"):
         db.insert_span(tool)
 
 
-def test_downsize_recoverable_aliases_monthly_savings(db):
+def test_downsize_recoverable_uses_window_basis(db):
+    # estimated_recoverable_usd is the WINDOW savings (actual − alternative),
+    # not the 30-day projection — so it shares a time basis with the other
+    # analyzers (#122). monthly_savings_usd stays separate for the CLI.
     _insert_small_opus_session(db)
     since, until = _window()
     finding = analyze_model_downgrade(db.conn, since, until, None, 30.0)
     assert finding is not None
-    assert finding.estimated_recoverable_usd == finding.monthly_savings_usd
+    window_savings = max(finding.actual_cost_usd - finding.alternative_cost_usd, 0.0)
+    assert finding.estimated_recoverable_usd == pytest.approx(window_savings, abs=1e-6)
     assert finding.estimated_recoverable_usd > 0
     assert finding.estimated_recoverable_tokens == finding.candidate_tokens
     assert finding.estimate_basis
     assert finding.estimate_confidence == "heuristic"
+
+
+def test_downsize_window_basis_differs_from_monthly_projection(db):
+    # With a window shorter than 30d, the window recoverable must NOT equal the
+    # 30-day projection (the old aliasing bug #122).
+    _insert_small_opus_session(db)
+    since, until = _window()
+    finding = analyze_model_downgrade(db.conn, since, until, None, 7.0)
+    assert finding.estimated_recoverable_usd != finding.monthly_savings_usd
 
 
 # --------------------------------------------------------------------------- #
