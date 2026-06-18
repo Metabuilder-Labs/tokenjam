@@ -2860,6 +2860,11 @@ function TracesListView({ params }) {
   const [traces, setTraces] = useState([]);
   const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
+  // Distinguish "first fetch in flight" from "fetch resolved with zero rows":
+  // until the first /traces fetch settles, show a loading shimmer rather than
+  // the "No traces yet" empty-state, which otherwise flashes on initial paint
+  // while real rows are still loading (issue #20).
+  const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
     const [td, sd] = await Promise.all([
@@ -2871,6 +2876,7 @@ function TracesListView({ params }) {
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
+    setLoaded(true);
   }, [since, result, agentId]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
@@ -2892,7 +2898,8 @@ function TracesListView({ params }) {
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
     </div>
-    ${traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
+    ${!loaded ? html`<div class="shimmer" style="height:200px"></div>`
+      : traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
       <div class="table-wrap"><table>
         <thead><tr><th>Agent</th><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Result <span class="info-btn">i<span class="info-tip">Shows "error" if even a single span in this trace failed</span></span></th><th>Status <span class="info-btn">i<span class="info-tip">Agent liveness: active (seen in last 5 min), stale (no recent spans), completed or idle</span></span></th><th>Spans</th><th></th></tr></thead>
         <tbody>
