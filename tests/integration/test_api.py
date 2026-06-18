@@ -276,6 +276,17 @@ async def test_optimize_response_includes_framing_block(client):
     assert _FRAMING_KEYS <= set(data["framing"])
 
 
+async def test_optimize_response_always_carries_downgrade_key(client):
+    """The downsize typed slot must always be present (null when no candidates)
+    so the UI can always render a Downsize section (#126)."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/optimize?since=30d")
+    data = resp.json()
+    if data.get("error") == "no_data":
+        pytest.skip("no spans landed for optimize in this fixture")
+    assert "downgrade" in data  # present even when null
+
+
 async def test_root_serves_lens_title(client):
     """Brand pass (#114): the served dashboard <title> is 'TokenJam Lens'."""
     resp = await client.get("/")
