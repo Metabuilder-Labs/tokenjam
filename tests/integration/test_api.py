@@ -238,18 +238,30 @@ async def test_get_cost_returns_aggregated_rows(client):
     assert "total_cost_usd" in data
 
 
-async def test_cost_includes_daily_series_for_chart(client):
-    """/api/v1/cost carries a daily-bucketed series (per date+agent+model) the
-    Cost chart consumes — finer than the grouped rows (#113)."""
+async def test_cost_includes_window_series_for_chart(client):
+    """/api/v1/cost carries a window-bucketed series (per bucket+agent+model)
+    plus the bucket size and window bounds so the chart can span the full
+    selected window with zero-fill (#113/#133)."""
     await _ingest_sample_span(client)
     resp = await client.get("/api/v1/cost", params={"since": "7d", "group_by": "day"})
     assert resp.status_code == 200
     data = resp.json()
     assert "series" in data and isinstance(data["series"], list)
+    assert data["series_bucket"] in ("hour", "day")
+    assert isinstance(data["window_start"], int) and isinstance(data["window_end"], int)
+    assert data["window_end"] >= data["window_start"]
     if data["series"]:
         item = data["series"][0]
-        assert {"date", "agent_id", "model", "cost_usd",
+        assert {"bucket", "agent_id", "model", "cost_usd",
                 "input_tokens", "output_tokens"} <= set(item)
+        assert isinstance(item["bucket"], int)  # epoch seconds
+
+
+async def test_cost_series_buckets_hourly_for_short_window(client):
+    """A ≤2-day window buckets hourly so 24h renders with hourly ticks (#133)."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/cost", params={"since": "24h"})
+    assert resp.json()["series_bucket"] == "hour"
 
 
 _FRAMING_KEYS = {

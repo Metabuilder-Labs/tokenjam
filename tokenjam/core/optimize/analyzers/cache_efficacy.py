@@ -69,6 +69,9 @@ class CacheEfficacyFinding:
     rows:        list[CacheEfficacyRow] = field(default_factory=list)
     flagged:     list[CacheEfficacyRow] = field(default_factory=list)
     confidence:  str = "structural"
+    # The realistic efficacy ceiling, exposed so the UI can classify an
+    # "already optimized" state without hardcoding the threshold (#135).
+    efficacy_ceiling: float = EFFICACY_CEILING
     # Recoverable-savings contract (#111). See types.DowngradeFinding for the
     # field semantics. None when no row has a caching dimension to recover.
     estimated_recoverable_usd:    float | None = None

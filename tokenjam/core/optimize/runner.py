@@ -328,6 +328,7 @@ def _build_finding_constructors() -> dict:
         return CacheEfficacyFinding(
             rows=rows, flagged=flagged,
             confidence=d.get("confidence", "structural"),
+            efficacy_ceiling=d.get("efficacy_ceiling", 0.80),
             estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
             estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
