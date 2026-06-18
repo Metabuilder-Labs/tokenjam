@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TokenJam</title>
+<title>TokenJam Lens</title>
 <!-- Favicon: inlined as a data: URL so the dashboard works fully offline.
      If you change the brand mark, also update the inline <svg class="brand-mark">
      in the sidebar below so the two stay in visual sync. Issue #87. -->
@@ -566,6 +566,58 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   animation: shimmer 1.4s ease infinite;
 }
 @keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
+
+/* Overview + Optimize (issue #114) */
+.ov-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.band-label {
+  font-family: 'Geist Mono', monospace; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-dim); margin: 22px 0 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+a.band-hero { display: block; text-decoration: none; color: inherit; transition: border-color 0.15s; }
+a.band-hero:hover { border-color: var(--accent); }
+.tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+.rec-tile {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 16px; transition: border-color 0.15s;
+}
+.rec-tile:hover { border-color: var(--accent); }
+.rec-tile.muted { opacity: 0.7; }
+.rec-name { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.rec-amount { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); margin: 8px 0 6px; }
+.rec-amount.dim { color: var(--text-faint); font-size: 14px; font-weight: 500; }
+.rec-hint { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
+.estimated-tag {
+  font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
+  border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
+}
+a.health-tile {
+  display: block; text-decoration: none; color: inherit;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 16px; transition: border-color 0.15s;
+}
+a.health-tile:hover { border-color: var(--accent); }
+a.health-tile.attn { border-color: var(--warn); }
+.health-value { font-family: 'Geist Mono', monospace; font-size: 24px; font-weight: 700; }
+.health-label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.health-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: 'Geist Mono', monospace; }
+.card-links { display: flex; gap: 14px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.card-links a { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; }
+.card-links a:hover { text-decoration: underline; }
+.opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
+.opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.opt-title { font-family: 'Geist', sans-serif; font-size: 15px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.opt-rec { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
+.opt-line { font-size: 13px; line-height: 1.6; margin: 4px 0; }
+.opt-line.dim { color: var(--text-dim); }
+.opt-sub { font-size: 12px; color: var(--text-dim); margin: 10px 0 4px; font-family: 'Geist Mono', monospace; }
+.opt-table { width: 100%; border-collapse: collapse; font-size: 12px; margin: 6px 0; }
+.opt-table th { text-align: left; color: var(--text-dim); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.opt-table td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+.opt-table tr.flagged td { color: var(--warn); }
+.opt-caveat { font-size: 12px; font-style: italic; color: var(--warn); margin-top: 10px; }
 </style>
 <script>
   // Apply theme before paint to prevent flash of incorrect theme
@@ -580,12 +632,14 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 <body>
 
 <nav class="sidebar">
-  <div class="sidebar-brand"><svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="26" height="26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="TokenJam"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/><g fill="currentColor" stroke="none" fill-rule="evenodd"><path transform="translate(85.68,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(106.83,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M4.74,-7.50 L4.74,-8.75 L7.24,-8.75 L7.24,-0.00 L5.86,-0.00 L5.86,-7.50 L4.74,-7.50 Z"/><path transform="translate(123.97,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(145.12,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M5.68,-1.86 Q6.83,-2.86 7.49,-3.50 Q8.16,-4.14 8.60,-4.84 Q9.05,-5.53 9.05,-6.23 Q9.05,-6.95 8.71,-7.36 Q8.36,-7.76 7.63,-7.76 Q6.92,-7.76 6.53,-7.31 Q6.14,-6.86 6.12,-6.11 L4.80,-6.11 Q4.84,-7.48 5.62,-8.20 Q6.41,-8.93 7.62,-8.93 Q8.93,-8.93 9.67,-8.21 Q10.40,-7.49 10.40,-6.29 Q10.40,-5.42 9.97,-4.63 Q9.53,-3.83 8.92,-3.20 Q8.32,-2.57 7.38,-1.74 L6.84,-1.26 L10.64,-1.26 L10.64,-0.12 L4.81,-0.12 L4.81,-1.12 L5.68,-1.86 Z"/><path transform="translate(84.35,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(105.44,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M7.46,-7.50 L7.46,-8.75 L9.96,-8.75 L9.96,-0.00 L8.58,-0.00 L8.58,-7.50 L7.46,-7.50 Z"/><path transform="translate(122.64,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(143.73,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M8.40,-1.86 Q9.55,-2.86 10.22,-3.50 Q10.88,-4.14 11.33,-4.84 Q11.77,-5.53 11.77,-6.23 Q11.77,-6.95 11.43,-7.36 Q11.09,-7.76 10.36,-7.76 Q9.65,-7.76 9.26,-7.31 Q8.87,-6.86 8.84,-6.11 L7.52,-6.11 Q7.56,-7.48 8.35,-8.20 Q9.13,-8.93 10.34,-8.93 Q11.65,-8.93 12.39,-8.21 Q13.13,-7.49 13.13,-6.29 Q13.13,-5.42 12.69,-4.63 Q12.25,-3.83 11.65,-3.20 Q11.04,-2.57 10.10,-1.74 L9.56,-1.26 L13.37,-1.26 L13.37,-0.12 L7.54,-0.12 L7.54,-1.12 L8.40,-1.86 Z"/></g></svg><span>TokenJam</span></div>
+  <div class="sidebar-brand"><svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="26" height="26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="TokenJam"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/><g fill="currentColor" stroke="none" fill-rule="evenodd"><path transform="translate(85.68,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(106.83,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M4.74,-7.50 L4.74,-8.75 L7.24,-8.75 L7.24,-0.00 L5.86,-0.00 L5.86,-7.50 L4.74,-7.50 Z"/><path transform="translate(123.97,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(145.12,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M5.68,-1.86 Q6.83,-2.86 7.49,-3.50 Q8.16,-4.14 8.60,-4.84 Q9.05,-5.53 9.05,-6.23 Q9.05,-6.95 8.71,-7.36 Q8.36,-7.76 7.63,-7.76 Q6.92,-7.76 6.53,-7.31 Q6.14,-6.86 6.12,-6.11 L4.80,-6.11 Q4.84,-7.48 5.62,-8.20 Q6.41,-8.93 7.62,-8.93 Q8.93,-8.93 9.67,-8.21 Q10.40,-7.49 10.40,-6.29 Q10.40,-5.42 9.97,-4.63 Q9.53,-3.83 8.92,-3.20 Q8.32,-2.57 7.38,-1.74 L6.84,-1.26 L10.64,-1.26 L10.64,-0.12 L4.81,-0.12 L4.81,-1.12 L5.68,-1.86 Z"/><path transform="translate(84.35,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(105.44,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M7.46,-7.50 L7.46,-8.75 L9.96,-8.75 L9.96,-0.00 L8.58,-0.00 L8.58,-7.50 L7.46,-7.50 Z"/><path transform="translate(122.64,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(143.73,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M8.40,-1.86 Q9.55,-2.86 10.22,-3.50 Q10.88,-4.14 11.33,-4.84 Q11.77,-5.53 11.77,-6.23 Q11.77,-6.95 11.43,-7.36 Q11.09,-7.76 10.36,-7.76 Q9.65,-7.76 9.26,-7.31 Q8.87,-6.86 8.84,-6.11 L7.52,-6.11 Q7.56,-7.48 8.35,-8.20 Q9.13,-8.93 10.34,-8.93 Q11.65,-8.93 12.39,-8.21 Q13.13,-7.49 13.13,-6.29 Q13.13,-5.42 12.69,-4.63 Q12.25,-3.83 11.65,-3.20 Q11.04,-2.57 10.10,-1.74 L9.56,-1.26 L13.37,-1.26 L13.37,-0.12 L7.54,-0.12 L7.54,-1.12 L8.40,-1.86 Z"/></g></svg><span>TokenJam Lens</span></div>
+  <a href="#/overview" class="nav-link" data-view="overview"><span class="icon">&#9678;</span> Overview</a>
   <a href="#/status" class="nav-link" data-view="status"><span class="icon">&bull;</span> Status</a>
   <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Cost</a>
   <a href="#/alerts" class="nav-link" data-view="alerts"><span class="icon">!</span> Alerts</a>
   <a href="#/drift" class="nav-link" data-view="drift"><span class="icon">~</span> Drift</a>
+  <a href="#/optimize" class="nav-link" data-view="optimize"><span class="icon">&#9889;</span> Optimize</a>
   <a href="#/budget" class="nav-link" data-view="budget"><span class="icon">$</span> Budget</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
@@ -845,7 +899,7 @@ function StatusView({ params }) {
     </div>
     <div class="cards">
       ${agents.map(a => html`
-        <div class="card clickable" onClick=${() => { location.hash = '#/traces'; }}>
+        <div class="card">
           <div class="card-header">
             <span class="status-dot ${a.status}"></span>
             ${a.agent_id}
@@ -857,6 +911,10 @@ function StatusView({ params }) {
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
+          <div class="card-links">
+            <a href=${'#/cost?agent_id=' + encodeURIComponent(a.agent_id)}>View cost →</a>
+            <a href=${'#/traces?agent_id=' + encodeURIComponent(a.agent_id)}>View traces →</a>
+          </div>
         </div>
       `)}
     </div>
@@ -1566,6 +1624,368 @@ function BudgetView({ params }) {
 }
 
 // ============================
+// Overview + Optimize (issue #114)
+// ============================
+// Per-analyzer display metadata for the recoverable band + Optimize sections.
+// cache-recommend / budget-projection are intentionally absent from the savings
+// band (no estimated_recoverable_usd); they surface elsewhere.
+const ANALYZER_META = {
+  downsize: { title: 'Downsize', hint: 'Route candidate sessions to a cheaper model' },
+  cache:    { title: 'Cache',    hint: 'Raise cache-read efficacy toward the 80% ceiling' },
+  script:   { title: 'Script',   hint: 'Replace a deterministic call-pattern with a script' },
+  trim:     { title: 'Trim',     hint: 'Trim low-significance tokens from prompt templates' },
+  'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
+  'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
+};
+
+// Mirror core/framing.render_savings: api/unknown → dollars; subscription →
+// token-share of the cycle; local → token count. The mode is server-decided.
+function fmtFramedSavings(usd, tokens, framing) {
+  const mode = framing ? framing.pricing_mode : 'api';
+  if (mode === 'subscription') {
+    if (tokens == null) return '—';
+    if (framing.window_total_tokens > 0) return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';
+    return fmtTokens(tokens) + ' tokens';
+  }
+  if (mode === 'local') return tokens == null ? '—' : fmtTokens(tokens) + ' tokens';
+  return usd == null ? '—' : fmtCost(usd);
+}
+
+// Count agents whose latest session breaches the 2σ drift threshold on any
+// tracked metric (mirrors the Drift screen's z-score logic).
+function driftSignalCount(drift) {
+  const agents = (drift && drift.agents) || (drift && drift.agent_id ? [drift] : []);
+  const metrics = [
+    ['avg_input_tokens', 'stddev_input_tokens', 'input_tokens'],
+    ['avg_output_tokens', 'stddev_output_tokens', 'output_tokens'],
+    ['avg_session_duration_s', 'stddev_session_duration', 'duration_seconds'],
+    ['avg_tool_call_count', 'stddev_tool_call_count', 'tool_call_count'],
+  ];
+  let n = 0;
+  for (const a of agents) {
+    if (!a.baseline || !a.latest_session) continue;
+    let breach = false;
+    for (const [avgK, stdK, latK] of metrics) {
+      const avg = a.baseline[avgK], std = a.baseline[stdK], latest = a.latest_session[latK];
+      if (avg == null || latest == null) continue;
+      if (std != null && std > 0) { if (Math.abs((latest - avg) / std) >= 2) breach = true; }
+      else if (latest !== avg) breach = true;
+    }
+    if (breach) n++;
+  }
+  return n;
+}
+
+// Flatten the optimize report into recoverable-band tiles. Ready tiles carry a
+// number; not-ready ones (capture off, missing dep, or skipped under fast=true)
+// render muted with an enablement hint.
+function recoverableTiles(opt) {
+  if (!opt) return [];
+  const out = [];
+  const skipped = new Set(opt.skipped_analyzers || []);
+  const push = (name, fd, typed) => {
+    const usd = fd ? fd.estimated_recoverable_usd : null;
+    const tokens = fd ? fd.estimated_recoverable_tokens : null;
+    const ready = fd && usd != null;
+    out.push({
+      name, ready,
+      usd, tokens,
+      basis: fd ? (fd.estimate_basis || '') : '',
+      hint: fd && fd.hint ? fd.hint : (skipped.has(name) ? 'Not run on Overview — open the Optimize tab.' : (ANALYZER_META[name] || {}).hint),
+    });
+  };
+  push('downsize', opt.downgrade, true);
+  const f = opt.findings || {};
+  ['cache', 'script', 'trim'].forEach(k => {
+    if (f[k]) push(k, f[k]);
+    else if (skipped.has(k)) out.push({ name: k, ready: false, usd: null, tokens: null, basis: '', hint: 'Not run on Overview — open the Optimize tab.' });
+  });
+  return out;
+}
+
+function HealthTile({ label, value, attention, href, sub }) {
+  return html`<a class="health-tile ${attention ? 'attn' : ''}" href=${href}>
+    <div class="health-value">${value}</div>
+    <div class="health-label">${label}</div>
+    ${sub ? html`<div class="health-sub">${sub}</div>` : null}
+  </a>`;
+}
+
+function OverviewView({ params }) {
+  const DEFAULTS = { since: '7d' };
+  const since = readParam(params, 'since', DEFAULTS.since, validSince);
+  const setWin = v => navigate('overview', { since: v }, DEFAULTS);
+  const [d, setD] = useState({ loading: true, empty: false, error: null });
+
+  const load = useCallback(async () => {
+    try {
+      const status = await api('/status');
+      if (!status.agents || status.agents.length === 0) {
+        setD({ loading: false, empty: true, error: null });
+        return;
+      }
+      // Fetch sequentially, not in parallel: the daemon's single DuckDB
+      // connection isn't safe for concurrent access across the sync routes'
+      // threadpool, and a 6-at-once burst can 500. Six local reads in series
+      // are still well under a frame on a 30s-poll surface.
+      const cost = await api('/cost', { since, group_by: 'day' });
+      const compare = await api('/cost/compare', { since, compare: 'previous' }).catch(() => null);
+      const opt = await api('/optimize', { since, fast: 'true' }).catch(() => null);
+      const al = await api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] }));
+      const drift = await api('/drift').catch(() => ({ agents: [] }));
+      const traces = await api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] }));
+      setD({ loading: false, empty: false, error: null, cost, compare, opt,
+        alerts: al.alerts || [], drift, traces: traces.traces || [] });
+    } catch (e) {
+      setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
+    }
+  }, [since]);
+
+  // Auto-refresh every 30s only while the tab is visible (#114).
+  useEffect(() => {
+    load();
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 30000);
+    const onVis = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
+  }, [load]);
+
+  const winPicker = html`
+    <select value=${since} onChange=${e => setWin(e.target.value)}>
+      <option value="24h">Last 24h</option>
+      <option value="7d">Last 7d</option>
+      <option value="30d">Last 30d</option>
+      <option value="90d">Last 90d</option>
+    </select>`;
+
+  if (d.loading) return html`<div class="page-title">Overview</div><div class="shimmer" style="height:220px"></div>`;
+
+  if (d.empty) return html`
+    <div class="page-title">Overview</div>
+    <div class="card" style="max-width:560px">
+      <div class="card-header">No data yet — TokenJam is listening.</div>
+      <p style="color:var(--text-dim);font-size:13px;line-height:1.6;margin:8px 0 16px">
+        Once an agent runs, this is where your spend, recoverable waste, and health show up.
+      </p>
+      <div style="font-size:13px;margin-bottom:10px">
+        <strong>Wire up Claude Code</strong><br/>
+        <code>tj onboard --claude-code</code> &nbsp;
+        <a href="https://github.com/Metabuilder-Labs/tokenjam#readme" style="color:var(--brand)">docs ↗</a>
+      </div>
+      <div style="font-size:13px">
+        <strong>Or try a demo</strong> <span style="color:var(--text-dim)">(no API keys)</span>
+        <div style="margin-top:6px;color:var(--text-dim);line-height:1.8">
+          <code>tj demo retry-loop</code> — an agent stuck calling the same tool<br/>
+          <code>tj demo surprise-cost</code> — a quiet run that rang up real spend<br/>
+          <code>tj demo hallucination-drift</code> — output drifting from baseline
+        </div>
+      </div>
+    </div>`;
+
+  if (d.error) return html`
+    <div class="page-title">Overview</div>
+    <div class="chart-card" style="border-color:var(--error)">
+      <div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load overview: ${d.error}</div>
+      <button class="btn" onClick=${load}>Retry</button>
+    </div>`;
+
+  const cost = d.cost || {};
+  const framing = cost.framing || null;
+  const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const series = buildCostSeries(cost.series, 'total', useTokens);
+  const totalDisplay = useTokens ? (fmtTokens(cost.total_tokens || 0) + ' tokens') : fmtFramedDollar(cost.total_cost_usd || 0, framing);
+  const trendPct = d.compare ? (useTokens ? d.compare.tokens_delta_pct : d.compare.cost_delta_pct) : null;
+  let runRate = null, projection = null;
+  if (series && series.data[1] && series.data[1].length) {
+    const ys = series.data[1];
+    runRate = ys.reduce((a, b) => a + b, 0) / ys.length;
+    projection = useTokens ? (fmtTokens(Math.round(runRate * 30)) + ' tokens') : fmtFramedDollar(runRate * 30, framing);
+  }
+
+  const tiles = recoverableTiles(d.opt);
+  const budgets = (d.opt && d.opt.budgets) || [];
+  const budgetAttn = budgets.filter(b => b.over_budget || (b.budget_usd > 0 && b.projected_cycle_total / b.budget_usd > 0.8)).length;
+  const driftN = driftSignalCount(d.drift);
+  const errTraces = d.traces.filter(t => t.status_code === 'error').length;
+
+  return html`
+    <div class="ov-head">
+      <div class="page-title" style="margin:0">Overview</div>
+      <div class="filters" style="margin:0">${winPicker}</div>
+    </div>
+    ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+
+    <!-- Band 1: Cost hero -->
+    <a class="chart-card band-hero" href=${'#/cost?since=' + since}>
+      <div class="chart-head">
+        <div class="chart-title">Spend ${useTokens ? '(tokens) ' : ''}· last ${since}</div>
+        <div class="chart-meta">
+          <span class="chart-total">${totalDisplay}</span>
+          <${TrendChip} pct=${trendPct} />
+        </div>
+      </div>
+      ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} runRate=${runRate} />`
+        : html`<div class="empty" style="padding:24px 0">No spend in this window.</div>`}
+      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} over 30 days <span class="dim">(linear run-rate)</span></div>` : null}
+    </a>
+
+    <!-- Band 2: Recoverable waste -->
+    <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></div>
+    <div class="tile-grid">
+      ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates in this window.</div>`
+        : tiles.map(t => {
+          const meta = ANALYZER_META[t.name] || { title: t.name, hint: '' };
+          if (!t.ready) return html`
+            <div class="rec-tile muted">
+              <div class="rec-name">${meta.title}</div>
+              <div class="rec-amount dim">— not ready</div>
+              <div class="rec-hint">${t.hint || meta.hint}</div>
+            </div>`;
+          return html`
+            <a class="rec-tile" href=${'#/optimize?finding=' + t.name + '&since=' + since}>
+              <div class="rec-name">${meta.title} <span class="estimated-tag" title=${t.basis}>estimated</span></div>
+              <div class="rec-amount">${fmtFramedSavings(t.usd, t.tokens, framing)}</div>
+              <div class="rec-hint">${meta.hint}</div>
+            </a>`;
+        })}
+    </div>
+
+    <!-- Band 3: Health -->
+    <div class="band-label">Health at a glance</div>
+    <div class="tile-grid">
+      <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
+        href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
+      <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
+        sub=${driftN ? 'review baselines' : 'within baseline'} />
+      <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
+        sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
+      <${HealthTile} label="Recent activity" value=${d.traces.length} attention=${errTraces > 0} href="#/traces"
+        sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
+    </div>
+  `;
+}
+
+// ---- Optimize detail screen ----
+function OptimizeFinding({ name, opt, framing }) {
+  const meta = ANALYZER_META[name] || { title: name };
+  let body = null;
+  if (name === 'downsize') {
+    const dg = opt.downgrade; if (!dg) return null;
+    body = html`
+      <div class="opt-line">${dg.percent_of_sessions}% of sessions match a smaller-model candidate shape (${dg.candidate_sessions} of ${dg.total_sessions}).</div>
+      ${dg.suggestions && Object.keys(dg.suggestions).length ? html`<div class="opt-line dim">Pattern: ${Object.entries(dg.suggestions).map(([k, v]) => k + ' → ' + v).join(', ')}</div>` : null}
+      ${(dg.examples || []).length ? html`<div class="opt-sub">Examples</div>
+        <table class="opt-table"><tbody>${dg.examples.map(ex => html`<tr><td class="mono">${(ex.trace_id || '').slice(0, 8)}…</td><td>${ex.tool_calls} tools</td><td class="mono">${ex.model}</td></tr>`)}</tbody></table>` : null}
+      ${dg.caveat ? html`<div class="opt-caveat">! ${dg.caveat}</div>` : null}`;
+  } else {
+    const fd = (opt.findings || {})[name];
+    if (!fd) return null;
+    if (name === 'cache') {
+      body = html`
+        ${(fd.flagged || []).length ? html`<div class="opt-line">${fd.flagged.length} (provider, model) row(s) below the efficacy threshold.</div>` : null}
+        <table class="opt-table"><thead><tr><th>Provider/Model</th><th>Efficacy</th><th>Input</th><th>Cache</th></tr></thead>
+          <tbody>${(fd.rows || []).map(r => html`<tr class=${r.flagged ? 'flagged' : ''}><td class="mono">${r.provider}/${r.model}</td><td>${(r.efficacy * 100).toFixed(0)}%</td><td>${fmtTokens(r.input_tokens)}</td><td>${fmtTokens(r.cache_tokens)}</td></tr>`)}</tbody></table>`;
+    } else if (name === 'cache-recommend') {
+      body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled. Set [capture] prompts = true to run this analyzer.'}</div>`
+        : (fd.candidates || []).length ? html`<div class="opt-line">${fd.candidates.length} prefix candidate(s) for cache_control:</div>
+          <table class="opt-table"><tbody>${fd.candidates.map(c => html`<tr><td class="mono">${(c.prefix_hash || '').slice(0, 8)}…</td><td>${c.occurrences}× shared</td><td>~${fmtTokens(c.estimated_cacheable_tokens)} cacheable</td></tr>`)}</tbody></table>`
+        : html`<div class="opt-line dim">No stable prefixes shared across ≥3 Anthropic calls.</div>`;
+    } else if (name === 'script') {
+      body = (fd.clusters || []).length ? html`
+        <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
+        <table class="opt-table"><thead><tr><th>Instances</th><th>Signature</th><th>Avg cost</th></tr></thead>
+          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtCost(c.avg_cost_usd)}</td></tr>`)}</tbody></table>
+        ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
+        : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
+    } else if (name === 'trim') {
+      body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled — needs [capture] prompts = true and tokenjam[bloat].'}</div>`
+        : (fd.per_prompt || []).length ? html`
+          <div class="opt-line">${fd.prompts_scored} prompt(s) scored; ${fd.total_bloat_chars} of ${fd.total_chars} chars flagged.</div>
+          <table class="opt-table"><thead><tr><th>Agent</th><th>Bloat</th><th>~Tokens</th></tr></thead>
+            <tbody>${fd.per_prompt.slice(0, 5).map(p => html`<tr><td class="mono">${p.agent_id}</td><td>${p.bloat_chars}/${p.prompt_chars}</td><td>~${p.estimated_token_reduction}</td></tr>`)}</tbody></table>`
+        : html`<div class="opt-line dim">No bloat regions above threshold.</div>`;
+    }
+  }
+  // Recoverable estimate line (when present)
+  const fd = name === 'downsize' ? opt.downgrade : (opt.findings || {})[name];
+  const recUsd = fd ? fd.estimated_recoverable_usd : null;
+  const recTok = fd ? fd.estimated_recoverable_tokens : null;
+  const rec = (recUsd != null || recTok != null) ? fmtFramedSavings(recUsd, recTok, framing) : null;
+
+  return html`<section class="opt-section" id=${'opt-' + name}>
+    <div class="opt-title">${meta.title}
+      ${rec ? html`<span class="opt-rec">${rec} <span class="estimated-tag" title=${fd && fd.estimate_basis}>estimated recoverable</span></span>` : null}
+    </div>
+    ${body}
+  </section>`;
+}
+
+function OptimizeView({ params }) {
+  const DEFAULTS = { since: '30d', agent_id: '', compare: '', finding: '' };
+  const since = readParam(params, 'since', DEFAULTS.since, validSince);
+  const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
+  const compare = readParam(params, 'compare', DEFAULTS.compare, v => ['previous', 'last-week', 'last-month', 'last-7d', 'last-30d'].includes(v));
+  const focus = readParam(params, 'finding', DEFAULTS.finding);
+  const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
+
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null });
+
+  const load = useCallback(async () => {
+    setSt(s => ({ ...s, loading: !s.opt, error: null }));
+    try {
+      const opt = await api('/optimize', { since, agent_id: agentId || undefined });
+      let cmp = null;
+      if (compare) cmp = await api('/cost/compare', { since, compare, agent_id: agentId || undefined }).catch(() => null);
+      setSt({ loading: false, error: null, opt, cmp });
+    } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
+  }, [since, agentId, compare]);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Scroll the focused finding into view + highlight it (deep-link from Overview).
+  useEffect(() => {
+    if (!focus || st.loading) return;
+    const el = document.getElementById('opt-' + focus);
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); el.classList.add('opt-focus'); }
+  }, [focus, st.loading, st.opt]);
+
+  const framing = st.opt ? st.opt.framing : null;
+  const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim'];
+
+  return html`
+    <div class="page-title">Optimize</div>
+    <div class="filters">
+      <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
+        <option value="7d">Last 7d</option>
+        <option value="30d">Last 30d</option>
+        <option value="90d">Last 90d</option>
+      </select>
+      <select value=${compare} onChange=${e => setFilter('compare', e.target.value)}>
+        <option value="">No comparison</option>
+        <option value="previous">vs previous</option>
+        <option value="last-week">vs last week</option>
+        <option value="last-month">vs last month</option>
+      </select>
+      ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
+      <button class="btn" onClick=${load}>Refresh</button>
+    </div>
+
+    ${st.error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load: ${st.error}</div><button class="btn" onClick=${load}>Retry</button></div>` : null}
+    ${st.loading ? html`<div class="shimmer" style="height:200px"></div>` : null}
+
+    ${!st.loading && st.opt ? html`
+      ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+      ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
+        <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtCost(Math.abs(st.cmp.cost_delta_usd))} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
+      ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}
+      ${(st.opt.budgets || []).length ? html`<section class="opt-section"><div class="opt-title">Budget projection</div>
+        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtCost(b.monthly_run_rate_usd)}/mo vs ${fmtCost(b.budget_usd)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtCost(b.projected_overage_usd)}</span>` : '— within budget'}</div>`)}
+      </section>` : null}
+    ` : null}
+  `;
+}
+
+// ============================
 // App Router
 // ============================
 function App() {
@@ -1584,14 +2004,15 @@ function App() {
     });
   }, [route.view]);
 
-  // Default to status
+  // Default to Overview — the triage front door (#114).
   if (!location.hash || location.hash === '#/') {
-    location.hash = '#/status';
+    location.hash = '#/overview';
     return null;
   }
 
   const p = route.params;
   switch (route.view) {
+    case 'overview': return html`<${OverviewView} params=${p} />`;
     case 'status': return html`<${StatusView} params=${p} />`;
     case 'traces':
       if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;
@@ -1599,6 +2020,7 @@ function App() {
     case 'cost': return html`<${CostView} params=${p} />`;
     case 'alerts': return html`<${AlertsView} params=${p} />`;
     case 'drift': return html`<${DriftView} params=${p} />`;
+    case 'optimize': return html`<${OptimizeView} params=${p} />`;
     case 'budget': return html`<${BudgetView} params=${p} />`;
     default: return html`<div class="empty">Page not found.</div>`;
   }

@@ -20,10 +20,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
-from tokenjam.core.optimize import build_report, report_to_dict
+from tokenjam.core.optimize import ANALYZER_REGISTRY, build_report, report_to_dict
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
+
+# Analyzers too slow to run on a polling surface (Overview). Trim runs
+# LLMLingua-2 (a BERT classifier) and is multi-second. `fast=true` skips these.
+_EXPENSIVE_ANALYZERS = {"trim"}
 
 
 @router.get("/optimize", dependencies=[Depends(require_api_key)])
@@ -37,6 +41,11 @@ def get_optimize(
     ),
     budget_provider: str | None = Query(None),
     budget_usd: float | None = Query(None),
+    fast: bool = Query(
+        False,
+        description="Skip expensive analyzers (Trim) for snappy polling surfaces "
+                    "like Overview. Skipped names are returned in skipped_analyzers.",
+    ),
 ) -> dict[str, Any]:
     """
     Run the optimize analyzers server-side and return the serialized report.
@@ -59,6 +68,16 @@ def get_optimize(
         raise HTTPException(status_code=400, detail=f"Invalid --since: {exc}") from exc
 
     until_dt = utcnow()
+
+    # Resolve which analyzers to run. fast=true drops the expensive ones from
+    # whatever set would otherwise run, recording what was skipped.
+    run_findings = list(finding) if finding else None
+    skipped: list[str] = []
+    if fast:
+        base = run_findings if run_findings is not None else list(ANALYZER_REGISTRY.keys())
+        run_findings = [f for f in base if f not in _EXPENSIVE_ANALYZERS]
+        skipped = [f for f in base if f in _EXPENSIVE_ANALYZERS]
+
     try:
         report = build_report(
             db=db,
@@ -66,7 +85,7 @@ def get_optimize(
             since=since_dt,
             until=until_dt,
             agent_id=agent_id,
-            findings=list(finding) if finding else None,
+            findings=run_findings,
             budget_provider_filter=budget_provider,
             budget_usd_override=budget_usd,
         )
@@ -76,6 +95,7 @@ def get_optimize(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     payload = report_to_dict(report)
+    payload["skipped_analyzers"] = skipped
 
     # Plan-tier mix lets the CLI render subscription / local / unknown
     # framings correctly under daemon mode. Without this the CLI defaults
