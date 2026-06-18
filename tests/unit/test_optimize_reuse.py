@@ -12,6 +12,7 @@ from tokenjam.core.optimize.analyzers.plan_reuse import (
     MIN_PLANNING_TOKENS,
     MIN_REPETITIONS,
     _SpanRow,
+    _cluster_key,
     _identify_planning_call,
     _prompt_prefix_hash,
     _strip_variables,
@@ -232,3 +233,16 @@ def test_estimate_basis_mentions_review(db):
     finding = _run(db, _config(prompts=False))
     assert finding.estimate_basis
     assert "review" in finding.estimate_basis.lower()
+
+
+def test_cluster_id_is_deterministic_across_runs(db):
+    """
+    cluster_id must be stable across re-runs over the same data — PR 2's
+    Markdown sidecar filenames key off it for idempotent overwrites.
+    """
+    _seed_cluster(db, count=5, tool_names=["read", "edit", "run"], cost=0.20)
+    first = _run(db, _config(prompts=False)).clusters[0].cluster_id
+    second = _run(db, _config(prompts=False)).clusters[0].cluster_id
+    assert first == second
+    # And it equals the pure key derived from the signature (Mode 1: no prefix).
+    assert first == _cluster_key(("read", "edit", "run"), None)

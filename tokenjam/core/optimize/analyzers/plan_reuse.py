@@ -78,6 +78,8 @@ class _SessionPlan(NamedTuple):
     session_id: str
     planning_tokens: int
     planning_cost_usd: float
+    # DuckDB returns the TIMESTAMPTZ column as a tz-aware datetime, so this is
+    # directly comparable — used to order cluster examples by recency.
     plan_start_time: Any
     tool_signature: tuple[str, ...]
     prompt_prefix_hash: str | None
@@ -87,6 +89,11 @@ class _SessionPlan(NamedTuple):
 # ISO dates are matched before bare digit runs so their internal digits don't
 # get partially replaced first. The goal: "release v0.3.4 on 2026-06-15" and
 # "release v0.3.5 on 2026-06-17" normalize identically.
+#
+# _PATH_RE is intentionally greedy and will also swallow the tail of a URL
+# (e.g. "https://host/path" → "https:<PATH>"). That's acceptable here: both
+# sides of a comparison normalize the same way, and this only feeds a
+# 200-char prefix hash used for coarse clustering — not anything reversible.
 _PATH_RE = re.compile(r"(?:~|\.{0,2})?/[\w.\-/]+")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _NUM_RE = re.compile(r"\d+")
@@ -191,6 +198,10 @@ def run(ctx: AnalyzerContext) -> None:
     capture_mode = "with_prompt_prefix" if prompts_captured else "tool_sequence_only"
 
     # Single windowed query; all per-session walking happens in Python. No N+1.
+    # Values are bound via DuckDB positional placeholders ($1, $2, ...). The
+    # f-string only interpolates the placeholder *index* (len(params)+1), never
+    # user data, so this stays parameterized (CLAUDE.md Rule 7) — same pattern
+    # as runner.summarize_window.
     clauses = ["start_time >= $1", "start_time < $2", "session_id IS NOT NULL"]
     params: list[Any] = [ctx.since, ctx.until]
     if ctx.agent_id:
