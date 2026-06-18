@@ -1275,3 +1275,23 @@ def test_status_archived_table_cost_routes_through_framing(html):
     # framing block (data.framing), not render raw fmtCost(s.total_cost_usd).
     assert "<td>${fmtCost(s.total_cost_usd)}</td>" not in html
     assert "<td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>" in html
+
+
+# --- #20: Traces empty-state must not flash before the first fetch -------- #
+def test_traces_distinguishes_loading_from_loaded_empty(html):
+    # The Traces view tracks a `loaded` flag that flips true only once the first
+    # /traces fetch resolves; until then it renders a loading shimmer. The
+    # "No traces yet" empty-state is gated on `loaded` so it can only appear
+    # after a fetch genuinely returned zero rows — never on initial paint.
+    assert "const [loaded, setLoaded] = useState(false);" in html
+    assert "setLoaded(true);" in html
+    # Empty-state is now downstream of the `!loaded` shimmer branch, so the
+    # bare "traces.length === 0 ? <empty>" first-branch pattern must be gone.
+    assert (
+        "${traces.length === 0 ? html`<div class=\"empty\">No traces yet."
+        not in html
+    )
+    assert (
+        "${!loaded ? html`<div class=\"shimmer\" style=\"height:200px\"></div>`"
+        in html
+    )
