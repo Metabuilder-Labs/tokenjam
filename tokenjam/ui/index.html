@@ -780,10 +780,12 @@ function friendlyAlertType(type) {
 function getRoute() {
   const raw = location.hash.replace(/^#\/?/, '');
   const qIdx = raw.indexOf('?');
-  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'status';
+  // Empty hash → Overview, the default landing route (#132). getRoute is the
+  // single source of the default so the first render and the URL agree.
+  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'overview';
   const query = qIdx >= 0 ? raw.slice(qIdx + 1) : '';
   const parts = path.split('/');
-  return { view: parts[0] || 'status', param: parts[1] || null, params: new URLSearchParams(query) };
+  return { view: parts[0] || 'overview', param: parts[1] || null, params: new URLSearchParams(query) };
 }
 
 // CLI-matching time-window vocabulary, plus explicit YYYY-MM-DD:YYYY-MM-DD ranges.
@@ -842,11 +844,23 @@ function windowDays(since) {
   return 7;
 }
 
-// Linear run-rate projection over `days` (default 30), spec'd as
+// Linear run-rate projection over `days`, spec'd as
 // (spend over window) / (days in window) × days. Pure + exported-ish so the
-// regression test (#129) can pin the formula.
-function runRateProjection(windowTotal, since, days = 30) {
+// regression test (#129) can pin the formula. Callers pass days=1 for the
+// per-day rate and days=daysRemaining for a cycle-relative projection (#134).
+function runRateProjection(windowTotal, since, days = 1) {
   return (windowTotal / Math.max(windowDays(since), 1 / 24)) * days;
+}
+
+// Days left in the current calendar cycle (this month) + its name. The run-rate
+// projection is cycle-relative ("~$X by end of June") rather than a fixed ×30,
+// which was circular at a 30d window and undershot at 90d (#134, matches
+// lens-architecture §10).
+function cycleRemaining() {
+  const now = new Date();
+  const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);  // last day of month
+  const days = Math.max(1, Math.ceil((end - now) / 86400000));
+  return { days, label: now.toLocaleString(undefined, { month: 'long' }) };
 }
 
 // Compact $-prefixed axis tick formatter (#129): "$0", "$25", "$1.5k" — no
@@ -857,6 +871,15 @@ function fmtAxisUsd(v) {
   if (a >= 1000) return '$' + (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
   if (Number.isInteger(v)) return '$' + v;
   return '$' + v.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+// Consistent time-axis labels (#136). Hourly buckets → "6 PM"; daily → "Jun 15"
+// — one format across every tick, no "6/15/26" mixed with "6/16". Formatted in
+// UTC to match the UTC-aligned buckets.
+function fmtAxisTime(epoch, bucket) {
+  const d = new Date(epoch * 1000);
+  if (bucket === 'hour') return d.toLocaleTimeString(undefined, { hour: 'numeric', timeZone: 'UTC' });
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 // uPlot hover tooltip (#128): crosshair → date + framed value(s) at the nearest
@@ -898,7 +921,7 @@ function chartTooltipPlugin(fmtFn) {
   };
 }
 
-function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, axisFmtY = null, runRate = null, showLegend = false }) {
+function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, axisFmtY = null, runRate = null, showLegend = false, bucket = 'day' }) {
   const ref = useRef(null);
   useEffect(() => {
     if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
@@ -933,9 +956,20 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ax
       legend: { show: showLegend },
       cursor: { y: false, focus: { prox: 16 }, points: { size: 5 } },
       plugins: [chartTooltipPlugin(fmtY)],
-      scales: { x: { time: true } },
+      // Pin the x range to the full window (data[0] spans it via zero-fill) so
+      // the axis reflects the selected window, not just where data falls (#133).
+      scales: { x: { time: true, range: [data[0][0], data[0][data[0].length - 1]] } },
       axes: [
-        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid } },
+        // Window-matched tick labels: "6 PM" (hourly) / "Jun 15" (daily). `incrs`
+        // restricts tick spacing to the bucket unit so a daily chart never gets
+        // sub-day ticks (which produced duplicate "Jun 11 / Jun 11" labels); the
+        // `space` then picks density within those increments (#133/#136).
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
+          space: 70,
+          incrs: bucket === 'hour'
+            ? [3600, 2 * 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400]
+            : [86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400],
+          values: (u, splits) => splits.map(s => fmtAxisTime(s, bucket)) },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
           size: 60, values: (u, vals) => vals.map(v => axisFmt(v)) },
       ],
@@ -945,7 +979,7 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ax
     const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
     window.addEventListener('resize', onResize);
     return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
-  }, [data, labels, height, runRate]);
+  }, [data, labels, height, runRate, bucket]);
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
@@ -1247,17 +1281,35 @@ function TrendChip({ pct }) {
 function _costVal(r, useTokens) {
   return useTokens ? ((r.input_tokens || 0) + (r.output_tokens || 0)) : (r.cost_usd || 0);
 }
-function buildCostSeries(series, mode, useTokens) {
-  const rows = series || [];   // items: {date, agent_id, model, cost_usd, input_tokens, output_tokens}
-  const dates = [...new Set(rows.map(r => r.date).filter(Boolean))].sort();
-  if (!dates.length) return null;
-  const xs = dates.map(d => Math.floor(new Date(d + 'T00:00:00Z').getTime() / 1000));
-  if (xs.some(Number.isNaN)) return null;
-  const idx = {}; dates.forEach((d, i) => { idx[d] = i; });
+
+// Build a uPlot [xs, ys...] series from a /cost response. The x-axis spans the
+// FULL selected window (zero-filled across empty buckets) so 7d/30d/90d look
+// distinct and idle periods show as $0 (#133). `resp` carries epoch-second
+// `series` buckets, `series_bucket` ('hour'|'day'), and `window_start/end`.
+function buildCostSeries(resp, mode, useTokens) {
+  const rows = (resp && resp.series) || [];
+  const bucket = (resp && resp.series_bucket) || 'day';
+  const step = bucket === 'hour' ? 3600 : 86400;
+  let start = resp && resp.window_start;
+  let end = resp && resp.window_end;
+  if (start == null || end == null) {
+    if (!rows.length) return null;
+    const bs = rows.map(r => r.bucket);
+    start = Math.min(...bs); end = Math.max(...bs);
+  }
+  // Align bounds to bucket boundaries and build the full grid.
+  start = Math.floor(start / step) * step;
+  end = Math.floor(end / step) * step;
+  if (!(end >= start)) return null;
+  const xs = [];
+  for (let t = start; t <= end; t += step) xs.push(t);
+  if (!xs.length || xs.length > 5000) return null;  // guard pathological ranges
+  const idx = {}; xs.forEach((t, i) => { idx[t] = i; });
+  const bucketOf = r => Math.floor(r.bucket / step) * step;
   if (mode === 'total') {
-    const ys = dates.map(() => 0);
-    rows.forEach(r => { ys[idx[r.date]] += _costVal(r, useTokens); });
-    return { data: [xs, ys], labels: ['Total'] };
+    const ys = xs.map(() => 0);
+    rows.forEach(r => { const b = bucketOf(r); if (b in idx) ys[idx[b]] += _costVal(r, useTokens); });
+    return { data: [xs, ys], labels: ['Total'], bucket };
   }
   const keyOf = mode === 'model' ? (r => r.model || '(none)') : (r => r.agent_id || '(none)');
   const totals = {};
@@ -1266,13 +1318,14 @@ function buildCostSeries(series, mode, useTokens) {
   const topSet = new Set(top);
   const hasOther = Object.keys(totals).length > top.length;
   const labels = hasOther ? [...top, 'other'] : [...top];
-  const yss = labels.map(() => dates.map(() => 0));
+  const yss = labels.map(() => xs.map(() => 0));
   rows.forEach(r => {
-    const k = keyOf(r);
+    const k = keyOf(r); const b = bucketOf(r);
+    if (!(b in idx)) return;
     const li = topSet.has(k) ? labels.indexOf(k) : (hasOther ? labels.length - 1 : -1);
-    if (li >= 0) yss[li][idx[r.date]] += _costVal(r, useTokens);
+    if (li >= 0) yss[li][idx[b]] += _costVal(r, useTokens);
   });
-  return { data: [xs, ...yss], labels };
+  return { data: [xs, ...yss], labels, bucket };
 }
 
 function CostView({ params }) {
@@ -1284,7 +1337,7 @@ function CostView({ params }) {
   const setFilter = (k, v) => navigate('cost', { since, group_by: groupBy, agent_id: agentId, [k]: v }, DEFAULTS);
 
   const [st, setSt] = useState({ loading: true, error: null, rows: [], total: 0,
-    totalTokens: 0, framing: null, dailySeries: [], compare: null });
+    totalTokens: 0, framing: null, costResp: null, compare: null });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: s.rows.length === 0, error: null }));
@@ -1301,7 +1354,7 @@ function CostView({ params }) {
         ? d.total_tokens
         : (d.rows || []).reduce((s, r) => s + (r.input_tokens || 0) + (r.output_tokens || 0), 0);
       setSt({ loading: false, error: null, rows: d.rows || [], total: d.total_cost_usd || 0,
-        totalTokens, framing: d.framing || null, dailySeries: d.series || [], compare });
+        totalTokens, framing: d.framing || null, costResp: d, compare });
     } catch (e) {
       setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -1309,19 +1362,20 @@ function CostView({ params }) {
 
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
-  const { loading, error, rows, total, totalTokens, framing, dailySeries, compare } = st;
+  const { loading, error, rows, total, totalTokens, framing, costResp, compare } = st;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
-  const series = buildCostSeries(dailySeries, groupBy, useTokens);
+  const series = buildCostSeries(costResp, groupBy, useTokens);
   const fmtY = useTokens ? fmtTokens : fmtCost;
 
   // Run-rate (total view only): per-day average over the FULL window length
-  // (not the data range — issue #129), drawn as a dashed line + projection.
-  // Single linear figure, no forecasting.
+  // (not the data range — #129), projected to the end of the calendar cycle
+  // (#134), drawn as a dashed line. Single linear figure, no forecasting.
+  const cyc = cycleRemaining();
   let runRate = null, projection = null;
   if (groupBy === 'total' && series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? totalTokens : total;
     runRate = runRateProjection(windowTotal, since, 1);  // per-day average (single windowDays source)
-    const projected = runRate * 30;
+    const projected = runRate * cyc.days;
     projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
   }
 
@@ -1370,8 +1424,9 @@ function CostView({ params }) {
         ${loading ? html`<div class="shimmer" style="height:160px"></div>`
           : series ? html`
             <${SpendChart} data=${series.data} labels=${series.labels} height=${160}
-              fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} showLegend=${groupBy !== 'total'} />
-            ${projection ? html`<div class="chart-foot">At this pace, ~${projection} over 30 days <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+              fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate}
+              showLegend=${groupBy !== 'total'} bucket=${series.bucket} />
+            ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by end of ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
           ` : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
       </div>
     ` : null}
@@ -1763,9 +1818,9 @@ function driftSignalCount(drift) {
 // Flatten the optimize report into recoverable-band tiles. Ready tiles carry a
 // number; not-ready ones (capture off, missing dep, or skipped under fast=true)
 // render muted with an enablement hint.
-// Cache efficacy ceiling — mirror core/optimize cache_efficacy.EFFICACY_CEILING.
+// Cache efficacy ceiling — fallback if the response doesn't carry
+// `efficacy_ceiling`; mirrors core/optimize cache_efficacy.EFFICACY_CEILING.
 const CACHE_EFFICACY_CEILING = 0.80;
-const CACHE_MIN_INPUT = 100000;
 
 // Classify a finding into one of four honest tile states (issue #127):
 //   actionable  — ran, found recoverable waste (carries a number)
@@ -1785,12 +1840,16 @@ function classifyFinding(name, fd, skipped) {
   }
   // Ran, nothing to recover. For cache, distinguish "already at the ceiling"
   // (positive) from "nothing here" so we never tell a user to raise efficacy
-  // they've already maxed out.
+  // they've already maxed out. A fully-cached model can have tiny *uncached*
+  // input (most volume is cache reads), so DON'T gate at_ceiling on input
+  // volume — gate on "all rows with usage are at/above the ceiling" (#135).
   if (name === 'cache' && fd) {
-    const big = (fd.rows || []).filter(r => r.input_tokens >= CACHE_MIN_INPUT)
-      .sort((a, b) => b.input_tokens - a.input_tokens)[0];
-    if (big && big.efficacy >= CACHE_EFFICACY_CEILING) {
-      return { state: 'at_ceiling', metric: Math.round(big.efficacy * 100) + '% cache efficacy' };
+    const ceiling = fd.efficacy_ceiling != null ? fd.efficacy_ceiling : CACHE_EFFICACY_CEILING;
+    const used = (fd.rows || []).filter(r => (r.input_tokens + r.cache_tokens) > 0);
+    if (used.length && used.every(r => r.efficacy >= ceiling)) {
+      const best = used.slice().sort((a, b) =>
+        (b.input_tokens + b.cache_tokens) - (a.input_tokens + a.cache_tokens))[0];
+      return { state: 'at_ceiling', metric: Math.round(best.efficacy * 100) + '% cache efficacy' };
     }
   }
   return { state: 'no_findings' };
@@ -1909,14 +1968,15 @@ function OverviewView({ params }) {
   const cost = d.cost || {};
   const framing = cost.framing || null;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
-  const series = buildCostSeries(cost.series, 'total', useTokens);
+  const series = buildCostSeries(cost, 'total', useTokens);
   const totalDisplay = useTokens ? (fmtTokens(cost.total_tokens || 0) + ' tokens') : fmtFramedDollar(cost.total_cost_usd || 0, framing);
   const trendPct = d.compare ? (useTokens ? d.compare.tokens_delta_pct : d.compare.cost_delta_pct) : null;
+  const cyc = cycleRemaining();
   let runRate = null, projection = null;
   if (series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
     runRate = runRateProjection(windowTotal, since, 1);  // per-day average over window length (#129)
-    const projected = runRate * 30;
+    const projected = runRate * cyc.days;  // cycle-relative projection (#134)
     projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
   }
 
@@ -1944,9 +2004,9 @@ function OverviewView({ params }) {
           <a class="drill-link" href=${'#/cost?since=' + since}>View Cost details →</a>
         </div>
       </div>
-      ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} />`
+      ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} bucket=${series.bucket} />`
         : html`<div class="empty" style="padding:24px 0">No spend in this window.</div>`}
-      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} over 30 days <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by end of ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
     </div>
 
     <!-- Band 2: Recoverable waste -->
@@ -2140,18 +2200,22 @@ function App() {
     return () => window.removeEventListener('hashchange', handler);
   }, []);
 
+  // Reflect the default route in the URL bar without a render-time redirect.
+  // getRoute() already defaults to 'overview', so the first render shows
+  // Overview; this just makes the address bar say so (replace = no extra
+  // history entry, no hashchange race that left the view blank — #132).
+  useEffect(() => {
+    if (!location.hash || location.hash === '#/') {
+      history.replaceState(null, '', '#/overview');
+    }
+  }, []);
+
   // Update active nav link
   useEffect(() => {
     document.querySelectorAll('.nav-link').forEach(el => {
       el.classList.toggle('active', el.dataset.view === route.view);
     });
   }, [route.view]);
-
-  // Default to Overview — the triage front door (#114).
-  if (!location.hash || location.hash === '#/') {
-    location.hash = '#/overview';
-    return null;
-  }
 
   const p = route.params;
   switch (route.view) {

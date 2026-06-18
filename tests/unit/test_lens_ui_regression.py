@@ -77,3 +77,40 @@ def test_overview_caption_says_not_a_forecast(html):
 def test_axis_uses_compact_dollar_formatter(html):
     assert "function fmtAxisUsd" in html
     assert "axisFmtY=" in html
+
+
+# --- #132: first-load lands on Overview (no redirect race) ----------------- #
+def test_first_load_defaults_to_overview(html):
+    # getRoute defaults to overview; the render-time hash redirect is gone.
+    assert "|| 'overview'" in html
+    assert "location.hash = '#/overview'" not in html
+    assert "history.replaceState(null, '', '#/overview')" in html
+
+
+# --- #133/#136: chart spans full window + consistent date labels ----------- #
+def test_chart_spans_full_window_with_buckets(html):
+    assert "function windowDays" in html
+    assert "series_bucket" in html and "window_start" in html
+    # x scale pinned to the window range, not the data range.
+    assert "range: [data[0][0]" in html
+
+
+def test_axis_time_labels_consistent(html):
+    assert "function fmtAxisTime" in html
+    # daily labels use abbreviated month/day ("Jun 15"), one format per axis.
+    assert "month: 'short', day: 'numeric'" in html
+
+
+# --- #134: run-rate is cycle-relative, not a fixed ×30 --------------------- #
+def test_run_rate_is_cycle_relative(html):
+    assert "function cycleRemaining" in html
+    assert "by end of ${cyc.label}" in html
+    assert "over 30 days" not in html  # the circular/undershooting framing is gone
+
+
+# --- #135: cache at_ceiling not gated on input volume --------------------- #
+def test_cache_at_ceiling_not_volume_gated(html):
+    # The volume threshold that hid 100%-efficacy/low-input rows is removed;
+    # the classifier reads the ceiling from the response.
+    assert "CACHE_MIN_INPUT" not in html
+    assert "fd.efficacy_ceiling" in html
