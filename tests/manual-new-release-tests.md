@@ -10,12 +10,13 @@ Run this after a new release publishes to PyPI to verify it works end-to-end. Th
 ## 1. Install the published release
 
 ```bash
-tj uninstall --yes 2>/dev/null
+tj uninstall --yes 2>/dev/null   # removes data, config, daemon
+pipx uninstall tokenjam 2>/dev/null   # remove the pipx venv so --force gets a pristine one
 rm -rf ~/.tj ~/.config/tj .tj
 
 # Recommended install path (PEP 668-safe on Homebrew Python and
 # Debian 12+/Ubuntu 24+). `--force` so we reinstall even if a prior
-# version is present.
+# version somehow survived above.
 pipx install --force tokenjam
 tj --version
 
@@ -24,27 +25,35 @@ tj --version
 # solves, and verifying pipx is what we ship docs telling users to do.
 ```
 
-**Pass criteria:** version matches the release being tested.
+**Pass criteria:** version matches the release being tested. `pipx install` reports a fresh venv (not "Installing to existing venv 'tokenjam'") thanks to the `pipx uninstall` step.
 
-## 2. Onboard
+## 2. Onboard (sets plan tier via the integration flow)
+
+Bare `tj onboard` only prompts for daily budget — plan tier is set by the integration onboarding flows (`--claude-code` / `--codex`) per the v0.3.x design. For the smoke pass we onboard against Claude Code to write the `plan` field:
 
 ```bash
-tj onboard --no-daemon   # daemon auto-installs by default; --no-daemon for this smoke pass
+tj onboard --claude-code --plan api --no-daemon
+# --plan api → writes `plan = "api"` non-interactively (so dollar rendering
+#              kicks in for the rest of the smoke)
+# --no-daemon → skip launchd/systemd install for this smoke pass
 ```
 
-The prompt should ask for plan tier (api / pro / max_5x / max_20x). Pick `api` so dollar rendering kicks in for the rest of the smoke.
-
 ```bash
-grep "^plan = " ~/.config/tj/config.toml || grep "^plan = " .tj/config.toml
-# [ ] plan field is set; no auto-written usd = 200 in [budget.anthropic]
+grep '^plan = ' ~/.config/tj/config.toml
+# [ ] plan field is set under [budget.anthropic]; no auto-written usd = 200
 ```
 
 ## 3. Drive an example + verify CLI
 
+The example scripts import provider SDKs (`anthropic`, `openai`, ...) that are not tokenjam dependencies. `pipx install tokenjam` isolates tokenjam in its own venv, so the SDKs aren't importable from system Python either. Inject them into the pipx venv and run via that interpreter:
+
 ```bash
+pipx inject tokenjam anthropic openai
+PIPX_PY="$(pipx environment --value PIPX_LOCAL_VENVS)/tokenjam/bin/python"
+
 cd ~/tokenjam
 source .env.local
-python3 examples/single_provider/anthropic_agent.py
+"$PIPX_PY" examples/single_provider/anthropic_agent.py
 
 tj status        # agent with cost > $0, tokens > 0
 tj traces        # waterfall renders
@@ -142,8 +151,10 @@ tj policy list
 tj serve &
 sleep 2
 
-# HTTP fallback while server holds the lock
-python3 examples/single_provider/litellm_agent.py
+# HTTP fallback while server holds the lock.
+# Inject litellm into the pipx venv first (one-time per smoke run):
+pipx inject tokenjam litellm
+"$PIPX_PY" examples/single_provider/litellm_agent.py
 tj cost --since 1h   # works via API fallback
 
 open http://127.0.0.1:7391/
