@@ -1693,11 +1693,19 @@ function recoverableTiles(opt) {
       hint: fd && fd.hint ? fd.hint : (skipped.has(name) ? 'Not run on Overview — open the Optimize tab.' : (ANALYZER_META[name] || {}).hint),
     });
   };
+  // Registry-driven (#114 AC #2): downsize is a typed slot; every wave-2
+  // finding that carries the recoverable-savings contract field
+  // (`estimated_recoverable_usd`) becomes a tile automatically. A future
+  // analyzer (e.g. reuse) appears here with no UI change. cache-recommend /
+  // budget-projection don't carry the field, so they're excluded by contract.
   push('downsize', opt.downgrade, true);
   const f = opt.findings || {};
-  ['cache', 'script', 'trim'].forEach(k => {
-    if (f[k]) push(k, f[k]);
-    else if (skipped.has(k)) out.push({ name: k, ready: false, usd: null, tokens: null, basis: '', hint: 'Not run on Overview — open the Optimize tab.' });
+  Object.keys(f).forEach(k => {
+    if (f[k] && 'estimated_recoverable_usd' in f[k]) push(k, f[k]);
+  });
+  // Savings analyzers skipped under fast=true (e.g. trim) — show muted.
+  skipped.forEach(k => {
+    if (!(k in f)) out.push({ name: k, ready: false, usd: null, tokens: null, basis: '', hint: 'Not run on Overview — open the Optimize tab.' });
   });
   return out;
 }
