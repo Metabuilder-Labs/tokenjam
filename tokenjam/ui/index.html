@@ -48,6 +48,13 @@
   --error: #ee0000;
   --success: #0ce490;
   --info: #3d8eff;
+  /* Chart series palette (issue #113). Re-read by uPlot at draw time so charts
+     re-theme. Series colors must read in both light and dark. */
+  --chart-1: #3d8eff;
+  --chart-2: #0ce490;
+  --chart-3: #f5a623;
+  --chart-4: #b36bff;
+  --chart-5: #ff6b9d;
 }
 [data-theme="light"] {
   --bg: #fff;
@@ -65,6 +72,11 @@
   --error: #cc0000;
   --success: #0a8050;
   --info: #0070f3;
+  --chart-1: #0070f3;
+  --chart-2: #0a8050;
+  --chart-3: #c47e0c;
+  --chart-4: #8b3dff;
+  --chart-5: #d6336c;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -527,8 +539,33 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   margin-bottom: 10px;
 }
 .chart { width: 100%; }
-.chart .u-legend { display: none; }
 .u-tooltip, .uplot { font-family: 'Geist Mono', monospace; }
+.chart-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; gap: 12px; }
+.chart-meta { display: flex; align-items: baseline; gap: 12px; }
+.chart-total { font-family: 'Geist Mono', monospace; font-size: 16px; font-weight: 600; color: var(--accent); }
+.trend-chip { font-family: 'Geist Mono', monospace; font-size: 12px; }
+.chart-foot { margin-top: 10px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
+.chart-foot .dim { color: var(--text-faint); }
+.qualifier {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-bottom: 16px;
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+/* Low-key loading shimmer (no full-page loader). */
+.shimmer {
+  width: 100%;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--surface2) 25%, var(--surface3) 37%, var(--surface2) 63%);
+  background-size: 400% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+@keyframes shimmer { 0% { background-position: 100% 0; } 100% { background-position: -100% 0; } }
 </style>
 <script>
   // Apply theme before paint to prevent flash of incorrect theme
@@ -719,40 +756,57 @@ function cssVar(name) {
 // Minimal time-series line/area chart over the vendored uPlot global. `data`
 // is uPlot's [xs, ys] tuple (xs in unix seconds). Reads CSS custom properties
 // so it matches the active light/dark theme at creation.
-function LineChart({ data, height = 120, fmtY = fmtCost, area = true }) {
+// Time-series chart over the vendored uPlot global (issues #112/#113).
+// `data` is uPlot's [xs, ys1, ys2, ...] (xs in unix seconds). `labels` names
+// each ys series. Optional `runRate` (a constant $/day or tokens/day) draws a
+// dashed reference line. Reads CSS custom properties so it matches the active
+// theme and the chart palette (--chart-1..5).
+function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, runRate = null, showLegend = false }) {
   const ref = useRef(null);
-  const plotRef = useRef(null);
   useEffect(() => {
     if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
-    const stroke = cssVar('--brand') || '#3d8eff';
+    const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
     const grid = cssVar('--border') || '#1f1f1f';
     const tick = cssVar('--text-dim') || '#a1a1a1';
     const width = ref.current.clientWidth || 600;
+    const single = labels.length === 1;
+    const series = [{}];
+    labels.forEach((lab, i) => {
+      const c = palette[i % palette.length] || '#3d8eff';
+      series.push({
+        label: lab, stroke: c, width: 2,
+        points: { show: data[0].length < 30 },
+        fill: single ? (c + '22') : undefined,
+        value: (u, v) => (v == null ? '-' : fmtY(v)),
+      });
+    });
+    // Append the data array with a run-rate series (flat dashed line) if given.
+    let chartData = data;
+    if (runRate != null) {
+      const flat = data[0].map(() => runRate);
+      chartData = [...data, flat];
+      series.push({
+        label: 'run-rate', stroke: tick, width: 1, dash: [6, 4],
+        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)),
+      });
+    }
     const opts = {
       width, height,
-      legend: { show: false },
+      legend: { show: showLegend },
       cursor: { y: false, points: { size: 5 } },
       scales: { x: { time: true } },
       axes: [
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid } },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
-          size: 56, values: (u, vals) => vals.map(v => fmtY(v)) },
+          size: 60, values: (u, vals) => vals.map(v => fmtY(v)) },
       ],
-      series: [
-        {},
-        {
-          stroke, width: 2, points: { show: data[0].length < 30 },
-          fill: area ? (stroke + '22') : undefined,
-          value: (u, v) => (v == null ? '-' : fmtY(v)),
-        },
-      ],
+      series,
     };
-    const plot = new window.uPlot(opts, data, ref.current);
-    plotRef.current = plot;
+    const plot = new window.uPlot(opts, chartData, ref.current);
     const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
     window.addEventListener('resize', onResize);
-    return () => { window.removeEventListener('resize', onResize); plot.destroy(); plotRef.current = null; };
-  }, [data, height]);
+    return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
+  }, [data, labels, height, runRate]);
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
@@ -1021,48 +1075,116 @@ function TraceDetailView({ traceId }) {
 // ============================
 // Cost View
 // ============================
-// Aggregate cost rows into a uPlot [xs, ys] daily series (sum cost per date).
-function dailyCostSeries(rows) {
-  const byDate = {};
-  for (const r of (rows || [])) {
-    if (!r.group) continue;
-    byDate[r.group] = (byDate[r.group] || 0) + (r.cost_usd || 0);
+// Render a dollar value with the server-decided plan-tier framing (#110). The
+// rule (which mode) is server-side; this only formats per that decision —
+// mirrors core/framing.render_dollar.
+function fmtFramedDollar(v, framing) {
+  if (!framing) return fmtCost(v);
+  const m = framing.pricing_mode;
+  if (m === 'local') return '—';
+  if (m === 'subscription') {
+    return framing.plan_monthly_usd ? (100 * v / framing.plan_monthly_usd).toFixed(1) + '% of cycle' : '—';
   }
-  const dates = Object.keys(byDate).sort();
+  return fmtCost(v); // api / unknown
+}
+
+// Trend chip: ▲ (up, red) / ▼ (down, green) with a percentage.
+function TrendChip({ pct }) {
+  if (pct == null) return null;
+  const up = pct > 0;
+  const arrow = pct === 0 ? '·' : up ? '▲' : '▼';
+  const color = pct === 0 ? 'var(--text-dim)' : up ? 'var(--error)' : 'var(--success)';
+  return html`<span class="trend-chip" style="color:${color}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev</span>`;
+}
+
+// Build a uPlot [xs, ys...] series from day-grouped cost rows. `mode` is
+// total | model | agent; `useTokens` swaps cost for token volume (subscription
+// / local framing where dollars are suppressed). Splits keep the top-5 keys
+// plus an "other" bucket.
+function _costVal(r, useTokens) {
+  return useTokens ? ((r.input_tokens || 0) + (r.output_tokens || 0)) : (r.cost_usd || 0);
+}
+function buildCostSeries(series, mode, useTokens) {
+  const rows = series || [];   // items: {date, agent_id, model, cost_usd, input_tokens, output_tokens}
+  const dates = [...new Set(rows.map(r => r.date).filter(Boolean))].sort();
   if (!dates.length) return null;
   const xs = dates.map(d => Math.floor(new Date(d + 'T00:00:00Z').getTime() / 1000));
-  const ys = dates.map(d => byDate[d]);
-  return xs.some(Number.isNaN) ? null : [xs, ys];
+  if (xs.some(Number.isNaN)) return null;
+  const idx = {}; dates.forEach((d, i) => { idx[d] = i; });
+  if (mode === 'total') {
+    const ys = dates.map(() => 0);
+    rows.forEach(r => { ys[idx[r.date]] += _costVal(r, useTokens); });
+    return { data: [xs, ys], labels: ['Total'] };
+  }
+  const keyOf = mode === 'model' ? (r => r.model || '(none)') : (r => r.agent_id || '(none)');
+  const totals = {};
+  rows.forEach(r => { const k = keyOf(r); totals[k] = (totals[k] || 0) + _costVal(r, useTokens); });
+  const top = Object.keys(totals).sort((a, b) => totals[b] - totals[a]).slice(0, 5);
+  const topSet = new Set(top);
+  const hasOther = Object.keys(totals).length > top.length;
+  const labels = hasOther ? [...top, 'other'] : [...top];
+  const yss = labels.map(() => dates.map(() => 0));
+  rows.forEach(r => {
+    const k = keyOf(r);
+    const li = topSet.has(k) ? labels.indexOf(k) : (hasOther ? labels.length - 1 : -1);
+    if (li >= 0) yss[li][idx[r.date]] += _costVal(r, useTokens);
+  });
+  return { data: [xs, ...yss], labels };
 }
 
 function CostView({ params }) {
-  const DEFAULTS = { since: '7d', group_by: 'day', agent_id: '' };
+  const DEFAULTS = { since: '7d', group_by: 'total', agent_id: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const groupBy = readParam(params, 'group_by', DEFAULTS.group_by,
-    v => ['day', 'agent', 'model', 'tool'].includes(v));
+    v => ['total', 'model', 'agent'].includes(v));
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
   const setFilter = (k, v) => navigate('cost', { since, group_by: groupBy, agent_id: agentId, [k]: v }, DEFAULTS);
 
-  const [rows, setRows] = useState([]);
-  const [total, setTotal] = useState(0);
-  const [chartData, setChartData] = useState(null);
+  const [st, setSt] = useState({ loading: true, error: null, rows: [], total: 0,
+    totalTokens: 0, framing: null, dailySeries: [], compare: null });
 
   const load = useCallback(async () => {
-    const d = await api('/cost', { since, group_by: groupBy, agent_id: agentId || undefined });
-    setRows(d.rows || []);
-    setTotal(d.total_cost_usd || 0);
-    // Smoke sparkline (#112): always show daily spend, fetching a day-grouped
-    // series independent of the table's group-by.
-    if (groupBy === 'day') {
-      setChartData(dailyCostSeries(d.rows));
-    } else {
-      const dd = await api('/cost', { since, group_by: 'day', agent_id: agentId || undefined });
-      setChartData(dailyCostSeries(dd.rows));
+    setSt(s => ({ ...s, loading: s.rows.length === 0, error: null }));
+    try {
+      const tableGroup = groupBy === 'total' ? 'day' : groupBy;
+      // One /cost call returns the grouped table `rows` + the daily `series`
+      // (per date+agent+model) the chart needs + framing + totals (#113).
+      const d = await api('/cost', { since, group_by: tableGroup, agent_id: agentId || undefined });
+      let compare = null;
+      try {
+        compare = await api('/cost/compare', { since, compare: 'previous', agent_id: agentId || undefined });
+      } catch (_) { compare = null; }
+      const totalTokens = d.total_tokens != null
+        ? d.total_tokens
+        : (d.rows || []).reduce((s, r) => s + (r.input_tokens || 0) + (r.output_tokens || 0), 0);
+      setSt({ loading: false, error: null, rows: d.rows || [], total: d.total_cost_usd || 0,
+        totalTokens, framing: d.framing || null, dailySeries: d.series || [], compare });
+    } catch (e) {
+      setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
   }, [since, groupBy, agentId]);
 
-  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
+  const { loading, error, rows, total, totalTokens, framing, dailySeries, compare } = st;
+  const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const series = buildCostSeries(dailySeries, groupBy, useTokens);
+  const fmtY = useTokens ? fmtTokens : fmtCost;
+
+  // Run-rate (total view only): mean per-day value over the window, drawn as a
+  // dashed line + a plain-language projection. Single linear figure — no
+  // moving averages / forecasting (issue #113 scope).
+  let runRate = null, projection = null;
+  if (groupBy === 'total' && series && series.data[1] && series.data[1].length) {
+    const ys = series.data[1];
+    runRate = ys.reduce((a, b) => a + b, 0) / ys.length;
+    const projected = runRate * 30;
+    projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
+  }
+
+  const trendPct = compare ? (useTokens ? compare.tokens_delta_pct : compare.cost_delta_pct) : null;
+  const totalDisplay = useTokens ? (fmtTokens(totalTokens) + ' tokens') : fmtFramedDollar(total, framing);
+  const tableMode = groupBy === 'total' ? 'day' : groupBy;
   const totalIn = rows.reduce((s, r) => s + (r.input_tokens || 0), 0);
   const totalOut = rows.reduce((s, r) => s + (r.output_tokens || 0), 0);
 
@@ -1070,60 +1192,75 @@ function CostView({ params }) {
     <div class="page-title">Cost</div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
-        <option value="1h">Last 1h</option>
         <option value="24h">Last 24h</option>
         <option value="7d">Last 7d</option>
         <option value="30d">Last 30d</option>
         <option value="90d">Last 90d</option>
       </select>
       <select value=${groupBy} onChange=${e => setFilter('group_by', e.target.value)}>
-        <option value="day">By day</option>
-        <option value="agent">By agent</option>
+        <option value="total">Total</option>
         <option value="model">By model</option>
-        <option value="tool">By tool</option>
+        <option value="agent">By agent</option>
       </select>
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${load}>Refresh</button>
     </div>
-    ${chartData ? html`
+
+    ${error ? html`
+      <div class="chart-card" style="border-color:var(--error)">
+        <div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load cost data: ${error}</div>
+        <button class="btn" onClick=${load}>Retry</button>
+      </div>` : null}
+
+    ${!error && framing && framing.qualifier_text ? html`
+      <div class="qualifier">${framing.qualifier_text}</div>` : null}
+
+    ${!error ? html`
       <div class="chart-card">
-        <div class="chart-title">Spend per day</div>
-        <${LineChart} data=${chartData} height=${120} fmtY=${fmtCost} />
+        <div class="chart-head">
+          <div class="chart-title">Spend over time ${useTokens ? '(tokens)' : ''}</div>
+          <div class="chart-meta">
+            <span class="chart-total">${totalDisplay}</span>
+            <${TrendChip} pct=${trendPct} />
+          </div>
+        </div>
+        ${loading ? html`<div class="shimmer" style="height:160px"></div>`
+          : series ? html`
+            <${SpendChart} data=${series.data} labels=${series.labels} height=${160}
+              fmtY=${fmtY} runRate=${runRate} showLegend=${groupBy !== 'total'} />
+            ${projection ? html`<div class="chart-foot">At this pace, ~${projection} over 30 days <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+          ` : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
       </div>
     ` : null}
-    <div class="summary">
-      <div class="summary-item"><div class="summary-label">Total cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></div><div class="summary-value" style="color:var(--accent)">${fmtCost(total)}</div></div>
-      <div class="summary-item"><div class="summary-label">Input tokens</div><div class="summary-value">${fmtTokens(totalIn)}</div></div>
-      <div class="summary-item"><div class="summary-label">Output tokens</div><div class="summary-value">${fmtTokens(totalOut)}</div></div>
-    </div>
-    ${rows.length === 0 ? html`<div class="empty">No cost data for the selected period.</div>` : html`
+
+    ${!error && !loading && rows.length > 0 ? html`
       <div class="table-wrap"><table>
         <thead><tr>
-          <th>${groupBy === 'day' ? 'Date' : groupBy === 'agent' ? 'Agent' : groupBy === 'model' ? 'Model' : 'Tool'}</th>
-          ${groupBy !== 'agent' ? html`<th>Agent</th>` : null}
-          ${groupBy !== 'model' ? html`<th>Model</th>` : null}
+          <th>${tableMode === 'day' ? 'Date' : tableMode === 'agent' ? 'Agent' : 'Model'}</th>
+          ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
+          ${tableMode !== 'model' ? html`<th>Model</th>` : null}
           <th>Input</th><th>Output</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
         </tr></thead>
         <tbody>
           ${rows.map(r => html`
             <tr>
               <td class="mono">${r.group || '-'}</td>
-              ${groupBy !== 'agent' ? html`<td class="mono">${r.agent_id || '-'}</td>` : null}
-              ${groupBy !== 'model' ? html`<td class="mono">${r.model || '-'}</td>` : null}
+              ${tableMode !== 'agent' ? html`<td class="mono">${r.agent_id || '-'}</td>` : null}
+              ${tableMode !== 'model' ? html`<td class="mono">${r.model || '-'}</td>` : null}
               <td>${fmtTokens(r.input_tokens)}</td>
               <td>${fmtTokens(r.output_tokens)}</td>
               <td>${fmtCost(r.cost_usd)}</td>
             </tr>
           `)}
           <tr style="font-weight:600;border-top:2px solid var(--border)">
-            <td colspan=${1 + (groupBy !== 'agent' ? 1 : 0) + (groupBy !== 'model' ? 1 : 0)}></td>
+            <td colspan=${1 + (tableMode !== 'agent' ? 1 : 0) + (tableMode !== 'model' ? 1 : 0)}></td>
             <td>${fmtTokens(totalIn)}</td>
             <td>${fmtTokens(totalOut)}</td>
             <td>${fmtCost(total)}</td>
           </tr>
         </tbody>
       </table></div>
-    `}
+    ` : null}
   `;
 }
 

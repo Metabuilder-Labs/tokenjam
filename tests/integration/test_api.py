@@ -238,6 +238,20 @@ async def test_get_cost_returns_aggregated_rows(client):
     assert "total_cost_usd" in data
 
 
+async def test_cost_includes_daily_series_for_chart(client):
+    """/api/v1/cost carries a daily-bucketed series (per date+agent+model) the
+    Cost chart consumes — finer than the grouped rows (#113)."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/cost", params={"since": "7d", "group_by": "day"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "series" in data and isinstance(data["series"], list)
+    if data["series"]:
+        item = data["series"][0]
+        assert {"date", "agent_id", "model", "cost_usd",
+                "input_tokens", "output_tokens"} <= set(item)
+
+
 _FRAMING_KEYS = {
     "pricing_mode", "plan_tier", "plan_label", "plan_monthly_usd",
     "subscription_share_pct", "api_share_pct", "display_rule", "qualifier_text",
