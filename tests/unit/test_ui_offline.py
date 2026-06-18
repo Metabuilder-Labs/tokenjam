@@ -121,7 +121,17 @@ def test_vendor_directory_has_expected_files():
     """
     vendor_dir = _UI_HTML.parent / "vendor"
     assert vendor_dir.exists(), "tokenjam/ui/vendor/ directory missing"
-    for filename in ("preact.js", "preact-hooks.js", "htm.js"):
+    for filename in ("preact.js", "preact-hooks.js", "htm.js", "uplot.js", "uplot.css"):
         f = vendor_dir / filename
         assert f.exists(), f"vendored module missing: {f}"
         assert f.stat().st_size > 100, f"vendored module suspiciously small: {f}"
+
+
+def test_vendored_css_has_no_external_refs():
+    """Vendored CSS (e.g. uplot.css) must not pull external url() assets at
+    render time — that would defeat offline-first. Data URLs are fine."""
+    vendor_dir = _UI_HTML.parent / "vendor"
+    for css in vendor_dir.glob("*.css"):
+        body = css.read_text(encoding="utf-8")
+        external = re.findall(r"url\(\s*['\"]?(https?:)", body)
+        assert not external, f"{css.name} references an external url(): {external}"
