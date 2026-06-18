@@ -546,6 +546,22 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .trend-chip { font-family: 'Geist Mono', monospace; font-size: 12px; }
 .chart-foot { margin-top: 10px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
 .chart-foot .dim { color: var(--text-faint); }
+.drill-link { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; white-space: nowrap; }
+.drill-link:hover { text-decoration: underline; }
+/* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
+.u-tip {
+  position: absolute; pointer-events: none; z-index: 5;
+  transform: translate(-50%, calc(-100% - 10px));
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 4px;
+  padding: 6px 8px; font-family: 'Geist Mono', monospace; font-size: 11px;
+  color: var(--text); white-space: nowrap;
+}
+.u-tip-date { color: var(--text-dim); margin-bottom: 3px; }
+.u-tip-row { display: flex; align-items: center; gap: 6px; }
+.u-tip-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+/* "Already optimized" recoverable-tile state (#127) — positive, not a warning. */
+a.rec-tile.ok:hover { border-color: var(--success); }
+.rec-amount.ok { color: var(--success); font-size: 15px; }
 .qualifier {
   background: var(--surface2);
   border: 1px solid var(--border);
@@ -815,7 +831,74 @@ function cssVar(name) {
 // each ys series. Optional `runRate` (a constant $/day or tokens/day) draws a
 // dashed reference line. Reads CSS custom properties so it matches the active
 // theme and the chart palette (--chart-1..5).
-function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, runRate = null, showLegend = false }) {
+// Days in a window from a since-string ('24h'/'7d'/'90d' or a date range), used
+// as the run-rate denominator per lens-architecture §10 — NOT the data range,
+// which overstates the rate for sparse windows (issue #129).
+function windowDays(since) {
+  const m = /^(\d+)([hd])$/.exec(since || '');
+  if (m) { const n = +m[1]; return m[2] === 'h' ? Math.max(n / 24, 1 / 24) : n; }
+  const r = /^(\d{4}-\d{2}-\d{2}):(\d{4}-\d{2}-\d{2})$/.exec(since || '');
+  if (r) { const d = (new Date(r[2]) - new Date(r[1])) / 86400000; return Math.max(d, 1); }
+  return 7;
+}
+
+// Linear run-rate projection over `days` (default 30), spec'd as
+// (spend over window) / (days in window) × days. Pure + exported-ish so the
+// regression test (#129) can pin the formula.
+function runRateProjection(windowTotal, since, days = 30) {
+  return (windowTotal / Math.max(windowDays(since), 1 / 24)) * days;
+}
+
+// Compact $-prefixed axis tick formatter (#129): "$0", "$25", "$1.5k" — no
+// superfluous trailing zeros, unlike the precise fmtCost used in headers.
+function fmtAxisUsd(v) {
+  if (!v) return '$0';
+  const a = Math.abs(v);
+  if (a >= 1000) return '$' + (v / 1000).toFixed(1).replace(/\.0$/, '') + 'k';
+  if (Number.isInteger(v)) return '$' + v;
+  return '$' + v.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+}
+
+// uPlot hover tooltip (#128): crosshair → date + framed value(s) at the nearest
+// point. Themed via CSS vars; skips the dashed run-rate series.
+function chartTooltipPlugin(fmtFn) {
+  let tip;
+  return {
+    hooks: {
+      init: (u) => {
+        tip = document.createElement('div');
+        tip.className = 'u-tip';
+        tip.style.display = 'none';
+        u.over.appendChild(tip);
+        u.over.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+      },
+      setCursor: (u) => {
+        const idx = u.cursor.idx;
+        if (idx == null) { tip.style.display = 'none'; return; }
+        const xs = u.data[0];
+        const d = new Date(xs[idx] * 1000);
+        const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+        const multi = u.series.length > 2;
+        let rows = '';
+        for (let si = 1; si < u.series.length; si++) {
+          const ser = u.series[si];
+          if (ser.label === 'run-rate') continue;
+          const val = u.data[si][idx];
+          if (val == null) continue;
+          const stroke = typeof ser.stroke === 'function' ? ser.stroke(u, si) : ser.stroke;
+          const lbl = multi ? (ser.label + ': ') : '';
+          rows += `<div class="u-tip-row"><span class="u-tip-dot" style="background:${stroke}"></span>${lbl}${fmtFn(val)}</div>`;
+        }
+        tip.innerHTML = `<div class="u-tip-date">${dateStr}</div>${rows}`;
+        tip.style.display = 'block';
+        tip.style.left = u.cursor.left + 'px';
+        tip.style.top = u.cursor.top + 'px';
+      },
+    },
+  };
+}
+
+function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, axisFmtY = null, runRate = null, showLegend = false }) {
   const ref = useRef(null);
   useEffect(() => {
     if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
@@ -824,6 +907,7 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ru
     const tick = cssVar('--text-dim') || '#a1a1a1';
     const width = ref.current.clientWidth || 600;
     const single = labels.length === 1;
+    const axisFmt = axisFmtY || fmtY;
     const series = [{}];
     labels.forEach((lab, i) => {
       const c = palette[i % palette.length] || '#3d8eff';
@@ -847,12 +931,13 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ru
     const opts = {
       width, height,
       legend: { show: showLegend },
-      cursor: { y: false, points: { size: 5 } },
+      cursor: { y: false, focus: { prox: 16 }, points: { size: 5 } },
+      plugins: [chartTooltipPlugin(fmtY)],
       scales: { x: { time: true } },
       axes: [
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid } },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
-          size: 60, values: (u, vals) => vals.map(v => fmtY(v)) },
+          size: 60, values: (u, vals) => vals.map(v => axisFmt(v)) },
       ],
       series,
     };
@@ -1229,14 +1314,14 @@ function CostView({ params }) {
   const series = buildCostSeries(dailySeries, groupBy, useTokens);
   const fmtY = useTokens ? fmtTokens : fmtCost;
 
-  // Run-rate (total view only): mean per-day value over the window, drawn as a
-  // dashed line + a plain-language projection. Single linear figure — no
-  // moving averages / forecasting (issue #113 scope).
+  // Run-rate (total view only): per-day average over the FULL window length
+  // (not the data range — issue #129), drawn as a dashed line + projection.
+  // Single linear figure, no forecasting.
   let runRate = null, projection = null;
   if (groupBy === 'total' && series && series.data[1] && series.data[1].length) {
-    const ys = series.data[1];
-    runRate = ys.reduce((a, b) => a + b, 0) / ys.length;
-    const projected = runRate * 30;
+    const windowTotal = useTokens ? totalTokens : total;
+    runRate = windowTotal / Math.max(windowDays(since), 1 / 24);
+    const projected = runRateProjection(windowTotal, since);
     projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
   }
 
@@ -1285,7 +1370,7 @@ function CostView({ params }) {
         ${loading ? html`<div class="shimmer" style="height:160px"></div>`
           : series ? html`
             <${SpendChart} data=${series.data} labels=${series.labels} height=${160}
-              fmtY=${fmtY} runRate=${runRate} showLegend=${groupBy !== 'total'} />
+              fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} showLegend=${groupBy !== 'total'} />
             ${projection ? html`<div class="chart-foot">At this pace, ~${projection} over 30 days <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
           ` : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
       </div>
@@ -1678,34 +1763,59 @@ function driftSignalCount(drift) {
 // Flatten the optimize report into recoverable-band tiles. Ready tiles carry a
 // number; not-ready ones (capture off, missing dep, or skipped under fast=true)
 // render muted with an enablement hint.
+// Cache efficacy ceiling — mirror core/optimize cache_efficacy.EFFICACY_CEILING.
+const CACHE_EFFICACY_CEILING = 0.80;
+const CACHE_MIN_INPUT = 100000;
+
+// Classify a finding into one of four honest tile states (issue #127):
+//   actionable  — ran, found recoverable waste (carries a number)
+//   at_ceiling  — ran, already optimized (no waste because at the ceiling)
+//   no_findings — ran, nothing actionable in this window
+//   not_ready   — couldn't run (capture off / missing dep / skipped on fast)
+// Reads richer discriminators from the finding rather than `usd in (None,0)`.
+function classifyFinding(name, fd, skipped) {
+  if (skipped.has(name)) return { state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' };
+  if (fd && fd.enabled === false) {
+    return { state: 'not_ready', hint: fd.hint || (ANALYZER_META[name] || {}).hint };
+  }
+  const usd = fd ? fd.estimated_recoverable_usd : null;
+  const tokens = fd ? fd.estimated_recoverable_tokens : null;
+  if (usd != null && usd > 0) {
+    return { state: 'actionable', usd, tokens, basis: fd.estimate_basis || '' };
+  }
+  // Ran, nothing to recover. For cache, distinguish "already at the ceiling"
+  // (positive) from "nothing here" so we never tell a user to raise efficacy
+  // they've already maxed out.
+  if (name === 'cache' && fd) {
+    const big = (fd.rows || []).filter(r => r.input_tokens >= CACHE_MIN_INPUT)
+      .sort((a, b) => b.input_tokens - a.input_tokens)[0];
+    if (big && big.efficacy >= CACHE_EFFICACY_CEILING) {
+      return { state: 'at_ceiling', metric: Math.round(big.efficacy * 100) + '% cache efficacy' };
+    }
+  }
+  return { state: 'no_findings' };
+}
+
+// Flatten the optimize report into recoverable-band tiles, each carrying a
+// state (see classifyFinding). Registry-driven: downsize is a typed slot; any
+// wave-2 finding carrying the `estimated_recoverable_usd` contract field becomes
+// a tile (so a future `reuse` analyzer appears with no UI change).
+// cache-recommend / budget-projection lack the field → excluded by contract.
 function recoverableTiles(opt) {
   if (!opt) return [];
   const out = [];
   const skipped = new Set(opt.skipped_analyzers || []);
-  const push = (name, fd, typed) => {
-    const usd = fd ? fd.estimated_recoverable_usd : null;
-    const tokens = fd ? fd.estimated_recoverable_tokens : null;
-    const ready = fd && usd != null;
-    out.push({
-      name, ready,
-      usd, tokens,
-      basis: fd ? (fd.estimate_basis || '') : '',
-      hint: fd && fd.hint ? fd.hint : (skipped.has(name) ? 'Not run on Overview — open the Optimize tab.' : (ANALYZER_META[name] || {}).hint),
-    });
-  };
-  // Registry-driven (#114 AC #2): downsize is a typed slot; every wave-2
-  // finding that carries the recoverable-savings contract field
-  // (`estimated_recoverable_usd`) becomes a tile automatically. A future
-  // analyzer (e.g. reuse) appears here with no UI change. cache-recommend /
-  // budget-projection don't carry the field, so they're excluded by contract.
-  push('downsize', opt.downgrade, true);
   const f = opt.findings || {};
+  // Downsize always gets a tile — it runs unconditionally; a null typed slot
+  // means "ran, no candidates", not "missing" (issue #126).
+  out.push({ name: 'downsize', ...classifyFinding('downsize', opt.downgrade, skipped) });
   Object.keys(f).forEach(k => {
-    if (f[k] && 'estimated_recoverable_usd' in f[k]) push(k, f[k]);
+    if (f[k] && 'estimated_recoverable_usd' in f[k]) out.push({ name: k, ...classifyFinding(k, f[k], skipped) });
   });
-  // Savings analyzers skipped under fast=true (e.g. trim) — show muted.
   skipped.forEach(k => {
-    if (!(k in f)) out.push({ name: k, ready: false, usd: null, tokens: null, basis: '', hint: 'Not run on Overview — open the Optimize tab.' });
+    if (!(k in f) && k !== 'downsize') {
+      out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' });
+    }
   });
   return out;
 }
@@ -1804,9 +1914,10 @@ function OverviewView({ params }) {
   const trendPct = d.compare ? (useTokens ? d.compare.tokens_delta_pct : d.compare.cost_delta_pct) : null;
   let runRate = null, projection = null;
   if (series && series.data[1] && series.data[1].length) {
-    const ys = series.data[1];
-    runRate = ys.reduce((a, b) => a + b, 0) / ys.length;
-    projection = useTokens ? (fmtTokens(Math.round(runRate * 30)) + ' tokens') : fmtFramedDollar(runRate * 30, framing);
+    const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
+    runRate = windowTotal / Math.max(windowDays(since), 1 / 24);  // window length, not data range (#129)
+    const projected = runRateProjection(windowTotal, since);
+    projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
   }
 
   const tiles = recoverableTiles(d.opt);
@@ -1822,19 +1933,21 @@ function OverviewView({ params }) {
     </div>
     ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
 
-    <!-- Band 1: Cost hero -->
-    <a class="chart-card band-hero" href=${'#/cost?since=' + since}>
+    <!-- Band 1: Cost hero. The chart is NOT a click-target (it owns hover for
+         the tooltip, #128); drill-through is an explicit link in the header. -->
+    <div class="chart-card">
       <div class="chart-head">
         <div class="chart-title">Spend ${useTokens ? '(tokens) ' : ''}· last ${since}</div>
         <div class="chart-meta">
           <span class="chart-total">${totalDisplay}</span>
           <${TrendChip} pct=${trendPct} />
+          <a class="drill-link" href=${'#/cost?since=' + since}>View Cost details →</a>
         </div>
       </div>
-      ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} runRate=${runRate} />`
+      ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} />`
         : html`<div class="empty" style="padding:24px 0">No spend in this window.</div>`}
-      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} over 30 days <span class="dim">(linear run-rate)</span></div>` : null}
-    </a>
+      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} over 30 days <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+    </div>
 
     <!-- Band 2: Recoverable waste -->
     <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></div>
@@ -1842,18 +1955,33 @@ function OverviewView({ params }) {
       ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates in this window.</div>`
         : tiles.map(t => {
           const meta = ANALYZER_META[t.name] || { title: t.name, hint: '' };
-          if (!t.ready) return html`
+          const href = '#/optimize?finding=' + t.name + '&since=' + since;
+          // Four honest states (#127): actionable / at_ceiling / no_findings / not_ready.
+          if (t.state === 'actionable') return html`
+            <a class="rec-tile" href=${href}>
+              <div class="rec-name">${meta.title} <span class="estimated-tag" title=${t.basis}>estimated</span></div>
+              <div class="rec-amount">${fmtFramedSavings(t.usd, t.tokens, framing)}</div>
+              <div class="rec-hint">${meta.hint}</div>
+            </a>`;
+          if (t.state === 'at_ceiling') return html`
+            <a class="rec-tile ok" href=${href}>
+              <div class="rec-name">${meta.title}</div>
+              <div class="rec-amount ok">✓ ${t.metric}</div>
+              <div class="rec-hint">Already optimized — nothing to recover.</div>
+            </a>`;
+          if (t.state === 'no_findings') return html`
+            <a class="rec-tile muted" href=${href}>
+              <div class="rec-name">${meta.title}</div>
+              <div class="rec-amount dim">No candidates</div>
+              <div class="rec-hint">Nothing actionable in the last ${since}.</div>
+            </a>`;
+          // not_ready — the only state that uses the "not ready" framing + hint.
+          return html`
             <div class="rec-tile muted">
               <div class="rec-name">${meta.title}</div>
               <div class="rec-amount dim">— not ready</div>
               <div class="rec-hint">${t.hint || meta.hint}</div>
             </div>`;
-          return html`
-            <a class="rec-tile" href=${'#/optimize?finding=' + t.name + '&since=' + since}>
-              <div class="rec-name">${meta.title} <span class="estimated-tag" title=${t.basis}>estimated</span></div>
-              <div class="rec-amount">${fmtFramedSavings(t.usd, t.tokens, framing)}</div>
-              <div class="rec-hint">${meta.hint}</div>
-            </a>`;
         })}
     </div>
 
@@ -1877,7 +2005,15 @@ function OptimizeFinding({ name, opt, framing }) {
   const meta = ANALYZER_META[name] || { title: name };
   let body = null;
   if (name === 'downsize') {
-    const dg = opt.downgrade; if (!dg) return null;
+    const dg = opt.downgrade;
+    // Always render the section — a null typed slot means the analyzer ran and
+    // found no candidates, not that it's missing (issue #126).
+    if (!dg) {
+      return html`<section class="opt-section" id="opt-downsize">
+        <div class="opt-title">Downsize</div>
+        <div class="opt-line dim">No downsize candidates in this window — sessions don't match the smaller-model shape (small input/output, few tool calls).</div>
+      </section>`;
+    }
     body = html`
       <div class="opt-line">${dg.percent_of_sessions}% of sessions match a smaller-model candidate shape (${dg.candidate_sessions} of ${dg.total_sessions}).</div>
       ${dg.suggestions && Object.keys(dg.suggestions).length ? html`<div class="opt-line dim">Pattern: ${Object.entries(dg.suggestions).map(([k, v]) => k + ' → ' + v).join(', ')}</div>` : null}
