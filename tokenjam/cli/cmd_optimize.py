@@ -832,10 +832,73 @@ def _render_prompt_bloat(finding, *, pricing_mode: str = "api") -> None:
     )
 
 
+def _render_reuse(finding, *, pricing_mode: str = "api") -> None:
+    """
+    Render the reuse (Reuse) finding — clusters of sessions whose planning
+    skeleton repeats. Two recoverable numbers per cluster: cache-reuse (reuse
+    the existing skeleton) and script-replacement (replace every planning call
+    with a deterministic template). Framed per pricing mode.
+    """
+    console.print("  [bold]Reuse:[/bold]")
+    if not finding.clusters:
+        console.print(
+            "     [dim]No repeated planning detected above threshold "
+            "(≥3 sessions sharing a skeleton).[/dim]"
+        )
+        if finding.hint:
+            console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
+        return
+
+    mode_note = (
+        " [dim](tool-sequence only — enable capture.prompts for finer "
+        "clustering)[/dim]"
+        if finding.capture_mode == "tool_sequence_only"
+        else ""
+    )
+    console.print(
+        f"     • [bold]{len(finding.clusters)}[/bold] cluster"
+        f"{'s' if len(finding.clusters) != 1 else ''} of repeated planning "
+        f"detected{mode_note}"
+    )
+
+    for c in finding.clusters[:5]:
+        sig_preview = " → ".join(c.tool_signature) if c.tool_signature else "(no tools)"
+        if len(sig_preview) > 100:
+            sig_preview = sig_preview[:97] + "..."
+        console.print(
+            f"       [bold]{c.repetitions}×[/bold] {sig_preview}"
+        )
+        # Recoverable framing. api → dollars; subscription/local → tokens;
+        # unknown → dollars with the standard overstate qualifier.
+        if pricing_mode in ("subscription", "local"):
+            cache_str = f"~{format_tokens(c.cache_reuse_recoverable_tokens)} tokens"
+            script_str = f"~{format_tokens(c.script_replacement_recoverable_tokens)} tokens"
+        else:
+            cache_str = format_cost(c.cache_reuse_recoverable_usd)
+            script_str = format_cost(c.script_replacement_recoverable_usd)
+        console.print(
+            f"          [dim]recoverable by reusing[/dim] [bold]{cache_str}[/bold]  "
+            f"[dim]· by scripting[/dim] {script_str}"
+        )
+        if pricing_mode == "unknown":
+            console.print(
+                "          [dim]figures may overstate — run "
+                "[bold]tj onboard --reconfigure[/bold][/dim]"
+            )
+
+    if finding.estimate_basis:
+        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.clusters:
+        console.print(
+            f"     [yellow]![/yellow] [italic]{finding.clusters[0].caveat}[/italic]"
+        )
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
     "cache-recommend":      _render_cache_recommend,
     "script": _render_workflow_restructure,
+    "reuse":        _render_reuse,
     "trim":         _render_prompt_bloat,
 }
