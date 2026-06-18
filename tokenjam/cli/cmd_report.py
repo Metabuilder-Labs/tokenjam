@@ -162,7 +162,7 @@ def _render_reuse_report(
     pricing_mode = pricing_mode_for(
         dominant_plan(plan_tier_mix(conn, since_dt, until_dt, agent_id))
     )
-    now = datetime.now(tz=timezone.utc)
+    now = utcnow()  # tz-aware UTC (Rule 9)
     html_filename = f"reuse-{now:%Y%m%d-%H%M%S}.html"
     out_dir = _report_dir()
 

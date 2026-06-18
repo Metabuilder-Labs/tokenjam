@@ -560,8 +560,6 @@ def _export_reuse_templates(report, *, conn, config, agent: str | None) -> None:
     print pointers. The `tj optimize reuse --export-templates` shortcut — same
     sidecars `tj report --reuse` writes, minus the HTML/browser.
     """
-    from datetime import datetime, timezone
-
     from tokenjam import __version__
     from tokenjam.cli.cmd_report import _report_dir
     from tokenjam.core.export.reuse_report import export_templates
@@ -579,7 +577,7 @@ def _export_reuse_templates(report, *, conn, config, agent: str | None) -> None:
         )
         return
 
-    now = datetime.now(tz=timezone.utc)
+    now = utcnow()  # tz-aware UTC (Rule 9)
     paths = export_templates(
         finding, conn=conn, config=config, out_dir=_report_dir(),
         version=__version__, generated_at_iso=now.isoformat(),

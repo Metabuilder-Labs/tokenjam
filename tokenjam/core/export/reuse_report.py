@@ -82,8 +82,11 @@ def _fetch_planning_texts(conn, session_ids: list[str]) -> dict[str, str | None]
     """Return {session_id: planning completion text or None} for the given ids."""
     if not session_ids:
         return {}
+    # Parameterized SQL (CLAUDE.md Rule 7): the f-string interpolates only the
+    # positional placeholder *indices* ($1, $2, …); every value is bound via
+    # the params list below. Same placeholders-only pattern as
+    # plan_reuse.run and runner.summarize_window — no user data in the string.
     placeholders = ",".join(f"${i + 1}" for i in range(len(session_ids)))
-    # Positional placeholders bind values; only the index is interpolated.
     rows = conn.execute(
         f"SELECT session_id, start_time, model, tool_name, attributes "
         f"FROM spans WHERE session_id IN ({placeholders}) "
