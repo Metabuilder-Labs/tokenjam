@@ -73,6 +73,8 @@ def make_llm_span(
     billing_account: str | None = "anthropic",
     service_namespace: str | None = None,
     service_instance_id: str | None = None,
+    request_params: dict | None = None,
+    request_tools: dict | None = None,
 ) -> NormalizedSpan:
     """
     Create a NormalizedSpan representing a single LLM call.
@@ -80,6 +82,10 @@ def make_llm_span(
     `billing_account` defaults to "anthropic" so existing tests using the
     default `provider="anthropic"` get a sensible value. Tests exercising
     OpenAI/Google/Bedrock/local paths should pass it explicitly.
+
+    `request_params` / `request_tools` default to None (capture off) so existing
+    tests are unaffected (#209). Tests exercising full-request capture should
+    pass them explicitly.
     """
     now = start_time or utcnow()
     end = now + timedelta(milliseconds=duration_ms)
@@ -110,6 +116,8 @@ def make_llm_span(
         billing_account=billing_account,
         service_namespace=service_namespace,
         service_instance_id=service_instance_id,
+        request_params=request_params,
+        request_tools=request_tools,
     )
 
 

@@ -212,6 +212,39 @@ class TestSerialise:
         restored = _parse({"version": "1"})
         assert restored.session_idle_minutes == 240
 
+    def test_proxy_roundtrip(self):
+        """[proxy] config round-trips through serialise/parse (#219)."""
+        config = TjConfig(version="1")
+        config.proxy.enabled = True
+        config.proxy.killswitch = True
+        config.proxy.port = 7392
+        restored = _parse(_serialise(config))
+        assert restored.proxy.enabled is True
+        assert restored.proxy.killswitch is True
+        assert restored.proxy.port == 7392
+        assert restored.proxy.mode == "suggest"
+        # Defaults when [proxy] is absent.
+        assert _parse({"version": "1"}).proxy.enabled is False
+
+    def test_policies_roundtrip(self):
+        """[[policies]] enforcement-plane policies round-trip (#220)."""
+        from tokenjam.core.config import PolicyConfig
+        config = TjConfig(version="1", policies=[
+            PolicyConfig(name="cap", kind="noop", mode="enforce",
+                         target_provider="openai", params={"limit": 5}),
+        ])
+        restored = _parse(_serialise(config))
+        assert len(restored.policies) == 1
+        p = restored.policies[0]
+        assert p.name == "cap"
+        assert p.kind == "noop"
+        assert p.mode == "enforce"
+        assert p.target_provider == "openai"
+        assert p.params == {"limit": 5}
+        # Defaults when [[policies]] absent / malformed entries skipped.
+        assert _parse({"version": "1"}).policies == []
+        assert _parse({"version": "1", "policies": [{"name": "x"}]}).policies == []  # no kind
+
     def test_serialise_excludes_config_path(self):
         """Regression: config_path is a Path object which is not TOML
         serializable. _serialise() must exclude it. See v0.1.7 fix."""

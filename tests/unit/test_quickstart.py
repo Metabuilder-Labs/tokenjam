@@ -304,8 +304,10 @@ def test_quickstart_json_reports_cap_metadata(tmp_path, monkeypatch):
     assert payload["backfill"]["max_sessions"] == 6
 
 
-def test_bare_tj_routes_to_quickstart(tmp_path, monkeypatch):
-    """`tj` with no subcommand IS the zero-install first run (one command)."""
+def test_quickstart_is_zero_install_first_run(tmp_path, monkeypatch):
+    """`tj quickstart` is the zero-install first run: it renders without ever
+    opening the on-disk DB (bare `tj` itself now shows the branded home screen —
+    see test_onboard_first_run.test_bare_tj_renders_home_without_opening_db)."""
     import unittest.mock as mock
 
     from tokenjam.cli.main import cli
@@ -318,10 +320,10 @@ def test_bare_tj_routes_to_quickstart(tmp_path, monkeypatch):
     )
     with mock.patch(
         "tokenjam.cli.main.open_db",
-        side_effect=AssertionError("bare tj must NOT open the on-disk DB"),
+        side_effect=AssertionError("quickstart must NOT open the on-disk DB"),
     ):
-        result = CliRunner().invoke(cli, [])
+        result = CliRunner().invoke(cli, ["quickstart"])
 
     assert result.exit_code == 0, result.output
-    # Routed to quickstart's no-logs branch (which names ccusage parity).
+    # quickstart's no-logs branch names ccusage parity.
     assert "ccusage" in result.output

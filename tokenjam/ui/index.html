@@ -297,6 +297,10 @@ code, .mono {
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
+/* Status List (#263): a min-width lets the table exceed a narrow container so
+   .table-wrap's overflow-x actually scrolls, instead of compressing columns and
+   clipping the actions cell (View cost / View traces) off the right edge. */
+.table-wrap table.status-list { min-width: 760px; }
 table {
   width: 100%;
   border-collapse: collapse;
@@ -369,6 +373,10 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .kpi-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
 .kpi-tile { flex: 1 1 140px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
 .kpi-tile.kpi-active { border-color: var(--accent); }
+.kpi-tile.kpi-clickable { cursor: pointer; }
+.kpi-tile.kpi-clickable:hover { border-color: var(--accent); }
+.kpi-tile.kpi-clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.kpi-caption { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); margin: -6px 0 16px; }
 .kpi-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .kpi-num { min-width: 0; }
 .spark { display: block; flex-shrink: 0; }
@@ -450,6 +458,17 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+
+/* Segmented view toggle (Cards | List), e.g. the Status screen (#241). */
+.view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.view-toggle button {
+  background: var(--surface); border: none; color: var(--text-dim);
+  padding: 5px 12px; cursor: pointer;
+  font-family: 'Geist Mono', monospace; font-size: 12px;
+}
+.view-toggle button + button { border-left: 1px solid var(--border); }
+.view-toggle button:hover:not(.active) { color: var(--text); }
+.view-toggle button.active { background: rgba(var(--accent-rgb),0.10); color: var(--accent); }
 
 /* Waterfall */
 .waterfall { margin: 16px 0; }
@@ -540,6 +559,37 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .wf-cost-fill { display: block; height: 100%; background: var(--accent); }
 .wf-cost-val { color: var(--text); min-width: 50px; text-align: right; }
 .wf-cost-tok { color: var(--text-dim); min-width: 46px; text-align: right; }
+
+/* #244: fixed span-name column (never clipped onto the bar), cost/token
+   magnitude bars, status icons, kind legend, per-span offset + value labels. */
+.wf-toolbar { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.wf-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace;
+  font-size: 10px; color: var(--text-dim); }
+.wf-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.wf-kind-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; display: inline-block; }
+.wf-kind-dot.agent { background: var(--success); }
+.wf-kind-dot.llm { background: var(--brand); }
+.wf-kind-dot.tool { background: var(--warn); }
+.wf-kind-dot.other { background: var(--text-dim); }
+/* The name column: the full span identity lives here, indented by depth — it is
+   NEVER painted onto the bar (that produced the "cla"/"Bas" clipping). */
+.wf-name { flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+  overflow: hidden; padding-right: 10px; }
+.wf-name-txt { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-row:hover .wf-name-txt { color: var(--text); }
+.wf-row.selected .wf-name-txt { color: var(--accent); }
+.wf-status { font-size: 11px; line-height: 1; flex-shrink: 0; width: 11px; text-align: center; }
+.wf-status.ok { color: var(--success); }
+.wf-status.error { color: var(--error); }
+/* Magnitude value printed just past the bar end (flips inside near the right
+   edge so it never collides with the offset/cost columns). */
+.wf-val { position: absolute; top: 0; line-height: 18px; font-size: 10px;
+  color: var(--text-dim); padding: 0 6px; white-space: nowrap; pointer-events: none; }
+.wf-val.flip { text-align: right; }
+.wf-offset { flex-shrink: 0; width: 62px; text-align: right; padding-right: 10px;
+  font-family: 'Geist Mono', monospace; font-size: 10px; color: var(--text-faint); }
 
 /* Span detail */
 .span-detail {
@@ -949,14 +999,23 @@ a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .trend-chip { font-family: 'Geist Mono', monospace; font-size: 12px; }
 .chart-foot { margin-top: 10px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
 .chart-foot .dim { color: var(--text-faint); }
+/* Cache-savings headline (#246): lead with the answer above the bars. */
+.cache-headline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; font-family: 'Geist Mono', monospace; font-size: 14px; color: var(--text); }
+.cache-headline b { font-weight: 600; font-size: 18px; }
+.cache-sep { color: var(--text-faint); }
 /* Per-analyzer recoverable-waste list under the #211 component chart. */
 .waste-list { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
 .waste-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; }
 .waste-name { font-family: 'Geist Mono', monospace; }
 .waste-rec { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .waste-caveat { font-size: 11px; color: var(--text-faint); margin: 0 0 6px; max-width: 70ch; }
-.drill-link { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; white-space: nowrap; }
-.drill-link:hover { text-decoration: underline; }
+/* Positive "nothing recoverable" state for the component chart's right column
+   (#251) — a clean signal, not blank space. */
+.waste-none { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px;
+  font-size: 13px; color: var(--success); display: flex; align-items: center; gap: 6px; }
+.waste-none .check { font-weight: 700; }
+/* Optional dominant-component note when one token component is ~all the spend. */
+.waste-split { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
 /* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
 .u-tip {
   position: absolute; pointer-events: none; z-index: 5;
@@ -1012,9 +1071,17 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   display: flex; align-items: center; gap: 8px;
 }
 .band-window { text-transform: none; letter-spacing: 0; color: var(--text-faint); font-weight: 400; }
-a.band-hero { display: block; text-decoration: none; color: inherit; transition: border-color 0.15s; }
-a.band-hero:hover { border-color: var(--accent); }
 .tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+/* Merged Dashboard preview (#/dashboard prototype) — compact triage band so the
+   tiles don't dominate the Analytics hero below them. */
+.dash-triage { display: flex; gap: 18px; flex-wrap: wrap; }
+.dash-col { flex: 1 1 320px; min-width: 0; }
+.tile-grid.compact { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.tile-grid.compact .rec-tile { padding: 8px 10px; }
+.tile-grid.compact .rec-name { font-size: 12px; }
+.tile-grid.compact .rec-amount { font-size: 15px; }
+.tile-grid.compact .rec-hint { display: none; }
+.tile-grid.compact .health-tile { padding: 8px 10px; }
 .rec-tile {
   display: block; text-decoration: none; color: inherit;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -1071,7 +1138,7 @@ a.health-tile.attn { border-color: var(--warn); }
 
 <nav class="sidebar">
   <div class="sidebar-brand"><svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="26" height="26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="TokenJam"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/><g fill="currentColor" stroke="none" fill-rule="evenodd"><path transform="translate(85.68,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(106.83,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M4.74,-7.50 L4.74,-8.75 L7.24,-8.75 L7.24,-0.00 L5.86,-0.00 L5.86,-7.50 L4.74,-7.50 Z"/><path transform="translate(123.97,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(145.12,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M5.68,-1.86 Q6.83,-2.86 7.49,-3.50 Q8.16,-4.14 8.60,-4.84 Q9.05,-5.53 9.05,-6.23 Q9.05,-6.95 8.71,-7.36 Q8.36,-7.76 7.63,-7.76 Q6.92,-7.76 6.53,-7.31 Q6.14,-6.86 6.12,-6.11 L4.80,-6.11 Q4.84,-7.48 5.62,-8.20 Q6.41,-8.93 7.62,-8.93 Q8.93,-8.93 9.67,-8.21 Q10.40,-7.49 10.40,-6.29 Q10.40,-5.42 9.97,-4.63 Q9.53,-3.83 8.92,-3.20 Q8.32,-2.57 7.38,-1.74 L6.84,-1.26 L10.64,-1.26 L10.64,-0.12 L4.81,-0.12 L4.81,-1.12 L5.68,-1.86 Z"/><path transform="translate(84.35,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(105.44,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M7.46,-7.50 L7.46,-8.75 L9.96,-8.75 L9.96,-0.00 L8.58,-0.00 L8.58,-7.50 L7.46,-7.50 Z"/><path transform="translate(122.64,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(143.73,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M8.40,-1.86 Q9.55,-2.86 10.22,-3.50 Q10.88,-4.14 11.33,-4.84 Q11.77,-5.53 11.77,-6.23 Q11.77,-6.95 11.43,-7.36 Q11.09,-7.76 10.36,-7.76 Q9.65,-7.76 9.26,-7.31 Q8.87,-6.86 8.84,-6.11 L7.52,-6.11 Q7.56,-7.48 8.35,-8.20 Q9.13,-8.93 10.34,-8.93 Q11.65,-8.93 12.39,-8.21 Q13.13,-7.49 13.13,-6.29 Q13.13,-5.42 12.69,-4.63 Q12.25,-3.83 11.65,-3.20 Q11.04,-2.57 10.10,-1.74 L9.56,-1.26 L13.37,-1.26 L13.37,-0.12 L7.54,-0.12 L7.54,-1.12 L8.40,-1.86 Z"/></g></svg><span>TokenJam Lens</span></div>
-  <a href="#/overview" class="nav-link" data-view="overview"><span class="icon">&#9678;</span> Overview</a>
+  <a href="#/dashboard" class="nav-link" data-view="dashboard"><span class="icon">&#9678;</span> Dashboard</a>
   <a href="#/status" class="nav-link" data-view="status"><span class="icon">&bull;</span> Status</a>
   <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Cost</a>
@@ -1230,6 +1297,15 @@ function friendlySpanName(name) {
   // sentence case fallback
   return name.charAt(0).toUpperCase() + name.slice(1).replace(/[._]/g, ' ');
 }
+// The identity shown in the waterfall's fixed name column (#244): the concrete
+// model (claude-opus-4-8) or tool (Bash), falling back to the friendly span
+// kind. This is what makes the left column legible without ever clipping onto
+// the bar.
+function spanPrimaryName(s) {
+  if (s.tool_name) return s.tool_name;
+  if (s.model) return s.model;
+  return friendlySpanName(s.name);
+}
 function friendlyAlertType(type) {
   const map = {
     'sensitive_action': 'Sensitive Action',
@@ -1252,12 +1328,13 @@ function friendlyAlertType(type) {
 function getRoute() {
   const raw = location.hash.replace(/^#\/?/, '');
   const qIdx = raw.indexOf('?');
-  // Empty hash → Overview, the default landing route (#132). getRoute is the
-  // single source of the default so the first render and the URL agree.
-  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'overview';
+  // Empty hash → Dashboard, the default landing route (#132). getRoute is the
+  // single source of the default so the first render and the URL agree — no
+  // render-time location.hash redirect (which raced the first render).
+  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'dashboard';
   const query = qIdx >= 0 ? raw.slice(qIdx + 1) : '';
   const parts = path.split('/');
-  return { view: parts[0] || 'overview', param: parts[1] || null, params: new URLSearchParams(query) };
+  return { view: parts[0] || 'dashboard', param: parts[1] || null, params: new URLSearchParams(query) };
 }
 
 // CLI-matching time-window vocabulary, plus explicit YYYY-MM-DD:YYYY-MM-DD ranges.
@@ -1298,13 +1375,16 @@ function navigate(view, filters, defaults, param) {
 // machine. The Analytics route already honors every param used here (metric,
 // group_by, stack, chart, since, and the agent_id/provider/model/tool dimension
 // filters — see AnalyticsView). Empty values are dropped so URLs stay clean.
-function analyticsHref(q) {
+// `route` lets a slice link target another screen that embeds the explorer
+// (the Dashboard hosts AnalyticsView under #/dashboard); the default preserves
+// the standalone #/analytics deep-links exactly.
+function analyticsHref(q, route = 'analytics') {
   const sp = new URLSearchParams();
   for (const [k, v] of Object.entries(q || {})) {
     if (v != null && v !== '') sp.set(k, v);
   }
   const s = sp.toString();
-  return '#/analytics' + (s ? '?' + s : '');
+  return '#/' + route + (s ? '?' + s : '');
 }
 
 // --- Charts (uPlot, issue #112) ---
@@ -1684,36 +1764,30 @@ function StackedBarChart({ data, labels = [], height = 200, fmtY = fmtCost, axis
 
 // Cache-savings chart (#212): cumulative CAPTURED savings (measured, area, left
 // axis) + per-bucket cache HIT-RATE (%, right axis). An optional dashed
-// "achievable" envelope = cumulative captured + estimated recoverable shows the
-// gap the cache analyzer says is still on the table — framed as "estimated
-// recoverable", never "saved" (Critical Rule 14). Plan-tier framing: captured
-// is rendered in tokens for subscription/local (dollars suppressed).
-function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
+// Per-period cache-savings bar chart (#246). ONE metric (savings) on ONE
+// y-axis — the old dual-axis (tokens left / hit-rate % right) + cumulative ramp
+// + recoverable overlay are gone; hit-rate now lives in the headline stat, not
+// an overlaid line. `data` = [xs, savingsPerBucket]. Bars via the vendored
+// uPlot. The y-axis is sized generously (size 70 + gap) so labels never clip
+// (the old "000.0M" leading-digit clip). Plan-tier framing: the caller passes
+// token-volume + token formatters for subscription/local (no raw $).
+function CacheSavingsChart({ data, height = 180, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
   const ref = useRef(null);
   useEffect(() => {
-    if (!ref.current || !window.uPlot || !cache || !cache[0] || cache[0].length === 0) return;
+    if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
     const grid = cssVar('--border') || '#1f1f1f';
     const tick = cssVar('--text-dim') || '#a1a1a1';
-    const c1 = cssVar('--chart-1') || '#3d8eff';
-    const c2 = cssVar('--chart-2') || '#22c55e';
+    const c = cssVar('--chart-2') || '#0ce490';   // green = savings
     const width = ref.current.clientWidth || 600;
     const axisFmt = axisFmtY || fmtY;
-    const xs = cache[0];
-    const chartData = [xs, cache[1], hit, env || xs.map(() => null)];
-    const series = [
-      {},
-      { label: 'Captured', stroke: c1, width: 2, fill: c1 + '22',
-        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
-      { label: 'Hit-rate', stroke: c2, width: 2, scale: 'rate', dash: [],
-        points: { show: false }, value: (u, v) => (v == null ? '-' : v.toFixed(0) + '%') },
-      { label: 'Recoverable (est.)', stroke: tick, width: 1, dash: [6, 4], _isRunRate: true,
-        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
-    ];
+    const xs = data[0];
+    const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
+      ? window.uPlot.paths.bars({ size: [0.7, Infinity] }) : undefined;
     const opts = {
-      width, height, legend: { show: true },
-      cursor: { y: false, focus: { prox: 16 }, points: { size: 5 } },
+      width, height, legend: { show: false },
+      cursor: { y: false, focus: { prox: 16 }, points: { show: false } },
       plugins: [chartTooltipPlugin(fmtY)],
-      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] }, rate: { range: [0, 100] } },
+      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] } },
       axes: [
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, space: 70,
           incrs: bucket === 'hour'
@@ -1721,17 +1795,19 @@ function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axis
             : [86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400],
           values: (u, splits) => splits.map(s => fmtAxisTime(s, bucket)) },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
-          size: 60, values: (u, vals) => vals.map(v => axisFmt(v)) },
-        { scale: 'rate', side: 1, stroke: tick, grid: { show: false },
-          size: 50, values: (u, vals) => vals.map(v => v + '%') },
+          size: 70, gap: 6, values: (u, vals) => vals.map(v => axisFmt(v)) },
       ],
-      series,
+      series: [
+        {},
+        { label: 'Saved', stroke: c, fill: c + '66', width: 0, paths: barsPath,
+          points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
+      ],
     };
-    const plot = new window.uPlot(opts, chartData, ref.current);
+    const plot = new window.uPlot(opts, data, ref.current);
     const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
     window.addEventListener('resize', onResize);
     return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
-  }, [cache, hit, env, height, bucket]);
+  }, [data, height, bucket]);
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
@@ -1752,22 +1828,30 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
     const tick = cssVar('--text-dim') || '#a1a1a1';
     const width = ref.current.clientWidth || 600;
     const xs = [0, 1];                          // Cost | Recoverable (est.)
+    // Drop ZERO-value segments before building the cumulative bars (#251). The
+    // back-to-front stacking trick plots each segment's CUMULATIVE total as a
+    // full bar; a zero-value segment carries the running cumulative (unchanged
+    // by its 0) and so paints a full-height bar in its own color OVER the real
+    // stack (the cache-write=0 → full-height-purple bug). Filtering first keeps
+    // every plotted bar tied to a real, non-zero contribution.
+    const costSegsNZ = (costSegs || []).filter(s => (s.value || 0) > 0);
+    const recSegsNZ = (recSegs || []).filter(s => (s.value || 0) > 0);
     // Per-column cumulative (within-column) so the back-to-front bars stack
     // independently; 0 in the other column → invisible there.
     const series = [{}];
     const cols = [];                            // data columns (cumulative)
     const meta = [];                            // {label, color, raw, col}
     let accC = 0;
-    costSegs.forEach((s, i) => {
+    costSegsNZ.forEach((s, i) => {
       accC += (s.value || 0);
       cols.push([accC, 0]);
       meta.push({ label: s.label, color: s.color || palette[i % palette.length], raw: s.value || 0, col: 0 });
     });
     let accR = 0;
-    recSegs.forEach((s, i) => {
+    recSegsNZ.forEach((s, i) => {
       accR += (s.value || 0);
       cols.push([0, accR]);
-      meta.push({ label: s.title, color: palette[(costSegs.length + i) % palette.length], raw: s.value || 0, col: 1 });
+      meta.push({ label: s.title, color: palette[(costSegsNZ.length + i) % palette.length], raw: s.value || 0, col: 1 });
     });
     // Draw tallest cumulative first (within each column) so shorter bars paint
     // on top. Sort indices by cumulative descending; cross-column order is moot.
@@ -1851,13 +1935,73 @@ function buildComponentWaste(resp, useTokens) {
   return { costSegs, recSegs };
 }
 
+// When one token component is essentially all the measured spend (>95%), the
+// stacked "Cost" bar reads as a single block — so surface a small explanatory
+// split label rather than leaving the reader to guess (#251). Returns null when
+// no component dominates that strongly.
+function dominantSplit(costSegs) {
+  const segs = (costSegs || []).filter(s => (s.value || 0) > 0);
+  const total = segs.reduce((s, c) => s + (c.value || 0), 0);
+  if (total <= 0 || segs.length < 2) return null;
+  const top = segs.reduce((a, b) => (b.value > a.value ? b : a), segs[0]);
+  const pct = (100 * top.value) / total;
+  return pct > 95 ? { label: top.label, pct: pct.toFixed(1) } : null;
+}
+
+// ============================
+// Status List Table (#241)
+// ============================
+// The List alternative to the Status cards: one row per agent in a columned
+// table — Agent · Status · Cost today · Tokens · Tool calls · Elapsed · Actions.
+// The Cost cell goes through fmtPerItemCost(framing) exactly like the cards do:
+// per-item cost is rendered as TOKENS for subscription/local users (not "% of
+// cycle", which is a window-level aggregate — #249) and as dollars for api. The
+// suppression decision is never re-derived here. Reuses the existing
+// .table-wrap/table CSS; no new lib.
+function StatusListTable({ agents, framing }) {
+  return html`
+    <div class="table-wrap"><table class="status-list">
+      <thead><tr>
+        <th>Agent</th>
+        <th>Status</th>
+        <th>Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
+        <th>Tokens (in / out)</th>
+        <th>Tool calls</th>
+        <th>Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days.</span></span></th>
+        <th></th>
+      </tr></thead>
+      <tbody>
+        ${agents.map(a => html`
+          <tr>
+            <td class="mono"><span class="status-dot ${a.status}" style="margin-right:7px"></span>${a.agent_id}</td>
+            <td><span class="badge badge-${a.status}">${a.status}</span></td>
+            <td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>
+            <td>${fmtTokens(a.input_tokens)} / ${fmtTokens(a.output_tokens)}</td>
+            <td>${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</td>
+            <td>${a.duration_seconds != null ? fmtDurLong(a.duration_seconds * 1000) : '-'}</td>
+            <td style="white-space:nowrap">
+              <a href=${'#/cost?agent_id=' + encodeURIComponent(a.agent_id)}>View cost →</a>
+              <a href=${'#/traces?agent_id=' + encodeURIComponent(a.agent_id)} style="margin-left:10px">View traces →</a>
+            </td>
+          </tr>
+        `)}
+      </tbody>
+    </table></div>`;
+}
+
 // ============================
 // Status View
 // ============================
 function StatusView({ params }) {
   // Optional single-agent filter via URL (#112). Filtered client-side since
   // /status returns every agent.
-  const agentId = readParam(params, 'agent_id', '');
+  // View mode (Cards | List) also lives in the URL (#241): `#/status?view=cards`.
+  // List is the default (the more useful scan view, #263) and is omitted from
+  // the URL; choosing Cards carries `?view=cards`.
+  const DEFAULTS = { view: 'list', agent_id: '' };
+  const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
+  const viewMode = readParam(params, 'view', DEFAULTS.view, v => ['cards', 'list'].includes(v));
+  const setView = (v) => navigate('status', { agent_id: agentId, view: v }, DEFAULTS);
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
 
@@ -1878,11 +2022,13 @@ function StatusView({ params }) {
   if (!data) return html`<div class="empty">Loading...</div>`;
   if (!data.agents.length && !(data.archived || []).length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
+  const agents = agentId ? data.agents.filter(a => a.agent_id === agentId) : data.agents;
+
   // Group agent tiles by project (service.namespace). Agents whose telemetry
   // carried no namespace fall under "Ungrouped".
   const UNGROUPED = ' ungrouped';
   const groups = {};
-  for (const a of data.agents) {
+  for (const a of agents) {
     const key = a.namespace || UNGROUPED;
     (groups[key] = groups[key] || []).push(a);
   }
@@ -1903,6 +2049,9 @@ function StatusView({ params }) {
     return total;
   };
 
+  // Cards-view tile. The whole card is clickable through to the session detail
+  // (or traces when there's no session_id yet). Cost goes through the same
+  // fmtPerItemCost(framing) path as the list view.
   const agentCard = (a) => html`
         <div class="card clickable" onClick=${() => { location.hash = a.session_id ? '#/sessions/' + a.session_id : '#/traces'; }}>
           <div class="card-header">
@@ -1912,7 +2061,7 @@ function StatusView({ params }) {
           </div>
           ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
           ${a.session_id ? html`<div class="card-row"><span class="label">Session</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.session_id.slice(0, 8)}</span></div>` : null}
-          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtFramedDollar(a.cost_today, data.framing)}</span></div>
+          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
           ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
@@ -1923,7 +2072,20 @@ function StatusView({ params }) {
 
   return html`
     <div class="page-title">Status</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click on an agent tile for details</div>
+    <div style="display:flex;align-items:center;gap:12px;margin:-14px 0 16px">
+      <div style="font-size:12px;color:var(--text-dim);font-family:'Geist Mono',monospace">
+        ${agentId
+          ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/status" style="color:var(--brand)">show all</a>`
+          : (viewMode === 'list' ? 'Click on an agent row for details' : 'Click on an agent tile for details')}
+      </div>
+      <div class="view-toggle" style="margin-left:auto" role="tablist" aria-label="Status view mode">
+        <button class=${viewMode === 'cards' ? 'active' : ''} aria-pressed=${viewMode === 'cards'} onClick=${() => setView('cards')}>Cards</button>
+        <button class=${viewMode === 'list' ? 'active' : ''} aria-pressed=${viewMode === 'list'} onClick=${() => setView('list')}>List</button>
+      </div>
+    </div>
+    ${viewMode === 'list'
+      ? StatusListTable({ agents, framing: data.framing })
+      : html`
     ${groupKeys.map(key => html`
       ${(showHeadings || groupOverflow(key) > 0) ? html`
         <div style="display:flex;align-items:baseline;gap:10px;margin:18px 0 10px;font-family:'Geist Mono',monospace">
@@ -1952,7 +2114,7 @@ function StatusView({ params }) {
           `)}
         </tbody>
       </table></div>
-    ` : null}
+    ` : null}`}
     ${alerts.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>
@@ -2731,7 +2893,7 @@ function SessionDetailView({ sessionId }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtFramedDollar(t.cost_usd, framing)}</td>
+              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${t.span_count}</td>
               <td class="chevron">→</td>
@@ -2858,6 +3020,7 @@ function TracesListView({ params }) {
   const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, [k]: v }, DEFAULTS);
 
   const [traces, setTraces] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
   const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
   // Distinguish "first fetch in flight" from "fetch resolved with zero rows":
@@ -2865,19 +3028,23 @@ function TracesListView({ params }) {
   // the "No traces yet" empty-state, which otherwise flashes on initial paint
   // while real rows are still loading (issue #20).
   const [loaded, setLoaded] = useState(false);
+  const TRACE_PAGE_SIZE = 100;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ append = false } = {}) => {
+    const offset = append ? traces.length : 0;
     const [td, sd] = await Promise.all([
-      api('/traces', { since, status: result || undefined, agent_id: agentId || undefined, limit: 100 }),
+      api('/traces', { since, status: result || undefined, agent_id: agentId || undefined, limit: TRACE_PAGE_SIZE, offset }),
       api('/status'),
     ]);
-    setTraces(td.traces || []);
+    const nextTraces = td.traces || [];
+    setTraces(prev => append ? prev.concat(nextTraces) : nextTraces);
+    setTotalCount(td.total_count ?? nextTraces.length);
     setFraming(td.framing || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
     setLoaded(true);
-  }, [since, result, agentId]);
+  }, [since, result, agentId, traces.length]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
@@ -2889,6 +3056,8 @@ function TracesListView({ params }) {
         <option value="1h">Last 1h</option>
         <option value="24h">Last 24h</option>
         <option value="7d">Last 7d</option>
+        <option value="30d">Last 30d</option>
+        <option value="90d">Last 90d</option>
       </select>
       <select value=${result} onChange=${e => setFilter('result', e.target.value)}>
         <option value="">All results</option>
@@ -2896,8 +3065,9 @@ function TracesListView({ params }) {
         <option value="error">error</option>
       </select>
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
-      <button class="btn" onClick=${load}>Refresh</button>
+      <button class="btn" onClick=${() => load()}>Refresh</button>
     </div>
+    ${loaded && traces.length > 0 ? html`<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>` : null}
     ${!loaded ? html`<div class="shimmer" style="height:200px"></div>`
       : traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
       <div class="table-wrap"><table>
@@ -2911,7 +3081,7 @@ function TracesListView({ params }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtFramedDollar(t.cost_usd, framing)}</td>
+              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${st ? html`<span class="status-dot ${st}" style="margin-right:5px"></span><span class="badge badge-${st}">${st}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
               <td>${t.span_count}</td>
@@ -2920,6 +3090,7 @@ function TracesListView({ params }) {
           `})}
         </tbody>
       </table></div>
+      ${traces.length < totalCount ? html`<button class="btn" onClick=${() => load({ append: true })}>Load more</button>` : null}
     `}
   `;
 }
@@ -2940,6 +3111,9 @@ function TraceDetailView({ traceId }) {
   const [spans, setSpans] = useState([]);
   const [framing, setFraming] = useState(null);
   const [selected, setSelected] = useState(null);
+  // Waterfall bar-sizing mode (#244): cost / tokens / duration. null = follow
+  // the framing-derived default (cost for api/unknown, tokens when $ suppressed).
+  const [wfMode, setWfMode] = useState(null);
 
   // Poll so a live trace's spans appear without re-navigating. Selection is
   // tracked by span_id, so replacing the spans array preserves it.
@@ -2979,7 +3153,7 @@ function TraceDetailView({ traceId }) {
     return result;
   }
   const rows = flatten(roots, 0);
-  const labelW = 100;
+  const nameW = 220;
 
   // Cost-first annotation (#215). Plan-tier framing: when dollars are suppressed
   // (subscription/local), the magnitude bar + summary read on TOKEN volume, never
@@ -2989,9 +3163,24 @@ function TraceDetailView({ traceId }) {
   const wfUseTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0);
   const wfMaxMag = Math.max(0, ...rows.map(r => wfMagOf(r.span)));
+
+  // #244 bar sizing: cost-first by default (the differentiator + the only mode
+  // that works on duration-less backfilled spans), with a tokens/duration
+  // toggle. Cost is never offered when $ is suppressed — tokens leads there.
+  const wfDefaultMode = wfUseTokens ? 'tokens' : 'cost';
+  const wfMode2 = wfMode || wfDefaultMode;
+  const wfHasDuration = rows.some(r => r.span.duration_ms != null && r.span.duration_ms > 0);
+  const magForMode = s => wfMode2 === 'duration' ? (s.duration_ms || 0)
+    : wfMode2 === 'tokens' ? spanTokens(s) : (s.cost_usd || 0);
+  const maxMagMode = Math.max(0, ...rows.map(r => magForMode(r.span)));
+
   const wfTotalCost = spans.reduce((a, s) => a + (s.cost_usd || 0), 0);
   const wfTotalTokens = spans.reduce((a, s) => a + spanTokens(s), 0);
-  const wfTotalCostFramed = fmtFramedDollar(wfTotalCost, framing);
+  // A single trace's total is per-item, not a window aggregate (#249) — render
+  // it as in+out TOKENS for subscription/local, dollars for api/unknown. ("% of
+  // cycle" for one trace is the same category error as the per-row cells.)
+  const wfTotalInOut = spans.reduce((a, s) => a + _costVal(s, true), 0);
+  const wfTotalCostFramed = fmtPerItemCost(wfTotalCost, wfTotalInOut, framing);
 
   const sel = selected ? spans.find(s => s.span_id === selected) : null;
 
@@ -3007,36 +3196,75 @@ function TraceDetailView({ traceId }) {
       <span>Total cost <b>${wfTotalCostFramed}</b></span>
       <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
       <span>Duration <b>${fmtDur(traceDur)}</b></span>
+      <span>Started <b>${isFinite(traceStart) ? new Date(traceStart).toLocaleString() : '—'}</b></span>
       <span><b>${spans.length}</b> spans</span>
     </div>
+    <div class="wf-toolbar">
+      <div class="wf-legend">
+        <span><i class="wf-kind-dot llm"></i>LLM</span>
+        <span><i class="wf-kind-dot tool"></i>Tool</span>
+        <span><i class="wf-kind-dot agent"></i>Agent</span>
+        <span><i class="wf-kind-dot other"></i>Other</span>
+      </div>
+      <div class="view-toggle">
+        ${!wfUseTokens ? html`<button class=${wfMode2 === 'cost' ? 'active' : ''} onClick=${() => setWfMode('cost')}>By cost</button>` : null}
+        <button class=${wfMode2 === 'tokens' ? 'active' : ''} onClick=${() => setWfMode('tokens')}>By tokens</button>
+        <button class=${wfMode2 === 'duration' ? 'active' : ''} onClick=${() => setWfMode('duration')} title=${wfHasDuration ? '' : 'Backfilled spans have no latency — bars will be flat'}>By duration</button>
+      </div>
+    </div>
     <div class="wf-head">
-      <div class="wf-label" style="width:${labelW}px;padding-left:8px">Span</div>
-      <div class="wf-track">Timeline</div>
+      <div class="wf-name" style="width:${nameW}px;padding-left:8px">Span</div>
+      <div class="wf-track">${wfMode2 === 'duration' ? 'Timeline' : ('Magnitude · by ' + wfMode2)}</div>
+      <div class="wf-offset">Offset</div>
       <div class="wf-cost">Cost / tokens</div>
     </div>
     <div class="waterfall">
       ${rows.map(({ span: s, depth }) => {
         const st = new Date(s.start_time).getTime() - traceStart;
-        const dur = s.duration_ms || 0;
-        const left = (st / traceDur * 100).toFixed(2);
-        const width = Math.max(dur / traceDur * 100, 3).toFixed(2);
         const kind = spanKindClass(s.name);
         const friendly = friendlySpanName(s.name);
-        const isAgent = kind === 'agent';
-        const detail = s.model || s.tool_name || '';
-        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local \u2192 "\u2014"
-        // (suppressed; omitted from the compact bar label), api/unknown \u2192 "$X".
+        const primaryName = spanPrimaryName(s);
+        const isError = (s.status_code || '') === 'error';
+        // #244 bar geometry. Duration mode keeps the classic time-positioned bar;
+        // cost/tokens modes draw a left-anchored magnitude bar (the only thing
+        // that renders on duration-less backfill data). A minimum width keeps
+        // tiny spans visible/clickable.
+        let left, width;
+        if (wfMode2 === 'duration') {
+          left = (st / traceDur * 100);
+          width = Math.max((s.duration_ms || 0) / traceDur * 100, 1.5);
+        } else {
+          left = 0;
+          width = maxMagMode > 0 ? Math.max(magForMode(s) / maxMagMode * 100, 1.5) : 1.5;
+        }
+        left = Math.max(0, Math.min(left, 98.5));
+        width = Math.max(1.5, Math.min(width, 100 - left));
+        const barEnd = left + width;
+        const valFlip = barEnd > 72;
+        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local
+        // \u2192 "\u2014" (suppressed), api/unknown \u2192 "$X".
         const costFramed = fmtFramedDollar(s.cost_usd, framing);
-        // Cost now lives in the dedicated annotation column (#215); the bar label
-        // stays focused on what/how-long so the two reads don't compete.
-        const barLabel = isAgent
-          ? fmtDur(s.duration_ms)
-          : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms);
+        // Per-SPAN cost is per-item (#249): "% of cycle" is nonsensical at this
+        // granularity, and the token column already conveys per-span magnitude,
+        // so only show the $ value for api/unknown.
+        const costShown = !wfUseTokens && s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
         const sTok = spanTokens(s);
-        const costShown = s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
         const wfFrac = wfMaxMag > 0 ? (wfMagOf(s) / wfMaxMag * 100) : 0;
+        // Value printed past the bar end reflects the active mode. Duration is
+        // "\u2014" with a "not captured in backfilled data" hint when absent (#243).
+        const durMissing = wfMode2 === 'duration' && s.duration_ms == null;
+        const valLabel = wfMode2 === 'duration'
+          ? (durMissing ? '\u2014' : fmtDur(s.duration_ms))
+          : wfMode2 === 'tokens'
+            ? (sTok ? fmtTokens(sTok) : '')
+            : (costShown ? costFramed : '');
+        const valTitle = durMissing ? 'Duration not captured in backfilled data' : '';
+        const absStart = isFinite(traceStart) && s.start_time ? new Date(s.start_time).toLocaleString() : '';
+        const offsetLabel = '+' + fmtDur(st);
         const tipLines = [friendly];
-        tipLines.push('Duration: ' + fmtDur(s.duration_ms));
+        tipLines.push('Status: ' + (s.status_code || 'unset'));
+        tipLines.push('Offset: ' + offsetLabel + (absStart ? ' (' + absStart + ')' : ''));
+        tipLines.push('Duration: ' + (s.duration_ms == null ? '\u2014 (not captured in backfill)' : fmtDur(s.duration_ms)));
         if (s.provider) tipLines.push('Provider: ' + s.provider);
         if (s.model) tipLines.push('Model: ' + s.model);
         if (s.tool_name) tipLines.push('Tool: ' + s.tool_name);
@@ -3044,17 +3272,23 @@ function TraceDetailView({ traceId }) {
         if (s.output_tokens != null) tipLines.push('Output tokens: ' + fmtTokens(s.output_tokens));
         if (s.cache_tokens) tipLines.push('Cache read: ' + fmtTokens(s.cache_tokens));
         if (s.cache_write_tokens) tipLines.push('Cache write: ' + fmtTokens(s.cache_write_tokens));
-        if (s.cost_usd != null && costFramed !== '—') tipLines.push('Cost: ' + costFramed);
+        if (!wfUseTokens && s.cost_usd != null && costFramed !== '\u2014') tipLines.push('Cost: ' + costFramed);
         const tooltip = tipLines.join('\n');
         return html`
           <div class="wf-row ${selected === s.span_id ? 'selected' : ''}" onClick=${() => setSelected(s.span_id)}>
-            <div class="wf-label" style="width:${labelW}px;padding-left:${depth * 16 + 8}px">${friendly}</div>
+            <div class="wf-name" style="width:${nameW}px;padding-left:${depth * 16 + 8}px">
+              <span class="wf-status ${isError ? 'error' : 'ok'}" title=${isError ? 'error' : 'ok'}>${isError ? '\u2715' : '\u2713'}</span>
+              <span class="wf-kind-dot ${kind}"></span>
+              <span class="wf-name-txt" title=${primaryName}>${primaryName}</span>
+            </div>
             <div class="wf-track">
-              <div class="wf-bar-wrap${left > 50 ? ' tip-flip' : ''}" style="left:${left}%;width:${width}%">
-                <div class="wf-bar ${kind}" style="width:100%">${barLabel}</div>
+              <div class="wf-bar-wrap${valFlip ? ' tip-flip' : ''}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">
+                <div class="wf-bar ${kind}" style="width:100%"></div>
                 <div class="wf-tip">${tooltip}</div>
               </div>
+              ${valLabel ? html`<span class="wf-val ${valFlip ? 'flip' : ''}" title=${valTitle} style=${valFlip ? ('right:' + (100 - barEnd).toFixed(2) + '%') : ('left:' + barEnd.toFixed(2) + '%')}>${valLabel}</span>` : null}
             </div>
+            <div class="wf-offset" title=${absStart}>${offsetLabel}</div>
             <div class="wf-cost">
               <div class="wf-cost-bar"><div class="wf-cost-fill" style="width:${wfFrac.toFixed(1)}%"></div></div>
               <span class="wf-cost-val">${costShown ? costFramed : ''}</span>
@@ -3079,7 +3313,7 @@ function TraceDetailView({ traceId }) {
           ${sel.output_tokens != null ? html`<span class="dk">Output tokens</span><span class="dv">${fmtTokens(sel.output_tokens)}</span>` : null}
           ${sel.cache_tokens ? html`<span class="dk">Cache read</span><span class="dv">${fmtTokens(sel.cache_tokens)}</span>` : null}
           ${sel.cache_write_tokens ? html`<span class="dk">Cache write</span><span class="dv">${fmtTokens(sel.cache_write_tokens)}</span>` : null}
-          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtFramedDollar(sel.cost_usd, framing)}</span>` : null}
+          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}</span>` : null}
           ${sel.agent_id ? html`<span class="dk">Agent</span><span class="dv">${sel.agent_id}</span>` : null}
           ${sel.conversation_id ? html`<span class="dk">Conversation</span><span class="dv">${sel.conversation_id}</span>` : null}
           ${sel.session_id ? html`<span class="dk">Session</span><span class="dv">${sel.session_id}</span>` : null}
@@ -3109,6 +3343,48 @@ function fmtFramedDollar(v, framing) {
   return fmtCost(v); // api / unknown
 }
 
+// Per-ITEM (per-row) cost rendering (#249). "% of cycle" is a WINDOW-LEVEL
+// aggregate concept — applying it to a single trace / agent / span produces
+// nonsense like "466.7% of cycle". So at per-item granularity, subscription /
+// local users see the row's TOKEN total (the same in+out basis as the Cost
+// table's "Cost (tokens)" column via _costVal), while api / unknown users keep
+// dollars unchanged. WINDOW-LEVEL totals + headlines still use fmtFramedDollar.
+// `tokenTotal` must be a server-provided per-row figure (single compute path) —
+// the /traces and /status payloads carry input_tokens/output_tokens per row.
+function perItemUsesTokens(framing) {
+  return !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+}
+function fmtPerItemCost(costUsd, tokenTotal, framing) {
+  if (perItemUsesTokens(framing)) return fmtTokens(tokenTotal || 0) + ' tok';
+  return fmtFramedDollar(costUsd, framing); // api / unknown → dollars
+}
+
+// Integer count with thousand separators (#262): "23954" → "23,954". For the
+// Sessions / Events KPI tiles, which are exact counts (not abbreviated like
+// fmtTokens "23.9k").
+function fmtCount(n) {
+  if (n == null) return '0';
+  return Math.round(n).toLocaleString('en-US');
+}
+
+// The Spend KPI tile under plan-tier framing (#262). For SUBSCRIPTION, the
+// confusing "% of cycle" is replaced by an honest implied-value MULTIPLIER —
+// "43.5× plan value" (implied API value ÷ the plan's monthly fee, which is just
+// the "% of cycle" number ÷ 100). It is plan VALUE, never "spent $X". api /
+// unknown keep dollars. LOCAL (no plan fee) and a subscription with no declared
+// monthly fee have no denominator, so the tile is dropped — the Tokens tile
+// already conveys volume. Returns {label, value} or null (drop the tile).
+function spendTileDisplay(spendUsd, framing) {
+  const mode = framing && framing.pricing_mode;
+  if (mode === 'subscription') {
+    if (!framing.plan_monthly_usd) return null;          // no fee → no multiplier
+    const mult = (spendUsd || 0) / framing.plan_monthly_usd;  // == (% of cycle) / 100
+    return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
+  }
+  if (mode === 'local') return null;                     // no plan fee to multiply against
+  return { label: 'Spend', value: fmtCost(spendUsd) };   // api / unknown → dollars
+}
+
 // Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
 // the warning `qualifier` banner — confirms api / subscription / local mode.
 function PlanBadge({ framing }) {
@@ -3134,8 +3410,15 @@ function TrendChip({ pct }) {
 // Signed period-over-period delta chip for KPI tiles (#217). `cost`=true uses
 // the spend semantic (up = red/attention, down = green); volume metrics
 // (tokens/sessions/events) stay neutral — more isn't inherently "bad".
-function DeltaChip({ pct, cost }) {
+function DeltaChip({ pct, cost, prevThin }) {
   if (pct == null) return null;
+  // Soften a delta computed against a near-empty prior window (#262): a fresh
+  // backfill makes the prior period a sliver of data, so the % (e.g. ▲1682%) is
+  // arithmetic noise, not a trend. Suppress the alarming number and annotate.
+  if (prevThin) {
+    return html`<span class="delta-chip" style="color:var(--text-dim)"
+      title="The prior window has little data, so a percentage change would be misleading.">vs partial prior window</span>`;
+  }
   const up = pct > 0;
   const arrow = pct === 0 ? '·' : up ? '▲' : '▼';
   const color = cost
@@ -3167,13 +3450,22 @@ function Sparkline({ values, color = 'var(--accent)', width = 92, height = 26 })
 // A trend-aware KPI tile (#217): value + sparkline + signed delta. The caller
 // passes series/delta already in the right unit (token-share for a suppressed
 // Spend tile), so framing is decided once upstream — never re-derived here.
-function KpiTile({ label, value, active, series, delta, cost }) {
-  return html`<div class=${'kpi-tile' + (active ? ' kpi-active' : '')}>
+// `onSelect` makes the tile the metric selector (#247): the kpi-active border
+// already implied it was clickable; wiring onClick fulfills that. Falls back to
+// a static tile when no handler is given.
+function KpiTile({ label, value, active, series, delta, cost, prevThin, onSelect }) {
+  const cls = 'kpi-tile' + (active ? ' kpi-active' : '') + (onSelect ? ' kpi-clickable' : '');
+  const props = onSelect
+    ? { class: cls, role: 'button', tabindex: '0', 'aria-pressed': String(!!active),
+        onClick: onSelect,
+        onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } } }
+    : { class: cls };
+  return html`<div ...${props}>
     <div class="kpi-top">
       <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div></div>
       <${Sparkline} values=${series} />
     </div>
-    <${DeltaChip} pct=${delta} cost=${cost} />
+    <${DeltaChip} pct=${delta} cost=${cost} prevThin=${prevThin} />
   </div>`;
 }
 
@@ -3293,30 +3585,29 @@ function _windowGrid(resp) {
   return { xs, idx, step, bucket, coarsened, reqBucket };
 }
 
-// Build the cache-savings chart series (#212) from a /cost/cache response.
-// `useTokens` swaps captured dollars for captured tokens (subscription/local
-// framing). Returns cumulative captured, per-bucket hit-rate (%), and an
-// "achievable" envelope = cumulative captured + estimated recoverable (or null
-// when the analyzer surfaced nothing). Hit-rate is a token ratio, always shown.
+// Build the redesigned cache-savings view (#246) from a /cost/cache response.
+// Leads with the answer instead of three overlaid series: PER-PERIOD savings
+// bars are the one chart (not a cumulative ramp), the overall hit-rate is a
+// headline stat (+ a tiny sparkline for trend, NOT an overlaid axis line), and
+// the "recoverable (est.)" overlay is gone (noise here; it lives on Optimize).
+// `useTokens` (subscription/local) swaps captured $ for cached-token volume.
 function buildCacheSeries(resp, useTokens) {
   const grid = _windowGrid(resp); if (!grid) return null;
   const { xs, idx, step, bucket } = grid;
   const rows = (resp && resp.series) || [];
-  const cap = xs.map(() => 0), read = xs.map(() => 0), inp = xs.map(() => 0);
+  const sav = xs.map(() => 0), read = xs.map(() => 0), inp = xs.map(() => 0);
   rows.forEach(r => {
     const b = Math.floor(r.bucket / step) * step; if (!(b in idx)) return;
     const i = idx[b];
-    cap[i] += useTokens ? (r.captured_tokens || 0) : (r.captured_usd || 0);
+    sav[i] += useTokens ? (r.captured_tokens || 0) : (r.captured_usd || 0);
     read[i] += r.cache_read_tokens || 0; inp[i] += r.input_tokens || 0;
   });
-  const cum = xs.map(() => 0); let acc = 0;
-  for (let i = 0; i < xs.length; i++) { acc += cap[i]; cum[i] = acc; }
-  const hit = xs.map((_, i) => { const d = read[i] + inp[i]; return d > 0 ? (100 * read[i] / d) : 0; });
-  const recoverable = useTokens
-    ? (resp.estimated_recoverable_tokens || 0)
-    : (resp.estimated_recoverable_usd || 0);
-  const env = recoverable > 0 ? cum.map(v => v + recoverable) : null;
-  return { data: [xs, cum], hit, env, recoverable, bucket, coarsened: grid.coarsened };
+  // Per-bucket hit-rate feeds the small sparkline; the headline stat is the
+  // overall window ratio (cached reads / all input reads).
+  const hitSpark = xs.map((_, i) => { const d = read[i] + inp[i]; return d > 0 ? (100 * read[i] / d) : 0; });
+  const totRead = read.reduce((a, b) => a + b, 0), totInp = inp.reduce((a, b) => a + b, 0);
+  const hitRate = (totRead + totInp) > 0 ? (100 * totRead / (totRead + totInp)) : 0;
+  return { data: [xs, sav], hitSpark, hitRate, bucket, coarsened: grid.coarsened };
 }
 
 function CostView({ params }) {
@@ -3438,19 +3729,24 @@ function CostView({ params }) {
 
     ${!error && cacheSeries ? html`
       <div class="chart-card">
-        <div class="chart-head">
-          <div class="chart-title">Cache savings over time</div>
-          <div class="chart-meta">
-            <span class="chart-total">${useTokens ? (fmtTokens(cacheResp.total_captured_tokens || 0) + ' tokens captured') : (fmtCost(cacheResp.total_captured_usd || 0) + ' captured')}</span>
-          </div>
+        <div class="chart-title">Caching</div>
+        <!-- Lead with the answer (#246): hit-rate + savings this window, framed.
+             Subscription/local show cached-token volume (never raw $). -->
+        <div class="cache-headline">
+          <span class="cache-stat"><b>${cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate</span>
+          <${Sparkline} values=${cacheSeries.hitSpark} color="var(--chart-2)" width=${72} height=${22} />
+          <span class="cache-sep">·</span>
+          <span class="cache-stat">${useTokens
+            ? html`<b>${fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window`
+            : html`~<b>${fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window`}</span>
         </div>
-        ${loading ? html`<div class="shimmer" style="height:200px"></div>` : html`
-          <${CacheSavingsChart} cache=${cacheSeries.data} hit=${cacheSeries.hit} env=${cacheSeries.env}
-            height=${200} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd}
+        ${loading ? html`<div class="shimmer" style="height:180px"></div>` : html`
+          <${CacheSavingsChart} data=${cacheSeries.data} height=${180}
+            fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtCost}
             bucket=${cacheSeries.bucket} />
           <div class="chart-foot">
-            <span class="dim">Cumulative <b>captured</b> savings (measured) + cache <b>hit-rate</b>.</span>
-            ${cacheSeries.recoverable > 0 ? html` <span class="dim">Dashed line = estimated recoverable: ~${useTokens ? (fmtTokens(cacheResp.estimated_recoverable_tokens || 0) + ' more tokens') : fmtFramedDollar(cacheResp.estimated_recoverable_usd || 0, framing)} more with better caching (estimated, not saved).</span>` : null}
+            <span class="dim">Per-${cacheSeries.bucket === 'hour' ? 'hour' : 'day'} ${useTokens ? 'cached-token volume' : 'savings'}. Cached input bills at roughly a tenth of the normal input rate — you read these tokens at that discount, ${useTokens ? 'sparing your token budget' : 'saving the difference vs paying full price'}.</span>
+            ${cacheSeries.coarsened ? html` <span class="dim">Showing ${cacheSeries.bucket} buckets.</span>` : null}
           </div>
         `}
       </div>
@@ -3819,9 +4115,9 @@ const ANALYZER_ANALYTICS_SLICE = {
   reuse:    { metric: 'sessions', group_by: 'agent', chart: 'hbar' },
   trim:     { metric: 'tokens',   group_by: 'agent', chart: 'hbar' },
 };
-function analyzerSliceHref(name, since) {
+function analyzerSliceHref(name, since, route = 'analytics') {
   const slice = ANALYZER_ANALYTICS_SLICE[name] || { metric: 'spend', group_by: 'model', chart: 'hbar' };
-  return analyticsHref({ ...slice, since });
+  return analyticsHref({ ...slice, since }, route);
 }
 
 // Title-case a registry key for display. Centralizes capitalization so a tile
@@ -3941,208 +4237,6 @@ function HealthTile({ label, value, attention, href, sub }) {
   </a>`;
 }
 
-function OverviewView({ params }) {
-  const DEFAULTS = { since: '7d' };
-  const since = readParam(params, 'since', DEFAULTS.since, validSince);
-  const setWin = v => navigate('overview', { since: v }, DEFAULTS);
-  const [d, setD] = useState({ loading: true, empty: false, error: null });
-
-  const load = useCallback(async () => {
-    try {
-      // Fetch the Overview's panels in PARALLEL: the daemon DB layer is now
-      // concurrency-safe (#124 — per-thread DuckDB cursors), so the #114
-      // serial-fetch workaround is gone. The error handling is deliberately
-      // ASYMMETRIC and must NOT be unified (#124 review):
-      //   - /cost is load-bearing — NO .catch, so its failure rejects the
-      //     Promise.all and surfaces the error state (the page can't render
-      //     without spend data).
-      //   - the other five panels each carry a .catch fallback so one failing
-      //     panel renders empty rather than blanking the whole Overview.
-      // /status is included for the onboarding empty-state decision below —
-      // its failure is non-fatal (one bad panel must not blank the Overview).
-      const [cost, compare, opt, al, drift, traces, status] = await Promise.all([
-        api('/cost', { since, group_by: 'day' }),
-        api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
-        api('/optimize', { since, fast: 'true' }).catch(() => null),
-        api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
-        api('/drift').catch(() => ({ agents: [] })),
-        api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
-        api('/status').catch(() => ({ agents: [], archived: [] })),
-      ]);
-      // Onboarding empty-state is reserved for a GENUINELY empty DB — NOT a DB
-      // whose data is all historical/backfilled with no live agents (#19). The
-      // old gate keyed off `status.agents` alone (the LIVE-session tiles), so an
-      // all-historical DB read as "No data yet" while Cost/Analytics/Traces all
-      // showed real totals — a false data-loss scare on the front door. Gate on
-      // whether ANY data exists instead: window totals (the same signal the
-      // other screens use) OR any historical/live session in /status.
-      const hasWindowData = (cost.total_tokens || 0) > 0
-        || (cost.total_cost_usd || 0) > 0
-        || (cost.rows && cost.rows.length > 0);
-      const hasAnySession = (status.agents && status.agents.length > 0)
-        || (status.archived && status.archived.length > 0);
-      if (!hasWindowData && !hasAnySession) {
-        setD({ loading: false, empty: true, error: null });
-        return;
-      }
-      setD({ loading: false, empty: false, error: null, cost, compare, opt,
-        alerts: al.alerts || [], drift, traces: traces.traces || [] });
-    } catch (e) {
-      setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
-    }
-  }, [since]);
-
-  // Auto-refresh every 30s only while the tab is visible (#114).
-  useEffect(() => {
-    load();
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 30000);
-    const onVis = () => { if (document.visibilityState === 'visible') load(); };
-    document.addEventListener('visibilitychange', onVis);
-    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
-  }, [load]);
-
-  const winPicker = html`
-    <select value=${since} onChange=${e => setWin(e.target.value)}>
-      <option value="24h">Last 24h</option>
-      <option value="7d">Last 7d</option>
-      <option value="30d">Last 30d</option>
-      <option value="90d">Last 90d</option>
-    </select>`;
-
-  if (d.loading) return html`<div class="page-title">Overview</div><div class="shimmer" style="height:220px"></div>`;
-
-  if (d.empty) return html`
-    <div class="page-title">Overview</div>
-    <div class="card" style="max-width:560px">
-      <div class="card-header">No data yet — TokenJam is listening.</div>
-      <p style="color:var(--text-dim);font-size:13px;line-height:1.6;margin:8px 0 16px">
-        Once an agent runs, this is where your spend, recoverable waste, and health show up.
-      </p>
-      <div style="font-size:13px;margin-bottom:10px">
-        <strong>Wire up Claude Code</strong><br/>
-        <code>tj onboard --claude-code</code> &nbsp;
-        <a href="https://github.com/Metabuilder-Labs/tokenjam#readme" style="color:var(--brand)">docs ↗</a>
-      </div>
-      <div style="font-size:13px">
-        <strong>Or try a demo</strong> <span style="color:var(--text-dim)">(no API keys)</span>
-        <div style="margin-top:6px;color:var(--text-dim);line-height:1.8">
-          <code>tj demo retry-loop</code> — an agent stuck calling the same tool<br/>
-          <code>tj demo surprise-cost</code> — a quiet run that rang up real spend<br/>
-          <code>tj demo hallucination-drift</code> — output drifting from baseline
-        </div>
-      </div>
-    </div>`;
-
-  if (d.error) return html`
-    <div class="page-title">Overview</div>
-    <div class="chart-card" style="border-color:var(--error)">
-      <div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load overview: ${d.error}</div>
-      <button class="btn" onClick=${load}>Retry</button>
-    </div>`;
-
-  const cost = d.cost || {};
-  const framing = cost.framing || null;
-  const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
-  const series = buildCostSeries(cost, 'total', useTokens);
-  const totalDisplay = useTokens ? (fmtTokens(cost.total_tokens || 0) + ' tokens') : fmtFramedDollar(cost.total_cost_usd || 0, framing);
-  const trendPct = d.compare ? (useTokens ? d.compare.tokens_delta_pct : d.compare.cost_delta_pct) : null;
-  const cyc = cycleRemaining(cost.cycle);
-  let runRate = null, projection = null;
-  if (series && series.data[1] && series.data[1].length) {
-    const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
-    runRate = runRateProjection(windowTotal, since, 1);  // per-day average over window length (#129)
-    const projected = runRate * cyc.days;  // cycle-relative projection (#134)
-    projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
-  }
-
-  const tiles = recoverableTiles(d.opt);
-  const budgets = (d.opt && d.opt.budgets) || [];
-  const budgetAttn = budgets.filter(b => b.over_budget || (b.budget_usd > 0 && b.projected_cycle_total / b.budget_usd > 0.8)).length;
-  const driftN = driftSignalCount(d.drift);
-  const errTraces = d.traces.filter(t => t.status_code === 'error').length;
-
-  return html`
-    <div class="ov-head">
-      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <div class="page-title" style="margin:0">Overview</div>
-        <${PlanBadge} framing=${framing} />
-      </div>
-      <div class="filters" style="margin:0">${winPicker}</div>
-    </div>
-    ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
-
-    <!-- Band 1: Cost hero. The chart is NOT a click-target (it owns hover for
-         the tooltip, #128); drill-through is an explicit link in the header. -->
-    <div class="chart-card">
-      <div class="chart-head">
-        <a class="chart-title" href=${analyticsHref({ metric: 'spend', group_by: 'day', chart: 'bar', since })}
-           title="Explore spend over time in Analytics">Spend ${useTokens ? '(tokens) ' : ''}· last ${since} →</a>
-        <div class="chart-meta">
-          <span class="chart-total">${totalDisplay}</span>
-          <${TrendChip} pct=${trendPct} />
-          <a class="drill-link" href=${'#/cost?since=' + since}>View Cost details →</a>
-        </div>
-      </div>
-      ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} bucket=${series.bucket} />`
-        : html`<div class="empty" style="padding:24px 0">No spend in this window.</div>`}
-      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
-      ${series && series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
-    </div>
-
-    <!-- Band 2: Recoverable waste -->
-    <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span> <span class="band-window">· over the last ${since}</span></div>
-    <div class="tile-grid">
-      ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates in this window.</div>`
-        : tiles.map(t => {
-          const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
-          // Deep-link into the Analytics explorer on this analyzer's slice (#229),
-          // carrying the Overview's current window. The route honors every param.
-          const href = analyzerSliceHref(t.name, since);
-          // Four honest states (#127): actionable / at_ceiling / no_findings / not_ready.
-          if (t.state === 'actionable') return html`
-            <a class="rec-tile" href=${href}>
-              <div class="rec-name">${meta.title} <span class="estimated-tag" title=${t.basis}>estimated</span></div>
-              <div class="rec-amount">${fmtFramedSavings(t.usd, t.tokens, framing)}</div>
-              <div class="rec-hint">${meta.hint}</div>
-            </a>`;
-          if (t.state === 'at_ceiling') return html`
-            <a class="rec-tile ok" href=${href}>
-              <div class="rec-name">${meta.title}</div>
-              <div class="rec-amount ok">✓ ${t.metric}</div>
-              <div class="rec-hint">Already optimized — nothing to recover.</div>
-            </a>`;
-          if (t.state === 'no_findings') return html`
-            <a class="rec-tile muted" href=${href}>
-              <div class="rec-name">${meta.title}</div>
-              <div class="rec-amount dim">No candidates</div>
-              <div class="rec-hint">Nothing actionable in the last ${since}.</div>
-            </a>`;
-          // not_ready — the analyzer hasn't run, but its underlying data slice is
-          // still explorable, so the tile stays a deep-link for consistency.
-          return html`
-            <a class="rec-tile muted" href=${href}>
-              <div class="rec-name">${meta.title}</div>
-              <div class="rec-amount dim">Not ready</div>
-              <div class="rec-hint">${t.hint || meta.hint}</div>
-            </a>`;
-        })}
-    </div>
-
-    <!-- Band 3: Health -->
-    <div class="band-label">Health at a glance</div>
-    <div class="tile-grid">
-      <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
-        href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
-      <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
-        sub=${driftN ? 'review baselines' : 'within baseline'} />
-      <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
-        sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
-      <${HealthTile} label="Recent activity" value=${d.traces.length} attention=${errTraces > 0} href="#/traces"
-        sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
-    </div>
-  `;
-}
-
 // ---- Optimize detail screen ----
 function OptimizeFinding({ name, opt, framing }) {
   const meta = ANALYZER_META[name] || { title: capitalize(name) };
@@ -4180,7 +4274,7 @@ function OptimizeFinding({ name, opt, framing }) {
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
         <table class="opt-table"><thead><tr><th>Instances</th><th>Signature</th><th>Avg cost</th></tr></thead>
-          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtFramedDollar(c.avg_cost_usd, framing)}</td></tr>`)}</tbody></table>
+          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}</td></tr>`)}</tbody></table>
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
         : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
     } else if (name === 'trim') {
@@ -4244,6 +4338,7 @@ function OptimizeView({ params }) {
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const waste = buildComponentWaste(st.comp, useTokens);
   const wasteFmtY = useTokens ? fmtTokens : fmtCost;
+  const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;
 
   return html`
     <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -4291,7 +4386,8 @@ function OptimizeView({ params }) {
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
               `)}
-            </div>` : html`<div class="chart-foot"><span class="dim">No recoverable waste estimated in this window.</span></div>`}
+            </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window — no estimated waste from any analyzer.</div>`}
+          ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
         </div>` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
@@ -4401,7 +4497,11 @@ function downloadCsv(filename, text) {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-function AnalyticsView({ params }) {
+// `route` lets the pivot live on another screen (the merged Dashboard preview
+// reuses it under #/dashboard); `embedded` drops the standalone title + window
+// picker so the host screen owns those. Default args preserve the standalone
+// #/analytics behavior exactly.
+function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null }) {
   const DEFAULTS = { since: '30d', metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
     agent_id: '', provider: '', model: '', tool: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
@@ -4414,8 +4514,8 @@ function AnalyticsView({ params }) {
   const fModel = readParam(params, 'model', '');
   const fTool = readParam(params, 'tool', '');
   const cur = { since, metric, group_by: groupBy, stack, chart, agent_id: fAgent, provider: fProvider, model: fModel, tool: fTool };
-  const setFilter = (k, v) => navigate('analytics', { ...cur, [k]: v }, DEFAULTS);
-  const applyPreset = (q) => navigate('analytics', { ...cur, ...q }, DEFAULTS);
+  const setFilter = (k, v) => navigate(route, { ...cur, [k]: v }, DEFAULTS);
+  const applyPreset = (q) => navigate(route, { ...cur, ...q }, DEFAULTS);
 
   const [st, setSt] = useState({ loading: true, error: null, resp: null });
 
@@ -4451,10 +4551,16 @@ function AnalyticsView({ params }) {
 
   const metricSuffix = isSpend ? (useTokens ? ' (tokens)' : '') : '';
 
+  // Tool spans carry no tokens/cost, so grouping spend/tokens BY tool (or tool
+  // category) is structurally all-zeros (#268). Rather than render a wall of
+  // zeros, show a helpful empty state with a one-click switch to Events.
+  const toolDimNoMetric = (groupBy === 'tool' || groupBy === 'tool_category')
+    && (metric === 'spend' || metric === 'tokens');
+
   return html`
-    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    ${embedded ? null : html`<div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Analytics <${PlanBadge} framing=${framing} />
-    </div>
+    </div>`}
 
     <div class="filters">
       <label class="ctl">Metric
@@ -4474,10 +4580,10 @@ function AnalyticsView({ params }) {
         <select value=${chart} onChange=${e => setFilter('chart', e.target.value)}>
           ${ANALYTICS_CHARTS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
         </select></label>
-      <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
+      ${embedded ? null : html`<select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="24h">Last 24h</option><option value="7d">Last 7d</option>
         <option value="30d">Last 30d</option><option value="90d">Last 90d</option>
-      </select>
+      </select>`}
       <button class="btn" onClick=${load}>Refresh</button>
       <button class="btn" onClick=${() => resp && downloadCsv('tokenjam-analytics.csv', analyticsCsv(resp))}>Export CSV</button>
     </div>
@@ -4493,28 +4599,39 @@ function AnalyticsView({ params }) {
     ${!error && framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
 
     ${!error && kpis ? (() => {
-      // The Spend tile follows the server framing block: subscription/local
-      // suppress dollars, so its value + sparkline + delta read on TOKEN volume,
-      // never raw $ — decided here once, not re-derived per render path. Token /
-      // session / event tiles are plan-independent counts.
-      const spendSuppressed = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+      // The Spend tile follows the server framing block (single source, never
+      // re-derived). Under SUBSCRIPTION it shows an implied-value MULTIPLIER
+      // ("43.5× plan value", #262) — NOT "% of cycle" and NOT raw tokens (which
+      // duplicated the Tokens tile, #247). Its sparkline/delta still track SPEND
+      // (cost_usd), since the multiplier is just spend rescaled by the plan fee
+      // — so the trend/shape are identical to spend, never raw $. LOCAL / a
+      // subscription with no declared fee have no denominator → the tile is
+      // dropped rather than duplicate Tokens.
       const deltas = resp.kpi_deltas || {};
-      const tiles = [
-        { key: 'spend', label: 'Spend', cost: true,
-          value: spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok') : fmtFramedDollar(kpis.spend, framing),
-          series: kpiSparkValues(resp, spendSuppressed ? 'tokens' : 'spend'),
-          delta: spendSuppressed ? deltas.tokens : deltas.spend },
-        { key: 'tokens', label: 'Tokens', cost: false, value: fmtTokens(kpis.tokens),
-          series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens },
-        { key: 'sessions', label: 'Sessions', cost: false, value: String(kpis.sessions),
-          series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions },
-        { key: 'events', label: 'Events', cost: false, value: String(kpis.events),
-          series: kpiSparkValues(resp, 'events'), delta: deltas.events },
-      ];
-      return html`<div class="kpi-row">
-        ${tiles.map(t => html`<${KpiTile} label=${t.label} value=${t.value} active=${t.key === metric}
-            series=${t.series} delta=${t.delta == null ? null : t.delta} cost=${t.cost} />`)}
-      </div>`;
+      const spend = spendTileDisplay(kpis.spend, framing);
+      // A prior window with almost no activity makes period-over-period % a
+      // misleading sliver (the ▲1682% on a fresh backfill, #262). Use the prior
+      // window's session count as the universal "did anything happen" proxy.
+      const prevThin = !!resp.kpi_prev && (resp.kpi_prev.sessions || 0) < 2;
+      const onMetric = (k) => setFilter('metric', k);
+      const tiles = [];
+      if (spend) {
+        tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
+          series: kpiSparkValues(resp, 'spend'), delta: deltas.spend });
+      }
+      tiles.push({ key: 'tokens', label: 'Tokens', cost: false, value: fmtTokens(kpis.tokens),
+        series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });
+      tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: fmtCount(kpis.sessions),
+        series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions });
+      tiles.push({ key: 'events', label: 'Events', cost: false, value: fmtCount(kpis.events),
+        series: kpiSparkValues(resp, 'events'), delta: deltas.events });
+      return html`
+        <div class="kpi-row">
+          ${tiles.map(t => html`<${KpiTile} label=${t.label} value=${t.value} active=${t.key === metric}
+              series=${t.series} delta=${t.delta == null ? null : t.delta} cost=${t.cost}
+              prevThin=${prevThin} onSelect=${() => onMetric(t.key)} />`)}
+        </div>
+        ${kpiCaption ? html`<div class="kpi-caption">${kpiCaption}</div>` : null}`;
     })() : null}
 
     ${!error ? html`
@@ -4522,7 +4639,16 @@ function AnalyticsView({ params }) {
         <div class="chart-head">
           <div class="chart-title">${(ANALYTICS_METRICS.find(m => m[0] === metric) || [, metric])[1]} by ${(ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1]}${metricSuffix}</div>
         </div>
-        ${loading ? html`<div class="shimmer" style="height:200px"></div>`
+        ${toolDimNoMetric ? html`
+          <div class="empty" style="padding:32px 16px;text-align:center">
+            <div style="font-size:13px;margin-bottom:12px">Tools don't carry ${metric === 'spend' ? 'cost' : 'tokens'} — those live on the LLM-call spans, not tool spans.</div>
+            <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+              <button class="btn" onClick=${() => setFilter('metric', 'events')}>Switch to Events</button>
+              <button class="btn" onClick=${() => setFilter('group_by', 'model')}>Group by Model</button>
+              <button class="btn" onClick=${() => setFilter('group_by', 'agent')}>Group by Agent</button>
+            </div>
+          </div>`
+          : loading ? html`<div class="shimmer" style="height:200px"></div>`
           : chart === 'hbar'
             ? (board && board.length ? html`
               <div class="leaderboard">
@@ -4548,6 +4674,161 @@ function AnalyticsView({ params }) {
 }
 
 // ============================
+// Merged Dashboard (PREVIEW, #/dashboard) — prototype for design review.
+// ============================
+// Composes the Overview triage front-door (spend hero + run-rate, compact
+// recoverable-waste + health bands) with the Analytics pivot explorer as the
+// hero canvas. Purely additive: a NEW route that reuses the existing helpers /
+// components (SpendChart, recoverableTiles, HealthTile, AnalyticsView) — it does
+// NOT touch the standalone Overview/Analytics screens or the default landing.
+// One window selector (header) drives BOTH the triage fetch and the embedded
+// explorer (which reads `since` from the same URL params).
+function DashboardView({ params }) {
+  const since = readParam(params, 'since', '30d', validSince);
+  // Preserve the explorer's params (metric/group_by/stack/chart/filters) when
+  // only the window changes, so the hero keeps its slice across window switches.
+  const setWin = v => navigate('dashboard', { ...Object.fromEntries(params.entries()), since: v }, { since: '30d' });
+  const [d, setD] = useState({ loading: true, empty: false, error: null });
+
+  // Triage fetch — same parallel fast=true pattern as Overview (#124): /cost is
+  // load-bearing (no .catch), the rest degrade individually. The Analytics hero
+  // fetches independently, so a triage failure never blanks the explorer.
+  const load = useCallback(async () => {
+    try {
+      const [cost, compare, opt, al, drift, traces, status] = await Promise.all([
+        api('/cost', { since, group_by: 'day' }),
+        api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
+        api('/optimize', { since, fast: 'true' }).catch(() => null),
+        api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
+        api('/drift').catch(() => ({ agents: [] })),
+        api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
+        api('/status').catch(() => ({ agents: [], archived: [] })),
+      ]);
+      // #19: the empty-state must key off whether ANY data exists — window totals
+      // (the same signal Cost/Analytics/Traces use) OR any historical/live session
+      // in /status — not the LIVE-agents list alone. An all-backfilled DB (no live
+      // agents but real spend) used to read as "No data yet": a false data-loss
+      // scare on the front door. /status is fetched non-fatally so a failing
+      // /status can't blank the Dashboard.
+      const hasWindowData = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;
+      const hasAnySession = (status.agents || []).length > 0 || (status.archived || []).length > 0;
+      if (!hasWindowData && !hasAnySession) {
+        setD({ loading: false, empty: true, error: null });
+        return;
+      }
+      setD({ loading: false, empty: false, error: null, cost, compare, opt,
+        alerts: al.alerts || [], drift, traces: traces.traces || [] });
+    } catch (e) {
+      setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
+    }
+  }, [since]);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 30000);
+    const onVis = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
+  }, [load]);
+
+  const winPicker = html`
+    <select value=${since} onChange=${e => setWin(e.target.value)}>
+      <option value="24h">Last 24h</option>
+      <option value="7d">Last 7d</option>
+      <option value="30d">Last 30d</option>
+      <option value="90d">Last 90d</option>
+    </select>`;
+
+  const cost = d.cost || {};
+  const framing = cost.framing || null;
+  const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  // Series only used to gate the run-rate projection (the chart itself is the
+  // explorer's now — spend de-dup); window total drives the run-rate caption.
+  const series = (!d.loading && !d.empty && !d.error) ? buildCostSeries(cost, 'total', useTokens) : null;
+  const cyc = cycleRemaining(cost.cycle);
+  let projection = null;
+  if (series && series.data[1] && series.data[1].length) {
+    const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
+    const projected = runRateProjection(windowTotal, since, 1) * cyc.days;
+    projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
+  }
+
+  const tiles = (!d.loading && !d.empty && !d.error) ? recoverableTiles(d.opt) : [];
+  const budgets = (d.opt && d.opt.budgets) || [];
+  const budgetAttn = budgets.filter(b => b.over_budget || (b.budget_usd > 0 && b.projected_cycle_total / b.budget_usd > 0.8)).length;
+  const driftN = driftSignalCount(d.drift);
+  const errTraces = (d.traces || []).filter(t => t.status_code === 'error').length;
+
+  // Run-rate projection folded into a one-line caption under the explorer's KPI
+  // row — the dashboard's single spend headline lives there, not as a separate
+  // chart (de-dup). Framed (tokens for subscription/local), never raw $.
+  const kpiCaption = (!d.loading && !d.empty && !d.error && projection && projection !== '—')
+    ? ('At this pace, ~' + projection + ' by ' + cyc.label + ' — linear run-rate, not a forecast')
+    : null;
+
+  return html`
+    <div class="ov-head">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="page-title" style="margin:0">Dashboard</div>
+        <${PlanBadge} framing=${framing} />
+      </div>
+      <div class="filters" style="margin:0">${winPicker}</div>
+    </div>
+    ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+
+    ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet — TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and your spend, waste, and health show up here.</p></div>`
+      : html`
+        <!-- Triage band: recoverable waste + health. Spend is NOT shown here —
+             it lives once, in the explorer's Spend KPI tile + chart below. -->
+        ${d.error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:8px">Couldn't load triage: ${d.error}</div><button class="btn" onClick=${load}>Retry</button></div>`
+          : d.loading ? html`<div class="shimmer" style="height:90px"></div>`
+          : html`
+            <div class="dash-triage">
+              <div class="dash-col">
+                <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></div>
+                <div class="tile-grid compact">
+                  ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
+                    : tiles.map(t => {
+                      const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
+                      // In-place drill-through: stays on #/dashboard and updates the
+                      // hero explorer's slice via URL state (#229 slice map) — never
+                      // navigates away to the standalone #/analytics screen.
+                      const href = analyzerSliceHref(t.name, since, 'dashboard');
+                      const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing)
+                        : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
+                        : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
+                      const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok' : 'rec-tile muted');
+                      const amtCls = t.state === 'actionable' ? 'rec-amount' : (t.state === 'at_ceiling' ? 'rec-amount ok' : 'rec-amount dim');
+                      return html`<a class=${cls} href=${href}>
+                        <div class="rec-name">${meta.title}</div>
+                        <div class=${amtCls}>${amount}</div>
+                      </a>`;
+                    })}
+                </div>
+              </div>
+              <div class="dash-col">
+                <div class="band-label">Health at a glance</div>
+                <div class="tile-grid compact">
+                  <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
+                    href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
+                  <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
+                    sub=${driftN ? 'review baselines' : 'within baseline'} />
+                  <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
+                    sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
+                  <${HealthTile} label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href="#/traces"
+                    sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
+                </div>
+              </div>
+            </div>`}
+
+        <!-- The HERO: the embedded Analytics pivot explorer. Spend lives here
+             once (Spend KPI tile + chart); the run-rate projection is the caption. -->
+        <div class="band-label" style="margin-top:18px">Explore <span class="band-window">· metric × dimension × chart, the full pivot</span></div>
+        <${AnalyticsView} params=${params} route="dashboard" embedded=${true} kpiCaption=${kpiCaption} />`}
+  `;
+}
+
+// ============================
 // App Router
 // ============================
 function App() {
@@ -4560,12 +4841,12 @@ function App() {
   }, []);
 
   // Reflect the default route in the URL bar without a render-time redirect.
-  // getRoute() already defaults to 'overview', so the first render shows
-  // Overview; this just makes the address bar say so (replace = no extra
+  // getRoute() already defaults to 'dashboard', so the first render shows the
+  // Dashboard; this just makes the address bar say so (replaceState = no extra
   // history entry, no hashchange race that left the view blank — #132).
   useEffect(() => {
     if (!location.hash || location.hash === '#/') {
-      history.replaceState(null, '', '#/overview');
+      history.replaceState(null, '', '#/dashboard');
     }
   }, []);
 
@@ -4578,7 +4859,10 @@ function App() {
 
   const p = route.params;
   switch (route.view) {
-    case 'overview': return html`<${OverviewView} params=${p} />`;
+    // Overview retired — the Dashboard's triage band subsumes it. Lingering
+    // #/overview bookmarks/links fall through to the Dashboard.
+    case 'overview':
+    case 'dashboard': return html`<${DashboardView} params=${p} />`;
     case 'status': return html`<${StatusView} params=${p} />`;
     case 'traces':
       if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;

@@ -63,7 +63,7 @@ def claude_code(ctx: click.Context, root_path: str | None, since_days: int | Non
             return
         if result.sessions_seen - state["last_print"] >= 1:
             console.print(
-                f"  [dim]({result.sessions_seen} sessions, "
+                f"  [dim]({result.conversations_seen} conversations, "
                 f"{result.spans_ingested} new spans, "
                 f"{format_cost(result.total_cost_usd)} total)[/dim]",
                 end="\r",
@@ -92,9 +92,11 @@ def claude_code(ctx: click.Context, root_path: str | None, since_days: int | Non
     if result.earliest and result.latest:
         days_span = (result.latest - result.earliest).days
 
+    total = result.sessions_total
     parts = [
-        f"Backfilled [bold]{result.sessions_ingested}[/bold] of "
-        f"{result.sessions_seen} sessions",
+        f"Backfilled [bold]{result.sessions_new}[/bold] new "
+        f"({result.sessions_existing} already present) · "
+        f"[bold]{total}[/bold] total session{'s' if total != 1 else ''}",
     ]
     if days_span is not None:
         parts.append(f"over {days_span} day{'s' if days_span != 1 else ''}")
@@ -109,6 +111,15 @@ def claude_code(ctx: click.Context, root_path: str | None, since_days: int | Non
             f"  [dim]Re-tagged {result.spans_retagged} existing spans "
             f"(sub_agent_id refreshed).[/dim]"
         )
+    # Make the conversations-vs-sessions distinction explicit when they differ
+    # (Claude Code writes multiple JSONL files per session) so the smaller
+    # `sessions` count doesn't read as data loss (#238).
+    if result.conversations_seen != total:
+        console.print(
+            f"  [dim]Parsed {result.conversations_seen} conversation files "
+            f"into {total} session{'s' if total != 1 else ''}.[/dim]"
+        )
+
     if result.spans_skipped_existing:
         console.print(
             f"  [dim]Skipped {result.spans_skipped_existing} spans already "

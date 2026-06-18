@@ -1,6 +1,6 @@
 {
   "name": "@tokenjam/sdk",
-  "version": "0.5.0",
+  "version": "0.5.2",
   "description": "TypeScript SDK for TokenJam — local-first observability for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

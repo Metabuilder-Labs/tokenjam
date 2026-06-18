@@ -101,6 +101,15 @@ class NormalizedSpan:
     # Optional spawning-session id (tokenjam.parent_session_id) for nested
     # spawns. Transient on the span; persisted on the session for the run tree.
     parent_session_id: str | None   = None
+    # Full-request capture (issue #209) — makes a span self-contained enough to
+    # replay. `request_params` holds sampling parameters (temperature, top_p,
+    # max_tokens, stop_sequences, …); `request_tools` holds the tools /
+    # tool_choice payload as {"tools": [...], "tool_choice": ...}. Both are
+    # populated only when the corresponding [capture] toggle is on (sampling
+    # params gate with `prompts`, tools gate with `tool_inputs`) — see
+    # strip_captured_content() in core/ingest.py. Round-trip via JSON columns.
+    request_params: dict[str, Any] | None = None
+    request_tools:  dict[str, Any] | None = None
 
 
 @dataclass
@@ -310,6 +319,12 @@ class TraceRecord:
     cost_usd:   float | None  = None
     status_code: str          = "ok"
     span_count:  int          = 0
+    # Per-trace token totals so the UI can render per-row cost as TOKENS for
+    # subscription/local users (#249) — "% of cycle" is a window-level aggregate
+    # and is nonsensical at per-trace granularity. Summed server-side (single
+    # compute path) rather than re-aggregated in JS.
+    input_tokens:  int        = 0
+    output_tokens: int        = 0
 
 
 @dataclass
@@ -322,6 +337,63 @@ class CostRow:
     cache_tokens: int         = 0   # cache-READ tokens
     cache_write_tokens: int   = 0   # cache-CREATE tokens (the hidden cost driver, #17)
     cost_usd:     float       = 0.0
+
+
+# -- Enforcement-plane audit log + savings meter (#221) --
+
+@dataclass
+class PolicyDecisionRecord:
+    """One persisted proxy observation — a row in the append-only audit log.
+
+    Records both the POLICY path and observe-only traffic. ``gate_decision`` +
+    ``passthrough_tos`` distinguish "we chose not to act" (policy path,
+    would_action='noop') from "we were not permitted to act" (subscription TOS).
+    ``label`` ('unvalidated') rides through from the envelope.
+    """
+    decision_id:     str
+    ts:              datetime
+    provider:        str | None
+    pricing_mode:    str
+    gate_decision:   str            # observe_only | policy
+    path:            str
+    would_action:    str            # overall action; 'noop' on observe-only
+    policy_name:     str | None = None
+    policy_kind:     str | None = None
+    passthrough_tos: bool = False   # observe-only due to provider TOS (subscription)
+    label:           str = "unvalidated"
+    suggest_only:    bool = True
+    envelope:        dict | None = None  # full round-trippable envelope (None observe-only)
+
+
+@dataclass
+class SavingsLedgerEntry:
+    """What ONE policy decision WOULD have recovered — never a realized figure.
+
+    Suggest mode enforces nothing, so ``realized`` is always False and the
+    amounts are ESTIMATED-RECOVERABLE / would-have-saved (Critical Rule 14).
+    Dollar figures are api-only; subscription/local accrue token-quota framing.
+    """
+    ledger_id:                    str
+    decision_id:                  str
+    ts:                           datetime
+    provider:                     str | None
+    pricing_mode:                 str
+    would_action:                 str
+    policy_name:                  str | None = None
+    estimated_recoverable_usd:    float = 0.0
+    estimated_recoverable_tokens: int = 0
+    estimate_basis:               str = ""
+    billing_period:               str = ""       # YYYY-MM
+    label:                        str = "unvalidated"
+    realized:                     bool = False    # suggest mode: NEVER realized
+
+
+@dataclass
+class PolicyDecisionFilters:
+    since:    datetime | None = None
+    until:    datetime | None = None
+    provider: str | None = None
+    limit:    int = 100
 
 
 # -- Filter dataclasses used by StorageBackend --

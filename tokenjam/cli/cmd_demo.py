@@ -9,8 +9,27 @@ import click
 
 from tokenjam.utils.formatting import console
 
-# incidents/ lives two levels above this file (tj/cli/ -> tj/ -> repo/site-packages root)
-_INCIDENTS_DIR = Path(__file__).parent.parent.parent / "incidents"
+# The scenarios live at repo-root `incidents/` in the dev tree, but ship INSIDE
+# the package at `tokenjam/incidents/` in a built wheel (via the hatchling
+# force-include in pyproject.toml — repo-root `incidents/` is outside the
+# `tokenjam/` package, so it is never wheeled on its own). Resolve both and use
+# whichever exists: installed location first, dev-tree fallback (#291). Scenarios
+# load by file path (spec_from_file_location), so the physical location doesn't
+# affect the import — both candidates work.
+def _candidate_incidents_dirs() -> list[Path]:
+    here = Path(__file__).resolve().parent  # …/tokenjam/cli
+    return [
+        here.parent / "incidents",         # installed: …/tokenjam/incidents (force-included)
+        here.parent.parent / "incidents",  # dev tree: repo-root incidents/
+    ]
+
+
+def _incidents_dir() -> Path | None:
+    """The first existing scenarios dir, or None when none are present."""
+    for candidate in _candidate_incidents_dirs():
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def _discover_scenarios() -> dict[str, ModuleType]:
@@ -19,9 +38,10 @@ def _discover_scenarios() -> dict[str, ModuleType]:
     Returns a dict mapping scenario slug to loaded module.
     """
     scenarios: dict[str, ModuleType] = {}
-    if not _INCIDENTS_DIR.exists():
+    base = _incidents_dir()
+    if base is None:
         return scenarios
-    for scenario_file in sorted(_INCIDENTS_DIR.glob("*/scenario.py")):
+    for scenario_file in sorted(base.glob("*/scenario.py")):
         slug = scenario_file.parent.name
         spec = importlib.util.spec_from_file_location(
             f"incidents.{slug}.scenario", scenario_file

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenjam"
-version = "0.5.0"
+version = "0.5.2"
 description = "TokenJam — local-first OTel-native observability for Autonomous AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -77,7 +77,15 @@ asyncio_mode = "auto"
 
 [tool.hatch.build.targets.wheel]
 packages = ["tokenjam"]
-artifacts = ["incidents"]
+
+# Ship the Agent Incident Library (`tj demo`) scenarios INSIDE the package so
+# they reach pip/pipx installs (#291). The source stays at repo-root `incidents/`
+# (the documented layout), but the wheel gets them at `tokenjam/incidents/<slug>/`
+# — `incidents/` is outside the `tokenjam/` package, so it is never wheeled on
+# its own. cmd_demo._discover_scenarios() resolves this packaged path first, with
+# a repo-root fallback for the dev tree.
+[tool.hatch.build.targets.wheel.force-include]
+"incidents" = "tokenjam/incidents"
 
 [tool.ruff]
 line-length = 100

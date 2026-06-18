@@ -269,6 +269,18 @@ class _ReadOnlyDB:
         from tokenjam.core.db import DuckDBBackend
         return DuckDBBackend.get_completed_sessions(self, agent_id, limit)
 
+    def _decision_where(self, filters):
+        from tokenjam.core.db import DuckDBBackend
+        return DuckDBBackend._decision_where(self, filters)
+
+    def get_policy_decisions(self, filters):
+        from tokenjam.core.db import DuckDBBackend
+        return DuckDBBackend.get_policy_decisions(self, filters)
+
+    def get_savings_entries(self, filters):
+        from tokenjam.core.db import DuckDBBackend
+        return DuckDBBackend.get_savings_entries(self, filters)
+
 
 # ---------------------------------------------------------------------------
 # Handler functions — called by @mcp.tool() wrappers and directly in tests
@@ -933,6 +945,40 @@ def _tool_open_dashboard(config) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Enforcement-plane policy tools (#223). Read-only, suggest-mode, unvalidated.
+# The MCP layer NEVER bypasses the api-only / pricing-mode invariants — it only
+# reports what the gated, suggest-mode engine already recorded. In DB mode it
+# reads via the read-only connection; when tj serve holds the lock it reads the
+# /api/v1/policy/* routes. `db.conn is None` distinguishes HTTP mode.
+# ---------------------------------------------------------------------------
+
+def _tool_get_policy_status(db, config, limit: int = 20) -> dict:
+    if config is None:
+        return _no_config()
+    if getattr(db, "conn", None) is None:  # HTTP mode
+        return _http_get("/api/v1/policy/status", {"limit": limit})
+    from tokenjam.proxy.recommend import policy_status
+    return policy_status(db, config, limit=limit)
+
+
+def _tool_get_savings_summary(db, since: str | None = None) -> dict:
+    if getattr(db, "conn", None) is None:  # HTTP mode
+        return _http_get("/api/v1/policy/savings", {"since": since})
+    from tokenjam.proxy.audit import reconcile_savings
+    from tokenjam.utils.time_parse import parse_since
+    return reconcile_savings(db, since=parse_since(since) if since else None).to_dict()
+
+
+def _tool_suggest_policies(db, config) -> dict:
+    if config is None:
+        return _no_config()
+    if getattr(db, "conn", None) is None:  # HTTP mode
+        return _http_get("/api/v1/policy/suggestions")
+    from tokenjam.proxy.recommend import suggest_policies
+    return suggest_policies(db, config)
+
+
+# ---------------------------------------------------------------------------
 # FastMCP tool registrations
 # ---------------------------------------------------------------------------
 
@@ -1289,5 +1335,66 @@ def open_dashboard() -> dict:
     """
     try:
         return _tool_open_dashboard(_config)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def get_policy_status(limit: int = 20) -> dict:
+    """
+    Return the TokenJam enforcement-plane policy status: the defined policies
+    (`[[policies]]`) and recent policy decisions recorded by the proxy. Use this
+    when the user asks what policies are active, what the proxy has been deciding,
+    or whether a policy would have blocked/modified traffic.
+
+    SUGGEST MODE ONLY: every decision is what a policy WOULD do — nothing is
+    enforced. Policies are `unvalidated` (there is no certification engine in the
+    open tree). Never describe a decision as enforced or validated-safe.
+    """
+    if _ro_db is None:
+        return _no_config()
+    try:
+        return _tool_get_policy_status(_ro_db, _config, limit)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def get_savings_summary(since: str | None = None) -> dict:
+    """
+    Return the policy savings meter: the ESTIMATED-RECOVERABLE amount these
+    policies WOULD have recovered if enforced, reconciled against actual spend
+    (the same source `tj cost` reads). Use this when the user asks how much the
+    policies could save or what the proxy's cost impact would be.
+
+    CRITICAL: this is NOT realized savings. Suggest mode enforces nothing, so
+    `realized` is always false and every figure is "estimated recoverable" /
+    "would-have-saved" — NEVER present it as money saved. Dollar figures are
+    api-only; the result is `unvalidated`. `since` accepts '7d', '30d', etc.
+    """
+    if _ro_db is None:
+        return _no_config()
+    try:
+        return _tool_get_savings_summary(_ro_db, since)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@mcp.tool()
+def suggest_policies() -> dict:
+    """
+    Recommend enforcement-plane policies from the user's actual usage — e.g. a
+    `budget_cap` ceiling for an api-billed provider that has cycle spend but no
+    ceiling configured. Use this when the user asks what policies they should add
+    or how to start using the proxy.
+
+    These are SUGGESTIONS in suggest mode — a suggested ceiling is a starting
+    point to review, not validated-safe, and adding a policy enforces nothing.
+    Dollar suggestions are api-only.
+    """
+    if _ro_db is None:
+        return _no_config()
+    try:
+        return _tool_suggest_policies(_ro_db, _config)
     except Exception as e:
         return {"error": str(e)}

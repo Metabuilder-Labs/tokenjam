@@ -1,12 +1,15 @@
 """
-`tj policy` — read-only preview of the unified policy surface.
+`tj policy` — read-only view of the unified + enforcement-plane policy surface.
 
-This sprint ships `tj policy list` only: a consolidated view of existing
-alerts / drift / schema / budget / sensitive-actions configuration under
-the unified "policy" framing. The underlying config structure is NOT
-migrated — each row points back to the TOML section it was read from.
+`tj policy list` consolidates existing alerts / drift / schema / budget /
+sensitive-actions configuration under the unified "policy" framing AND the
+data-driven `[[policies]]` enforcement-plane policies (#220) the proxy engine
+loads. Each row points back to the TOML section it was read from.
 
-`tj policy add | edit | apply | remove | test` land next sprint.
+`tj policy decisions` shows recent policy decisions (what each policy WOULD do)
+from a running `tj serve` proxy.
+
+`tj policy add | edit | apply | remove | test` remain out of scope this sprint.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import click
+from rich.markup import escape
 
 from tokenjam.core.config import (
     AgentConfig,
@@ -23,15 +27,24 @@ from tokenjam.core.config import (
     BudgetConfig,
     CaptureConfig,
     DriftConfig,
+    PolicyConfig,
     ProviderBudget,
     TjConfig,
 )
+from tokenjam.proxy.engine import UNVALIDATED_LABEL
 from tokenjam.utils.formatting import console
 
 
 PREVIEW_NOTE = (
     "Note: this is a read-only preview. The unified "
     "`tj policy add|edit|apply` surface lands next sprint."
+)
+
+# Every OSS enforcement-plane policy runs unvalidated — there is no certification
+# engine in the open tree, so a suggestion is never implied to be validated safe.
+UNVALIDATED_NOTE = (
+    f"Enforcement-plane policies ([[policies]]) run '{UNVALIDATED_LABEL}' "
+    "(suggest mode only — they record what they WOULD do; nothing is enforced)."
 )
 
 
@@ -62,12 +75,15 @@ def cmd_policy_list(ctx: click.Context, output_json_flag: bool) -> None:
     output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
 
     rows = _collect_rows(config)
+    has_engine_policies = bool(config.policies)
 
     if output_json:
-        payload = {
+        payload: dict[str, Any] = {
             "policies": [r.to_dict() for r in rows],
             "note": PREVIEW_NOTE,
         }
+        if has_engine_policies:
+            payload["unvalidated_note"] = UNVALIDATED_NOTE
         click.echo(json.dumps(payload, indent=2))
         return
 
@@ -77,7 +93,6 @@ def cmd_policy_list(ctx: click.Context, output_json_flag: bool) -> None:
         console.print(f"[dim]{PREVIEW_NOTE}[/dim]")
         return
 
-    from rich.markup import escape
     from rich.table import Table
 
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
@@ -90,18 +105,186 @@ def cmd_policy_list(ctx: click.Context, output_json_flag: bool) -> None:
 
     console.print(table)
     console.print()
+    if has_engine_policies:
+        console.print(f"[yellow]{escape(UNVALIDATED_NOTE)}[/yellow]")
     console.print(f"[dim]{PREVIEW_NOTE}[/dim]")
+
+
+def _fetch_proxy_json(config: TjConfig, path: str) -> dict | None:
+    """GET a tj-internal read endpoint from the running proxy (None if down).
+
+    The proxy keeps recent decisions in memory, so `tj policy decisions` reads
+    them from the live `tj serve` proxy. Best-effort: any failure (proxy not
+    running, connection refused) returns None and the caller renders a hint.
+    """
+    import httpx
+    url = f"http://{config.proxy.host}:{config.proxy.port}{path}"
+    try:
+        resp = httpx.get(url, timeout=2.0)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:  # noqa: BLE001 — proxy may simply be down
+        return None
+    return None
+
+
+def _read_decisions_from_db(config: TjConfig, since, limit: int):
+    """Read PERSISTED decisions + savings from the DB (#221).
+
+    Returns (decisions, savings_dict) or None when the DB can't be opened (e.g.
+    `tj serve` holds the write lock) so the caller falls back to the live proxy.
+    """
+    from tokenjam.core.db import open_db
+    from tokenjam.core.models import PolicyDecisionFilters
+    from tokenjam.proxy.audit import decision_to_display_dict, reconcile_savings
+    try:
+        db = open_db(config.storage)
+    except Exception:  # noqa: BLE001 — locked / missing → caller falls back
+        return None
+    try:
+        recs = db.get_policy_decisions(PolicyDecisionFilters(since=since, limit=limit))
+        savings = reconcile_savings(db, since=since).to_dict()
+        return [decision_to_display_dict(r) for r in recs], savings
+    finally:
+        db.close()
+
+
+@cmd_policy.command("decisions")
+@click.option("--json", "output_json_flag", is_flag=True,
+              help="Emit machine-readable JSON.")
+@click.option("--limit", default=20, show_default=True,
+              help="Max number of recent decisions to show.")
+@click.option("--since", default=None,
+              help="Window for the savings summary (e.g. 7d, 30d).")
+@click.pass_context
+def cmd_policy_decisions(ctx: click.Context, output_json_flag: bool, limit: int,
+                         since: str | None) -> None:
+    """Show recent persisted policy decisions + the estimated-recoverable meter."""
+    config: TjConfig = ctx.obj["config"]
+    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+
+    since_dt = None
+    if since:
+        from tokenjam.utils.time_parse import parse_since
+        since_dt = parse_since(since)
+
+    # Persisted DB read is the richer source (history + savings). If the DB is
+    # locked by a running daemon, fall back to the live proxy's in-memory ring.
+    db_result = _read_decisions_from_db(config, since_dt, limit)
+    savings = None
+    source = "db"
+    if db_result is not None:
+        decisions, savings = db_result
+    else:
+        source = "proxy"
+        payload = _fetch_proxy_json(config, "/__tj/policy/decisions")
+        raw = (payload or {}).get("decisions", [])
+        # Normalise the live-proxy envelope shape to the display shape.
+        decisions = [{
+            "ts": d.get("ts", ""), "provider": d.get("provider", ""),
+            "path": d.get("path", ""),
+            "would_action": (d.get("policy") or {}).get("overall_action", "-"),
+            "policy_name": ", ".join(
+                e.get("policy_name", "") for e in (d.get("policy") or {}).get("evaluations", [])
+            ) or None,
+            "label": (d.get("policy") or {}).get("label", UNVALIDATED_LABEL),
+        } for d in raw][-limit:]
+        if payload is None:
+            decisions = None  # signals "unreachable" below
+
+    if output_json:
+        click.echo(json.dumps({
+            "source": source,
+            "decisions": decisions or [],
+            "savings": savings,
+            "label": UNVALIDATED_LABEL,
+        }, indent=2))
+        return
+
+    if decisions is None:
+        console.print(
+            "[dim]No persisted decisions and no running proxy reachable at "
+            f"http://{config.proxy.host}:{config.proxy.port}. "
+            "Start it with `tj proxy enable` + `tj serve`.[/dim]"
+        )
+        return
+    if not decisions:
+        console.print("[dim]No policy decisions recorded yet "
+                      "(suggest mode — eligible api traffic only).[/dim]")
+        console.print()
+        if savings is not None:
+            _print_savings_summary(savings)
+        console.print(f"[yellow]{escape(UNVALIDATED_NOTE)}[/yellow]")
+        return
+
+    from rich.table import Table
+
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    for col in ("TIME", "PROVIDER", "PATH", "WOULD-DO", "POLICY", "LABEL"):
+        table.add_column(col, style="dim" if col in ("TIME", "LABEL") else None)
+    for d in decisions:
+        table.add_row(
+            escape(str(d.get("ts", ""))[:19]),
+            escape(str(d.get("provider") or "")),
+            escape(str(d.get("path") or "")),
+            escape(str(d.get("would_action") or "-")),
+            escape(str(d.get("policy_name") or "-")),
+            escape(str(d.get("label", UNVALIDATED_LABEL))),
+        )
+    console.print(table)
+    console.print()
+    if savings is not None:
+        _print_savings_summary(savings)
+    console.print(f"[yellow]{escape(UNVALIDATED_NOTE)}[/yellow]")
+
+
+def _print_savings_summary(savings: dict) -> None:
+    """Render the savings meter — always 'estimated recoverable', NEVER 'saved'."""
+    est = savings.get("estimated_recoverable_usd", 0.0)
+    spend = savings.get("actual_spend_usd", 0.0)
+    pct = savings.get("estimated_recoverable_pct")
+    pct_str = f" ({pct:.1f}% of actual spend)" if pct is not None else ""
+    console.print(
+        f"[bold]Estimated recoverable:[/bold] ~${est:.4f}{pct_str} "
+        f"vs actual spend ${spend:.4f} "
+        f"[dim]({savings.get('decisions', 0)} decisions, label={savings.get('label')})[/dim]"
+    )
+    console.print(f"[dim]{escape(savings.get('disclaimer', ''))}[/dim]")
 
 
 def _collect_rows(config: TjConfig) -> list[PolicyRow]:
     rows: list[PolicyRow] = []
 
+    rows.extend(_policy_engine_rows(config.policies))
     rows.extend(_alerts_rows(config.alerts))
     rows.extend(_defaults_budget_rows(config.defaults.budget))
     rows.extend(_provider_budget_rows(config.budgets))
     rows.extend(_agents_rows(config.agents))
     rows.extend(_capture_rows(config.capture))
 
+    return rows
+
+
+def _policy_engine_rows(policies: list[PolicyConfig]) -> list[PolicyRow]:
+    """Rows for the data-driven `[[policies]]` enforcement-plane policies (#220).
+
+    Each carries the explicit `unvalidated` label so the surface never implies a
+    policy has been certified safe.
+    """
+    rows: list[PolicyRow] = []
+    for idx, p in enumerate(policies):
+        parts = [f"kind={p.kind}", f"mode={p.mode}", f"label={UNVALIDATED_LABEL}"]
+        if not p.enabled:
+            parts.append("enabled=false")
+        if p.target_provider:
+            parts.append(f"provider={p.target_provider}")
+        if p.target_agent:
+            parts.append(f"agent={p.target_agent}")
+        rows.append(PolicyRow(
+            f"policies.{p.name}",
+            ", ".join(parts),
+            f"[[policies]][{idx}]",
+        ))
     return rows
 
 

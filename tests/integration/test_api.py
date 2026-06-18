@@ -11,7 +11,6 @@ from unittest.mock import patch
 from tokenjam.api.app import create_app
 from tokenjam.core.config import (
     AgentConfig,
-    AlertsConfig,
     ApiAuthConfig,
     ApiConfig,
     BudgetConfig,
@@ -209,6 +208,18 @@ async def test_get_traces_returns_list(client):
     data = resp.json()
     assert "traces" in data
     assert len(data["traces"]) >= 1
+
+
+async def test_get_traces_returns_total_count_for_pagination(db, client):
+    for idx in range(3):
+        db.insert_span(make_llm_span(agent_id="a", trace_id=f"trace-{idx}"))
+
+    resp = await client.get("/api/v1/traces", params={"agent_id": "a", "limit": 2, "offset": 0})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 2
+    assert data["total_count"] == 3
 
 
 async def test_get_traces_filter_by_agent_id(client):

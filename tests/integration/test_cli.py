@@ -513,9 +513,11 @@ def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
     assert cfg.agents[agent_id].project == "aquanode"
 
 
-def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
-    """Without --project, onboard prompts for a project name and stores it as
-    the agent's configured project (not in project settings.json)."""
+def test_onboard_claude_code_defaults_project_when_flag_absent(runner, tmp_path):
+    """Without --project, onboard does NOT prompt for a project name — the
+    plan-first flow (#240) keeps "How do you pay?" the opener. The project
+    defaults to the derived repo/cwd name; --project (covered above) overrides
+    it non-interactively."""
     from tokenjam.core.config import load_config
 
     fake_home = tmp_path / "home"
@@ -525,12 +527,12 @@ def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        # First prompt is the project name; budget is supplied via flag.
+        # No input fed: there is no interactive project prompt to satisfy.
         result = runner.invoke(cli, [
             "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
             "--plan", "max_20x",
-        ], input="myproject\n")
-        assert result.exit_code == 0
+        ])
+        assert result.exit_code == 0, result.output
         env = json.loads(
             (Path(cwd) / ".claude" / "settings.json").read_text()
         ).get("env", {})
@@ -538,7 +540,9 @@ def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
 
     cfg = load_config(str(fake_home / ".config" / "tj" / "config.toml"))
     agent_id = next(k for k in cfg.agents if k.startswith("claude-code-"))
-    assert cfg.agents[agent_id].project == "myproject"
+    # Project defaulted to the derived name (the agent_id suffix), never blank.
+    assert cfg.agents[agent_id].project
+    assert cfg.agents[agent_id].project == agent_id[len("claude-code-"):]
 
 
 def test_onboard_claude_code_removes_existing_resource_attrs(runner, tmp_path):
@@ -692,6 +696,18 @@ def test_budget_show_displays_defaults(runner, db, config):
     assert "5.00" in result.output  # fixture has daily_usd=5.0
 
 
+def test_budget_show_json_outputs_valid_budget_rows(runner, db, config):
+    """tj budget --json emits machine-readable rows."""
+    result = _invoke(runner, db, config, ["budget", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    test_agent = next(r for r in data if r["agent_id"] == "test-agent")
+    assert data[0]["scope"] == "defaults"
+    assert test_agent["daily_usd"] == 5.0
+    assert test_agent["effective_daily_usd"] == 5.0
+
+
 def test_budget_set_global_writes_config(runner, db, config, tmp_path):
     """tj budget --daily updates global defaults and writes config."""
     config_file = tmp_path / "config.toml"
@@ -707,6 +723,29 @@ def test_budget_set_global_writes_config(runner, db, config, tmp_path):
     assert mock_write.called
     saved_config = mock_write.call_args[0][0]
     assert saved_config.defaults.budget.daily_usd == 8.0
+
+
+def test_budget_set_json_outputs_updated_values(runner, db, config, tmp_path):
+    """tj budget --daily --json emits the updated budget values."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("")
+
+    with patch("tokenjam.cli.main.load_config", return_value=config), \
+         patch("tokenjam.cli.main.open_db", return_value=db), \
+         patch("tokenjam.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tokenjam.cli.cmd_budget.write_config"):
+        result = runner.invoke(cli, ["budget", "--daily", "8.0", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data == {
+        "scope": "defaults",
+        "agent_id": None,
+        "daily_usd": 8.0,
+        "session_usd": None,
+        "effective_daily_usd": 8.0,
+        "effective_session_usd": None,
+    }
 
 
 def test_budget_set_agent_writes_config(runner, db, config, tmp_path):

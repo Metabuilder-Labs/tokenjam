@@ -12,6 +12,7 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.integrations._request_capture import record_full_request_gemini
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class GeminiIntegration:
                 GenAIAttributes.REQUEST_MODEL,
                 getattr(self_model, "model_name", "unknown"),
             )
+            record_full_request_gemini(span, kwargs)
             try:
                 response = integration._original_generate(self_model, *args, **kwargs)
                 meta = getattr(response, "usage_metadata", None)
@@ -81,6 +83,7 @@ class GeminiIntegration:
                     GenAIAttributes.REQUEST_MODEL,
                     getattr(self_model, "model_name", "unknown"),
                 )
+                record_full_request_gemini(span, kwargs)
                 try:
                     response = await integration._original_generate_async(
                         self_model, *args, **kwargs,

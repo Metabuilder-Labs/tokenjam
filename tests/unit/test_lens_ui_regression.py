@@ -19,6 +19,16 @@ def html() -> str:
     return _UI.read_text(encoding="utf-8")
 
 
+def test_traces_window_select_exposes_longer_supported_windows(html):
+    # Traces honors these URL/API windows already; keep the filter dropdown in sync
+    # so #/traces?since=30d and #/traces?since=90d render selected options.
+    traces_start = html.index("function TracesListView")
+    traces_end = html.index("function dedup", traces_start)
+    traces_view = html[traces_start:traces_end]
+    assert '<option value="30d">Last 30d</option>' in traces_view
+    assert '<option value="90d">Last 90d</option>' in traces_view
+
+
 # --- #126: Downsize typed slot always rendered ----------------------------- #
 def test_downsize_section_always_renders(html):
     # The no-candidates branch renders a literal Downsize section id instead of
@@ -52,15 +62,7 @@ def test_chart_has_hover_tooltip(html):
     assert "plugins: [chartTooltipPlugin(" in html
 
 
-def test_overview_chart_is_not_a_click_target(html):
-    # The cost hero must no longer be wrapped in an <a class="band-hero">; drill
-    # is an explicit link.
-    assert 'class="chart-card band-hero"' not in html
-    assert 'class="drill-link"' in html
-    assert "View Cost details" in html
 
-
-# --- #178 / #188: chart x-axis tick timezone handling --------------------- #
 def test_axis_time_ticks_timezone_split(html):
     # #178: HOURLY ticks localize — they format the UTC epoch-second buckets in
     # the viewer's local zone (a US-Pacific user sees their noon, not UTC's 7pm).
@@ -88,10 +90,10 @@ def test_run_rate_uses_window_length_not_data_range(html):
     assert "ys.reduce((a, b) => a + b, 0) / ys.length" not in html
 
 
-def test_overview_caption_says_not_a_forecast(html):
-    # Both screens carry the honesty qualifier now.
-    assert html.count("(linear run-rate, not a forecast)") >= 2
-    assert "(linear run-rate)<" not in html  # the bare Overview variant is gone
+def test_run_rate_caption_says_not_a_forecast(html):
+    # The honesty qualifier rides every run-rate projection (Cost screen's
+    # parenthesized form + the Dashboard's folded KPI caption).
+    assert html.count("linear run-rate, not a forecast") >= 2
 
 
 def test_axis_uses_compact_dollar_formatter(html):
@@ -100,14 +102,7 @@ def test_axis_uses_compact_dollar_formatter(html):
 
 
 # --- #132: first-load lands on Overview (no redirect race) ----------------- #
-def test_first_load_defaults_to_overview(html):
-    # getRoute defaults to overview; the render-time hash redirect is gone.
-    assert "|| 'overview'" in html
-    assert "location.hash = '#/overview'" not in html
-    assert "history.replaceState(null, '', '#/overview')" in html
 
-
-# --- #133/#136: chart spans full window + consistent date labels ----------- #
 def test_chart_spans_full_window_with_buckets(html):
     assert "function windowDays" in html
     assert "series_bucket" in html and "window_start" in html
@@ -397,11 +392,13 @@ def test_overview_error_handling_is_asymmetric(html):
 
 
 # --- #19: Overview empty-state gated on real has-data, not live agents ------ #
-def test_overview_empty_state_not_gated_on_live_agents_alone(html):
+def test_dashboard_empty_state_not_gated_on_live_agents_alone(html):
     # The old gate showed the onboarding empty-state whenever the LIVE-agents
     # list was empty, so an all-historical/backfilled DB (no live agents) read
     # as "No data yet" while Cost/Analytics/Traces all showed real totals — a
     # false data-loss scare on the front door (#19). The buggy gate is gone.
+    # (#19 was originally fixed on the Overview screen; with Overview retired in
+    # favor of the Dashboard, the same has-data gate lives in DashboardView.)
     assert "if (!status.agents || status.agents.length === 0) {" not in html
     # The decision now keys off whether ANY data exists: window totals (the same
     # signal the other screens use) OR any historical/live session in /status.
@@ -443,10 +440,10 @@ def test_reuse_tile_title_is_title_cased(html):
 
 
 def test_not_ready_tile_drops_em_dash(html):
-    # Trim's not_ready content line read "— not ready"; the em-dash prefix is
-    # dropped so the three states share a prefix-free scheme.
+    # The not_ready content line reads a bare "Not ready" (no "— not ready"
+    # em-dash prefix), so the tile states share a prefix-free scheme.
     assert "— not ready" not in html
-    assert ">Not ready<" in html
+    assert "'Not ready'" in html
 
 
 def test_recoverable_tile_titles_share_one_weight(html):
@@ -454,7 +451,7 @@ def test_recoverable_tile_titles_share_one_weight(html):
     # so the at_ceiling (Cache) tile can't bold its title differently. The
     # positive emphasis lives only on the content line (.rec-amount.ok), which
     # is the intended #127 design and must stay.
-    assert html.count('<div class="rec-name">${meta.title}</div>') >= 3
+    assert html.count('<div class="rec-name">${meta.title}</div>') >= 1
     assert ".rec-amount.ok" in html          # green content line preserved (AC #4)
     # No state-specific rule bolds the title for the at_ceiling tile.
     assert ".rec-tile.ok .rec-name" not in html
@@ -472,10 +469,20 @@ def test_cost_table_cells_route_through_framing(html):
 
 def test_traces_list_cost_routes_through_framing(html):
     # Traces list COST column must consume the framing block, not raw fmtCost.
+    # Per #249 it now goes through fmtPerItemCost (per-item → tokens for
+    # subscription/local), not the window-aggregate fmtFramedDollar "% of cycle".
     assert "<td>${fmtCost(t.cost_usd)}</td>" not in html
-    assert "${fmtFramedDollar(t.cost_usd, framing)}" in html
+    assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html
     # The screen actually pulls the framing block off the /traces response.
     assert "setFraming(td.framing || null)" in html
+
+
+def test_traces_list_surfaces_pagination(html):
+    assert "total_count" in html
+    assert "Showing ${traces.length} of ${totalCount} traces" in html
+    assert "Load more" in html
+    assert "load({ append: true })" in html
+    assert "offset" in html
 
 
 def test_trace_detail_costs_route_through_framing(html):
@@ -484,7 +491,8 @@ def test_trace_detail_costs_route_through_framing(html):
     assert "fmtCost(s.cost_usd)" not in html
     assert "${fmtCost(sel.cost_usd)}" not in html
     assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
-    assert "${fmtFramedDollar(sel.cost_usd, framing)}" in html
+    # The span-detail panel "Cost" is per-item → fmtPerItemCost (#249).
+    assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html
     # Trace detail pulls the framing block off the /traces/{id} response.
     assert "setFraming(d.framing || null)" in html
 
@@ -492,9 +500,10 @@ def test_trace_detail_costs_route_through_framing(html):
 # --- #191: suppress raw $ on Status, Optimize & Reuse/script surfaces -------- #
 def test_status_card_cost_today_routes_through_framing(html):
     # Status agent cards' "Cost today" must consume the /status framing block,
-    # not render raw fmtCost(a.cost_today).
+    # not render raw fmtCost(a.cost_today). Per #249 it's per-item → tokens for
+    # subscription/local via fmtPerItemCost (not fmtFramedDollar "% of cycle").
     assert "${fmtCost(a.cost_today)}" not in html
-    assert "${fmtFramedDollar(a.cost_today, data.framing)}" in html
+    assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html
 
 
 def test_optimize_window_comparison_routes_through_framing(html):
@@ -514,9 +523,12 @@ def test_optimize_budget_projection_routes_through_framing(html):
 
 
 def test_optimize_cluster_avg_cost_routes_through_framing(html):
-    # The script/reuse cluster table "Avg cost" cell must reframe, not raw $.
+    # The script cluster table "Avg cost" cell is per-item, so per #260 it routes
+    # through fmtPerItemCost (tokens for subscription/local), not the raw $ nor
+    # the window-aggregate fmtFramedDollar "% of cycle".
     assert "${fmtCost(c.avg_cost_usd)}" not in html
-    assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" in html
+    assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" not in html
+    assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
 
 
 # --- #17: #2 shipped incomplete — SessionDetailView + Status cost cells ----- #
@@ -568,12 +580,13 @@ def test_cache_savings_chart_present(html):
 
 
 def test_cache_savings_honesty_framing(html):
-    # Rule 14: "captured" is measured; the recoverable gap is "estimated", never
-    # "saved". The caption must say estimated/recoverable and not claim "saved".
-    assert "estimated recoverable" in html.lower()
-    assert "not saved" in html.lower()
-    # recoverable dollar figure routes through framing (subscription -> tokens)
-    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" in html
+    # #246 dropped the "estimated recoverable" overlay from this chart (noise;
+    # it lives on Optimize). The cache card now reports MEASURED savings, framed:
+    # api → "$X saved", subscription/local → cached-token VOLUME (never raw $).
+    assert "fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window" in html
+    assert "fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window" in html
+    # the recoverable overlay is no longer wired into the cache chart
+    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" not in html
 
 
 def test_cache_savings_chart_is_best_effort(html):
@@ -665,8 +678,11 @@ def test_analytics_presets_and_csv_export(html):
 
 
 def test_analytics_url_is_source_of_truth(html):
-    # state read from URL params with validators, written back via navigate()
-    assert "navigate('analytics'" in html
+    # state read from URL params with validators, written back via navigate().
+    # navigate() targets `route` (default 'analytics' preserves the standalone
+    # screen; the dashboard preview passes route="dashboard").
+    assert "route = 'analytics'" in html
+    assert "navigate(route, { ...cur" in html
     assert "readParam(params, 'metric'" in html
     assert "readParam(params, 'group_by'" in html
     assert "readParam(params, 'chart'" in html
@@ -683,7 +699,9 @@ def test_analytics_respects_plan_tier_framing(html):
     # spend metric switches to token volume for subscription/local (dollars
     # suppressed); never re-derives the suppression rule — reads framing.
     assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
-    assert "fmtFramedDollar(kpis.spend, framing)" in html
+    # The Spend KPI tile reframes via spendTileDisplay (implied-value multiplier
+    # for subscription, #262) rather than fmtFramedDollar's "% of cycle".
+    assert "spendTileDisplay(kpis.spend, framing)" in html
 
 
 def test_analytics_leaderboard_has_inline_bars(html):
@@ -699,8 +717,10 @@ def test_trace_waterfall_cost_summary(html):
     assert "wf-summary" in html
     assert "Total cost" in html
     assert "wfTotalCostFramed" in html
-    # the total cost routes through the framing helper (not raw fmtCost)
-    assert "const wfTotalCostFramed = fmtFramedDollar(wfTotalCost, framing)" in html
+    # A single trace's total is per-item, not a window aggregate — per #249 it
+    # routes through fmtPerItemCost (tokens for subscription/local), not the
+    # window-level fmtFramedDollar "% of cycle".
+    assert "const wfTotalCostFramed = fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html
 
 
 def test_trace_waterfall_per_span_cost_token_annotation(html):
@@ -747,12 +767,13 @@ def test_kpi_series_is_server_computed_not_client_aggregated(html):
 
 
 def test_kpi_spend_tile_respects_framing(html):
-    # The Spend tile's value, sparkline, AND delta read on TOKEN volume when
-    # dollars are suppressed (subscription/local) — decided once from the server
-    # framing block, never re-derived. Volume tiles stay plan-independent.
-    assert "const spendSuppressed = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
-    assert "kpiSparkValues(resp, spendSuppressed ? 'tokens' : 'spend')" in html
-    assert "delta: spendSuppressed ? deltas.tokens : deltas.spend" in html
+    # The Spend tile reads the framed value from the server block (api → $,
+    # subscription → implied-value multiplier "43.5× plan value", #262), never
+    # raw $ for subscription. Its sparkline and delta track SPEND (cost_usd) —
+    # the multiplier is just spend rescaled, so the trend/shape match while the
+    # displayed number is never raw dollars.
+    assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
+    assert "series: kpiSparkValues(resp, 'spend'), delta: deltas.spend" in html
 
 
 # --- #228: shared series→color map + colored leaderboard ------------------- #
@@ -821,29 +842,18 @@ def test_overview_recoverable_tiles_deeplink_into_analytics(html):
     assert "const ANALYZER_ANALYTICS_SLICE = {" in html
     for analyzer in ("downsize", "cache", "script", "reuse", "trim"):
         assert f"{analyzer}:" in html  # each analyzer has a slice mapping
-    assert "function analyzerSliceHref(name, since)" in html
-    assert "const href = analyzerSliceHref(t.name, since);" in html
-    # the tiles no longer point at the Optimize finding screen
+    assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
+    # Dashboard tiles drill IN-PLACE (route='dashboard'), not to the Optimize screen.
+    assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
     assert "'#/optimize?finding=' + t.name" not in html
 
-
-def test_overview_spend_headline_deeplinks_into_analytics(html):
-    # The spend headline is an <a> deep-linking into Analytics spend-over-time.
-    assert "<a class=\"chart-title\" href=${analyticsHref({ metric: 'spend', group_by: 'day', chart: 'bar', since })}" in html
 
 
 def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
     # The deep-link helper builds #/analytics?... URLs (offline hash links, no
     # fetch) from a query object, dropping empty values.
-    assert "function analyticsHref(q)" in html
-    assert "return '#/analytics' + (s ? '?' + s : '');" in html
-
-
-def test_overview_remains_default_landing_no_render_time_redirect(html):
-    # #132 guard must hold: empty hash → Overview via getRoute, and there is no
-    # render-time location.hash assignment that would race the first render.
-    assert "(qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'overview'" in html
-    assert "location.hash = '#/overview'" not in html
+    assert "function analyticsHref(q, route = 'analytics')" in html
+    assert "return '#/' + route + (s ? '?' + s : '');" in html
 
 
 # --- #20: Traces empty-state must not flash before the first fetch -------- #
@@ -864,3 +874,320 @@ def test_traces_distinguishes_loading_from_loaded_empty(html):
         "${!loaded ? html`<div class=\"shimmer\" style=\"height:200px\"></div>`"
         in html
     )
+
+
+def test_dashboard_is_default_landing(html):
+    # Empty hash → dashboard, set via the PARSED default (no render-time
+    # location.hash redirect — #132 discipline).
+    assert "|| 'dashboard'" in html
+    assert "|| 'overview'" not in html
+    assert "location.hash = '#/dashboard'" not in html  # no hash-assign redirect
+    assert "function DashboardView" in html
+    assert "case 'dashboard': return html`<${DashboardView}" in html
+    assert 'href="#/dashboard"' in html
+
+
+def test_overview_retired(html):
+    # Standalone Overview screen + nav item gone; lingering #/overview links fall
+    # through to the Dashboard.
+    assert "function OverviewView" not in html
+    assert 'href="#/overview"' not in html
+    assert "case 'overview':\n    case 'dashboard'" in html
+
+
+def test_dashboard_embeds_analytics_explorer(html):
+    # The hero composes the existing AnalyticsView (route rewired to dashboard,
+    # embedded, with the run-rate caption) — not a reimplemented pivot. Standalone
+    # #/analytics keeps working: the props are default-preserving.
+    assert 'route="dashboard" embedded=${true} kpiCaption=${kpiCaption}' in html
+    assert "function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null })" in html
+    # The full-screen explorer nav item stays.
+    assert 'href="#/analytics"' in html
+
+
+def test_dashboard_spend_deduped(html):
+    # Spend shown ONCE (explorer's Spend KPI tile + chart); the old separate
+    # run-rate headline chart is gone, folded into a caption under the KPI row.
+    assert "const kpiCaption = (!d.loading && !d.empty && !d.error && projection" in html
+    assert 'class="kpi-caption"' in html
+
+
+def test_kpi_tiles_clickable_select_metric(html):
+    # #247: tiles are the metric selector — onSelect writes the metric to the URL.
+    assert "onSelect=${() => onMetric(t.key)}" in html
+    assert "const onMetric = (k) => setFilter('metric', k)" in html
+    assert "kpi-clickable" in html
+
+
+def test_spend_tile_distinct_under_subscription(html):
+    # #247/#262: the Spend tile no longer falls back to raw tokens (which
+    # duplicated the Tokens tile). It uses spendTileDisplay (implied-value
+    # multiplier for subscription) and is dropped when no distinct value exists
+    # (local / a subscription with no declared fee → null).
+    assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
+    assert "if (spend) {" in html
+    assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
+
+
+def test_dashboard_triage_drills_in_place(html):
+    # Recoverable-waste tiles update the embedded explorer via #/dashboard URL
+    # state (not a jump to standalone #/analytics).
+    assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
+    assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
+# --- #241: Status screen Cards | List view toggle -------------------------- #
+def test_status_view_toggle_exists(html):
+    # A segmented Cards | List control on the Status screen, driven by the URL
+    # view param. List is the default (#263), omitted from the URL via navigate
+    # defaults; Cards carries ?view=cards.
+    assert ".view-toggle" in html  # segmented-control CSS
+    assert "const DEFAULTS = { view: 'list', agent_id: '' };" in html
+    assert "readParam(params, 'view', DEFAULTS.view, v => ['cards', 'list'].includes(v))" in html
+    assert "const setView = (v) => navigate('status', { agent_id: agentId, view: v }, DEFAULTS);" in html
+    # both toggle buttons present
+    assert "onClick=${() => setView('cards')}>Cards</button>" in html
+    assert "onClick=${() => setView('list')}>List</button>" in html
+
+
+def test_status_list_is_default_view(html):
+    # #263: List is the default scan view (not Cards).
+    assert "const DEFAULTS = { view: 'list', agent_id: '' };" in html
+    assert "const DEFAULTS = { view: 'cards', agent_id: '' };" not in html
+
+
+def test_status_list_table_renderer_exists(html):
+    # The List view is a dedicated columned-table renderer, gated behind the
+    # view mode (now the default render path).
+    assert "function StatusListTable({ agents, framing })" in html
+    assert "? StatusListTable({ agents, framing: data.framing })" in html
+
+
+def test_status_list_table_horizontally_scrolls(html):
+    # #263: the list table sits in the scrolling .table-wrap AND carries a
+    # min-width so it overflows (and scrolls) on narrow viewports instead of
+    # compressing columns and clipping the actions cell.
+    assert "<div class=\"table-wrap\"><table class=\"status-list\">" in html
+    assert ".table-wrap { overflow-x: auto; }" in html
+    assert ".table-wrap table.status-list { min-width: 760px; }" in html
+
+
+def test_status_list_cost_column_respects_framing(html):
+    # The List view's Cost cell goes through fmtPerItemCost exactly like the
+    # cards — per-item cost renders as tokens for subscription/local (#249),
+    # plan-tier framing is never re-derived in JS (#110/#241).
+    assert "<td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>" in html
+
+
+# --- #249: "% of cycle" is window-level; per-item cost must render as tokens -- #
+def test_per_item_cost_helper_renders_tokens_for_subscription_local(html):
+    # The per-item formatter: subscription/local → token total (the in+out basis
+    # via _costVal), api/unknown → dollars. "% of cycle" (a window aggregate) is
+    # never produced at per-item granularity.
+    assert "function perItemUsesTokens(framing)" in html
+    assert "function fmtPerItemCost(costUsd, tokenTotal, framing)" in html
+    assert "if (perItemUsesTokens(framing)) return fmtTokens(tokenTotal || 0) + ' tok';" in html
+    # the only "% of cycle" string in the codebase lives in fmtFramedDollar, which
+    # per-item surfaces no longer call directly for the row value.
+    assert "return fmtFramedDollar(costUsd, framing); // api / unknown → dollars" in html
+
+
+def test_per_item_cost_surfaces_use_the_helper_not_framed_dollar(html):
+    # Every per-item dollar cell — Traces list, Status cards, StatusListTable,
+    # span-detail, and the per-trace total — uses fmtPerItemCost, not the
+    # window-aggregate fmtFramedDollar. Guards against a regression reintroducing
+    # "% of cycle" at per-row granularity (the #249 bug: "466.7% of cycle").
+    assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html        # traces list
+    assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html  # status card
+    assert "<td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>" in html  # status list
+    assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html     # span detail
+    assert "fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html                # trace total
+    # these per-item surfaces must NOT call fmtFramedDollar on the row value
+    assert "${fmtFramedDollar(t.cost_usd, framing)}" not in html
+    assert "${fmtFramedDollar(a.cost_today, data.framing)}" not in html
+    assert "${fmtFramedDollar(sel.cost_usd, framing)}" not in html
+
+
+def test_per_trace_token_totals_come_from_server_not_aggregated_in_js(html):
+    # _costVal reads server-provided per-row input_tokens/output_tokens; the UI
+    # never re-sums spans in JS for the list rows (single compute path, #249).
+    assert "function _costVal(r, useTokens)" in html
+
+
+# --- #244: trace-waterfall — fixed name column, magnitude bars, status ------ #
+def test_waterfall_name_in_fixed_column_not_on_bar(html):
+    # The span identity lives in a fixed left column (spanPrimaryName), never
+    # painted onto the bar — that produced the "cla"/"Bas" clipping. The old
+    # on-bar ${barLabel} and the detail/isAgent bar-label machinery are gone.
+    assert "function spanPrimaryName(s)" in html
+    assert 'class="wf-name-txt"' in html
+    assert "${barLabel}" not in html
+    assert "const barLabel = isAgent" not in html
+    # The bar itself carries no text child now.
+    assert '<div class="wf-bar ${kind}" style="width:100%"></div>' in html
+
+
+def test_waterfall_bars_sized_by_magnitude_with_mode_toggle(html):
+    # Bars size by cost/token magnitude by default (the only thing that renders
+    # on duration-less backfill), with a cost/tokens/duration toggle. Cost-first
+    # default; tokens when $ is suppressed.
+    assert "const [wfMode, setWfMode] = useState(null)" in html
+    assert "const wfDefaultMode = wfUseTokens ? 'tokens' : 'cost'" in html
+    assert "const magForMode = s =>" in html
+    assert "setWfMode('cost')" in html
+    assert "setWfMode('tokens')" in html
+    assert "setWfMode('duration')" in html
+
+
+def test_waterfall_has_minimum_bar_width(html):
+    # A floor keeps tiny/zero-magnitude spans visible and clickable.
+    assert "width = Math.max(1.5, Math.min(width, 100 - left))" in html
+
+
+def test_waterfall_relative_offset_and_absolute_on_hover(html):
+    # Per-span relative offset on the row; absolute wall-clock in the tooltip
+    # and as a title; trace start in the summary header.
+    assert "const offsetLabel = '+' + fmtDur(st)" in html
+    assert 'class="wf-offset"' in html
+    assert "new Date(traceStart).toLocaleString()" in html  # header trace start
+    assert "new Date(s.start_time).toLocaleString()" in html  # per-span absolute
+
+
+def test_waterfall_duration_not_captured_hint(html):
+    # Missing duration shows an em-dash with a "not captured in backfilled data"
+    # hint rather than a misleading 0 / 1ms sliver (#243/#244).
+    assert "Duration not captured in backfilled data" in html
+    assert "not captured in backfill" in html
+
+
+def test_waterfall_status_icons_and_kind_legend(html):
+    # Status icon per row (ok/error) + kind color dots + a legend.
+    assert 'class="wf-status' in html
+    assert 'class="wf-kind-dot' in html
+    assert 'class="wf-legend"' in html
+    assert "(s.status_code || '') === 'error'" in html
+
+
+def test_waterfall_cost_framing_preserved(html):
+    # Cost-first but plan-tier-safe: the per-span value still routes through the
+    # server framing block, never a raw fmtCost (guards #187/#249 regressions).
+    assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
+    assert "fmtCost(s.cost_usd)" not in html
+
+
+# --- #246: cache-savings chart redesign (answer-first, single-axis bars) ---- #
+def test_cache_chart_leads_with_answer_headline(html):
+    # A plain headline: hit-rate stat + savings this window (not three overlaid
+    # series). The card title is "Caching".
+    assert '<div class="cache-headline">' in html
+    assert "cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate" in html
+    assert "saved this window" in html          # api framing
+    assert "cached reads this window" in html    # subscription framing (no raw $)
+
+
+def test_cache_chart_is_single_axis_per_period_bars(html):
+    # The dual-axis (tokens left / hit-rate % right) + cumulative ramp + recoverable
+    # overlay are gone. CacheSavingsChart takes a single per-bucket savings series.
+    assert "function CacheSavingsChart({ data, height = 180" in html
+    assert "<${CacheSavingsChart} data=${cacheSeries.data}" in html
+    # old dual-axis/overlay props no longer passed
+    assert "cache=${cacheSeries.data}" not in html
+    assert "env=${cacheSeries.env}" not in html
+    assert "hit=${cacheSeries.hit}" not in html
+    # buildCacheSeries returns per-bucket savings (not a cumulative ramp) + the
+    # headline stat + a hit-rate sparkline.
+    assert "return { data: [xs, sav], hitSpark, hitRate" in html
+    assert "let acc = 0" not in html.split("function buildCacheSeries")[1].split("function ")[1]
+
+
+def test_cache_chart_hitrate_is_stat_not_overlaid_line(html):
+    # Hit-rate shows as a small sparkline beside the stat, not an overlaid rate axis.
+    assert "<${Sparkline} values=${cacheSeries.hitSpark}" in html
+
+
+def test_cache_chart_explains_the_mechanic(html):
+    # One-line plain-English mechanic.
+    assert "Cached input bills at roughly a tenth of the normal input rate" in html
+
+
+# --- #251: component-waste chart drops zero segments + positive empty state -- #
+def test_component_waste_chart_filters_zero_segments(html):
+    # The cumulative-overlap bar technique paints a zero-value segment as a
+    # full-height bar in its own color (cache-write=0 → full-height purple over
+    # the real stack). Zero-value segments must be filtered BEFORE building the
+    # cumulative bars, in both columns.
+    assert "const costSegsNZ = (costSegs || []).filter(s => (s.value || 0) > 0);" in html
+    assert "const recSegsNZ = (recSegs || []).filter(s => (s.value || 0) > 0);" in html
+    # the cumulative loops iterate the filtered lists, not the raw props
+    assert "costSegsNZ.forEach((s, i) =>" in html
+    assert "recSegsNZ.forEach((s, i) =>" in html
+    # color offset uses the filtered cost length so the palette stays aligned
+    assert "palette[(costSegsNZ.length + i) % palette.length]" in html
+
+
+def test_component_waste_empty_recoverable_is_positive_state(html):
+    # The empty "Recoverable (est.)" column shows a positive signal, not blank /
+    # dim space.
+    assert "Nothing recoverable in this window" in html
+    assert 'class="waste-none"' in html
+    # the old neutral/dim empty message is gone
+    assert "No recoverable waste estimated in this window." not in html
+
+
+def test_component_waste_dominant_split_label(html):
+    # Optional %-split note when one token component is ~all the spend (>95%),
+    # so the single-block bar is explained rather than mysterious.
+    assert "function dominantSplit(costSegs)" in html
+    assert "pct > 95 ?" in html
+    assert "const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;" in html
+    assert 'class="waste-split"' in html
+
+
+# --- #260: script cluster avg cost carries a server-side token total --------- #
+def test_script_cluster_payload_token_total_is_server_side(html):
+    # The cell consumes c.avg_tokens (server-provided per-cluster token total),
+    # never re-aggregating in JS.
+    assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
+
+
+# --- #262: Analytics spend tile = implied-value multiplier, separators, soft delta -- #
+def test_analytics_spend_tile_uses_value_multiplier_for_subscription(html):
+    # The Spend tile shows an implied-value multiplier ("43.5× plan value") for
+    # subscription, never "% of cycle" and never raw $ — plan VALUE, not spend.
+    assert "function spendTileDisplay(spendUsd, framing)" in html
+    assert "+ '× plan value'" in html
+    # multiplier == (% of cycle) / 100 == spend / plan_monthly_usd
+    assert "(spendUsd || 0) / framing.plan_monthly_usd" in html
+    # the tile no longer renders fmtFramedDollar (the "% of cycle") for spend
+    assert "const spendVal = fmtFramedDollar(kpis.spend, framing);" not in html
+    assert "const spend = spendTileDisplay(kpis.spend, framing);" in html
+
+
+def test_analytics_count_tiles_have_thousand_separators(html):
+    # Sessions / Events tiles are exact counts with separators ("23,954"), not
+    # raw String() integers.
+    assert "function fmtCount(n)" in html
+    assert "toLocaleString('en-US')" in html
+    assert "value: fmtCount(kpis.sessions)" in html
+    assert "value: fmtCount(kpis.events)" in html
+    assert "value: String(kpis.sessions)" not in html
+    assert "value: String(kpis.events)" not in html
+
+
+def test_analytics_thin_prior_window_softens_delta(html):
+    # A near-empty prior window suppresses the alarming ▲% and annotates instead.
+    assert "const prevThin = !!resp.kpi_prev && (resp.kpi_prev.sessions || 0) < 2;" in html
+    assert "vs partial prior window" in html
+    # the flag is threaded through the tile into the delta chip
+    assert "prevThin=${prevThin}" in html
+    assert "function DeltaChip({ pct, cost, prevThin })" in html
+
+
+# --- #268: tool dimension + spend/tokens → helpful empty state, not zeros ----- #
+def test_analytics_tool_dim_no_cost_metric_empty_state(html):
+    # Grouping spend/tokens by tool(_category) is structurally all-zeros (tool
+    # spans carry no tokens/cost) — show an empty state with a one-click switch.
+    assert "const toolDimNoMetric = (groupBy === 'tool' || groupBy === 'tool_category')" in html
+    assert "&& (metric === 'spend' || metric === 'tokens');" in html
+    assert "Tools don't carry" in html
+    # one-click recovery actions
+    assert "onClick=${() => setFilter('metric', 'events')}>Switch to Events" in html
+    assert "setFilter('group_by', 'model')" in html

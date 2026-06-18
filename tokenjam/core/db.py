@@ -21,6 +21,9 @@ from tokenjam.core.models import (
     CostRow,
     DriftBaseline,
     NormalizedSpan,
+    PolicyDecisionFilters,
+    PolicyDecisionRecord,
+    SavingsLedgerEntry,
     SchemaValidationResult,
     SessionRecord,
     SpanKind,
@@ -40,6 +43,14 @@ class StorageBackend(Protocol):
     def insert_span(self, span: NormalizedSpan) -> None: ...
     def insert_alert(self, alert: Alert) -> None: ...
     def insert_validation(self, result: SchemaValidationResult) -> None: ...
+    def insert_policy_decision(self, decision: PolicyDecisionRecord) -> None: ...
+    def insert_savings_entry(self, entry: SavingsLedgerEntry) -> None: ...
+    def get_policy_decisions(
+        self, filters: PolicyDecisionFilters,
+    ) -> list[PolicyDecisionRecord]: ...
+    def get_savings_entries(
+        self, filters: PolicyDecisionFilters,
+    ) -> list[SavingsLedgerEntry]: ...
     def upsert_session(self, session: SessionRecord) -> None: ...
     def upsert_agent(self, agent: AgentRecord) -> None: ...
     def upsert_baseline(self, baseline: DriftBaseline) -> None: ...
@@ -48,6 +59,7 @@ class StorageBackend(Protocol):
     def close_sessions_by_instance(self, instance_id: str) -> int: ...
     def close_session_by_id(self, session_id: str) -> int: ...
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
+    def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
     def get_alerts(self, filters: AlertFilters) -> list[Alert]: ...
@@ -209,29 +221,82 @@ MIGRATIONS: list[tuple[int, str]] = [
     # _row_to_span helper coerces NULL -> None and ingest writes 0 for
     # spans that don't carry the count.
     (5, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT"),
-    # Migration 6: service_namespace on sessions — the OTel service.namespace
+    # Migration 6: enforcement-plane audit log + savings meter (#221).
+    # `policy_decisions` is the append-only audit log — one row per recorded
+    # proxy observation (both the POLICY path and observe-only). `gate_decision`
+    # + `passthrough_tos` let the log distinguish "we CHOSE not to act" (policy
+    # path, action=noop) from "we were NOT PERMITTED to act" (subscription TOS).
+    # `savings_ledger` records what each policy decision WOULD have recovered —
+    # SUGGEST MODE ENFORCES NOTHING, so `realized` is always FALSE and the
+    # figures are estimated-recoverable / would-have-saved, NEVER realized
+    # savings (Critical Rule 14). The `label` ('unvalidated') rides through from
+    # the envelope on both tables.
+    (6, (
+        "CREATE TABLE IF NOT EXISTS policy_decisions (\n"
+        "    decision_id     TEXT PRIMARY KEY,\n"
+        "    ts              TIMESTAMPTZ NOT NULL,\n"
+        "    provider        TEXT,\n"
+        "    pricing_mode    TEXT,\n"
+        "    gate_decision   TEXT,\n"
+        "    path            TEXT,\n"
+        "    policy_name     TEXT,\n"
+        "    policy_kind     TEXT,\n"
+        "    would_action    TEXT,\n"
+        "    passthrough_tos BOOLEAN DEFAULT FALSE,\n"
+        "    label           TEXT,\n"
+        "    suggest_only    BOOLEAN DEFAULT TRUE,\n"
+        "    envelope        JSON\n"
+        ");\n"
+        "CREATE TABLE IF NOT EXISTS savings_ledger (\n"
+        "    ledger_id                    TEXT PRIMARY KEY,\n"
+        "    decision_id                  TEXT NOT NULL,\n"
+        "    ts                           TIMESTAMPTZ NOT NULL,\n"
+        "    provider                     TEXT,\n"
+        "    pricing_mode                 TEXT,\n"
+        "    policy_name                  TEXT,\n"
+        "    would_action                 TEXT,\n"
+        "    estimated_recoverable_usd    DOUBLE DEFAULT 0.0,\n"
+        "    estimated_recoverable_tokens BIGINT DEFAULT 0,\n"
+        "    estimate_basis               TEXT,\n"
+        "    billing_period               TEXT,\n"
+        "    label                        TEXT,\n"
+        "    realized                     BOOLEAN DEFAULT FALSE\n"
+        ");\n"
+        "CREATE INDEX IF NOT EXISTS idx_policy_decisions_ts ON policy_decisions(ts);\n"
+        "CREATE INDEX IF NOT EXISTS idx_savings_ledger_ts   ON savings_ledger(ts)"
+    )),
+    # Migration 7: full-request capture on spans (#209). `request_params` holds
+    # sampling parameters (temperature, top_p, max_tokens, stop_sequences, …);
+    # `request_tools` holds the tools / tool_choice payload. Both are JSON,
+    # NULL on rows captured before this migration (and whenever the relevant
+    # [capture] toggle is off). _row_to_span coerces NULL -> None.
+    (7, (
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS request_params JSON;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS request_tools  JSON"
+    )),
+    # Migration 8: service_namespace on sessions — the OTel service.namespace
     # the session's service rolls up under (the dashboard's "project" grouping
     # key). Nullable; sessions whose telemetry carried no namespace stay NULL.
-    (6, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_namespace TEXT"),
-    # Migration 7: service_instance_id on sessions — the per-terminal label
+    (8, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_namespace TEXT"),
+    # Migration 9: service_instance_id on sessions — the per-terminal label
     # (OTel service.instance.id) used as the session's display name.
-    (7, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_instance_id TEXT"),
-    # Migration 8: run_id + parent_session_id on sessions — cross-session run
+    (9, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_instance_id TEXT"),
+    # Migration 10: run_id + parent_session_id on sessions — cross-session run
     # grouping declared by a fan-out harness (tokenjam.run_id /
     # tokenjam.parent_session_id resource attributes). Both nullable; existing
     # sessions stay NULL on upgrade.
-    (8, (
+    (10, (
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_id            TEXT;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_session_id TEXT"
     )),
-    # Migration 9: repair ended_at on already-closed sessions. A prior bug in
+    # Migration 11: repair ended_at on already-closed sessions. A prior bug in
     # close_session(s) advanced ended_at to the close time, so a session closed
     # days after its last span showed a "Last seen" of the close moment instead
     # of its real last activity. Recompute ended_at from the session's actual
     # spans (max of end_time / start_time), but only LOWER it — never touch
     # sessions whose ended_at already matches or precedes their last span.
     # Idempotent: re-running finds nothing left to correct.
-    (9, (
+    (11, (
         "UPDATE sessions AS s "
         "SET ended_at = sub.max_ts "
         "FROM (SELECT session_id, MAX(COALESCE(end_time, start_time)) AS max_ts "
@@ -241,22 +306,22 @@ MIGRATIONS: list[tuple[int, str]] = [
         "  AND sub.max_ts IS NOT NULL "
         "  AND (s.ended_at IS NULL OR s.ended_at > sub.max_ts)"
     )),
-    # Migration 10: cache_write_tokens on sessions — the session-level rollup of
+    # Migration 12: cache_write_tokens on sessions — the session-level rollup of
     # the span-level cache-write column added in migration 5. Lets the dashboard
     # show total cache activity (reads + writes) per session. The spans ALTER is
     # defensive: a no-op on DBs that already applied migration 5, but it repairs
     # any DB whose version-5 slot was consumed by an unreleased parallel branch.
-    (10, (
+    (12, (
         "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0"
     )),
-    # Migration 11: sub_agent_id on spans — the Claude Code subagent (Task-tool
+    # Migration 13: sub_agent_id on spans — the Claude Code subagent (Task-tool
     # / sidechain) that issued the span. NULL for main-thread spans and all
     # non-Claude-Code telemetry. A single research session can spawn 12-20
     # subagents whose spans all fold under the parent session_id; this column
     # keeps them attributable per subagent. Populated by the backfill parser
     # from each record's top-level agentId when isSidechain is true.
-    (11, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_id TEXT"),
+    (13, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_id TEXT"),
 ]
 
 
@@ -294,6 +359,12 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
     events = d.get("events") or []
     if isinstance(events, str):
         events = json.loads(events)
+    request_params = d.get("request_params")
+    if isinstance(request_params, str):
+        request_params = json.loads(request_params)
+    request_tools = d.get("request_tools")
+    if isinstance(request_tools, str):
+        request_tools = json.loads(request_tools)
     return NormalizedSpan(
         span_id=d["span_id"],
         trace_id=d["trace_id"],
@@ -321,6 +392,8 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
         billing_account=d.get("billing_account"),
+        request_params=request_params,
+        request_tools=request_tools,
     )
 
 
@@ -560,9 +633,9 @@ class DuckDBBackend:
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
             "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens, sub_agent_id"
+            "cache_write_tokens, sub_agent_id, request_params, request_tools"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -571,6 +644,8 @@ class DuckDBBackend:
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
                 span.billing_account, span.cache_write_tokens, span.sub_agent_id,
+                json.dumps(span.request_params) if span.request_params is not None else None,
+                json.dumps(span.request_tools) if span.request_tools is not None else None,
             ],
         )
 
@@ -592,6 +667,104 @@ class DuckDBBackend:
                 result.validated_at, result.passed, json.dumps(result.errors),
             ],
         )
+
+    def insert_policy_decision(self, decision: PolicyDecisionRecord) -> None:
+        # Append-only audit log (#221). Named columns so future migrations stay safe.
+        self.conn.execute(
+            "INSERT INTO policy_decisions ("
+            "decision_id, ts, provider, pricing_mode, gate_decision, path, "
+            "policy_name, policy_kind, would_action, passthrough_tos, label, "
+            "suggest_only, envelope"
+            ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            [
+                decision.decision_id, decision.ts, decision.provider,
+                decision.pricing_mode, decision.gate_decision, decision.path,
+                decision.policy_name, decision.policy_kind, decision.would_action,
+                decision.passthrough_tos, decision.label, decision.suggest_only,
+                json.dumps(decision.envelope) if decision.envelope is not None else None,
+            ],
+        )
+
+    def insert_savings_entry(self, entry: SavingsLedgerEntry) -> None:
+        self.conn.execute(
+            "INSERT INTO savings_ledger ("
+            "ledger_id, decision_id, ts, provider, pricing_mode, policy_name, "
+            "would_action, estimated_recoverable_usd, estimated_recoverable_tokens, "
+            "estimate_basis, billing_period, label, realized"
+            ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            [
+                entry.ledger_id, entry.decision_id, entry.ts, entry.provider,
+                entry.pricing_mode, entry.policy_name, entry.would_action,
+                entry.estimated_recoverable_usd, entry.estimated_recoverable_tokens,
+                entry.estimate_basis, entry.billing_period, entry.label,
+                entry.realized,
+            ],
+        )
+
+    def _decision_where(self, filters: PolicyDecisionFilters) -> tuple[str, list]:
+        clauses: list[str] = ["1=1"]
+        params: list[object] = []
+        idx = 1
+        if filters.since:
+            clauses.append(f"ts >= ${idx}")
+            params.append(filters.since)
+            idx += 1
+        if filters.until:
+            clauses.append(f"ts <= ${idx}")
+            params.append(filters.until)
+            idx += 1
+        if filters.provider:
+            clauses.append(f"provider = ${idx}")
+            params.append(filters.provider)
+            idx += 1
+        return " AND ".join(clauses), params
+
+    def get_policy_decisions(
+        self, filters: PolicyDecisionFilters,
+    ) -> list[PolicyDecisionRecord]:
+        where, params = self._decision_where(filters)
+        rows = self.conn.execute(
+            "SELECT decision_id, ts, provider, pricing_mode, gate_decision, path, "
+            "policy_name, policy_kind, would_action, passthrough_tos, label, "
+            "suggest_only, envelope "
+            f"FROM policy_decisions WHERE {where} ORDER BY ts DESC LIMIT ${len(params)+1}",
+            [*params, filters.limit],
+        ).fetchall()
+        out: list[PolicyDecisionRecord] = []
+        for r in rows:
+            env = r[12]
+            if isinstance(env, str):
+                env = json.loads(env)
+            out.append(PolicyDecisionRecord(
+                decision_id=r[0], ts=r[1], provider=r[2], pricing_mode=r[3],
+                gate_decision=r[4], path=r[5], policy_name=r[6], policy_kind=r[7],
+                would_action=r[8], passthrough_tos=bool(r[9]), label=r[10],
+                suggest_only=bool(r[11]), envelope=env,
+            ))
+        return out
+
+    def get_savings_entries(
+        self, filters: PolicyDecisionFilters,
+    ) -> list[SavingsLedgerEntry]:
+        where, params = self._decision_where(filters)
+        rows = self.conn.execute(
+            "SELECT ledger_id, decision_id, ts, provider, pricing_mode, policy_name, "
+            "would_action, estimated_recoverable_usd, estimated_recoverable_tokens, "
+            "estimate_basis, billing_period, label, realized "
+            f"FROM savings_ledger WHERE {where} ORDER BY ts DESC LIMIT ${len(params)+1}",
+            [*params, filters.limit],
+        ).fetchall()
+        return [
+            SavingsLedgerEntry(
+                ledger_id=r[0], decision_id=r[1], ts=r[2], provider=r[3],
+                pricing_mode=r[4], policy_name=r[5], would_action=r[6],
+                estimated_recoverable_usd=float(r[7] or 0.0),
+                estimated_recoverable_tokens=int(r[8] or 0),
+                estimate_basis=r[9] or "", billing_period=r[10] or "",
+                label=r[11], realized=bool(r[12]),
+            )
+            for r in rows
+        ]
 
     def upsert_session(self, session: SessionRecord) -> None:
         # plan_tier: promote unknown → known on conflict; never overwrite a
@@ -792,7 +965,7 @@ class DuckDBBackend:
             )
         return count
 
-    def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
+    def _trace_filter_where(self, filters: TraceFilters) -> tuple[str, list[object], int]:
         clauses: list[str] = []
         params: list[object] = []
         idx = 1
@@ -817,6 +990,10 @@ class DuckDBBackend:
             params.append(filters.status)
             idx += 1
         where = " AND ".join(clauses) if clauses else "1=1"
+        return where, params, idx
+
+    def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
+        where, params, idx = self._trace_filter_where(filters)
         # Use FIRST(name ORDER BY start_time) to pick the root span name —
         # the previous correlated-subquery variant returned NULL for most
         # rows in DuckDB, leaving the TYPE column blank in `tj traces` (U2).
@@ -829,7 +1006,9 @@ class DuckDBBackend:
             f"CASE WHEN SUM(CASE WHEN status_code='error' THEN 1 ELSE 0 END) > 0 THEN 'error' "
             f"     WHEN SUM(CASE WHEN status_code='ok' THEN 1 ELSE 0 END) > 0 THEN 'ok' "
             f"     ELSE 'unset' END AS status_code, "
-            f"COUNT(*) AS span_count "
+            f"COUNT(*) AS span_count, "
+            f"SUM(input_tokens) AS input_tokens, "
+            f"SUM(output_tokens) AS output_tokens "
             f"FROM spans WHERE {where} "
             f"GROUP BY trace_id "
             f"ORDER BY start_time DESC "
@@ -842,9 +1021,15 @@ class DuckDBBackend:
                 trace_id=r[0], agent_id=r[1], name=r[2], start_time=r[3],
                 duration_ms=r[4], cost_usd=r[5], status_code=r[6],
                 span_count=r[7],
+                input_tokens=int(r[8] or 0), output_tokens=int(r[9] or 0),
             )
             for r in rows
         ]
+
+    def count_traces(self, filters: TraceFilters) -> int:
+        where, params, _ = self._trace_filter_where(filters)
+        row = self.conn.execute(f"SELECT COUNT(DISTINCT trace_id) FROM spans WHERE {where}", params).fetchone()
+        return int(row[0] or 0) if row else 0
 
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
         cur = self.conn.execute(

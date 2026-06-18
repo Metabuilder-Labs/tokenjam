@@ -17,6 +17,19 @@ class GenAIAttributes:
     REQUEST_MODEL = "gen_ai.request.model"
     REQUEST_TYPE  = "gen_ai.request.type"
 
+    # LLM request sampling parameters (issue #209). These describe HOW the model
+    # was asked to generate, not the message content — captured so a span is
+    # self-contained enough to replay. Gated under the [capture] `prompts`
+    # toggle alongside the request prompt (see strip_captured_content).
+    REQUEST_TEMPERATURE       = "gen_ai.request.temperature"
+    REQUEST_TOP_P             = "gen_ai.request.top_p"
+    REQUEST_TOP_K             = "gen_ai.request.top_k"
+    REQUEST_MAX_TOKENS        = "gen_ai.request.max_tokens"
+    REQUEST_STOP_SEQUENCES    = "gen_ai.request.stop_sequences"
+    REQUEST_FREQUENCY_PENALTY = "gen_ai.request.frequency_penalty"
+    REQUEST_PRESENCE_PENALTY  = "gen_ai.request.presence_penalty"
+    REQUEST_SEED              = "gen_ai.request.seed"
+
     # Token usage
     INPUT_TOKENS        = "gen_ai.usage.input_tokens"
     OUTPUT_TOKENS       = "gen_ai.usage.output_tokens"
@@ -173,6 +186,29 @@ class TjAttributes:
     # detection tell an identical repeated call from normal repeated tool use
     # without retaining the (potentially sensitive) raw input.
     TOOL_ARG_SIG      = "tokenjam.tool_arg_sig"
+
+    # Full tools / tool_choice payload for the request (issue #209). OTel GenAI
+    # has no single attribute for the tool-definition list, so this is a
+    # tj-specific extension carrying a JSON object: {"tools": [...],
+    # "tool_choice": ...}. It is tool-definition content, so it is gated under
+    # the [capture] `tool_inputs` toggle (see strip_captured_content).
+    REQUEST_TOOLS    = "tokenjam.request.tools"
+
+    # Enforcement-plane self-observation (#223). The proxy emits one span per
+    # recorded policy decision under this namespace so the web UI + drift see
+    # enforcement activity. Suggest mode only: ACTION is what a policy WOULD do,
+    # REALIZED is always False, and ESTIMATED_RECOVERABLE_USD is would-have-saved
+    # (never realized). LABEL carries the `unvalidated` honesty marker.
+    POLICY_DECISION   = "tokenjam.policy.decision"        # observe_only | policy
+    POLICY_NAME       = "tokenjam.policy.name"
+    POLICY_KIND       = "tokenjam.policy.kind"
+    POLICY_ACTION     = "tokenjam.policy.action"          # would_action
+    POLICY_MODE       = "tokenjam.policy.mode"            # suggest (enforce gated off)
+    POLICY_LABEL      = "tokenjam.policy.label"           # unvalidated
+    POLICY_PRICING_MODE = "tokenjam.policy.pricing_mode"
+    POLICY_PASSTHROUGH_TOS = "tokenjam.policy.passthrough_tos"
+    POLICY_ESTIMATED_RECOVERABLE_USD = "tokenjam.policy.estimated_recoverable_usd"
+    POLICY_REALIZED   = "tokenjam.policy.realized"        # always False (suggest mode)
 
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"

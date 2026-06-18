@@ -24,34 +24,27 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         verbose: bool) -> None:
     """tj - local-first observability for AI agents."""
     ctx.ensure_object(dict)
+
+    # Bare `tj` (no subcommand) → branded home screen (#240): banner +
+    # next-best-action. Reads only config presence, never opens the DB.
+    if ctx.invoked_subcommand is None:
+        if no_color:
+            from rich import reconfigure
+            reconfigure(no_color=True)
+        from tokenjam.cli.home import print_home
+        print_home()
+        return
+
     config = load_config(config_path)
     if db_path:
         config.storage.path = db_path
 
     # Commands that don't need a database connection
     no_db_commands = {
-        "stop", "uninstall", "onboard", "mcp", "demo", "policy",
+        "stop", "uninstall", "onboard", "mcp", "demo", "policy", "proxy",
         "otel-resource-attrs", "session-end", "quickstart",
     }
     invoked = ctx.invoked_subcommand
-
-    # Bare `tj` (no subcommand) IS the zero-install first run: it routes to
-    # `tj quickstart`, so `npx tj` / `uvx tj` deliver value in one command with
-    # no setup (issue #6). `--help` / `--version` are eager and short-circuit
-    # before this callback body, so they still print and exit.
-    if invoked is None:
-        if no_color:
-            from rich import reconfigure
-            reconfigure(no_color=True)
-        ctx.obj["config"] = config
-        ctx.obj["db"] = None
-        ctx.obj["output_json"] = output_json
-        ctx.obj["no_color"] = no_color
-        ctx.obj["agent"] = agent
-        ctx.obj["verbose"] = verbose
-        ctx.invoke(cmd_quickstart, since="30d", root_path=None,
-                   output_json=output_json)
-        return
 
     if invoked in no_db_commands:
         ctx.obj["config"] = config
@@ -119,6 +112,7 @@ from tokenjam.cli.cmd_session_end import cmd_session_end  # noqa: E402
 from tokenjam.cli.cmd_context import cmd_context  # noqa: E402
 from tokenjam.cli.cmd_quota_audit import cmd_quota_audit  # noqa: E402
 from tokenjam.cli.cmd_quickstart import cmd_quickstart  # noqa: E402
+from tokenjam.cli.cmd_proxy import cmd_proxy  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 cli.add_command(cmd_status, name="status")
@@ -144,6 +138,7 @@ cli.add_command(cmd_session_end, name="session-end")
 cli.add_command(cmd_context, name="context")
 cli.add_command(cmd_quota_audit, name="quota-audit")
 cli.add_command(cmd_quickstart, name="quickstart")
+cli.add_command(cmd_proxy, name="proxy")
 
 # cmd_drift is provided by task 05 — register if available
 try:

@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="https://tokenjam.dev/icon.svg" alt="TokenJam" width="72" height="72">
-
-# TokenJam
+<img src="docs/brand/tokenjam-banner.png" alt="TokenJam" width="440">
 
 ### Token Efficiency For AI Agents
 
@@ -10,6 +8,7 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
+[![Downloads](https://img.shields.io/pypi/dm/tokenjam?color=3d8eff&labelColor=0d1117&label=downloads)](https://pypi.org/project/tokenjam/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3d8eff?labelColor=0d1117)](https://pypi.org/project/tokenjam/)
 [![npm](https://img.shields.io/npm/v/@tokenjam/sdk?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/@tokenjam/sdk)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3d8eff?labelColor=0d1117)](LICENSE)
@@ -22,6 +21,8 @@ npx tj
 <sub>Zero install, zero config. Reads the same <code>~/.claude/projects/*.jsonl</code> files <a href="https://github.com/ryoppippi/ccusage">ccusage</a> does and shows you <b>where your Claude Code quota actually goes</b> — no pip env, no daemon, no onboarding. Prefer Python? <code>uvx --from tokenjam tj</code> does the same. Ready to go deeper (live capture + dashboard + MCP)? <code>pipx install tokenjam &amp;&amp; tj onboard</code>.</sub>
 
 **No cloud · No signup · No vendor lock-in**
+
+<sub>⭐ If TokenJam saves you tokens, **star it** · 👁 **Watch for releases** — we ship often</sub>
 
 </div>
 
@@ -148,6 +149,23 @@ tj optimize          # cost-saving candidates from your actual usage
 tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
+That's it. Run `tj` any time and it points you to the next best action:
+
+```text
+ _____    _              _
+|_   _|__| |_____ _ _   | |__ _ _ __
+  | |/ _ \ / / -_) ' \  | / _` | '  \
+  |_|\___/_\_\___|_||_|_/ \__,_|_|_|_|
+                     |__/
+  TokenJam · cost-optimization for AI agents · local-first, OTel-native · no signup
+
+You're set up. Next best actions:
+  tj status      agent overview — what's running, recent cost
+  tj tokenmaxx   your shareable spend tier
+  tj optimize    cost-saving candidates from your usage
+  tj serve       open Lens (web UI) at http://127.0.0.1:7391/
+```
+
 To upgrade later: `pipx upgrade tokenjam` (then `tj stop && tj serve &` to reload the daemon, and `tj --version` to verify). See [docs/installation.md](docs/installation.md#upgrading).
 
 For any Python agent:
@@ -169,16 +187,20 @@ def run(task: str) -> str:
 
 ## Lens — the local dashboard
 
-`tj serve` runs Lens at `http://127.0.0.1:7391/`: an Overview triage screen with spend, recoverable waste, and health at a glance; an Optimize tab showing every analyzer's findings side by side; and the standard Status, Traces, Cost, Alerts, Drift, and Budget screens. Plan-tier-aware, fully offline, no signup.
+`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and health at a glance, with an embedded explorer to slice your usage any way (metric × dimension × chart); plus Status, Traces, Cost, Analytics, Alerts, Drift, Optimize, and Budget screens. Plan-tier-aware, fully offline, no signup.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status screen" /></td>
-<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost screen with spend-over-time chart" /></td>
+<td width="50%"><img src="docs/screenshots/tj-dashboard.png" alt="Dashboard — recoverable waste, health at a glance, and the embedded pivot explorer" /></td>
+<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost — spend over time + cache savings" /></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Traces table" /></td>
-<td width="50%"><img src="docs/screenshots/tj-alerts.png" alt="Alerts table" /></td>
+<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Trace waterfall — session-level spans with cost annotations" /></td>
+<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status — per-agent cards" /></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/tj-dashboard-tools.png" alt="Analytics explorer — tool-usage leaderboard" /></td>
+<td width="50%"><img src="docs/screenshots/tj-dashboard-leaderboard.png" alt="Analytics explorer — cost-by-model leaderboard" /></td>
 </tr>
 </table>
 
@@ -250,13 +272,34 @@ tj serve               # start Lens + REST API
 - [x] **Daemon DB concurrency** — per-thread DuckDB cursors so the Overview's fan-out doesn't block on a single shared connection (v0.4.1)
 - [x] **Cache cost transparency** — `cache_read` + `cache_write` token columns surfaced in CLI + UI + API (the previously-hidden ~91% cost driver on cache-heavy workloads)
 
-**Up next:**
+**Shipped in 0.5.x:**
+- [x] **Lens Visualizations** — an Analytics pivot explorer (metric × dimension × chart, presets, CSV), stacked cost-by-model, a cache-savings chart, KPI sparklines, a cost-annotated trace waterfall, and consistent series coloring
+- [x] **Merged Dashboard** — the explorer and the triage front-door unified into one default screen, with in-place drill-through from recoverable-waste tiles
+- [x] **First-run polish** — backfill fidelity (session-level traces, cache read/write split, honest session counts), plan-tier-aware framing throughout (subscription users see token-share, never raw spend), an onboarding welcome banner + next-steps guidance, and a contribution funnel
+
+**Up next** (roughly):
+- [ ] Continued Lens polish + per-product visual branding
 - [ ] `tj policy add | edit | apply` — unified rule surface
 - [ ] `tj replay` — replay captured sessions against new model versions
 - [ ] TypeScript framework patches (LangChain JS, OpenAI Agents SDK)
 - [ ] Vercel AI SDK & Mastra integrations
 - [ ] Docker image
 - [ ] GitHub Actions for CI drift/cost checks
+
+---
+
+## Contributing
+
+TokenJam is MIT, and contributions are welcome — from a one-line pricing fix to a whole new framework integration. A few easy on-ramps:
+
+- 🟢 **[Good first issues →](https://github.com/Metabuilder-Labs/tokenjam/labels/good%20first%20issue)** — scoped, newcomer-friendly tasks, ready to pick up.
+- 💸 **Model pricing** — `tokenjam/pricing/models.toml` is community-maintained. Fix a rate or add a model in a single PR — no issue needed.
+- 🔌 **Framework integrations** — provider/framework patches follow one clear pattern (`tokenjam/sdk/integrations/anthropic.py` is the reference). Open an issue first to align on approach.
+- 🤖 **Built with coding agents** — TokenJam is built by AI coding agents, and contributing with one is first-class. **Claude Code:** read [CLAUDE.md](CLAUDE.md) and run `/init` to bring your agent up to speed. **Codex / other agents:** [AGENTS.md](AGENTS.md) has the critical rules.
+
+Setup and the full dev workflow are in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
+If TokenJam saves you tokens, **⭐ star it** and **👁 watch for releases** — we ship often.
 
 ---
 
