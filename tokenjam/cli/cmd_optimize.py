@@ -58,6 +58,9 @@ from tokenjam.utils.time_parse import parse_since, utcnow
               help="Write the current recommendations to a snippet file the "
                    "user can merge into their routing config manually. Does "
                    "not modify any file outside the TokenJam config directory.")
+@click.option("--export-templates", "export_templates", is_flag=True, default=False,
+              help="Reuse only: write per-cluster Markdown skeletons to the "
+                   "reports directory without opening the HTML report.")
 @click.option("--json", "output_json", is_flag=True,
               help="Emit machine-readable JSON.")
 @click.pass_context
@@ -70,6 +73,7 @@ def cmd_optimize(
     budget_usd: float | None,
     compare: str | None,
     export_target: str | None,
+    export_templates: bool,
     output_json: bool,
 ) -> None:
     """Analyze recent usage for cost-saving candidates and budget exposure."""
@@ -193,6 +197,13 @@ def cmd_optimize(
             target=export_target, agent_id=agent,
             output_json=output_json,
         )
+        return
+
+    # --export-templates branch: write the Reuse Markdown skeletons and exit,
+    # without rendering the HTML report. Needs direct DB access (to fetch the
+    # planning completion text), so it's local-mode only.
+    if export_templates:
+        _export_reuse_templates(report, conn=conn, config=config, agent=agent)
         return
 
     # Optional period comparison. Independent of the analyzer findings —
@@ -541,6 +552,49 @@ def _render_budget(p: BudgetProjection) -> None:
         console.print(
             f"     [dim]Counted services: {', '.join(p.applies_to_services)}[/dim]"
         )
+
+
+def _export_reuse_templates(report, *, conn, config, agent: str | None) -> None:
+    """
+    Write the Reuse analyzer's Markdown skeletons to the reports directory and
+    print pointers. The `tj optimize reuse --export-templates` shortcut — same
+    sidecars `tj report --reuse` writes, minus the HTML/browser.
+    """
+    from tokenjam import __version__
+    from tokenjam.cli.cmd_report import _report_dir
+    from tokenjam.core.export.reuse_report import export_templates
+
+    if conn is None:
+        raise click.ClickException(
+            "--export-templates needs direct database access. Stop the daemon "
+            "with `tj stop` and re-run."
+        )
+    finding = report.findings.get("reuse")
+    if finding is None or not finding.clusters:
+        console.print(
+            "[dim]No repeated planning detected — nothing to export. Try a "
+            "longer [bold]--since[/bold].[/dim]"
+        )
+        return
+
+    now = utcnow()  # tz-aware UTC (Rule 9)
+    paths = export_templates(
+        finding, conn=conn, config=config, out_dir=_report_dir(),
+        version=__version__, generated_at_iso=now.isoformat(),
+    )
+    if not paths:
+        console.print(
+            "[yellow]No skeletons written.[/yellow] [dim]Enable "
+            "[bold]capture.completions[/bold] so the planning text is "
+            "available to render.[/dim]"
+        )
+        return
+    console.print(
+        f"[green]✓[/green] Wrote [bold]{len(paths)}[/bold] Reuse skeleton"
+        f"{'s' if len(paths) != 1 else ''}:"
+    )
+    for p in paths:
+        console.print(f"  [dim]{p}[/dim]")
 
 
 def _export_snippet(
