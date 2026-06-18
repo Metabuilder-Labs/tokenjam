@@ -276,6 +276,43 @@ async def test_optimize_response_includes_framing_block(client):
     assert _FRAMING_KEYS <= set(data["framing"])
 
 
+async def test_root_serves_lens_title(client):
+    """Brand pass (#114): the served dashboard <title> is 'TokenJam Lens'."""
+    resp = await client.get("/")
+    assert resp.status_code == 200
+    assert "<title>TokenJam Lens</title>" in resp.text
+
+
+async def test_optimize_chain_framing_and_recoverable_fields(client):
+    """The framing block (#110) + per-finding recoverable fields (#111) are
+    both present on /api/v1/optimize — validates the chain Overview relies on."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/optimize?since=30d")
+    data = resp.json()
+    if data.get("error") == "no_data":
+        pytest.skip("no spans landed for optimize in this fixture")
+    assert _FRAMING_KEYS <= set(data["framing"])
+    # The savings analyzers carry the recoverable contract fields (#111).
+    # cache-recommend / budget-projection intentionally do not.
+    findings = data.get("findings") or {}
+    for name in ("cache", "script", "trim"):
+        if name in findings:
+            assert "estimated_recoverable_usd" in findings[name]
+            assert "estimate_basis" in findings[name]
+
+
+async def test_optimize_fast_skips_trim(client):
+    """fast=true skips the expensive Trim analyzer and reports it (#114)."""
+    await _ingest_sample_span(client)
+    resp = await client.get("/api/v1/optimize?since=30d&fast=true")
+    assert resp.status_code == 200
+    data = resp.json()
+    if data.get("error") == "no_data":
+        pytest.skip("no spans landed for optimize in this fixture")
+    assert "trim" in data.get("skipped_analyzers", [])
+    assert "trim" not in (data.get("findings") or {})
+
+
 async def test_budget_framing_reflects_configured_subscription_plan(db):
     """The budget surface has no window, so framing falls back to the
     declared plan in config (#110)."""

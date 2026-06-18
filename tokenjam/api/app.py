@@ -38,7 +38,7 @@ def create_app(
     running daemon's state file).
     """
     app = FastAPI(
-        title="TokenJam",
+        title="TokenJam Lens",
         version="0.1.0",
         docs_url="/docs",
         redoc_url=None,
