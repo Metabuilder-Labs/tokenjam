@@ -50,3 +50,6 @@ tj.toml
 # Superpowers skill output (internal planning artifacts, not for OSS)
 docs/superpowers/
 .gstack/
+
+# Per-release pre-release test logs — runner writes here, each run is local
+tests/results/
