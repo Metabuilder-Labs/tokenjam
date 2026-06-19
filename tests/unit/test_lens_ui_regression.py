@@ -104,8 +104,20 @@ def test_axis_time_labels_consistent(html):
 # --- #134: run-rate is cycle-relative, not a fixed ×30 --------------------- #
 def test_run_rate_is_cycle_relative(html):
     assert "function cycleRemaining" in html
-    assert "by end of ${cyc.label}" in html
+    assert "by ${cyc.label}" in html
     assert "over 30 days" not in html  # the circular/undershooting framing is gone
+
+
+# --- #138: run-rate cycle honors [budget.<provider>] cycle_start_day -------- #
+def test_run_rate_cycle_honors_server_bounds(html):
+    # cycleRemaining now reads server-provided cycle bounds (cycle_start_day
+    # aware) instead of always assuming the calendar month.
+    assert "function cycleRemaining(cycle)" in html
+    assert "cycle.days_remaining" in html
+    assert "cycle.start_day" in html
+    # Both run-rate call sites pass the response's cycle block through.
+    assert "cycleRemaining(cost.cycle)" in html
+    assert "cycleRemaining(costResp && costResp.cycle)" in html
 
 
 # --- #135: cache at_ceiling not gated on input volume --------------------- #

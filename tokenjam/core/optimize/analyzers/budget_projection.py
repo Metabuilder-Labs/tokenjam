@@ -11,27 +11,10 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from tokenjam.core.config import ProviderBudget
+# Shared with the cost API's run-rate caption (#138) — one home for cycle math.
+from tokenjam.core.cycle import cycle_bounds as _cycle_bounds
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext, BudgetProjection
-
-
-def _cycle_bounds(now: datetime, start_day: int) -> tuple[datetime, datetime]:
-    """
-    Return (cycle_start, cycle_end) for the cycle that contains `now`,
-    given a monthly cycle that begins on `start_day` of each month.
-    """
-    start_day = max(1, min(start_day, 28))  # clamp; avoids Feb edge cases
-    if now.day >= start_day:
-        cs = now.replace(day=start_day, hour=0, minute=0, second=0, microsecond=0)
-    else:
-        prev_month_year = now.year if now.month > 1 else now.year - 1
-        prev_month = now.month - 1 if now.month > 1 else 12
-        cs = datetime(prev_month_year, prev_month, start_day, tzinfo=now.tzinfo)
-    # cycle_end = next cycle_start
-    next_month_year = cs.year + (1 if cs.month == 12 else 0)
-    next_month = 1 if cs.month == 12 else cs.month + 1
-    ce = datetime(next_month_year, next_month, start_day, tzinfo=cs.tzinfo)
-    return cs, ce
 
 
 def _spend_in_window(

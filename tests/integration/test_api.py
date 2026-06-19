@@ -304,6 +304,35 @@ async def test_cost_response_includes_framing_block(client):
     assert _FRAMING_KEYS <= set(framing)
 
 
+async def test_cost_cycle_block_defaults_to_calendar_month(client):
+    """With no [budget.<provider>] cycle configured, the run-rate cycle falls
+    back to the calendar month (start_day=1) (#138)."""
+    cycle = (await client.get("/api/v1/cost")).json()["cycle"]
+    assert cycle["start_day"] == 1
+    assert {"start", "end", "days_remaining"} <= set(cycle)
+    assert cycle["end"] > cycle["start"]
+    assert cycle["days_remaining"] >= 1
+
+
+async def test_cost_cycle_block_honors_provider_cycle_start_day(db):
+    """A configured [budget.<provider>] cycle_start_day is surfaced on the cost
+    response so the UI projects to the real cycle end, not the calendar month."""
+    from tokenjam.core.config import ProviderBudget
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    cfg.budgets["anthropic"] = ProviderBudget(cycle_start_day=15)
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        cycle = (await c.get("/api/v1/cost")).json()["cycle"]
+    assert cycle["start_day"] == 15
+
+
 async def test_optimize_response_includes_framing_block(client):
     await _ingest_sample_span(client)
     resp = await client.get("/api/v1/optimize?since=30d")
