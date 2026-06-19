@@ -65,6 +65,14 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
             if sessions:
                 session = sessions[0]
 
+        # Active (compute) time = sum of span durations; distinct from the
+        # wall-clock duration_seconds, which spans days for resumed sessions
+        # (issue #147).
+        active_seconds = None
+        if session is not None and hasattr(db, "conn"):
+            from tokenjam.core.db import session_active_seconds
+            active_seconds = session_active_seconds(db.conn, session.session_id)
+
         today_cost = db.get_daily_cost(aid, utcnow().date())
 
         # Budget from config: per-agent overrides defaults
@@ -94,6 +102,8 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
             "tool_call_count": session.tool_call_count if session else 0,
             "error_count": session.error_count if session else 0,
             "active_alerts": len(active_alerts),
+            "duration_seconds": session.duration_seconds if session else None,
+            "active_seconds": active_seconds,
         }
         agents_data.append(agent_data)
 
@@ -127,19 +137,30 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
     ctx.exit(1 if has_active_alerts else 0)
 
 
+def _fmt_dur(seconds: float | None, *, coarse: bool = False) -> str:
+    """Human duration. coarse=True caps at days/hours for long wall-clock spans."""
+    if seconds is None:
+        return "-"
+    secs = int(seconds)
+    if coarse and secs >= 3600:
+        mins = secs // 60
+        d, rem = divmod(mins, 1440)
+        h, m = divmod(rem, 60)
+        return f"{d}d {h}h" if d else f"{h}h {m}m"
+    mins, s = divmod(secs, 60)
+    if mins >= 60:
+        h, m = divmod(mins, 60)
+        return f"{h}h {m}m"
+    return f"{mins}m {s}s"
+
+
 def _print_agent_status(data: dict, active_alerts: list, session: object | None) -> None:
     status = data["status"]
     icon = status_icon(status)
     style = "green" if status == "active" else "dim"
 
-    duration_str = ""
-    if session and hasattr(session, "duration_seconds") and session.duration_seconds:
-        secs = int(session.duration_seconds)
-        mins, s = divmod(secs, 60)
-        duration_str = f"   ({mins}m {s}s)"
-
     console.print(f"[{style}]{icon}[/] [bold]{data['agent_id']}[/bold]   "
-                  f"{status}{duration_str}")
+                  f"{status}")
     console.print()
 
     cost_str = format_cost(data["cost_today"])
@@ -155,6 +176,16 @@ def _print_agent_status(data: dict, active_alerts: list, session: object | None)
     if data["error_count"]:
         tool_str += f"  ({data['error_count']} failed)"
     console.print(f"  Tool calls:     {tool_str}")
+
+    # Active = compute time (Σ span durations); Elapsed = wall-clock, which can
+    # span days for resumed sessions (issue #147).
+    if data.get("active_seconds") is not None or data.get("duration_seconds") is not None:
+        parts = []
+        if data.get("active_seconds") is not None:
+            parts.append(f"active {_fmt_dur(data['active_seconds'])}")
+        if data.get("duration_seconds") is not None:
+            parts.append(f"[dim]elapsed {_fmt_dur(data['duration_seconds'], coarse=True)}[/dim]")
+        console.print(f"  Duration:       {' · '.join(parts)}")
 
     if data["session_id"]:
         console.print(f"  Active session: {data['session_id']}")

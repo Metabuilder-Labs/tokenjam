@@ -165,3 +165,18 @@ def test_overview_error_handling_is_asymmetric(html):
     assert "api('/cost/compare', { since, compare: 'previous' }).catch(() => null)" in html
     assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" in html
     assert "api('/drift').catch(() => ({ agents: [] }))" in html
+
+
+# --- #147: status tile shows Active (compute) time + relabeled Elapsed ----- #
+def test_status_tile_shows_active_and_elapsed(html):
+    # A coarse formatter for multi-day wall-clock spans, so "3087m" reads "2d 3h".
+    assert "function fmtDurLong" in html
+    # Active time is sourced from the new status payload field.
+    assert "a.active_seconds" in html
+    # The wall-clock row is relabeled Elapsed and uses the coarse formatter;
+    # Active is a distinct row using the fine-grained one.
+    assert "fmtDurLong(a.duration_seconds" in html
+    assert 'Active <span class="info-btn"' in html
+    assert 'Elapsed <span class="info-btn"' in html
+    # The misleading bare "Duration" label is gone from the status tile.
+    assert '<span class="label">Duration</span>' not in html

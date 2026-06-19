@@ -726,6 +726,19 @@ function fmtDur(ms) {
   const s = Math.round((ms % 60000)/1000);
   return m + 'm ' + s + 's';
 }
+// Coarse formatter for long wall-clock spans (resumed sessions run for days).
+// fmtDur tops out at minutes — "3087m" reads as a runaway; this shows "2d 3h".
+function fmtDurLong(ms) {
+  if (ms == null) return '-';
+  if (ms < 60000) return fmtDur(ms);
+  const totalMin = Math.floor(ms/60000);
+  const d = Math.floor(totalMin/1440);
+  const h = Math.floor((totalMin % 1440)/60);
+  const m = totalMin % 60;
+  if (d > 0) return d + 'd ' + h + 'h';
+  if (h > 0) return h + 'h ' + m + 'm';
+  return m + 'm';
+}
 function fmtAgo(iso) {
   if (!iso) return '-';
   const d = new Date(iso);
@@ -1045,7 +1058,8 @@ function StatusView({ params }) {
           <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(a.cost_today)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
-          ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Duration</span><span class="value">${fmtDur(a.duration_seconds * 1000)}</span></div>` : null}
+          ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
+          ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
           <div class="card-links">

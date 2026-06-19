@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.core.db import _row_to_session
+from tokenjam.core.db import _row_to_session, session_active_seconds
 from tokenjam.core.models import AlertFilters
 from tokenjam.utils.time_parse import utcnow
 
@@ -54,6 +54,12 @@ async def get_status(
             if sessions:
                 session = sessions[0]
 
+        # Active (compute) time = sum of span durations for the session.
+        # Distinct from the wall-clock duration_seconds below — see issue #147.
+        active_seconds = None
+        if session is not None and hasattr(db, "conn"):
+            active_seconds = session_active_seconds(db.conn, session.session_id)
+
         today_cost = db.get_daily_cost(aid, utcnow().date())
 
         # Active (unacknowledged, unsuppressed) alerts
@@ -73,6 +79,7 @@ async def get_status(
             "error_count": session.error_count if session else 0,
             "active_alerts": len(active_alerts),
             "duration_seconds": session.duration_seconds if session else None,
+            "active_seconds": active_seconds,
             "started_at": session.started_at.isoformat() if session and session.started_at else None,
             "total_cost_usd": float(session.total_cost_usd) if session and session.total_cost_usd is not None else 0.0,
         }
