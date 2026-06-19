@@ -115,7 +115,13 @@ def _render_reuse_report(
     since: str,
     no_open: bool,
 ) -> None:
-    """Run the Reuse analyzer and write its HTML page + Markdown sidecars."""
+    """Run the Reuse analyzer and write its HTML page + Markdown sidecars.
+
+    Two paths, mirroring `cmd_optimize` (#154): with a direct DuckDB connection
+    we build the report and fetch planning text locally; when the daemon holds
+    the write lock (main.py hands us an ApiBackend, no `.conn`) we fetch the
+    finding + skeleton text from `/api/v1/reuse/clusters` instead of erroring.
+    """
     from tokenjam import __version__
     from tokenjam.core.export.reuse_report import write_reuse_report
     from tokenjam.core.framing import (
@@ -123,7 +129,7 @@ def _render_reuse_report(
         plan_tier_mix,
         pricing_mode_for,
     )
-    from tokenjam.core.optimize import build_report
+    from tokenjam.core.optimize import build_report, report_from_dict
     from tokenjam.utils.time_parse import parse_since, utcnow
 
     db = ctx.obj.get("db")
@@ -132,26 +138,45 @@ def _render_reuse_report(
         raise click.ClickException("tj report requires a database connection.")
 
     conn = getattr(db, "conn", None)
+    # planning_texts is supplied only on the API path; conn is supplied only on
+    # the local path — write_reuse_report uses whichever it's given.
+    planning_texts: dict[str, str | None] | None = None
+
     if conn is None:
-        # The report needs direct DB access to fetch planning text. When the
-        # daemon holds the write lock, point the user at it rather than failing
-        # opaquely (same constraint as --trim).
-        raise click.ClickException(
-            "tj report --reuse needs direct database access. Stop the daemon "
-            "with `tj stop` and re-run, or query via the API."
+        # API-shim path: the daemon holds the DB lock. Fetch the finding +
+        # skeleton text over HTTP rather than failing opaquely.
+        from tokenjam.core.api_backend import ApiBackend
+        if not isinstance(db, ApiBackend):
+            raise click.ClickException(
+                "tj report --reuse needs either a direct DuckDB connection or a "
+                "running tj serve at the configured api.{host,port}."
+            )
+        try:
+            resp = db.fetch_reuse_clusters(since=since, agent_id=agent_id)
+        except Exception as exc:
+            raise click.ClickException(
+                f"Failed to fetch reuse clusters from tj serve: {exc}"
+            ) from exc
+        report = report_from_dict(resp)
+        finding = report.findings.get("reuse")
+        planning_texts = resp.get("planning_texts") or {}
+        pricing_mode = resp.get("pricing_mode", "unknown")
+    else:
+        try:
+            since_dt = parse_since(since)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="'--since'") from exc
+
+        until_dt = utcnow()
+        report = build_report(
+            db=db, config=config, since=since_dt, until=until_dt,
+            agent_id=agent_id, findings=["reuse"],
+        )
+        finding = report.findings.get("reuse")
+        pricing_mode = pricing_mode_for(
+            dominant_plan(plan_tier_mix(conn, since_dt, until_dt, agent_id))
         )
 
-    try:
-        since_dt = parse_since(since)
-    except ValueError as exc:
-        raise click.BadParameter(str(exc), param_hint="'--since'") from exc
-
-    until_dt = utcnow()
-    report = build_report(
-        db=db, config=config, since=since_dt, until=until_dt,
-        agent_id=agent_id, findings=["reuse"],
-    )
-    finding = report.findings.get("reuse")
     if finding is None or not finding.clusters:
         console.print(
             "[dim]No repeated planning detected in the window — try a longer "
@@ -159,9 +184,6 @@ def _render_reuse_report(
         )
         return
 
-    pricing_mode = pricing_mode_for(
-        dominant_plan(plan_tier_mix(conn, since_dt, until_dt, agent_id))
-    )
     now = utcnow()  # tz-aware UTC (Rule 9)
     html_filename = f"reuse-{now:%Y%m%d-%H%M%S}.html"
     out_dir = _report_dir()
@@ -172,6 +194,7 @@ def _render_reuse_report(
         agent_scope=agent_id, since=since, pricing_mode=pricing_mode,
         version=__version__, generated_at_iso=now.isoformat(),
         html_filename=html_filename,
+        planning_texts=planning_texts,
     )
 
     console.print(f"[green]✓[/green] Reuse report written to [bold]{html_path}[/bold]")
