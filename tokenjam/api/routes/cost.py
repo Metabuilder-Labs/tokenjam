@@ -1,14 +1,37 @@
 """GET /api/v1/cost — aggregated cost data."""
 from __future__ import annotations
 
+import math
+
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.cycle import cycle_bounds, effective_cycle_start_day
 from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
 from tokenjam.core.models import CostFilters
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter(dependencies=[Depends(require_api_key)])
+
+
+def _cycle_block(config) -> dict:
+    """Current billing-cycle bounds for the run-rate caption (#138).
+
+    Honors `[budget.<provider>] cycle_start_day` when configured, falling back
+    to the calendar month (start_day=1). The UI projects the run-rate to
+    `cycle.end` instead of assuming a calendar-month boundary, so a user on a
+    non-calendar cycle gets an honest "by <cycle end>" caption.
+    """
+    now = utcnow()
+    start_day = effective_cycle_start_day(config)
+    cs, ce = cycle_bounds(now, start_day)
+    days_remaining = max(1, math.ceil((ce - now).total_seconds() / 86400.0))
+    return {
+        "start": int(cs.timestamp()),
+        "end": int(ce.timestamp()),
+        "days_remaining": days_remaining,
+        "start_day": start_day,
+    }
 
 
 def _window_series(conn, agent_id, since_dt, until_dt) -> dict:
@@ -121,5 +144,6 @@ async def get_cost(
         "total_cache_tokens": sum(r.cache_tokens for r in rows),
         "total_cache_write_tokens": sum(r.cache_write_tokens for r in rows),
         **_window_series(conn, agent_id, since_dt, until_dt),
+        "cycle": _cycle_block(config),
         "framing": framing.to_dict(),
     }

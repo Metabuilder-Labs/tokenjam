@@ -853,15 +853,32 @@ function runRateProjection(windowTotal, since, days = 1) {
   return (windowTotal / Math.max(windowDays(since), 1 / 24)) * days;
 }
 
-// Days left in the current calendar cycle (this month) + its name. The run-rate
+// Days left in the current billing cycle + a caption label. The run-rate
 // projection is cycle-relative ("~$X by end of June") rather than a fixed ×30,
 // which was circular at a 30d window and undershot at 90d (#134, matches
-// lens-architecture §10).
-function cycleRemaining() {
+// lens-architecture §10). Honors the server-provided cycle bounds, which
+// respect [budget.<provider>] cycle_start_day (#138) — so a non-calendar
+// cycle (e.g. start_day=15) reads "by Jul 15", not "by end of June". Falls
+// back to the calendar month when the cost response carries no cycle block.
+function cycleRemaining(cycle) {
+  if (cycle && typeof cycle.end === 'number') {
+    const days = Math.max(1, cycle.days_remaining || 1);
+    let label;
+    if ((cycle.start_day || 1) === 1) {
+      // Calendar month: name the month that's ending. cycle.end is 00:00 on the
+      // 1st of the next month, so step back a day to land in the ending month.
+      const m = new Date((cycle.end - 86400) * 1000);
+      label = 'end of ' + m.toLocaleString(undefined, { month: 'long', timeZone: 'UTC' });
+    } else {
+      // Custom cycle: a dated form ("Jul 15"); "end of <month>" would mislead.
+      label = new Date(cycle.end * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    }
+    return { days, label };
+  }
   const now = new Date();
   const end = new Date(now.getFullYear(), now.getMonth() + 1, 0);  // last day of month
   const days = Math.max(1, Math.ceil((end - now) / 86400000));
-  return { days, label: now.toLocaleString(undefined, { month: 'long' }) };
+  return { days, label: 'end of ' + now.toLocaleString(undefined, { month: 'long' }) };
 }
 
 // Compact $-prefixed axis tick formatter (#129): "$0", "$25", "$1.5k" — no
@@ -1373,9 +1390,9 @@ function CostView({ params }) {
   const fmtY = useTokens ? fmtTokens : fmtCost;
 
   // Run-rate (total view only): per-day average over the FULL window length
-  // (not the data range — #129), projected to the end of the calendar cycle
-  // (#134), drawn as a dashed line. Single linear figure, no forecasting.
-  const cyc = cycleRemaining();
+  // (not the data range — #129), projected to the end of the billing cycle
+  // (#134/#138), drawn as a dashed line. Single linear figure, no forecasting.
+  const cyc = cycleRemaining(costResp && costResp.cycle);
   let runRate = null, projection = null;
   if (groupBy === 'total' && series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? totalTokens : total;
@@ -1431,7 +1448,7 @@ function CostView({ params }) {
             <${SpendChart} data=${series.data} labels=${series.labels} height=${160}
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate}
               showLegend=${groupBy !== 'total'} bucket=${series.bucket} />
-            ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by end of ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+            ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
           ` : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
       </div>
     ` : null}
@@ -1980,7 +1997,7 @@ function OverviewView({ params }) {
   const series = buildCostSeries(cost, 'total', useTokens);
   const totalDisplay = useTokens ? (fmtTokens(cost.total_tokens || 0) + ' tokens') : fmtFramedDollar(cost.total_cost_usd || 0, framing);
   const trendPct = d.compare ? (useTokens ? d.compare.tokens_delta_pct : d.compare.cost_delta_pct) : null;
-  const cyc = cycleRemaining();
+  const cyc = cycleRemaining(cost.cycle);
   let runRate = null, projection = null;
   if (series && series.data[1] && series.data[1].length) {
     const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
@@ -2015,7 +2032,7 @@ function OverviewView({ params }) {
       </div>
       ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} bucket=${series.bucket} />`
         : html`<div class="empty" style="padding:24px 0">No spend in this window.</div>`}
-      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by end of ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+      ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
     </div>
 
     <!-- Band 2: Recoverable waste -->
