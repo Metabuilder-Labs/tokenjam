@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import click
+from rich.markup import escape
 
 from tokenjam.core.config import find_config_file
 from tokenjam.utils.formatting import console
@@ -157,8 +158,11 @@ retention_days = 90
         console.print(f"[green]\u2713[/green] Default daily budget: "
                       f"[bold]${budget:.2f}[/bold] per agent")
     if plan_tier:
+        # Escape the TOML section header \u2014 Rich treats `[budget.<provider>]` as a
+        # markup tag and would strip it, leaving "(written to )". See issue #157.
+        plan_section = escape(f"[budget.{plan_provider}]")
         console.print(f"[green]\u2713[/green] Plan tier: "
-                      f"[bold]{plan_tier}[/bold] (written to [budget.{plan_provider}])")
+                      f"[bold]{plan_tier}[/bold] (written to {plan_section})")
     if daemon_msg:
         console.print(f"[green]\u2713[/green] {daemon_msg}")
 
