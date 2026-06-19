@@ -91,6 +91,11 @@ class ApiBackend:
                 model=r["model"],
                 input_tokens=r.get("input_tokens", 0),
                 output_tokens=r.get("output_tokens", 0),
+                # Cache fields added in #149; the API serializes them but this
+                # shim was missed, so `tj cost` silently showed 0s in the cache
+                # columns whenever the daemon was up. Mirror the wider contract.
+                cache_tokens=r.get("cache_tokens", 0),
+                cache_write_tokens=r.get("cache_write_tokens", 0),
                 cost_usd=r.get("cost_usd", 0.0),
             )
             for r in data.get("rows", [])
