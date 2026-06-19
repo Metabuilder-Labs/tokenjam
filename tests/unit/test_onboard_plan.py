@@ -53,6 +53,16 @@ def test_plain_onboard_no_plan_noninteractive_writes_no_plan(tmp_path):
     assert "plan =" not in cfg
 
 
+def test_plan_message_shows_section_name(tmp_path):
+    # Regression for #157: the "written to [budget.<provider>]" confirmation must
+    # NOT have its TOML section header eaten by Rich markup parsing (which left
+    # the message reading "(written to )").
+    res, _ = _onboard(tmp_path, "--plan", "api")
+    assert res.exit_code == 0, res.output
+    assert "[budget.anthropic]" in res.output, res.output
+    assert "(written to )" not in res.output
+
+
 def test_plain_onboard_writes_valid_toml(tmp_path):
     import sys
     if sys.version_info >= (3, 11):
