@@ -1,6 +1,8 @@
 """Integration tests for the REST API using httpx.AsyncClient + ASGITransport."""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import httpx
 
@@ -331,6 +333,27 @@ async def test_cost_cycle_block_honors_provider_cycle_start_day(db):
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         cycle = (await c.get("/api/v1/cost")).json()["cycle"]
     assert cycle["start_day"] == 15
+
+
+async def test_overview_endpoint_set_survives_concurrent_requests(client):
+    """#124: the daemon's sync (`def`) read routes (`/optimize`,
+    `/cost/compare`) run in Starlette's threadpool, so concurrent requests reach
+    DuckDB from several threads at once. A single shared connection aborts the
+    process under that load; per-thread cursors (DuckDBBackend.conn) make it
+    safe. Fire the Overview's endpoint set concurrently, repeatedly, and assert
+    every response is 200 — the issue's acceptance criterion."""
+    await _ingest_sample_span(client)
+    endpoints = [
+        "/api/v1/cost?since=7d",
+        "/api/v1/optimize?fast=true&since=30d",
+        "/api/v1/cost/compare?since=7d&compare=previous",
+        "/api/v1/traces",
+        "/api/v1/budget",
+    ]
+    for _ in range(5):  # several rounds so threadpool overlap is likely
+        results = await asyncio.gather(*(client.get(u) for u in endpoints * 3))
+        bad = [(str(r.url), r.status_code) for r in results if r.status_code != 200]
+        assert not bad, bad
 
 
 async def test_optimize_response_includes_framing_block(client):

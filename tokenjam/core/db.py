@@ -5,6 +5,7 @@ and migration runner. DuckDB only — never import sqlite3.
 from __future__ import annotations
 
 import json
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -373,8 +374,32 @@ class DuckDBBackend:
     def __init__(self, config: StorageConfig) -> None:
         db_path = Path(config.path).expanduser()
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = duckdb.connect(str(db_path))
-        run_migrations(self.conn)
+        self._conn = duckdb.connect(str(db_path))
+        run_migrations(self._conn)
+        self._local = threading.local()
+
+    @property
+    def conn(self) -> duckdb.DuckDBPyConnection:
+        """A per-thread DuckDB cursor over the shared database (#124).
+
+        The daemon's sync (`def`) read routes (`/optimize`, `/cost/compare`)
+        run in Starlette's threadpool, so concurrent requests can reach the DB
+        from several threads at once. A single DuckDB *connection object* is NOT
+        safe for concurrent use — overlapping `execute()` calls abort the
+        process (SIGABRT). Cursors created via `connect().cursor()` are
+        independent connections over the *same* database that ARE safe to use
+        concurrently from different threads (the DuckDB-recommended pattern), so
+        each thread lazily gets and reuses its own cursor. All cursors share one
+        database, so a write on one thread is visible to reads on another.
+
+        Single-threaded callers (tests, the CLI) always see the same cursor, so
+        behavior is unchanged for them.
+        """
+        cur = getattr(self._local, "cursor", None)
+        if cur is None:
+            cur = self._conn.cursor()
+            self._local.cursor = cur
+        return cur
 
     # -- writes --
 
@@ -815,7 +840,8 @@ class DuckDBBackend:
         return count
 
     def close(self) -> None:
-        self.conn.close()
+        # Closing the root connection tears down the database and all cursors.
+        self._conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -826,9 +852,13 @@ class InMemoryBackend(DuckDBBackend):
     """In-memory DuckDB backend for tests. Same implementation, no disk I/O."""
 
     def __init__(self) -> None:
-        # Bypass DuckDBBackend.__init__ to use :memory:
-        self.conn = duckdb.connect(":memory:")
-        run_migrations(self.conn)
+        # Bypass DuckDBBackend.__init__ to use :memory:. Cursors of an in-memory
+        # connection share the same in-memory database, so the per-thread cursor
+        # property (#124) works identically here — including cross-thread
+        # visibility, which the threadpool-backed integration tests rely on.
+        self._conn = duckdb.connect(":memory:")
+        run_migrations(self._conn)
+        self._local = threading.local()
 
 
 # ---------------------------------------------------------------------------
