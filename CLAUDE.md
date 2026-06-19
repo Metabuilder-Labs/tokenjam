@@ -37,6 +37,27 @@ cd sdk-ts && npm install && npm test
 ```
 
 
+## Working with concurrent agents
+
+When more than one agent is editing this repo in parallel, **each agent must operate in its own git worktree**. A single working directory shares one `HEAD`, so two `git commit` calls from different agents land on whichever branch was checked out last — leading to commits leaking into the wrong PR. We've hit this multiple times.
+
+Spin up a per-task worktree before starting:
+```bash
+git worktree add ../tokenjam-<task> main
+cd ../tokenjam-<task>
+git checkout -b feat/<task>
+```
+
+When the PR merges and the branch is deleted, prune the worktree:
+```bash
+git worktree remove ../tokenjam-<task>
+```
+
+Symptom of a missed worktree: `git log` shows a commit on a branch you didn't intend (because another agent's `HEAD` was the checked-out one when your `git commit` ran). If you see this, do **not** force-push — rebase the stray commit off your branch first, and only force-push if you own every commit being rewritten.
+
+`.tj/config.toml` is intentionally untracked (see PR #145 + Critical Rule 20) and gets mutated at runtime by `tj onboard` / `tj serve` regenerating the local `ingest_secret`. Don't `git add` it back. The CI test `tests/unit/test_no_tracked_dev_secrets.py` guards against this.
+
+
 ## Architecture
 
 ### Data Flow
@@ -105,7 +126,7 @@ Post-ingest hooks run synchronously after each span is written to DB:
 - **`tj tokenmaxx`** (`cmd_tokenmaxx.py`) — shareable spend-tier command. Reads last 30 days of usage, classifies into a 6-tier ladder (Sipper / Moderator / Maxxer / SuperMaxxer / MegaMaxxer / GigaMaxxer) using the multiplier vs the user's declared subscription plan as the primary classifier, with absolute USD/mo thresholds as the API-user fallback. Output is a bordered Panel designed for screenshotting. Plan-aware: shows the multiplier line only when the user has `[budget.<provider>] plan = "max_5x"` (or pro / max_20x / plus) configured — the declared-plan lookup uses `core/framing.config_declared_plan`, which falls back to the global `~/.config/tj/config.toml` when the active project config has no `[budget]` section (issue #106). The companion landing page is `tokenjam.dev/tokenmaxxing`. Designed to never exit without an actionable next step — pairs the tier callout with the downsize savings figure inline.
 - **`tj cost`** (`cmd_cost.py`) — cost breakdown by `--group-by agent|model|day|tool`. Same `--compare <period>` flag as `tj optimize` for window-over-window diffs (▲/▼ indicators, per-agent and per-model top-shifts, dollar + token deltas).
 - **`tj backfill <source>`** (`cmd_backfill.py`) — ingest historical telemetry from external sources. Subcommands: `claude-code` (parses `~/.claude/projects/*.jsonl`, auto-invoked at the end of `tj onboard --claude-code`), `langfuse` (live API or JSON dump), `helicone` (live API or JSON dump), `otlp` (raw OTLP JSON via URL or file — reuses the same parser as the live `POST /api/v1/spans` route). All idempotent via deterministic span IDs.
-- **`tj onboard`** (`cmd_onboard.py`) — `--claude-code` and `--codex` flags trigger integration-specific flows. Prompts for plan tier (api / pro / max_5x / max_20x for Anthropic; api / plus / team / enterprise for OpenAI) and writes it to `[budget.<provider>] plan = "..."`. Supports `--reconfigure` to re-prompt against an existing config, and `--plan <tier>` for non-interactive use. Does NOT auto-write a default `usd = 200` cycle ceiling — subscription users get only the `plan` field; API users are explicitly asked whether they want a self-imposed ceiling.
+- **`tj onboard`** (`cmd_onboard.py`) — `--claude-code` and `--codex` flags trigger integration-specific flows (writing to the **global** config). All paths — including plain `tj onboard` — prompt for plan tier (api / pro / max_5x / max_20x for Anthropic; api / plus / team / enterprise for OpenAI) and write it to `[budget.<provider>] plan = "..."`; `--plan <tier>` sets it non-interactively (issue #4). The plain path is Claude-first: its interactive prompt offers the Anthropic tiers, and an OpenAI-only `--plan` (plus/team/enterprise) is routed to `[budget.openai]`. Supports `--reconfigure` to re-prompt against an existing config. Does NOT auto-write a default `usd = 200` cycle ceiling — subscription users get only the `plan` field; API users are explicitly asked whether they want a self-imposed ceiling.
 - **`tj report`** (`cmd_report.py`) — generates standalone HTML visualizations of analyzer findings. Currently `tj report --trim [<agent_id>]` renders the Trim analyzer's per-token significance (was `--bloat` pre-0.3.1, renamed alongside the analyzer's registry string). Writes to `~/.cache/tokenjam/reports/` (override via `TOKENJAM_REPORT_DIR`) and opens in the default browser.
 - **`tj policy list`** (`cmd_policy.py`) — read-only preview of the unified policy surface. Consolidates existing `[alerts]`, `[alerts.channels]`, `[defaults.budget]`, `[budget.<provider>]`, per-agent `budget`/`drift`/`sensitive_actions`/`output_schema`, and `[capture]` config into one table; each row carries its source TOML section. Supports `--json`. `tj policy add | edit | apply | remove | test` are intentionally absent this sprint — the unified config migration is next sprint's work. `policy` is in `no_db_commands` in `cli/main.py` so it doesn't open the DB. Rich source-section strings (`[budget.anthropic]`, `[[alerts.channels]]`) must be passed through `rich.markup.escape()` before rendering — otherwise Rich consumes them as style tags.
 
@@ -168,6 +189,7 @@ When a span has a `conversation_id` matching an existing session, it's attribute
 17. **OTLP parsing has one home** — `tokenjam/otel/otlp_parsing.py`. Both the live `POST /api/v1/spans` route and the `tj backfill otlp` adapter import `parse_otlp_span` and `extract_resource_attrs` from there. If you need to extend OTLP attribute extraction, do it once in that module; do not copy-paste into either caller.
 18. **Web UI must work fully offline** — `tokenjam/ui/index.html` is the served dashboard ("TokenJam Lens"; see Architecture → Web UI). It is intentionally a single-file SPA with **zero external HTTP loads at render time**. Preact + hooks + htm + **uPlot** are vendored under `tokenjam/ui/vendor/` (ESM via `<script type="importmap">`; uPlot as a plain `<script>` IIFE global); fonts use system-font fallbacks (no Google Fonts); the favicon is inlined as a `data:` URL. The FastAPI app mounts `/ui/vendor` as `StaticFiles`. The `tests/unit/test_ui_offline.py` regression test asserts no render-time external URLs exist anywhere outside `<a href>` (clickable links to github.com are fine — they only fetch on click) and that vendored CSS has no external `url()`. If you add a CDN font, script, or stylesheet, that test will fail. Vendor the asset locally instead. See issue #87 + PR #88.
 19. **Analyzer registry names ≠ file names** — registry strings (`downsize`, `cache`, `script`, `trim`) are decoupled from Python module filenames (`model_downgrade.py`, `cache_efficacy.py`, `workflow_restructure.py`, `prompt_bloat.py`). The 0.3.1 rename only changed `@register("...")` strings; file names stayed for git-blame continuity. When grepping for an analyzer, search both the registry string AND the older file-name keyword.
+20. **`.tj/config.toml` is untracked and must stay that way** — the file contains a live per-install `ingest_secret` and is regenerated by `tj onboard` / `tj serve`. It was committed in error from v0.2.0 through v0.3.5 (leaked secret in git history; see PR #145 + issue #141 finding #6). `.gitignore` covers it, and `tests/unit/test_no_tracked_dev_secrets.py` fails CI if it's re-added to the index. If you see `.tj/config.toml` in your `git status` as modified or new, that's expected — just don't `git add` it.
 
 ## Config
 
