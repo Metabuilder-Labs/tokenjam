@@ -97,6 +97,21 @@ def test_status_exits_1_when_active_alerts(runner, db, config):
     assert data["has_active_alerts"] is True
 
 
+def test_status_json_includes_active_and_elapsed(runner, db, config):
+    """Status JSON carries active (compute) time + wall-clock elapsed (#147)."""
+    session = _seed_agent_and_session(db)
+    for ms in (1500.0, 2500.0):
+        sp = make_llm_span(agent_id="test-agent", duration_ms=ms)
+        sp.session_id = session.session_id
+        db.insert_span(sp)
+
+    result = _invoke(runner, db, config, ["status", "--json"])
+    assert result.exit_code == 0
+    a = json.loads(result.output)["agents"][0]
+    assert "active_seconds" in a and "duration_seconds" in a
+    assert a["active_seconds"] == 4.0   # 4000 ms of spans
+
+
 # -- traces tests --
 
 def test_traces_json_output_is_valid_json(runner, db, config):
