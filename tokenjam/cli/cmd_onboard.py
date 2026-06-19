@@ -98,7 +98,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
 
     config_text = f"""\
 # TokenJam configuration
-# Docs: https://github.com/Metabuilder-Labs/openclawwatch#configuration
+# Docs: https://github.com/Metabuilder-Labs/tokenjam#configuration
 
 [defaults.budget]
 {budget_line}
@@ -109,6 +109,7 @@ ingest_secret = "{ingest_secret}"
 [capture]
 prompts = false
 completions = false
+tool_inputs = false
 tool_outputs = false
 
 [storage]
@@ -174,7 +175,7 @@ retention_days = 90
     )
     console.print(
         "  Edit [bold].tj/config.toml[/bold] \u2014 see "
-        "[dim]https://github.com/Metabuilder-Labs/openclawwatch#configuration[/dim]"
+        "[dim]https://github.com/Metabuilder-Labs/tokenjam#configuration[/dim]"
     )
     console.print()
 
