@@ -1308,30 +1308,48 @@ function _costVal(r, useTokens) {
 // FULL selected window (zero-filled across empty buckets) so 7d/30d/90d look
 // distinct and idle periods show as $0 (#133). `resp` carries epoch-second
 // `series` buckets, `series_bucket` ('hour'|'day'), and `window_start/end`.
+// Upper bound on grid points handed to uPlot. Past this the chart coarsens its
+// bucket (hour->day->week) rather than returning null and rendering an empty
+// state (#139) — graceful degradation, never silent truncation.
+const MAX_BUCKETS = 5000;
+const _BUCKET_LADDER = [['hour', 3600], ['day', 86400], ['week', 604800]];
+
 function buildCostSeries(resp, mode, useTokens) {
   const rows = (resp && resp.series) || [];
-  const bucket = (resp && resp.series_bucket) || 'day';
-  const step = bucket === 'hour' ? 3600 : 86400;
+  const reqBucket = (resp && resp.series_bucket) || 'day';
   let start = resp && resp.window_start;
   let end = resp && resp.window_end;
   if (start == null || end == null) {
-    if (!rows.length) return null;
+    if (!rows.length) return null;  // genuinely no data -> "No spend" empty state
     const bs = rows.map(r => r.bucket);
     start = Math.min(...bs); end = Math.max(...bs);
   }
+  if (!(end >= start)) return null;
+  // Pick the FINEST bucket (starting from the server-requested one) whose grid
+  // stays within MAX_BUCKETS. Long windows (or future finer bucketing) coarsen
+  // up the ladder instead of silently emptying the chart (#139). Counting is
+  // closed-form so we never build an oversized array just to discard it.
+  let reqIdx = _BUCKET_LADDER.findIndex(b => b[0] === reqBucket);
+  if (reqIdx < 0) reqIdx = 1;  // unknown bucket name -> treat as daily
+  let bucket = _BUCKET_LADDER[reqIdx][0], step = _BUCKET_LADDER[reqIdx][1];
+  for (let i = reqIdx; i < _BUCKET_LADDER.length; i++) {
+    const s = _BUCKET_LADDER[i][1];
+    const count = (Math.floor(end / s) - Math.floor(start / s)) + 1;
+    bucket = _BUCKET_LADDER[i][0]; step = s;
+    if (count <= MAX_BUCKETS) break;  // fits; coarsest is kept if none do
+  }
+  const coarsened = bucket !== reqBucket;
   // Align bounds to bucket boundaries and build the full grid.
   start = Math.floor(start / step) * step;
   end = Math.floor(end / step) * step;
-  if (!(end >= start)) return null;
   const xs = [];
   for (let t = start; t <= end; t += step) xs.push(t);
-  if (!xs.length || xs.length > 5000) return null;  // guard pathological ranges
   const idx = {}; xs.forEach((t, i) => { idx[t] = i; });
   const bucketOf = r => Math.floor(r.bucket / step) * step;
   if (mode === 'total') {
     const ys = xs.map(() => 0);
     rows.forEach(r => { const b = bucketOf(r); if (b in idx) ys[idx[b]] += _costVal(r, useTokens); });
-    return { data: [xs, ys], labels: ['Total'], bucket };
+    return { data: [xs, ys], labels: ['Total'], bucket, coarsened, requestedBucket: reqBucket };
   }
   const keyOf = mode === 'model' ? (r => r.model || '(none)') : (r => r.agent_id || '(none)');
   const totals = {};
@@ -1347,7 +1365,7 @@ function buildCostSeries(resp, mode, useTokens) {
     const li = topSet.has(k) ? labels.indexOf(k) : (hasOther ? labels.length - 1 : -1);
     if (li >= 0) yss[li][idx[b]] += _costVal(r, useTokens);
   });
-  return { data: [xs, ...yss], labels, bucket };
+  return { data: [xs, ...yss], labels, bucket, coarsened, requestedBucket: reqBucket };
 }
 
 function CostView({ params }) {
@@ -1449,6 +1467,7 @@ function CostView({ params }) {
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate}
               showLegend=${groupBy !== 'total'} bucket=${series.bucket} />
             ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
           ` : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
       </div>
     ` : null}
@@ -1926,16 +1945,23 @@ function OverviewView({ params }) {
         setD({ loading: false, empty: true, error: null });
         return;
       }
-      // Fetch sequentially, not in parallel: the daemon's single DuckDB
-      // connection isn't safe for concurrent access across the sync routes'
-      // threadpool, and a 6-at-once burst can 500. Six local reads in series
-      // are still well under a frame on a 30s-poll surface.
-      const cost = await api('/cost', { since, group_by: 'day' });
-      const compare = await api('/cost/compare', { since, compare: 'previous' }).catch(() => null);
-      const opt = await api('/optimize', { since, fast: 'true' }).catch(() => null);
-      const al = await api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] }));
-      const drift = await api('/drift').catch(() => ({ agents: [] }));
-      const traces = await api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] }));
+      // Fetch the Overview's panels in PARALLEL: the daemon DB layer is now
+      // concurrency-safe (#124 — per-thread DuckDB cursors), so the #114
+      // serial-fetch workaround is gone. The error handling is deliberately
+      // ASYMMETRIC and must NOT be unified (#124 review):
+      //   - /cost is load-bearing — NO .catch, so its failure rejects the
+      //     Promise.all and surfaces the error state (the page can't render
+      //     without spend data).
+      //   - the other five panels each carry a .catch fallback so one failing
+      //     panel renders empty rather than blanking the whole Overview.
+      const [cost, compare, opt, al, drift, traces] = await Promise.all([
+        api('/cost', { since, group_by: 'day' }),
+        api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
+        api('/optimize', { since, fast: 'true' }).catch(() => null),
+        api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
+        api('/drift').catch(() => ({ agents: [] })),
+        api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
+      ]);
       setD({ loading: false, empty: false, error: null, cost, compare, opt,
         alerts: al.alerts || [], drift, traces: traces.traces || [] });
     } catch (e) {
@@ -2033,6 +2059,7 @@ function OverviewView({ params }) {
       ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${130} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} bucket=${series.bucket} />`
         : html`<div class="empty" style="padding:24px 0">No spend in this window.</div>`}
       ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+      ${series && series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
     </div>
 
     <!-- Band 2: Recoverable waste -->
