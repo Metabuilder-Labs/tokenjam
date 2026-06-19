@@ -51,5 +51,6 @@ tj.toml
 docs/superpowers/
 .gstack/
 
-# Per-release pre-release test logs — runner writes here, each run is local
-tests/results/
+# Per-release pre-release test logs are committed (for reference) — see
+# tests/results/. They're small markdown files, one per release run, and
+# serve as a record of what was verified at release time.
