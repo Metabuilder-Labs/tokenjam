@@ -84,7 +84,8 @@ def _span_to_dict(span: object) -> dict:
         "tool_name": span.tool_name,
         "input_tokens": span.input_tokens,
         "output_tokens": span.output_tokens,
-        "cache_tokens": span.cache_tokens,
+        "cache_tokens": span.cache_tokens,            # cache-READ tokens
+        "cache_write_tokens": span.cache_write_tokens,  # cache-CREATE tokens (#17)
         "cost_usd": span.cost_usd,
         "request_type": span.request_type,
         "conversation_id": span.conversation_id,

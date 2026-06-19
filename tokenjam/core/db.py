@@ -613,24 +613,28 @@ class DuckDBBackend:
             idx += 1
         where = " AND ".join(clauses)
 
+        # Cache-read + cache-write are summed alongside in/out so callers can
+        # show the full token picture (cache-write is often the dominant cost
+        # driver yet was invisible above the DB — issue #17).
+        token_cols = (
+            "COALESCE(SUM(input_tokens), 0), "
+            "COALESCE(SUM(output_tokens), 0), "
+            "COALESCE(SUM(cache_tokens), 0), "
+            "COALESCE(SUM(cache_write_tokens), 0), "
+            "COALESCE(SUM(cost_usd), 0.0) "
+        )
         if filters.group_by in ("agent", "model"):
             sql = (
-                f"SELECT {group_expr} AS grp, agent_id, model, "
-                f"COALESCE(SUM(input_tokens), 0), "
-                f"COALESCE(SUM(output_tokens), 0), "
-                f"COALESCE(SUM(cost_usd), 0.0) "
-                f"FROM spans WHERE {where} "
+                f"SELECT {group_expr} AS grp, agent_id, model, " + token_cols
+                + f"FROM spans WHERE {where} "
                 f"GROUP BY grp, agent_id, model "
                 f"ORDER BY grp DESC"
             )
         else:
             # day / tool: group only by the primary expression to avoid cross-product
             sql = (
-                f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, "
-                f"COALESCE(SUM(input_tokens), 0), "
-                f"COALESCE(SUM(output_tokens), 0), "
-                f"COALESCE(SUM(cost_usd), 0.0) "
-                f"FROM spans WHERE {where} "
+                f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, " + token_cols
+                + f"FROM spans WHERE {where} "
                 f"GROUP BY grp "
                 f"ORDER BY grp DESC"
             )
@@ -638,7 +642,9 @@ class DuckDBBackend:
         return [
             CostRow(
                 group=str(r[0]), agent_id=r[1], model=r[2],
-                input_tokens=r[3] or 0, output_tokens=r[4] or 0, cost_usd=r[5] or 0.0,
+                input_tokens=r[3] or 0, output_tokens=r[4] or 0,
+                cache_tokens=r[5] or 0, cache_write_tokens=r[6] or 0,
+                cost_usd=r[7] or 0.0,
             )
             for r in rows
         ]
