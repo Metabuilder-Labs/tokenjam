@@ -133,3 +133,35 @@ def test_cache_write_rendered(html):
     # trace-detail panel + waterfall tooltip + Cost table show cache-write.
     assert "cache_write_tokens" in html
     assert "Cache write" in html
+
+
+# --- #139: buildCostSeries coarsens instead of silently emptying ----------- #
+def test_cost_series_coarsens_not_silently_empty(html):
+    # The silent "too many buckets -> null" guard is gone; the chart coarsens up
+    # a bucket ladder (hour->day->week) and flags it instead of rendering empty.
+    assert "xs.length > 5000) return null" not in html  # the silent-empty guard
+    assert "const MAX_BUCKETS = 5000" in html
+    assert "_BUCKET_LADDER" in html
+    assert "['week', 604800]" in html
+    # The coarsening is surfaced to the user, not silent (CLAUDE.md spirit).
+    assert "coarsened" in html
+    assert "Showing ${series.bucket} buckets" in html
+
+
+# --- #124 follow-up: Overview fetches in parallel, asymmetric error handling- #
+def test_overview_fetches_in_parallel(html):
+    # The #114 serial-fetch workaround is gone now that the DB layer is
+    # concurrency-safe (#124); the Overview fans out via Promise.all.
+    assert "Fetch sequentially, not in parallel" not in html
+    assert "await Promise.all([" in html
+
+
+def test_overview_error_handling_is_asymmetric(html):
+    # /cost is load-bearing: NO .catch, so its failure surfaces the error state.
+    # The other five panels keep .catch fallbacks so one failing panel renders
+    # empty instead of blanking the Overview. Don't unify these (#124 review).
+    assert "api('/cost', { since, group_by: 'day' }).catch" not in html  # no catch on /cost
+    assert "api('/cost', { since, group_by: 'day' })," in html           # bare, inside Promise.all
+    assert "api('/cost/compare', { since, compare: 'previous' }).catch(() => null)" in html
+    assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" in html
+    assert "api('/drift').catch(() => ({ agents: [] }))" in html
