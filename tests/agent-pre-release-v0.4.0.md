@@ -1,6 +1,6 @@
 # Pre-release checklist — v0.4.0
 
-Focused on the delta since v0.3.5. The runner (`tests/manual-pre-release-runner.md`) walks each step in order.
+Focused on the delta since v0.3.5. The runner (`tests/agent-pre-release-runner.md`) walks each step in order.
 
 **What's new in v0.4.0** (so you know what we're validating):
 - TokenJam Lens UI rebrand (Overview triage screen + Optimize tab + real charts)
@@ -11,7 +11,7 @@ Focused on the delta since v0.3.5. The runner (`tests/manual-pre-release-runner.
 - Security: `.tj/config.toml` untracked + CI guard
 - Onboard: plain `tj onboard --plan` honored; tool_inputs capture toggle added; stale URLs removed
 
-Stable surfaces (ingest, alerts, drift, schema validation, MCP server) are **not** in scope — they're covered by the standing pre-release playbook in `tests/manual-pre-release-testing.md`.
+Stable surfaces (ingest, alerts, drift, schema validation, MCP server) are **not** in scope — they're covered by the standing pre-release playbook in `tests/agent-pre-release-testing.md`.
 
 ---
 

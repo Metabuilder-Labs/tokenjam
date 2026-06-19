@@ -3,7 +3,7 @@
 - **Run at:** 2026-06-19T20:22:33Z
 - **Branch:** main
 - **HEAD:** 4dd2185
-- **Checklist:** tests/manual-pre-release-v0.4.0.md
+- **Checklist:** tests/agent-pre-release-v0.4.0.md
 - **Result:** 8/12 PASS, 1 FAIL, 3 UNCLEAR
 
 > **Pre-flight note:** `pyproject.toml` still reads `version = "0.3.5"`, and both `tj --version` and `/api/v1/version` report `0.3.5`. The version has **not** been bumped to 0.4.0 yet. All steps below were run against the 0.3.5 build, since that's what the daemon is serving. Per Critical Rule 15, the version bump must happen before the release is cut.
