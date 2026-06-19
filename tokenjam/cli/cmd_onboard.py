@@ -85,6 +85,22 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
             type=float, default=0.0, show_default=False,
         )
 
+    # Plan tier (#4): the plain path now honors `--plan` and prompts for it
+    # interactively, instead of silently ignoring `--plan` and never writing a
+    # `[budget.<provider>] plan`. This is a Claude-first tool, so the interactive
+    # prompt offers the Anthropic tiers; an OpenAI-only `--plan` (plus/team/
+    # enterprise) is routed to its provider section. (The `--claude-code` /
+    # `--codex` flows still own the global integration configs.)
+    plan_tier = plan
+    if plan_tier is None and sys.stdin.isatty():
+        plan_tier = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES)
+    plan_provider = (
+        "openai" if plan_tier in ("plus", "team", "enterprise") else "anthropic"
+    )
+    plan_section = (
+        f'\n[budget.{plan_provider}]\nplan = "{plan_tier}"\n' if plan_tier else ""
+    )
+
     ingest_secret = secrets.token_hex(32)
 
     want_daemon = not no_daemon
@@ -102,7 +118,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
 
 [defaults.budget]
 {budget_line}
-
+{plan_section}
 [security]
 ingest_secret = "{ingest_secret}"
 
@@ -140,6 +156,9 @@ retention_days = 90
     if budget and budget > 0:
         console.print(f"[green]\u2713[/green] Default daily budget: "
                       f"[bold]${budget:.2f}[/bold] per agent")
+    if plan_tier:
+        console.print(f"[green]\u2713[/green] Plan tier: "
+                      f"[bold]{plan_tier}[/bold] (written to [budget.{plan_provider}])")
     if daemon_msg:
         console.print(f"[green]\u2713[/green] {daemon_msg}")
 

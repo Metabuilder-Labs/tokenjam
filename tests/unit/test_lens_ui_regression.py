@@ -114,3 +114,10 @@ def test_cache_at_ceiling_not_volume_gated(html):
     # the classifier reads the ceiling from the response.
     assert "CACHE_MIN_INPUT" not in html
     assert "fd.efficacy_ceiling" in html
+
+
+# --- #17: cache-write surfaced in trace detail + cost table ---------------- #
+def test_cache_write_rendered(html):
+    # trace-detail panel + waterfall tooltip + Cost table show cache-write.
+    assert "cache_write_tokens" in html
+    assert "Cache write" in html

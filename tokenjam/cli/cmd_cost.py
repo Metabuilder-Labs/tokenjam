@@ -71,6 +71,8 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
     )
     rows = db.get_cost_summary(filters)
     total = sum(r.cost_usd for r in rows)
+    total_in = sum(r.input_tokens for r in rows)
+    total_out = sum(r.output_tokens for r in rows)
 
     if output_json:
         click.echo(json.dumps({
@@ -83,51 +85,51 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
         console.print("[dim]No cost data found for the given filters.[/dim]")
         return
 
+    # CACHE R / CACHE W columns make cost reconcilable from the shown tokens —
+    # cache-write is often the dominant driver and was previously invisible (#17).
+    cache_r = sum(r.cache_tokens for r in rows)
+    cache_w = sum(r.cache_write_tokens for r in rows)
     if group_by == "day":
-        table = make_table("DATE", "AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "COST")
+        table = make_table("DATE", "AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
         for r in rows:
             table.add_row(
-                r.group,
-                r.agent_id or "-",
-                r.model or "-",
-                format_tokens(r.input_tokens),
-                format_tokens(r.output_tokens),
+                r.group, r.agent_id or "-", r.model or "-",
+                format_tokens(r.input_tokens), format_tokens(r.output_tokens),
+                format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
                 format_cost(r.cost_usd),
             )
+        table.add_row("", "", "", format_tokens(total_in), format_tokens(total_out),
+                      format_tokens(cache_r), format_tokens(cache_w),
+                      f"[bold]{format_cost(total)}[/bold]")
     elif group_by == "agent":
-        table = make_table("AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "COST")
+        table = make_table("AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
         for r in rows:
             table.add_row(
-                r.group,
-                r.model or "-",
-                format_tokens(r.input_tokens),
-                format_tokens(r.output_tokens),
+                r.group, r.model or "-",
+                format_tokens(r.input_tokens), format_tokens(r.output_tokens),
+                format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
                 format_cost(r.cost_usd),
             )
+        table.add_row("", "", format_tokens(total_in), format_tokens(total_out),
+                      format_tokens(cache_r), format_tokens(cache_w),
+                      f"[bold]{format_cost(total)}[/bold]")
     elif group_by == "model":
-        table = make_table("MODEL", "TOKENS IN", "TOKENS OUT", "COST")
+        table = make_table("MODEL", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
         for r in rows:
             table.add_row(
                 r.group,
-                format_tokens(r.input_tokens),
-                format_tokens(r.output_tokens),
+                format_tokens(r.input_tokens), format_tokens(r.output_tokens),
+                format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
                 format_cost(r.cost_usd),
             )
+        table.add_row("", format_tokens(total_in), format_tokens(total_out),
+                      format_tokens(cache_r), format_tokens(cache_w),
+                      f"[bold]{format_cost(total)}[/bold]")
     elif group_by == "tool":
+        # Tool grouping has no token dimension — cost only.
         table = make_table("TOOL", "COST")
         for r in rows:
-            table.add_row(
-                r.group,
-                format_cost(r.cost_usd),
-            )
-
-    if group_by == "day":
-        table.add_row("", "", "", "", "[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
-    elif group_by == "agent":
-        table.add_row("", "", "", "[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
-    elif group_by == "model":
-        table.add_row("", "", "[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
-    elif group_by == "tool":
+            table.add_row(r.group, format_cost(r.cost_usd))
         table.add_row("[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
 
     console.print(table)

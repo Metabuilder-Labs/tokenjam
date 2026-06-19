@@ -1208,6 +1208,8 @@ function TraceDetailView({ traceId }) {
         if (s.tool_name) tipLines.push('Tool: ' + s.tool_name);
         if (s.input_tokens != null) tipLines.push('Input tokens: ' + fmtTokens(s.input_tokens));
         if (s.output_tokens != null) tipLines.push('Output tokens: ' + fmtTokens(s.output_tokens));
+        if (s.cache_tokens) tipLines.push('Cache read: ' + fmtTokens(s.cache_tokens));
+        if (s.cache_write_tokens) tipLines.push('Cache write: ' + fmtTokens(s.cache_write_tokens));
         if (s.cost_usd != null) tipLines.push('Cost: ' + fmtCost(s.cost_usd));
         const tooltip = tipLines.join('\n');
         return html`
@@ -1236,6 +1238,8 @@ function TraceDetailView({ traceId }) {
           ${sel.tool_name ? html`<span class="dk">Tool</span><span class="dv">${sel.tool_name}</span>` : null}
           ${sel.input_tokens != null ? html`<span class="dk">Input tokens</span><span class="dv">${fmtTokens(sel.input_tokens)}</span>` : null}
           ${sel.output_tokens != null ? html`<span class="dk">Output tokens</span><span class="dv">${fmtTokens(sel.output_tokens)}</span>` : null}
+          ${sel.cache_tokens ? html`<span class="dk">Cache read</span><span class="dv">${fmtTokens(sel.cache_tokens)}</span>` : null}
+          ${sel.cache_write_tokens ? html`<span class="dk">Cache write</span><span class="dv">${fmtTokens(sel.cache_write_tokens)}</span>` : null}
           ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtCost(sel.cost_usd)}</span>` : null}
           ${sel.agent_id ? html`<span class="dk">Agent</span><span class="dv">${sel.agent_id}</span>` : null}
           ${sel.conversation_id ? html`<span class="dk">Conversation</span><span class="dv">${sel.conversation_id}</span>` : null}
@@ -1438,7 +1442,7 @@ function CostView({ params }) {
           <th>${tableMode === 'day' ? 'Date' : tableMode === 'agent' ? 'Agent' : 'Model'}</th>
           ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
           ${tableMode !== 'model' ? html`<th>Model</th>` : null}
-          <th>Input</th><th>Output</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
+          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
         </tr></thead>
         <tbody>
           ${rows.map(r => html`
@@ -1448,6 +1452,8 @@ function CostView({ params }) {
               ${tableMode !== 'model' ? html`<td class="mono">${r.model || '-'}</td>` : null}
               <td>${fmtTokens(r.input_tokens)}</td>
               <td>${fmtTokens(r.output_tokens)}</td>
+              <td>${fmtTokens(r.cache_tokens || 0)}</td>
+              <td>${fmtTokens(r.cache_write_tokens || 0)}</td>
               <td>${fmtCost(r.cost_usd)}</td>
             </tr>
           `)}
@@ -1455,6 +1461,8 @@ function CostView({ params }) {
             <td colspan=${1 + (tableMode !== 'agent' ? 1 : 0) + (tableMode !== 'model' ? 1 : 0)}></td>
             <td>${fmtTokens(totalIn)}</td>
             <td>${fmtTokens(totalOut)}</td>
+            <td>${fmtTokens(rows.reduce((s, r) => s + (r.cache_tokens || 0), 0))}</td>
+            <td>${fmtTokens(rows.reduce((s, r) => s + (r.cache_write_tokens || 0), 0))}</td>
             <td>${fmtCost(total)}</td>
           </tr>
         </tbody>
