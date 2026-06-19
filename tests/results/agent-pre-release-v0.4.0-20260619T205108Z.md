@@ -3,7 +3,7 @@
 - **Run at:** 2026-06-19T20:51:08Z
 - **Branch:** main
 - **HEAD:** ae94d41
-- **Checklist:** tests/manual-pre-release-v0.4.0.md
+- **Checklist:** tests/agent-pre-release-v0.4.0.md
 - **Result:** 11/12 steps PASS, 0 FAIL, 1 UNCLEAR
 
 Note: daemon is running v0.3.5 (pre-bump) per parent prompt — Step 1 marked UNCLEAR as flagged.

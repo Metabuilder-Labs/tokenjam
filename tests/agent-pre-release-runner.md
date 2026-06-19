@@ -2,13 +2,13 @@
 
 Generic instructions for a sub-agent to execute a release-specific pre-release test pass and produce a structured log a human can review.
 
-This file does not change between releases. Each release authors a focused `tests/manual-pre-release-vX.Y.Z.md` companion checklist; the runner consumes that file.
+This file does not change between releases. Each release authors a focused `tests/agent-pre-release-vX.Y.Z.md` companion checklist; the runner consumes that file.
 
 ---
 
 ## Your job (as the sub-agent reading this)
 
-1. **Find the release-specific checklist** at `tests/manual-pre-release-v<VERSION>.md`. `VERSION` will be in the parent's prompt (e.g. "v0.4.0"). If you can't determine the version, read `pyproject.toml` and assume the next minor version — but flag this uncertainty in the log.
+1. **Find the release-specific checklist** at `tests/agent-pre-release-v<VERSION>.md`. `VERSION` will be in the parent's prompt (e.g. "v0.4.0"). If you can't determine the version, read `pyproject.toml` and assume the next minor version — but flag this uncertainty in the log.
 
 2. **Verify environment before starting.** Run these checks; abort with a clear message if anything fails:
 
@@ -43,7 +43,7 @@ This file does not change between releases. Each release authors a focused `test
    - Compare captured output to **Expected**. Decide PASS / FAIL / UNCLEAR.
    - Run **Assertions** commands if present. They print `ok:` on pass. If they don't print `ok:`, mark FAIL with the actual output.
 
-4. **Write the result log** to `tests/results/manual-pre-release-<VERSION>-<TIMESTAMP>.md`. Create the `tests/results/` directory if it doesn't exist. Use this format:
+4. **Write the result log** to `tests/results/agent-pre-release-<VERSION>-<TIMESTAMP>.md`. Create the `tests/results/` directory if it doesn't exist. Use this format:
 
    ````markdown
    # Pre-release test results — v<VERSION>
@@ -51,7 +51,7 @@ This file does not change between releases. Each release authors a focused `test
    - **Run at:** <ISO timestamp>
    - **Branch:** <branch name>
    - **HEAD:** <short SHA>
-   - **Checklist:** tests/manual-pre-release-v<VERSION>.md
+   - **Checklist:** tests/agent-pre-release-v<VERSION>.md
    - **Result:** N/M steps PASS, K FAIL, J UNCLEAR
 
    ---
@@ -104,7 +104,7 @@ If the daemon crashes mid-run, restart it and re-run the most recent step before
 
 After the run, print:
 ```
-Results written to tests/results/manual-pre-release-<VERSION>-<TIMESTAMP>.md
+Results written to tests/results/agent-pre-release-<VERSION>-<TIMESTAMP>.md
 Summary: <N>/<M> PASS, <K> FAIL, <J> UNCLEAR
 ```
 
