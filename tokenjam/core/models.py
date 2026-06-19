@@ -229,6 +229,8 @@ class CostRow:
     model:        str | None  = None
     input_tokens: int         = 0
     output_tokens: int        = 0
+    cache_tokens: int         = 0   # cache-READ tokens
+    cache_write_tokens: int   = 0   # cache-CREATE tokens (the hidden cost driver, #17)
     cost_usd:     float       = 0.0
 
 

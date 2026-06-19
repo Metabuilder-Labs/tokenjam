@@ -110,12 +110,16 @@ async def get_cost(
                 "model": r.model,
                 "input_tokens": r.input_tokens,
                 "output_tokens": r.output_tokens,
+                "cache_tokens": r.cache_tokens,
+                "cache_write_tokens": r.cache_write_tokens,
                 "cost_usd": r.cost_usd,
             }
             for r in rows
         ],
         "total_cost_usd": total,
         "total_tokens": total_tokens,
+        "total_cache_tokens": sum(r.cache_tokens for r in rows),
+        "total_cache_write_tokens": sum(r.cache_write_tokens for r in rows),
         **_window_series(conn, agent_id, since_dt, until_dt),
         "framing": framing.to_dict(),
     }

@@ -238,6 +238,32 @@ async def test_get_cost_returns_aggregated_rows(client):
     assert "total_cost_usd" in data
 
 
+async def test_trace_detail_includes_cache_write_tokens(db, client):
+    """The traces API exposes cache_write_tokens so per-span cost reconciles
+    from the displayed columns (#17 — it was the ~91% cost driver, hidden)."""
+    sp = make_llm_span(agent_id="a", model="claude-opus-4-8", provider="anthropic",
+                       input_tokens=2, output_tokens=465, cache_tokens=243597,
+                       cache_write_tokens=209000, cost_usd=1.4423)
+    db.insert_span(sp)
+    resp = await client.get(f"/api/v1/traces/{sp.trace_id}")
+    assert resp.status_code == 200
+    span = resp.json()["spans"][0]
+    assert span["cache_tokens"] == 243597
+    assert span["cache_write_tokens"] == 209000
+
+
+async def test_cost_rows_carry_cache_tokens(db, client):
+    """`/api/v1/cost` rows + totals include cache-read and cache-write (#17)."""
+    sp = make_llm_span(agent_id="a", model="claude-opus-4-8", provider="anthropic",
+                       input_tokens=2, output_tokens=465, cache_tokens=243597,
+                       cache_write_tokens=209000, cost_usd=1.4423)
+    db.insert_span(sp)
+    data = (await client.get("/api/v1/cost?group_by=model")).json()
+    assert data["rows"][0]["cache_tokens"] == 243597
+    assert data["rows"][0]["cache_write_tokens"] == 209000
+    assert data["total_cache_write_tokens"] == 209000
+
+
 async def test_cost_includes_window_series_for_chart(client):
     """/api/v1/cost carries a window-bucketed series (per bucket+agent+model)
     plus the bucket size and window bounds so the chart can span the full
