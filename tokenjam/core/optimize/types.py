@@ -3,13 +3,28 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 # Mandatory caveat string. Every channel that surfaces the downsize
 # finding must include this verbatim; spec rule #2 is non-negotiable.
 MODEL_DOWNGRADE_CAVEAT = (
     "Candidate-flagging heuristic, not a quality judgment. "
     "Review the example sessions before changing models."
+)
+
+# Mandatory caveat string for the Reuse analyzer. Honesty discipline
+# (CLAUDE.md Rule 14): structural detection only, never a claim of
+# interchangeability. Surfaced verbatim next to every recoverable figure.
+REUSE_HONESTY_CAVEAT = (
+    "Structural skeleton match, not a guarantee the plans were "
+    "interchangeable. Review the templates before reusing them."
+)
+
+# Required `estimate_basis` for ReuseFinding (issue #115 AC8 / savings
+# contract). Must contain the word "review".
+REUSE_ESTIMATE_BASIS = (
+    "structurally repeated planning calls — cache-reuse number assumes future "
+    "re-plans skip the LLM call entirely; review templates before reusing"
 )
 
 
@@ -85,6 +100,46 @@ class BudgetProjection:
     over_budget:            bool
     applies_to_services:    list[str]
     downgrade_run_rate_usd: float | None = None
+
+
+@dataclass
+class ReuseCluster:
+    """One cluster of sessions sharing the same planning skeleton."""
+    cluster_id:        str                 # deterministic hash of the cluster key
+    tool_signature:    tuple[str, ...]     # ordered tool names after the planner
+    prompt_prefix_hash: str | None         # None when capture.prompts is off
+    repetitions:       int                 # number of sessions in the cluster
+    avg_planning_tokens: int               # mean tokens of the planning LLM call
+    avg_planning_cost_usd: float           # mean USD cost of the planning LLM call
+    # Two recoverable framings (savings contract). Cache-reuse is the
+    # conservative number (you already paid once); script-replacement is the
+    # upper bound (replace every planning call with a deterministic template).
+    cache_reuse_recoverable_usd:        float
+    script_replacement_recoverable_usd: float
+    cache_reuse_recoverable_tokens:        int
+    script_replacement_recoverable_tokens: int
+    example_session_ids: list[str]         # top 3, ordered by recency
+    skeleton_session_id: str               # which session's plan to render
+    caveat:            str = REUSE_HONESTY_CAVEAT
+
+
+@dataclass
+class ReuseFinding:
+    """Clusters of sessions with structurally repeated planning calls."""
+    clusters:      list[ReuseCluster] = field(default_factory=list)
+    capture_mode:  Literal["tool_sequence_only", "with_prompt_prefix"] = (
+        "tool_sequence_only"
+    )
+    # Recoverable-savings contract (#111). The aggregate uses the conservative
+    # cache-reuse number — the front-page tile shows what's recoverable going
+    # forward, not the script-replacement upper bound. None when no cluster
+    # cleared the thresholds.
+    estimated_recoverable_usd:    float | None = None
+    estimated_recoverable_tokens: int | None   = None
+    estimate_basis:    str = REUSE_ESTIMATE_BASIS
+    confidence:        Literal["heuristic"] = "heuristic"
+    # Populated in Mode 1 (capture.prompts off) to nudge the richer mode.
+    hint:              str = ""
 
 
 @dataclass
