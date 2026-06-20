@@ -208,7 +208,7 @@ tj serve               # start Lens + REST API
 | Installation extras (Trim, framework patches) | [docs/installation.md](docs/installation.md) |
 | Export to Grafana / Datadog / NDJSON | [docs/export.md](docs/export.md) |
 | NemoClaw sandbox observer | [docs/nemoclaw-integration.md](docs/nemoclaw-integration.md) |
-| Release notes | [CHANGELOG.md](CHANGELOG.md) |
+| Release notes | [GitHub Releases](https://github.com/Metabuilder-Labs/tokenjam/releases) |
 
 ---
 
@@ -237,5 +237,7 @@ tj serve               # start Lens + REST API
 **[tokenjam.dev](https://tokenjam.dev)** · [PyPI](https://pypi.org/project/tokenjam/) · [npm](https://www.npmjs.com/package/@tokenjam/sdk) · [Issues](https://github.com/Metabuilder-Labs/tokenjam/issues)
 
 MIT License · Built by [Metabuilder Labs](https://github.com/Metabuilder-Labs)
+
+TokenJam was created by [Anil Murty](https://github.com/anilmurty) — reach him at [anil@metabldr.com](mailto:anil@metabldr.com).
 
 </div>
