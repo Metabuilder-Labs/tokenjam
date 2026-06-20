@@ -1,0 +1,42 @@
+name: traffic-archive
+
+# Weekly snapshot of the GitHub Traffic API (which only retains 14 days) into
+# traffic/<year>-W<week>.json. This is the ONLY writer to main in the growth-
+# instrumentation system; the Cowork jobs only read what this commits.
+on:
+  schedule:
+    - cron: '0 12 * * 0'   # Sundays at 12:00 UTC
+  workflow_dispatch:        # manual trigger for backfill / testing
+
+permissions:
+  contents: write
+  administration: read     # required for the Traffic API; without it the API returns 403
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Archive traffic data
+        id: archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python .github/scripts/archive_traffic.py
+
+      - name: Commit and push the archive
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add traffic/
+          if git diff --cached --quiet; then
+            echo "No changes — archive already current for ${{ steps.archive.outputs.iso_week }}."
+            exit 0
+          fi
+          git commit -m "chore(traffic): archive week ${{ steps.archive.outputs.iso_week }}"
+          git push
