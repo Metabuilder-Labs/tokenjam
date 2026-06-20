@@ -6,7 +6,7 @@
 
 ### Token Efficiency For AI Agents
 
-TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, and what to script. The result is a lower AI bill. Runs entirely on your machine.
+TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out — then shows it all in a local browser dashboard. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -27,9 +27,9 @@ pipx install tokenjam
 
 ---
 
-## Four Analyzers. One Install.
+## Five Analyzers + Lens. One Install.
 
-TokenJam reads telemetry from every major agent runtime, framework, provider, and observability tool and surfaces savings across four areas.
+TokenJam reads telemetry from every major agent runtime, framework, provider, and observability tool and surfaces savings across five areas — then brings them together in a local browser dashboard.
 
 <table>
 <tr>
@@ -80,9 +80,33 @@ Predicts which regions of your prompts the model gives little weight to. Surface
 
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🔁 Reuse
+
+Detects clusters of sessions where your agent re-plans the same work and exports reviewable skeleton templates you can drop into a slash command or script.
+
+<pre><code>tj optimize reuse</code></pre>
+
+[Details →](https://tokenjam.dev/products/reuse)
+
+</td>
+<td width="50%" valign="top">
+
+### 🔭 Lens
+
+A local browser dashboard that brings every analyzer's findings, your real spend, and your alerts together in one place. No cloud, no signup, fully offline.
+
+<pre><code>tj serve</code></pre>
+
+[Details →](https://tokenjam.dev/products/lens)
+
+</td>
+</tr>
 </table>
 
-Run all four with `tj optimize`. Run several with `tj optimize downsize cache trim`.
+Run all five analyzers with `tj optimize`. Run several with `tj optimize downsize cache reuse`.
 
 ---
 
@@ -91,9 +115,10 @@ Run all four with `tj optimize`. Run several with `tj optimize downsize cache tr
 For **Claude Code** users — zero code, auto-backfills your last 30 days:
 
 ```bash
-pipx install 'tokenjam[mcp]'
+pipx install tokenjam
 tj onboard --claude-code
 tj optimize          # cost-saving candidates from your actual usage
+tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
 To upgrade later: `pipx upgrade tokenjam` (then `tj stop && tj serve &` to reload the daemon, and `tj --version` to verify). See [docs/installation.md](docs/installation.md#upgrading).
@@ -115,64 +140,51 @@ def run(task: str) -> str:
 
 ---
 
-## Why local-first matters
+## Lens — the local dashboard
 
-Your spans contain prompts, completions, tool inputs, and customer data. Shipping that to a SaaS vendor for "observability" is a data-egress decision most teams aren't ready to make.
-
-|                                            | TokenJam | LangSmith | Langfuse | Datadog LLM Obs |
-|---|---|---|---|---|
-| Signup required                            | ❌       | ✅        | ✅       | ✅              |
-| Data leaves your machine                   | ❌       | ✅        | cloud only | ✅           |
-| Cost-optimization analyzers (Downsize, Cache, Script, Trim) | ✅ | ❌ | ❌ | ❌ |
-| Real-time sensitive-action alerts          | ✅       | ❌        | ❌       | ❌              |
-| Behavioral drift detection                 | ✅       | ❌        | ❌       | ❌              |
-| OTel GenAI SemConv native                  | ✅       | partial   | partial  | partial         |
-| Works with any agent / framework           | ✅       | LangChain-first | partial | ❌            |
-| Free, MIT licensed                         | ✅       | freemium  | freemium | paid            |
-
----
-
-## Web UI
-
-`tj serve` runs a local dashboard at `http://127.0.0.1:7391/` with status, traces, cost breakdown, alerts, budget, and drift.
+`tj serve` runs Lens at `http://127.0.0.1:7391/`: an Overview triage screen with spend, recoverable waste, and health at a glance; an Optimize tab showing every analyzer's findings side by side; and the standard Status, Traces, Cost, Alerts, Drift, and Budget screens. Plan-tier-aware, fully offline, no signup.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-status.png" alt="tj status page" /></td>
-<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="tj cost page" /></td>
+<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status screen" /></td>
+<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost screen with spend-over-time chart" /></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="tj traces page" /></td>
-<td width="50%"><img src="docs/screenshots/tj-alerts.png" alt="tj alerts page" /></td>
+<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Traces table" /></td>
+<td width="50%"><img src="docs/screenshots/tj-alerts.png" alt="Alerts table" /></td>
 </tr>
 </table>
+
+→ [tokenjam.dev/products/lens](https://tokenjam.dev/products/lens) for the visual walkthrough.
 
 ---
 
 ## Beyond optimization
 
-TokenJam is also a full observability stack. The four analyzers ride on top.
+TokenJam is also a full observability stack. The five analyzers and Lens ride on top.
 
 - **Real-time cost tracking** — every LLM call priced as it happens
 - **Safety alerts** — 13 alert types, 6 channels (ntfy, Discord, Telegram, webhook, file, stdout)
 - **Behavioral drift detection** — Z-score baselines, no LLM required
 - **Schema validation** — declare or infer JSON Schema for tool outputs
 - **OTel-native** — point any OTLP exporter at `tj serve` and you're done
-- **MCP server** — 14 tools letting Claude Code query its own telemetry mid-session
+- **MCP server** — lets Claude Code query its own telemetry mid-session
 
 ---
 
 ## CLI
 
 ```bash
-tj optimize            # all four cost-optimization analyzers
-tj optimize downsize   # one analyzer
+tj optimize            # all five cost-optimization analyzers
+tj optimize downsize   # one analyzer (positional args)
+tj tokenmaxx           # shareable spend-tier callout
 tj status              # current cost, tokens, active alerts
 tj cost --since 7d     # spend by agent / model / day / tool
 tj alerts              # everything that fired while you were away
 tj drift               # behavioral drift Z-scores
+tj report --reuse      # HTML + Markdown skeleton export for the Reuse analyzer
 tj backfill claude-code # ingest historical ~/.claude/projects/ sessions
-tj serve               # start the web UI + REST API
+tj serve               # start Lens + REST API
 ```
 
 [Full CLI reference →](docs/cli-reference.md)
@@ -184,6 +196,7 @@ tj serve               # start the web UI + REST API
 | Topic | Where |
 |---|---|
 | 🪶 Downsize / Cache / Script / Trim deep-dives | [docs/optimize/](docs/optimize/) |
+| 🔁 Reuse analyzer deep-dive | [tokenjam.dev/products/reuse](https://tokenjam.dev/products/reuse) |
 | Claude Code & Codex integration | [docs/claude-code-integration.md](docs/claude-code-integration.md) |
 | Python SDK reference | [docs/python-sdk.md](docs/python-sdk.md) |
 | TypeScript SDK reference | [docs/typescript-sdk.md](docs/typescript-sdk.md) |
@@ -195,6 +208,7 @@ tj serve               # start the web UI + REST API
 | Installation extras (Trim, framework patches) | [docs/installation.md](docs/installation.md) |
 | Export to Grafana / Datadog / NDJSON | [docs/export.md](docs/export.md) |
 | NemoClaw sandbox observer | [docs/nemoclaw-integration.md](docs/nemoclaw-integration.md) |
+| Release notes | [CHANGELOG.md](CHANGELOG.md) |
 
 ---
 
@@ -202,9 +216,13 @@ tj serve               # start the web UI + REST API
 
 **Shipped in 0.3.x:** Downsize · Cache · Script · Trim · Claude Code + Codex onboarding · MCP server · Web UI · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview
 
+**Shipped in 0.4.x:**
+- [x] **[TokenJam Lens](https://github.com/Metabuilder-Labs/tokenjam/milestone/1)** — local dashboard rebrand: Overview triage front-door, Optimize detail tab, real spend-over-time charts, cross-screen drill-through
+- [x] **[Reuse analyzer](https://github.com/Metabuilder-Labs/tokenjam/milestone/2)** — fifth analyzer: detects clusters of sessions with repeated planning, exports reviewable skeleton templates you can convert into slash commands or scripts
+- [x] **Daemon DB concurrency** — per-thread DuckDB cursors so the Overview's fan-out doesn't block on a single shared connection (v0.4.1)
+- [x] **Cache cost transparency** — `cache_read` + `cache_write` token columns surfaced in CLI + UI + API (the previously-hidden ~91% cost driver on cache-heavy workloads)
+
 **Up next:**
-- [ ] **[TokenJam Lens](https://github.com/Metabuilder-Labs/tokenjam/milestone/1)** — local dashboard rebrand: new Overview triage front-door, Optimize detail tab, real spend-over-time charts, cross-screen drill-through
-- [ ] **[Reuse analyzer](https://github.com/Metabuilder-Labs/tokenjam/milestone/2)** — fifth analyzer: detects clusters of sessions with repeated planning, exports reviewable skeleton templates you can convert into slash commands or scripts
 - [ ] `tj policy add | edit | apply` — unified rule surface
 - [ ] `tj replay` — replay captured sessions against new model versions
 - [ ] TypeScript framework patches (LangChain JS, OpenAI Agents SDK)
