@@ -28,8 +28,17 @@ jobs:
           # GITHUB_TOKEN cannot be granted (there is no such permissions: key —
           # a literal `administration` value is a workflow parse error, and the
           # default token 403s on these endpoints). So this step authenticates
-          # with a PAT stored as the TRAFFIC_PAT repo secret. See the PR / README
-          # Setup notes for the minimum scope (Administration: Read on this repo).
+          # with a PAT stored as the TRAFFIC_PAT repo secret.
+          #
+          # TRAFFIC_PAT must be a fine-grained PAT with ALL of:
+          #   - Resource owner = Metabuilder-Labs (the ORG, not a personal
+          #     account — otherwise it can't see this repo: 403 "Resource not
+          #     accessible by personal access token")
+          #   - Repository access = this repo
+          #   - Repository permissions -> Administration: Read  (the one the
+          #     Traffic API needs; separate from Contents/Metadata)
+          # A classic PAT with the `repo` scope also works. See the README/PR
+          # Setup notes.
           GITHUB_TOKEN: ${{ secrets.TRAFFIC_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python .github/scripts/archive_traffic.py
