@@ -454,7 +454,9 @@ def _onboard_claude_code(
             from tokenjam.core.db import open_db
             try:
                 db = open_db(config.storage)
-                result = ingest_claude_code(db)
+                # Pass the just-written config so backfilled sessions carry the
+                # declared plan tier instead of "unknown" (#176).
+                result = ingest_claude_code(db, config=config)
                 db.close()
                 if result.sessions_ingested > 0:
                     days = None
