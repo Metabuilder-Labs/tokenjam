@@ -296,6 +296,26 @@ class ApiBackend:
             params["budget_usd"] = budget_usd
         return self._get("/api/v1/optimize", params)
 
+    def fetch_reuse_clusters(
+        self,
+        *,
+        since: str = "30d",
+        agent_id: str | None = None,
+    ) -> dict:
+        """
+        Fetch the Reuse finding + skeleton-rendering data from `tj serve`.
+
+        Used by `tj report --reuse` when the local DuckDB connection is
+        unavailable (daemon holds the write lock). The response is
+        `report_to_dict(report)` plus `planning_texts` ({session_id: completion
+        text or null}) and `pricing_mode`; the CLI reconstructs the finding via
+        `report_from_dict` and renders without direct DB access. See issue #154.
+        """
+        params: dict[str, Any] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        return self._get("/api/v1/reuse/clusters", params)
+
     def close(self) -> None:
         self.client.close()
 

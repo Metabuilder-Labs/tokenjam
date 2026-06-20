@@ -951,3 +951,46 @@ def test_optimize_export_templates_writes_markdown(runner, db, tmp_path, monkeyp
     assert "Reuse skeleton" in result.output
     assert len(list(tmp_path.glob("reuse-*.md"))) == 1
     assert list(tmp_path.glob("reuse-*.html")) == []   # markdown only, no HTML
+
+
+def test_report_reuse_api_mode_writes_artifacts(runner, db, tmp_path, monkeypatch):
+    """#154: with the daemon holding the DB lock, `tj report --reuse` fetches
+    the finding + skeleton text from /api/v1/reuse/clusters via ApiBackend and
+    still writes the HTML + Markdown — instead of erroring with 'needs direct
+    database access'."""
+    import asyncio
+
+    import httpx
+
+    from tokenjam.api.app import create_app
+    from tokenjam.core.api_backend import ApiBackend
+    from tokenjam.core.ingest import IngestPipeline
+
+    monkeypatch.setenv("TOKENJAM_REPORT_DIR", str(tmp_path))
+    cfg = _reuse_config(completions=True)
+    _seed_reuse_cluster(db, count=3, completions=True)
+
+    # Capture the real endpoint payload (exercises the route handler).
+    app = create_app(config=cfg, db=db, ingest_pipeline=IngestPipeline(db=db, config=cfg))
+
+    async def _fetch():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            r = await c.get("/api/v1/reuse/clusters", params={"since": "30d"})
+            assert r.status_code == 200, r.text
+            return r.json()
+
+    payload = asyncio.run(_fetch())
+
+    # An ApiBackend has no `.conn`, so cmd_report takes the HTTP path. Stub the
+    # network call with the captured payload (sync httpx can't drive ASGI).
+    backend = ApiBackend("http://test")
+    monkeypatch.setattr(backend, "fetch_reuse_clusters", lambda **kw: payload)
+    assert getattr(backend, "conn", None) is None
+
+    result = _invoke(runner, backend, cfg, ["report", "--reuse", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "Reuse report written" in result.output
+    assert "needs direct database access" not in result.output
+    assert len(list(tmp_path.glob("reuse-*.html"))) == 1
+    assert len(list(tmp_path.glob("reuse-*.md"))) == 1   # skeleton text → sidecar

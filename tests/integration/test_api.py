@@ -356,6 +356,64 @@ async def test_overview_endpoint_set_survives_concurrent_requests(client):
         assert not bad, bad
 
 
+def _seed_reuse_cluster(db, *, count: int = 3, completions: bool = True):
+    """Seed `count` sessions sharing a planning skeleton + tool sequence."""
+    from datetime import timedelta
+
+    from tokenjam.otel.semconv import GenAIAttributes
+    from tokenjam.utils.time_parse import utcnow
+    from tests.factories import make_session
+
+    base = utcnow() - timedelta(days=2)
+    for i in range(count):
+        sid = f"reuse-{i}"
+        db.upsert_session(make_session(agent_id="a", session_id=sid))
+        t0 = base + timedelta(minutes=i)
+        attrs = (
+            {GenAIAttributes.COMPLETION_CONTENT: f"Cut release v0.{i} then run tests"}
+            if completions else None
+        )
+        db.insert_span(make_llm_span(
+            agent_id="a", session_id=sid, start_time=t0,
+            cost_usd=0.20, input_tokens=1000, output_tokens=300,
+            extra_attributes=attrs,
+        ))
+        for j, tn in enumerate(["read_file", "run_test"]):
+            ts = make_tool_span(tool_name=tn)
+            ts.session_id = sid
+            ts.start_time = t0 + timedelta(seconds=j + 1)
+            db.insert_span(ts)
+
+
+async def test_reuse_clusters_endpoint_returns_finding_and_skeleton_text(db):
+    """#154: /api/v1/reuse/clusters returns the Reuse finding (so the CLI can
+    reconstruct it via report_from_dict) PLUS the skeleton-rendering extras
+    (planning_texts + pricing_mode) that the report renderer needs — letting
+    `tj report --reuse` render without a direct DB connection."""
+    from tokenjam.core.config import CaptureConfig
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        capture=CaptureConfig(completions=True),
+    )
+    _seed_reuse_cluster(db, count=3, completions=True)
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/reuse/clusters", params={"since": "30d"})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    clusters = data["findings"]["reuse"]["clusters"]
+    assert clusters, data  # the seeded cluster is detected
+    # Skeleton text travels with the finding, and at least one example resolves.
+    assert "planning_texts" in data
+    assert any(v for v in data["planning_texts"].values())
+    assert data["pricing_mode"] in ("api", "subscription", "local", "unknown")
+
+
 async def test_optimize_response_includes_framing_block(client):
     await _ingest_sample_span(client)
     resp = await client.get("/api/v1/optimize?since=30d")
