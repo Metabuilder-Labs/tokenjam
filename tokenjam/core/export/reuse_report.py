@@ -201,7 +201,14 @@ def prepare_renders(
         present. No DB connection needed.
       - `conn` (local path): fetched per cluster, gated on local
         `capture.completions` (no text is in the DB unless it was captured).
+
+    Exactly one of `conn` / `planning_texts` must be supplied. Passing neither
+    is a programming error — guarded loudly rather than silently rendering every
+    cluster skeleton-less (or crashing in `_fetch_planning_texts(None, …)`).
     """
+    if conn is None and planning_texts is None:
+        raise ValueError("prepare_renders requires either conn or planning_texts")
+
     capture = getattr(config, "capture", None)
     completions_on = bool(capture and getattr(capture, "completions", False))
 

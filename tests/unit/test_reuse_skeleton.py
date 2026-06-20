@@ -1,13 +1,16 @@
 """Unit tests for Reuse skeleton rendering + Markdown sidecar (issue #116)."""
 from __future__ import annotations
 
-from tokenjam.core.export.reuse_report import _render_markdown
+import pytest
+
+from tokenjam.core.config import TjConfig
+from tokenjam.core.export.reuse_report import _render_markdown, prepare_renders
 from tokenjam.core.export.reuse_skeleton import (
     MAX_SLOTS,
     is_weak_match,
     render_skeleton,
 )
-from tokenjam.core.optimize.types import ReuseCluster
+from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
 
 def _cluster(cluster_id="abc123", sig=("read", "edit")) -> ReuseCluster:
@@ -25,6 +28,21 @@ def _cluster(cluster_id="abc123", sig=("read", "edit")) -> ReuseCluster:
         example_session_ids=["s2", "s1", "s0"],
         skeleton_session_id="s2",
     )
+
+
+# -- prepare_renders source guard (#154 review) --
+
+def test_prepare_renders_requires_conn_or_planning_texts(tmp_path):
+    # Passing neither source is a programming error — guarded loudly instead of
+    # silently rendering skeleton-less clusters or crashing in the DB fetch.
+    with pytest.raises(ValueError, match="conn or planning_texts"):
+        prepare_renders(
+            ReuseFinding(clusters=[_cluster()]),
+            config=TjConfig(version="1"),
+            out_dir=tmp_path,
+            version="0.0.0",
+            generated_at_iso="2026-06-19T00:00:00+00:00",
+        )
 
 
 # -- render_skeleton --
