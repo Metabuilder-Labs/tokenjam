@@ -1832,9 +1832,17 @@ const ANALYZER_META = {
   cache:    { title: 'Cache',    hint: 'Raise cache-read efficacy toward the 80% ceiling' },
   script:   { title: 'Script',   hint: 'Replace a deterministic call-pattern with a script' },
   trim:     { title: 'Trim',     hint: 'Trim low-significance tokens from prompt templates' },
+  reuse:    { title: 'Reuse',    hint: 'Reuse a repeated planning skeleton instead of re-planning' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
+
+// Title-case a registry key for display. Centralizes capitalization so a tile
+// for a not-yet-known analyzer still renders title-case instead of the raw
+// lowercase key (#162) — registry keys are lowercase by convention.
+function capitalize(name) {
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
+}
 
 // Mirror core/framing.render_savings: api/unknown → dollars; subscription →
 // token-share of the cycle; local → token count. The mode is server-decided.
@@ -2081,7 +2089,7 @@ function OverviewView({ params }) {
     <div class="tile-grid">
       ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates in this window.</div>`
         : tiles.map(t => {
-          const meta = ANALYZER_META[t.name] || { title: t.name, hint: '' };
+          const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
           const href = '#/optimize?finding=' + t.name + '&since=' + since;
           // Four honest states (#127): actionable / at_ceiling / no_findings / not_ready.
           if (t.state === 'actionable') return html`
@@ -2106,7 +2114,7 @@ function OverviewView({ params }) {
           return html`
             <div class="rec-tile muted">
               <div class="rec-name">${meta.title}</div>
-              <div class="rec-amount dim">— not ready</div>
+              <div class="rec-amount dim">Not ready</div>
               <div class="rec-hint">${t.hint || meta.hint}</div>
             </div>`;
         })}
@@ -2129,7 +2137,7 @@ function OverviewView({ params }) {
 
 // ---- Optimize detail screen ----
 function OptimizeFinding({ name, opt, framing }) {
-  const meta = ANALYZER_META[name] || { title: name };
+  const meta = ANALYZER_META[name] || { title: capitalize(name) };
   let body = null;
   if (name === 'downsize') {
     const dg = opt.downgrade;

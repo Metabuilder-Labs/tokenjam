@@ -180,3 +180,33 @@ def test_status_tile_shows_active_and_elapsed(html):
     assert 'Elapsed <span class="info-btn"' in html
     # The misleading bare "Duration" label is gone from the status tile.
     assert '<span class="label">Duration</span>' not in html
+
+
+# --- #162: Recoverable Waste tiles render consistently --------------------- #
+def test_reuse_tile_title_is_title_cased(html):
+    # reuse was missing from ANALYZER_META and slipped through lowercase.
+    assert "reuse:    { title: 'Reuse'" in html
+    # Capitalization is centralized so a future 6th analyzer auto-title-cases
+    # instead of rendering its raw lowercase registry key.
+    assert "function capitalize" in html
+    assert "capitalize(t.name)" in html
+    # The old raw-lowercase fallback is gone.
+    assert "{ title: t.name, hint: '' }" not in html
+
+
+def test_not_ready_tile_drops_em_dash(html):
+    # Trim's not_ready content line read "— not ready"; the em-dash prefix is
+    # dropped so the three states share a prefix-free scheme.
+    assert "— not ready" not in html
+    assert ">Not ready<" in html
+
+
+def test_recoverable_tile_titles_share_one_weight(html):
+    # All non-actionable tiles use the identical bare .rec-name title element,
+    # so the at_ceiling (Cache) tile can't bold its title differently. The
+    # positive emphasis lives only on the content line (.rec-amount.ok), which
+    # is the intended #127 design and must stay.
+    assert html.count('<div class="rec-name">${meta.title}</div>') >= 3
+    assert ".rec-amount.ok" in html          # green content line preserved (AC #4)
+    # No state-specific rule bolds the title for the at_ceiling tile.
+    assert ".rec-tile.ok .rec-name" not in html
