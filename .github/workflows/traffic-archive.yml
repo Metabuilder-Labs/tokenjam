@@ -9,8 +9,7 @@ on:
   workflow_dispatch:        # manual trigger for backfill / testing
 
 permissions:
-  contents: write
-  administration: read     # required for the Traffic API; without it the API returns 403
+  contents: write          # to commit the archive back to the branch
 
 jobs:
   archive:
