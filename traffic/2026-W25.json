@@ -1,0 +1,271 @@
+{
+  "archived_at": "2026-06-20T18:49:20Z",
+  "iso_week": "2026-W25",
+  "repo": "Metabuilder-Labs/tokenjam",
+  "views": {
+    "count": 1782,
+    "uniques": 407,
+    "daily": [
+      {
+        "timestamp": "2026-06-06T00:00:00Z",
+        "count": 21,
+        "uniques": 9
+      },
+      {
+        "timestamp": "2026-06-07T00:00:00Z",
+        "count": 61,
+        "uniques": 26
+      },
+      {
+        "timestamp": "2026-06-08T00:00:00Z",
+        "count": 81,
+        "uniques": 18
+      },
+      {
+        "timestamp": "2026-06-09T00:00:00Z",
+        "count": 126,
+        "uniques": 21
+      },
+      {
+        "timestamp": "2026-06-10T00:00:00Z",
+        "count": 56,
+        "uniques": 18
+      },
+      {
+        "timestamp": "2026-06-11T00:00:00Z",
+        "count": 49,
+        "uniques": 18
+      },
+      {
+        "timestamp": "2026-06-12T00:00:00Z",
+        "count": 78,
+        "uniques": 14
+      },
+      {
+        "timestamp": "2026-06-13T00:00:00Z",
+        "count": 162,
+        "uniques": 47
+      },
+      {
+        "timestamp": "2026-06-14T00:00:00Z",
+        "count": 200,
+        "uniques": 92
+      },
+      {
+        "timestamp": "2026-06-15T00:00:00Z",
+        "count": 244,
+        "uniques": 36
+      },
+      {
+        "timestamp": "2026-06-16T00:00:00Z",
+        "count": 122,
+        "uniques": 42
+      },
+      {
+        "timestamp": "2026-06-17T00:00:00Z",
+        "count": 100,
+        "uniques": 39
+      },
+      {
+        "timestamp": "2026-06-18T00:00:00Z",
+        "count": 194,
+        "uniques": 36
+      },
+      {
+        "timestamp": "2026-06-19T00:00:00Z",
+        "count": 288,
+        "uniques": 52
+      }
+    ]
+  },
+  "clones": {
+    "count": 1695,
+    "uniques": 484,
+    "daily": [
+      {
+        "timestamp": "2026-06-06T00:00:00Z",
+        "count": 5,
+        "uniques": 4
+      },
+      {
+        "timestamp": "2026-06-07T00:00:00Z",
+        "count": 5,
+        "uniques": 4
+      },
+      {
+        "timestamp": "2026-06-08T00:00:00Z",
+        "count": 114,
+        "uniques": 39
+      },
+      {
+        "timestamp": "2026-06-09T00:00:00Z",
+        "count": 136,
+        "uniques": 55
+      },
+      {
+        "timestamp": "2026-06-10T00:00:00Z",
+        "count": 13,
+        "uniques": 8
+      },
+      {
+        "timestamp": "2026-06-11T00:00:00Z",
+        "count": 10,
+        "uniques": 7
+      },
+      {
+        "timestamp": "2026-06-12T00:00:00Z",
+        "count": 40,
+        "uniques": 18
+      },
+      {
+        "timestamp": "2026-06-13T00:00:00Z",
+        "count": 30,
+        "uniques": 19
+      },
+      {
+        "timestamp": "2026-06-14T00:00:00Z",
+        "count": 43,
+        "uniques": 18
+      },
+      {
+        "timestamp": "2026-06-15T00:00:00Z",
+        "count": 211,
+        "uniques": 72
+      },
+      {
+        "timestamp": "2026-06-16T00:00:00Z",
+        "count": 92,
+        "uniques": 40
+      },
+      {
+        "timestamp": "2026-06-17T00:00:00Z",
+        "count": 119,
+        "uniques": 50
+      },
+      {
+        "timestamp": "2026-06-18T00:00:00Z",
+        "count": 489,
+        "uniques": 146
+      },
+      {
+        "timestamp": "2026-06-19T00:00:00Z",
+        "count": 388,
+        "uniques": 132
+      }
+    ]
+  },
+  "referrers": [
+    {
+      "referrer": "github.com",
+      "count": 345,
+      "uniques": 89
+    },
+    {
+      "referrer": "Google",
+      "count": 18,
+      "uniques": 13
+    },
+    {
+      "referrer": "linkedin.com",
+      "count": 16,
+      "uniques": 15
+    },
+    {
+      "referrer": "t.co",
+      "count": 16,
+      "uniques": 11
+    },
+    {
+      "referrer": "statics.teams.cdn.office.net",
+      "count": 5,
+      "uniques": 4
+    },
+    {
+      "referrer": "com.linkedin.android",
+      "count": 4,
+      "uniques": 2
+    },
+    {
+      "referrer": "l.facebook.com",
+      "count": 2,
+      "uniques": 2
+    },
+    {
+      "referrer": "lm.facebook.com",
+      "count": 2,
+      "uniques": 2
+    },
+    {
+      "referrer": "teams.public.onecdn.static.microsoft",
+      "count": 2,
+      "uniques": 2
+    },
+    {
+      "referrer": "jira.espace.ws",
+      "count": 2,
+      "uniques": 1
+    }
+  ],
+  "paths": [
+    {
+      "path": "/metabuilder-labs/tokenjam",
+      "title": "Overview",
+      "count": 491,
+      "uniques": 340
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam",
+      "title": "Overview",
+      "count": 316,
+      "uniques": 63
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/pulls",
+      "title": "/pulls",
+      "count": 156,
+      "uniques": 10
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/issues",
+      "title": "/issues",
+      "count": 104,
+      "uniques": 19
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/stargazers",
+      "title": "/stargazers",
+      "count": 63,
+      "uniques": 4
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/blob/main/docs/screenshots/tj-status.png",
+      "title": "/blob/main/docs/screenshots/tj-status.png",
+      "count": 59,
+      "uniques": 33
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/tree/main/tests",
+      "title": "/tree/main/tests",
+      "count": 22,
+      "uniques": 3
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/commits/main",
+      "title": "/commits/main",
+      "count": 20,
+      "uniques": 6
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/graphs/contributors",
+      "title": "/graphs/contributors",
+      "count": 20,
+      "uniques": 5
+    },
+    {
+      "path": "/Metabuilder-Labs/tokenjam/releases",
+      "title": "/releases",
+      "count": 14,
+      "uniques": 3
+    }
+  ]
+}

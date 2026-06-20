@@ -1,0 +1,56 @@
+name: traffic-archive
+
+# Weekly snapshot of the GitHub Traffic API (which only retains 14 days) into
+# traffic/<year>-W<week>.json. This is the ONLY writer to main in the growth-
+# instrumentation system; the Cowork jobs only read what this commits.
+on:
+  schedule:
+    - cron: '0 12 * * 0'   # Sundays at 12:00 UTC
+  workflow_dispatch:        # manual trigger for backfill / testing
+
+permissions:
+  contents: write          # to commit the archive back to the branch
+
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Archive traffic data
+        id: archive
+        env:
+          # The Traffic API requires Administration:Read, which the default
+          # GITHUB_TOKEN cannot be granted (there is no such permissions: key —
+          # a literal `administration` value is a workflow parse error, and the
+          # default token 403s on these endpoints). So this step authenticates
+          # with a PAT stored as the TRAFFIC_PAT repo secret.
+          #
+          # TRAFFIC_PAT must be a fine-grained PAT with ALL of:
+          #   - Resource owner = Metabuilder-Labs (the ORG, not a personal
+          #     account — otherwise it can't see this repo: 403 "Resource not
+          #     accessible by personal access token")
+          #   - Repository access = this repo
+          #   - Repository permissions -> Administration: Read  (the one the
+          #     Traffic API needs; separate from Contents/Metadata)
+          # A classic PAT with the `repo` scope also works. See the README/PR
+          # Setup notes.
+          GITHUB_TOKEN: ${{ secrets.TRAFFIC_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python .github/scripts/archive_traffic.py
+
+      - name: Commit and push the archive
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add traffic/
+          if git diff --cached --quiet; then
+            echo "No changes — archive already current for ${{ steps.archive.outputs.iso_week }}."
+            exit 0
+          fi
+          git commit -m "chore(traffic): archive week ${{ steps.archive.outputs.iso_week }}"
+          git push
