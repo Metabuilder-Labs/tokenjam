@@ -58,6 +58,86 @@ Symptom of a missed worktree: `git log` shows a commit on a branch you didn't in
 `.tj/config.toml` is intentionally untracked (see PR #145 + Critical Rule 20) and gets mutated at runtime by `tj onboard` / `tj serve` regenerating the local `ingest_secret`. Don't `git add` it back. The CI test `tests/unit/test_no_tracked_dev_secrets.py` guards against this.
 
 
+## PR and commit conventions (for any agent producing a PR)
+
+These conventions apply to any agent — feature work, bug fixes, docs, content. Briefs may add task-specific structure but should not contradict these.
+
+### Branch + PR titles
+
+- **Branch names** are slash-separated, kebab-case, prefixed by type:
+  - `fix/<issue-or-area>` — bug fixes (e.g. `fix/175-176-cost-framing-backfill-plan`)
+  - `feat/<area>` — new features (e.g. `feat/reuse-analyzer-115`)
+  - `docs/<area>` — documentation (e.g. `docs/readme-cleanup-v0.4.1`)
+  - `chore/<area>` — refactors, renames, infra
+  - `release/<X.Y.Z>` — release-cut PRs
+- **PR titles** lead with the verb / type and reference issues by number when applicable:
+  - `Fix #175, #176: tj cost framing + backfill plan_tier propagation (v0.4.2)` (bug fixes)
+  - `[feature] Add Reuse analyzer (#115)` (features)
+  - `docs: drop stale CHANGELOG.md + add maintainer contact` (docs)
+  - `Bump version to 0.4.1` (release-cut PRs — keep these terse)
+- Use **`Closes #N`** in the PR body (not just title) when fixing an issue, so GitHub auto-closes the issue on merge. Multiple `Closes` lines if you're closing several. Do not use the comma form `Closes #1, #2` — GitHub only catches the first; use separate lines.
+
+### Commit messages
+
+- **Subject line** (first line, ≤72 chars): one-line summary in active voice. Reference issues with `#N` when applicable.
+- **Body** (after blank line): explain *why* the change is needed, not *what* it changes (the diff shows that). Use full sentences, paragraphs, bullet lists.
+- **Trailers** (after another blank line, at the very end):
+  - Always include: `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` (or the appropriate model identifier)
+  - When fixing an externally-reported bug: also include `Co-Authored-By: <reporter-handle> <noreply@github.com>` (e.g. `ashwmu` for the external contributor's reports)
+- Use **HEREDOC for multi-line messages** to preserve formatting: `git commit -m "$(cat <<'EOF' ... EOF)"`
+
+### PR body structure
+
+```markdown
+[1-2 sentence framing of why this exists]
+
+## Summary
+- [bullet — what changed at a high level]
+- [bullet — another high-level change]
+
+## [Per-issue or per-feature section, repeated as needed]
+[Detail per issue, including the symptom, root cause, fix]
+
+## Tests / Verification
+- [test files added or modified, what they cover]
+- [any live verification: workflow run URL, screenshot, command output]
+
+## What's NOT in this PR (if scope was deliberately limited)
+- [out-of-scope item 1 — explain why deferred]
+- [out-of-scope item 2]
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: <reporter-handle> <noreply@github.com>   # if applicable
+```
+
+The "What's NOT in this PR" section is load-bearing — it makes the reviewer's job 10x easier when the agent explicitly named what they decided to defer. Use it whenever scope is non-obvious.
+
+### Self-review checklist before requesting review
+
+Run through this before pushing the PR:
+
+1. **Tests pass locally.** `pytest tests/unit/ tests/integration/` (or `tests/unit/<file>.py` if narrow).
+2. **`ruff check tokenjam/` and `mypy tokenjam/` clean** for any files you touched.
+3. **CI on the branch is green** for at least the test-ts job (Python jobs may still be running when you push).
+4. **Acceptance criteria from the issue are met** — go through them one by one and verify.
+5. **No accidental files in the diff** — `.tj/config.toml`, `.tj-test-data/`, screenshots that were just for debugging, etc.
+6. **PR body explains the WHY** — symptom + root cause + fix, not just "fixes the bug."
+7. **Honesty discipline preserved.** If the change touches any user-facing string ("recoverable," "estimated," "savings"), verify it matches existing analyzer caveat language. Never silently strengthen claims.
+
+### Scope discipline
+
+- **Do what the brief / issue says, no more.** If you notice an adjacent issue, file it as a separate issue rather than expanding the PR. Reviewers should never have to mentally separate "the fix" from "drive-by cleanup."
+- **Exception:** when an adjacent change is functionally required to make the primary fix work (e.g., updating a caller of a function you changed). Note it explicitly in the PR body under "What's also in this PR."
+- **When in doubt about scope, ask the master agent before expanding.** A 30-second clarification beats a 30-minute scope review.
+
+### Worker vs master
+
+- **Worker agents do not merge their own PRs.** Open the PR, request review, the master + Anil handle merge.
+- **Worker agents do not file follow-up issues unprompted.** If you notice something during your work that's out of scope, mention it in the PR body and let the master decide whether to file.
+- **Worker agents do not bump versions.** Release-cut PRs are a separate concern handled by the master / Anil.
+
+
 ## Architecture
 
 ### Data Flow
