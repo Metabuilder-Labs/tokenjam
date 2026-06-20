@@ -24,7 +24,13 @@ jobs:
       - name: Archive traffic data
         id: archive
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The Traffic API requires Administration:Read, which the default
+          # GITHUB_TOKEN cannot be granted (there is no such permissions: key —
+          # a literal `administration` value is a workflow parse error, and the
+          # default token 403s on these endpoints). So this step authenticates
+          # with a PAT stored as the TRAFFIC_PAT repo secret. See the PR / README
+          # Setup notes for the minimum scope (Administration: Read on this repo).
+          GITHUB_TOKEN: ${{ secrets.TRAFFIC_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python .github/scripts/archive_traffic.py
 
