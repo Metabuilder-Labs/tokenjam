@@ -101,6 +101,23 @@ class ApiBackend:
             for r in data.get("rows", [])
         ]
 
+    def fetch_cost_framing(
+        self, *, since: str = "7d", agent_id: str | None = None,
+    ) -> dict | None:
+        """Return the plan-tier `framing` block from /api/v1/cost.
+
+        `tj cost` renders the COST column plan-tier-aware (#175). When the
+        daemon holds the DB lock the CLI can't compute framing locally, so it
+        reuses the block the API already emits (`Framing.to_dict()`); the CLI
+        reconstructs a `Framing` from it. Returns None if the response carries
+        no framing.
+        """
+        params: dict[str, str] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        data = self._get("/api/v1/cost", params)
+        return data.get("framing")
+
     def get_alerts(self, filters: AlertFilters) -> list[Alert]:
         params: dict[str, str | int | bool] = {}
         if filters.agent_id:
