@@ -1,8 +1,9 @@
 name: traffic-archive
 
-# Weekly snapshot of the GitHub Traffic API (which only retains 14 days) into
-# traffic/<year>-W<week>.json. This is the ONLY writer to main in the growth-
-# instrumentation system; the Cowork jobs only read what this commits.
+# Weekly snapshot of the GitHub Traffic API (which only retains 14 days),
+# committed as traffic/<year>-W<week>.json onto the data-only `traffic-data`
+# branch (NOT main — main is protected and blocks automated direct pushes).
+# See growth/README.md for the schema and how to read the archive.
 on:
   schedule:
     - cron: '0 12 * * 0'   # Sundays at 12:00 UTC
@@ -30,41 +31,42 @@ jobs:
           # default token 403s on these endpoints). So this step authenticates
           # with a PAT stored as the TRAFFIC_PAT repo secret.
           #
-          # TRAFFIC_PAT must be a fine-grained PAT with ALL of:
+          # TRAFFIC_PAT must be a fine-grained PAT with:
           #   - Resource owner = Metabuilder-Labs (the ORG, not a personal
           #     account — otherwise it can't see this repo: 403 "Resource not
           #     accessible by personal access token")
           #   - Repository access = this repo
-          #   - Repository permissions:
-          #       * Administration: Read   — the Traffic API read (this step)
-          #       * Contents: Write        — the commit/push step (the owner is a
-          #         repo admin, so the push bypasses main's branch protection)
-          #       * Metadata: Read         — auto-included
-          # A classic PAT with the `repo` scope also works. See the README/PR
-          # Setup notes.
+          #   - Repository permissions -> Administration: Read (the one the
+          #     Traffic API needs; separate from Contents/Metadata)
+          # A classic PAT with the `repo` scope also works. The push step below
+          # uses the default GITHUB_TOKEN (not this PAT) since traffic-data is
+          # unprotected. See growth/README.md.
           GITHUB_TOKEN: ${{ secrets.TRAFFIC_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python .github/scripts/archive_traffic.py
 
-      - name: Commit and push the archive
+      - name: Publish the archive to the traffic-data branch
         env:
-          # Push as the PAT owner (a repo admin), not the default GITHUB_TOKEN /
-          # github-actions[bot]. main is a protected branch that blocks the bot;
-          # the admin owner's push bypasses protection. TRAFFIC_PAT therefore
-          # needs Contents: Write (to push) in addition to Administration: Read
-          # (for the Traffic API read above). Passed via env so the token value
-          # is masked in logs and never echoed in the run script.
-          TRAFFIC_PAT: ${{ secrets.TRAFFIC_PAT }}
+          # The archive lands on the unprotected, data-only `traffic-data` branch,
+          # so the default GITHUB_TOKEN (contents: write) can push it — no PAT and
+          # no branch-protection bypass needed. The job runs from main (where the
+          # script lives), then publishes just the new JSON to traffic-data via a
+          # shallow clone so main's tree never leaks onto the data branch.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          GH_REF_NAME: ${{ github.ref_name }}
+          WEEK: ${{ steps.archive.outputs.iso_week }}
         run: |
-          # Commit authored as the maintainer so it attributes to their account.
-          git config user.name  "Anil Murty"
-          git config user.email "anil.murty@gmail.com"
-          git add traffic/
-          if git diff --cached --quiet; then
-            echo "No changes — archive already current for ${{ steps.archive.outputs.iso_week }}."
+          tmp="$(mktemp -d)"
+          git clone --quiet --depth 1 --branch traffic-data \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" "$tmp"
+          mkdir -p "$tmp/traffic"
+          cp "traffic/${WEEK}.json" "$tmp/traffic/${WEEK}.json"
+          git -C "$tmp" config user.name  "github-actions[bot]"
+          git -C "$tmp" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$tmp" add traffic/
+          if git -C "$tmp" diff --cached --quiet; then
+            echo "No changes — archive already current for ${WEEK}."
             exit 0
           fi
-          git commit -m "chore(traffic): archive week ${{ steps.archive.outputs.iso_week }}"
-          git push "https://x-access-token:${TRAFFIC_PAT}@github.com/${GH_REPO}.git" "HEAD:${GH_REF_NAME}"
+          git -C "$tmp" commit -m "chore(traffic): archive week ${WEEK}"
+          git -C "$tmp" push origin HEAD:traffic-data
