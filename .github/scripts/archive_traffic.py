@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +31,13 @@ API_ROOT = "https://api.github.com"
 
 
 def _get(path: str, token: str):
-    """GET an api.github.com path and return parsed JSON. Raises on any error."""
+    """GET an api.github.com path and return parsed JSON. Raises on any error.
+
+    On an HTTP error, surface the status, GitHub's response message, and the
+    relevant rate-limit / SSO headers to stderr before re-raising — a bare
+    `HTTPError: 403 Forbidden` hides whether the cause is a missing token scope,
+    an unapproved fine-grained PAT, or SAML SSO authorization.
+    """
     req = urllib.request.Request(
         f"{API_ROOT}{path}",
         headers={
@@ -40,8 +47,20 @@ def _get(path: str, token: str):
             "User-Agent": "tokenjam-traffic-archive",
         },
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")[:600]
+        sso = exc.headers.get("X-GitHub-SSO")
+        remaining = exc.headers.get("X-RateLimit-Remaining")
+        print(
+            f"error: GET {path} -> HTTP {exc.code} {exc.reason}\n"
+            f"  body: {body}\n"
+            f"  x-github-sso: {sso}  x-ratelimit-remaining: {remaining}",
+            file=sys.stderr,
+        )
+        raise
 
 
 def _daily(payload: dict, key: str) -> list[dict]:
