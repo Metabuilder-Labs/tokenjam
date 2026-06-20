@@ -159,31 +159,69 @@ interchangeable. Review before reusing.
 # Render preparation (shared by report + --export-templates)
 # --------------------------------------------------------------------------
 
+def gather_planning_texts(conn, finding: ReuseFinding) -> dict[str, str | None]:
+    """{session_id: planning completion text or None} across ALL clusters.
+
+    The dedicated `/api/v1/reuse/clusters` endpoint (#154) calls this so the
+    skeleton-rendering text travels with the finding over HTTP — letting
+    `tj report --reuse` render without a direct DB connection when the daemon
+    holds the write lock. One batched query for every example session in the
+    finding.
+    """
+    ids: list[str] = []
+    seen: set[str] = set()
+    for c in finding.clusters:
+        for sid in c.example_session_ids:
+            if sid not in seen:
+                seen.add(sid)
+                ids.append(sid)
+    return _fetch_planning_texts(conn, ids)
+
+
 def prepare_renders(
     finding: ReuseFinding,
     *,
-    conn,
     config,
     out_dir: Path,
     version: str,
     generated_at_iso: str,
     write_md: bool = True,
+    conn=None,
+    planning_texts: dict[str, str | None] | None = None,
 ) -> list[ClusterRender]:
     """
     Build per-cluster render data, writing Markdown sidecars as a side effect
-    (when `write_md` and capture.completions allow). Returns one ClusterRender
-    per cluster in the finding's existing (recoverable-ranked) order.
+    (when capture.completions allow). Returns one ClusterRender per cluster in
+    the finding's existing (recoverable-ranked) order.
+
+    Planning text comes from one of two sources:
+      - `planning_texts` (HTTP path, #154): a pre-fetched {session_id: text}
+        map from `/api/v1/reuse/clusters`. Used as-is — the daemon already
+        applied its own capture gating, so a skeleton renders iff text is
+        present. No DB connection needed.
+      - `conn` (local path): fetched per cluster, gated on local
+        `capture.completions` (no text is in the DB unless it was captured).
+
+    Exactly one of `conn` / `planning_texts` must be supplied. Passing neither
+    is a programming error — guarded loudly rather than silently rendering every
+    cluster skeleton-less (or crashing in `_fetch_planning_texts(None, …)`).
     """
+    if conn is None and planning_texts is None:
+        raise ValueError("prepare_renders requires either conn or planning_texts")
+
     capture = getattr(config, "capture", None)
     completions_on = bool(capture and getattr(capture, "completions", False))
 
     renders: list[ClusterRender] = []
     for c in finding.clusters:
-        if not completions_on:
+        if planning_texts is not None:
+            texts = {sid: planning_texts.get(sid) for sid in c.example_session_ids}
+        elif completions_on:
+            texts = _fetch_planning_texts(conn, list(c.example_session_ids))
+        else:
             renders.append(ClusterRender(cluster=c, skeleton_available=False))
             continue
 
-        texts = _fetch_planning_texts(conn, list(c.example_session_ids))
         skel_text = texts.get(c.skeleton_session_id)
         if not skel_text:
             # Fall back to any example that does have text.
@@ -377,7 +415,6 @@ def render_html(
 def write_reuse_report(
     finding: ReuseFinding,
     *,
-    conn,
     config,
     out_dir: Path,
     agent_scope: str | None,
@@ -386,11 +423,18 @@ def write_reuse_report(
     version: str,
     generated_at_iso: str,
     html_filename: str,
+    conn=None,
+    planning_texts: dict[str, str | None] | None = None,
 ) -> tuple[Path, list[Path]]:
-    """Write the HTML page + Markdown sidecars. Returns (html_path, md_paths)."""
+    """Write the HTML page + Markdown sidecars. Returns (html_path, md_paths).
+
+    Pass either `conn` (local DB) or `planning_texts` (pre-fetched over HTTP,
+    #154) — see `prepare_renders`.
+    """
     renders = prepare_renders(
         finding, conn=conn, config=config, out_dir=out_dir,
         version=version, generated_at_iso=generated_at_iso, write_md=True,
+        planning_texts=planning_texts,
     )
     html_path = out_dir / html_filename
     html_path.write_text(render_html(
