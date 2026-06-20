@@ -89,7 +89,7 @@ Detects clusters of sessions where your agent re-plans the same work and exports
 
 <pre><code>tj optimize reuse</code></pre>
 
-[Details →](https://tokenjam.dev/products/reuse)
+[Details →](docs/optimize/reuse.md)
 
 </td>
 <td width="50%" valign="top">
@@ -196,7 +196,7 @@ tj serve               # start Lens + REST API
 | Topic | Where |
 |---|---|
 | 🪶 Downsize / Cache / Script / Trim deep-dives | [docs/optimize/](docs/optimize/) |
-| 🔁 Reuse analyzer deep-dive | [tokenjam.dev/products/reuse](https://tokenjam.dev/products/reuse) |
+| 🔁 Reuse analyzer deep-dive | [docs/optimize/reuse.md](docs/optimize/reuse.md) |
 | Claude Code & Codex integration | [docs/claude-code-integration.md](docs/claude-code-integration.md) |
 | Python SDK reference | [docs/python-sdk.md](docs/python-sdk.md) |
 | TypeScript SDK reference | [docs/typescript-sdk.md](docs/typescript-sdk.md) |
