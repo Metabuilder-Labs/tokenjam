@@ -598,6 +598,26 @@ async def test_status_and_traces_agree_on_agent_ids(client):
     assert trace_agents == status_agents
 
 
+async def test_status_exposes_active_seconds(client, db):
+    """Status payload carries active (compute) time alongside wall-clock (#147)."""
+    from tests.factories import make_llm_span, make_session
+
+    db.upsert_session(make_session(agent_id="a1", session_id="s1", status="completed"))
+    for ms in (1000.0, 2000.0, 3000.0):
+        sp = make_llm_span(agent_id="a1", duration_ms=ms)
+        sp.session_id = "s1"
+        db.insert_span(sp)
+
+    resp = await client.get("/api/v1/status")
+    assert resp.status_code == 200
+    agents = {a["agent_id"]: a for a in resp.json()["agents"]}
+    assert "a1" in agents
+    a = agents["a1"]
+    assert "active_seconds" in a and "duration_seconds" in a
+    # 6000 ms of spans → 6.0 s active; distinct from wall-clock duration_seconds.
+    assert a["active_seconds"] == pytest.approx(6.0)
+
+
 # ── Budget ─────────────────────────────────────────────────────────────────
 
 async def test_post_budget_zero_clears_limit(db):

@@ -292,6 +292,26 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
     )
 
 
+def session_active_seconds(conn, session_id: str) -> float | None:
+    """
+    Active (compute) time for a session: the sum of its span durations, in
+    seconds. Distinct from `SessionRecord.duration_seconds`, which is wall-clock
+    (`ended_at - started_at`) and can span days for resumed Claude Code sessions.
+
+    Returns None when the session has no spans with a recorded duration (so
+    callers can omit the field rather than show a misleading 0).
+    """
+    if session_id is None:
+        return None
+    row = conn.execute(
+        "SELECT SUM(duration_ms) FROM spans WHERE session_id = $1",
+        [session_id],
+    ).fetchone()
+    if not row or row[0] is None:
+        return None
+    return float(row[0]) / 1000.0
+
+
 def _int_or_none(val: object) -> int | None:
     if val is None:
         return None
