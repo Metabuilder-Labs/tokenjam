@@ -230,3 +230,32 @@ def test_recoverable_tile_titles_share_one_weight(html):
     assert ".rec-amount.ok" in html          # green content line preserved (AC #4)
     # No state-specific rule bolds the title for the at_ceiling tile.
     assert ".rec-tile.ok .rec-name" not in html
+
+
+# --- #187: suppress raw $ for subscription/local on table & trace surfaces --- #
+def test_cost_table_cells_route_through_framing(html):
+    # The per-row + footer COST cells must reframe like the hero (useTokens /
+    # fmtFramedDollar), not render raw fmtCost. The bug was bare fmtCost cells.
+    assert "<td>${fmtCost(r.cost_usd)}</td>" not in html
+    assert "<td>${fmtCost(total)}</td>" not in html
+    assert "${useTokens ? fmtTokens(_costVal(r, true)) : fmtFramedDollar(r.cost_usd, framing)}" in html
+    assert "${useTokens ? fmtTokens(totalTokens) : fmtFramedDollar(total, framing)}" in html
+
+
+def test_traces_list_cost_routes_through_framing(html):
+    # Traces list COST column must consume the framing block, not raw fmtCost.
+    assert "<td>${fmtCost(t.cost_usd)}</td>" not in html
+    assert "${fmtFramedDollar(t.cost_usd, framing)}" in html
+    # The screen actually pulls the framing block off the /traces response.
+    assert "setFraming(td.framing || null)" in html
+
+
+def test_trace_detail_costs_route_through_framing(html):
+    # Waterfall bar label, tooltip line, and the span-detail panel all reframe —
+    # no bare per-span fmtCost (the bar label + tooltip both used s.cost_usd).
+    assert "fmtCost(s.cost_usd)" not in html
+    assert "${fmtCost(sel.cost_usd)}" not in html
+    assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
+    assert "${fmtFramedDollar(sel.cost_usd, framing)}" in html
+    # Trace detail pulls the framing block off the /traces/{id} response.
+    assert "setFraming(d.framing || null)" in html

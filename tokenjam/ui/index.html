@@ -1118,6 +1118,7 @@ function TracesListView({ params }) {
   const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, [k]: v }, DEFAULTS);
 
   const [traces, setTraces] = useState([]);
+  const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
 
   const load = useCallback(async () => {
@@ -1126,6 +1127,7 @@ function TracesListView({ params }) {
       api('/status'),
     ]);
     setTraces(td.traces || []);
+    setFraming(td.framing || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
@@ -1162,7 +1164,7 @@ function TracesListView({ params }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtCost(t.cost_usd)}</td>
+              <td>${fmtFramedDollar(t.cost_usd, framing)}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${st ? html`<span class="status-dot ${st}" style="margin-right:5px"></span><span class="badge badge-${st}">${st}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
               <td>${t.span_count}</td>
@@ -1189,10 +1191,11 @@ function dedup(traces) {
 // ============================
 function TraceDetailView({ traceId }) {
   const [spans, setSpans] = useState([]);
+  const [framing, setFraming] = useState(null);
   const [selected, setSelected] = useState(null);
 
   useEffect(() => {
-    api('/traces/' + traceId).then(d => setSpans(d.spans || []));
+    api('/traces/' + traceId).then(d => { setSpans(d.spans || []); setFraming(d.framing || null); });
   }, [traceId]);
 
   if (!spans.length) return html`<div class="empty">Loading trace...</div>`;
@@ -1247,7 +1250,10 @@ function TraceDetailView({ traceId }) {
         const friendly = friendlySpanName(s.name);
         const isAgent = kind === 'agent';
         const detail = s.model || s.tool_name || '';
-        const costStr = s.cost_usd != null && s.cost_usd > 0 ? ' \u2014 ' + fmtCost(s.cost_usd) : '';
+        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local \u2192 "\u2014"
+        // (suppressed; omitted from the compact bar label), api/unknown \u2192 "$X".
+        const costFramed = fmtFramedDollar(s.cost_usd, framing);
+        const costStr = s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014' ? ' \u2014 ' + costFramed : '';
         const barLabel = isAgent
           ? fmtDur(s.duration_ms) + costStr
           : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms) + costStr;
@@ -1260,7 +1266,7 @@ function TraceDetailView({ traceId }) {
         if (s.output_tokens != null) tipLines.push('Output tokens: ' + fmtTokens(s.output_tokens));
         if (s.cache_tokens) tipLines.push('Cache read: ' + fmtTokens(s.cache_tokens));
         if (s.cache_write_tokens) tipLines.push('Cache write: ' + fmtTokens(s.cache_write_tokens));
-        if (s.cost_usd != null) tipLines.push('Cost: ' + fmtCost(s.cost_usd));
+        if (s.cost_usd != null && costFramed !== '—') tipLines.push('Cost: ' + costFramed);
         const tooltip = tipLines.join('\n');
         return html`
           <div class="wf-row ${selected === s.span_id ? 'selected' : ''}" onClick=${() => setSelected(s.span_id)}>
@@ -1290,7 +1296,7 @@ function TraceDetailView({ traceId }) {
           ${sel.output_tokens != null ? html`<span class="dk">Output tokens</span><span class="dv">${fmtTokens(sel.output_tokens)}</span>` : null}
           ${sel.cache_tokens ? html`<span class="dk">Cache read</span><span class="dv">${fmtTokens(sel.cache_tokens)}</span>` : null}
           ${sel.cache_write_tokens ? html`<span class="dk">Cache write</span><span class="dv">${fmtTokens(sel.cache_write_tokens)}</span>` : null}
-          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtCost(sel.cost_usd)}</span>` : null}
+          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtFramedDollar(sel.cost_usd, framing)}</span>` : null}
           ${sel.agent_id ? html`<span class="dk">Agent</span><span class="dv">${sel.agent_id}</span>` : null}
           ${sel.conversation_id ? html`<span class="dk">Conversation</span><span class="dv">${sel.conversation_id}</span>` : null}
           ${sel.session_id ? html`<span class="dk">Session</span><span class="dv">${sel.session_id}</span>` : null}
@@ -1526,7 +1532,7 @@ function CostView({ params }) {
           <th>${tableMode === 'day' ? 'Date' : tableMode === 'agent' ? 'Agent' : 'Model'}</th>
           ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
           ${tableMode !== 'model' ? html`<th>Model</th>` : null}
-          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
+          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
         </tr></thead>
         <tbody>
           ${rows.map(r => html`
@@ -1538,7 +1544,7 @@ function CostView({ params }) {
               <td>${fmtTokens(r.output_tokens)}</td>
               <td>${fmtTokens(r.cache_tokens || 0)}</td>
               <td>${fmtTokens(r.cache_write_tokens || 0)}</td>
-              <td>${fmtCost(r.cost_usd)}</td>
+              <td>${useTokens ? fmtTokens(_costVal(r, true)) : fmtFramedDollar(r.cost_usd, framing)}</td>
             </tr>
           `)}
           <tr style="font-weight:600;border-top:2px solid var(--border)">
@@ -1547,7 +1553,7 @@ function CostView({ params }) {
             <td>${fmtTokens(totalOut)}</td>
             <td>${fmtTokens(rows.reduce((s, r) => s + (r.cache_tokens || 0), 0))}</td>
             <td>${fmtTokens(rows.reduce((s, r) => s + (r.cache_write_tokens || 0), 0))}</td>
-            <td>${fmtCost(total)}</td>
+            <td>${useTokens ? fmtTokens(totalTokens) : fmtFramedDollar(total, framing)}</td>
           </tr>
         </tbody>
       </table></div>
