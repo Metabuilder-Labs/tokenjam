@@ -7,7 +7,11 @@ from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.cycle import cycle_bounds, effective_cycle_start_day
-from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
+from tokenjam.core.framing import (
+    WindowSummary,
+    compute_framing,
+    plan_determination_mix,
+)
 from tokenjam.core.models import CostFilters
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -111,9 +115,13 @@ async def get_cost(
 
     # Plan-tier framing block — single source shared with the CLI (#110). Lets
     # the local web UI render the same suppressed/qualified dollar figures.
+    # The mix is window-INDEPENDENT (#177): the pricing mode + qualifier banner
+    # are a property of the user's plan, so the chart's tokens-vs-dollars unit
+    # stays consistent as the user switches windows. Only the window totals
+    # (above) and the `series` (below) are window-scoped.
     conn = getattr(db, "conn", None)
     mix = (
-        plan_tier_mix(conn, since_dt, until_dt, agent_id)
+        plan_determination_mix(conn, agent_id)
         if conn is not None else {}
     )
     framing = compute_framing(

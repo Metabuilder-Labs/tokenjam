@@ -269,6 +269,27 @@ def test_render_savings_none_dash():
     assert render_savings(None, None, f) == "—"
 
 
+# --------------------------------------------------------------------------- #
+# plan_determination_mix — window-independent (#177)
+# --------------------------------------------------------------------------- #
+def test_plan_determination_mix_ignores_time_window():
+    """The framing mix must not be scoped to a window: a 24h-vs-30d split was
+    the root cause of window-dependent framing (#177). plan_determination_mix
+    passes since=until=None to plan_tier_mix, so it counts every session."""
+    from unittest.mock import MagicMock
+
+    from tokenjam.core.framing import plan_determination_mix
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [("max_5x", 3), ("unknown", 40)]
+    result = plan_determination_mix(conn, agent_id="agent-x")
+    assert result == {"max_5x": 3, "unknown": 40}
+    # The SQL is bound only with the agent_id — no started_at window clause.
+    sql, params = conn.execute.call_args[0]
+    assert "started_at" not in sql
+    assert params == ["agent-x"]
+
+
 def test_framing_to_dict_has_contract_fields():
     f = compute_framing(
         _Config(),
