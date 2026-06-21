@@ -1074,7 +1074,7 @@ function StatusView({ params }) {
             ${a.agent_id}
             <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
           </div>
-          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtCost(a.cost_today)}</span></div>
+          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtFramedDollar(a.cost_today, data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
           ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
@@ -2215,7 +2215,7 @@ function OptimizeFinding({ name, opt, framing }) {
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
         <table class="opt-table"><thead><tr><th>Instances</th><th>Signature</th><th>Avg cost</th></tr></thead>
-          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtCost(c.avg_cost_usd)}</td></tr>`)}</tbody></table>
+          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtFramedDollar(c.avg_cost_usd, framing)}</td></tr>`)}</tbody></table>
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
         : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
     } else if (name === 'trim') {
@@ -2299,10 +2299,10 @@ function OptimizeView({ params }) {
     ${!st.loading && st.opt ? html`
       ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
-        <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtCost(Math.abs(st.cmp.cost_delta_usd))} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
+        <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section"><div class="opt-title">Budget projection</div>
-        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtCost(b.monthly_run_rate_usd)}/mo vs ${fmtCost(b.budget_usd)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtCost(b.projected_overage_usd)}</span>` : '— within budget'}</div>`)}
+        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtFramedDollar(b.projected_overage_usd, framing)}</span>` : '— within budget'}</div>`)}
       </section>` : null}
     ` : null}
   `;

@@ -5,6 +5,11 @@ from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.db import _row_to_session, session_active_seconds
+from tokenjam.core.framing import (
+    WindowSummary,
+    compute_framing,
+    plan_determination_mix,
+)
 from tokenjam.core.models import AlertFilters
 from tokenjam.utils.time_parse import utcnow
 
@@ -85,7 +90,20 @@ async def get_status(
         }
         agents_data.append(agent_data)
 
+    # Plan-tier framing block so the agent cards' "Cost today" figure suppresses
+    # / reframes raw dollars for subscription / local users (#191) — the web UI
+    # consumes this rather than re-deriving the rules in JS (single compute
+    # path). Window-INDEPENDENT mix (`plan_determination_mix`), as on /traces.
+    config = request.app.state.config
+    conn = getattr(db, "conn", None)
+    mix = plan_determination_mix(conn, agent_id) if conn is not None else {}
+    framing = compute_framing(
+        config,
+        WindowSummary(plan_tier_mix=mix, sessions=sum(mix.values())),
+    )
+
     return {
         "agents": agents_data,
         "has_active_alerts": has_active_alerts,
+        "framing": framing.to_dict(),
     }

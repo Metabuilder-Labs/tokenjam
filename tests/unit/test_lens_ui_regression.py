@@ -259,3 +259,33 @@ def test_trace_detail_costs_route_through_framing(html):
     assert "${fmtFramedDollar(sel.cost_usd, framing)}" in html
     # Trace detail pulls the framing block off the /traces/{id} response.
     assert "setFraming(d.framing || null)" in html
+
+
+# --- #191: suppress raw $ on Status, Optimize & Reuse/script surfaces -------- #
+def test_status_card_cost_today_routes_through_framing(html):
+    # Status agent cards' "Cost today" must consume the /status framing block,
+    # not render raw fmtCost(a.cost_today).
+    assert "${fmtCost(a.cost_today)}" not in html
+    assert "${fmtFramedDollar(a.cost_today, data.framing)}" in html
+
+
+def test_optimize_window_comparison_routes_through_framing(html):
+    # The window-comparison cost delta must reframe for subscription/local.
+    assert "${fmtCost(Math.abs(st.cmp.cost_delta_usd))}" not in html
+    assert "${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)}" in html
+
+
+def test_optimize_budget_projection_routes_through_framing(html):
+    # Budget-projection run-rate / ceiling / overage must reframe, not raw $.
+    assert "${fmtCost(b.monthly_run_rate_usd)}" not in html
+    assert "${fmtCost(b.budget_usd)}" not in html
+    assert "${fmtCost(b.projected_overage_usd)}" not in html
+    assert "${fmtFramedDollar(b.monthly_run_rate_usd, framing)}" in html
+    assert "${fmtFramedDollar(b.budget_usd, framing)}" in html
+    assert "${fmtFramedDollar(b.projected_overage_usd, framing)}" in html
+
+
+def test_optimize_cluster_avg_cost_routes_through_framing(html):
+    # The script/reuse cluster table "Avg cost" cell must reframe, not raw $.
+    assert "${fmtCost(c.avg_cost_usd)}" not in html
+    assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" in html
