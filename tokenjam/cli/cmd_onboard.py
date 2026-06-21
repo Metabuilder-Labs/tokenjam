@@ -566,8 +566,8 @@ def _onboard_claude_code(
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")
-    console.print("[dim]Restart Claude Code for settings to take effect.[/dim]")
-    console.print(f"[dim]Then run:[/dim]  tj status --agent {agent_id}")
+    _print_restart_banner("Claude Code")
+    console.print(f"[dim]After restarting, run:[/dim]  tj status --agent {agent_id}")
 
 
 def _onboard_codex(
@@ -808,7 +808,40 @@ def _onboard_codex(
     console.print(
         "[dim]Codex can now call TokenJam tools (open_dashboard, get_status, etc.) directly.[/dim]"
     )
-    console.print("[dim]Then run:[/dim]  tj traces")
+    _print_restart_banner("Codex")
+    console.print("[dim]After restarting, run:[/dim]  tj traces")
+
+
+def _print_restart_banner(app_name: str) -> None:
+    """Render a prominent restart-required banner at the end of onboarding.
+
+    Coding agents (Claude Code, Codex) read their OTLP exporter env vars once
+    at startup, not per request. After onboard rewrites the endpoint/ingest
+    secret, an already-running instance keeps exporting to the stale endpoint
+    and today's spans silently never reach TokenJam (issue #179). A single dim
+    one-liner was too easy to miss, so make this a Rich panel.
+    """
+    from rich.panel import Panel
+    from rich.text import Text
+
+    body = Text()
+    body.append("Restart ", style="bold")
+    body.append(app_name, style="bold yellow")
+    body.append(" now for the new settings to take effect.\n", style="bold")
+    body.append(
+        f"A {app_name} session already running will keep sending telemetry to "
+        "the old endpoint — today's activity won't reach TokenJam until you "
+        "restart it.",
+        style="dim",
+    )
+    console.print(
+        Panel(
+            body,
+            title="[bold]Action required[/bold]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
 
 
 def _warn_manual_serve_restart(*, stopped_for_db: bool, no_daemon: bool) -> None:
