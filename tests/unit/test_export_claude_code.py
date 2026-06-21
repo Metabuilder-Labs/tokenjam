@@ -62,7 +62,7 @@ def test_render_unknown_plan_includes_reconfigure_hint():
         pricing_mode="unknown",
         plan_tier="unknown",
     )
-    assert "tj onboard --reconfigure" in snippet
+    assert "tj onboard --claude-code --reconfigure" in snippet
     assert "estimated_savings_usd_month" not in snippet
     assert "estimated_tokens_freed" not in snippet
 

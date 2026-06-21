@@ -85,6 +85,20 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
         console.print("[dim]No cost data found for the given filters.[/dim]")
         return
 
+    # Plan-tier framing for the COST column (#175). Same source the API and
+    # `tj optimize` / `tj cost --compare` use: subscription users get token-share
+    # framing instead of raw dollars they never paid, and a qualifier note is
+    # surfaced above the table. API users are byte-identical to before.
+    until_dt = utcnow()
+    framing = _cost_framing(ctx, db, since, since_dt, until_dt, agent,
+                            total, total_in + total_out)
+    note = _cost_note(framing)
+    if note:
+        console.print(f"[dim]{note}[/dim]")
+
+    def _cost(value: float) -> str:
+        return _cost_cell(value, framing)
+
     # CACHE R / CACHE W columns make cost reconcilable from the shown tokens —
     # cache-write is often the dominant driver and was previously invisible (#17).
     cache_r = sum(r.cache_tokens for r in rows)
@@ -96,11 +110,11 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                 r.group, r.agent_id or "-", r.model or "-",
                 format_tokens(r.input_tokens), format_tokens(r.output_tokens),
                 format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
-                format_cost(r.cost_usd),
+                _cost(r.cost_usd),
             )
         table.add_row("", "", "", format_tokens(total_in), format_tokens(total_out),
                       format_tokens(cache_r), format_tokens(cache_w),
-                      f"[bold]{format_cost(total)}[/bold]")
+                      f"[bold]{_cost(total)}[/bold]")
     elif group_by == "agent":
         table = make_table("AGENT", "MODEL", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
         for r in rows:
@@ -108,11 +122,11 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                 r.group, r.model or "-",
                 format_tokens(r.input_tokens), format_tokens(r.output_tokens),
                 format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
-                format_cost(r.cost_usd),
+                _cost(r.cost_usd),
             )
         table.add_row("", "", format_tokens(total_in), format_tokens(total_out),
                       format_tokens(cache_r), format_tokens(cache_w),
-                      f"[bold]{format_cost(total)}[/bold]")
+                      f"[bold]{_cost(total)}[/bold]")
     elif group_by == "model":
         table = make_table("MODEL", "TOKENS IN", "TOKENS OUT", "CACHE R", "CACHE W", "COST")
         for r in rows:
@@ -120,19 +134,83 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                 r.group,
                 format_tokens(r.input_tokens), format_tokens(r.output_tokens),
                 format_tokens(r.cache_tokens), format_tokens(r.cache_write_tokens),
-                format_cost(r.cost_usd),
+                _cost(r.cost_usd),
             )
         table.add_row("", format_tokens(total_in), format_tokens(total_out),
                       format_tokens(cache_r), format_tokens(cache_w),
-                      f"[bold]{format_cost(total)}[/bold]")
+                      f"[bold]{_cost(total)}[/bold]")
     elif group_by == "tool":
         # Tool grouping has no token dimension — cost only.
         table = make_table("TOOL", "COST")
         for r in rows:
-            table.add_row(r.group, format_cost(r.cost_usd))
-        table.add_row("[bold]TOTAL[/bold]", f"[bold]{format_cost(total)}[/bold]")
+            table.add_row(r.group, _cost(r.cost_usd))
+        table.add_row("[bold]TOTAL[/bold]", f"[bold]{_cost(total)}[/bold]")
 
     console.print(table)
+
+
+def _cost_framing(ctx, db, since, since_dt, until_dt, agent, total_cost, total_tokens):
+    """Plan-tier Framing for the bare `tj cost` table (#175), from the shared
+    core/framing module — the same source the API and `tj cost --compare` use.
+
+    Direct-conn path computes it locally; the API-shim path (daemon holds the
+    DB lock, the common real-world case) reuses the `framing` block the
+    /api/v1/cost response already carries. Returns None when neither is
+    available → API-style raw-dollar rendering, unchanged."""
+    config = ctx.obj.get("config") if ctx.obj else None
+    conn = getattr(db, "conn", None)
+    if config is not None and conn is not None:
+        from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
+        mix = plan_tier_mix(conn, since_dt, until_dt, agent)
+        return compute_framing(config, WindowSummary(
+            total_cost_usd=total_cost,
+            total_tokens=total_tokens,
+            sessions=sum(mix.values()),
+            plan_tier_mix=mix,
+        ))
+    if hasattr(db, "fetch_cost_framing"):
+        try:
+            fr = db.fetch_cost_framing(since=since, agent_id=agent)
+        except Exception:
+            return None
+        if fr:
+            from tokenjam.core.framing import Framing
+            try:
+                return Framing(**fr)
+            except TypeError:
+                return None  # server framing schema drift → fall back to dollars
+    return None
+
+
+def _cost_note(framing) -> str | None:
+    """The honesty note printed above the COST table (#175).
+
+    Prefers the framing's own qualifier_text (set for unknown plan tier and
+    mixed subscription/API windows); otherwise emits a concise mode note for
+    pure subscription / local so the reframed COST column is never unexplained.
+    API → None (no note; byte-identical to the pre-framing output)."""
+    if framing is None:
+        return None
+    if framing.qualifier_text:
+        return framing.qualifier_text
+    if framing.pricing_mode == "subscription":
+        return ("Subscription plan — flat-fee billing; COST shown as share of "
+                "your monthly plan, not dollars spent.")
+    if framing.pricing_mode == "local":
+        return "Local inference — no marginal cost; dollar figures suppressed."
+    return None
+
+
+def _cost_cell(value: float, framing) -> str:
+    """Render one COST cell, plan-tier-aware (#175). API/unknown keep the
+    historical format_cost output byte-for-byte; subscription shows token-share
+    ("X% of cycle") and local suppresses to "—" via core/framing.render_dollar.
+    The qualifier note (surfaced above the table) carries the honesty caveat for
+    the subscription-with-API-mix and unknown cases."""
+    if framing is not None and framing.pricing_mode in ("subscription", "local"):
+        from tokenjam.core.framing import render_dollar
+        return render_dollar(value, framing)
+    return format_cost(value)
 
 
 def _compare_framing(ctx, db, since_dt, until_dt, agent, diff):
@@ -186,7 +264,7 @@ def _diff_note(mode: str, qualifier_text: str | None = None) -> str | None:
     if mode == "unknown":
         return qualifier_text or (
             "Plan tier unknown — figures may overstate actual cost. "
-            "Run `tj onboard --reconfigure`."
+            "Run `tj onboard --claude-code --reconfigure` (or `--codex`)."
         )
     return None  # api → no note (byte-identical)
 

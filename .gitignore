@@ -18,6 +18,7 @@ venv/
 # IDE
 .idea/
 .vscode/
+.cursor/debug-*.log
 *.swp
 *.swo
 

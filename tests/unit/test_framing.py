@@ -15,6 +15,7 @@ from tokenjam.core.framing import (
     WindowSummary,
     compute_framing,
     config_declared_plan,
+    config_declared_plan_labels,
     dominant_plan,
     pricing_mode_for,
     render_dollar,
@@ -91,6 +92,38 @@ def test_config_declared_plan_sorted_provider_order():
     assert config_declared_plan(cfg) == "pro"
 
 
+def test_config_declared_plan_labels_single_provider():
+    cfg = _Config({"anthropic": _Budget(plan="api")})
+    assert config_declared_plan_labels(cfg) == ["API billing"]
+
+
+def test_config_declared_plan_labels_multi_provider():
+    cfg = _Config({
+        "anthropic": _Budget(plan="api"),
+        "openai": _Budget(plan="plus"),
+    })
+    assert config_declared_plan_labels(cfg) == [
+        "API billing (anthropic)",
+        "ChatGPT Plus (openai)",
+    ]
+
+
+def test_compute_framing_emits_declared_plan_labels():
+    cfg = _Config({
+        "anthropic": _Budget(plan="api"),
+        "openai": _Budget(plan="plus"),
+    })
+    f = compute_framing(
+        cfg,
+        WindowSummary(total_cost_usd=10.0, total_tokens=500, sessions=3,
+                      plan_tier_mix={"api": 3}),
+    )
+    assert f.plan_labels == [
+        "API billing (anthropic)",
+        "ChatGPT Plus (openai)",
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # compute_framing — one path per pricing_mode
 # --------------------------------------------------------------------------- #
@@ -102,6 +135,7 @@ def test_compute_framing_api_clean():
     )
     assert f.pricing_mode == "api"
     assert f.plan_tier == "api"
+    assert f.plan_label == "API billing"
     assert f.display_rule == DISPLAY_SHOW_DOLLARS
     assert f.qualifier_text is None
     assert f.api_share_pct == 100.0
@@ -154,6 +188,7 @@ def test_compute_framing_local():
                       plan_tier_mix={"local": 4}),
     )
     assert f.pricing_mode == "local"
+    assert f.plan_label == "Local inference"
     assert f.display_rule == DISPLAY_TOKENS_ONLY
     assert "no marginal cost" in (f.qualifier_text or "")
 
@@ -166,7 +201,7 @@ def test_compute_framing_all_unknown_suppressed():
     )
     assert f.pricing_mode == "unknown"
     assert f.display_rule == DISPLAY_SUPPRESS_UNKNOWN
-    assert "tj onboard --reconfigure" in (f.qualifier_text or "")
+    assert "claude-code --reconfigure" in (f.qualifier_text or "")
 
 
 def test_compute_framing_empty_data_falls_back_to_declared_plan():
