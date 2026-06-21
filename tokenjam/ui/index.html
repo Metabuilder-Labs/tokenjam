@@ -918,14 +918,18 @@ function fmtAxisUsd(v) {
 
 // Consistent time-axis labels (#136). Hourly buckets → "6 PM"; daily → "Jun 15"
 // — one format across every tick, no "6/15/26" mixed with "6/16". The server
-// sends UTC epoch-second buckets, but the tick labels render in the browser's
-// LOCAL timezone (#178) — a US-Pacific user sees "12 PM", not UTC's "7 PM".
-// `new Date(epoch*1000)` already holds the correct instant; omitting `timeZone`
-// makes toLocale*String() format it in the viewer's local zone.
+// sends UTC epoch-second buckets.
+// Hourly ticks render in the browser's LOCAL timezone (#178) — a US-Pacific
+// user sees "12 PM", not UTC's "7 PM" — since an hour label is meaningful in
+// the viewer's zone. Daily labels, however, stay UTC (#188): the buckets are
+// UTC-day-aligned server-side, so localizing a UTC-midnight key would print
+// the PREVIOUS local day for west-of-UTC users and no longer match the bucket's
+// span. (True local-day labels would require local-day bucketing server-side —
+// deferred; see #188.)
 function fmtAxisTime(epoch, bucket) {
   const d = new Date(epoch * 1000);
   if (bucket === 'hour') return d.toLocaleTimeString(undefined, { hour: 'numeric' });
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
 }
 
 // uPlot hover tooltip (#128): crosshair → date + framed value(s) at the nearest

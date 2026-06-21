@@ -60,20 +60,24 @@ def test_overview_chart_is_not_a_click_target(html):
     assert "View Cost details" in html
 
 
-# --- #178: chart x-axis ticks render in the browser's local timezone ------- #
-def test_axis_time_ticks_render_in_local_timezone(html):
-    # The hourly + date tick formatter must NOT pin to UTC — it formats the
-    # UTC epoch-second buckets in the viewer's local zone (a US-Pacific user
-    # sees their noon, not UTC's 7pm). Server data stays UTC; only labels shift.
+# --- #178 / #188: chart x-axis tick timezone handling --------------------- #
+def test_axis_time_ticks_timezone_split(html):
+    # #178: HOURLY ticks localize — they format the UTC epoch-second buckets in
+    # the viewer's local zone (a US-Pacific user sees their noon, not UTC's 7pm).
+    # #188: DAILY date labels stay UTC, because the buckets are UTC-day-aligned;
+    # localizing a UTC-midnight key would print the previous local day for
+    # west-of-UTC users and no longer match the bucket span.
     import re
 
     m = re.search(r"function fmtAxisTime\(epoch, bucket\) \{.*?\n\}", html, re.DOTALL)
     assert m, "fmtAxisTime helper not found"
     body = m.group(0)
-    assert "toLocaleTimeString" in body
-    assert "toLocaleDateString" in body
-    # The bug: the formatters previously forced { timeZone: 'UTC' }.
-    assert "timeZone: 'UTC'" not in body, "axis ticks must localize, not force UTC"
+    hour_line = next(line for line in body.splitlines() if "toLocaleTimeString" in line)
+    date_line = next(line for line in body.splitlines() if "toLocaleDateString" in line)
+    # Hourly localizes (must NOT force UTC).
+    assert "timeZone: 'UTC'" not in hour_line, "hourly ticks must localize (#178)"
+    # Daily stays UTC-aligned (must force UTC).
+    assert "timeZone: 'UTC'" in date_line, "daily date labels stay UTC-aligned (#188)"
 
 
 # --- #129: run-rate denominator + caption + $ axis ------------------------- #
