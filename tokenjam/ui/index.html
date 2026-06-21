@@ -573,6 +573,18 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   font-size: 12px;
   color: var(--text-dim);
 }
+.plan-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 9px;
+  letter-spacing: 0.02em;
+}
 /* Low-key loading shimmer (no full-page loader). */
 .shimmer {
   width: 100%;
@@ -1301,6 +1313,19 @@ function fmtFramedDollar(v, framing) {
   return fmtCost(v); // api / unknown
 }
 
+// Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
+// the warning `qualifier` banner — confirms api / subscription / local mode.
+function PlanBadge({ framing }) {
+  if (!framing || framing.pricing_mode === 'unknown') return null;
+  const labels = (framing.plan_labels && framing.plan_labels.length)
+    ? framing.plan_labels
+    : (framing.plan_label ? [framing.plan_label] : []);
+  if (!labels.length) return null;
+  return html`${labels.map(l => html`
+    <span class="plan-badge" title="Billing mode from your tj config">${l}</span>
+  `)}`;
+}
+
 // Trend chip: ▲ (up, red) / ▼ (down, green) with a percentage.
 function TrendChip({ pct }) {
   if (pct == null) return null;
@@ -1440,7 +1465,9 @@ function CostView({ params }) {
   const totalOut = rows.reduce((s, r) => s + (r.output_tokens || 0), 0);
 
   return html`
-    <div class="page-title">Cost</div>
+    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      Cost <${PlanBadge} framing=${framing} />
+    </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="24h">Last 24h</option>
@@ -2062,7 +2089,10 @@ function OverviewView({ params }) {
 
   return html`
     <div class="ov-head">
-      <div class="page-title" style="margin:0">Overview</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="page-title" style="margin:0">Overview</div>
+        <${PlanBadge} framing=${framing} />
+      </div>
       <div class="filters" style="margin:0">${winPicker}</div>
     </div>
     ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
@@ -2231,7 +2261,9 @@ function OptimizeView({ params }) {
   const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim'];
 
   return html`
-    <div class="page-title">Optimize</div>
+    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      Optimize <${PlanBadge} framing=${framing} />
+    </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="7d">Last 7d</option>

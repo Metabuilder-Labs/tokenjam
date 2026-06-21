@@ -62,6 +62,16 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # startup
         scheduler.start()
+        # Stamp unknown sessions from declared [budget.*].plan on startup so
+        # historical/backfilled rows match config without a separate onboard pass.
+        from tokenjam.core.framing import apply_declared_plans_to_sessions
+
+        conn = getattr(db, "conn", None)
+        if conn is not None:
+            try:
+                apply_declared_plans_to_sessions(conn, config)
+            except Exception:
+                pass
         _state_path.parent.mkdir(parents=True, exist_ok=True)
         _state_path.write_text(
             _json.dumps({

@@ -264,7 +264,7 @@ def _diff_note(mode: str, qualifier_text: str | None = None) -> str | None:
     if mode == "unknown":
         return qualifier_text or (
             "Plan tier unknown — figures may overstate actual cost. "
-            "Run `tj onboard --reconfigure`."
+            "Run `tj onboard --claude-code --reconfigure` (or `--codex`)."
         )
     return None  # api → no note (byte-identical)
 

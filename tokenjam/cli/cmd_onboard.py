@@ -98,6 +98,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     plan_provider = (
         "openai" if plan_tier in ("plus", "team", "enterprise") else "anthropic"
     )
+    plan_changed = plan_tier is not None
     plan_section = (
         f'\n[budget.{plan_provider}]\nplan = "{plan_tier}"\n' if plan_tier else ""
     )
@@ -108,6 +109,16 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
 
     config_path = Path(".tj/config.toml")
     config_path.parent.mkdir(parents=True, exist_ok=True)
+
+    prior_plan: str | None = None
+    if config_path.exists():
+        try:
+            from tokenjam.core.config import load_config as _load_prior_config
+            prior_cfg = _load_prior_config(str(config_path.resolve()))
+            prior_pb = prior_cfg.budgets.get(plan_provider)
+            prior_plan = prior_pb.plan if prior_pb else None
+        except Exception:
+            prior_plan = None
 
     budget_line = ""
     if budget and budget > 0:
@@ -145,9 +156,29 @@ retention_days = 90
 """
     config_path.write_text(config_text)
 
+    from tokenjam.core.config import load_config as _load_plain_config
+    plain_config = _load_plain_config(str(config_path.resolve()))
+    stopped_for_db = _stop_serve_for_db_write()
+    reconcile_plan = (
+        prior_plan is not None
+        and plan_tier is not None
+        and plan_tier != prior_plan
+    )
+    apply_msg = _try_apply_declared_plans(plain_config, reconcile=reconcile_plan)
+    if apply_msg:
+        console.print(f"[green]\u2713[/green] {apply_msg}")
+
     daemon_msg = None
     if want_daemon:
-        daemon_msg = _install_daemon(str(config_path.resolve()))
+        daemon_msg = _finish_onboard_serve(
+            str(config_path.resolve()),
+            want_daemon=True,
+            plan_changed=plan_changed,
+            stopped_for_db=stopped_for_db,
+            secret_rotated=False,
+            no_daemon=no_daemon,
+            force=False,
+        )
 
     # Output
     console.print()
@@ -189,6 +220,7 @@ retention_days = 90
     console.print()
 
     if not want_daemon:
+        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("  Run [bold]tj serve[/bold] to start the web UI "
                       "and enable real-time alerts.")
         console.print()
@@ -278,6 +310,8 @@ def _onboard_claude_code(
             config.budgets["anthropic"].plan
             if "anthropic" in config.budgets else None
         )
+        plan_changed = False
+        new_plan: str | None = None
         # Prompt for plan tier when:
         #   - this is a fresh onboard for this agent (no existing plan), or
         #   - the user passed --reconfigure to explicitly re-prompt
@@ -287,6 +321,8 @@ def _onboard_claude_code(
                 plan = plan_override
             else:
                 plan = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES, current=existing_plan)
+            new_plan = plan
+            plan_changed = plan != existing_plan
             # Subscription plans don't get an auto-written budget ceiling.
             usd: float | None = None
             if plan == "api" and not plan_override:
@@ -318,6 +354,8 @@ def _onboard_claude_code(
             plan = plan_override
         else:
             plan = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES)
+        new_plan = plan
+        plan_changed = False
         usd: float | None = None  # type: ignore[no-redef]
         if plan == "api" and not plan_override:
             ceiling = click.prompt(
@@ -340,6 +378,62 @@ def _onboard_claude_code(
         console.print(f"  tj config written to: {config_path}")
         if _sync_secret_to_codex(ingest_secret):
             console.print("  Codex config updated to match new ingest secret.")
+
+    stopped_for_db = _stop_serve_for_db_write()
+    if stopped_for_db:
+        console.print(
+            "[dim]  Server:              stopped briefly for "
+            "config/DB update[/dim]"
+        )
+
+    apply_msg = _try_apply_declared_plans(
+        config, reconcile=reconfigure and plan_changed,
+    )
+    if apply_msg:
+        console.print(f"  {apply_msg}")
+
+    # --- Backfill existing Claude Code session logs ---
+    # Run before daemon install so a freshly-started serve does not hold the
+    # DuckDB write lock (#71). Idempotent — safe to re-run.
+    backfill_msg: str | None = None
+    try:
+        from tokenjam.core.backfill import (
+            CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code,
+        )
+        if CLAUDE_CODE_PROJECTS_ROOT.exists():
+            from tokenjam.core.db import open_db
+            try:
+                db = open_db(config.storage)
+                result = ingest_claude_code(db, config=config)
+                post_apply = _try_apply_declared_plans(
+                    config, reconcile=reconfigure and plan_changed,
+                )
+                if post_apply and not apply_msg:
+                    console.print(f"  {post_apply}")
+                db.close()
+                if result.sessions_ingested > 0:
+                    days = None
+                    if result.earliest and result.latest:
+                        days = (result.latest - result.earliest).days
+                    pieces = [f"{result.sessions_ingested} sessions"]
+                    if days is not None:
+                        pieces.append(f"over {days} day{'s' if days != 1 else ''}")
+                    pieces.append(f"${result.total_cost_usd:.0f} total")
+                    backfill_msg = ", ".join(pieces)
+                elif result.sessions_seen > 0:
+                    backfill_msg = "history already up to date"
+            except Exception as exc:
+                _err = str(exc).lower()
+                if "lock" in _err or "i/o error" in _err or "io error" in _err:
+                    backfill_msg = (
+                        "skipped — daemon holds the DB write lock. "
+                        "Stop the daemon (`tj stop`) and re-run "
+                        "`tj backfill claude-code`."
+                    )
+                else:
+                    backfill_msg = f"skipped ({exc})"
+    except Exception:
+        pass
 
     # --- Register MCP server with Claude Code ---
     if shutil.which("claude"):
@@ -434,56 +528,15 @@ def _onboard_claude_code(
         zshrc.write_text(updated)
 
     want_daemon = not no_daemon
-    if want_daemon:
-        if not force and _daemon_already_running():
-            console.print("  Daemon:              already running (skipped reinstall)")
-        else:
-            console.print("  Daemon:              installing...")
-            _install_daemon(str(config_path.resolve()))
-
-    # --- Backfill existing Claude Code session logs ---
-    # First-time users have no history yet; this populates the DB so that
-    # `tj optimize` returns useful output on first run. Idempotent — safe to
-    # re-run; will skip already-ingested spans.
-    backfill_msg: str | None = None
-    try:
-        from tokenjam.core.backfill import (
-            CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code,
-        )
-        if CLAUDE_CODE_PROJECTS_ROOT.exists():
-            from tokenjam.core.db import open_db
-            try:
-                db = open_db(config.storage)
-                # Pass the just-written config so backfilled sessions carry the
-                # declared plan tier instead of "unknown" (#176).
-                result = ingest_claude_code(db, config=config)
-                db.close()
-                if result.sessions_ingested > 0:
-                    days = None
-                    if result.earliest and result.latest:
-                        days = (result.latest - result.earliest).days
-                    pieces = [f"{result.sessions_ingested} sessions"]
-                    if days is not None:
-                        pieces.append(f"over {days} day{'s' if days != 1 else ''}")
-                    pieces.append(f"${result.total_cost_usd:.0f} total")
-                    backfill_msg = ", ".join(pieces)
-                elif result.sessions_seen > 0:
-                    backfill_msg = "history already up to date"
-            except Exception as exc:
-                # Friendly message for the most common case: daemon holds
-                # the DB write lock. Backfill is a writer and can't share
-                # the lock; raw DuckDB IO error is unhelpful (#71 finding 2).
-                _err = str(exc).lower()
-                if "lock" in _err or "i/o error" in _err or "io error" in _err:
-                    backfill_msg = (
-                        "skipped — daemon holds the DB write lock. "
-                        "Stop the daemon (`tj stop`) and re-run "
-                        "`tj backfill claude-code`."
-                    )
-                else:
-                    backfill_msg = f"skipped ({exc})"
-    except Exception:
-        pass
+    _finish_onboard_serve(
+        str(config_path.resolve()),
+        want_daemon=want_daemon,
+        plan_changed=plan_changed,
+        stopped_for_db=stopped_for_db,
+        secret_rotated=False,
+        no_daemon=no_daemon,
+        force=force,
+    )
 
     console.print()
     console.print("[bold green]Claude Code observability configured.[/bold green]")
@@ -514,6 +567,7 @@ def _onboard_claude_code(
         pass
     console.print()
     if not want_daemon:
+        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")
     console.print("[dim]Restart Claude Code for settings to take effect.[/dim]")
     console.print(f"[dim]Then run:[/dim]  tj status --agent {agent_id}")
@@ -574,11 +628,13 @@ def _onboard_codex(
             config.budgets["openai"].plan
             if "openai" in config.budgets else None
         )
+        plan_changed = False
         if existing_plan is None or reconfigure or plan_override:
             if plan_override:
                 plan = plan_override
             else:
                 plan = _prompt_plan("OpenAI / Codex", _OPENAI_PLAN_CHOICES, current=existing_plan)
+            plan_changed = plan != existing_plan
             usd: float | None = None
             if plan == "api" and not plan_override:
                 ceiling = click.prompt(
@@ -606,6 +662,7 @@ def _onboard_codex(
             plan = plan_override
         else:
             plan = _prompt_plan("OpenAI / Codex", _OPENAI_PLAN_CHOICES)
+        plan_changed = False
         usd: float | None = None  # type: ignore[no-redef]
         if plan == "api" and not plan_override:
             ceiling = click.prompt(
@@ -628,9 +685,23 @@ def _onboard_codex(
         if _sync_secret_to_claude_code(ingest_secret):
             console.print("  Claude Code config updated to match new ingest secret.")
 
+    stopped_for_db = _stop_serve_for_db_write()
+    if stopped_for_db:
+        console.print(
+            "[dim]  Server:              stopped briefly for "
+            "config/DB update[/dim]"
+        )
+
+    apply_msg = _try_apply_declared_plans(
+        config, reconcile=reconfigure and plan_changed,
+    )
+    if apply_msg:
+        console.print(f"  {apply_msg}")
+
     port = config.api.port
     secret = config.security.ingest_secret
     secret_rotated = bool(previous_secret) and previous_secret != secret
+    want_daemon = not no_daemon
 
     # --- Write Codex CLI OTel config (~/.codex/config.toml) ---
     codex_config_path = Path.home() / ".codex" / "config.toml"
@@ -667,6 +738,16 @@ def _onboard_codex(
         click.echo("Use --force to overwrite, or add manually:")
         click.echo("")
         _print_codex_otel_block(port, secret, agent_id)
+        _finish_onboard_serve(
+            str(config_path.resolve()),
+            want_daemon=not no_daemon,
+            plan_changed=plan_changed,
+            stopped_for_db=stopped_for_db,
+            secret_rotated=secret_rotated,
+            no_daemon=no_daemon,
+            force=force,
+        )
+        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=no_daemon)
         return
 
     otel_block = _codex_otel_toml_block(port, secret, agent_id)
@@ -702,18 +783,16 @@ def _onboard_codex(
             capture_output=True,
         )
 
-    # --- If ingest secret rotated, restart running server first ---
-    restart_msg: str | None = None
-    if secret_rotated:
-        restart_msg = _restart_tj_server_for_secret_rotation(
-            str(config_path.resolve()), no_daemon=no_daemon
-        )
-
-    # --- Install daemon if requested ---
-    want_daemon = not no_daemon
-    if want_daemon and not secret_rotated:
-        console.print("  Daemon:              auto-installing (use --no-daemon to skip)")
-        _install_daemon(str(config_path.resolve()))
+    # --- Install / restart serve after DB writes ---
+    _finish_onboard_serve(
+        str(config_path.resolve()),
+        want_daemon=not no_daemon,
+        plan_changed=plan_changed,
+        stopped_for_db=stopped_for_db,
+        secret_rotated=secret_rotated,
+        no_daemon=no_daemon,
+        force=force,
+    )
 
     console.print()
     console.print("[bold green]Codex CLI observability configured.[/bold green]")
@@ -725,10 +804,9 @@ def _onboard_codex(
     if secret:
         console.print(f"  Ingest secret:       {secret[:8]}...")
     console.print("  MCP server:          tj mcp (registered in Codex config)")
-    if restart_msg:
-        console.print(f"  Server restart:      {restart_msg}")
     console.print()
     if not want_daemon:
+        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")
     console.print(
         "[dim]Codex can now call TokenJam tools (open_dashboard, get_status, etc.) directly.[/dim]"
@@ -736,33 +814,144 @@ def _onboard_codex(
     console.print("[dim]Then run:[/dim]  tj traces")
 
 
-def _restart_tj_server_for_secret_rotation(config_path: str, no_daemon: bool) -> str:
-    """Restart running tj serve to pick up a rotated ingest secret.
+def _warn_manual_serve_restart(*, stopped_for_db: bool, no_daemon: bool) -> None:
+    """Tell the user to restart serve when onboard stopped it without daemon mode."""
+    if stopped_for_db and no_daemon:
+        console.print(
+            "[dim]  Serve was stopped for DB update — "
+            "run `tj serve` to start again.[/dim]"
+        )
 
-    We stop first to ensure any manually-started server process with stale config
-    is terminated, then (when daemon mode is enabled) start it again.
+
+def _finish_onboard_serve(
+    config_path: str,
+    *,
+    want_daemon: bool,
+    plan_changed: bool,
+    stopped_for_db: bool,
+    secret_rotated: bool,
+    no_daemon: bool,
+    force: bool,
+) -> str | None:
+    """Install or restart ``tj serve`` after onboard DB/config writes."""
+    if not config_path or not Path(config_path).exists():
+        return None
+
+    restart_msg: str | None = None
+    need_restart = secret_rotated or plan_changed or stopped_for_db
+
+    if want_daemon and not (need_restart and not force):
+        if (
+            not force
+            and _daemon_already_running()
+            and not stopped_for_db
+            and not need_restart
+        ):
+            console.print(
+                "  Daemon:              already running (skipped reinstall)"
+            )
+            restart_msg = "daemon already running"
+        else:
+            console.print("  Daemon:              installing...")
+            install_msg = _install_daemon(config_path)
+            if install_msg:
+                restart_msg = install_msg
+
+    if want_daemon and need_restart and not force:
+        if secret_rotated:
+            reason = "secret"
+        elif plan_changed:
+            reason = "plan"
+        else:
+            reason = "db_update"
+        restart_msg = _restart_tj_server(config_path, no_daemon, reason=reason)
+        console.print(f"  Server restart:      {restart_msg}")
+
+    return restart_msg
+
+
+def _stop_serve_for_db_write() -> bool:
+    """Stop a running tj serve so onboard can write DuckDB. Returns True if stopped."""
+    from tokenjam.cli.cmd_stop import stop_tj_serve
+
+    stopped, _ = stop_tj_serve(quiet=True)
+    return stopped
+
+
+def _try_apply_declared_plans(config, *, reconcile: bool = False) -> str | None:
+    """Stamp sessions from ``[budget.<provider>].plan``. Best-effort.
+
+    When *reconcile* is True (plan changed on reconfigure), all sessions for
+    each provider are updated to match config — not only ``unknown`` rows.
+    """
+    from tokenjam.core.db import open_db
+    from tokenjam.core.framing import apply_declared_plans_to_sessions
+
+    try:
+        db = open_db(config.storage)
+        try:
+            n = apply_declared_plans_to_sessions(
+                db.conn, config, reconcile=reconcile,
+            )
+            if n:
+                return f"Plan tier applied to {n} session(s)."
+        finally:
+            db.close()
+    except Exception as exc:
+        err = str(exc).lower()
+        if "lock" in err or "i/o error" in err or "io error" in err:
+            return (
+                "Plan tier backfill deferred — serve holds the DB write lock. "
+                "Plans apply on next `tj serve` startup, or stop serve "
+                "(`tj stop`) and re-run onboard."
+            )
+    return None
+
+
+def _restart_tj_server(
+    config_path: str,
+    no_daemon: bool,
+    *,
+    reason: str = "secret",
+) -> str:
+    """Restart running tj serve to pick up config changes.
+
+    *reason* selects the user-facing message: ``secret``, ``plan``, or
+    ``db_update``.
     """
     stopped = False
     try:
-        # Best-effort: stop launchd/systemd daemon or background serve process.
-        stop_result = subprocess.run(
-            ["tj", "stop"], capture_output=True, text=True, timeout=10
-        )
-        stopped = stop_result.returncode == 0
+        from tokenjam.cli.cmd_stop import stop_tj_serve
+        stopped, _ = stop_tj_serve(quiet=True)
     except Exception:
         stopped = False
 
     if no_daemon:
+        if reason == "secret":
+            hint = "run `tj serve` to start with new secret"
+        elif reason == "plan":
+            hint = "run `tj serve` to pick up plan tier change"
+        else:
+            hint = "run `tj serve` to pick up config changes"
         if stopped:
-            return "stopped stale server; run `tj serve` to start with new secret"
-        return "could not auto-restart in --no-daemon mode; run `tj serve` manually"
+            return f"stopped stale server; {hint}"
+        return f"could not auto-restart in --no-daemon mode; {hint}"
 
     daemon_msg = _install_daemon(config_path)
     if daemon_msg:
-        return "restarted to pick up new ingest secret"
+        if reason == "secret":
+            return "restarted to pick up new ingest secret"
+        if reason == "plan":
+            return "restarted to pick up plan tier change"
+        return "restarted to pick up config changes"
     if stopped:
         return "stopped stale server; please run `tj serve` manually"
     return "restart attempted; verify with `tj status`"
+
+
+def _restart_tj_server_for_secret_rotation(config_path: str, no_daemon: bool) -> str:
+    """Backward-compatible alias for secret-rotation restarts."""
+    return _restart_tj_server(config_path, no_daemon, reason="secret")
 
 
 def _codex_mcp_toml_block() -> str:
