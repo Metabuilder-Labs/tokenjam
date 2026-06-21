@@ -351,6 +351,32 @@ async def test_traces_framing_reflects_plan_tier(
     assert framing["pricing_mode"] == expected_mode
 
 
+# --- #191: /status carries a framing block so the agent cards' "Cost today" -- #
+# --- figure can suppress / reframe raw dollars for subscription / local. ----- #
+async def test_status_response_includes_framing_block(db, client):
+    _seed_trace_with_plan(db, "api", trace_id="dd" * 16, session_id="sess-191")
+    data = (await client.get("/api/v1/status")).json()
+    assert _FRAMING_KEYS <= set(data["framing"])
+
+
+@pytest.mark.parametrize("plan_tier,expected_mode", [
+    ("max_5x", "subscription"),
+    ("api", "api"),
+    ("local", "local"),
+    ("unknown", "unknown"),
+])
+async def test_status_framing_reflects_plan_tier(
+    db, client, monkeypatch, tmp_path, plan_tier, expected_mode,
+):
+    """The /status framing pricing_mode tracks the session plan tier (#191).
+    HOME is isolated so the unknown case can't pick up this machine's global
+    ~/.config/tj plan via compute_framing's config fallback."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _seed_trace_with_plan(db, plan_tier, trace_id="ee" * 16, session_id="sess-191")
+    framing = (await client.get("/api/v1/status")).json()["framing"]
+    assert framing["pricing_mode"] == expected_mode
+
+
 async def test_cost_cycle_block_defaults_to_calendar_month(client):
     """With no [budget.<provider>] cycle configured, the run-rate cycle falls
     back to the calendar month (start_day=1) (#138)."""
