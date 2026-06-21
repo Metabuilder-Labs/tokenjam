@@ -311,7 +311,6 @@ def _onboard_claude_code(
             if "anthropic" in config.budgets else None
         )
         plan_changed = False
-        new_plan: str | None = None
         # Prompt for plan tier when:
         #   - this is a fresh onboard for this agent (no existing plan), or
         #   - the user passed --reconfigure to explicitly re-prompt
@@ -321,7 +320,6 @@ def _onboard_claude_code(
                 plan = plan_override
             else:
                 plan = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES, current=existing_plan)
-            new_plan = plan
             plan_changed = plan != existing_plan
             # Subscription plans don't get an auto-written budget ceiling.
             usd: float | None = None
@@ -354,7 +352,6 @@ def _onboard_claude_code(
             plan = plan_override
         else:
             plan = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES)
-        new_plan = plan
         plan_changed = False
         usd: float | None = None  # type: ignore[no-redef]
         if plan == "api" and not plan_override:
