@@ -37,12 +37,23 @@ PLAN_LABEL_AND_FEE: dict[str, tuple[str, float | None]] = {
     "enterprise": ("ChatGPT Enterprise", None),
 }
 
+# Human-readable labels for api / local tiers (subscription labels live above).
+PLAN_DISPLAY_LABEL: dict[str, str] = {
+    "api":   "API billing",
+    "local": "Local inference",
+}
+
 # display_rule values — the UI / CLI reads this to pick a rendering path.
 DISPLAY_SHOW_DOLLARS = "show_dollars"
 DISPLAY_SHOW_DOLLARS_WITH_QUALIFIER = "show_dollars_with_qualifier"
 DISPLAY_SUPPRESS_SUBSCRIPTION = "suppress_dollars_for_subscription_share"
 DISPLAY_TOKENS_ONLY = "tokens_only"
 DISPLAY_SUPPRESS_UNKNOWN = "suppress_dollars_unknown"
+
+# Shown when sessions lack plan_tier and config has no declared plan.
+RECONFIGURE_HINT = (
+    "Run `tj onboard --claude-code --reconfigure` (or `--codex`)."
+)
 
 
 def pricing_mode_for(plan_tier: str) -> str:
@@ -71,6 +82,75 @@ def dominant_plan(plan_mix: dict[str, int]) -> str:
     if not known:
         return "unknown"
     return max(known.items(), key=lambda kv: kv[1])[0]
+
+
+def plan_label_for(plan_tier: str, provider: str | None = None) -> str | None:
+    """Human-readable plan label, optionally scoped to a billing provider."""
+    label, _ = PLAN_LABEL_AND_FEE.get(plan_tier, (None, None))
+    if label is None:
+        label = PLAN_DISPLAY_LABEL.get(plan_tier)
+    if not label:
+        return None
+    if provider:
+        return f"{label} ({provider})"
+    return label
+
+
+def _declared_budget_plans(config: Any) -> list[tuple[str, str]]:
+    """Return ``(provider, plan_tier)`` pairs from active config, then global.
+
+    Mirrors the global-config fallback in :func:`config_declared_plan` so
+    session stamping stays aligned with UI framing when a project-local
+    ``.tj/config.toml`` omits ``[budget]`` sections (issue #106).
+    """
+    budgets = getattr(config, "budgets", None) or {}
+    entries: list[tuple[str, str]] = []
+    for provider in sorted(budgets.keys()):
+        plan = getattr(budgets[provider], "plan", None)
+        if plan:
+            entries.append((str(provider), str(plan)))
+    if entries:
+        return entries
+    try:
+        import sys
+        from pathlib import Path
+        if sys.version_info >= (3, 11):
+            import tomllib
+        else:
+            import tomli as tomllib  # type: ignore[no-redef]
+        global_path = Path.home() / ".config" / "tj" / "config.toml"
+        if not global_path.exists():
+            return []
+        with open(global_path, "rb") as f:
+            raw = tomllib.load(f)
+        budget_block = raw.get("budget") or {}
+        for provider in sorted(budget_block.keys()):
+            plan = (budget_block[provider] or {}).get("plan")
+            if plan:
+                entries.append((str(provider), str(plan)))
+    except Exception:  # noqa: BLE001
+        return []
+    return entries
+
+
+def config_declared_plan_labels(config: Any) -> list[str]:
+    """All declared ``[budget.<provider>].plan`` labels from config.
+
+    When multiple providers declare plans, each label is suffixed with the
+    provider key (e.g. ``API billing (anthropic)``) so Claude Code + Codex
+    setups are distinguishable in the UI.
+    """
+    entries = _declared_budget_plans(config)
+
+    multi = len(entries) > 1
+    labels: list[str] = []
+    seen: set[str] = set()
+    for provider, tier in entries:
+        text = plan_label_for(tier, provider if multi else None)
+        if text and text not in seen:
+            labels.append(text)
+            seen.add(text)
+    return labels
 
 
 def config_declared_plan(config: Any) -> str | None:
@@ -113,6 +193,69 @@ def config_declared_plan(config: Any) -> str | None:
     return None
 
 
+def apply_declared_plans_to_sessions(
+    conn: Any,
+    config: Any,
+    *,
+    reconcile: bool = False,
+) -> int:
+    """Apply ``[budget.<provider>].plan`` to matching sessions.
+
+    By default only promotes ``plan_tier`` from ``unknown``. When *reconcile*
+    is True (explicit plan change via ``--reconfigure``), all sessions with
+    spans for that provider are updated to the declared plan.
+    """
+    if conn is None:
+        return 0
+    updated = 0
+    for provider, plan in _declared_budget_plans(config):
+        if reconcile:
+            count_row = conn.execute(
+                "SELECT COUNT(*) FROM sessions "
+                "WHERE session_id IN ("
+                "  SELECT DISTINCT session_id FROM spans "
+                "  WHERE billing_account = $1"
+                ")",
+                [str(provider)],
+            ).fetchone()
+            to_update = int(count_row[0]) if count_row else 0
+            if to_update == 0:
+                continue
+            conn.execute(
+                "UPDATE sessions SET plan_tier = $1 "
+                "WHERE session_id IN ("
+                "  SELECT DISTINCT session_id FROM spans "
+                "  WHERE billing_account = $2"
+                ")",
+                [str(plan), str(provider)],
+            )
+            updated += to_update
+            continue
+        count_row = conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE COALESCE(plan_tier, 'unknown') = 'unknown' "
+            "AND session_id IN ("
+            "  SELECT DISTINCT session_id FROM spans "
+            "  WHERE billing_account = $1"
+            ")",
+            [str(provider)],
+        ).fetchone()
+        to_update = int(count_row[0]) if count_row else 0
+        if to_update == 0:
+            continue
+        conn.execute(
+            "UPDATE sessions SET plan_tier = $1 "
+            "WHERE COALESCE(plan_tier, 'unknown') = 'unknown' "
+            "AND session_id IN ("
+            "  SELECT DISTINCT session_id FROM spans "
+            "  WHERE billing_account = $2"
+            ")",
+            [str(plan), str(provider)],
+        )
+        updated += to_update
+    return updated
+
+
 @dataclass
 class WindowSummary:
     """Minimal window aggregate that :func:`compute_framing` consumes.
@@ -132,6 +275,7 @@ class Framing:
     pricing_mode: str = "unknown"
     plan_tier: str = "unknown"
     plan_label: str | None = None
+    plan_labels: list[str] = field(default_factory=list)
     plan_monthly_usd: float | None = None
     subscription_share_pct: float = 0.0
     api_share_pct: float = 0.0
@@ -185,17 +329,26 @@ def compute_framing(
     # a subscription user. This deliberately diverges from the CLI's data-driven
     # `dominant_plan` (which the CLI calls directly) — compute_framing is the
     # UI/API path and benefits from the config fallback.
-    if not mix:
-        declared = config_declared_plan(config)
-        if declared:
-            dom = declared
-
-    mode = pricing_mode_for(dom)
-    label, fee = PLAN_LABEL_AND_FEE.get(dom, (None, None))
+    declared = config_declared_plan(config)
+    if not mix and declared:
+        dom = declared
 
     sub_pct = (100.0 * sub_sessions / total_sessions) if total_sessions else 0.0
     api_pct = (100.0 * api_sessions / total_sessions) if total_sessions else 0.0
     all_unknown = total_sessions > 0 and unknown_sessions == total_sessions
+    inferred_from_config = False
+    # When every session is unknown but config declares a plan, trust config for
+    # framing so the UI reflects the user's onboard choice without requiring a
+    # DB backfill (belt-and-suspenders alongside apply_declared_plans_to_sessions).
+    if all_unknown and declared:
+        dom = declared
+        all_unknown = False
+        inferred_from_config = True
+
+    mode = pricing_mode_for(dom)
+    label, fee = PLAN_LABEL_AND_FEE.get(dom, (None, None))
+    if label is None:
+        label = PLAN_DISPLAY_LABEL.get(dom)
 
     display_rule = DISPLAY_SHOW_DOLLARS
     qualifier: str | None = None
@@ -204,7 +357,7 @@ def compute_framing(
         display_rule = DISPLAY_SUPPRESS_UNKNOWN
         qualifier = (
             "Plan tier unknown — figures may overstate actual cost. "
-            "Run `tj onboard --reconfigure`."
+            + RECONFIGURE_HINT
         )
     elif mode == "subscription":
         display_rule = DISPLAY_SUPPRESS_SUBSCRIPTION
@@ -217,18 +370,21 @@ def compute_framing(
         display_rule = DISPLAY_TOKENS_ONLY
         qualifier = "Local inference — no marginal cost."
     elif mode == "api":
-        if unknown_sessions > 0:
+        if unknown_sessions > 0 and not inferred_from_config:
             display_rule = DISPLAY_SHOW_DOLLARS_WITH_QUALIFIER
             qualifier = (
                 f"{unknown_sessions} of {total_sessions} sessions have unknown "
                 f"plan tier; dollar figures may overstate actual cost. "
-                f"Run `tj onboard --reconfigure`."
+                + RECONFIGURE_HINT
             )
+
+    declared_labels = config_declared_plan_labels(config)
 
     return Framing(
         pricing_mode=mode,
         plan_tier=dom,
         plan_label=label,
+        plan_labels=declared_labels or ([label] if label else []),
         plan_monthly_usd=fee,
         subscription_share_pct=round(sub_pct, 1),
         api_share_pct=round(api_pct, 1),

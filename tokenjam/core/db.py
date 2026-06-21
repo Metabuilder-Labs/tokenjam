@@ -468,12 +468,9 @@ class DuckDBBackend:
         )
 
     def upsert_session(self, session: SessionRecord) -> None:
-        # Named-column INSERT for migration safety (plan_tier added in migration 4).
-        # plan_tier is updated on conflict because IngestPipeline late-resolves
-        # it: a session that started with billing_account=None (e.g. tool span
-        # first) can be promoted from 'unknown' to a real plan_tier when a
-        # later LLM span carries billing_account. The Python side never demotes
-        # a known plan_tier back to 'unknown', so always copying EXCLUDED is safe.
+        # plan_tier: promote unknown → known on conflict; never overwrite a
+        # session that already has a known tier (backfill re-runs must not
+        # clobber historical tiers when config plan changes).
         self.conn.execute(
             """
             INSERT INTO sessions (
@@ -490,7 +487,11 @@ class DuckDBBackend:
                 cache_tokens = EXCLUDED.cache_tokens,
                 tool_call_count = EXCLUDED.tool_call_count,
                 error_count = EXCLUDED.error_count,
-                plan_tier = EXCLUDED.plan_tier
+                plan_tier = CASE
+                    WHEN COALESCE(sessions.plan_tier, 'unknown') != 'unknown'
+                    THEN sessions.plan_tier
+                    ELSE EXCLUDED.plan_tier
+                END
             """,
             [
                 session.session_id, session.agent_id, session.conversation_id,

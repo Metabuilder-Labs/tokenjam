@@ -304,7 +304,8 @@ def _render_report(
             f"[bold]{format_tokens(w.total_tokens)}[/bold] tokens "
             f"(last {days_int}d{scope_tag})\n"
             f"[dim]All sessions have unknown plan tier; dollar figures suppressed. "
-            f"Run [bold]tj onboard --reconfigure[/bold] to set your plan.[/dim]\n"
+            f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
+            f"(or [bold]--codex[/bold]) to set your plan.[/dim]\n"
         )
     elif pricing_mode == "subscription":
         label, fee = PLAN_LABEL_AND_FEE.get(dominant_plan, (dominant_plan, None))
@@ -346,7 +347,8 @@ def _render_report(
             console.print(
                 f"[dim]Note: {unknown_count} of {total_sessions} sessions have "
                 f"unknown plan tier; dollar figures may overstate actual cost "
-                f"for those. Run [bold]tj onboard --reconfigure[/bold] to "
+                f"for those. Run [bold]tj onboard --claude-code --reconfigure[/bold] "
+                f"(or [bold]--codex[/bold]) to "
                 f"resolve.[/dim]\n"
             )
 
@@ -954,7 +956,8 @@ def _render_reuse(finding, *, pricing_mode: str = "api") -> None:
         if pricing_mode == "unknown":
             console.print(
                 "          [dim]figures may overstate — run "
-                "[bold]tj onboard --reconfigure[/bold][/dim]"
+                "[bold]tj onboard --claude-code --reconfigure[/bold] "
+                "(or [bold]--codex[/bold])[/dim]"
             )
 
     if finding.estimate_basis:

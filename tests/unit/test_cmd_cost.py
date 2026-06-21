@@ -16,6 +16,13 @@ from tokenjam.core.db import InMemoryBackend
 from tests.factories import make_llm_span, make_session
 
 
+@pytest.fixture(autouse=True)
+def _isolate_home(monkeypatch, tmp_path):
+    """Point Path.home() at an empty tmp dir so config_declared_plan's global
+    fallback never reads this dev machine's ~/.config/tj/config.toml."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+
 def _config(plan: str | None) -> TjConfig:
     cfg = TjConfig(version="1", api=ApiConfig(auth=ApiAuthConfig(enabled=False)))
     if plan is not None:
