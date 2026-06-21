@@ -58,6 +58,86 @@ Symptom of a missed worktree: `git log` shows a commit on a branch you didn't in
 `.tj/config.toml` is intentionally untracked (see PR #145 + Critical Rule 20) and gets mutated at runtime by `tj onboard` / `tj serve` regenerating the local `ingest_secret`. Don't `git add` it back. The CI test `tests/unit/test_no_tracked_dev_secrets.py` guards against this.
 
 
+## PR and commit conventions (for any agent producing a PR)
+
+These conventions apply to any agent — feature work, bug fixes, docs, content. Briefs may add task-specific structure but should not contradict these.
+
+### Branch + PR titles
+
+- **Branch names** are slash-separated, kebab-case, prefixed by type:
+  - `fix/<issue-or-area>` — bug fixes (e.g. `fix/175-176-cost-framing-backfill-plan`)
+  - `feat/<area>` — new features (e.g. `feat/reuse-analyzer-115`)
+  - `docs/<area>` — documentation (e.g. `docs/readme-cleanup-v0.4.1`)
+  - `chore/<area>` — refactors, renames, infra
+  - `release/<X.Y.Z>` — release-cut PRs
+- **PR titles** lead with the verb / type and reference issues by number when applicable:
+  - `Fix #175, #176: tj cost framing + backfill plan_tier propagation (v0.4.2)` (bug fixes)
+  - `[feature] Add Reuse analyzer (#115)` (features)
+  - `docs: drop stale CHANGELOG.md + add maintainer contact` (docs)
+  - `Bump version to 0.4.1` (release-cut PRs — keep these terse)
+- Use **`Closes #N`** in the PR body (not just title) when fixing an issue, so GitHub auto-closes the issue on merge. Multiple `Closes` lines if you're closing several. Do not use the comma form `Closes #1, #2` — GitHub only catches the first; use separate lines.
+
+### Commit messages
+
+- **Subject line** (first line, ≤72 chars): one-line summary in active voice. Reference issues with `#N` when applicable.
+- **Body** (after blank line): explain *why* the change is needed, not *what* it changes (the diff shows that). Use full sentences, paragraphs, bullet lists.
+- **Trailers** (after another blank line, at the very end):
+  - Always include: `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>` (or the appropriate model identifier)
+  - When fixing an externally-reported bug: also include `Co-Authored-By: <reporter-handle> <noreply@github.com>` (e.g. `ashwmu` for the external contributor's reports)
+- Use **HEREDOC for multi-line messages** to preserve formatting: `git commit -m "$(cat <<'EOF' ... EOF)"`
+
+### PR body structure
+
+```markdown
+[1-2 sentence framing of why this exists]
+
+## Summary
+- [bullet — what changed at a high level]
+- [bullet — another high-level change]
+
+## [Per-issue or per-feature section, repeated as needed]
+[Detail per issue, including the symptom, root cause, fix]
+
+## Tests / Verification
+- [test files added or modified, what they cover]
+- [any live verification: workflow run URL, screenshot, command output]
+
+## What's NOT in this PR (if scope was deliberately limited)
+- [out-of-scope item 1 — explain why deferred]
+- [out-of-scope item 2]
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: <reporter-handle> <noreply@github.com>   # if applicable
+```
+
+The "What's NOT in this PR" section is load-bearing — it makes the reviewer's job 10x easier when the agent explicitly named what they decided to defer. Use it whenever scope is non-obvious.
+
+### Self-review checklist before requesting review
+
+Run through this before pushing the PR:
+
+1. **Tests pass locally.** `pytest tests/unit/ tests/integration/` (or `tests/unit/<file>.py` if narrow).
+2. **`ruff check tokenjam/` and `mypy tokenjam/` clean** for any files you touched.
+3. **CI on the branch is green** for at least the test-ts job (Python jobs may still be running when you push).
+4. **Acceptance criteria from the issue are met** — go through them one by one and verify.
+5. **No accidental files in the diff** — `.tj/config.toml`, `.tj-test-data/`, screenshots that were just for debugging, etc.
+6. **PR body explains the WHY** — symptom + root cause + fix, not just "fixes the bug."
+7. **Honesty discipline preserved.** If the change touches any user-facing string ("recoverable," "estimated," "savings"), verify it matches existing analyzer caveat language. Never silently strengthen claims.
+
+### Scope discipline
+
+- **Do what the brief / issue says, no more.** If you notice an adjacent issue, file it as a separate issue rather than expanding the PR. Reviewers should never have to mentally separate "the fix" from "drive-by cleanup."
+- **Exception:** when an adjacent change is functionally required to make the primary fix work (e.g., updating a caller of a function you changed). Note it explicitly in the PR body under "What's also in this PR."
+- **When in doubt about scope, ask the master agent before expanding.** A 30-second clarification beats a 30-minute scope review.
+
+### Worker vs master
+
+- **Worker agents do not merge their own PRs.** Open the PR, request review, the master + Anil handle merge.
+- **Worker agents do not file follow-up issues unprompted.** If you notice something during your work that's out of scope, mention it in the PR body and let the master decide whether to file.
+- **Worker agents do not bump versions.** Release-cut PRs are a separate concern handled by the master / Anil.
+
+
 ## Architecture
 
 ### Data Flow
@@ -91,6 +171,7 @@ Post-ingest hooks run synchronously after each span is written to DB:
   - `cache_efficacy.py` → `@register("cache")` — current cache-read efficacy per (provider, model)
   - `cache_recommend.py` → `@register("cache-recommend")` — Anthropic-only structural prefix detection for `cache_control` placement
   - `workflow_restructure.py` → `@register("script")` — `(tool_name, arg_shape)` cluster detection for deterministic-script candidates
+  - `plan_reuse.py` → `@register("reuse")` — repeated-planning cluster detection; a savings analyzer (carries `estimated_recoverable_usd`). Has a dedicated endpoint/report path (`GET /api/v1/reuse/clusters`, `tj report --reuse`) because its per-cluster planner text can be many KB — see the routes/report bullets below
   - `prompt_bloat.py` → `@register("trim")` — LLMLingua-2 token-significance classification (requires `tokenjam[bloat]` extra)
   Analyzers receive an `AnalyzerContext` and operate on `db.conn` directly. To add a new analyzer: drop a file under `analyzers/`, decorate with `@register("name")`, append to `ANALYZER_ORDER` if ordering matters — `cmd_optimize`'s positional `findings` Click choices auto-derive from the registry.
   **Recoverable-savings contract** (issues #111/#122): every *savings* analyzer's result dataclass carries `estimated_recoverable_usd` / `estimated_recoverable_tokens` / `estimate_basis` / `estimate_confidence` (`"heuristic"`). All four are on **one time basis — recoverable over the analyzed window** (`downsize` keeps a separate `monthly_savings_usd` for its CLI projection line, but `estimated_recoverable_usd` is the window figure so Overview tiles are comparable). `cache-recommend` and `budget-projection` deliberately carry **no** recoverable field (not savings analyzers); the Overview waste band is registry-driven off the presence of `estimated_recoverable_usd`, so a future analyzer (e.g. reuse) appears with no UI change. `report_to_dict`/`report_from_dict` round-trip these fields. Honesty discipline (Critical Rule 14) is mandatory — every estimate is "estimated recoverable", never "saves you".
@@ -122,7 +203,7 @@ Post-ingest hooks run synchronously after each span is written to DB:
 
 - **`tj demo [scenario]`** (`cmd_demo.py`) — runs Agent Incident Library scenarios (zero-config, no API keys). `tj demo` lists all; `tj demo retry-loop` runs one.
 - **`tj doctor`** (`cmd_doctor.py`) — health checks (config, DB, secrets, webhooks, drift readiness, schema-vs-capture consistency). Exit 0 = ok, 1 = warnings, 2 = errors.
-- **`tj optimize`** (`cmd_optimize.py`) — six analyzers, registry-driven. **Analyzers are positional args** (not `--finding <name>`): `tj optimize downsize cache trim` runs three; bare `tj optimize` runs all. Registered names: `downsize`, `cache`, `cache-recommend`, `script`, `trim`, `budget-projection`. Flags: `--since 30d`, `--budget <provider>`, `--budget-usd <amount>`, `--compare <period>` (window-cost diff vs prior period; accepts `previous` / `last-week` / `last-month` / `last-7d` / `last-30d` / `YYYY-MM-DD:YYYY-MM-DD`), `--export-config <target>` (writes a routing snippet — currently `claude-code` — under `~/.config/tokenjam/exports/`; no `--apply` flag by design). Plan-tier-aware rendering: subscription users see "implied API value" framing and token-share savings (never dollar "spend"); local users see token-only framing; unknown-plan users see dollar figures suppressed with a `tj onboard --reconfigure` hint. Works alongside a running `tj serve` via the `/api/v1/optimize` HTTP fallback when the DuckDB write lock is held by the daemon.
+- **`tj optimize`** (`cmd_optimize.py`) — seven analyzers, registry-driven. **Analyzers are positional args** (not `--finding <name>`): `tj optimize downsize cache trim` runs three; bare `tj optimize` runs all. Registered names: `downsize`, `cache`, `cache-recommend`, `script`, `reuse`, `trim`, `budget-projection`. Flags: `--since 30d`, `--budget <provider>`, `--budget-usd <amount>`, `--compare <period>` (window-cost diff vs prior period; accepts `previous` / `last-week` / `last-month` / `last-7d` / `last-30d` / `YYYY-MM-DD:YYYY-MM-DD`), `--export-config <target>` (writes a routing snippet — currently `claude-code` — under `~/.config/tokenjam/exports/`; no `--apply` flag by design). Plan-tier-aware rendering: subscription users see "implied API value" framing and token-share savings (never dollar "spend"); local users see token-only framing; unknown-plan users see dollar figures suppressed with a `tj onboard --reconfigure` hint. Works alongside a running `tj serve` via the `/api/v1/optimize` HTTP fallback when the DuckDB write lock is held by the daemon.
 - **`tj tokenmaxx`** (`cmd_tokenmaxx.py`) — shareable spend-tier command. Reads last 30 days of usage, classifies into a 6-tier ladder (Sipper / Moderator / Maxxer / SuperMaxxer / MegaMaxxer / GigaMaxxer) using the multiplier vs the user's declared subscription plan as the primary classifier, with absolute USD/mo thresholds as the API-user fallback. Output is a bordered Panel designed for screenshotting. Plan-aware: shows the multiplier line only when the user has `[budget.<provider>] plan = "max_5x"` (or pro / max_20x / plus) configured — the declared-plan lookup uses `core/framing.config_declared_plan`, which falls back to the global `~/.config/tj/config.toml` when the active project config has no `[budget]` section (issue #106). The companion landing page is `tokenjam.dev/tokenmaxxing`. Designed to never exit without an actionable next step — pairs the tier callout with the downsize savings figure inline.
 - **`tj cost`** (`cmd_cost.py`) — cost breakdown by `--group-by agent|model|day|tool`. Same `--compare <period>` flag as `tj optimize` for window-over-window diffs (▲/▼ indicators, per-agent and per-model top-shifts, dollar + token deltas).
 - **`tj backfill <source>`** (`cmd_backfill.py`) — ingest historical telemetry from external sources. Subcommands: `claude-code` (parses `~/.claude/projects/*.jsonl`, auto-invoked at the end of `tj onboard --claude-code`), `langfuse` (live API or JSON dump), `helicone` (live API or JSON dump), `otlp` (raw OTLP JSON via URL or file — reuses the same parser as the live `POST /api/v1/spans` route). All idempotent via deterministic span IDs.
