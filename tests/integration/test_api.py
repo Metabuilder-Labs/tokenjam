@@ -20,7 +20,7 @@ from tokenjam.core.config import (
 )
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
-from tests.factories import make_llm_span, make_tool_span
+from tests.factories import make_llm_span, make_session, make_tool_span
 
 
 INGEST_SECRET = "test-secret-token"
@@ -304,6 +304,51 @@ async def test_cost_response_includes_framing_block(client):
     assert resp.status_code == 200
     framing = resp.json()["framing"]
     assert _FRAMING_KEYS <= set(framing)
+
+
+# --- #187: /traces + trace-detail carry a framing block so the web UI can ---- #
+# --- suppress / reframe raw dollar costs for subscription / local users. ----- #
+def _seed_trace_with_plan(db, plan_tier, *, trace_id, session_id="sess-187"):
+    """Insert a session (carrying plan_tier) + a matching LLM span so the trace
+    surfaces in /traces and the framing query has a session to read."""
+    db.upsert_session(make_session(session_id=session_id, plan_tier=plan_tier))
+    db.insert_span(make_llm_span(
+        session_id=session_id, trace_id=trace_id, cost_usd=1.23,
+        billing_account="anthropic",
+    ))
+
+
+async def test_traces_response_includes_framing_block(db, client):
+    _seed_trace_with_plan(db, "api", trace_id="aa" * 16)
+    framing = (await client.get("/api/v1/traces")).json()["framing"]
+    assert _FRAMING_KEYS <= set(framing)
+
+
+async def test_trace_detail_includes_framing_block(db, client):
+    tid = "bb" * 16
+    _seed_trace_with_plan(db, "max_5x", trace_id=tid)
+    body = (await client.get(f"/api/v1/traces/{tid}")).json()
+    assert _FRAMING_KEYS <= set(body["framing"])
+    # Detail scopes the plan determination to the trace's agent → subscription.
+    assert body["framing"]["pricing_mode"] == "subscription"
+
+
+@pytest.mark.parametrize("plan_tier,expected_mode", [
+    ("max_5x", "subscription"),
+    ("api", "api"),
+    ("local", "local"),
+    ("unknown", "unknown"),
+])
+async def test_traces_framing_reflects_plan_tier(
+    db, client, monkeypatch, tmp_path, plan_tier, expected_mode,
+):
+    """The /traces framing pricing_mode tracks the session plan tier across the
+    full matrix (#187). HOME is isolated so the unknown case can't pick up this
+    dev machine's global ~/.config/tj plan via compute_framing's fallback."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _seed_trace_with_plan(db, plan_tier, trace_id="cc" * 16)
+    framing = (await client.get("/api/v1/traces")).json()["framing"]
+    assert framing["pricing_mode"] == expected_mode
 
 
 async def test_cost_cycle_block_defaults_to_calendar_month(client):
