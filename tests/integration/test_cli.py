@@ -208,6 +208,60 @@ def test_doctor_exits_2_when_errors_present(runner, db, config):
     assert result.exit_code == 2
 
 
+def _clean_doctor_config(config, tmp_path):
+    """Configure `config` so only the check under test can produce a warning."""
+    config.storage.path = str(tmp_path / "test.duckdb")
+    config.security.ingest_secret = "test-secret"
+    config.agents["test-agent"].drift.enabled = False
+
+
+def test_doctor_no_staleness_warning_with_fresh_spans(runner, db, config, tmp_path):
+    """A just-recorded span keeps the freshness check green (no false alarm)."""
+    _clean_doctor_config(config, tmp_path)
+    span = make_llm_span(agent_id="test-agent", start_time=utcnow())
+    db.insert_span(span)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 0
+    checks = json.loads(result.output)
+    freshness = [c for c in checks if c["name"] == "Live-span freshness"]
+    assert freshness and freshness[0]["level"] == "ok"
+
+
+def test_doctor_warns_on_stale_spans(runner, db, config, tmp_path):
+    """A newest span older than the 6h threshold warns (exit 1) with a restart hint."""
+    from datetime import timedelta
+
+    _clean_doctor_config(config, tmp_path)
+    span = make_llm_span(agent_id="test-agent", start_time=utcnow() - timedelta(hours=10))
+    db.insert_span(span)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 1
+    checks = json.loads(result.output)
+    freshness = [c for c in checks if c["name"] == "Live-span freshness"]
+    assert freshness and freshness[0]["level"] == "warning"
+    assert "restart" in freshness[0]["message"].lower()
+
+
+def test_doctor_no_staleness_warning_when_no_spans(runner, db, config, tmp_path):
+    """An empty DB (pre-onboard) must not be mistaken for a stalled connection."""
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 0
+    checks = json.loads(result.output)
+    freshness = [c for c in checks if c["name"] == "Live-span freshness"]
+    assert freshness and freshness[0]["level"] == "info"
+    assert not any(c["level"] == "warning" for c in checks)
+
+
 def test_doctor_warns_on_schema_without_capture(runner, db, config, tmp_path):
     config.agents["test-agent"] = AgentConfig(output_schema="schema.json")
     config.capture.tool_outputs = False
