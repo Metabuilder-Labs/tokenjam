@@ -329,6 +329,14 @@ def compute_framing(
     # a subscription user. This deliberately diverges from the CLI's data-driven
     # `dominant_plan` (which the CLI calls directly) — compute_framing is the
     # UI/API path and benefits from the config fallback.
+    #
+    # The pricing mode (and thus the tokens-vs-dollars unit + qualifier banner)
+    # is a property of the user's PLAN, not the selected time window (#177).
+    # Framing callers therefore pass a window-INDEPENDENT session mix (the user's
+    # full history via `plan_determination_mix`); only the window totals above
+    # stay window-scoped. Without this, a 24h view (no in-window session starts →
+    # empty-mix "api" default) rendered dollars while a 30d view rendered the
+    # subscription / unknown framing for the very same user.
     declared = config_declared_plan(config)
     if not mix and declared:
         dom = declared
@@ -362,8 +370,12 @@ def compute_framing(
     elif mode == "subscription":
         display_rule = DISPLAY_SUPPRESS_SUBSCRIPTION
         if api_sessions > 0:
+            # Scope-neutral wording ("of sessions", not "this window"): the
+            # /cost route now frames off the user's full session history (#177)
+            # while the CLI / compare callers still pass a window-scoped mix —
+            # the phrasing must read truthfully for both.
             qualifier = (
-                f"{sub_pct:.1f}% of this window was subscription-billed; "
+                f"{sub_pct:.1f}% of sessions are subscription-billed; "
                 f"dollar figures reflect API traffic only."
             )
     elif mode == "local":
@@ -487,3 +499,19 @@ def plan_tier_mix(
     )
     rows = conn.execute(sql, params).fetchall()
     return {str(r[0]): int(r[1]) for r in rows}
+
+
+def plan_determination_mix(conn: Any, agent_id: str | None = None) -> dict[str, int]:
+    """Window-INDEPENDENT session plan-tier mix for framing decisions (#177).
+
+    The pricing mode (tokens vs dollars) and the qualifier banner are a property
+    of the user's plan, not the selected time window. Computing the mix over a
+    bounded window made a 24h view resolve differently from a 30d view for the
+    same user — e.g. a window with no in-window session *starts* (but recent
+    spans from long-running sessions) collapsed to the empty-mix "api" default
+    while a longer window read "unknown" or "subscription". Framing callers
+    therefore determine the plan from the user's FULL session history; only the
+    window totals (cost / tokens) remain window-scoped. ``agent_id`` still
+    narrows to a single agent when set — the plan is per-agent, not per-window.
+    """
+    return plan_tier_mix(conn, None, None, agent_id)

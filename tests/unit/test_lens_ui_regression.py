@@ -60,6 +60,22 @@ def test_overview_chart_is_not_a_click_target(html):
     assert "View Cost details" in html
 
 
+# --- #178: chart x-axis ticks render in the browser's local timezone ------- #
+def test_axis_time_ticks_render_in_local_timezone(html):
+    # The hourly + date tick formatter must NOT pin to UTC — it formats the
+    # UTC epoch-second buckets in the viewer's local zone (a US-Pacific user
+    # sees their noon, not UTC's 7pm). Server data stays UTC; only labels shift.
+    import re
+
+    m = re.search(r"function fmtAxisTime\(epoch, bucket\) \{.*?\n\}", html, re.DOTALL)
+    assert m, "fmtAxisTime helper not found"
+    body = m.group(0)
+    assert "toLocaleTimeString" in body
+    assert "toLocaleDateString" in body
+    # The bug: the formatters previously forced { timeZone: 'UTC' }.
+    assert "timeZone: 'UTC'" not in body, "axis ticks must localize, not force UTC"
+
+
 # --- #129: run-rate denominator + caption + $ axis ------------------------- #
 def test_run_rate_uses_window_length_not_data_range(html):
     assert "function windowDays" in html
