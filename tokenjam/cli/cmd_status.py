@@ -131,7 +131,8 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
     elif unknown_count > 0:
         console.print(
             f"[dim]Note: {unknown_count} session(s) have unknown plan tier. "
-            f"Run [bold]tj onboard --reconfigure[/bold] to set it.[/dim]"
+            f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
+            f"(or [bold]--codex[/bold]) to set it.[/dim]"
         )
 
     ctx.exit(1 if has_active_alerts else 0)
