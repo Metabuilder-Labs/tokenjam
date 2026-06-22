@@ -133,3 +133,40 @@ def get_rates(provider: str, model: str) -> ModelRates | None:
         if rates is not None:
             return rates
     return None
+
+
+def provider_for_model(model: str | None) -> str | None:
+    """Best-effort provider inference from a bare model name.
+
+    Used when an upstream integration can't tell us the provider directly —
+    e.g. LiteLLM >= 1.75 returns ``custom_llm_provider = None`` and the caller
+    passed a bare model name like ``claude-haiku-4-5`` (no ``anthropic/``
+    prefix). Returns the canonical provider/billing_account identifier
+    (``anthropic`` / ``openai`` / ``google`` / ``bedrock`` / ``local.ollama``),
+    or ``None`` when the model can't be confidently attributed.
+
+    Callers must NOT invent a provider when this returns None — record
+    ``"unknown"`` instead, so pricing and billing_account stay honest (#194).
+
+    Note: a parallel, source-specific copy of this knowledge lives in the
+    Langfuse adapter (``_model_to_provider``) and the Claude Code backfill
+    parser (``_provider_for_model``); those carry adapter-specific defaults and
+    are intentionally left in place.
+    """
+    if not model:
+        return None
+    m = model.lower()
+    # Defensive: strip any leftover "provider/" prefix the caller didn't.
+    if "/" in m:
+        m = m.rsplit("/", 1)[1]
+    if "claude" in m:
+        return "anthropic"
+    if m.startswith(("gpt-", "gpt", "o1", "o3", "o4", "chatgpt-")):
+        return "openai"
+    if "gemini" in m:
+        return "google"
+    if m.startswith(("llama", "qwen", "mistral", "mixtral", "gemma", "phi-", "deepseek")):
+        # Open-weight families default to the local billing_account; the user
+        # can override via an explicit billing_account attribute upstream.
+        return "local.ollama"
+    return None
