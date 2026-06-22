@@ -320,7 +320,18 @@ The Agent Incident Library at `incidents/` is separate: each scenario is a `scen
 
 Model pricing lives in `tokenjam/pricing/models.toml` (USD per million tokens) — the packaged file `core/pricing.py` loads via `PRICING_FILE = Path(__file__).parent.parent / "pricing" / "models.toml"`. There is no repo-root `pricing/` copy (it was moved into the package in v0.1.x so it ships in the wheel; editing a repo-root file would have no runtime effect). Structure: `[provider.model_name]` with `input_per_mtok`, `output_per_mtok`, and optional `cache_read_per_mtok`/`cache_write_per_mtok`. Unknown models fall back to default rates ($0.50/$2.00 per MTok) with a logged warning. The pricing table is LRU-cached at process startup — restart to pick up changes.
 
-Pricing is community-maintained: submit a PR editing `tokenjam/pricing/models.toml` when provider prices change. No code changes needed — the file is loaded at runtime.
+The packaged table is community-maintained: submit a PR editing `tokenjam/pricing/models.toml` when provider prices change. No code changes needed — the file is loaded at runtime.
+
+**Local user overrides (no PR needed)** — users correct or add rates *for their own install* via override layers that `core/pricing.py` merges over the packaged table. Two sources, two key forms (see `docs/configuration.md` → "Pricing overrides" for the user-facing version):
+
+- **Sources** (lowest priority first; later wins): the packaged `models.toml`, then a standalone file (`~/.config/tj/pricing.toml`, or `TJ_PRICING_FILE`), then a `[pricing]` section in the main config (`tj.toml`). The project-local config `[pricing]` wins over the global standalone file.
+- **Key forms** — both share one TOML namespace, told apart by value shape in `_split_pricing_raw()`:
+  - **Provider-keyed** (`[pricing.anthropic]` / `[anthropic]` whose values are model sub-tables) — merged per `(provider, model)` over the packaged table.
+  - **Model-keyed** (a bare top-level `model = { ... }` inline rate table, i.e. one carrying an `input_per_mtok`-class field) — keyed by **bare model name**, applied **regardless of inferred provider**. This is the attribution-proof path: it prices a span even when the provider resolved to `"unknown"` (the #194 open-weight class). In TOML a bare model-keyed key must appear *before* any `[table]` header.
+- **`get_rates(provider, model)` lookup order** (first match wins): model-keyed override → provider-keyed table (user `[provider.model]` over packaged) → `None` (→ `calculate_cost` applies the `$0.50`/`$2.00` default and logs once). Each step tries an exact match, then strips a trailing `-YYYYMMDD` suffix.
+- Both layers are LRU-cached (`load_pricing_table` + `load_model_pricing_overrides`); call `clear_pricing_cache()` or **restart the daemon** to pick up an edit.
+
+The packaged table stays the zero-config default — the override is a *layer*, never a replacement; no user ever has to declare a rate to get started. (Follow-up not yet built: a `tj pricing set|list` CLI for editing overrides without hand-writing TOML.)
 
 ## CI
 
