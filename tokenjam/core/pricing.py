@@ -142,11 +142,19 @@ def provider_for_model(model: str | None) -> str | None:
     e.g. LiteLLM >= 1.75 returns ``custom_llm_provider = None`` and the caller
     passed a bare model name like ``claude-haiku-4-5`` (no ``anthropic/``
     prefix). Returns the canonical provider/billing_account identifier
-    (``anthropic`` / ``openai`` / ``google`` / ``bedrock`` / ``local.ollama``),
-    or ``None`` when the model can't be confidently attributed.
+    (``anthropic`` / ``openai`` / ``google``), or ``None`` when the model can't
+    be confidently attributed.
 
     Callers must NOT invent a provider when this returns None — record
     ``"unknown"`` instead, so pricing and billing_account stay honest (#194).
+
+    Open-weight families (llama / qwen / mistral / gemma / deepseek / ...) are
+    intentionally left unattributed -> ``"unknown"``. Mapping them to a local
+    billing_account would set ``pricing_mode = local``, asserting "no marginal
+    cost" — but the same weights run on PAID hosts (Groq / Together / Bedrock),
+    so that would over-claim "free". When unsure we hedge ("unknown" -> dollars
+    with a "may overstate" qualifier) rather than assert free; a genuinely-local
+    user can pin the rate via the user pricing override.
 
     Note: a parallel, source-specific copy of this knowledge lives in the
     Langfuse adapter (``_model_to_provider``) and the Claude Code backfill
@@ -165,8 +173,4 @@ def provider_for_model(model: str | None) -> str | None:
         return "openai"
     if "gemini" in m:
         return "google"
-    if m.startswith(("llama", "qwen", "mistral", "mixtral", "gemma", "phi-", "deepseek")):
-        # Open-weight families default to the local billing_account; the user
-        # can override via an explicit billing_account attribute upstream.
-        return "local.ollama"
     return None

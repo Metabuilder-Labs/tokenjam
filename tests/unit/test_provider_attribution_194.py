@@ -29,15 +29,18 @@ from tests.factories import make_llm_span
     ("o3-mini", "openai"),
     ("chatgpt-4o-latest", "openai"),
     ("gemini-2.5-pro", "google"),
-    ("llama-3.1-70b", "local.ollama"),
-    ("mistral-large", "local.ollama"),
     ("anthropic/claude-haiku-4-5", "anthropic"),   # tolerates leftover prefix
 ])
 def test_provider_for_model_resolves(model, expected):
     assert provider_for_model(model) == expected
 
 
-@pytest.mark.parametrize("model", ["", None, "some-internal-model-x", "weird"])
+@pytest.mark.parametrize("model", [
+    "", None, "some-internal-model-x", "weird",
+    # Open-weight families are intentionally unattributed -> "unknown" rather
+    # than local.ollama, which would over-claim "free" on paid hosts (#194).
+    "llama-3.1-70b", "mistral-large", "qwen2.5-72b", "deepseek-chat",
+])
 def test_provider_for_model_unresolvable_returns_none(model):
     assert provider_for_model(model) is None
 
