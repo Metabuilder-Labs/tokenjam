@@ -160,8 +160,17 @@ def _cost_framing(ctx, db, since, since_dt, until_dt, agent, total_cost, total_t
     config = ctx.obj.get("config") if ctx.obj else None
     conn = getattr(db, "conn", None)
     if config is not None and conn is not None:
-        from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
-        mix = plan_tier_mix(conn, since_dt, until_dt, agent)
+        from tokenjam.core.framing import (
+            WindowSummary,
+            compute_framing,
+            plan_determination_mix,
+        )
+        # Window-INDEPENDENT mix for the framing DECISION — matching the API
+        # (`api/routes/cost.py`) so the CLI direct-conn path and Lens render
+        # identical units + qualifier for the same DB (#197). The pricing mode
+        # is a property of the user's plan, not the selected window; only the
+        # totals below stay window-scoped.
+        mix = plan_determination_mix(conn, agent)
         return compute_framing(config, WindowSummary(
             total_cost_usd=total_cost,
             total_tokens=total_tokens,
@@ -221,8 +230,15 @@ def _compare_framing(ctx, db, since_dt, until_dt, agent, diff):
     conn = getattr(db, "conn", None)
     if config is None or conn is None:
         return None
-    from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
-    mix = plan_tier_mix(conn, since_dt, until_dt, agent)
+    from tokenjam.core.framing import (
+        WindowSummary,
+        compute_framing,
+        plan_determination_mix,
+    )
+    # Window-INDEPENDENT mix for the framing DECISION (#197) — same basis as the
+    # bare `tj cost` table and the API. The compare window's totals/deltas stay
+    # window-scoped; only the tokens-vs-dollars framing decision is plan-wide.
+    mix = plan_determination_mix(conn, agent)
     return compute_framing(config, WindowSummary(
         total_cost_usd=diff.current.total_cost_usd,
         total_tokens=diff.current.total_tokens,
