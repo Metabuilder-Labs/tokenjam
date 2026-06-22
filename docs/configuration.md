@@ -114,6 +114,86 @@ The four flags are independent: capture prompts without completions, or tool inp
 
 The analyzers that need content fail with a clear message ("set `capture.prompts = true` in tj.toml and let the daemon collect a fresh window of data") rather than running on partial data.
 
+## Pricing overrides
+
+`tj` ships a packaged pricing table (`tokenjam/pricing/models.toml`, USD per
+million tokens) that prices most public models with zero configuration. It is
+community-maintained — submit a PR editing that file when a provider's public
+prices change.
+
+But the packaged table can't know *your* situation: negotiated/enterprise
+rates, open-weight models hosted on Groq / Together / Bedrock, or a
+self-hosted endpoint. For those, declare your own rates **locally** — no PR,
+no package edit (a pip upgrade would overwrite the packaged file anyway).
+There are two places to put an override, and two ways to key it.
+
+### Where overrides live
+
+1. **A `[pricing]` section in your main config** (`tj.toml` / `.tj/config.toml`
+   / `~/.config/tj/config.toml`) — the discoverable, project-local home.
+2. **A standalone pricing file** — `~/.config/tj/pricing.toml`, or any path in
+   the `TJ_PRICING_FILE` environment variable. Useful for sharing one rate
+   sheet across projects.
+
+Both are merged over the packaged table. When the same model appears in more
+than one place, the **project-local `[pricing]` section wins over the
+standalone file**, which in turn wins over the packaged table.
+
+### Two ways to key a rate
+
+**Provider-keyed** — corrects or adds a rate for a specific provider/model. Use
+when attribution is reliable. This is the long-standing format:
+
+```toml
+[pricing.anthropic]
+"claude-haiku-4-5" = { input_per_mtok = 0.80, output_per_mtok = 4.00, cache_read_per_mtok = 0.08, cache_write_per_mtok = 1.00 }
+```
+
+**Model-keyed (attribution-proof)** — pins a rate to a **bare model name**, used
+regardless of which provider `tj` inferred. These live under a reserved
+`models` section. This is the one to reach for when a model's provider resolves
+to `unknown` (open-weight or unattributed traffic):
+
+```toml
+# In tj.toml — under [pricing.models].
+[pricing.models]
+"llama-3.3-70b"    = { input_per_mtok = 0.59, output_per_mtok = 0.79 }
+"claude-haiku-4-5" = { input_per_mtok = 0.50, output_per_mtok = 2.50 }  # your negotiated rate
+```
+
+Equivalently, in the standalone `~/.config/tj/pricing.toml`, the reserved
+section is simply `[models]` (the file has no enclosing `[pricing]` key), and
+provider-keyed entries stay at the top level:
+
+```toml
+[models]
+"llama-3.3-70b" = { input_per_mtok = 0.59, output_per_mtok = 0.79 }
+
+[anthropic]
+"claude-haiku-4-5" = { input_per_mtok = 0.50, output_per_mtok = 2.50 }
+```
+
+`models` is a reserved section name, never a provider — so the two forms can't
+collide, and section order doesn't matter. Only `input_per_mtok` and
+`output_per_mtok` are required; `cache_read_per_mtok` and `cache_write_per_mtok`
+default to `0.0`. Dated model variants (`claude-haiku-4-5-20251001`) are priced
+off the base-name entry automatically.
+
+### Precedence and reload
+
+Full lookup order (first match wins):
+
+1. **Model-keyed override** (bare model name) — attribution-proof.
+2. **Provider-keyed override** (`[provider.model]`, your config or file).
+3. **Packaged `models.toml`** — the zero-config default table.
+4. **Default flat rate** — `$0.50` input / `$2.00` per MTok output, used only
+   when nothing above matches (a warning is logged once per model).
+
+This is an *override layer*, never a replacement — you never have to declare a
+single rate to get started. The pricing table is loaded once and cached for the
+process lifetime, so **restart the daemon (`tj stop` / `tj serve`) to pick up
+an edit** to any of these sources.
+
 ## Verifying your config
 
 Run `tj doctor` at any time to verify your configuration:

@@ -16,19 +16,28 @@ log = logging.getLogger(__name__)
 
 PRICING_FILE = Path(__file__).parent.parent / "pricing" / "models.toml"
 
-# Optional user-maintained override file. Lets users add or correct rates
-# without editing the packaged models.toml (which a pip upgrade overwrites).
-# Resolution order, highest priority first:
+# Optional user-maintained pricing override file. Lets users add or correct
+# rates without editing the packaged models.toml (which a pip upgrade
+# overwrites). Resolution order, highest priority first:
 #   1. The path in the TJ_PRICING_FILE env var, if set.
 #   2. ~/.config/tj/pricing.toml, if it exists.
-# Entries in the override are merged over the packaged table per
-# provider/model, so it can both override existing rates and add new models.
+# Entries in the override are merged over the packaged table; see
+# _build_pricing() for the full source/precedence chain (the main config's
+# [pricing] section is also merged, and wins over this file).
 USER_PRICING_ENV = "TJ_PRICING_FILE"
 
 # Default rate used when a model is not in the pricing table.
 # 0.50 per MTok input, 2.00 per MTok output — conservative mid-range estimate.
 DEFAULT_INPUT_PER_MTOK = 0.50
 DEFAULT_OUTPUT_PER_MTOK = 2.00
+
+# Reserved section name for *model-keyed* (provider-agnostic) overrides.
+# Lives at `[models]` in the standalone pricing file and `[pricing.models]`
+# in the main config. Everything else at that level is a provider section
+# (`[anthropic]` / `[pricing.anthropic]`), preserving the existing
+# `[provider.model]` format. No provider is named "models", so the reserved
+# key never collides — see _split_pricing_raw().
+MODEL_SECTION_KEY = "models"
 
 
 @dataclass(frozen=True)
@@ -39,21 +48,43 @@ class ModelRates:
     cache_write_per_mtok: float = 0.0
 
 
-def _parse_pricing_file(path: Path) -> dict[str, dict[str, ModelRates]]:
-    """Parse a pricing TOML file into { provider: { model: ModelRates } }."""
-    with open(path, "rb") as f:
-        raw = tomllib.load(f)
-    result: dict[str, dict[str, ModelRates]] = {}
-    for provider, models in raw.items():
-        result[provider] = {}
-        for model_name, rates in models.items():
-            result[provider][model_name] = ModelRates(
-                input_per_mtok=rates.get("input_per_mtok", DEFAULT_INPUT_PER_MTOK),
-                output_per_mtok=rates.get("output_per_mtok", DEFAULT_OUTPUT_PER_MTOK),
-                cache_read_per_mtok=rates.get("cache_read_per_mtok", 0.0),
-                cache_write_per_mtok=rates.get("cache_write_per_mtok", 0.0),
-            )
-    return result
+def _rates_from(raw: dict) -> ModelRates:
+    """Build ModelRates from a raw inline rate table, defaulting absent fields."""
+    return ModelRates(
+        input_per_mtok=raw.get("input_per_mtok", DEFAULT_INPUT_PER_MTOK),
+        output_per_mtok=raw.get("output_per_mtok", DEFAULT_OUTPUT_PER_MTOK),
+        cache_read_per_mtok=raw.get("cache_read_per_mtok", 0.0),
+        cache_write_per_mtok=raw.get("cache_write_per_mtok", 0.0),
+    )
+
+
+def _split_pricing_raw(
+    raw: dict,
+) -> tuple[dict[str, dict[str, ModelRates]], dict[str, ModelRates]]:
+    """Split a raw pricing dict into (provider_table, model_keyed).
+
+    Two explicit forms, told apart deterministically by section name (no
+    value-shape guessing, no ordering dependency):
+
+      [models]                          # reserved model-keyed section ->
+      "claude-haiku-4-5" = { ... }      #   keyed by bare model name
+
+      [anthropic]                       # any other section is a provider ->
+      "claude-haiku-4-5" = { ... }      #   keyed by (provider, model)
+
+    A model-keyed entry wins regardless of the inferred provider, so it can
+    rescue a span whose provider resolved to "unknown" (#194/#200).
+    """
+    provider_table: dict[str, dict[str, ModelRates]] = {}
+    model_keyed: dict[str, ModelRates] = {}
+    for key, val in raw.items():
+        if not isinstance(val, dict):
+            continue
+        target = model_keyed if key == MODEL_SECTION_KEY else provider_table.setdefault(key, {})
+        for model_name, rates in val.items():
+            if isinstance(rates, dict):
+                target[model_name] = _rates_from(rates)
+    return provider_table, model_keyed
 
 
 def _user_pricing_file() -> Path | None:
@@ -72,31 +103,51 @@ def _user_pricing_file() -> Path | None:
     return default if default.exists() else None
 
 
-@lru_cache(maxsize=1)
-def load_pricing_table() -> dict[str, dict[str, ModelRates]]:
-    """
-    Load the packaged pricing/models.toml, then merge an optional user
-    override file over it, and return a nested dict:
-      { provider: { model_name: ModelRates } }
+def _config_pricing_section() -> dict | None:
+    """Return the [pricing] section of the discovered main config, or None.
 
-    The override (see USER_PRICING_ENV / ~/.config/tj/pricing.toml) is
-    applied per provider/model, so it can correct a packaged rate or add a
-    model the package doesn't ship. Cached after first load — restart the
-    process (or call load_pricing_table.cache_clear()) to pick up changes.
+    Read directly from the config file (not via a full TjConfig parse) so the
+    pricing loader stays light and free of the config dataclass tree. Any
+    error — no config file, unreadable, malformed — degrades silently to None;
+    config problems surface through the normal config-load path elsewhere.
     """
-    result = _parse_pricing_file(PRICING_FILE)
+    from tokenjam.core.config import find_config_file
+
+    try:
+        path = find_config_file()
+    except (FileNotFoundError, OSError):
+        return None
+    if path is None:
+        return None
+    try:
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    section = raw.get("pricing")
+    return section if isinstance(section, dict) else None
+
+
+def _override_raw_sources() -> list[dict]:
+    """Raw override dicts in precedence order (lowest first, later wins).
+
+    1. The user pricing file (TJ_PRICING_FILE / ~/.config/tj/pricing.toml).
+    2. The main config's [pricing] section — project-local, so it wins over
+       the global user file.
+    """
+    sources: list[dict] = []
 
     user_file = _user_pricing_file()
     if user_file is not None:
         try:
-            overrides = _parse_pricing_file(user_file)
+            with open(user_file, "rb") as f:
+                sources.append(tomllib.load(f))
         except FileNotFoundError:
             log.warning(
                 "Pricing override file %s=%s not found; using packaged rates only.",
                 USER_PRICING_ENV,
                 user_file,
             )
-            overrides = {}
         except (OSError, tomllib.TOMLDecodeError) as exc:
             log.warning(
                 "Could not read pricing override file %s (%s); "
@@ -104,34 +155,127 @@ def load_pricing_table() -> dict[str, dict[str, ModelRates]]:
                 user_file,
                 exc,
             )
-            overrides = {}
-        for provider, models in overrides.items():
-            result.setdefault(provider, {}).update(models)
 
-    return result
+    section = _config_pricing_section()
+    if section:
+        sources.append(section)
+
+    return sources
+
+
+def _build_pricing() -> tuple[dict[str, dict[str, ModelRates]], dict[str, ModelRates]]:
+    """Assemble the merged (provider_table, model_keyed) pricing structures.
+
+    Precedence, highest first:
+      user model-keyed override  >  user [provider.model] override
+        >  packaged models.toml  >  default flat rate (in get_rates)
+
+    The packaged table is the base; each override source (see
+    _override_raw_sources) is merged over it per provider/model, and its
+    model-keyed entries accumulate into a separate map consulted first by
+    get_rates.
+    """
+    with open(PRICING_FILE, "rb") as f:
+        provider_table, model_keyed = _split_pricing_raw(tomllib.load(f))
+
+    for raw in _override_raw_sources():
+        prov, mk = _split_pricing_raw(raw)
+        for provider, models in prov.items():
+            provider_table.setdefault(provider, {}).update(models)
+        model_keyed.update(mk)
+
+    return provider_table, model_keyed
+
+
+@lru_cache(maxsize=1)
+def load_pricing_table() -> dict[str, dict[str, ModelRates]]:
+    """
+    Load the packaged pricing/models.toml, then merge optional user overrides
+    (the user pricing file and the main config's [pricing] section) over it,
+    and return a nested dict:
+      { provider: { model_name: ModelRates } }
+
+    Provider-keyed overrides are applied per provider/model, so they can
+    correct a packaged rate or add a model the package doesn't ship. Cached
+    after first load — restart the process (or call clear_pricing_cache()) to
+    pick up changes. Model-keyed overrides live separately; see
+    load_model_pricing_overrides().
+    """
+    return _build_pricing()[0]
+
+
+@lru_cache(maxsize=1)
+def load_model_pricing_overrides() -> dict[str, ModelRates]:
+    """
+    Return user-declared rates keyed by **bare model name**, applied
+    regardless of the inferred provider (so they price a span even when the
+    provider resolved to "unknown" — #194/#200).
+
+    Sourced from the reserved model section of the same overrides as
+    load_pricing_table (`[models]` in the standalone pricing file,
+    `[pricing.models]` in the main config). Cached — call
+    clear_pricing_cache() to reload.
+    """
+    return _build_pricing()[1]
+
+
+def clear_pricing_cache() -> None:
+    """Clear both pricing caches so the next lookup re-reads from disk.
+
+    Use after editing the packaged table or a user override at runtime
+    (otherwise changes are picked up only on process restart). Primarily a
+    test hook — both lru_caches must be cleared together to stay consistent.
+    """
+    load_pricing_table.cache_clear()
+    load_model_pricing_overrides.cache_clear()
+
+
+def _strip_date_suffix(model: str) -> str | None:
+    """Return `model` minus a trailing `-YYYYMMDD` suffix, or None if absent."""
+    import re as _re
+
+    m = _re.match(r"^(.*)-(\d{8})$", model)
+    return m.group(1) if m else None
 
 
 def get_rates(provider: str, model: str) -> ModelRates | None:
     """
     Return ModelRates for the given provider/model, or None if not found.
 
-    Tries an exact match first, then falls back to stripping a trailing
-    YYYYMMDD release-date suffix (Anthropic/OpenAI both ship dated variants
-    like `claude-haiku-4-5-20251001`). This keeps pricing/models.toml short
+    Lookup order (first match wins):
+      1. A user **model-keyed** override (bare model name), consulted before
+         the provider table so a user-declared rate is attribution-proof —
+         it prices the model even when `provider` is "unknown" (#200).
+      2. The provider-keyed table (user [provider.model] overrides merged
+         over the packaged models.toml).
+
+    Each step tries an exact match first, then falls back to stripping a
+    trailing YYYYMMDD release-date suffix (Anthropic/OpenAI both ship dated
+    variants like `claude-haiku-4-5-20251001`). This keeps the tables short
     while still pricing the dated names that flow through Claude Code logs.
     """
+    base = _strip_date_suffix(model)
+
+    # 1. Model-keyed user override — wins regardless of inferred provider.
+    model_keyed = load_model_pricing_overrides()
+    rates = model_keyed.get(model)
+    if rates is not None:
+        return rates
+    if base is not None:
+        rates = model_keyed.get(base)
+        if rates is not None:
+            return rates
+
+    # 2. Provider-keyed table (user [provider.model] over packaged).
     table = load_pricing_table()
     rates = table.get(provider, {}).get(model)
     if rates is not None:
         return rates
-    # Strip trailing 8-digit date suffix
-    import re as _re
-    m = _re.match(r"^(.*)-(\d{8})$", model)
-    if m:
-        base = m.group(1)
+    if base is not None:
         rates = table.get(provider, {}).get(base)
         if rates is not None:
             return rates
+
     return None
 
 
