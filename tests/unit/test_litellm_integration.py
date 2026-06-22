@@ -151,8 +151,37 @@ class TestLiteLLMIntegration:
         span = spans[0]
         assert span.attributes[GenAIAttributes.PROVIDER_NAME] == "together"
 
-    def test_provider_fallback_no_slash(self, tracer_and_spans):
-        """Model with no slash and no hidden params falls back to 'litellm'."""
+    def test_bare_model_no_hidden_resolves_provider(self, tracer_and_spans):
+        """Bare model + no custom_llm_provider is resolved from the model name (#194).
+
+        Aider hits exactly this: LiteLLM >= 1.75 returns custom_llm_provider=None
+        and the model is bare (no ``anthropic/`` prefix). The provider must
+        resolve to ``anthropic`` (never the bogus ``"litellm"``) so pricing and
+        billing_account are correct.
+        """
+        tracer, spans = tracer_and_spans
+        import litellm
+
+        def no_provider(*a, **kw):
+            resp = MagicMock()
+            resp.usage.prompt_tokens = 10
+            resp.usage.completion_tokens = 5
+            resp._hidden_params = {"custom_llm_provider": None}
+            resp.model = "claude-haiku-4-5-20251001"
+            return resp
+        litellm.completion = no_provider
+
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
+        integration = LiteLLMIntegration()
+        integration.install(tracer)
+
+        litellm.completion(model="claude-haiku-4-5", messages=[])
+
+        span = spans[0]
+        assert span.attributes[GenAIAttributes.PROVIDER_NAME] == "anthropic"
+
+    def test_unresolvable_bare_model_is_unknown_not_litellm(self, tracer_and_spans):
+        """An unattributable bare model yields 'unknown', never 'litellm' (#194)."""
         tracer, spans = tracer_and_spans
         import litellm
 
@@ -161,7 +190,7 @@ class TestLiteLLMIntegration:
             resp.usage.prompt_tokens = 10
             resp.usage.completion_tokens = 5
             resp._hidden_params = {}
-            resp.model = "gpt-4o-mini"
+            resp.model = "some-internal-model-x"
             return resp
         litellm.completion = no_provider
 
@@ -169,10 +198,11 @@ class TestLiteLLMIntegration:
         integration = LiteLLMIntegration()
         integration.install(tracer)
 
-        litellm.completion(model="gpt-4o-mini", messages=[])
+        litellm.completion(model="some-internal-model-x", messages=[])
 
         span = spans[0]
-        assert span.attributes[GenAIAttributes.PROVIDER_NAME] == "litellm"
+        assert span.attributes[GenAIAttributes.PROVIDER_NAME] == "unknown"
+        assert span.attributes[GenAIAttributes.PROVIDER_NAME] != "litellm"
 
     def test_sync_streaming(self, tracer_and_spans):
         tracer, spans = tracer_and_spans

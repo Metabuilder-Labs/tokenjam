@@ -19,6 +19,7 @@ import logging
 
 from opentelemetry import trace
 
+from tokenjam.core.pricing import provider_for_model
 from tokenjam.otel.semconv import GenAIAttributes
 
 logger = logging.getLogger(__name__)
@@ -31,17 +32,30 @@ _tj_litellm_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
 
 
 def _parse_provider(model: str, response: object) -> str:
-    """Extract provider name from response or model string prefix."""
-    # Prefer the actual provider from LiteLLM's hidden params
+    """Resolve the real provider for a LiteLLM call.
+
+    Resolution order:
+      1. LiteLLM's ``custom_llm_provider`` from the response hidden params.
+      2. A ``provider/`` prefix on the model string (``anthropic/claude-...``).
+      3. Inference from the bare model name (``claude-*`` -> ``anthropic`` etc.).
+
+    Never returns the literal ``"litellm"`` — that is not a real provider and
+    misses both pricing and billing_account, undercounting cost and suppressing
+    plan-tier framing (#194). An unresolvable provider yields ``"unknown"``,
+    which has no pricing table (so it isn't billed as a real provider) and maps
+    to a NULL billing_account downstream.
+    """
+    # 1. Prefer the actual provider from LiteLLM's hidden params.
     hidden = getattr(response, "_hidden_params", None)
     if isinstance(hidden, dict):
         provider = hidden.get("custom_llm_provider")
         if provider:
             return str(provider)
-    # Fallback: infer from model string prefix (e.g. "anthropic/claude-...")
+    # 2. A "provider/model" prefix (e.g. "anthropic/claude-...").
     if "/" in model:
         return model.split("/", 1)[0]
-    return "litellm"
+    # 3. Infer from the bare model name; never fall back to "litellm".
+    return provider_for_model(model) or "unknown"
 
 
 def _strip_provider_prefix(model: str) -> str:

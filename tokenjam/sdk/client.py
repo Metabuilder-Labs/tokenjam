@@ -17,6 +17,7 @@ from typing import Any, Optional
 
 import httpx
 
+from tokenjam.core.pricing import provider_for_model
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 
 logger = logging.getLogger("tokenjam.sdk")
@@ -185,7 +186,8 @@ def _parse_provider(model: str, response: Any) -> str:
             return str(hidden["custom_llm_provider"])
     if "/" in model:
         return model.split("/", 1)[0]
-    return "litellm"
+    # Infer from the bare model name; never write the bogus "litellm" (#194).
+    return provider_for_model(model) or "unknown"
 
 
 def _get_usage(response: Any) -> Optional[dict[str, Any]]:

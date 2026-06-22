@@ -119,7 +119,8 @@ def test_build_span_missing_model_defaults_to_unknown():
     )
     attrs = _attrs_to_dict(span["attributes"])
     assert attrs[GenAIAttributes.REQUEST_MODEL] == "unknown"
-    assert attrs[GenAIAttributes.PROVIDER_NAME] == "litellm"
+    # Unresolvable model -> 'unknown' provider, never the bogus 'litellm' (#194).
+    assert attrs[GenAIAttributes.PROVIDER_NAME] == "unknown"
 
 
 # --- TokenJamClient HTTP behavior ------------------------------------------
