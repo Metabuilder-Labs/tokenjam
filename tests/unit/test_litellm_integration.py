@@ -318,3 +318,143 @@ class TestLiteLLMIntegration:
             _tj_litellm_active.reset(token)
 
         assert _tj_litellm_active.get(False) is False
+
+    # -- content + cache-token capture (#195) ------------------------------- #
+
+    def test_captures_prompt_and_completion_content(self, tracer_and_spans):
+        """Prompt (from request messages) + completion (from response) land on
+        the span as PROMPT_CONTENT / COMPLETION_CONTENT (#195). The ingest gate
+        strips them later when [capture] is off — capture is unconditional here."""
+        tracer, spans = tracer_and_spans
+        import litellm
+
+        def fake(*a, **kw):
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="the answer"))],
+                usage=types.SimpleNamespace(prompt_tokens=100, completion_tokens=50),
+                _hidden_params={"custom_llm_provider": "openai"},
+                model="gpt-4o-mini",
+            )
+        litellm.completion = fake
+
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
+        LiteLLMIntegration().install(tracer)
+
+        litellm.completion(
+            model="openai/gpt-4o-mini",
+            messages=[{"role": "user", "content": "what is 2+2?"}],
+        )
+
+        attrs = spans[0].attributes
+        assert "what is 2+2?" in attrs[GenAIAttributes.PROMPT_CONTENT]
+        assert attrs[GenAIAttributes.COMPLETION_CONTENT] == "the answer"
+
+    def test_captures_cache_tokens_anthropic_style(self, tracer_and_spans):
+        """Anthropic-style usage exposes cache_read/creation_input_tokens directly."""
+        tracer, spans = tracer_and_spans
+        import litellm
+
+        def fake(*a, **kw):
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="ok"))],
+                usage=types.SimpleNamespace(
+                    prompt_tokens=100, completion_tokens=50,
+                    cache_read_input_tokens=300,
+                    cache_creation_input_tokens=120,
+                ),
+                _hidden_params={"custom_llm_provider": "anthropic"},
+                model="claude-haiku-4-5",
+            )
+        litellm.completion = fake
+
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
+        LiteLLMIntegration().install(tracer)
+        litellm.completion(model="anthropic/claude-haiku-4-5", messages=[])
+
+        attrs = spans[0].attributes
+        assert attrs[GenAIAttributes.CACHE_READ_TOKENS] == 300
+        assert attrs[GenAIAttributes.CACHE_CREATE_TOKENS] == 120
+
+    def test_captures_cache_tokens_openai_style(self, tracer_and_spans):
+        """OpenAI-style usage nests the cached read count under
+        prompt_tokens_details.cached_tokens (no creation count)."""
+        tracer, spans = tracer_and_spans
+        import litellm
+
+        def fake(*a, **kw):
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="ok"))],
+                usage=types.SimpleNamespace(
+                    prompt_tokens=100, completion_tokens=50,
+                    prompt_tokens_details=types.SimpleNamespace(cached_tokens=200),
+                ),
+                _hidden_params={"custom_llm_provider": "openai"},
+                model="gpt-4o-mini",
+            )
+        litellm.completion = fake
+
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
+        LiteLLMIntegration().install(tracer)
+        litellm.completion(model="openai/gpt-4o-mini", messages=[])
+
+        attrs = spans[0].attributes
+        assert attrs[GenAIAttributes.CACHE_READ_TOKENS] == 200
+        assert GenAIAttributes.CACHE_CREATE_TOKENS not in attrs
+
+    def test_no_cache_fields_means_no_cache_attrs(self, tracer_and_spans):
+        """A usage object with no cache fields leaves cache attributes unset, so
+        no-cache spans stay clean (and don't carry MagicMock-truthy garbage)."""
+        tracer, spans = tracer_and_spans
+        import litellm
+
+        def fake(*a, **kw):
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(
+                    message=types.SimpleNamespace(content="ok"))],
+                usage=types.SimpleNamespace(prompt_tokens=100, completion_tokens=50),
+                _hidden_params={"custom_llm_provider": "openai"},
+                model="gpt-4o-mini",
+            )
+        litellm.completion = fake
+
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
+        LiteLLMIntegration().install(tracer)
+        litellm.completion(model="openai/gpt-4o-mini", messages=[])
+
+        attrs = spans[0].attributes
+        assert GenAIAttributes.CACHE_READ_TOKENS not in attrs
+        assert GenAIAttributes.CACHE_CREATE_TOKENS not in attrs
+
+    def test_streaming_captures_completion_content_and_cache(self, tracer_and_spans):
+        """Sync streaming accumulates delta content + reads cache from the final
+        usage chunk."""
+        tracer, spans = tracer_and_spans
+        import litellm
+
+        def _chunk(text=None, usage=None):
+            delta = types.SimpleNamespace(content=text)
+            return types.SimpleNamespace(
+                choices=[types.SimpleNamespace(delta=delta)], usage=usage,
+            )
+        chunks = [
+            _chunk("Hel"),
+            _chunk("lo!"),
+            _chunk(None, types.SimpleNamespace(
+                prompt_tokens=50, completion_tokens=25,
+                cache_read_input_tokens=10)),
+        ]
+        litellm.completion = lambda *a, **kw: iter(chunks)
+
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
+        LiteLLMIntegration().install(tracer)
+        list(litellm.completion(
+            model="openai/gpt-4o-mini", messages=[], stream=True,
+        ))
+
+        attrs = spans[0].attributes
+        assert attrs[GenAIAttributes.COMPLETION_CONTENT] == "Hello!"
+        assert attrs[GenAIAttributes.CACHE_READ_TOKENS] == 10
+        assert attrs[GenAIAttributes.INPUT_TOKENS] == 50
