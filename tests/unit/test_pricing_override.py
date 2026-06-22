@@ -127,6 +127,7 @@ def test_model_keyed_override_wins_for_unknown_provider(tmp_path, monkeypatch):
     f = tmp_path / "pricing.toml"
     _write(
         f,
+        "[models]\n"
         '"claude-haiku-4-5" = { input_per_mtok = 7.0, output_per_mtok = 9.0, '
         "cache_read_per_mtok = 1.0, cache_write_per_mtok = 2.0 }\n",
     )
@@ -148,7 +149,7 @@ def test_model_keyed_override_prices_unattributed_span_via_factory(tmp_path, mon
     from tests.factories import make_llm_span
 
     f = tmp_path / "pricing.toml"
-    _write(f, '"my-local-model" = { input_per_mtok = 3.0, output_per_mtok = 6.0 }\n')
+    _write(f, '[models]\n"my-local-model" = { input_per_mtok = 3.0, output_per_mtok = 6.0 }\n')
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
     pricing.clear_pricing_cache()
 
@@ -178,7 +179,7 @@ def test_model_keyed_override_wins_over_packaged_provider_rate(tmp_path, monkeyp
     declaration outranks the packaged table — the user pays a negotiated rate
     they alone know."""
     f = tmp_path / "pricing.toml"
-    _write(f, '"claude-haiku-4-5" = { input_per_mtok = 0.01, output_per_mtok = 0.02 }\n')
+    _write(f, '[models]\n"claude-haiku-4-5" = { input_per_mtok = 0.01, output_per_mtok = 0.02 }\n')
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
     pricing.clear_pricing_cache()
 
@@ -191,7 +192,7 @@ def test_model_keyed_override_honors_date_suffix(tmp_path, monkeypatch):
     """A model-keyed override pins the base name and still prices the dated
     `-YYYYMMDD` variant Anthropic/OpenAI ship."""
     f = tmp_path / "pricing.toml"
-    _write(f, '"claude-haiku-4-5" = { input_per_mtok = 5.0, output_per_mtok = 5.0 }\n')
+    _write(f, '[models]\n"claude-haiku-4-5" = { input_per_mtok = 5.0, output_per_mtok = 5.0 }\n')
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
     pricing.clear_pricing_cache()
 
@@ -205,12 +206,13 @@ def test_precedence_model_keyed_then_provider_then_packaged(tmp_path, monkeypatc
     f = tmp_path / "pricing.toml"
     _write(
         f,
-        # Model-keyed override (must precede any [table] header in TOML, else
-        # the bare key is parsed into that table). Should outrank everything.
-        '"claude-haiku-4-5" = { input_per_mtok = 1.0, output_per_mtok = 1.0 }\n'
         # Provider-keyed override of the packaged anthropic rate.
         "[anthropic]\n"
-        "claude-haiku-4-5 = { input_per_mtok = 50.0, output_per_mtok = 50.0 }\n",
+        "claude-haiku-4-5 = { input_per_mtok = 50.0, output_per_mtok = 50.0 }\n"
+        # Model-keyed override (reserved [models] section) — should outrank it.
+        # Order doesn't matter: the sections are explicit and disjoint.
+        "[models]\n"
+        '"claude-haiku-4-5" = { input_per_mtok = 1.0, output_per_mtok = 1.0 }\n',
     )
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(f))
     pricing.clear_pricing_cache()
@@ -235,7 +237,7 @@ def test_config_pricing_section_model_keyed(tmp_path, monkeypatch):
     """A [pricing] section in tj.toml supports model-keyed overrides too."""
     _write_main_config(
         tmp_path,
-        '[pricing]\n"claude-haiku-4-5" = { input_per_mtok = 0.05, output_per_mtok = 0.06 }\n',
+        '[pricing.models]\n"claude-haiku-4-5" = { input_per_mtok = 0.05, output_per_mtok = 0.06 }\n',
     )
     pricing.clear_pricing_cache()
 
@@ -264,13 +266,14 @@ def test_config_pricing_merges_with_user_file_and_wins(tmp_path, monkeypatch):
     user_file = tmp_path / "pricing.toml"
     _write(
         user_file,
+        "[models]\n"
         '"shared-model" = { input_per_mtok = 1.0, output_per_mtok = 1.0 }\n'
         '"file-only-model" = { input_per_mtok = 2.0, output_per_mtok = 2.0 }\n',
     )
     monkeypatch.setenv(pricing.USER_PRICING_ENV, str(user_file))
     _write_main_config(
         tmp_path,
-        "[pricing]\n"
+        "[pricing.models]\n"
         '"shared-model" = { input_per_mtok = 9.0, output_per_mtok = 9.0 }\n'
         '"config-only-model" = { input_per_mtok = 3.0, output_per_mtok = 3.0 }\n',
     )

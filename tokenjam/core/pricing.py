@@ -31,16 +31,13 @@ USER_PRICING_ENV = "TJ_PRICING_FILE"
 DEFAULT_INPUT_PER_MTOK = 0.50
 DEFAULT_OUTPUT_PER_MTOK = 2.00
 
-# Rate-field keys recognised in an inline model-rate table. Their presence is
-# how a *model-keyed* override (`claude-haiku-4-5 = { input_per_mtok = ... }`)
-# is told apart from a *provider* section (`[anthropic]` whose values are
-# themselves model sub-tables) — see _split_pricing_raw().
-_RATE_FIELDS = (
-    "input_per_mtok",
-    "output_per_mtok",
-    "cache_read_per_mtok",
-    "cache_write_per_mtok",
-)
+# Reserved section name for *model-keyed* (provider-agnostic) overrides.
+# Lives at `[models]` in the standalone pricing file and `[pricing.models]`
+# in the main config. Everything else at that level is a provider section
+# (`[anthropic]` / `[pricing.anthropic]`), preserving the existing
+# `[provider.model]` format. No provider is named "models", so the reserved
+# key never collides — see _split_pricing_raw().
+MODEL_SECTION_KEY = "models"
 
 
 @dataclass(frozen=True)
@@ -66,33 +63,27 @@ def _split_pricing_raw(
 ) -> tuple[dict[str, dict[str, ModelRates]], dict[str, ModelRates]]:
     """Split a raw pricing dict into (provider_table, model_keyed).
 
-    Both override forms share one TOML namespace, told apart by value shape:
+    Two explicit forms, told apart deterministically by section name (no
+    value-shape guessing, no ordering dependency):
 
-      [anthropic]                       # provider section -> values are
-      claude-haiku-4-5 = { ... }        #   model sub-tables
+      [models]                          # reserved model-keyed section ->
+      "claude-haiku-4-5" = { ... }      #   keyed by bare model name
 
-      "claude-haiku-4-5" = { ... }      # model-keyed override -> value is a
-                                        #   flat inline rate table (has a
-                                        #   recognised _RATE_FIELDS key)
+      [anthropic]                       # any other section is a provider ->
+      "claude-haiku-4-5" = { ... }      #   keyed by (provider, model)
 
     A model-keyed entry wins regardless of the inferred provider, so it can
-    rescue a span whose provider resolved to "unknown" (#194/#200). The two
-    forms never collide because a provider section's values are dicts of
-    dicts while a model-rate spec's values are numbers.
+    rescue a span whose provider resolved to "unknown" (#194/#200).
     """
     provider_table: dict[str, dict[str, ModelRates]] = {}
     model_keyed: dict[str, ModelRates] = {}
     for key, val in raw.items():
         if not isinstance(val, dict):
             continue
-        if any(field in val for field in _RATE_FIELDS):
-            model_keyed[key] = _rates_from(val)
-        else:
-            models: dict[str, ModelRates] = {}
-            for model_name, rates in val.items():
-                if isinstance(rates, dict):
-                    models[model_name] = _rates_from(rates)
-            provider_table[key] = models
+        target = model_keyed if key == MODEL_SECTION_KEY else provider_table.setdefault(key, {})
+        for model_name, rates in val.items():
+            if isinstance(rates, dict):
+                target[model_name] = _rates_from(rates)
     return provider_table, model_keyed
 
 
@@ -220,8 +211,9 @@ def load_model_pricing_overrides() -> dict[str, ModelRates]:
     regardless of the inferred provider (so they price a span even when the
     provider resolved to "unknown" — #194/#200).
 
-    Sourced from the same override files/section as load_pricing_table (a
-    top-level `model = { ... }` inline rate table). Cached — call
+    Sourced from the reserved model section of the same overrides as
+    load_pricing_table (`[models]` in the standalone pricing file,
+    `[pricing.models]` in the main config). Cached — call
     clear_pricing_cache() to reload.
     """
     return _build_pricing()[1]

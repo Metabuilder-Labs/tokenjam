@@ -142,7 +142,7 @@ standalone file**, which in turn wins over the packaged table.
 ### Two ways to key a rate
 
 **Provider-keyed** — corrects or adds a rate for a specific provider/model. Use
-when attribution is reliable:
+when attribution is reliable. This is the long-standing format:
 
 ```toml
 [pricing.anthropic]
@@ -150,31 +150,34 @@ when attribution is reliable:
 ```
 
 **Model-keyed (attribution-proof)** — pins a rate to a **bare model name**, used
-regardless of which provider `tj` inferred. This is the one to reach for when a
-model's provider resolves to `unknown` (open-weight or unattributed traffic):
+regardless of which provider `tj` inferred. These live under a reserved
+`models` section. This is the one to reach for when a model's provider resolves
+to `unknown` (open-weight or unattributed traffic):
 
 ```toml
-[pricing]
-# Keyed by bare model name — wins even when the provider is "unknown".
-"llama-3.3-70b"   = { input_per_mtok = 0.59, output_per_mtok = 0.79 }
+# In tj.toml — under [pricing.models].
+[pricing.models]
+"llama-3.3-70b"    = { input_per_mtok = 0.59, output_per_mtok = 0.79 }
 "claude-haiku-4-5" = { input_per_mtok = 0.50, output_per_mtok = 2.50 }  # your negotiated rate
 ```
 
-Equivalently, in the standalone `~/.config/tj/pricing.toml`:
+Equivalently, in the standalone `~/.config/tj/pricing.toml`, the reserved
+section is simply `[models]` (the file has no enclosing `[pricing]` key), and
+provider-keyed entries stay at the top level:
 
 ```toml
-# Model-keyed entries are bare top-level keys. In TOML they MUST appear
-# BEFORE any [provider] header — once a [table] header opens, later bare
-# keys are parsed into that table.
+[models]
 "llama-3.3-70b" = { input_per_mtok = 0.59, output_per_mtok = 0.79 }
 
 [anthropic]
 "claude-haiku-4-5" = { input_per_mtok = 0.50, output_per_mtok = 2.50 }
 ```
 
-Only `input_per_mtok` and `output_per_mtok` are required; `cache_read_per_mtok`
-and `cache_write_per_mtok` default to `0.0`. Dated model variants
-(`claude-haiku-4-5-20251001`) are priced off the base-name entry automatically.
+`models` is a reserved section name, never a provider — so the two forms can't
+collide, and section order doesn't matter. Only `input_per_mtok` and
+`output_per_mtok` are required; `cache_read_per_mtok` and `cache_write_per_mtok`
+default to `0.0`. Dated model variants (`claude-haiku-4-5-20251001`) are priced
+off the base-name entry automatically.
 
 ### Precedence and reload
 
