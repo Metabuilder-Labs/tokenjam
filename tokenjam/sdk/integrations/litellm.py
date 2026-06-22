@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import json
 import logging
 
 from opentelemetry import trace
@@ -68,6 +69,115 @@ def _strip_provider_prefix(model: str) -> str:
     return model
 
 
+# --- content + cache-token enrichment (#195) ------------------------------- #
+# These set attributes unconditionally; the IngestPipeline's
+# strip_captured_content() gate drops prompt/completion content when the
+# matching [capture] toggle is off, so there is no behavior change when content
+# capture is disabled. Without them, cache-recommend / Reuse text / trim get no
+# content and the cache analyzer always reads 0% efficacy for LiteLLM spans.
+
+def _serialize_prompt(args: tuple, kwargs: dict) -> str | None:
+    """Serialize a completion call's request messages/prompt to a string.
+
+    OTel attributes can't hold a list-of-dicts, so chat ``messages`` are
+    JSON-encoded; the analyzers' ``_stringify_prompt`` accepts a string. Falls
+    back to a text-completion ``prompt`` kwarg.
+    """
+    messages = kwargs.get("messages")
+    if messages is None and len(args) > 1:
+        messages = args[1]
+    if messages is not None:
+        try:
+            return json.dumps(messages, default=str)
+        except Exception:
+            return str(messages)
+    prompt = kwargs.get("prompt")
+    if prompt is not None:
+        return prompt if isinstance(prompt, str) else str(prompt)
+    return None
+
+
+def _record_prompt_content(span, args: tuple, kwargs: dict) -> None:
+    """Set PROMPT_CONTENT on the span (stripped at ingest if capture is off)."""
+    content = _serialize_prompt(args, kwargs)
+    if content is not None:
+        span.set_attribute(GenAIAttributes.PROMPT_CONTENT, content)
+
+
+def _extract_completion_text(response: object) -> str | None:
+    """Pull the assistant text from a non-streaming ModelResponse."""
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None
+    try:
+        choice = choices[0]
+    except (IndexError, TypeError):
+        return None
+    message = getattr(choice, "message", None)
+    if message is not None:
+        content = getattr(message, "content", None)
+        if content is not None:
+            return content if isinstance(content, str) else str(content)
+    text = getattr(choice, "text", None)
+    if text is not None:
+        return str(text)
+    return None
+
+
+def _chunk_delta_text(chunk: object) -> str | None:
+    """Extract the incremental assistant text from one streaming chunk."""
+    choices = getattr(chunk, "choices", None)
+    if not choices:
+        return None
+    try:
+        delta = getattr(choices[0], "delta", None)
+    except (IndexError, TypeError):
+        return None
+    if delta is None:
+        return None
+    content = getattr(delta, "content", None)
+    return content if isinstance(content, str) else None
+
+
+def _extract_cache_tokens(usage: object) -> tuple[int | None, int | None]:
+    """Return ``(cache_read, cache_write)`` from a LiteLLM Usage object.
+
+    LiteLLM normalizes provider usage inconsistently: Anthropic-style prompt
+    caching surfaces ``cache_read_input_tokens`` / ``cache_creation_input_tokens``
+    directly on the usage object, while OpenAI-style caching nests the read
+    count under ``prompt_tokens_details.cached_tokens``. Check both shapes.
+    """
+    cache_read = getattr(usage, "cache_read_input_tokens", None)
+    if not cache_read:
+        details = getattr(usage, "prompt_tokens_details", None)
+        if isinstance(details, dict):
+            cache_read = details.get("cached_tokens")
+        elif details is not None:
+            cache_read = getattr(details, "cached_tokens", None)
+    cache_write = getattr(usage, "cache_creation_input_tokens", None)
+    return cache_read, cache_write
+
+
+def _set_usage_attributes(usage: object, span) -> None:
+    """Set input/output + cache-read/write token attributes from a Usage object.
+
+    Cache fields (#195) were previously dropped, so the ``cache`` analyzer
+    always read 0% efficacy for LiteLLM spans. Mirrors patch_anthropic: only
+    set cache attributes when non-zero so no-cache spans stay clean.
+    """
+    prompt_tokens = getattr(usage, "prompt_tokens", None)
+    if prompt_tokens is not None:
+        span.set_attribute(GenAIAttributes.INPUT_TOKENS, prompt_tokens)
+    completion_tokens = getattr(usage, "completion_tokens", None)
+    if completion_tokens is not None:
+        span.set_attribute(GenAIAttributes.OUTPUT_TOKENS, completion_tokens)
+    cache_read, cache_write = _extract_cache_tokens(usage)
+    if cache_read:
+        span.set_attribute(GenAIAttributes.CACHE_READ_TOKENS, cache_read)
+    if cache_write:
+        span.set_attribute(GenAIAttributes.CACHE_CREATE_TOKENS, cache_write)
+
+
 class LiteLLMIntegration:
     name = "litellm"
     installed = False
@@ -115,6 +225,8 @@ class LiteLLMIntegration:
                         GenAIAttributes.CONVERSATION_ID, conv_id,
                     )
 
+            _record_prompt_content(span, args, kwargs)
+
             token = _tj_litellm_active.set(True)
             try:
                 response = integration._original_completion(*args, **kwargs)
@@ -156,6 +268,8 @@ class LiteLLMIntegration:
                     span.set_attribute(
                         GenAIAttributes.CONVERSATION_ID, conv_id,
                     )
+
+            _record_prompt_content(span, args, kwargs)
 
             token = _tj_litellm_active.set(True)
             try:
@@ -205,14 +319,11 @@ def _record_usage(response: object, span, model: str) -> None:
 
     usage = getattr(response, "usage", None)
     if usage:
-        prompt_tokens = getattr(usage, "prompt_tokens", None)
-        if prompt_tokens is not None:
-            span.set_attribute(GenAIAttributes.INPUT_TOKENS, prompt_tokens)
-        completion_tokens = getattr(usage, "completion_tokens", None)
-        if completion_tokens is not None:
-            span.set_attribute(
-                GenAIAttributes.OUTPUT_TOKENS, completion_tokens,
-            )
+        _set_usage_attributes(usage, span)
+
+    completion = _extract_completion_text(response)
+    if completion is not None:
+        span.set_attribute(GenAIAttributes.COMPLETION_CONTENT, completion)
 
 
 class _SyncStreamWrapper:
@@ -225,6 +336,7 @@ class _SyncStreamWrapper:
         self._token = token
         self._usage = None
         self._last_chunk = None
+        self._completion_parts: list[str] = []
 
     def __iter__(self):
         _ok = False
@@ -233,6 +345,9 @@ class _SyncStreamWrapper:
                 usage = getattr(chunk, "usage", None)
                 if usage:
                     self._usage = usage
+                delta = _chunk_delta_text(chunk)
+                if delta:
+                    self._completion_parts.append(delta)
                 self._last_chunk = chunk
                 yield chunk
             _ok = True
@@ -249,20 +364,12 @@ class _SyncStreamWrapper:
                 _strip_provider_prefix(self._model),
             )
             if self._usage:
-                prompt_tokens = getattr(
-                    self._usage, "prompt_tokens", None,
+                _set_usage_attributes(self._usage, self._span)
+            if self._completion_parts:
+                self._span.set_attribute(
+                    GenAIAttributes.COMPLETION_CONTENT,
+                    "".join(self._completion_parts),
                 )
-                if prompt_tokens is not None:
-                    self._span.set_attribute(
-                        GenAIAttributes.INPUT_TOKENS, prompt_tokens,
-                    )
-                completion_tokens = getattr(
-                    self._usage, "completion_tokens", None,
-                )
-                if completion_tokens is not None:
-                    self._span.set_attribute(
-                        GenAIAttributes.OUTPUT_TOKENS, completion_tokens,
-                    )
             if _ok:
                 self._span.set_status(trace.Status(trace.StatusCode.OK))
             self._span.end()
@@ -282,6 +389,7 @@ class _AsyncStreamWrapper:
         self._token = token
         self._usage = None
         self._last_chunk = None
+        self._completion_parts: list[str] = []
 
     def __aiter__(self):
         return self._iterate()
@@ -293,6 +401,9 @@ class _AsyncStreamWrapper:
                 usage = getattr(chunk, "usage", None)
                 if usage:
                     self._usage = usage
+                delta = _chunk_delta_text(chunk)
+                if delta:
+                    self._completion_parts.append(delta)
                 self._last_chunk = chunk
                 yield chunk
             _ok = True
@@ -309,20 +420,12 @@ class _AsyncStreamWrapper:
                 _strip_provider_prefix(self._model),
             )
             if self._usage:
-                prompt_tokens = getattr(
-                    self._usage, "prompt_tokens", None,
+                _set_usage_attributes(self._usage, self._span)
+            if self._completion_parts:
+                self._span.set_attribute(
+                    GenAIAttributes.COMPLETION_CONTENT,
+                    "".join(self._completion_parts),
                 )
-                if prompt_tokens is not None:
-                    self._span.set_attribute(
-                        GenAIAttributes.INPUT_TOKENS, prompt_tokens,
-                    )
-                completion_tokens = getattr(
-                    self._usage, "completion_tokens", None,
-                )
-                if completion_tokens is not None:
-                    self._span.set_attribute(
-                        GenAIAttributes.OUTPUT_TOKENS, completion_tokens,
-                    )
             if _ok:
                 self._span.set_status(trace.Status(trace.StatusCode.OK))
             self._span.end()
