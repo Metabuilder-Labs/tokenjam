@@ -703,6 +703,67 @@ def test_per_trace_token_totals_come_from_server_not_aggregated_in_js(html):
     assert "function _costVal(r, useTokens)" in html
 
 
+# --- #244: trace-waterfall — fixed name column, magnitude bars, status ------ #
+def test_waterfall_name_in_fixed_column_not_on_bar(html):
+    # The span identity lives in a fixed left column (spanPrimaryName), never
+    # painted onto the bar — that produced the "cla"/"Bas" clipping. The old
+    # on-bar ${barLabel} and the detail/isAgent bar-label machinery are gone.
+    assert "function spanPrimaryName(s)" in html
+    assert 'class="wf-name-txt"' in html
+    assert "${barLabel}" not in html
+    assert "const barLabel = isAgent" not in html
+    # The bar itself carries no text child now.
+    assert '<div class="wf-bar ${kind}" style="width:100%"></div>' in html
+
+
+def test_waterfall_bars_sized_by_magnitude_with_mode_toggle(html):
+    # Bars size by cost/token magnitude by default (the only thing that renders
+    # on duration-less backfill), with a cost/tokens/duration toggle. Cost-first
+    # default; tokens when $ is suppressed.
+    assert "const [wfMode, setWfMode] = useState(null)" in html
+    assert "const wfDefaultMode = wfUseTokens ? 'tokens' : 'cost'" in html
+    assert "const magForMode = s =>" in html
+    assert "setWfMode('cost')" in html
+    assert "setWfMode('tokens')" in html
+    assert "setWfMode('duration')" in html
+
+
+def test_waterfall_has_minimum_bar_width(html):
+    # A floor keeps tiny/zero-magnitude spans visible and clickable.
+    assert "width = Math.max(1.5, Math.min(width, 100 - left))" in html
+
+
+def test_waterfall_relative_offset_and_absolute_on_hover(html):
+    # Per-span relative offset on the row; absolute wall-clock in the tooltip
+    # and as a title; trace start in the summary header.
+    assert "const offsetLabel = '+' + fmtDur(st)" in html
+    assert 'class="wf-offset"' in html
+    assert "new Date(traceStart).toLocaleString()" in html  # header trace start
+    assert "new Date(s.start_time).toLocaleString()" in html  # per-span absolute
+
+
+def test_waterfall_duration_not_captured_hint(html):
+    # Missing duration shows an em-dash with a "not captured in backfilled data"
+    # hint rather than a misleading 0 / 1ms sliver (#243/#244).
+    assert "Duration not captured in backfilled data" in html
+    assert "not captured in backfill" in html
+
+
+def test_waterfall_status_icons_and_kind_legend(html):
+    # Status icon per row (ok/error) + kind color dots + a legend.
+    assert 'class="wf-status' in html
+    assert 'class="wf-kind-dot' in html
+    assert 'class="wf-legend"' in html
+    assert "(s.status_code || '') === 'error'" in html
+
+
+def test_waterfall_cost_framing_preserved(html):
+    # Cost-first but plan-tier-safe: the per-span value still routes through the
+    # server framing block, never a raw fmtCost (guards #187/#249 regressions).
+    assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
+    assert "fmtCost(s.cost_usd)" not in html
+
+
 # --- #246: cache-savings chart redesign (answer-first, single-axis bars) ---- #
 def test_cache_chart_leads_with_answer_headline(html):
     # A plain headline: hit-rate stat + savings this window (not three overlaid
