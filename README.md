@@ -124,6 +124,23 @@ tj optimize          # cost-saving candidates from your actual usage
 tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
+That's it. Run `tj` any time and it points you to the next best action:
+
+```text
+ _____    _              _
+|_   _|__| |_____ _ _   | |__ _ _ __
+  | |/ _ \ / / -_) ' \  | / _` | '  \
+  |_|\___/_\_\___|_||_|_/ \__,_|_|_|_|
+                     |__/
+  TokenJam · cost-optimization for AI agents · local-first, OTel-native · no signup
+
+You're set up. Next best actions:
+  tj status      agent overview — what's running, recent cost
+  tj tokenmaxx   your shareable spend tier
+  tj optimize    cost-saving candidates from your usage
+  tj serve       open Lens (web UI) at http://127.0.0.1:7391/
+```
+
 To upgrade later: `pipx upgrade tokenjam` (then `tj stop && tj serve &` to reload the daemon, and `tj --version` to verify). See [docs/installation.md](docs/installation.md#upgrading).
 
 For any Python agent:
