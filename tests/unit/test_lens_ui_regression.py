@@ -441,3 +441,33 @@ def test_analytics_leaderboard_has_inline_bars(html):
     assert "function buildLeaderboard" in html
     assert "lb-fill" in html
     assert ".lb-bar" in html
+
+
+# --- #215: cost-annotated trace waterfall ---------------------------------- #
+def test_trace_waterfall_cost_summary(html):
+    # A cost-first trace summary header (total cost + tokens + duration + spans).
+    assert "wf-summary" in html
+    assert "Total cost" in html
+    assert "wfTotalCostFramed" in html
+    # the total cost routes through the framing helper (not raw fmtCost)
+    assert "const wfTotalCostFramed = fmtFramedDollar(wfTotalCost, framing)" in html
+
+
+def test_trace_waterfall_per_span_cost_token_annotation(html):
+    # Per-span cost + tokens annotation column with a magnitude bar (not just the
+    # hover tooltip), so the timeline reads cost-first.
+    assert "wf-cost-bar" in html
+    assert "wf-cost-fill" in html
+    assert 'class="wf-cost-val"' in html
+    assert 'class="wf-cost-tok"' in html
+    # tokens summed per span and shown in the annotation
+    assert "const spanTokens = s =>" in html
+    assert "wf-cost-tok\">${sTok ? fmtTokens(sTok)" in html
+
+
+def test_trace_waterfall_magnitude_respects_framing(html):
+    # The magnitude bar (and summary) read on TOKEN volume when dollars are
+    # suppressed (subscription/local) — the suppression decision comes from the
+    # server framing block, never re-derived in JS.
+    assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
+    assert "const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0)" in html
