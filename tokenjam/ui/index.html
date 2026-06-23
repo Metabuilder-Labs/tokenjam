@@ -296,6 +296,10 @@ code, .mono {
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
+/* Status List (#263): a min-width lets the table exceed a narrow container so
+   .table-wrap's overflow-x actually scrolls, instead of compressing columns and
+   clipping the actions cell (View cost / View traces) off the right edge. */
+.table-wrap table.status-list { min-width: 760px; }
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1523,7 +1527,7 @@ function dominantSplit(costSegs) {
 // .table-wrap/table CSS; no new lib.
 function StatusListTable({ agents, framing }) {
   return html`
-    <div class="table-wrap"><table>
+    <div class="table-wrap"><table class="status-list">
       <thead><tr>
         <th>Agent</th>
         <th>Status</th>
@@ -1558,9 +1562,10 @@ function StatusListTable({ agents, framing }) {
 function StatusView({ params }) {
   // Optional single-agent filter via URL (#112). Filtered client-side since
   // /status returns every agent.
-  // View mode (Cards | List) also lives in the URL (#241): `#/status?view=list`.
-  // Cards is the default and is omitted from the URL so default links stay clean.
-  const DEFAULTS = { view: 'cards', agent_id: '' };
+  // View mode (Cards | List) also lives in the URL (#241): `#/status?view=cards`.
+  // List is the default (the more useful scan view, #263) and is omitted from
+  // the URL; choosing Cards carries `?view=cards`.
+  const DEFAULTS = { view: 'list', agent_id: '' };
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
   const viewMode = readParam(params, 'view', DEFAULTS.view, v => ['cards', 'list'].includes(v));
   const setView = (v) => navigate('status', { agent_id: agentId, view: v }, DEFAULTS);
