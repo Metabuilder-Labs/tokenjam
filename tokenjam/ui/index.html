@@ -676,6 +676,21 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 a.band-hero { display: block; text-decoration: none; color: inherit; transition: border-color 0.15s; }
 a.band-hero:hover { border-color: var(--accent); }
 .tile-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+/* Merged Dashboard preview (#/dashboard prototype) — compact triage band so the
+   tiles don't dominate the Analytics hero below them. */
+.preview-badge { font-family: 'Geist Mono', monospace; font-size: 10px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--warn); border: 1px solid var(--warn); border-radius: 4px;
+  padding: 1px 6px; opacity: 0.85; }
+.nav-preview { font-size: 9px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--warn);
+  border: 1px solid var(--warn); border-radius: 3px; padding: 0 4px; margin-left: 4px; opacity: 0.8; }
+.dash-triage { display: flex; gap: 18px; flex-wrap: wrap; }
+.dash-col { flex: 1 1 320px; min-width: 0; }
+.tile-grid.compact { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; }
+.tile-grid.compact .rec-tile { padding: 8px 10px; }
+.tile-grid.compact .rec-name { font-size: 12px; }
+.tile-grid.compact .rec-amount { font-size: 15px; }
+.tile-grid.compact .rec-hint { display: none; }
+.tile-grid.compact .health-tile { padding: 8px 10px; }
 .rec-tile {
   display: block; text-decoration: none; color: inherit;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -733,6 +748,7 @@ a.health-tile.attn { border-color: var(--warn); }
 <nav class="sidebar">
   <div class="sidebar-brand"><svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="26" height="26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="TokenJam"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/><g fill="currentColor" stroke="none" fill-rule="evenodd"><path transform="translate(85.68,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(106.83,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M4.74,-7.50 L4.74,-8.75 L7.24,-8.75 L7.24,-0.00 L5.86,-0.00 L5.86,-7.50 L4.74,-7.50 Z"/><path transform="translate(123.97,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(145.12,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M5.68,-1.86 Q6.83,-2.86 7.49,-3.50 Q8.16,-4.14 8.60,-4.84 Q9.05,-5.53 9.05,-6.23 Q9.05,-6.95 8.71,-7.36 Q8.36,-7.76 7.63,-7.76 Q6.92,-7.76 6.53,-7.31 Q6.14,-6.86 6.12,-6.11 L4.80,-6.11 Q4.84,-7.48 5.62,-8.20 Q6.41,-8.93 7.62,-8.93 Q8.93,-8.93 9.67,-8.21 Q10.40,-7.49 10.40,-6.29 Q10.40,-5.42 9.97,-4.63 Q9.53,-3.83 8.92,-3.20 Q8.32,-2.57 7.38,-1.74 L6.84,-1.26 L10.64,-1.26 L10.64,-0.12 L4.81,-0.12 L4.81,-1.12 L5.68,-1.86 Z"/><path transform="translate(84.35,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(105.44,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M7.46,-7.50 L7.46,-8.75 L9.96,-8.75 L9.96,-0.00 L8.58,-0.00 L8.58,-7.50 L7.46,-7.50 Z"/><path transform="translate(122.64,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(143.73,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M8.40,-1.86 Q9.55,-2.86 10.22,-3.50 Q10.88,-4.14 11.33,-4.84 Q11.77,-5.53 11.77,-6.23 Q11.77,-6.95 11.43,-7.36 Q11.09,-7.76 10.36,-7.76 Q9.65,-7.76 9.26,-7.31 Q8.87,-6.86 8.84,-6.11 L7.52,-6.11 Q7.56,-7.48 8.35,-8.20 Q9.13,-8.93 10.34,-8.93 Q11.65,-8.93 12.39,-8.21 Q13.13,-7.49 13.13,-6.29 Q13.13,-5.42 12.69,-4.63 Q12.25,-3.83 11.65,-3.20 Q11.04,-2.57 10.10,-1.74 L9.56,-1.26 L13.37,-1.26 L13.37,-0.12 L7.54,-0.12 L7.54,-1.12 L8.40,-1.86 Z"/></g></svg><span>TokenJam Lens</span></div>
   <a href="#/overview" class="nav-link" data-view="overview"><span class="icon">&#9678;</span> Overview</a>
+  <a href="#/dashboard" class="nav-link" data-view="dashboard"><span class="icon">&#9707;</span> Dashboard <span class="nav-preview">preview</span></a>
   <a href="#/status" class="nav-link" data-view="status"><span class="icon">&bull;</span> Status</a>
   <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Cost</a>
@@ -3021,7 +3037,11 @@ function downloadCsv(filename, text) {
   document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
-function AnalyticsView({ params }) {
+// `route` lets the pivot live on another screen (the merged Dashboard preview
+// reuses it under #/dashboard); `embedded` drops the standalone title + window
+// picker so the host screen owns those. Default args preserve the standalone
+// #/analytics behavior exactly.
+function AnalyticsView({ params, route = 'analytics', embedded = false }) {
   const DEFAULTS = { since: '30d', metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
     agent_id: '', provider: '', model: '', tool: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
@@ -3034,8 +3054,8 @@ function AnalyticsView({ params }) {
   const fModel = readParam(params, 'model', '');
   const fTool = readParam(params, 'tool', '');
   const cur = { since, metric, group_by: groupBy, stack, chart, agent_id: fAgent, provider: fProvider, model: fModel, tool: fTool };
-  const setFilter = (k, v) => navigate('analytics', { ...cur, [k]: v }, DEFAULTS);
-  const applyPreset = (q) => navigate('analytics', { ...cur, ...q }, DEFAULTS);
+  const setFilter = (k, v) => navigate(route, { ...cur, [k]: v }, DEFAULTS);
+  const applyPreset = (q) => navigate(route, { ...cur, ...q }, DEFAULTS);
 
   const [st, setSt] = useState({ loading: true, error: null, resp: null });
 
@@ -3072,9 +3092,9 @@ function AnalyticsView({ params }) {
   const metricSuffix = isSpend ? (useTokens ? ' (tokens)' : '') : '';
 
   return html`
-    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    ${embedded ? null : html`<div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Analytics <${PlanBadge} framing=${framing} />
-    </div>
+    </div>`}
 
     <div class="filters">
       <label class="ctl">Metric
@@ -3094,10 +3114,10 @@ function AnalyticsView({ params }) {
         <select value=${chart} onChange=${e => setFilter('chart', e.target.value)}>
           ${ANALYTICS_CHARTS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
         </select></label>
-      <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
+      ${embedded ? null : html`<select value=${since} onChange=${e => setFilter('since', e.target.value)}>
         <option value="24h">Last 24h</option><option value="7d">Last 7d</option>
         <option value="30d">Last 30d</option><option value="90d">Last 90d</option>
-      </select>
+      </select>`}
       <button class="btn" onClick=${load}>Refresh</button>
       <button class="btn" onClick=${() => resp && downloadCsv('tokenjam-analytics.csv', analyticsCsv(resp))}>Export CSV</button>
     </div>
@@ -3168,6 +3188,157 @@ function AnalyticsView({ params }) {
 }
 
 // ============================
+// Merged Dashboard (PREVIEW, #/dashboard) — prototype for design review.
+// ============================
+// Composes the Overview triage front-door (spend hero + run-rate, compact
+// recoverable-waste + health bands) with the Analytics pivot explorer as the
+// hero canvas. Purely additive: a NEW route that reuses the existing helpers /
+// components (SpendChart, recoverableTiles, HealthTile, AnalyticsView) — it does
+// NOT touch the standalone Overview/Analytics screens or the default landing.
+// One window selector (header) drives BOTH the triage fetch and the embedded
+// explorer (which reads `since` from the same URL params).
+function DashboardView({ params }) {
+  const since = readParam(params, 'since', '30d', validSince);
+  // Preserve the explorer's params (metric/group_by/stack/chart/filters) when
+  // only the window changes, so the hero keeps its slice across window switches.
+  const setWin = v => navigate('dashboard', { ...Object.fromEntries(params.entries()), since: v }, { since: '30d' });
+  const [d, setD] = useState({ loading: true, empty: false, error: null });
+
+  // Triage fetch — same parallel fast=true pattern as Overview (#124): /cost is
+  // load-bearing (no .catch), the rest degrade individually. The Analytics hero
+  // fetches independently, so a triage failure never blanks the explorer.
+  const load = useCallback(async () => {
+    try {
+      const status = await api('/status');
+      if (!status.agents || status.agents.length === 0) {
+        setD({ loading: false, empty: true, error: null });
+        return;
+      }
+      const [cost, compare, opt, al, drift, traces] = await Promise.all([
+        api('/cost', { since, group_by: 'day' }),
+        api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
+        api('/optimize', { since, fast: 'true' }).catch(() => null),
+        api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
+        api('/drift').catch(() => ({ agents: [] })),
+        api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
+      ]);
+      setD({ loading: false, empty: false, error: null, cost, compare, opt,
+        alerts: al.alerts || [], drift, traces: traces.traces || [] });
+    } catch (e) {
+      setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
+    }
+  }, [since]);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 30000);
+    const onVis = () => { if (document.visibilityState === 'visible') load(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(timer); document.removeEventListener('visibilitychange', onVis); };
+  }, [load]);
+
+  const winPicker = html`
+    <select value=${since} onChange=${e => setWin(e.target.value)}>
+      <option value="24h">Last 24h</option>
+      <option value="7d">Last 7d</option>
+      <option value="30d">Last 30d</option>
+      <option value="90d">Last 90d</option>
+    </select>`;
+
+  const cost = d.cost || {};
+  const framing = cost.framing || null;
+  const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const series = (!d.loading && !d.empty && !d.error) ? buildCostSeries(cost, 'total', useTokens) : null;
+  const totalDisplay = useTokens ? (fmtTokens(cost.total_tokens || 0) + ' tokens') : fmtFramedDollar(cost.total_cost_usd || 0, framing);
+  const trendPct = d.compare ? (useTokens ? d.compare.tokens_delta_pct : d.compare.cost_delta_pct) : null;
+  const cyc = cycleRemaining(cost.cycle);
+  let runRate = null, projection = null;
+  if (series && series.data[1] && series.data[1].length) {
+    const windowTotal = useTokens ? (cost.total_tokens || 0) : (cost.total_cost_usd || 0);
+    runRate = runRateProjection(windowTotal, since, 1);
+    const projected = runRate * cyc.days;
+    projection = useTokens ? (fmtTokens(Math.round(projected)) + ' tokens') : fmtFramedDollar(projected, framing);
+  }
+
+  const tiles = (!d.loading && !d.empty && !d.error) ? recoverableTiles(d.opt) : [];
+  const budgets = (d.opt && d.opt.budgets) || [];
+  const budgetAttn = budgets.filter(b => b.over_budget || (b.budget_usd > 0 && b.projected_cycle_total / b.budget_usd > 0.8)).length;
+  const driftN = driftSignalCount(d.drift);
+  const errTraces = (d.traces || []).filter(t => t.status_code === 'error').length;
+
+  return html`
+    <div class="ov-head">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <div class="page-title" style="margin:0">Dashboard</div>
+        <span class="preview-badge">preview</span>
+        <${PlanBadge} framing=${framing} />
+      </div>
+      <div class="filters" style="margin:0">${winPicker}</div>
+    </div>
+    ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+
+    <!-- Band 1: spend hero + run-rate (reuses Overview's SpendChart + run-rate) -->
+    ${d.loading ? html`<div class="shimmer" style="height:150px"></div>`
+      : d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet — TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and your spend, waste, and health show up here.</p></div>`
+      : d.error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load triage: ${d.error}</div><button class="btn" onClick=${load}>Retry</button></div>`
+      : html`
+        <div class="chart-card">
+          <div class="chart-head">
+            <a class="chart-title" href=${'#/cost?since=' + since} title="Cost details">Spend ${useTokens ? '(tokens) ' : ''}· last ${since} →</a>
+            <div class="chart-meta">
+              <span class="chart-total">${totalDisplay}</span>
+              <${TrendChip} pct=${trendPct} />
+            </div>
+          </div>
+          ${series ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${120} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate} bucket=${series.bucket} />`
+            : html`<div class="empty" style="padding:20px 0">No spend in this window.</div>`}
+          ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
+        </div>`}
+
+    <!-- Band 2: compact triage — recoverable waste + health side by side -->
+    ${(!d.loading && !d.empty && !d.error) ? html`
+      <div class="dash-triage">
+        <div class="dash-col">
+          <div class="band-label">Recoverable waste <span class="estimated-tag" title="Heuristic estimates — review before acting">estimated</span></div>
+          <div class="tile-grid compact">
+            ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
+              : tiles.map(t => {
+                const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
+                const href = analyzerSliceHref(t.name, since);
+                const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing)
+                  : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
+                  : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
+                const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok' : 'rec-tile muted');
+                const amtCls = t.state === 'actionable' ? 'rec-amount' : (t.state === 'at_ceiling' ? 'rec-amount ok' : 'rec-amount dim');
+                return html`<a class=${cls} href=${href}>
+                  <div class="rec-name">${meta.title}</div>
+                  <div class=${amtCls}>${amount}</div>
+                </a>`;
+              })}
+          </div>
+        </div>
+        <div class="dash-col">
+          <div class="band-label">Health at a glance</div>
+          <div class="tile-grid compact">
+            <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
+              href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
+            <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
+              sub=${driftN ? 'review baselines' : 'within baseline'} />
+            <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
+              sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
+            <${HealthTile} label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href="#/traces"
+              sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
+          </div>
+        </div>
+      </div>` : null}
+
+    <!-- Band 3: the HERO — the Analytics pivot explorer, embedded -->
+    <div class="band-label" style="margin-top:18px">Explore <span class="band-window">· metric × dimension × chart, the full pivot</span></div>
+    <${AnalyticsView} params=${params} route="dashboard" embedded=${true} />
+  `;
+}
+
+// ============================
 // App Router
 // ============================
 function App() {
@@ -3199,6 +3370,7 @@ function App() {
   const p = route.params;
   switch (route.view) {
     case 'overview': return html`<${OverviewView} params=${p} />`;
+    case 'dashboard': return html`<${DashboardView} params=${p} />`;
     case 'status': return html`<${StatusView} params=${p} />`;
     case 'traces':
       if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;

@@ -415,8 +415,11 @@ def test_analytics_presets_and_csv_export(html):
 
 
 def test_analytics_url_is_source_of_truth(html):
-    # state read from URL params with validators, written back via navigate()
-    assert "navigate('analytics'" in html
+    # state read from URL params with validators, written back via navigate().
+    # navigate() targets `route` (default 'analytics' preserves the standalone
+    # screen; the dashboard preview passes route="dashboard").
+    assert "route = 'analytics'" in html
+    assert "navigate(route, { ...cur" in html
     assert "readParam(params, 'metric'" in html
     assert "readParam(params, 'group_by'" in html
     assert "readParam(params, 'chart'" in html
@@ -594,3 +597,29 @@ def test_overview_remains_default_landing_no_render_time_redirect(html):
     # render-time location.hash assignment that would race the first render.
     assert "(qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'overview'" in html
     assert "location.hash = '#/overview'" not in html
+
+
+# --- merged Dashboard prototype (#/dashboard) — non-destructive ------------ #
+def test_dashboard_preview_route_registered(html):
+    # New, additive route + screen + sidebar nav item.
+    assert "function DashboardView" in html
+    assert "case 'dashboard': return html`<${DashboardView}" in html
+    assert 'href="#/dashboard"' in html
+
+
+def test_dashboard_embeds_analytics_explorer(html):
+    # The hero composes the existing AnalyticsView (route rewired to dashboard,
+    # embedded) rather than reimplementing the pivot.
+    assert 'route="dashboard" embedded=${true}' in html
+    # AnalyticsView is parameterized but defaults preserve standalone behavior.
+    assert "function AnalyticsView({ params, route = 'analytics', embedded = false })" in html
+
+
+def test_overview_default_landing_unchanged(html):
+    # The prototype must NOT change the default landing (#132): empty hash still
+    # resolves to overview, and there is no render-time redirect to dashboard.
+    assert "|| 'overview'" in html
+    assert "location.hash = '#/dashboard'" not in html
+    # Overview screen + route remain intact for side-by-side comparison.
+    assert "function OverviewView" in html
+    assert "case 'overview': return html`<${OverviewView}" in html
