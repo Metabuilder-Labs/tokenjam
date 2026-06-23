@@ -52,15 +52,7 @@ def test_chart_has_hover_tooltip(html):
     assert "plugins: [chartTooltipPlugin(" in html
 
 
-def test_overview_chart_is_not_a_click_target(html):
-    # The cost hero must no longer be wrapped in an <a class="band-hero">; drill
-    # is an explicit link.
-    assert 'class="chart-card band-hero"' not in html
-    assert 'class="drill-link"' in html
-    assert "View Cost details" in html
 
-
-# --- #178 / #188: chart x-axis tick timezone handling --------------------- #
 def test_axis_time_ticks_timezone_split(html):
     # #178: HOURLY ticks localize — they format the UTC epoch-second buckets in
     # the viewer's local zone (a US-Pacific user sees their noon, not UTC's 7pm).
@@ -88,10 +80,10 @@ def test_run_rate_uses_window_length_not_data_range(html):
     assert "ys.reduce((a, b) => a + b, 0) / ys.length" not in html
 
 
-def test_overview_caption_says_not_a_forecast(html):
-    # Both screens carry the honesty qualifier now.
-    assert html.count("(linear run-rate, not a forecast)") >= 2
-    assert "(linear run-rate)<" not in html  # the bare Overview variant is gone
+def test_run_rate_caption_says_not_a_forecast(html):
+    # The honesty qualifier rides every run-rate projection (Cost screen's
+    # parenthesized form + the Dashboard's folded KPI caption).
+    assert html.count("linear run-rate, not a forecast") >= 2
 
 
 def test_axis_uses_compact_dollar_formatter(html):
@@ -100,14 +92,7 @@ def test_axis_uses_compact_dollar_formatter(html):
 
 
 # --- #132: first-load lands on Overview (no redirect race) ----------------- #
-def test_first_load_defaults_to_overview(html):
-    # getRoute defaults to overview; the render-time hash redirect is gone.
-    assert "|| 'overview'" in html
-    assert "location.hash = '#/overview'" not in html
-    assert "history.replaceState(null, '', '#/overview')" in html
 
-
-# --- #133/#136: chart spans full window + consistent date labels ----------- #
 def test_chart_spans_full_window_with_buckets(html):
     assert "function windowDays" in html
     assert "series_bucket" in html and "window_start" in html
@@ -215,10 +200,10 @@ def test_reuse_tile_title_is_title_cased(html):
 
 
 def test_not_ready_tile_drops_em_dash(html):
-    # Trim's not_ready content line read "— not ready"; the em-dash prefix is
-    # dropped so the three states share a prefix-free scheme.
+    # The not_ready content line reads a bare "Not ready" (no "— not ready"
+    # em-dash prefix), so the tile states share a prefix-free scheme.
     assert "— not ready" not in html
-    assert ">Not ready<" in html
+    assert "'Not ready'" in html
 
 
 def test_recoverable_tile_titles_share_one_weight(html):
@@ -226,7 +211,7 @@ def test_recoverable_tile_titles_share_one_weight(html):
     # so the at_ceiling (Cache) tile can't bold its title differently. The
     # positive emphasis lives only on the content line (.rec-amount.ok), which
     # is the intended #127 design and must stay.
-    assert html.count('<div class="rec-name">${meta.title}</div>') >= 3
+    assert html.count('<div class="rec-name">${meta.title}</div>') >= 1
     assert ".rec-amount.ok" in html          # green content line preserved (AC #4)
     # No state-specific rule bolds the title for the at_ceiling tile.
     assert ".rec-tile.ok .rec-name" not in html
@@ -500,12 +485,12 @@ def test_kpi_series_is_server_computed_not_client_aggregated(html):
 
 
 def test_kpi_spend_tile_respects_framing(html):
-    # The Spend tile's value, sparkline, AND delta read on TOKEN volume when
-    # dollars are suppressed (subscription/local) — decided once from the server
-    # framing block, never re-derived. Volume tiles stay plan-independent.
-    assert "const spendSuppressed = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
-    assert "kpiSparkValues(resp, spendSuppressed ? 'tokens' : 'spend')" in html
-    assert "delta: spendSuppressed ? deltas.tokens : deltas.spend" in html
+    # The Spend tile reads the framed value from the server block (api → $,
+    # subscription → "% of cycle"), never raw $ for subscription. Its sparkline
+    # and delta track SPEND (cost_usd) — "% of cycle" is just spend rescaled, so
+    # the trend/shape match while the displayed number is never raw dollars.
+    assert "const spendVal = fmtFramedDollar(kpis.spend, framing)" in html
+    assert "series: kpiSparkValues(resp, 'spend'), delta: deltas.spend" in html
 
 
 # --- #228: shared series→color map + colored leaderboard ------------------- #
@@ -574,52 +559,75 @@ def test_overview_recoverable_tiles_deeplink_into_analytics(html):
     assert "const ANALYZER_ANALYTICS_SLICE = {" in html
     for analyzer in ("downsize", "cache", "script", "reuse", "trim"):
         assert f"{analyzer}:" in html  # each analyzer has a slice mapping
-    assert "function analyzerSliceHref(name, since)" in html
-    assert "const href = analyzerSliceHref(t.name, since);" in html
-    # the tiles no longer point at the Optimize finding screen
+    assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
+    # Dashboard tiles drill IN-PLACE (route='dashboard'), not to the Optimize screen.
+    assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
     assert "'#/optimize?finding=' + t.name" not in html
 
-
-def test_overview_spend_headline_deeplinks_into_analytics(html):
-    # The spend headline is an <a> deep-linking into Analytics spend-over-time.
-    assert "<a class=\"chart-title\" href=${analyticsHref({ metric: 'spend', group_by: 'day', chart: 'bar', since })}" in html
 
 
 def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
     # The deep-link helper builds #/analytics?... URLs (offline hash links, no
     # fetch) from a query object, dropping empty values.
-    assert "function analyticsHref(q)" in html
-    assert "return '#/analytics' + (s ? '?' + s : '');" in html
+    assert "function analyticsHref(q, route = 'analytics')" in html
+    assert "return '#/' + route + (s ? '?' + s : '');" in html
 
 
-def test_overview_remains_default_landing_no_render_time_redirect(html):
-    # #132 guard must hold: empty hash → Overview via getRoute, and there is no
-    # render-time location.hash assignment that would race the first render.
-    assert "(qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'overview'" in html
-    assert "location.hash = '#/overview'" not in html
 
-
-# --- merged Dashboard prototype (#/dashboard) — non-destructive ------------ #
-def test_dashboard_preview_route_registered(html):
-    # New, additive route + screen + sidebar nav item.
+def test_dashboard_is_default_landing(html):
+    # Empty hash → dashboard, set via the PARSED default (no render-time
+    # location.hash redirect — #132 discipline).
+    assert "|| 'dashboard'" in html
+    assert "|| 'overview'" not in html
+    assert "location.hash = '#/dashboard'" not in html  # no hash-assign redirect
     assert "function DashboardView" in html
     assert "case 'dashboard': return html`<${DashboardView}" in html
     assert 'href="#/dashboard"' in html
 
 
+def test_overview_retired(html):
+    # Standalone Overview screen + nav item gone; lingering #/overview links fall
+    # through to the Dashboard.
+    assert "function OverviewView" not in html
+    assert 'href="#/overview"' not in html
+    assert "case 'overview':\n    case 'dashboard'" in html
+
+
 def test_dashboard_embeds_analytics_explorer(html):
     # The hero composes the existing AnalyticsView (route rewired to dashboard,
-    # embedded) rather than reimplementing the pivot.
-    assert 'route="dashboard" embedded=${true}' in html
-    # AnalyticsView is parameterized but defaults preserve standalone behavior.
-    assert "function AnalyticsView({ params, route = 'analytics', embedded = false })" in html
+    # embedded, with the run-rate caption) — not a reimplemented pivot. Standalone
+    # #/analytics keeps working: the props are default-preserving.
+    assert 'route="dashboard" embedded=${true} kpiCaption=${kpiCaption}' in html
+    assert "function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null })" in html
+    # The full-screen explorer nav item stays.
+    assert 'href="#/analytics"' in html
 
 
-def test_overview_default_landing_unchanged(html):
-    # The prototype must NOT change the default landing (#132): empty hash still
-    # resolves to overview, and there is no render-time redirect to dashboard.
-    assert "|| 'overview'" in html
-    assert "location.hash = '#/dashboard'" not in html
-    # Overview screen + route remain intact for side-by-side comparison.
-    assert "function OverviewView" in html
-    assert "case 'overview': return html`<${OverviewView}" in html
+def test_dashboard_spend_deduped(html):
+    # Spend shown ONCE (explorer's Spend KPI tile + chart); the old separate
+    # run-rate headline chart is gone, folded into a caption under the KPI row.
+    assert "const kpiCaption = (!d.loading && !d.empty && !d.error && projection" in html
+    assert 'class="kpi-caption"' in html
+
+
+def test_kpi_tiles_clickable_select_metric(html):
+    # #247: tiles are the metric selector — onSelect writes the metric to the URL.
+    assert "onSelect=${() => onMetric(t.key)}" in html
+    assert "const onMetric = (k) => setFilter('metric', k)" in html
+    assert "kpi-clickable" in html
+
+
+def test_spend_tile_distinct_under_subscription(html):
+    # #247: the Spend tile no longer falls back to raw tokens (which duplicated
+    # the Tokens tile). It uses the framed value (% of cycle) and is dropped when
+    # no distinct value exists.
+    assert "const spendVal = fmtFramedDollar(kpis.spend, framing)" in html
+    assert "if (spendVal !== '—')" in html
+    assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
+
+
+def test_dashboard_triage_drills_in_place(html):
+    # Recoverable-waste tiles update the embedded explorer via #/dashboard URL
+    # state (not a jump to standalone #/analytics).
+    assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
+    assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
