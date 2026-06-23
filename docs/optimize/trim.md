@@ -25,7 +25,7 @@ base install:
 pipx install 'tokenjam[bloat]'
 ```
 
-The base `pip install tokenjam` does NOT pull torch. Trim shows up in
+The base install (`pipx install tokenjam`) does NOT pull torch. Trim shows up in
 `tj optimize` analyzer choices regardless, but running it without the
 extra prints a clear install hint and exits.
 
