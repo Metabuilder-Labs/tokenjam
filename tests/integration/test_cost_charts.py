@@ -18,7 +18,7 @@ from tokenjam.core.config import ProviderBudget, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.utils.time_parse import utcnow
-from tests.factories import make_llm_span, make_session
+from tests.factories import make_llm_span, make_session, make_tool_span
 
 
 def _app(db, config):
@@ -104,4 +104,95 @@ async def test_cost_cache_empty_window_is_safe():
         d = (await c.get("/api/v1/cost/cache?since=7d")).json()
     assert d["series"] == []
     assert d["total_captured_usd"] == 0
+    assert "framing" in d
+
+
+# --- #211: cost-by-component + recoverable-waste overlay ------------------- #
+def _seed_downsize_and_cache(db, plan_tier="api"):
+    """Small Opus sessions (downsize candidate) with cache tokens (cache
+    recoverable) + tool spans, so build_report yields multiple recoverables."""
+    now = utcnow()
+    for i in range(6):
+        s = make_session(session_id=f"s{i}", plan_tier=plan_tier, agent_id="cc")
+        db.upsert_session(s)
+        llm = make_llm_span(
+            session_id=f"s{i}", agent_id="cc", model="claude-opus-4-7",
+            provider="anthropic", input_tokens=1200, output_tokens=200,
+            cache_tokens=3000, cache_write_tokens=800, cost_usd=0.05,
+            start_time=now - timedelta(days=i),
+        )
+        db.insert_span(llm)
+        for _ in range(2):
+            t = make_tool_span(agent_id="cc", tool_name="Read", trace_id=llm.trace_id)
+            t.session_id = f"s{i}"
+            t.start_time = now - timedelta(days=i)
+            db.insert_span(t)
+
+
+@pytest.mark.asyncio
+async def test_components_split_priced_per_component():
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed_downsize_and_cache(db)
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost/components?since=30d")).json()
+    keys = [c["key"] for c in d["components"]]
+    assert keys == ["input", "output", "cache_read", "cache_write"]
+    by = {c["key"]: c for c in d["components"]}
+    # Opus 4.7 input rate; 6 × 1200 = 7200 input tokens. Cost must be > 0 and
+    # token volume exact.
+    assert by["input"]["tokens"] == 7200
+    assert by["cache_read"]["tokens"] == 18000
+    assert by["input"]["cost_usd"] > 0
+    assert d["framing"]["pricing_mode"] == "api"
+
+
+@pytest.mark.asyncio
+async def test_components_recoverable_is_registry_driven_and_honest():
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed_downsize_and_cache(db)
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost/components?since=30d")).json()
+    rec = {r["analyzer"]: r for r in d["recoverable"]}
+    # downsize is the typed slot; reuse comes from the findings dict — its
+    # presence proves the collector is registry-driven (not a hard-coded list).
+    assert "downsize" in rec
+    assert "reuse" in rec
+    # each carries a component attribution
+    assert rec["downsize"]["component"] == "call"
+    assert rec["cache"]["component"] == "input" if "cache" in rec else True
+    # downsize keeps its mandatory caveat verbatim (Rule 14)
+    from tokenjam.core.optimize.types import MODEL_DOWNGRADE_CAVEAT
+    assert rec["downsize"]["caveat"] == MODEL_DOWNGRADE_CAVEAT
+    # honesty: the payload never calls recoverable "saved"
+    import json
+    assert "saved" not in json.dumps(d).lower()
+    assert d["total_recoverable_usd"] > 0
+
+
+@pytest.mark.asyncio
+async def test_components_subscription_framing_suppresses_dollars():
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1", budgets={"anthropic": ProviderBudget(plan="max_20x")})
+    _seed_downsize_and_cache(db, plan_tier="max_20x")
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost/components?since=30d")).json()
+    assert d["framing"]["pricing_mode"] == "subscription"
+    # token volumes stay present so the UI can render the tokens framing
+    assert sum(c["tokens"] for c in d["components"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_components_empty_window_is_safe():
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost/components?since=7d")).json()
+    assert d["total_cost_usd"] == 0
+    assert d["recoverable"] == []
     assert "framing" in d

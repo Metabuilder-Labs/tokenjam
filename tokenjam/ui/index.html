@@ -546,6 +546,12 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .trend-chip { font-family: 'Geist Mono', monospace; font-size: 12px; }
 .chart-foot { margin-top: 10px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
 .chart-foot .dim { color: var(--text-faint); }
+/* Per-analyzer recoverable-waste list under the #211 component chart. */
+.waste-list { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
+.waste-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; }
+.waste-name { font-family: 'Geist Mono', monospace; }
+.waste-rec { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.waste-caveat { font-size: 11px; color: var(--text-faint); margin: 0 0 6px; max-width: 70ch; }
 .drill-link { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; white-space: nowrap; }
 .drill-link:hover { text-decoration: underline; }
 /* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
@@ -1172,6 +1178,122 @@ function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axis
     return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
   }, [cache, hit, env, height, bucket]);
   return html`<div class="chart" ref=${ref}></div>`;
+}
+
+// Cost-by-component + recoverable-waste overlay (#211, the differentiator).
+// TWO ordinal columns: "Cost" stacked by the four token components (measured
+// spend) and "Recoverable (est.)" stacked by analyzer (estimated waste). They
+// are SEPARATE bars — recoverable is never subtracted from cost and never
+// called "saved" (Critical Rule 14). `costSegs` = [{label,value,color}],
+// `recSegs` = [{title,value,...}] already framed ($ or tokens) by the caller.
+// Stacking reuses the back-to-front cumulative-bars trick; each series is
+// non-zero in only ONE column, so per-column stacks stay independent.
+function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.uPlot) return;
+    const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+    const grid = cssVar('--border') || '#1f1f1f';
+    const tick = cssVar('--text-dim') || '#a1a1a1';
+    const width = ref.current.clientWidth || 600;
+    const xs = [0, 1];                          // Cost | Recoverable (est.)
+    // Per-column cumulative (within-column) so the back-to-front bars stack
+    // independently; 0 in the other column → invisible there.
+    const series = [{}];
+    const cols = [];                            // data columns (cumulative)
+    const meta = [];                            // {label, color, raw, col}
+    let accC = 0;
+    costSegs.forEach((s, i) => {
+      accC += (s.value || 0);
+      cols.push([accC, 0]);
+      meta.push({ label: s.label, color: s.color || palette[i % palette.length], raw: s.value || 0, col: 0 });
+    });
+    let accR = 0;
+    recSegs.forEach((s, i) => {
+      accR += (s.value || 0);
+      cols.push([0, accR]);
+      meta.push({ label: s.title, color: palette[(costSegs.length + i) % palette.length], raw: s.value || 0, col: 1 });
+    });
+    // Draw tallest cumulative first (within each column) so shorter bars paint
+    // on top. Sort indices by cumulative descending; cross-column order is moot.
+    const order = meta.map((_, i) => i).sort((a, b) => {
+      const ca = cols[a][meta[a].col], cb = cols[b][meta[b].col];
+      return cb - ca;
+    });
+    const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
+      ? window.uPlot.paths.bars({ size: [0.5, 80] }) : undefined;
+    const chartData = [xs, ...order.map(k => cols[k])];
+    order.forEach(k => {
+      series.push({ label: meta[k].label, stroke: meta[k].color, fill: meta[k].color,
+        width: 0, paths: barsPath, points: { show: false },
+        value: (u, v) => (v == null ? '-' : fmtY(v)) });
+    });
+    const opts = {
+      width, height, legend: { show: false },
+      cursor: { x: false, y: false, points: { show: false } },
+      plugins: [componentWasteTooltip(meta, fmtY)],
+      scales: { x: { time: false, range: [-0.5, 1.5] } },
+      axes: [
+        { stroke: tick, grid: { show: false }, ticks: { stroke: grid },
+          splits: [0, 1], values: () => ['Cost', 'Recoverable (est.)'] },
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
+          size: 60, values: (u, vals) => vals.map(v => fmtY(v)) },
+      ],
+      series,
+    };
+    const plot = new window.uPlot(opts, chartData, ref.current);
+    const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
+  }, [costSegs, recSegs, height]);
+  return html`<div class="chart" ref=${ref}></div>`;
+}
+
+// Tooltip for the component-waste chart: lists the segments of the hovered
+// column with their raw (un-cumulated) framed values.
+function componentWasteTooltip(meta, fmtFn) {
+  let tip;
+  return { hooks: {
+    init: (u) => {
+      tip = document.createElement('div'); tip.className = 'u-tip'; tip.style.display = 'none';
+      u.over.appendChild(tip);
+      u.over.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+    },
+    setCursor: (u) => {
+      const idx = u.cursor.idx;
+      if (idx == null) { tip.style.display = 'none'; return; }
+      const col = u.data[0][idx];               // 0 = Cost, 1 = Recoverable
+      const title = col === 0 ? 'Cost by component' : 'Estimated recoverable';
+      let rows = '';
+      meta.forEach(m => {
+        if (m.col !== col || !m.raw) return;
+        rows += `<div class="u-tip-row"><span class="u-tip-dot" style="background:${m.color}"></span>${m.label}: ${fmtFn(m.raw)}</div>`;
+      });
+      tip.innerHTML = `<div class="u-tip-date">${title}</div>${rows || '<div class="u-tip-row">—</div>'}`;
+      tip.style.display = 'block';
+      tip.style.left = u.cursor.left + 'px'; tip.style.top = u.cursor.top + 'px';
+    },
+  } };
+}
+
+// Build the cost-by-component + recoverable overlay from a /cost/components
+// response. `useTokens` (subscription/local) swaps measured cost $ → token
+// volume and recoverable $ → recoverable tokens, so the whole surface respects
+// plan-tier framing. Returns null when there's nothing to show.
+function buildComponentWaste(resp, useTokens) {
+  if (!resp || !resp.components) return null;
+  const costSegs = resp.components.map(c => ({
+    label: c.label, value: useTokens ? (c.tokens || 0) : (c.cost_usd || 0),
+  }));
+  const recSegs = (resp.recoverable || []).map(r => ({
+    title: r.title, component: r.component,
+    value: useTokens ? (r.estimated_recoverable_tokens || 0) : (r.estimated_recoverable_usd || 0),
+    usd: r.estimated_recoverable_usd, tokens: r.estimated_recoverable_tokens,
+    basis: r.estimate_basis || '', caveat: r.caveat || '',
+  })).filter(r => r.value > 0);
+  const totalCost = costSegs.reduce((s, c) => s + c.value, 0);
+  if (totalCost <= 0 && recSegs.length === 0) return null;
+  return { costSegs, recSegs };
 }
 
 // ============================
@@ -2475,7 +2597,7 @@ function OptimizeView({ params }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -2483,7 +2605,10 @@ function OptimizeView({ params }) {
       const opt = await api('/optimize', { since, agent_id: agentId || undefined });
       let cmp = null;
       if (compare) cmp = await api('/cost/compare', { since, compare, agent_id: agentId || undefined }).catch(() => null);
-      setSt({ loading: false, error: null, opt, cmp });
+      // Cost-by-component + recoverable-waste overlay (#211). Best-effort: a
+      // failure must not blank the Optimize screen.
+      const comp = await api('/cost/components', { since, agent_id: agentId || undefined }).catch(() => null);
+      setSt({ loading: false, error: null, opt, cmp, comp });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
@@ -2498,6 +2623,10 @@ function OptimizeView({ params }) {
 
   const framing = st.opt ? st.opt.framing : null;
   const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim'];
+  const compFraming = st.comp ? st.comp.framing : framing;
+  const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
+  const waste = buildComponentWaste(st.comp, useTokens);
+  const wasteFmtY = useTokens ? fmtTokens : fmtCost;
 
   return html`
     <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -2524,6 +2653,29 @@ function OptimizeView({ params }) {
 
     ${!st.loading && st.opt ? html`
       ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+      ${waste ? html`
+        <div class="chart-card">
+          <div class="chart-head">
+            <div class="chart-title">Cost by component + recoverable waste ${useTokens ? '(tokens)' : ''}</div>
+            <div class="chart-meta">
+              <span class="chart-total">${useTokens ? (fmtTokens(st.comp.total_tokens || 0) + ' tokens') : fmtFramedDollar(st.comp.total_cost_usd || 0, compFraming)}</span>
+            </div>
+          </div>
+          <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} height=${220} />
+          <div class="chart-foot">
+            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>estimated recoverable</b> waste, stacked by analyzer — a heuristic estimate to review before acting, not a realized cost reduction.</span>
+          </div>
+          ${waste.recSegs.length ? html`
+            <div class="waste-list">
+              ${waste.recSegs.map(r => html`
+                <div class="waste-row">
+                  <span class="waste-name">${r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
+                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)} <span class="estimated-tag" title=${r.caveat || r.basis}>estimated recoverable</span></span>
+                </div>
+                ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
+              `)}
+            </div>` : html`<div class="chart-foot"><span class="dim">No recoverable waste estimated in this window.</span></div>`}
+        </div>` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}

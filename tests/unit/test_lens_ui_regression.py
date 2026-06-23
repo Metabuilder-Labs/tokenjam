@@ -330,3 +330,56 @@ def test_cache_savings_chart_is_best_effort(html):
     # A failing /cost/cache must not blank the cost screen.
     assert "cacheResp = await api('/cost/cache'" in html
     assert "} catch (_) { cacheResp = null; }" in html
+
+
+# --- #211: cost-by-component + recoverable-waste overlay ------------------- #
+def _component_waste_card(html: str) -> str:
+    """Extract the #211 chart card markup so honesty asserts are scoped to it."""
+    start = html.index("Cost by component + recoverable waste")
+    return html[start:start + 1800]
+
+
+def test_component_waste_chart_present(html):
+    assert "function ComponentWasteChart" in html
+    assert "function buildComponentWaste" in html
+    assert "function componentWasteTooltip" in html
+    assert "${ComponentWasteChart}" in html
+    assert "uPlot.paths.bars" in html  # uPlot stacked bars, not a new lib
+
+
+def test_component_waste_fetches_dedicated_endpoint(html):
+    assert "/cost/components" in html
+    # best-effort: a failed fetch must not blank the Optimize screen
+    assert "api('/cost/components'" in html
+    assert ".catch(() => null)" in html
+
+
+def test_component_waste_is_registry_driven(html):
+    # The overlay is built from the response's `recoverable` list (server-side
+    # registry iteration), not a hard-coded analyzer array in the UI.
+    assert "resp.recoverable" in html
+    # no hard-coded per-analyzer overlay list like ['downsize','cache',...] in
+    # buildComponentWaste — it maps over whatever the server returned
+    card = html[html.index("function buildComponentWaste"):html.index("function buildComponentWaste") + 700]
+    assert "resp.recoverable" in card
+    assert "['downsize'" not in card
+
+
+def test_component_waste_honesty_estimated_not_saved(html):
+    card = _component_waste_card(html)
+    # Positive honesty language present…
+    assert "estimated recoverable" in card.lower()
+    assert "not a realized cost reduction" in card
+    # …and the word "saved" never appears on THIS surface (Rule 14).
+    assert "saved" not in card.lower()
+    assert "savings you got" not in card.lower()
+
+
+def test_component_waste_recoverable_routes_through_framing(html):
+    # Per-analyzer recoverable must reframe (subscription/local → token-share),
+    # mirroring the existing recoverable band — not raw fmtCost.
+    assert "fmtFramedSavings(r.usd, r.tokens, compFraming)" in html
+    # the measured-cost total uses the dollar framing helper, not raw fmtCost
+    assert "fmtFramedDollar(st.comp.total_cost_usd" in html
+    # plan-tier toggle drives tokens-vs-dollars for the whole surface
+    assert "compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local'" in html

@@ -194,6 +194,171 @@ def _cache_series(conn, agent_id, since_dt, until_dt) -> dict:
     return out
 
 
+# Component a given analyzer's recoverable savings primarily acts on. "call"
+# means whole-call (a model swap or call elimination), NOT a single token
+# component — used for analyzers whose savings can't be honestly pinned to one
+# component (downsize / script / reuse). New analyzers default to "call", so the
+# overlay stays registry-driven (#211).
+_ANALYZER_COMPONENT = {
+    "cache": "input",     # raising cache efficacy shrinks the input component
+    "trim": "input",      # trims low-significance input/prompt tokens
+    "downsize": "call",   # whole-call model swap
+    "script": "call",     # eliminates whole deterministic calls
+    "reuse": "call",      # eliminates whole repeated-planning calls
+}
+_ANALYZER_TITLE = {
+    "downsize": "Downsize", "cache": "Cache", "script": "Script",
+    "trim": "Trim", "reuse": "Reuse",
+}
+
+_COMPONENT_LABELS = [
+    ("input", "Input"),
+    ("output", "Output"),
+    ("cache_read", "Cache read"),
+    ("cache_write", "Cache write"),
+]
+
+
+def _component_costs(conn, agent_id, since_dt, until_dt) -> dict:
+    """Split the window's spend into the four token components (#211).
+
+    Computes each component's cost per (provider, model) via the pricing table
+    so the split is exact rather than apportioned from the aggregate cost_usd.
+    Returns the four components with both cost and token volume (the UI shows
+    tokens for subscription/local framing where dollars are suppressed).
+    """
+    from tokenjam.core.pricing import get_rates
+
+    comp = {k: {"cost_usd": 0.0, "tokens": 0} for k, _ in _COMPONENT_LABELS}
+    if conn is None:
+        return comp
+    clauses = ["model IS NOT NULL"]
+    params: list = []
+    if agent_id:
+        params.append(agent_id)
+        clauses.append("agent_id = $" + str(len(params)))
+    if since_dt is not None:
+        params.append(since_dt)
+        clauses.append("start_time >= $" + str(len(params)))
+    if until_dt is not None:
+        params.append(until_dt)
+        clauses.append("start_time <= $" + str(len(params)))
+    where = " AND ".join(clauses)
+    sql = (
+        "SELECT provider, model, COALESCE(SUM(input_tokens), 0), "
+        "COALESCE(SUM(output_tokens), 0), COALESCE(SUM(cache_tokens), 0), "
+        "COALESCE(SUM(cache_write_tokens), 0) "
+        "FROM spans WHERE " + where + " GROUP BY provider, model"
+    )
+    for provider, model, in_t, out_t, cr_t, cw_t in conn.execute(sql, params).fetchall():
+        in_t, out_t, cr_t, cw_t = int(in_t or 0), int(out_t or 0), int(cr_t or 0), int(cw_t or 0)
+        comp["input"]["tokens"] += in_t
+        comp["output"]["tokens"] += out_t
+        comp["cache_read"]["tokens"] += cr_t
+        comp["cache_write"]["tokens"] += cw_t
+        rates = get_rates(provider, model) if model else None
+        if rates is None:
+            continue
+        comp["input"]["cost_usd"] += in_t * rates.input_per_mtok / 1_000_000.0
+        comp["output"]["cost_usd"] += out_t * rates.output_per_mtok / 1_000_000.0
+        comp["cache_read"]["cost_usd"] += cr_t * rates.cache_read_per_mtok / 1_000_000.0
+        comp["cache_write"]["cost_usd"] += cw_t * rates.cache_write_per_mtok / 1_000_000.0
+    return comp
+
+
+def _collect_recoverable(report) -> list[dict]:
+    """Registry-driven per-analyzer recoverable list (#211 overlay).
+
+    Iterates the typed downgrade slot + every wave-2 finding carrying the #111
+    recoverable contract field, so a new analyzer appears with no code change
+    here. Each entry keeps the analyzer's own caveat + estimate_basis verbatim
+    (Rule 14) and the component its savings act on. Only positive estimates are
+    surfaced (a None/0 estimate is "nothing to recover", not an overlay bar)."""
+    out: list[dict] = []
+
+    def add(name: str, finding) -> None:
+        if finding is None:
+            return
+        usd = getattr(finding, "estimated_recoverable_usd", None)
+        tok = getattr(finding, "estimated_recoverable_tokens", None)
+        if not ((usd is not None and usd > 0) or (tok is not None and tok > 0)):
+            return
+        out.append({
+            "analyzer": name,
+            "title": _ANALYZER_TITLE.get(name, name.replace("-", " ").title()),
+            "component": _ANALYZER_COMPONENT.get(name, "call"),
+            "estimated_recoverable_usd": usd,
+            "estimated_recoverable_tokens": tok,
+            "estimate_basis": getattr(finding, "estimate_basis", "") or "",
+            "caveat": getattr(finding, "caveat", "") or "",
+        })
+
+    add("downsize", getattr(report, "downgrade", None))
+    for name, finding in (getattr(report, "findings", None) or {}).items():
+        if name == "downsize":
+            continue
+        if hasattr(finding, "estimated_recoverable_usd"):
+            add(name, finding)
+    return out
+
+
+@router.get("/cost/components")
+async def get_cost_components(
+    request: Request,
+    agent_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict:
+    """Cost-by-component split + per-analyzer recoverable-waste overlay (#211).
+
+    The component bars are MEASURED spend split into input / output / cache-read
+    / cache-write. The overlay is each analyzer's *estimated recoverable* waste —
+    registry-driven, carrying the analyzer's own caveat verbatim. "Estimated
+    recoverable" is never conflated with the measured cost and never called
+    "saved" (Critical Rule 14). Every figure routes through the framing block so
+    subscription/local users see token-share, not raw dollars."""
+    db = request.app.state.db
+    config = request.app.state.config
+    since_dt = parse_since(since) if since else None
+    until_dt = parse_since(until) if until else None
+    conn = getattr(db, "conn", None)
+
+    comp = _component_costs(conn, agent_id, since_dt, until_dt)
+    components = [
+        {"key": key, "label": label,
+         "cost_usd": round(comp[key]["cost_usd"], 8), "tokens": comp[key]["tokens"]}
+        for key, label in _COMPONENT_LABELS
+    ]
+    total_cost = sum(c["cost_usd"] for c in components)
+    total_tokens = sum(c["tokens"] for c in components)
+
+    recoverable: list[dict] = []
+    if conn is not None:
+        try:
+            from tokenjam.core.optimize import build_report
+            report = build_report(
+                db=db, config=config,
+                since=since_dt or utcnow(), until=until_dt or utcnow(),
+                agent_id=agent_id,
+            )
+            recoverable = _collect_recoverable(report)
+        except Exception:
+            recoverable = []
+
+    total_rec_usd = sum(r["estimated_recoverable_usd"] or 0.0 for r in recoverable)
+    total_rec_tokens = sum(r["estimated_recoverable_tokens"] or 0 for r in recoverable)
+
+    return {
+        "components": components,
+        "total_cost_usd": round(total_cost, 8),
+        "total_tokens": total_tokens,
+        "recoverable": recoverable,
+        "total_recoverable_usd": round(total_rec_usd, 8),
+        "total_recoverable_tokens": total_rec_tokens,
+        "framing": _framing_block(db, config, agent_id, total_cost, total_tokens),
+    }
+
+
 @router.get("/cost/cache")
 async def get_cost_cache(
     request: Request,
