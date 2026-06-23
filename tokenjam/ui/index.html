@@ -439,6 +439,29 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .wf-bar.tool { background: var(--warn); color: var(--bg); }
 .wf-bar.other { background: var(--text-dim); }
 
+/* Cost-annotated waterfall (#215): trace cost summary + a per-span cost/token
+   annotation column with a magnitude bar so the timeline reads cost-first. */
+.wf-summary {
+  display: flex; gap: 18px; flex-wrap: wrap;
+  margin: 0 0 14px; padding: 10px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim);
+}
+.wf-summary b { color: var(--text); font-weight: 600; }
+.wf-head { display: flex; align-items: center; font-size: 10px; color: var(--text-faint);
+  font-family: 'Geist Mono', monospace; text-transform: uppercase; letter-spacing: 0.04em;
+  margin-bottom: 4px; }
+.wf-head .wf-cost { color: var(--text-faint); }
+.wf-cost {
+  flex-shrink: 0; width: 156px; display: flex; align-items: center; gap: 8px;
+  padding-left: 12px; font-family: 'Geist Mono', monospace; font-size: 11px;
+}
+.wf-cost-bar { width: 34px; height: 8px; background: var(--border); border-radius: 2px;
+  overflow: hidden; flex-shrink: 0; }
+.wf-cost-fill { display: block; height: 100%; background: var(--accent); }
+.wf-cost-val { color: var(--text); min-width: 50px; text-align: right; }
+.wf-cost-tok { color: var(--text-dim); min-width: 46px; text-align: right; }
+
 /* Span detail */
 .span-detail {
   background: var(--surface);
@@ -1510,6 +1533,18 @@ function TraceDetailView({ traceId }) {
   const rows = flatten(roots, 0);
   const labelW = 100;
 
+  // Cost-first annotation (#215). Plan-tier framing: when dollars are suppressed
+  // (subscription/local), the magnitude bar + summary read on TOKEN volume, never
+  // raw spend — the suppression decision comes from the server framing block, not
+  // re-derived here. Tokens are never suppressed, so they always annotate.
+  const spanTokens = s => (s.input_tokens || 0) + (s.output_tokens || 0) + (s.cache_tokens || 0) + (s.cache_write_tokens || 0);
+  const wfUseTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0);
+  const wfMaxMag = Math.max(0, ...rows.map(r => wfMagOf(r.span)));
+  const wfTotalCost = spans.reduce((a, s) => a + (s.cost_usd || 0), 0);
+  const wfTotalTokens = spans.reduce((a, s) => a + spanTokens(s), 0);
+  const wfTotalCostFramed = fmtFramedDollar(wfTotalCost, framing);
+
   const sel = selected ? spans.find(s => s.span_id === selected) : null;
 
   // Determine agent name from root span
@@ -1520,6 +1555,17 @@ function TraceDetailView({ traceId }) {
     <button class="btn btn-back" onClick=${() => location.hash = '#/traces'}>\u2190 Back to traces</button>
     <div class="page-title">Trace details for ${agentName}</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">Click a span for details</div>
+    <div class="wf-summary">
+      <span>Total cost <b>${wfTotalCostFramed}</b></span>
+      <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
+      <span>Duration <b>${fmtDur(traceDur)}</b></span>
+      <span><b>${spans.length}</b> spans</span>
+    </div>
+    <div class="wf-head">
+      <div class="wf-label" style="width:${labelW}px;padding-left:8px">Span</div>
+      <div class="wf-track">Timeline</div>
+      <div class="wf-cost">Cost / tokens</div>
+    </div>
     <div class="waterfall">
       ${rows.map(({ span: s, depth }) => {
         const st = new Date(s.start_time).getTime() - traceStart;
@@ -1533,10 +1579,14 @@ function TraceDetailView({ traceId }) {
         // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local \u2192 "\u2014"
         // (suppressed; omitted from the compact bar label), api/unknown \u2192 "$X".
         const costFramed = fmtFramedDollar(s.cost_usd, framing);
-        const costStr = s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014' ? ' \u2014 ' + costFramed : '';
+        // Cost now lives in the dedicated annotation column (#215); the bar label
+        // stays focused on what/how-long so the two reads don't compete.
         const barLabel = isAgent
-          ? fmtDur(s.duration_ms) + costStr
-          : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms) + costStr;
+          ? fmtDur(s.duration_ms)
+          : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms);
+        const sTok = spanTokens(s);
+        const costShown = s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
+        const wfFrac = wfMaxMag > 0 ? (wfMagOf(s) / wfMaxMag * 100) : 0;
         const tipLines = [friendly];
         tipLines.push('Duration: ' + fmtDur(s.duration_ms));
         if (s.provider) tipLines.push('Provider: ' + s.provider);
@@ -1556,6 +1606,11 @@ function TraceDetailView({ traceId }) {
                 <div class="wf-bar ${kind}" style="width:100%">${barLabel}</div>
                 <div class="wf-tip">${tooltip}</div>
               </div>
+            </div>
+            <div class="wf-cost">
+              <div class="wf-cost-bar"><div class="wf-cost-fill" style="width:${wfFrac.toFixed(1)}%"></div></div>
+              <span class="wf-cost-val">${costShown ? costFramed : ''}</span>
+              <span class="wf-cost-tok">${sTok ? fmtTokens(sTok) : ''}</span>
             </div>
           </div>
         `;
