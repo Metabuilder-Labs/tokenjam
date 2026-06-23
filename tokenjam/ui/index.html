@@ -625,6 +625,10 @@ a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .trend-chip { font-family: 'Geist Mono', monospace; font-size: 12px; }
 .chart-foot { margin-top: 10px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
 .chart-foot .dim { color: var(--text-faint); }
+/* Cache-savings headline (#246): lead with the answer above the bars. */
+.cache-headline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; font-family: 'Geist Mono', monospace; font-size: 14px; color: var(--text); }
+.cache-headline b { font-weight: 600; font-size: 18px; }
+.cache-sep { color: var(--text-faint); }
 /* Per-analyzer recoverable-waste list under the #211 component chart. */
 .waste-list { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
 .waste-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; }
@@ -1276,36 +1280,30 @@ function StackedBarChart({ data, labels = [], height = 200, fmtY = fmtCost, axis
 
 // Cache-savings chart (#212): cumulative CAPTURED savings (measured, area, left
 // axis) + per-bucket cache HIT-RATE (%, right axis). An optional dashed
-// "achievable" envelope = cumulative captured + estimated recoverable shows the
-// gap the cache analyzer says is still on the table — framed as "estimated
-// recoverable", never "saved" (Critical Rule 14). Plan-tier framing: captured
-// is rendered in tokens for subscription/local (dollars suppressed).
-function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
+// Per-period cache-savings bar chart (#246). ONE metric (savings) on ONE
+// y-axis — the old dual-axis (tokens left / hit-rate % right) + cumulative ramp
+// + recoverable overlay are gone; hit-rate now lives in the headline stat, not
+// an overlaid line. `data` = [xs, savingsPerBucket]. Bars via the vendored
+// uPlot. The y-axis is sized generously (size 70 + gap) so labels never clip
+// (the old "000.0M" leading-digit clip). Plan-tier framing: the caller passes
+// token-volume + token formatters for subscription/local (no raw $).
+function CacheSavingsChart({ data, height = 180, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
   const ref = useRef(null);
   useEffect(() => {
-    if (!ref.current || !window.uPlot || !cache || !cache[0] || cache[0].length === 0) return;
+    if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
     const grid = cssVar('--border') || '#1f1f1f';
     const tick = cssVar('--text-dim') || '#a1a1a1';
-    const c1 = cssVar('--chart-1') || '#3d8eff';
-    const c2 = cssVar('--chart-2') || '#22c55e';
+    const c = cssVar('--chart-2') || '#0ce490';   // green = savings
     const width = ref.current.clientWidth || 600;
     const axisFmt = axisFmtY || fmtY;
-    const xs = cache[0];
-    const chartData = [xs, cache[1], hit, env || xs.map(() => null)];
-    const series = [
-      {},
-      { label: 'Captured', stroke: c1, width: 2, fill: c1 + '22',
-        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
-      { label: 'Hit-rate', stroke: c2, width: 2, scale: 'rate', dash: [],
-        points: { show: false }, value: (u, v) => (v == null ? '-' : v.toFixed(0) + '%') },
-      { label: 'Recoverable (est.)', stroke: tick, width: 1, dash: [6, 4], _isRunRate: true,
-        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
-    ];
+    const xs = data[0];
+    const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
+      ? window.uPlot.paths.bars({ size: [0.7, Infinity] }) : undefined;
     const opts = {
-      width, height, legend: { show: true },
-      cursor: { y: false, focus: { prox: 16 }, points: { size: 5 } },
+      width, height, legend: { show: false },
+      cursor: { y: false, focus: { prox: 16 }, points: { show: false } },
       plugins: [chartTooltipPlugin(fmtY)],
-      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] }, rate: { range: [0, 100] } },
+      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] } },
       axes: [
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, space: 70,
           incrs: bucket === 'hour'
@@ -1313,17 +1311,19 @@ function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axis
             : [86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400],
           values: (u, splits) => splits.map(s => fmtAxisTime(s, bucket)) },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
-          size: 60, values: (u, vals) => vals.map(v => axisFmt(v)) },
-        { scale: 'rate', side: 1, stroke: tick, grid: { show: false },
-          size: 50, values: (u, vals) => vals.map(v => v + '%') },
+          size: 70, gap: 6, values: (u, vals) => vals.map(v => axisFmt(v)) },
       ],
-      series,
+      series: [
+        {},
+        { label: 'Saved', stroke: c, fill: c + '66', width: 0, paths: barsPath,
+          points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
+      ],
     };
-    const plot = new window.uPlot(opts, chartData, ref.current);
+    const plot = new window.uPlot(opts, data, ref.current);
     const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
     window.addEventListener('resize', onResize);
     return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
-  }, [cache, hit, env, height, bucket]);
+  }, [data, height, bucket]);
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
@@ -2039,30 +2039,29 @@ function _windowGrid(resp) {
   return { xs, idx, step, bucket, coarsened, reqBucket };
 }
 
-// Build the cache-savings chart series (#212) from a /cost/cache response.
-// `useTokens` swaps captured dollars for captured tokens (subscription/local
-// framing). Returns cumulative captured, per-bucket hit-rate (%), and an
-// "achievable" envelope = cumulative captured + estimated recoverable (or null
-// when the analyzer surfaced nothing). Hit-rate is a token ratio, always shown.
+// Build the redesigned cache-savings view (#246) from a /cost/cache response.
+// Leads with the answer instead of three overlaid series: PER-PERIOD savings
+// bars are the one chart (not a cumulative ramp), the overall hit-rate is a
+// headline stat (+ a tiny sparkline for trend, NOT an overlaid axis line), and
+// the "recoverable (est.)" overlay is gone (noise here; it lives on Optimize).
+// `useTokens` (subscription/local) swaps captured $ for cached-token volume.
 function buildCacheSeries(resp, useTokens) {
   const grid = _windowGrid(resp); if (!grid) return null;
   const { xs, idx, step, bucket } = grid;
   const rows = (resp && resp.series) || [];
-  const cap = xs.map(() => 0), read = xs.map(() => 0), inp = xs.map(() => 0);
+  const sav = xs.map(() => 0), read = xs.map(() => 0), inp = xs.map(() => 0);
   rows.forEach(r => {
     const b = Math.floor(r.bucket / step) * step; if (!(b in idx)) return;
     const i = idx[b];
-    cap[i] += useTokens ? (r.captured_tokens || 0) : (r.captured_usd || 0);
+    sav[i] += useTokens ? (r.captured_tokens || 0) : (r.captured_usd || 0);
     read[i] += r.cache_read_tokens || 0; inp[i] += r.input_tokens || 0;
   });
-  const cum = xs.map(() => 0); let acc = 0;
-  for (let i = 0; i < xs.length; i++) { acc += cap[i]; cum[i] = acc; }
-  const hit = xs.map((_, i) => { const d = read[i] + inp[i]; return d > 0 ? (100 * read[i] / d) : 0; });
-  const recoverable = useTokens
-    ? (resp.estimated_recoverable_tokens || 0)
-    : (resp.estimated_recoverable_usd || 0);
-  const env = recoverable > 0 ? cum.map(v => v + recoverable) : null;
-  return { data: [xs, cum], hit, env, recoverable, bucket, coarsened: grid.coarsened };
+  // Per-bucket hit-rate feeds the small sparkline; the headline stat is the
+  // overall window ratio (cached reads / all input reads).
+  const hitSpark = xs.map((_, i) => { const d = read[i] + inp[i]; return d > 0 ? (100 * read[i] / d) : 0; });
+  const totRead = read.reduce((a, b) => a + b, 0), totInp = inp.reduce((a, b) => a + b, 0);
+  const hitRate = (totRead + totInp) > 0 ? (100 * totRead / (totRead + totInp)) : 0;
+  return { data: [xs, sav], hitSpark, hitRate, bucket, coarsened: grid.coarsened };
 }
 
 function CostView({ params }) {
@@ -2184,19 +2183,24 @@ function CostView({ params }) {
 
     ${!error && cacheSeries ? html`
       <div class="chart-card">
-        <div class="chart-head">
-          <div class="chart-title">Cache savings over time</div>
-          <div class="chart-meta">
-            <span class="chart-total">${useTokens ? (fmtTokens(cacheResp.total_captured_tokens || 0) + ' tokens captured') : (fmtCost(cacheResp.total_captured_usd || 0) + ' captured')}</span>
-          </div>
+        <div class="chart-title">Caching</div>
+        <!-- Lead with the answer (#246): hit-rate + savings this window, framed.
+             Subscription/local show cached-token volume (never raw $). -->
+        <div class="cache-headline">
+          <span class="cache-stat"><b>${cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate</span>
+          <${Sparkline} values=${cacheSeries.hitSpark} color="var(--chart-2)" width=${72} height=${22} />
+          <span class="cache-sep">·</span>
+          <span class="cache-stat">${useTokens
+            ? html`<b>${fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window`
+            : html`~<b>${fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window`}</span>
         </div>
-        ${loading ? html`<div class="shimmer" style="height:200px"></div>` : html`
-          <${CacheSavingsChart} cache=${cacheSeries.data} hit=${cacheSeries.hit} env=${cacheSeries.env}
-            height=${200} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd}
+        ${loading ? html`<div class="shimmer" style="height:180px"></div>` : html`
+          <${CacheSavingsChart} data=${cacheSeries.data} height=${180}
+            fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtCost}
             bucket=${cacheSeries.bucket} />
           <div class="chart-foot">
-            <span class="dim">Cumulative <b>captured</b> savings (measured) + cache <b>hit-rate</b>.</span>
-            ${cacheSeries.recoverable > 0 ? html` <span class="dim">Dashed line = estimated recoverable: ~${useTokens ? (fmtTokens(cacheResp.estimated_recoverable_tokens || 0) + ' more tokens') : fmtFramedDollar(cacheResp.estimated_recoverable_usd || 0, framing)} more with better caching (estimated, not saved).</span>` : null}
+            <span class="dim">Per-${cacheSeries.bucket === 'hour' ? 'hour' : 'day'} ${useTokens ? 'cached-token volume' : 'savings'}. Cached input bills at roughly a tenth of the normal input rate — you read these tokens at that discount, ${useTokens ? 'sparing your token budget' : 'saving the difference vs paying full price'}.</span>
+            ${cacheSeries.coarsened ? html` <span class="dim">Showing ${cacheSeries.bucket} buckets.</span>` : null}
           </div>
         `}
       </div>

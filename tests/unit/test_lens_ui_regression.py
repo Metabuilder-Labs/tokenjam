@@ -307,12 +307,13 @@ def test_cache_savings_chart_present(html):
 
 
 def test_cache_savings_honesty_framing(html):
-    # Rule 14: "captured" is measured; the recoverable gap is "estimated", never
-    # "saved". The caption must say estimated/recoverable and not claim "saved".
-    assert "estimated recoverable" in html.lower()
-    assert "not saved" in html.lower()
-    # recoverable dollar figure routes through framing (subscription -> tokens)
-    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" in html
+    # #246 dropped the "estimated recoverable" overlay from this chart (noise;
+    # it lives on Optimize). The cache card now reports MEASURED savings, framed:
+    # api → "$X saved", subscription/local → cached-token VOLUME (never raw $).
+    assert "fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window" in html
+    assert "fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window" in html
+    # the recoverable overlay is no longer wired into the cache chart
+    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" not in html
 
 
 def test_cache_savings_chart_is_best_effort(html):
@@ -697,3 +698,38 @@ def test_per_trace_token_totals_come_from_server_not_aggregated_in_js(html):
     # _costVal reads server-provided per-row input_tokens/output_tokens; the UI
     # never re-sums spans in JS for the list rows (single compute path, #249).
     assert "function _costVal(r, useTokens)" in html
+
+
+# --- #246: cache-savings chart redesign (answer-first, single-axis bars) ---- #
+def test_cache_chart_leads_with_answer_headline(html):
+    # A plain headline: hit-rate stat + savings this window (not three overlaid
+    # series). The card title is "Caching".
+    assert '<div class="cache-headline">' in html
+    assert "cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate" in html
+    assert "saved this window" in html          # api framing
+    assert "cached reads this window" in html    # subscription framing (no raw $)
+
+
+def test_cache_chart_is_single_axis_per_period_bars(html):
+    # The dual-axis (tokens left / hit-rate % right) + cumulative ramp + recoverable
+    # overlay are gone. CacheSavingsChart takes a single per-bucket savings series.
+    assert "function CacheSavingsChart({ data, height = 180" in html
+    assert "<${CacheSavingsChart} data=${cacheSeries.data}" in html
+    # old dual-axis/overlay props no longer passed
+    assert "cache=${cacheSeries.data}" not in html
+    assert "env=${cacheSeries.env}" not in html
+    assert "hit=${cacheSeries.hit}" not in html
+    # buildCacheSeries returns per-bucket savings (not a cumulative ramp) + the
+    # headline stat + a hit-rate sparkline.
+    assert "return { data: [xs, sav], hitSpark, hitRate" in html
+    assert "let acc = 0" not in html.split("function buildCacheSeries")[1].split("function ")[1]
+
+
+def test_cache_chart_hitrate_is_stat_not_overlaid_line(html):
+    # Hit-rate shows as a small sparkline beside the stat, not an overlaid rate axis.
+    assert "<${Sparkline} values=${cacheSeries.hitSpark}" in html
+
+
+def test_cache_chart_explains_the_mechanic(html):
+    # One-line plain-English mechanic.
+    assert "Cached input bills at roughly a tenth of the normal input rate" in html
