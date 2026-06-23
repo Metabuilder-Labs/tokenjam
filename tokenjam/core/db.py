@@ -608,7 +608,9 @@ class DuckDBBackend:
             f"CASE WHEN SUM(CASE WHEN status_code='error' THEN 1 ELSE 0 END) > 0 THEN 'error' "
             f"     WHEN SUM(CASE WHEN status_code='ok' THEN 1 ELSE 0 END) > 0 THEN 'ok' "
             f"     ELSE 'unset' END AS status_code, "
-            f"COUNT(*) AS span_count "
+            f"COUNT(*) AS span_count, "
+            f"SUM(input_tokens) AS input_tokens, "
+            f"SUM(output_tokens) AS output_tokens "
             f"FROM spans WHERE {where} "
             f"GROUP BY trace_id "
             f"ORDER BY start_time DESC "
@@ -621,6 +623,7 @@ class DuckDBBackend:
                 trace_id=r[0], agent_id=r[1], name=r[2], start_time=r[3],
                 duration_ms=r[4], cost_usd=r[5], status_code=r[6],
                 span_count=r[7],
+                input_tokens=int(r[8] or 0), output_tokens=int(r[9] or 0),
             )
             for r in rows
         ]

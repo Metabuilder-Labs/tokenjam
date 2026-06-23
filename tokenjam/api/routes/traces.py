@@ -69,6 +69,10 @@ async def list_traces(
                 "cost_usd": t.cost_usd,
                 "status_code": t.status_code,
                 "span_count": t.span_count,
+                # Per-trace token totals — the UI renders per-row cost as TOKENS
+                # for subscription/local users (#249), never "% of cycle".
+                "input_tokens": t.input_tokens,
+                "output_tokens": t.output_tokens,
             }
             for t in traces
         ],

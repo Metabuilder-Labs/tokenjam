@@ -244,8 +244,10 @@ def test_cost_table_cells_route_through_framing(html):
 
 def test_traces_list_cost_routes_through_framing(html):
     # Traces list COST column must consume the framing block, not raw fmtCost.
+    # Per #249 it now goes through fmtPerItemCost (per-item → tokens for
+    # subscription/local), not the window-aggregate fmtFramedDollar "% of cycle".
     assert "<td>${fmtCost(t.cost_usd)}</td>" not in html
-    assert "${fmtFramedDollar(t.cost_usd, framing)}" in html
+    assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html
     # The screen actually pulls the framing block off the /traces response.
     assert "setFraming(td.framing || null)" in html
 
@@ -256,7 +258,8 @@ def test_trace_detail_costs_route_through_framing(html):
     assert "fmtCost(s.cost_usd)" not in html
     assert "${fmtCost(sel.cost_usd)}" not in html
     assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
-    assert "${fmtFramedDollar(sel.cost_usd, framing)}" in html
+    # The span-detail panel "Cost" is per-item → fmtPerItemCost (#249).
+    assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html
     # Trace detail pulls the framing block off the /traces/{id} response.
     assert "setFraming(d.framing || null)" in html
 
@@ -264,9 +267,10 @@ def test_trace_detail_costs_route_through_framing(html):
 # --- #191: suppress raw $ on Status, Optimize & Reuse/script surfaces -------- #
 def test_status_card_cost_today_routes_through_framing(html):
     # Status agent cards' "Cost today" must consume the /status framing block,
-    # not render raw fmtCost(a.cost_today).
+    # not render raw fmtCost(a.cost_today). Per #249 it's per-item → tokens for
+    # subscription/local via fmtPerItemCost (not fmtFramedDollar "% of cycle").
     assert "${fmtCost(a.cost_today)}" not in html
-    assert "${fmtFramedDollar(a.cost_today, data.framing)}" in html
+    assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html
 
 
 def test_optimize_window_comparison_routes_through_framing(html):
@@ -449,8 +453,10 @@ def test_trace_waterfall_cost_summary(html):
     assert "wf-summary" in html
     assert "Total cost" in html
     assert "wfTotalCostFramed" in html
-    # the total cost routes through the framing helper (not raw fmtCost)
-    assert "const wfTotalCostFramed = fmtFramedDollar(wfTotalCost, framing)" in html
+    # A single trace's total is per-item, not a window aggregate — per #249 it
+    # routes through fmtPerItemCost (tokens for subscription/local), not the
+    # window-level fmtFramedDollar "% of cycle".
+    assert "const wfTotalCostFramed = fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html
 
 
 def test_trace_waterfall_per_span_cost_token_annotation(html):
@@ -617,6 +623,42 @@ def test_status_list_table_renderer_exists(html):
 
 
 def test_status_list_cost_column_respects_framing(html):
-    # The List view's Cost cell goes through fmtFramedDollar(framing) exactly
-    # like the cards — plan-tier framing is never re-derived in JS (#110/#241).
-    assert "<td>${fmtFramedDollar(a.cost_today, framing)}</td>" in html
+    # The List view's Cost cell goes through fmtPerItemCost exactly like the
+    # cards — per-item cost renders as tokens for subscription/local (#249),
+    # plan-tier framing is never re-derived in JS (#110/#241).
+    assert "<td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>" in html
+
+
+# --- #249: "% of cycle" is window-level; per-item cost must render as tokens -- #
+def test_per_item_cost_helper_renders_tokens_for_subscription_local(html):
+    # The per-item formatter: subscription/local → token total (the in+out basis
+    # via _costVal), api/unknown → dollars. "% of cycle" (a window aggregate) is
+    # never produced at per-item granularity.
+    assert "function perItemUsesTokens(framing)" in html
+    assert "function fmtPerItemCost(costUsd, tokenTotal, framing)" in html
+    assert "if (perItemUsesTokens(framing)) return fmtTokens(tokenTotal || 0) + ' tok';" in html
+    # the only "% of cycle" string in the codebase lives in fmtFramedDollar, which
+    # per-item surfaces no longer call directly for the row value.
+    assert "return fmtFramedDollar(costUsd, framing); // api / unknown → dollars" in html
+
+
+def test_per_item_cost_surfaces_use_the_helper_not_framed_dollar(html):
+    # Every per-item dollar cell — Traces list, Status cards, StatusListTable,
+    # span-detail, and the per-trace total — uses fmtPerItemCost, not the
+    # window-aggregate fmtFramedDollar. Guards against a regression reintroducing
+    # "% of cycle" at per-row granularity (the #249 bug: "466.7% of cycle").
+    assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html        # traces list
+    assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html  # status card
+    assert "<td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>" in html  # status list
+    assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html     # span detail
+    assert "fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html                # trace total
+    # these per-item surfaces must NOT call fmtFramedDollar on the row value
+    assert "${fmtFramedDollar(t.cost_usd, framing)}" not in html
+    assert "${fmtFramedDollar(a.cost_today, data.framing)}" not in html
+    assert "${fmtFramedDollar(sel.cost_usd, framing)}" not in html
+
+
+def test_per_trace_token_totals_come_from_server_not_aggregated_in_js(html):
+    # _costVal reads server-provided per-row input_tokens/output_tokens; the UI
+    # never re-sums spans in JS for the list rows (single compute path, #249).
+    assert "function _costVal(r, useTokens)" in html
