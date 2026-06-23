@@ -1033,6 +1033,147 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ax
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
+// Tooltip for the stacked bar chart (#213): maps the cursor back to each
+// segment's ORIGINAL (non-cumulative) value, since the plotted series carry
+// cumulative totals for the back-to-front stacking trick.
+function stackedTooltip(segs, labels, fmtFn) {
+  let tip;
+  return { hooks: {
+    init: (u) => {
+      tip = document.createElement('div'); tip.className = 'u-tip'; tip.style.display = 'none';
+      u.over.appendChild(tip);
+      u.over.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+    },
+    setCursor: (u) => {
+      const idx = u.cursor.idx;
+      if (idx == null) { tip.style.display = 'none'; return; }
+      const d = new Date(u.data[0][idx] * 1000);
+      const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+      let rows = '';
+      for (let k = 0; k < segs.length; k++) {
+        const val = segs[k][idx];
+        if (!val) continue;
+        const c = palette[k % palette.length] || '#3d8eff';
+        rows += `<div class="u-tip-row"><span class="u-tip-dot" style="background:${c}"></span>${labels[k] || ('s' + k)}: ${fmtFn(val)}</div>`;
+      }
+      tip.innerHTML = `<div class="u-tip-date">${dateStr}</div>${rows || '<div class="u-tip-row">—</div>'}`;
+      tip.style.display = 'block';
+      tip.style.left = u.cursor.left + 'px'; tip.style.top = u.cursor.top + 'px';
+    },
+  } };
+}
+
+// Stacked bar chart over the vendored uPlot global (#213). `data` is the uPlot
+// tuple [xs, ys1..ysN] where each ys is an INDEPENDENT (non-stacked) series.
+// We stack by drawing cumulative totals as bars from tallest to shortest, so
+// each shorter bar paints over the taller one's base — a stacked look without
+// uPlot bands (cheap, offline). Used for cost-by-model / cost-by-agent.
+function StackedBarChart({ data, labels = [], height = 200, fmtY = fmtCost, axisFmtY = null, bucket = 'day', showLegend = true }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
+    const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+    const grid = cssVar('--border') || '#1f1f1f';
+    const tick = cssVar('--text-dim') || '#a1a1a1';
+    const width = ref.current.clientWidth || 600;
+    const axisFmt = axisFmtY || fmtY;
+    const xs = data[0];
+    const segs = data.slice(1);                 // original per-series values
+    const n = segs.length;
+    const cum = segs.map(() => xs.map(() => 0)); // cumulative totals
+    for (let i = 0; i < xs.length; i++) {
+      let acc = 0;
+      for (let k = 0; k < n; k++) { acc += (segs[k][i] || 0); cum[k][i] = acc; }
+    }
+    // Draw tallest cumulative first so shorter bars paint on top.
+    const order = []; for (let k = n - 1; k >= 0; k--) order.push(k);
+    const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
+      ? window.uPlot.paths.bars({ size: [0.86, Infinity] }) : undefined;
+    const chartData = [xs, ...order.map(k => cum[k])];
+    const series = [{}];
+    order.forEach(k => {
+      const c = palette[k % palette.length] || '#3d8eff';
+      series.push({ label: labels[k] || ('s' + k), stroke: c, fill: c, width: 0,
+        paths: barsPath, points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) });
+    });
+    const opts = {
+      width, height, legend: { show: showLegend },
+      cursor: { y: false, points: { show: false } },
+      plugins: [stackedTooltip(segs, labels, fmtY)],
+      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] } },
+      axes: [
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, space: 70,
+          incrs: bucket === 'hour'
+            ? [3600, 2 * 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400]
+            : [86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400],
+          values: (u, splits) => splits.map(s => fmtAxisTime(s, bucket)) },
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, size: 60,
+          values: (u, vals) => vals.map(v => axisFmt(v)) },
+      ],
+      series,
+    };
+    const plot = new window.uPlot(opts, chartData, ref.current);
+    const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
+  }, [data, labels, height, bucket]);
+  return html`<div class="chart" ref=${ref}></div>`;
+}
+
+// Cache-savings chart (#212): cumulative CAPTURED savings (measured, area, left
+// axis) + per-bucket cache HIT-RATE (%, right axis). An optional dashed
+// "achievable" envelope = cumulative captured + estimated recoverable shows the
+// gap the cache analyzer says is still on the table — framed as "estimated
+// recoverable", never "saved" (Critical Rule 14). Plan-tier framing: captured
+// is rendered in tokens for subscription/local (dollars suppressed).
+function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current || !window.uPlot || !cache || !cache[0] || cache[0].length === 0) return;
+    const grid = cssVar('--border') || '#1f1f1f';
+    const tick = cssVar('--text-dim') || '#a1a1a1';
+    const c1 = cssVar('--chart-1') || '#3d8eff';
+    const c2 = cssVar('--chart-2') || '#22c55e';
+    const width = ref.current.clientWidth || 600;
+    const axisFmt = axisFmtY || fmtY;
+    const xs = cache[0];
+    const chartData = [xs, cache[1], hit, env || xs.map(() => null)];
+    const series = [
+      {},
+      { label: 'Captured', stroke: c1, width: 2, fill: c1 + '22',
+        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
+      { label: 'Hit-rate', stroke: c2, width: 2, scale: 'rate', dash: [],
+        points: { show: false }, value: (u, v) => (v == null ? '-' : v.toFixed(0) + '%') },
+      { label: 'Recoverable (est.)', stroke: tick, width: 1, dash: [6, 4], _isRunRate: true,
+        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
+    ];
+    const opts = {
+      width, height, legend: { show: true },
+      cursor: { y: false, focus: { prox: 16 }, points: { size: 5 } },
+      plugins: [chartTooltipPlugin(fmtY)],
+      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] }, rate: { range: [0, 100] } },
+      axes: [
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, space: 70,
+          incrs: bucket === 'hour'
+            ? [3600, 2 * 3600, 3 * 3600, 6 * 3600, 12 * 3600, 86400]
+            : [86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400],
+          values: (u, splits) => splits.map(s => fmtAxisTime(s, bucket)) },
+        { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
+          size: 60, values: (u, vals) => vals.map(v => axisFmt(v)) },
+        { scale: 'rate', side: 1, stroke: tick, grid: { show: false },
+          size: 50, values: (u, vals) => vals.map(v => v + '%') },
+      ],
+      series,
+    };
+    const plot = new window.uPlot(opts, chartData, ref.current);
+    const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
+  }, [cache, hit, env, height, bucket]);
+  return html`<div class="chart" ref=${ref}></div>`;
+}
+
 // ============================
 // Status View
 // ============================
@@ -1420,6 +1561,60 @@ function buildCostSeries(resp, mode, useTokens) {
   return { data: [xs, ...yss], labels, bucket, coarsened, requestedBucket: reqBucket };
 }
 
+// Shared window grid from a series response (epoch `window_start/end` +
+// `series_bucket`). Returns the zero-filled bucket xs + an index map, coarsening
+// up the bucket ladder past MAX_BUCKETS (#139). Used by the cache-savings chart
+// (#212); buildCostSeries keeps its own inline copy for the stacked cost chart.
+function _windowGrid(resp) {
+  const rows = (resp && resp.series) || [];
+  const reqBucket = (resp && resp.series_bucket) || 'day';
+  let start = resp && resp.window_start, end = resp && resp.window_end;
+  if (start == null || end == null) {
+    if (!rows.length) return null;
+    const bs = rows.map(r => r.bucket); start = Math.min(...bs); end = Math.max(...bs);
+  }
+  if (!(end >= start)) return null;
+  let reqIdx = _BUCKET_LADDER.findIndex(b => b[0] === reqBucket); if (reqIdx < 0) reqIdx = 1;
+  let bucket = _BUCKET_LADDER[reqIdx][0], step = _BUCKET_LADDER[reqIdx][1];
+  for (let i = reqIdx; i < _BUCKET_LADDER.length; i++) {
+    const s = _BUCKET_LADDER[i][1];
+    const count = (Math.floor(end / s) - Math.floor(start / s)) + 1;
+    bucket = _BUCKET_LADDER[i][0]; step = s;
+    if (count <= MAX_BUCKETS) break;
+  }
+  const coarsened = bucket !== reqBucket;
+  start = Math.floor(start / step) * step; end = Math.floor(end / step) * step;
+  const xs = []; for (let t = start; t <= end; t += step) xs.push(t);
+  const idx = {}; xs.forEach((t, i) => { idx[t] = i; });
+  return { xs, idx, step, bucket, coarsened, reqBucket };
+}
+
+// Build the cache-savings chart series (#212) from a /cost/cache response.
+// `useTokens` swaps captured dollars for captured tokens (subscription/local
+// framing). Returns cumulative captured, per-bucket hit-rate (%), and an
+// "achievable" envelope = cumulative captured + estimated recoverable (or null
+// when the analyzer surfaced nothing). Hit-rate is a token ratio, always shown.
+function buildCacheSeries(resp, useTokens) {
+  const grid = _windowGrid(resp); if (!grid) return null;
+  const { xs, idx, step, bucket } = grid;
+  const rows = (resp && resp.series) || [];
+  const cap = xs.map(() => 0), read = xs.map(() => 0), inp = xs.map(() => 0);
+  rows.forEach(r => {
+    const b = Math.floor(r.bucket / step) * step; if (!(b in idx)) return;
+    const i = idx[b];
+    cap[i] += useTokens ? (r.captured_tokens || 0) : (r.captured_usd || 0);
+    read[i] += r.cache_read_tokens || 0; inp[i] += r.input_tokens || 0;
+  });
+  const cum = xs.map(() => 0); let acc = 0;
+  for (let i = 0; i < xs.length; i++) { acc += cap[i]; cum[i] = acc; }
+  const hit = xs.map((_, i) => { const d = read[i] + inp[i]; return d > 0 ? (100 * read[i] / d) : 0; });
+  const recoverable = useTokens
+    ? (resp.estimated_recoverable_tokens || 0)
+    : (resp.estimated_recoverable_usd || 0);
+  const env = recoverable > 0 ? cum.map(v => v + recoverable) : null;
+  return { data: [xs, cum], hit, env, recoverable, bucket, coarsened: grid.coarsened };
+}
+
 function CostView({ params }) {
   const DEFAULTS = { since: '7d', group_by: 'total', agent_id: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
@@ -1429,7 +1624,7 @@ function CostView({ params }) {
   const setFilter = (k, v) => navigate('cost', { since, group_by: groupBy, agent_id: agentId, [k]: v }, DEFAULTS);
 
   const [st, setSt] = useState({ loading: true, error: null, rows: [], total: 0,
-    totalTokens: 0, framing: null, costResp: null, compare: null });
+    totalTokens: 0, framing: null, costResp: null, compare: null, cacheResp: null });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: s.rows.length === 0, error: null }));
@@ -1442,11 +1637,17 @@ function CostView({ params }) {
       try {
         compare = await api('/cost/compare', { since, compare: 'previous', agent_id: agentId || undefined });
       } catch (_) { compare = null; }
+      // Cache-savings series (#212). Best-effort: a failure here must not blank
+      // the cost screen, so it falls back to null (card renders nothing).
+      let cacheResp = null;
+      try {
+        cacheResp = await api('/cost/cache', { since, agent_id: agentId || undefined });
+      } catch (_) { cacheResp = null; }
       const totalTokens = d.total_tokens != null
         ? d.total_tokens
         : (d.rows || []).reduce((s, r) => s + (r.input_tokens || 0) + (r.output_tokens || 0), 0);
       setSt({ loading: false, error: null, rows: d.rows || [], total: d.total_cost_usd || 0,
-        totalTokens, framing: d.framing || null, costResp: d, compare });
+        totalTokens, framing: d.framing || null, costResp: d, compare, cacheResp });
     } catch (e) {
       setSt(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -1454,10 +1655,11 @@ function CostView({ params }) {
 
   useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t); }, [load]);
 
-  const { loading, error, rows, total, totalTokens, framing, costResp, compare } = st;
+  const { loading, error, rows, total, totalTokens, framing, costResp, compare, cacheResp } = st;
   const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   const series = buildCostSeries(costResp, groupBy, useTokens);
   const fmtY = useTokens ? fmtTokens : fmtCost;
+  const cacheSeries = buildCacheSeries(cacheResp, useTokens);
 
   // Run-rate (total view only): per-day average over the FULL window length
   // (not the data range — #129), projected to the end of the billing cycle
@@ -1509,20 +1711,44 @@ function CostView({ params }) {
     ${!error ? html`
       <div class="chart-card">
         <div class="chart-head">
-          <div class="chart-title">Spend over time ${useTokens ? '(tokens)' : ''}</div>
+          <div class="chart-title">Spend over time ${groupBy === 'model' ? 'by model' : groupBy === 'agent' ? 'by agent' : ''} ${useTokens ? '(tokens)' : ''}</div>
           <div class="chart-meta">
             <span class="chart-total">${totalDisplay}</span>
             <${TrendChip} pct=${trendPct} />
           </div>
         </div>
         ${loading ? html`<div class="shimmer" style="height:160px"></div>`
-          : series ? html`
+          : series ? (groupBy === 'total' ? html`
             <${SpendChart} data=${series.data} labels=${series.labels} height=${160}
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate}
-              showLegend=${groupBy !== 'total'} bucket=${series.bucket} />
+              showLegend=${false} bucket=${series.bucket} />
             ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
             ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
-          ` : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
+          ` : html`
+            <${StackedBarChart} data=${series.data} labels=${series.labels} height=${200}
+              fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} bucket=${series.bucket} />
+            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+          `) : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
+      </div>
+    ` : null}
+
+    ${!error && cacheSeries ? html`
+      <div class="chart-card">
+        <div class="chart-head">
+          <div class="chart-title">Cache savings over time</div>
+          <div class="chart-meta">
+            <span class="chart-total">${useTokens ? (fmtTokens(cacheResp.total_captured_tokens || 0) + ' tokens captured') : (fmtCost(cacheResp.total_captured_usd || 0) + ' captured')}</span>
+          </div>
+        </div>
+        ${loading ? html`<div class="shimmer" style="height:200px"></div>` : html`
+          <${CacheSavingsChart} cache=${cacheSeries.data} hit=${cacheSeries.hit} env=${cacheSeries.env}
+            height=${200} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd}
+            bucket=${cacheSeries.bucket} />
+          <div class="chart-foot">
+            <span class="dim">Cumulative <b>captured</b> savings (measured) + cache <b>hit-rate</b>.</span>
+            ${cacheSeries.recoverable > 0 ? html` <span class="dim">Dashed line = estimated recoverable: ~${useTokens ? (fmtTokens(cacheResp.estimated_recoverable_tokens || 0) + ' more tokens') : fmtFramedDollar(cacheResp.estimated_recoverable_usd || 0, framing)} more with better caching (estimated, not saved).</span>` : null}
+          </div>
+        `}
       </div>
     ` : null}
 

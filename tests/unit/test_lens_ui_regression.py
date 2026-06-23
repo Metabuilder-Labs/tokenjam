@@ -289,3 +289,44 @@ def test_optimize_cluster_avg_cost_routes_through_framing(html):
     # The script/reuse cluster table "Avg cost" cell must reframe, not raw $.
     assert "${fmtCost(c.avg_cost_usd)}" not in html
     assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" in html
+
+
+# --- Lens Visualizations Wave 1: cost charts (#211–#213) ------------------- #
+def test_stacked_bar_chart_present(html):
+    # #213: cost-by-model/agent renders a STACKED bar chart, not overlapping
+    # lines. The component + the cumulative back-to-front stacking must exist.
+    assert "function StackedBarChart" in html
+    assert "uPlot.paths.bars" in html
+    # CostView routes model/agent group_by to the stacked chart (total stays line).
+    assert "${StackedBarChart}" in html
+    assert "groupBy === 'total' ?" in html
+
+
+def test_stacked_bar_chart_uses_framing_tokens(html):
+    # Stacked chart respects plan-tier framing: subscription/local -> tokens.
+    assert "fmtY=${fmtY}" in html  # fmtY = useTokens ? fmtTokens : fmtCost
+    assert "const useTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
+
+
+def test_cache_savings_chart_present(html):
+    # #212: cache hit-rate + cumulative captured-vs-recoverable chart.
+    assert "function CacheSavingsChart" in html
+    assert "function buildCacheSeries" in html
+    assert "${CacheSavingsChart}" in html
+    # fetched from the dedicated endpoint
+    assert "/cost/cache" in html
+
+
+def test_cache_savings_honesty_framing(html):
+    # Rule 14: "captured" is measured; the recoverable gap is "estimated", never
+    # "saved". The caption must say estimated/recoverable and not claim "saved".
+    assert "estimated recoverable" in html.lower()
+    assert "not saved" in html.lower()
+    # recoverable dollar figure routes through framing (subscription -> tokens)
+    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" in html
+
+
+def test_cache_savings_chart_is_best_effort(html):
+    # A failing /cost/cache must not blank the cost screen.
+    assert "cacheResp = await api('/cost/cache'" in html
+    assert "} catch (_) { cacheResp = null; }" in html
