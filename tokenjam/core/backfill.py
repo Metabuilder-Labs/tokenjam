@@ -65,6 +65,10 @@ def _plan_tier_for_provider(config, provider: str) -> str:
 
 @dataclass
 class BackfillResult:
+    # `sessions_seen` counts conversation *files* parsed in the window — Claude
+    # Code writes many JSONL files (continuations, sidechains) that can share
+    # one sessionId, so this is NOT the number of rows that land in the
+    # `sessions` table. Use the distinct-session counts below for that (#238).
     sessions_seen: int = 0
     sessions_ingested: int = 0
     spans_ingested: int = 0
@@ -75,6 +79,32 @@ class BackfillResult:
     total_cost_usd: float = 0.0
     project_count: int = 0
     sample_errors: list[str] = field(default_factory=list)
+    # Distinct session_ids seen in the window, and the subset that received at
+    # least one newly-inserted span this run. These match the `sessions` table
+    # (which is upserted by session_id), so the summary can report
+    # new / already-present / total honestly instead of new-only (#238).
+    seen_session_ids: set[str] = field(default_factory=set)
+    new_session_ids: set[str] = field(default_factory=set)
+
+    @property
+    def conversations_seen(self) -> int:
+        """Conversation files parsed (alias for sessions_seen, clearer label)."""
+        return self.sessions_seen
+
+    @property
+    def sessions_total(self) -> int:
+        """Distinct sessions in the window — matches the `sessions` table."""
+        return len(self.seen_session_ids)
+
+    @property
+    def sessions_new(self) -> int:
+        """Distinct sessions that gained at least one new span this run."""
+        return len(self.new_session_ids)
+
+    @property
+    def sessions_existing(self) -> int:
+        """Distinct sessions already fully present before this run."""
+        return self.sessions_total - self.sessions_new
 
 
 @dataclass
@@ -236,7 +266,11 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
             cache_read_tokens=cache_read,
             cache_write_tokens=cache_creation,
         )
-        cache_tokens = cache_read + cache_creation
+        # Persist the cache read/write split, mirroring the live ingest path
+        # (#245). cache_tokens = cache-READ only; cache_write_tokens =
+        # cache-CREATION (priced higher). Collapsing them into one field made
+        # the Cost table show CACHE W = 0 and a CACHE R that was actually
+        # read+write. See models.py NormalizedSpan + Critical Rule on cache.
 
         agent_id = _agent_id_from_cwd(cwd)
         start_time = ts or datetime.now(tz=timezone.utc)
@@ -257,7 +291,8 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                 model=model,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
-                cache_tokens=cache_tokens,
+                cache_tokens=cache_read,
+                cache_write_tokens=cache_creation,
                 cost_usd=cost,
                 request_type="completion",
                 conversation_id=sid_str,
@@ -267,7 +302,10 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
         )
         total_input += input_tokens
         total_output += output_tokens
-        total_cache += cache_tokens
+        # Session-level cache_tokens tracks cache-READ only, matching the live
+        # path (IngestPipeline aggregates span.cache_tokens) and SessionRecord's
+        # documented semantics (it has no cache_write_tokens field).
+        total_cache += cache_read
         total_cost += cost
 
         # Tool uses inside the assistant message become tool spans
@@ -400,6 +438,7 @@ def ingest_claude_code(
     plan_tier = _plan_tier_for_provider(config, _CLAUDE_CODE_PROVIDER)
     for parsed in iter_claude_code_sessions(root=root, since=since):
         result.sessions_seen += 1
+        result.seen_session_ids.add(parsed.session_id)
         if parsed.cwd:
             projects_seen.add(parsed.cwd)
         try:
@@ -414,7 +453,11 @@ def ingest_claude_code(
         result.spans_skipped_existing += len(parsed.spans) - inserted
         if inserted > 0:
             result.sessions_ingested += 1
-            result.total_cost_usd += parsed.total_cost_usd
+            result.new_session_ids.add(parsed.session_id)
+        # Accumulate cost for every parsed file (not just files with new spans)
+        # so the summary reports the full in-window total, not a new-only figure
+        # that reads as "barely worked" on an idempotent re-run (#238).
+        result.total_cost_usd += parsed.total_cost_usd
 
         if result.earliest is None or parsed.started_at < result.earliest:
             result.earliest = parsed.started_at
@@ -466,9 +509,10 @@ def _insert_session_idempotent(
             "name, kind, status_code, status_message, start_time, end_time, "
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account"
+            "request_type, conversation_id, events, billing_account, "
+            "cache_write_tokens"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -476,7 +520,7 @@ def _insert_session_idempotent(
                 json.dumps(span.attributes), span.provider, span.model, span.tool_name,
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account,
+                span.billing_account, span.cache_write_tokens,
             ],
         )
         inserted += 1
