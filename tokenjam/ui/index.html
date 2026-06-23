@@ -498,6 +498,37 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .wf-cost-val { color: var(--text); min-width: 50px; text-align: right; }
 .wf-cost-tok { color: var(--text-dim); min-width: 46px; text-align: right; }
 
+/* #244: fixed span-name column (never clipped onto the bar), cost/token
+   magnitude bars, status icons, kind legend, per-span offset + value labels. */
+.wf-toolbar { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.wf-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace;
+  font-size: 10px; color: var(--text-dim); }
+.wf-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.wf-kind-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; display: inline-block; }
+.wf-kind-dot.agent { background: var(--success); }
+.wf-kind-dot.llm { background: var(--brand); }
+.wf-kind-dot.tool { background: var(--warn); }
+.wf-kind-dot.other { background: var(--text-dim); }
+/* The name column: the full span identity lives here, indented by depth — it is
+   NEVER painted onto the bar (that produced the "cla"/"Bas" clipping). */
+.wf-name { flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+  overflow: hidden; padding-right: 10px; }
+.wf-name-txt { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-row:hover .wf-name-txt { color: var(--text); }
+.wf-row.selected .wf-name-txt { color: var(--accent); }
+.wf-status { font-size: 11px; line-height: 1; flex-shrink: 0; width: 11px; text-align: center; }
+.wf-status.ok { color: var(--success); }
+.wf-status.error { color: var(--error); }
+/* Magnitude value printed just past the bar end (flips inside near the right
+   edge so it never collides with the offset/cost columns). */
+.wf-val { position: absolute; top: 0; line-height: 18px; font-size: 10px;
+  color: var(--text-dim); padding: 0 6px; white-space: nowrap; pointer-events: none; }
+.wf-val.flip { text-align: right; }
+.wf-offset { flex-shrink: 0; width: 62px; text-align: right; padding-right: 10px;
+  font-family: 'Geist Mono', monospace; font-size: 10px; color: var(--text-faint); }
+
 /* Span detail */
 .span-detail {
   background: var(--surface);
@@ -875,6 +906,15 @@ function friendlySpanName(name) {
   if (!name) return '-';
   // sentence case fallback
   return name.charAt(0).toUpperCase() + name.slice(1).replace(/[._]/g, ' ');
+}
+// The identity shown in the waterfall's fixed name column (#244): the concrete
+// model (claude-opus-4-8) or tool (Bash), falling back to the friendly span
+// kind. This is what makes the left column legible without ever clipping onto
+// the bar.
+function spanPrimaryName(s) {
+  if (s.tool_name) return s.tool_name;
+  if (s.model) return s.model;
+  return friendlySpanName(s.name);
 }
 function friendlyAlertType(type) {
   const map = {
@@ -1657,6 +1697,9 @@ function TraceDetailView({ traceId }) {
   const [spans, setSpans] = useState([]);
   const [framing, setFraming] = useState(null);
   const [selected, setSelected] = useState(null);
+  // Waterfall bar-sizing mode (#244): cost / tokens / duration. null = follow
+  // the framing-derived default (cost for api/unknown, tokens when $ suppressed).
+  const [wfMode, setWfMode] = useState(null);
 
   useEffect(() => {
     api('/traces/' + traceId).then(d => { setSpans(d.spans || []); setFraming(d.framing || null); });
@@ -1692,7 +1735,7 @@ function TraceDetailView({ traceId }) {
     return result;
   }
   const rows = flatten(roots, 0);
-  const labelW = 100;
+  const nameW = 220;
 
   // Cost-first annotation (#215). Plan-tier framing: when dollars are suppressed
   // (subscription/local), the magnitude bar + summary read on TOKEN volume, never
@@ -1702,6 +1745,17 @@ function TraceDetailView({ traceId }) {
   const wfUseTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0);
   const wfMaxMag = Math.max(0, ...rows.map(r => wfMagOf(r.span)));
+
+  // #244 bar sizing: cost-first by default (the differentiator + the only mode
+  // that works on duration-less backfilled spans), with a tokens/duration
+  // toggle. Cost is never offered when $ is suppressed — tokens leads there.
+  const wfDefaultMode = wfUseTokens ? 'tokens' : 'cost';
+  const wfMode2 = wfMode || wfDefaultMode;
+  const wfHasDuration = rows.some(r => r.span.duration_ms != null && r.span.duration_ms > 0);
+  const magForMode = s => wfMode2 === 'duration' ? (s.duration_ms || 0)
+    : wfMode2 === 'tokens' ? spanTokens(s) : (s.cost_usd || 0);
+  const maxMagMode = Math.max(0, ...rows.map(r => magForMode(r.span)));
+
   const wfTotalCost = spans.reduce((a, s) => a + (s.cost_usd || 0), 0);
   const wfTotalTokens = spans.reduce((a, s) => a + spanTokens(s), 0);
   // A single trace's total is per-item, not a window aggregate (#249) — render
@@ -1724,40 +1778,75 @@ function TraceDetailView({ traceId }) {
       <span>Total cost <b>${wfTotalCostFramed}</b></span>
       <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
       <span>Duration <b>${fmtDur(traceDur)}</b></span>
+      <span>Started <b>${isFinite(traceStart) ? new Date(traceStart).toLocaleString() : '—'}</b></span>
       <span><b>${spans.length}</b> spans</span>
     </div>
+    <div class="wf-toolbar">
+      <div class="wf-legend">
+        <span><i class="wf-kind-dot llm"></i>LLM</span>
+        <span><i class="wf-kind-dot tool"></i>Tool</span>
+        <span><i class="wf-kind-dot agent"></i>Agent</span>
+        <span><i class="wf-kind-dot other"></i>Other</span>
+      </div>
+      <div class="view-toggle">
+        ${!wfUseTokens ? html`<button class=${wfMode2 === 'cost' ? 'active' : ''} onClick=${() => setWfMode('cost')}>By cost</button>` : null}
+        <button class=${wfMode2 === 'tokens' ? 'active' : ''} onClick=${() => setWfMode('tokens')}>By tokens</button>
+        <button class=${wfMode2 === 'duration' ? 'active' : ''} onClick=${() => setWfMode('duration')} title=${wfHasDuration ? '' : 'Backfilled spans have no latency — bars will be flat'}>By duration</button>
+      </div>
+    </div>
     <div class="wf-head">
-      <div class="wf-label" style="width:${labelW}px;padding-left:8px">Span</div>
-      <div class="wf-track">Timeline</div>
+      <div class="wf-name" style="width:${nameW}px;padding-left:8px">Span</div>
+      <div class="wf-track">${wfMode2 === 'duration' ? 'Timeline' : ('Magnitude · by ' + wfMode2)}</div>
+      <div class="wf-offset">Offset</div>
       <div class="wf-cost">Cost / tokens</div>
     </div>
     <div class="waterfall">
       ${rows.map(({ span: s, depth }) => {
         const st = new Date(s.start_time).getTime() - traceStart;
-        const dur = s.duration_ms || 0;
-        const left = (st / traceDur * 100).toFixed(2);
-        const width = Math.max(dur / traceDur * 100, 3).toFixed(2);
         const kind = spanKindClass(s.name);
         const friendly = friendlySpanName(s.name);
-        const isAgent = kind === 'agent';
-        const detail = s.model || s.tool_name || '';
-        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local \u2192 "\u2014"
-        // (suppressed; omitted from the compact bar label), api/unknown \u2192 "$X".
+        const primaryName = spanPrimaryName(s);
+        const isError = (s.status_code || '') === 'error';
+        // #244 bar geometry. Duration mode keeps the classic time-positioned bar;
+        // cost/tokens modes draw a left-anchored magnitude bar (the only thing
+        // that renders on duration-less backfill data). A minimum width keeps
+        // tiny spans visible/clickable.
+        let left, width;
+        if (wfMode2 === 'duration') {
+          left = (st / traceDur * 100);
+          width = Math.max((s.duration_ms || 0) / traceDur * 100, 1.5);
+        } else {
+          left = 0;
+          width = maxMagMode > 0 ? Math.max(magForMode(s) / maxMagMode * 100, 1.5) : 1.5;
+        }
+        left = Math.max(0, Math.min(left, 98.5));
+        width = Math.max(1.5, Math.min(width, 100 - left));
+        const barEnd = left + width;
+        const valFlip = barEnd > 72;
+        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local
+        // \u2192 "\u2014" (suppressed), api/unknown \u2192 "$X".
         const costFramed = fmtFramedDollar(s.cost_usd, framing);
-        // Cost now lives in the dedicated annotation column (#215); the bar label
-        // stays focused on what/how-long so the two reads don't compete.
-        const barLabel = isAgent
-          ? fmtDur(s.duration_ms)
-          : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms);
-        const sTok = spanTokens(s);
-        // Per-SPAN cost is per-item: under subscription/local "% of cycle" is
-        // nonsensical at this granularity (#249), and the adjacent token column
-        // already conveys the per-span magnitude \u2014 so only show the $ value for
-        // api/unknown. (local was already suppressed via costFramed === '\u2014'.)
+        // Per-SPAN cost is per-item (#249): "% of cycle" is nonsensical at this
+        // granularity, and the token column already conveys per-span magnitude,
+        // so only show the $ value for api/unknown.
         const costShown = !wfUseTokens && s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
+        const sTok = spanTokens(s);
         const wfFrac = wfMaxMag > 0 ? (wfMagOf(s) / wfMaxMag * 100) : 0;
+        // Value printed past the bar end reflects the active mode. Duration is
+        // "\u2014" with a "not captured in backfilled data" hint when absent (#243).
+        const durMissing = wfMode2 === 'duration' && s.duration_ms == null;
+        const valLabel = wfMode2 === 'duration'
+          ? (durMissing ? '\u2014' : fmtDur(s.duration_ms))
+          : wfMode2 === 'tokens'
+            ? (sTok ? fmtTokens(sTok) : '')
+            : (costShown ? costFramed : '');
+        const valTitle = durMissing ? 'Duration not captured in backfilled data' : '';
+        const absStart = isFinite(traceStart) && s.start_time ? new Date(s.start_time).toLocaleString() : '';
+        const offsetLabel = '+' + fmtDur(st);
         const tipLines = [friendly];
-        tipLines.push('Duration: ' + fmtDur(s.duration_ms));
+        tipLines.push('Status: ' + (s.status_code || 'unset'));
+        tipLines.push('Offset: ' + offsetLabel + (absStart ? ' (' + absStart + ')' : ''));
+        tipLines.push('Duration: ' + (s.duration_ms == null ? '\u2014 (not captured in backfill)' : fmtDur(s.duration_ms)));
         if (s.provider) tipLines.push('Provider: ' + s.provider);
         if (s.model) tipLines.push('Model: ' + s.model);
         if (s.tool_name) tipLines.push('Tool: ' + s.tool_name);
@@ -1765,17 +1854,23 @@ function TraceDetailView({ traceId }) {
         if (s.output_tokens != null) tipLines.push('Output tokens: ' + fmtTokens(s.output_tokens));
         if (s.cache_tokens) tipLines.push('Cache read: ' + fmtTokens(s.cache_tokens));
         if (s.cache_write_tokens) tipLines.push('Cache write: ' + fmtTokens(s.cache_write_tokens));
-        if (!wfUseTokens && s.cost_usd != null && costFramed !== '—') tipLines.push('Cost: ' + costFramed);
+        if (!wfUseTokens && s.cost_usd != null && costFramed !== '\u2014') tipLines.push('Cost: ' + costFramed);
         const tooltip = tipLines.join('\n');
         return html`
           <div class="wf-row ${selected === s.span_id ? 'selected' : ''}" onClick=${() => setSelected(s.span_id)}>
-            <div class="wf-label" style="width:${labelW}px;padding-left:${depth * 16 + 8}px">${friendly}</div>
+            <div class="wf-name" style="width:${nameW}px;padding-left:${depth * 16 + 8}px">
+              <span class="wf-status ${isError ? 'error' : 'ok'}" title=${isError ? 'error' : 'ok'}>${isError ? '\u2715' : '\u2713'}</span>
+              <span class="wf-kind-dot ${kind}"></span>
+              <span class="wf-name-txt" title=${primaryName}>${primaryName}</span>
+            </div>
             <div class="wf-track">
-              <div class="wf-bar-wrap${left > 50 ? ' tip-flip' : ''}" style="left:${left}%;width:${width}%">
-                <div class="wf-bar ${kind}" style="width:100%">${barLabel}</div>
+              <div class="wf-bar-wrap${valFlip ? ' tip-flip' : ''}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">
+                <div class="wf-bar ${kind}" style="width:100%"></div>
                 <div class="wf-tip">${tooltip}</div>
               </div>
+              ${valLabel ? html`<span class="wf-val ${valFlip ? 'flip' : ''}" title=${valTitle} style=${valFlip ? ('right:' + (100 - barEnd).toFixed(2) + '%') : ('left:' + barEnd.toFixed(2) + '%')}>${valLabel}</span>` : null}
             </div>
+            <div class="wf-offset" title=${absStart}>${offsetLabel}</div>
             <div class="wf-cost">
               <div class="wf-cost-bar"><div class="wf-cost-fill" style="width:${wfFrac.toFixed(1)}%"></div></div>
               <span class="wf-cost-val">${costShown ? costFramed : ''}</span>
