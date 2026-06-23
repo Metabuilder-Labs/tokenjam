@@ -275,9 +275,12 @@ def test_optimize_budget_projection_routes_through_framing(html):
 
 
 def test_optimize_cluster_avg_cost_routes_through_framing(html):
-    # The script/reuse cluster table "Avg cost" cell must reframe, not raw $.
+    # The script cluster table "Avg cost" cell is per-item, so per #260 it routes
+    # through fmtPerItemCost (tokens for subscription/local), not the raw $ nor
+    # the window-aggregate fmtFramedDollar "% of cycle".
     assert "${fmtCost(c.avg_cost_usd)}" not in html
-    assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" in html
+    assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" not in html
+    assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
 
 
 # --- Lens Visualizations Wave 1: cost charts (#211–#213) ------------------- #
@@ -307,12 +310,13 @@ def test_cache_savings_chart_present(html):
 
 
 def test_cache_savings_honesty_framing(html):
-    # Rule 14: "captured" is measured; the recoverable gap is "estimated", never
-    # "saved". The caption must say estimated/recoverable and not claim "saved".
-    assert "estimated recoverable" in html.lower()
-    assert "not saved" in html.lower()
-    # recoverable dollar figure routes through framing (subscription -> tokens)
-    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" in html
+    # #246 dropped the "estimated recoverable" overlay from this chart (noise;
+    # it lives on Optimize). The cache card now reports MEASURED savings, framed:
+    # api → "$X saved", subscription/local → cached-token VOLUME (never raw $).
+    assert "fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window" in html
+    assert "fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window" in html
+    # the recoverable overlay is no longer wired into the cache chart
+    assert "fmtFramedDollar(cacheResp.estimated_recoverable_usd" not in html
 
 
 def test_cache_savings_chart_is_best_effort(html):
@@ -758,3 +762,78 @@ def test_waterfall_cost_framing_preserved(html):
     # server framing block, never a raw fmtCost (guards #187/#249 regressions).
     assert "const costFramed = fmtFramedDollar(s.cost_usd, framing)" in html
     assert "fmtCost(s.cost_usd)" not in html
+
+
+# --- #246: cache-savings chart redesign (answer-first, single-axis bars) ---- #
+def test_cache_chart_leads_with_answer_headline(html):
+    # A plain headline: hit-rate stat + savings this window (not three overlaid
+    # series). The card title is "Caching".
+    assert '<div class="cache-headline">' in html
+    assert "cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate" in html
+    assert "saved this window" in html          # api framing
+    assert "cached reads this window" in html    # subscription framing (no raw $)
+
+
+def test_cache_chart_is_single_axis_per_period_bars(html):
+    # The dual-axis (tokens left / hit-rate % right) + cumulative ramp + recoverable
+    # overlay are gone. CacheSavingsChart takes a single per-bucket savings series.
+    assert "function CacheSavingsChart({ data, height = 180" in html
+    assert "<${CacheSavingsChart} data=${cacheSeries.data}" in html
+    # old dual-axis/overlay props no longer passed
+    assert "cache=${cacheSeries.data}" not in html
+    assert "env=${cacheSeries.env}" not in html
+    assert "hit=${cacheSeries.hit}" not in html
+    # buildCacheSeries returns per-bucket savings (not a cumulative ramp) + the
+    # headline stat + a hit-rate sparkline.
+    assert "return { data: [xs, sav], hitSpark, hitRate" in html
+    assert "let acc = 0" not in html.split("function buildCacheSeries")[1].split("function ")[1]
+
+
+def test_cache_chart_hitrate_is_stat_not_overlaid_line(html):
+    # Hit-rate shows as a small sparkline beside the stat, not an overlaid rate axis.
+    assert "<${Sparkline} values=${cacheSeries.hitSpark}" in html
+
+
+def test_cache_chart_explains_the_mechanic(html):
+    # One-line plain-English mechanic.
+    assert "Cached input bills at roughly a tenth of the normal input rate" in html
+
+
+# --- #251: component-waste chart drops zero segments + positive empty state -- #
+def test_component_waste_chart_filters_zero_segments(html):
+    # The cumulative-overlap bar technique paints a zero-value segment as a
+    # full-height bar in its own color (cache-write=0 → full-height purple over
+    # the real stack). Zero-value segments must be filtered BEFORE building the
+    # cumulative bars, in both columns.
+    assert "const costSegsNZ = (costSegs || []).filter(s => (s.value || 0) > 0);" in html
+    assert "const recSegsNZ = (recSegs || []).filter(s => (s.value || 0) > 0);" in html
+    # the cumulative loops iterate the filtered lists, not the raw props
+    assert "costSegsNZ.forEach((s, i) =>" in html
+    assert "recSegsNZ.forEach((s, i) =>" in html
+    # color offset uses the filtered cost length so the palette stays aligned
+    assert "palette[(costSegsNZ.length + i) % palette.length]" in html
+
+
+def test_component_waste_empty_recoverable_is_positive_state(html):
+    # The empty "Recoverable (est.)" column shows a positive signal, not blank /
+    # dim space.
+    assert "Nothing recoverable in this window" in html
+    assert 'class="waste-none"' in html
+    # the old neutral/dim empty message is gone
+    assert "No recoverable waste estimated in this window." not in html
+
+
+def test_component_waste_dominant_split_label(html):
+    # Optional %-split note when one token component is ~all the spend (>95%),
+    # so the single-block bar is explained rather than mysterious.
+    assert "function dominantSplit(costSegs)" in html
+    assert "pct > 95 ?" in html
+    assert "const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;" in html
+    assert 'class="waste-split"' in html
+
+
+# --- #260: script cluster avg cost carries a server-side token total --------- #
+def test_script_cluster_payload_token_total_is_server_side(html):
+    # The cell consumes c.avg_tokens (server-provided per-cluster token total),
+    # never re-aggregating in JS.
+    assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
