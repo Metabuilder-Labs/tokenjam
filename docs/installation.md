@@ -52,8 +52,8 @@ TokenJam keeps heavyweight ML dependencies, framework adapters, and the MCP serv
 
 | Extra | What it pulls in | Why it's optional |
 |---|---|---|
-| `tokenjam[mcp]` | `fastmcp` | Only needed for the Claude Code / Codex MCP server (`tj mcp`). Pulled by `tj onboard --claude-code` automatically when invoked through the documented one-liner. |
-| `tokenjam[bloat]` | `llmlingua>=0.2`, transitively PyTorch + transformers (~2GB) | The Trim analyzer (`tj optimize trim`) scores token significance with LLMLingua-2. Most users don't run it; keeping torch out of the base install means `pip install tokenjam` stays small and fast on machines that don't have a GPU/CPU build of torch already. |
+| `tokenjam[mcp]` | nothing (no-op alias) | **No longer needed.** `fastmcp` moved into the base install in v0.3.5, so the Claude Code / Codex MCP server (`tj mcp`) works on a plain `pipx install tokenjam`. The extra is kept as an empty no-op so old `pipx install 'tokenjam[mcp]'` commands still succeed; it pulls nothing extra. |
+| `tokenjam[bloat]` | `llmlingua>=0.2`, transitively PyTorch + transformers (~2GB) | The Trim analyzer (`tj optimize trim`) scores token significance with LLMLingua-2. Most users don't run it; keeping torch out of the base install keeps it small and fast on machines that don't have a GPU/CPU build of torch already. |
 | `tokenjam[langchain]` | `langchain>=0.2` | Convenience pin for `patch_langchain()`; you can also install langchain yourself. |
 | `tokenjam[crewai]` | `crewai>=0.28` | Convenience pin for `patch_crewai()`. |
 | `tokenjam[autogen]` | `pyautogen>=0.2` | Convenience pin for `patch_autogen()`. |
@@ -63,7 +63,7 @@ TokenJam keeps heavyweight ML dependencies, framework adapters, and the MCP serv
 Combine multiple extras:
 
 ```bash
-pipx install 'tokenjam[mcp,bloat]'
+pipx install 'tokenjam[bloat,litellm]'
 ```
 
 ### Bloat extra details
