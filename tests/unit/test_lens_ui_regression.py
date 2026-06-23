@@ -383,3 +383,61 @@ def test_component_waste_recoverable_routes_through_framing(html):
     assert "fmtFramedDollar(st.comp.total_cost_usd" in html
     # plan-tier toggle drives tokens-vs-dollars for the whole surface
     assert "compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local'" in html
+
+
+# --- #210: Analytics pivot explorer (subsumes #214 leaderboard + #216) ----- #
+def test_analytics_screen_registered(html):
+    assert "function AnalyticsView" in html
+    assert "case 'analytics': return html`<${AnalyticsView}" in html
+    assert 'href="#/analytics"' in html  # sidebar nav link
+
+
+def test_analytics_metric_dimension_chart_controls(html):
+    # metric × group_by × stack × chart-type controls, driven off shared vocab.
+    assert "const ANALYTICS_METRICS" in html
+    assert "const ANALYTICS_DIMENSIONS" in html
+    assert "const ANALYTICS_CHARTS" in html
+    for ctl in ("'metric'", "'group_by'", "'stack'", "'chart'"):
+        assert ctl in html, f"missing control {ctl}"
+    # the three uPlot/leaderboard chart types
+    for ch in ("'bar'", "'line'", "'hbar'"):
+        assert ch in html
+
+
+def test_analytics_presets_and_csv_export(html):
+    assert "const ANALYTICS_PRESETS" in html
+    assert "function analyticsCsv" in html
+    assert "function downloadCsv" in html
+    assert "Export CSV" in html
+    # the leaderboard preset closes #214; spend-by-model line closes #216
+    assert "'leaderboard'" in html
+    assert "'spend-by-model'" in html
+
+
+def test_analytics_url_is_source_of_truth(html):
+    # state read from URL params with validators, written back via navigate()
+    assert "navigate('analytics'" in html
+    assert "readParam(params, 'metric'" in html
+    assert "readParam(params, 'group_by'" in html
+    assert "readParam(params, 'chart'" in html
+
+
+def test_analytics_consumes_endpoint_not_reimplements(html):
+    # single compute path: fetches /analytics and renders from the response
+    assert "api('/analytics'" in html
+    assert "resp.groups" in html
+    assert "resp.rows" in html
+
+
+def test_analytics_respects_plan_tier_framing(html):
+    # spend metric switches to token volume for subscription/local (dollars
+    # suppressed); never re-derives the suppression rule — reads framing.
+    assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
+    assert "fmtFramedDollar(kpis.spend, framing)" in html
+
+
+def test_analytics_leaderboard_has_inline_bars(html):
+    # #214: sorted leaderboard with inline magnitude bars (CSS, no chart lib).
+    assert "function buildLeaderboard" in html
+    assert "lb-fill" in html
+    assert ".lb-bar" in html

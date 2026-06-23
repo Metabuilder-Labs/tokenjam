@@ -76,6 +76,7 @@ def create_app(
     from tokenjam.api.routes.optimize import router as optimize_router
     from tokenjam.api.routes.reuse import router as reuse_router
     from tokenjam.api.routes.cost_compare import router as cost_compare_router
+    from tokenjam.api.routes.analytics import router as analytics_router
     from tokenjam.api.routes.version import router as version_router, health_router
 
     app.include_router(spans_router, prefix="/api/v1")
@@ -90,6 +91,7 @@ def create_app(
     app.include_router(optimize_router, prefix="/api/v1")
     app.include_router(reuse_router, prefix="/api/v1")
     app.include_router(cost_compare_router, prefix="/api/v1")
+    app.include_router(analytics_router, prefix="/api/v1")
     app.include_router(version_router, prefix="/api/v1")
     app.include_router(health_router)  # /health — no prefix, for uptime probes
     app.include_router(metrics_router)  # /metrics — no prefix

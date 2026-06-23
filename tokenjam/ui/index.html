@@ -343,6 +343,22 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   font-size: 12px;
 }
 .filters select:focus, .filters input:focus { outline: none; border-color: var(--accent); }
+/* Analytics explorer (#210) — labelled controls, KPI tiles, leaderboard. */
+.ctl { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; }
+.preset-row { margin-top: -6px; }
+.preset-btn { font-size: 11px; padding: 4px 9px; }
+.kpi-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+.kpi-tile { flex: 1 1 120px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.kpi-tile.kpi-active { border-color: var(--accent); }
+.kpi-val { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 600; }
+.kpi-lab { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.leaderboard { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
+.lb-row { display: grid; grid-template-columns: 24px minmax(80px, 160px) 1fr auto; align-items: center; gap: 10px; font-size: 13px; }
+.lb-rank { color: var(--text-faint); font-family: 'Geist Mono', monospace; text-align: right; }
+.lb-name { font-family: 'Geist Mono', monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-bar { height: 14px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.lb-fill { display: block; height: 100%; background: var(--accent); }
+.lb-val { font-family: 'Geist Mono', monospace; font-weight: 600; white-space: nowrap; }
 .btn {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -672,6 +688,7 @@ a.health-tile.attn { border-color: var(--warn); }
   <a href="#/status" class="nav-link" data-view="status"><span class="icon">&bull;</span> Status</a>
   <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Cost</a>
+  <a href="#/analytics" class="nav-link" data-view="analytics"><span class="icon">&#9636;</span> Analytics</a>
   <a href="#/alerts" class="nav-link" data-view="alerts"><span class="icon">!</span> Alerts</a>
   <a href="#/drift" class="nav-link" data-view="drift"><span class="icon">~</span> Drift</a>
   <a href="#/optimize" class="nav-link" data-view="optimize"><span class="icon">&#9889;</span> Optimize</a>
@@ -2687,6 +2704,217 @@ function OptimizeView({ params }) {
 }
 
 // ============================
+// Analytics explorer (#210)
+// ============================
+// The single explorable pivot: metric × group_by × optional stack × chart-type,
+// filters, KPI tiles, presets, URL state, CSV export. Renders entirely from the
+// /api/v1/analytics response + its framing block (single compute path — the UI
+// never re-derives plan-tier rules). Subsumes the cost-by-model / spend-over-
+// time / leaderboard charts as presets (#214/#216).
+const ANALYTICS_METRICS = [
+  ['spend', 'Spend'], ['tokens', 'Tokens'], ['sessions', 'Sessions'], ['events', 'Events'],
+];
+const ANALYTICS_DIMENSIONS = [
+  ['model', 'Model'], ['agent', 'Agent'], ['provider', 'Provider'], ['tool', 'Tool'],
+  ['tool_category', 'Tool category'], ['kind', 'Span kind'], ['request_type', 'Request type'],
+  ['day', 'Day'],
+];
+const ANALYTICS_CHARTS = [['bar', 'Bars'], ['line', 'Lines'], ['hbar', 'Leaderboard']];
+// Built-in presets (close #214 leaderboard + #216 multi-series as preset views).
+const ANALYTICS_PRESETS = [
+  { id: 'spend-by-model', label: 'Spend by model', q: { metric: 'spend', group_by: 'model', chart: 'line', stack: '' } },
+  { id: 'leaderboard', label: 'Cost leaderboard', q: { metric: 'spend', group_by: 'model', chart: 'hbar', stack: '' } },
+  { id: 'tokens-over-time', label: 'Tokens over time', q: { metric: 'tokens', group_by: 'day', chart: 'bar', stack: '' } },
+  { id: 'tool-usage', label: 'Tool usage', q: { metric: 'events', group_by: 'tool_category', chart: 'hbar', stack: '' } },
+];
+
+// Pivot the analytics rows into a uPlot [xs, ...ys] time-series, one ys per
+// top-N group (+ "other"), zero-filled across the window (reuses _windowGrid so
+// the x-axis spans the full selected window, #133). `valueOf` picks cost vs
+// tokens per plan-tier framing.
+function buildAnalyticsSeries(resp, useTokens) {
+  if (!resp || !resp.rows) return null;
+  const grid = _windowGrid({ ...resp, series: resp.rows });
+  if (!grid) return null;
+  const { xs, idx, step, bucket, coarsened } = grid;
+  const valueOf = r => (useTokens ? (r.tokens || 0) : (r.value || 0));
+  const top = (resp.groups || []).slice(0, 5);
+  const topSet = new Set(top);
+  const hasOther = (resp.groups || []).length > top.length;
+  const labels = hasOther ? [...top, 'other'] : [...top];
+  const yss = labels.map(() => xs.map(() => 0));
+  resp.rows.forEach(r => {
+    const b = Math.floor(r.bucket / step) * step; if (!(b in idx)) return;
+    const li = topSet.has(r.group) ? labels.indexOf(r.group) : (hasOther ? labels.length - 1 : -1);
+    if (li >= 0) yss[li][idx[b]] += valueOf(r);
+  });
+  return { data: [xs, ...yss], labels, bucket, coarsened, requestedBucket: grid.reqBucket };
+}
+
+// Collapse the time dimension into per-group totals for the leaderboard (#214):
+// sorted desc, each with a fraction-of-max for the inline magnitude bar.
+function buildLeaderboard(resp, useTokens) {
+  if (!resp || !resp.rows) return null;
+  const totals = {};
+  resp.rows.forEach(r => { totals[r.group] = (totals[r.group] || 0) + (useTokens ? (r.tokens || 0) : (r.value || 0)); });
+  const entries = Object.keys(totals).map(g => ({ group: g, value: totals[g] }))
+    .sort((a, b) => b.value - a.value);
+  const max = entries.length ? Math.max(...entries.map(e => e.value), 0) : 0;
+  entries.forEach(e => { e.frac = max > 0 ? e.value / max : 0; });
+  return entries;
+}
+
+// CSV from the current pivot — built client-side from the response (offline,
+// no server round-trip), downloaded via a Blob object URL.
+function analyticsCsv(resp) {
+  const head = ['bucket_epoch', 'bucket_iso', resp.group_by, resp.stack_by || 'stack', resp.metric, 'tokens'];
+  const lines = [head.join(',')];
+  (resp.rows || []).forEach(r => {
+    const iso = new Date(r.bucket * 1000).toISOString();
+    const cell = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    lines.push([r.bucket, iso, cell(r.group), cell(r.stack), r.value, r.tokens].join(','));
+  });
+  return lines.join('\n');
+}
+
+function downloadCsv(filename, text) {
+  const blob = new Blob([text], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+function AnalyticsView({ params }) {
+  const DEFAULTS = { since: '30d', metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
+    agent_id: '', provider: '', model: '', tool: '' };
+  const since = readParam(params, 'since', DEFAULTS.since, validSince);
+  const metric = readParam(params, 'metric', DEFAULTS.metric, v => ANALYTICS_METRICS.some(m => m[0] === v));
+  const groupBy = readParam(params, 'group_by', DEFAULTS.group_by, v => ANALYTICS_DIMENSIONS.some(d => d[0] === v));
+  const stack = readParam(params, 'stack', DEFAULTS.stack, v => v === '' || ANALYTICS_DIMENSIONS.some(d => d[0] === v));
+  const chart = readParam(params, 'chart', DEFAULTS.chart, v => ANALYTICS_CHARTS.some(c => c[0] === v));
+  const fAgent = readParam(params, 'agent_id', '');
+  const fProvider = readParam(params, 'provider', '');
+  const fModel = readParam(params, 'model', '');
+  const fTool = readParam(params, 'tool', '');
+  const cur = { since, metric, group_by: groupBy, stack, chart, agent_id: fAgent, provider: fProvider, model: fModel, tool: fTool };
+  const setFilter = (k, v) => navigate('analytics', { ...cur, [k]: v }, DEFAULTS);
+  const applyPreset = (q) => navigate('analytics', { ...cur, ...q }, DEFAULTS);
+
+  const [st, setSt] = useState({ loading: true, error: null, resp: null });
+
+  const load = useCallback(async () => {
+    setSt(s => ({ ...s, loading: !s.resp, error: null }));
+    try {
+      const resp = await api('/analytics', {
+        metric, group_by: groupBy, stack_by: stack || undefined, since,
+        agent_id: fAgent || undefined, provider: fProvider || undefined,
+        model: fModel || undefined, tool: fTool || undefined,
+      });
+      setSt({ loading: false, error: null, resp });
+    } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
+  }, [metric, groupBy, stack, chart, since, fAgent, fProvider, fModel, fTool]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const { loading, error, resp } = st;
+  const framing = resp ? resp.framing : null;
+  // Plan-tier framing: the spend metric switches to token volume for
+  // subscription/local (dollars suppressed) — single source, never re-derived.
+  const isSpend = metric === 'spend';
+  const useTokens = isSpend && !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+  const valueIsDollars = isSpend && !useTokens;
+  const fmtV = valueIsDollars ? fmtCost : fmtTokens;
+  const fmtVal = v => (metric === 'sessions' || metric === 'events') ? fmtTokens(v).replace(/ tokens$/, '') : fmtV(v);
+  const axisFmt = valueIsDollars ? fmtAxisUsd : fmtTokens;
+
+  const series = (chart === 'line' || chart === 'bar') ? buildAnalyticsSeries(resp, useTokens) : null;
+  const board = chart === 'hbar' ? buildLeaderboard(resp, useTokens) : null;
+  const kpis = resp ? resp.kpis : null;
+  const filterChips = [['agent_id', fAgent], ['provider', fProvider], ['model', fModel], ['tool', fTool]].filter(x => x[1]);
+
+  const metricSuffix = isSpend ? (useTokens ? ' (tokens)' : '') : '';
+
+  return html`
+    <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      Analytics <${PlanBadge} framing=${framing} />
+    </div>
+
+    <div class="filters">
+      <label class="ctl">Metric
+        <select value=${metric} onChange=${e => setFilter('metric', e.target.value)}>
+          ${ANALYTICS_METRICS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+        </select></label>
+      <label class="ctl">By
+        <select value=${groupBy} onChange=${e => setFilter('group_by', e.target.value)}>
+          ${ANALYTICS_DIMENSIONS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+        </select></label>
+      <label class="ctl">Stack
+        <select value=${stack} onChange=${e => setFilter('stack', e.target.value)}>
+          <option value="">none</option>
+          ${ANALYTICS_DIMENSIONS.filter(d => d[0] !== groupBy).map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+        </select></label>
+      <label class="ctl">Chart
+        <select value=${chart} onChange=${e => setFilter('chart', e.target.value)}>
+          ${ANALYTICS_CHARTS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+        </select></label>
+      <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
+        <option value="24h">Last 24h</option><option value="7d">Last 7d</option>
+        <option value="30d">Last 30d</option><option value="90d">Last 90d</option>
+      </select>
+      <button class="btn" onClick=${load}>Refresh</button>
+      <button class="btn" onClick=${() => resp && downloadCsv('tokenjam-analytics.csv', analyticsCsv(resp))}>Export CSV</button>
+    </div>
+
+    <div class="filters preset-row">
+      <span class="dim" style="font-size:12px">Presets:</span>
+      ${ANALYTICS_PRESETS.map(p => html`<button class="btn preset-btn" onClick=${() => applyPreset(p.q)}>${p.label}</button>`)}
+      ${filterChips.map(([k, v]) => html`<button class="btn" onClick=${() => setFilter(k, '')}>${k.replace('_id', '')}: ${v} ✕</button>`)}
+    </div>
+
+    ${error ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load analytics: ${error}</div><button class="btn" onClick=${load}>Retry</button></div>` : null}
+
+    ${!error && framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
+
+    ${!error && kpis ? html`
+      <div class="kpi-row">
+        ${[['spend', 'Spend', valueIsDollars || !isSpend ? fmtFramedDollar(kpis.spend, framing) : fmtTokens(kpis.tokens) + ' tok'],
+           ['tokens', 'Tokens', fmtTokens(kpis.tokens)],
+           ['sessions', 'Sessions', String(kpis.sessions)],
+           ['events', 'Events', String(kpis.events)]].map(([k, lab, val]) => html`
+          <div class=${'kpi-tile' + (k === metric ? ' kpi-active' : '')}>
+            <div class="kpi-val">${val}</div><div class="kpi-lab">${lab}</div>
+          </div>`)}
+      </div>` : null}
+
+    ${!error ? html`
+      <div class="chart-card">
+        <div class="chart-head">
+          <div class="chart-title">${(ANALYTICS_METRICS.find(m => m[0] === metric) || [, metric])[1]} by ${(ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1]}${metricSuffix}</div>
+        </div>
+        ${loading ? html`<div class="shimmer" style="height:200px"></div>`
+          : chart === 'hbar'
+            ? (board && board.length ? html`
+              <div class="leaderboard">
+                ${board.map((e, i) => html`
+                  <div class="lb-row">
+                    <span class="lb-rank">${i + 1}</span>
+                    <span class="lb-name" title=${e.group}>${e.group}</span>
+                    <span class="lb-bar"><span class="lb-fill" style=${'width:' + (e.frac * 100).toFixed(1) + '%'}></span></span>
+                    <span class="lb-val">${fmtVal(e.value)}</span>
+                  </div>`)}
+              </div>` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
+            : (series ? html`
+              ${chart === 'line'
+                ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} showLegend=${series.labels.length > 1} bucket=${series.bucket} />`
+                : html`<${StackedBarChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} bucket=${series.bucket} />`}
+              ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+            ` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)}
+      </div>` : null}
+  `;
+}
+
+// ============================
 // App Router
 // ============================
 function App() {
@@ -2723,6 +2951,7 @@ function App() {
       if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;
       return html`<${TracesListView} params=${p} />`;
     case 'cost': return html`<${CostView} params=${p} />`;
+    case 'analytics': return html`<${AnalyticsView} params=${p} />`;
     case 'alerts': return html`<${AlertsView} params=${p} />`;
     case 'drift': return html`<${DriftView} params=${p} />`;
     case 'optimize': return html`<${OptimizeView} params=${p} />`;
