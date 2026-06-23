@@ -137,6 +137,7 @@ async def get_analytics(
     empty = {
         **meta, "rows": [], "groups": [], "stacks": [], "totals_by_group": {},
         "kpis": {"spend": 0.0, "tokens": 0, "events": 0, "sessions": 0},
+        "kpi_series": [], "kpi_prev": None, "kpi_deltas": {},
         "framing": _framing_block(db, config, agent_id, 0.0, 0),
     }
     if conn is None:
@@ -164,22 +165,31 @@ async def get_analytics(
         subtype.append("model IS NOT NULL")
     if dims & {"tool", "tool_category"}:
         subtype.append("tool_name IS NOT NULL")
-    # User filters + time window (shared param list across grouped + KPI queries).
-    user_clauses: list[str] = []
-    params: list = []
-    for pname, value in (("agent_id", agent_id), ("provider", provider),
-                         ("model", model), ("tool", tool)):
-        if value:
-            params.append(value)
-            user_clauses.append(_FILTER_COLUMN[pname] + " = $" + str(len(params)))
-    if since_dt is not None:
-        params.append(since_dt)
-        user_clauses.append("start_time >= $" + str(len(params)))
-    if until_dt is not None:
-        params.append(until_dt)
-        user_clauses.append("start_time <= $" + str(len(params)))
-    where = " AND ".join(subtype + user_clauses) if (subtype or user_clauses) else "1=1"
-    kpi_where = " AND ".join(user_clauses) if user_clauses else "1=1"
+    # The non-time equality filters (agent/provider/model/tool), reused to build
+    # the current window, the per-bucket KPI series, and the prior-period window.
+    filter_pairs = [(_FILTER_COLUMN[p], v) for p, v in
+                    (("agent_id", agent_id), ("provider", provider),
+                     ("model", model), ("tool", tool)) if v]
+
+    def where_and_params(*, with_subtype: bool, lo, hi) -> tuple[str, list]:
+        """Build a (where, params) over the filters + a [lo, hi) time window.
+        `with_subtype` adds the breakdown's span-subtype gate (no params)."""
+        cl: list[str] = list(subtype) if with_subtype else []
+        ps: list = []
+        for col, val in filter_pairs:
+            ps.append(val)
+            cl.append(col + " = $" + str(len(ps)))
+        if lo is not None:
+            ps.append(lo)
+            cl.append("start_time >= $" + str(len(ps)))
+        if hi is not None:
+            ps.append(hi)
+            cl.append("start_time < $" + str(len(ps)))
+        return (" AND ".join(cl) if cl else "1=1", ps)
+
+    end_dt = until_dt or utcnow()
+    where, params = where_and_params(with_subtype=True, lo=since_dt, hi=end_dt)
+    kpi_where, kpi_params = where_and_params(with_subtype=False, lo=since_dt, hi=end_dt)
 
     g1 = resolve(group_by)
     g2 = resolve(stack_by) if stack_by else None
@@ -222,19 +232,48 @@ async def get_analytics(
     stack_keys = sorted(stacks, key=lambda k: stacks[k], reverse=True)
 
     # KPI totals over the window (independent of group_by). DISTINCT for sessions
-    # so a session spanning models/buckets is counted once.
-    kpi_sql = (
-        "SELECT COALESCE(SUM(cost_usd),0.0), "
-        + _TOKENS_EXPR + ", COUNT(*), COUNT(DISTINCT session_id) "
-        "FROM spans WHERE " + kpi_where
+    # so a session spanning models/buckets is counted once. The four-metric
+    # SELECT is reused for the prior window too.
+    _kpi_cols = ("COALESCE(SUM(cost_usd),0.0), " + _TOKENS_EXPR
+                 + ", COUNT(*), COUNT(DISTINCT session_id)")
+
+    def _kpi_totals(where_sql: str, ps: list) -> dict:
+        row = conn.execute("SELECT " + _kpi_cols + " FROM spans WHERE " + where_sql, ps).fetchone()
+        return {
+            "spend": float(row[0] or 0.0) if row else 0.0,
+            "tokens": int(row[1] or 0) if row else 0,
+            "events": int(row[2] or 0) if row else 0,
+            "sessions": int(row[3] or 0) if row else 0,
+        }
+
+    kpis = _kpi_totals(kpi_where, kpi_params)
+
+    # Per-bucket series for ALL FOUR KPI metrics (the sparklines, #217). One
+    # query, server-side — the UI zero-fills across the window and never
+    # aggregates per-bucket in JS (single compute path).
+    kpi_series_sql = (
+        "SELECT " + _bucket_expr(bucket) + " AS b, " + _kpi_cols
+        + " FROM spans WHERE " + kpi_where + " GROUP BY b ORDER BY b"
     )
-    krow = conn.execute(kpi_sql, params).fetchone()
-    kpis = {
-        "spend": float(krow[0] or 0.0) if krow else 0.0,
-        "tokens": int(krow[1] or 0) if krow else 0,
-        "events": int(krow[2] or 0) if krow else 0,
-        "sessions": int(krow[3] or 0) if krow else 0,
-    }
+    kpi_series = [
+        {"bucket": int(r[0]), "spend": float(r[1] or 0.0), "tokens": int(r[2] or 0),
+         "events": int(r[3] or 0), "sessions": int(r[4] or 0)}
+        for r in conn.execute(kpi_series_sql, kpi_params).fetchall()
+    ]
+
+    # Period-over-period delta vs the prior equal-length window (#217), same
+    # convention as the Cost/Overview --compare headline. Computed server-side.
+    kpi_prev: dict | None = None
+    kpi_deltas: dict = {}
+    if since_dt is not None:
+        prev_since = since_dt - (end_dt - since_dt)
+        pwhere, pparams = where_and_params(with_subtype=False, lo=prev_since, hi=since_dt)
+        kpi_prev = _kpi_totals(pwhere, pparams)
+        for m in ("spend", "tokens", "events", "sessions"):
+            prev_v = kpi_prev[m]
+            cur_v = kpis[m]
+            kpi_deltas[m] = (round((cur_v - prev_v) / prev_v * 100.0, 1)
+                             if prev_v else None)
 
     return {
         **meta,
@@ -243,5 +282,8 @@ async def get_analytics(
         "stacks": stack_keys,
         "totals_by_group": {k: round(v, 8) for k, v in totals.items()},
         "kpis": kpis,
+        "kpi_series": kpi_series,
+        "kpi_prev": kpi_prev,
+        "kpi_deltas": kpi_deltas,
         "framing": _framing_block(db, config, agent_id, kpis["spend"], kpis["tokens"]),
     }

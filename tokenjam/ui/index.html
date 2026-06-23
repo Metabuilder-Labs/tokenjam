@@ -348,8 +348,13 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .preset-row { margin-top: -6px; }
 .preset-btn { font-size: 11px; padding: 4px 9px; }
 .kpi-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.kpi-tile { flex: 1 1 120px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.kpi-tile { flex: 1 1 140px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
 .kpi-tile.kpi-active { border-color: var(--accent); }
+.kpi-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.kpi-num { min-width: 0; }
+.spark { display: block; flex-shrink: 0; }
+.spark-empty { flex-shrink: 0; }
+.kpi-tile .delta-chip { font-family: 'Geist Mono', monospace; font-size: 11px; margin-top: 6px; display: inline-block; }
 .kpi-val { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 600; }
 .kpi-lab { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
 .leaderboard { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
@@ -1683,6 +1688,68 @@ function TrendChip({ pct }) {
   return html`<span class="trend-chip" style="color:${color}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev</span>`;
 }
 
+// Signed period-over-period delta chip for KPI tiles (#217). `cost`=true uses
+// the spend semantic (up = red/attention, down = green); volume metrics
+// (tokens/sessions/events) stay neutral — more isn't inherently "bad".
+function DeltaChip({ pct, cost }) {
+  if (pct == null) return null;
+  const up = pct > 0;
+  const arrow = pct === 0 ? '·' : up ? '▲' : '▼';
+  const color = cost
+    ? (pct === 0 ? 'var(--text-dim)' : up ? 'var(--error)' : 'var(--success)')
+    : 'var(--text-dim)';
+  return html`<span class="delta-chip" style="color:${color}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev</span>`;
+}
+
+// Inline-SVG sparkline (#217) — lightweight + offline; avoids spinning up a
+// uPlot instance per KPI tile. `values` is a numeric series (already in the
+// plan-tier-appropriate unit chosen by the caller). Draws a normalized polyline
+// over a faint area fill.
+function Sparkline({ values, color = 'var(--accent)', width = 92, height = 26 }) {
+  const vs = (values || []).filter(v => typeof v === 'number' && !isNaN(v));
+  if (vs.length < 2) return html`<div class="spark-empty" style=${'width:' + width + 'px;height:' + height + 'px'}></div>`;
+  const max = Math.max(...vs), min = Math.min(...vs);
+  const span = (max - min) || 1;
+  const n = vs.length;
+  const px = i => (i / (n - 1)) * width;
+  const py = v => height - ((v - min) / span) * (height - 4) - 2;
+  const line = vs.map((v, i) => px(i).toFixed(1) + ',' + py(v).toFixed(1)).join(' ');
+  const area = 'M0,' + height + ' L' + vs.map((v, i) => px(i).toFixed(1) + ',' + py(v).toFixed(1)).join(' L') + ' L' + width.toFixed(1) + ',' + height + ' Z';
+  return html`<svg class="spark" width=${width} height=${height} viewBox=${'0 0 ' + width + ' ' + height} preserveAspectRatio="none">
+    <path d=${area} fill=${color} opacity="0.13"></path>
+    <polyline points=${line} fill="none" stroke=${color} stroke-width="1.5"></polyline>
+  </svg>`;
+}
+
+// A trend-aware KPI tile (#217): value + sparkline + signed delta. The caller
+// passes series/delta already in the right unit (token-share for a suppressed
+// Spend tile), so framing is decided once upstream — never re-derived here.
+function KpiTile({ label, value, active, series, delta, cost }) {
+  return html`<div class=${'kpi-tile' + (active ? ' kpi-active' : '')}>
+    <div class="kpi-top">
+      <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div></div>
+      <${Sparkline} values=${series} />
+    </div>
+    <${DeltaChip} pct=${delta} cost=${cost} />
+  </div>`;
+}
+
+// Zero-filled per-bucket values for one KPI metric from the analytics
+// `kpi_series` (server-computed; the UI never aggregates per-bucket — single
+// compute path). Spans the full window via the shared grid so the sparkline
+// shape matches the chart's window.
+function kpiSparkValues(resp, metric) {
+  const grid = _windowGrid({ ...resp, series: resp.kpi_series });
+  if (!grid) return (resp.kpi_series || []).map(b => b[metric] || 0);
+  const { xs, idx, step } = grid;
+  const ys = xs.map(() => 0);
+  (resp.kpi_series || []).forEach(b => {
+    const t = Math.floor(b.bucket / step) * step;
+    if (t in idx) ys[idx[t]] += (b[metric] || 0);
+  });
+  return ys;
+}
+
 // Build a uPlot [xs, ys...] series from day-grouped cost rows. `mode` is
 // total | model | agent; `useTokens` swaps cost for token volume (subscription
 // / local framing where dollars are suppressed). Splits keep the top-5 keys
@@ -2931,16 +2998,30 @@ function AnalyticsView({ params }) {
 
     ${!error && framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
 
-    ${!error && kpis ? html`
-      <div class="kpi-row">
-        ${[['spend', 'Spend', valueIsDollars || !isSpend ? fmtFramedDollar(kpis.spend, framing) : fmtTokens(kpis.tokens) + ' tok'],
-           ['tokens', 'Tokens', fmtTokens(kpis.tokens)],
-           ['sessions', 'Sessions', String(kpis.sessions)],
-           ['events', 'Events', String(kpis.events)]].map(([k, lab, val]) => html`
-          <div class=${'kpi-tile' + (k === metric ? ' kpi-active' : '')}>
-            <div class="kpi-val">${val}</div><div class="kpi-lab">${lab}</div>
-          </div>`)}
-      </div>` : null}
+    ${!error && kpis ? (() => {
+      // The Spend tile follows the server framing block: subscription/local
+      // suppress dollars, so its value + sparkline + delta read on TOKEN volume,
+      // never raw $ — decided here once, not re-derived per render path. Token /
+      // session / event tiles are plan-independent counts.
+      const spendSuppressed = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+      const deltas = resp.kpi_deltas || {};
+      const tiles = [
+        { key: 'spend', label: 'Spend', cost: true,
+          value: spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok') : fmtFramedDollar(kpis.spend, framing),
+          series: kpiSparkValues(resp, spendSuppressed ? 'tokens' : 'spend'),
+          delta: spendSuppressed ? deltas.tokens : deltas.spend },
+        { key: 'tokens', label: 'Tokens', cost: false, value: fmtTokens(kpis.tokens),
+          series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens },
+        { key: 'sessions', label: 'Sessions', cost: false, value: String(kpis.sessions),
+          series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions },
+        { key: 'events', label: 'Events', cost: false, value: String(kpis.events),
+          series: kpiSparkValues(resp, 'events'), delta: deltas.events },
+      ];
+      return html`<div class="kpi-row">
+        ${tiles.map(t => html`<${KpiTile} label=${t.label} value=${t.value} active=${t.key === metric}
+            series=${t.series} delta=${t.delta == null ? null : t.delta} cost=${t.cost} />`)}
+      </div>`;
+    })() : null}
 
     ${!error ? html`
       <div class="chart-card">

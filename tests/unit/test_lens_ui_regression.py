@@ -471,3 +471,35 @@ def test_trace_waterfall_magnitude_respects_framing(html):
     # server framing block, never re-derived in JS.
     assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
     assert "const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0)" in html
+
+
+# --- #217: KPI tiles → sparkline + period-over-period delta ----------------- #
+def test_kpi_tiles_have_sparkline_and_delta(html):
+    # KPI tiles gain a trend sparkline + a signed period-over-period delta chip.
+    assert "function Sparkline(" in html
+    assert "function DeltaChip(" in html
+    assert "function KpiTile(" in html
+
+
+def test_kpi_sparkline_is_inline_svg_not_uplot(html):
+    # The sparkline is a lightweight inline SVG (offline, no per-tile uPlot
+    # instance) — so #218's offline guarantee + render cost both hold.
+    assert '<svg class="spark"' in html
+    assert "<polyline points=" in html
+
+
+def test_kpi_series_is_server_computed_not_client_aggregated(html):
+    # Single compute path: the sparkline reads the server's `kpi_series` through
+    # the shared window grid; the UI never buckets/aggregates per-span in JS.
+    assert "function kpiSparkValues(" in html
+    assert "_windowGrid({ ...resp, series: resp.kpi_series })" in html
+    assert "resp.kpi_deltas" in html
+
+
+def test_kpi_spend_tile_respects_framing(html):
+    # The Spend tile's value, sparkline, AND delta read on TOKEN volume when
+    # dollars are suppressed (subscription/local) — decided once from the server
+    # framing block, never re-derived. Volume tiles stay plan-independent.
+    assert "const spendSuppressed = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
+    assert "kpiSparkValues(resp, spendSuppressed ? 'tokens' : 'spend')" in html
+    assert "delta: spendSuppressed ? deltas.tokens : deltas.spend" in html
