@@ -213,6 +213,79 @@ def test_backfill_plan_tier_unknown_when_config_has_no_plan(tmp_path):
         db.close()
 
 
+# --- #243: backfilled spans group into one session-level trace ------------- #
+
+def test_backfill_groups_session_into_one_trace(tmp_path):
+    # A conversation with two assistant turns; the first issues two tool calls.
+    # All four spans (2 LLM + 2 tool) should land in ONE trace, with the tool
+    # spans as children of their assistant message (not per-message fragments).
+    _make_session_file(
+        tmp_path, session_id="sess-trace", cwd="/Users/me/proj",
+        records=[
+            _assistant_record(
+                "msg-1", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-trace", "/Users/me/proj",
+                tool_uses=[("tu-1", "Bash"), ("tu-2", "Read")],
+            ),
+            _assistant_record(
+                "msg-2", "claude-opus-4-7", 500, 100,
+                "2026-04-01T10:00:05.000Z", "sess-trace", "/Users/me/proj",
+            ),
+        ],
+    )
+    db = InMemoryBackend()
+    try:
+        from tokenjam.core.models import TraceFilters
+
+        ingest_claude_code(db, root=tmp_path)
+
+        # Exactly one trace for the whole session.
+        trace_ids = [
+            r[0] for r in db.conn.execute(
+                "SELECT DISTINCT trace_id FROM spans"
+            ).fetchall()
+        ]
+        assert len(trace_ids) == 1
+
+        traces = db.get_traces(TraceFilters())
+        assert len(traces) == 1
+        assert traces[0].span_count == 4  # 2 LLM + 2 tool
+
+        # The trace holds both LLM calls and both tool calls, and every tool
+        # span is parented to an LLM span in the same trace.
+        spans = db.get_trace_spans(trace_ids[0])
+        llm = [s for s in spans if s.name == "gen_ai.llm.call"]
+        tools = [s for s in spans if s.name == "gen_ai.tool.call"]
+        assert len(llm) == 2
+        assert len(tools) == 2
+        llm_ids = {s.span_id for s in llm}
+        assert all(t.parent_span_id in llm_ids for t in tools)
+        assert {t.tool_name for t in tools} == {"Bash", "Read"}
+    finally:
+        db.close()
+
+
+def test_backfill_separate_sessions_get_separate_traces(tmp_path):
+    # Two distinct sessions must NOT collapse into one trace.
+    for sid in ("sess-x", "sess-y"):
+        _make_session_file(
+            tmp_path, session_id=sid, cwd="/Users/me/proj",
+            records=[_assistant_record(
+                f"m-{sid}", "claude-haiku-4-5", 100, 50,
+                "2026-04-01T10:00:00.000Z", sid, "/Users/me/proj",
+            )],
+        )
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        n_traces = db.conn.execute(
+            "SELECT COUNT(DISTINCT trace_id) FROM spans"
+        ).fetchone()[0]
+        assert n_traces == 2
+    finally:
+        db.close()
+
+
 # --- #245: backfill persists the cache read/write split -------------------- #
 
 def test_backfill_persists_cache_read_write_split(tmp_path):
