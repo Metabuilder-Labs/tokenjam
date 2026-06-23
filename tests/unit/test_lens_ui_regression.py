@@ -594,3 +594,29 @@ def test_overview_remains_default_landing_no_render_time_redirect(html):
     # render-time location.hash assignment that would race the first render.
     assert "(qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'overview'" in html
     assert "location.hash = '#/overview'" not in html
+
+
+# --- #241: Status screen Cards | List view toggle -------------------------- #
+def test_status_view_toggle_exists(html):
+    # A segmented Cards | List control on the Status screen, driven by the URL
+    # view param (default 'cards', omitted from the URL via navigate defaults).
+    assert ".view-toggle" in html  # segmented-control CSS
+    assert "const DEFAULTS = { view: 'cards', agent_id: '' };" in html
+    assert "readParam(params, 'view', DEFAULTS.view, v => ['cards', 'list'].includes(v))" in html
+    assert "const setView = (v) => navigate('status', { agent_id: agentId, view: v }, DEFAULTS);" in html
+    # both toggle buttons present
+    assert "onClick=${() => setView('cards')}>Cards</button>" in html
+    assert "onClick=${() => setView('list')}>List</button>" in html
+
+
+def test_status_list_table_renderer_exists(html):
+    # The List view is a dedicated columned-table renderer, gated behind the
+    # view mode. Cards remains the default render path.
+    assert "function StatusListTable({ agents, framing })" in html
+    assert "? StatusListTable({ agents, framing: data.framing })" in html
+
+
+def test_status_list_cost_column_respects_framing(html):
+    # The List view's Cost cell goes through fmtFramedDollar(framing) exactly
+    # like the cards — plan-tier framing is never re-derived in JS (#110/#241).
+    assert "<td>${fmtFramedDollar(a.cost_today, framing)}</td>" in html
