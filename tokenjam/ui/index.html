@@ -902,6 +902,36 @@ function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
+// Shared series→color map (#228). ONE place that turns a series NAME (model /
+// agent / tool-category / …) into a stable hue from the --chart-1..5 palette,
+// so a given series is the SAME color on every chart and screen — never a
+// per-chart palette indexed by draw order. Every colored surface (leaderboard,
+// stacked bars, multi-series spend) must route through this; do not introduce a
+// second palette. 'other'/'(none)' buckets read as a neutral grey so the
+// catch-all never masquerades as a real series.
+function colorFor(name) {
+  const s = String(name == null ? '' : name);
+  if (s === 'other' || s === '(none)' || s === '') return cssVar('--text-dim') || '#a1a1a1';
+  const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+  if (!palette.length) return '#3d8eff';
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return palette[h % palette.length];
+}
+
+// Format a group/series key for display. A TIME dimension (Day) carries raw
+// epoch-second keys; render them as dates, never the raw integer (#227). Other
+// dimensions pass through unchanged.
+function formatGroupLabel(name, dim) {
+  if (dim === 'day') {
+    const n = Number(name);
+    if (Number.isFinite(n) && n > 1e9) {
+      return new Date(n * 1000).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+    }
+  }
+  return name;
+}
+
 // Minimal time-series line/area chart over the vendored uPlot global. `data`
 // is uPlot's [xs, ys] tuple (xs in unix seconds). Reads CSS custom properties
 // so it matches the active light/dark theme at creation.
@@ -1034,7 +1064,10 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ax
     const axisFmt = axisFmtY || fmtY;
     const series = [{}];
     labels.forEach((lab, i) => {
-      const c = palette[i % palette.length] || '#3d8eff';
+      // Single-series charts (e.g. a "Total" line) keep the primary chart hue;
+      // multi-series color by NAME via the shared map (#228) so a model is the
+      // same color here and on every other chart.
+      const c = single ? (palette[0] || '#3d8eff') : colorFor(lab);
       series.push({
         label: lab, stroke: c, width: 2,
         points: { show: data[0].length < 30 },
@@ -1101,11 +1134,14 @@ function stackedTooltip(segs, labels, fmtFn) {
       const d = new Date(u.data[0][idx] * 1000);
       const dateStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
       const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+      const single = labels.length === 1;
       let rows = '';
       for (let k = 0; k < segs.length; k++) {
         const val = segs[k][idx];
         if (!val) continue;
-        const c = palette[k % palette.length] || '#3d8eff';
+        // Match the bar color exactly: shared color map by name (#228), primary
+        // hue for a lone series.
+        const c = single ? (palette[0] || '#3d8eff') : colorFor(labels[k] || ('s' + k));
         rows += `<div class="u-tip-row"><span class="u-tip-dot" style="background:${c}"></span>${labels[k] || ('s' + k)}: ${fmtFn(val)}</div>`;
       }
       tip.innerHTML = `<div class="u-tip-date">${dateStr}</div>${rows || '<div class="u-tip-row">—</div>'}`;
@@ -1142,10 +1178,14 @@ function StackedBarChart({ data, labels = [], height = 200, fmtY = fmtCost, axis
     const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
       ? window.uPlot.paths.bars({ size: [0.86, Infinity] }) : undefined;
     const chartData = [xs, ...order.map(k => cum[k])];
+    const single = labels.length === 1;
     const series = [{}];
     order.forEach(k => {
-      const c = palette[k % palette.length] || '#3d8eff';
-      series.push({ label: labels[k] || ('s' + k), stroke: c, fill: c, width: 0,
+      const lab = labels[k] || ('s' + k);
+      // Color by series NAME via the shared map (#228); a lone series keeps the
+      // primary hue. Same map the spend line + leaderboard use.
+      const c = single ? (palette[0] || '#3d8eff') : colorFor(lab);
+      series.push({ label: lab, stroke: c, fill: c, width: 0,
         paths: barsPath, points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) });
     });
     const opts = {
@@ -2860,14 +2900,30 @@ function buildAnalyticsSeries(resp, useTokens) {
   if (!grid) return null;
   const { xs, idx, step, bucket, coarsened } = grid;
   const valueOf = r => (useTokens ? (r.tokens || 0) : (r.value || 0));
-  const top = (resp.groups || []).slice(0, 5);
+  // When group_by IS the time dimension (Day), time is already the x-axis, so
+  // coloring by the day-bucket key produces a meaningless rainbow with raw epoch
+  // legend labels (#227). The colored SERIES then come from stack_by (g2) if
+  // present, otherwise a SINGLE series — never one-per-day-bucket.
+  const timeGroup = resp.group_by === 'day';
+  const keyOf = timeGroup ? (r => r.stack) : (r => r.group);
+  const seriesKeys = timeGroup ? (resp.stacks || []) : (resp.groups || []);
+  if (!seriesKeys.length) {
+    const ys = xs.map(() => 0);
+    resp.rows.forEach(r => {
+      const b = Math.floor(r.bucket / step) * step;
+      if (b in idx) ys[idx[b]] += valueOf(r);
+    });
+    return { data: [xs, ys], labels: ['Total'], bucket, coarsened, requestedBucket: grid.reqBucket };
+  }
+  const top = seriesKeys.slice(0, 5);
   const topSet = new Set(top);
-  const hasOther = (resp.groups || []).length > top.length;
+  const hasOther = seriesKeys.length > top.length;
   const labels = hasOther ? [...top, 'other'] : [...top];
   const yss = labels.map(() => xs.map(() => 0));
   resp.rows.forEach(r => {
     const b = Math.floor(r.bucket / step) * step; if (!(b in idx)) return;
-    const li = topSet.has(r.group) ? labels.indexOf(r.group) : (hasOther ? labels.length - 1 : -1);
+    const k = keyOf(r);
+    const li = topSet.has(k) ? labels.indexOf(k) : (hasOther ? labels.length - 1 : -1);
     if (li >= 0) yss[li][idx[b]] += valueOf(r);
   });
   return { data: [xs, ...yss], labels, bucket, coarsened, requestedBucket: grid.reqBucket };
@@ -3032,13 +3088,16 @@ function AnalyticsView({ params }) {
           : chart === 'hbar'
             ? (board && board.length ? html`
               <div class="leaderboard">
-                ${board.map((e, i) => html`
+                ${board.map((e, i) => {
+                  const label = formatGroupLabel(e.group, groupBy);
+                  return html`
                   <div class="lb-row">
                     <span class="lb-rank">${i + 1}</span>
-                    <span class="lb-name" title=${e.group}>${e.group}</span>
-                    <span class="lb-bar"><span class="lb-fill" style=${'width:' + (e.frac * 100).toFixed(1) + '%'}></span></span>
+                    <span class="lb-name" title=${label}>${label}</span>
+                    <span class="lb-bar"><span class="lb-fill" style=${'width:' + (e.frac * 100).toFixed(1) + '%;background:' + colorFor(e.group)}></span></span>
                     <span class="lb-val">${fmtVal(e.value)}</span>
-                  </div>`)}
+                  </div>`;
+                })}
               </div>` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
             : (series ? html`
               ${chart === 'line'
