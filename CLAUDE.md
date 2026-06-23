@@ -376,7 +376,7 @@ Key runtime dependency: `pytz` is required by DuckDB for `TIMESTAMPTZ` column ha
 - `tokenjam[bloat]` — `llmlingua>=0.2`, used by the Trim analyzer. Pulls PyTorch + transformers (~2GB). Kept out of base install. The analyzer self-registers without the extra installed; the deferred `import llmlingua` inside the analysis function body raises a typed message pointing the user at the install command.
 - Framework extras `[langchain]`, `[crewai]`, `[autogen]`, `[litellm]` for SDK patches.
 - `[dev]` for local development (`pytest`, `ruff`, `mypy`, `httpx`).
-- `[mcp]` for the FastMCP stdio server.
+- `[mcp]` — empty no-op alias. `fastmcp` moved into the base install in v0.3.5 (#101), so the FastMCP stdio server (`tj mcp`) works on a plain `pipx install tokenjam`. The extra is kept so old `tokenjam[mcp]` install commands still succeed; it pulls nothing extra.
 
 ## Further Reading
 
