@@ -130,8 +130,17 @@ def _det_id(*parts: str, length: int = 16) -> str:
     return h[:length]
 
 
-def _trace_id_for(session_id: str, message_uuid: str) -> str:
-    return _det_id("trace", session_id, message_uuid, length=32)
+def _trace_id_for(session_id: str) -> str:
+    """One trace per session/conversation.
+
+    Keyed on the session id alone (NOT per assistant message) so a whole
+    conversation is a single trace with its LLM calls and tool calls as
+    children — the Traces view then shows real session-level waterfalls
+    instead of ~1.5-span per-message fragments (#243). This matches the live
+    Claude Code log path (`routes/logs.py._trace_id_from_session`), which
+    already groups by session.
+    """
+    return _det_id("trace", session_id, length=32)
 
 
 def _span_id_for_assistant(session_id: str, message_uuid: str) -> str:
@@ -254,7 +263,10 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
 
         message_uuid = record.get("uuid") or msg.get("id") or f"{line_no}"
         sid_str = session_id or path.stem
-        trace_id = _trace_id_for(sid_str, message_uuid)
+        # One trace per session (#243): all assistant turns + their tool calls
+        # in this conversation share a trace_id. span_id stays per-message so
+        # idempotency (deterministic span IDs) is unaffected.
+        trace_id = _trace_id_for(sid_str)
         span_id = _span_id_for_assistant(sid_str, message_uuid)
 
         provider = _provider_for_model(model)
