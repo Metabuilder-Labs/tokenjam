@@ -393,6 +393,17 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
 .btn-back { margin-bottom: 16px; }
 
+/* Segmented view toggle (Cards | List), e.g. the Status screen (#241). */
+.view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.view-toggle button {
+  background: var(--surface); border: none; color: var(--text-dim);
+  padding: 5px 12px; cursor: pointer;
+  font-family: 'Geist Mono', monospace; font-size: 12px;
+}
+.view-toggle button + button { border-left: 1px solid var(--border); }
+.view-toggle button:hover:not(.active) { color: var(--text); }
+.view-toggle button.active { background: rgba(var(--accent-rgb),0.10); color: var(--accent); }
+
 /* Waterfall */
 .waterfall { margin: 16px 0; }
 .wf-row {
@@ -1419,12 +1430,56 @@ function buildComponentWaste(resp, useTokens) {
 }
 
 // ============================
+// Status List Table (#241)
+// ============================
+// The List alternative to the Status cards: one row per agent in a columned
+// table — Agent · Status · Cost today · Tokens · Tool calls · Elapsed · Actions.
+// The Cost cell goes through fmtFramedDollar(framing) exactly like the cards do,
+// so plan-tier framing (subscription → "% of cycle", local → "—") is respected
+// — never re-derived here. Reuses the existing .table-wrap/table CSS; no new lib.
+function StatusListTable({ agents, framing }) {
+  return html`
+    <div class="table-wrap"><table>
+      <thead><tr>
+        <th>Agent</th>
+        <th>Status</th>
+        <th>Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
+        <th>Tokens (in / out)</th>
+        <th>Tool calls</th>
+        <th>Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days.</span></span></th>
+        <th></th>
+      </tr></thead>
+      <tbody>
+        ${agents.map(a => html`
+          <tr>
+            <td class="mono"><span class="status-dot ${a.status}" style="margin-right:7px"></span>${a.agent_id}</td>
+            <td><span class="badge badge-${a.status}">${a.status}</span></td>
+            <td>${fmtFramedDollar(a.cost_today, framing)}</td>
+            <td>${fmtTokens(a.input_tokens)} / ${fmtTokens(a.output_tokens)}</td>
+            <td>${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</td>
+            <td>${a.duration_seconds != null ? fmtDurLong(a.duration_seconds * 1000) : '-'}</td>
+            <td style="white-space:nowrap">
+              <a href=${'#/cost?agent_id=' + encodeURIComponent(a.agent_id)}>View cost →</a>
+              <a href=${'#/traces?agent_id=' + encodeURIComponent(a.agent_id)} style="margin-left:10px">View traces →</a>
+            </td>
+          </tr>
+        `)}
+      </tbody>
+    </table></div>`;
+}
+
+// ============================
 // Status View
 // ============================
 function StatusView({ params }) {
   // Optional single-agent filter via URL (#112). Filtered client-side since
   // /status returns every agent.
-  const agentId = readParam(params, 'agent_id', '');
+  // View mode (Cards | List) also lives in the URL (#241): `#/status?view=list`.
+  // Cards is the default and is omitted from the URL so default links stay clean.
+  const DEFAULTS = { view: 'cards', agent_id: '' };
+  const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
+  const viewMode = readParam(params, 'view', DEFAULTS.view, v => ['cards', 'list'].includes(v));
+  const setView = (v) => navigate('status', { agent_id: agentId, view: v }, DEFAULTS);
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
 
@@ -1446,12 +1501,20 @@ function StatusView({ params }) {
 
   return html`
     <div class="page-title">Status</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">
-      ${agentId
-        ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/status" style="color:var(--brand)">show all</a>`
-        : 'Click on an agent tile for details'}
+    <div style="display:flex;align-items:center;gap:12px;margin:-14px 0 16px">
+      <div style="font-size:12px;color:var(--text-dim);font-family:'Geist Mono',monospace">
+        ${agentId
+          ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/status" style="color:var(--brand)">show all</a>`
+          : (viewMode === 'list' ? 'Click on an agent row for details' : 'Click on an agent tile for details')}
+      </div>
+      <div class="view-toggle" style="margin-left:auto" role="tablist" aria-label="Status view mode">
+        <button class=${viewMode === 'cards' ? 'active' : ''} aria-pressed=${viewMode === 'cards'} onClick=${() => setView('cards')}>Cards</button>
+        <button class=${viewMode === 'list' ? 'active' : ''} aria-pressed=${viewMode === 'list'} onClick=${() => setView('list')}>List</button>
+      </div>
     </div>
-    <div class="cards">
+    ${viewMode === 'list'
+      ? StatusListTable({ agents, framing: data.framing })
+      : html`<div class="cards">
       ${agents.map(a => html`
         <div class="card">
           <div class="card-header">
@@ -1472,7 +1535,7 @@ function StatusView({ params }) {
           </div>
         </div>
       `)}
-    </div>
+    </div>`}
     ${alerts.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>
