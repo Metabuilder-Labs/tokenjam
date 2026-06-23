@@ -4,6 +4,7 @@ from tokenjam.core.db import open_db
 
 
 @click.group(
+    invoke_without_command=True,
     epilog="Upgrade with: pipx upgrade tokenjam "
            "(then `tj stop && tj serve &` to reload the daemon). "
            "Verify with `tj --version`.",
@@ -23,6 +24,17 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         verbose: bool) -> None:
     """tj - local-first observability for AI agents."""
     ctx.ensure_object(dict)
+
+    # Bare `tj` (no subcommand) → branded home screen (#240): banner +
+    # next-best-action. Reads only config presence, never opens the DB.
+    if ctx.invoked_subcommand is None:
+        if no_color:
+            from rich import reconfigure
+            reconfigure(no_color=True)
+        from tokenjam.cli.home import print_home
+        print_home()
+        return
+
     config = load_config(config_path)
     if db_path:
         config.storage.path = db_path

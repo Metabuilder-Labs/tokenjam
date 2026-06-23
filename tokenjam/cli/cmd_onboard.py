@@ -11,6 +11,7 @@ from pathlib import Path
 import click
 from rich.markup import escape
 
+from tokenjam.cli.banner import print_welcome_banner
 from tokenjam.core.config import find_config_file
 from tokenjam.utils.formatting import console
 
@@ -42,6 +43,9 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 install_daemon: bool, no_daemon: bool, force: bool,
                 reconfigure: bool, plan: str | None) -> None:
     """Interactive setup wizard for tj."""
+    # Branded welcome moment (#240) — shown once at the top of every onboard
+    # flow (plain / --claude-code / --codex) before any prompt or config check.
+    print_welcome_banner()
     if claude_code:
         _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan)
         return
@@ -80,21 +84,25 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     console.print("[bold]Setting up TokenJam...[/bold]")
     console.print()
 
-    if budget is None:
-        budget = click.prompt(
-            "Daily budget in USD per agent (0 = no limit, default 0)",
-            type=float, default=0.0, show_default=False,
-        )
-
     # Plan tier (#4): the plain path now honors `--plan` and prompts for it
     # interactively, instead of silently ignoring `--plan` and never writing a
     # `[budget.<provider>] plan`. This is a Claude-first tool, so the interactive
     # prompt offers the Anthropic tiers; an OpenAI-only `--plan` (plus/team/
     # enterprise) is routed to its provider section. (The `--claude-code` /
     # `--codex` flows still own the global integration configs.)
+    #
+    # Plan-first (#240): "How do you pay?" is the more important and more natural
+    # opening question, so it comes before the daily-budget prompt below.
     plan_tier = plan
     if plan_tier is None and sys.stdin.isatty():
         plan_tier = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES)
+
+    if budget is None:
+        budget = click.prompt(
+            "Daily budget in USD per agent (0 = no limit, default 0)",
+            type=float, default=0.0, show_default=False,
+        )
+
     plan_provider = (
         "openai" if plan_tier in ("plus", "team", "enterprise") else "anthropic"
     )
@@ -270,6 +278,46 @@ def _prompt_plan(provider_label: str, choices: list[tuple[str, str]],
     return keys[int(raw) - 1]
 
 
+def _prompt_daily_budget(budget: float | None) -> float:
+    """Prompt for the per-agent daily-budget alert threshold, unless already
+    supplied via --budget. Called AFTER the plan prompt so onboard reads
+    plan-first (#240)."""
+    if budget is not None:
+        return budget
+    return click.prompt(
+        "Daily budget in USD (0 = no limit, default 0)",
+        type=float, default=0.0, show_default=False,
+    )
+
+
+def _print_next_steps_nudge(*, has_data: bool, days: int | None = None) -> None:
+    """Curated post-onboard nudge (#240).
+
+    Leads with the commands that work on the just-backfilled data *immediately*
+    — no Claude Code restart required — because onboard otherwise ends on
+    "Restart Claude Code", the exact point we lose new users. The restart note
+    (for live telemetry) is printed separately, after this. Curated to ~3
+    high-wow commands rather than a `--help` wall; copy stays honest (no
+    promised savings — Critical Rule 14).
+    """
+    console.print()
+    if has_data:
+        span = f"last {days} days" if days else "history"
+        console.print(
+            f"[bold]▸ Next steps[/bold]  [dim]your {span} "
+            "already loaded — these work right now:[/dim]"
+        )
+    else:
+        console.print(
+            "[bold]▸ Next steps[/bold]  [dim]these work right now:[/dim]"
+        )
+    console.print()
+    console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable spend tier[/dim]")
+    console.print("  [bold]tj optimize[/bold]    [dim]cost-saving candidates from your usage[/dim]")
+    console.print("  [bold]tj serve[/bold]       [dim]open Lens (web UI) at http://127.0.0.1:7391/[/dim]")
+    console.print()
+
+
 def _onboard_claude_code(
     ctx: click.Context,
     budget: float | None,
@@ -293,18 +341,12 @@ def _onboard_claude_code(
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
 
-    if budget is None:
-        budget = click.prompt(
-            "Daily budget in USD (0 = no limit, default 0)",
-            type=float, default=0.0, show_default=False,
-        )
-
+    # Plan-first (#240): resolve the plan tier before prompting for the daily
+    # budget — "How do you pay?" is the more important, more natural opener.
     if global_config_path.exists() and not force:
         config = load_config(str(global_config_path))
         if agent_id not in config.agents:
             config.agents[agent_id] = AgentConfig()
-        if budget and budget > 0:
-            config.agents[agent_id].budget.daily_usd = budget
 
         existing_plan = (
             config.budgets["anthropic"].plan
@@ -341,13 +383,14 @@ def _onboard_claude_code(
                 config.budgets["anthropic"] = ProviderBudget(
                     usd=usd, cycle_start_day=1, plan=plan,
                 )
+        budget = _prompt_daily_budget(budget)
+        if budget and budget > 0:
+            config.agents[agent_id].budget.daily_usd = budget
         config_path = global_config_path
         write_config(config, config_path)
         console.print(f"  tj config updated: {config_path}")
     else:
         ingest_secret = secrets.token_hex(32)
-        daily_usd = budget if budget and budget > 0 else None
-        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
         if plan_override:
             plan = plan_override
         else:
@@ -361,6 +404,9 @@ def _onboard_claude_code(
             )
             if ceiling > 0:
                 usd = ceiling
+        budget = _prompt_daily_budget(budget)
+        daily_usd = budget if budget and budget > 0 else None
+        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
         config = TjConfig(
             version="1",
             agents=agents,
@@ -393,6 +439,8 @@ def _onboard_claude_code(
     # Run before daemon install so a freshly-started serve does not hold the
     # DuckDB write lock (#71). Idempotent — safe to re-run.
     backfill_msg: str | None = None
+    backfill_has_data = False
+    backfill_days: int | None = None
     try:
         from tokenjam.core.backfill import (
             CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code,
@@ -409,9 +457,11 @@ def _onboard_claude_code(
                     console.print(f"  {post_apply}")
                 db.close()
                 if result.sessions_total > 0:
+                    backfill_has_data = True
                     days = None
                     if result.earliest and result.latest:
                         days = (result.latest - result.earliest).days
+                    backfill_days = days
                     # Report new / already-present / total so a re-run reads as
                     # "13 total" rather than "1 session" (#238).
                     total = result.sessions_total
@@ -568,6 +618,8 @@ def _onboard_claude_code(
     except Exception:
         pass
     console.print()
+    # Lead with the wins that need no restart, THEN the restart note (#240).
+    _print_next_steps_nudge(has_data=backfill_has_data, days=backfill_days)
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")
@@ -598,12 +650,6 @@ def _onboard_codex(
     # what [otel.resource] says, so all Codex traces land under "codex_exec".
     agent_id = "codex_exec"
 
-    if budget is None:
-        budget = click.prompt(
-            "Daily budget in USD (0 = no limit, default 0)",
-            type=float, default=0.0, show_default=False,
-        )
-
     # `--codex` always writes to the global config, mirroring `--claude-code`.
     # Codex's own config (~/.codex/config.toml) is global and the agent_id
     # `codex_exec` is project-agnostic by design (Codex hardcodes service.name
@@ -619,12 +665,12 @@ def _onboard_codex(
         except Exception:
             previous_secret = None
 
+    # Plan-first (#240): resolve the plan tier before prompting for the daily
+    # budget — "How do you pay?" is the more important, more natural opener.
     if config_path.exists():
         config = load_config(str(config_path))
         if agent_id not in config.agents:
             config.agents[agent_id] = AgentConfig()
-        if budget and budget > 0:
-            config.agents[agent_id].budget.daily_usd = budget
 
         existing_plan = (
             config.budgets["openai"].plan
@@ -654,12 +700,13 @@ def _onboard_codex(
                 config.budgets["openai"] = ProviderBudget(
                     usd=usd, cycle_start_day=1, plan=plan,
                 )
+        budget = _prompt_daily_budget(budget)
+        if budget and budget > 0:
+            config.agents[agent_id].budget.daily_usd = budget
         write_config(config, config_path)
         console.print(f"  tj config updated: {config_path}")
     else:
         ingest_secret = secrets.token_hex(32)
-        daily_usd = budget if budget and budget > 0 else None
-        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
         if plan_override:
             plan = plan_override
         else:
@@ -673,6 +720,9 @@ def _onboard_codex(
             )
             if ceiling > 0:
                 usd = ceiling
+        budget = _prompt_daily_budget(budget)
+        daily_usd = budget if budget and budget > 0 else None
+        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
         config = TjConfig(
             version="1",
             agents=agents,
@@ -806,7 +856,9 @@ def _onboard_codex(
     if secret:
         console.print(f"  Ingest secret:       {secret[:8]}...")
     console.print("  MCP server:          tj mcp (registered in Codex config)")
-    console.print()
+    # Lead with the wins that need no restart, THEN the restart note (#240).
+    # Codex onboarding doesn't backfill, so there's no "already loaded" claim.
+    _print_next_steps_nudge(has_data=False)
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")

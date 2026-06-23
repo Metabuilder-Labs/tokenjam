@@ -1,6 +1,6 @@
 # Contributing to TokenJam
 
-TokenJam is MIT licensed and welcomes contributions. The codebase was built using parallel Claude Code agents — the `.claude/` task files are intentionally committed so contributors can use the same workflow.
+TokenJam is MIT licensed and welcomes contributions. It's built by AI coding agents, and contributing with one is first-class — see [Using coding agents](#using-coding-agents) below.
 
 ## Good first contributions
 
@@ -58,12 +58,12 @@ tests/factories.py     Span factory — use this in all synthetic tests, never
                        construct NormalizedSpan directly
 ```
 
-## Using Claude Code
+## Using coding agents
 
-This project was built using parallel Claude Code agents. The `.claude/` directory contains the original task files. If you're using Claude Code to contribute:
+TokenJam is built by AI coding agents, and contributing with one is first-class:
 
-- Read `AGENTS.md` at the repo root before starting — it contains the critical rules (DuckDB not SQLite, TOML not YAML, no CLI imports in `tokenjam/core/`, etc.)
-- The task files in `.claude/` show how the codebase was structured and are useful context for larger contributions
+- **Claude Code** — it reads [`CLAUDE.md`](CLAUDE.md) automatically; run `/init` to bring your agent up to speed on the architecture and conventions.
+- **Codex / Gemini / other agents** — read [`AGENTS.md`](AGENTS.md): the critical rules (DuckDB not SQLite, TOML not YAML, no CLI imports in `tokenjam/core/`, etc.) plus a pointer to CLAUDE.md for the full guide.
 
 ## Pricing table contributions
 

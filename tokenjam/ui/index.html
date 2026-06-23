@@ -1974,6 +1974,32 @@ function fmtPerItemCost(costUsd, tokenTotal, framing) {
   return fmtFramedDollar(costUsd, framing); // api / unknown → dollars
 }
 
+// Integer count with thousand separators (#262): "23954" → "23,954". For the
+// Sessions / Events KPI tiles, which are exact counts (not abbreviated like
+// fmtTokens "23.9k").
+function fmtCount(n) {
+  if (n == null) return '0';
+  return Math.round(n).toLocaleString('en-US');
+}
+
+// The Spend KPI tile under plan-tier framing (#262). For SUBSCRIPTION, the
+// confusing "% of cycle" is replaced by an honest implied-value MULTIPLIER —
+// "43.5× plan value" (implied API value ÷ the plan's monthly fee, which is just
+// the "% of cycle" number ÷ 100). It is plan VALUE, never "spent $X". api /
+// unknown keep dollars. LOCAL (no plan fee) and a subscription with no declared
+// monthly fee have no denominator, so the tile is dropped — the Tokens tile
+// already conveys volume. Returns {label, value} or null (drop the tile).
+function spendTileDisplay(spendUsd, framing) {
+  const mode = framing && framing.pricing_mode;
+  if (mode === 'subscription') {
+    if (!framing.plan_monthly_usd) return null;          // no fee → no multiplier
+    const mult = (spendUsd || 0) / framing.plan_monthly_usd;  // == (% of cycle) / 100
+    return { label: 'Implied value', value: mult.toFixed(1) + '× plan value' };
+  }
+  if (mode === 'local') return null;                     // no plan fee to multiply against
+  return { label: 'Spend', value: fmtCost(spendUsd) };   // api / unknown → dollars
+}
+
 // Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from
 // the warning `qualifier` banner — confirms api / subscription / local mode.
 function PlanBadge({ framing }) {
@@ -1999,8 +2025,15 @@ function TrendChip({ pct }) {
 // Signed period-over-period delta chip for KPI tiles (#217). `cost`=true uses
 // the spend semantic (up = red/attention, down = green); volume metrics
 // (tokens/sessions/events) stay neutral — more isn't inherently "bad".
-function DeltaChip({ pct, cost }) {
+function DeltaChip({ pct, cost, prevThin }) {
   if (pct == null) return null;
+  // Soften a delta computed against a near-empty prior window (#262): a fresh
+  // backfill makes the prior period a sliver of data, so the % (e.g. ▲1682%) is
+  // arithmetic noise, not a trend. Suppress the alarming number and annotate.
+  if (prevThin) {
+    return html`<span class="delta-chip" style="color:var(--text-dim)"
+      title="The prior window has little data, so a percentage change would be misleading.">vs partial prior window</span>`;
+  }
   const up = pct > 0;
   const arrow = pct === 0 ? '·' : up ? '▲' : '▼';
   const color = cost
@@ -2035,7 +2068,7 @@ function Sparkline({ values, color = 'var(--accent)', width = 92, height = 26 })
 // `onSelect` makes the tile the metric selector (#247): the kpi-active border
 // already implied it was clickable; wiring onClick fulfills that. Falls back to
 // a static tile when no handler is given.
-function KpiTile({ label, value, active, series, delta, cost, onSelect }) {
+function KpiTile({ label, value, active, series, delta, cost, prevThin, onSelect }) {
   const cls = 'kpi-tile' + (active ? ' kpi-active' : '') + (onSelect ? ' kpi-clickable' : '');
   const props = onSelect
     ? { class: cls, role: 'button', tabindex: '0', 'aria-pressed': String(!!active),
@@ -2047,7 +2080,7 @@ function KpiTile({ label, value, active, series, delta, cost, onSelect }) {
       <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div></div>
       <${Sparkline} values=${series} />
     </div>
-    <${DeltaChip} pct=${delta} cost=${cost} />
+    <${DeltaChip} pct=${delta} cost=${cost} prevThin=${prevThin} />
   </div>`;
 }
 
@@ -3133,6 +3166,12 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 
   const metricSuffix = isSpend ? (useTokens ? ' (tokens)' : '') : '';
 
+  // Tool spans carry no tokens/cost, so grouping spend/tokens BY tool (or tool
+  // category) is structurally all-zeros (#268). Rather than render a wall of
+  // zeros, show a helpful empty state with a one-click switch to Events.
+  const toolDimNoMetric = (groupBy === 'tool' || groupBy === 'tool_category')
+    && (metric === 'spend' || metric === 'tokens');
+
   return html`
     ${embedded ? null : html`<div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Analytics <${PlanBadge} framing=${framing} />
@@ -3176,33 +3215,36 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 
     ${!error && kpis ? (() => {
       // The Spend tile follows the server framing block (single source, never
-      // re-derived). Under suppression (subscription/local) it shows a DISTINCT
-      // subscription value — "% of cycle" via fmtFramedDollar — NOT raw tokens
-      // (which duplicated the Tokens tile, #247). Its sparkline/delta still
-      // track SPEND (cost_usd), since "% of cycle" is just spend rescaled by the
-      // plan fee — so the trend/shape are identical to spend, never raw $. When
-      // no distinct value is meaningful (fmtFramedDollar → "—": local, or a
-      // subscription with no declared monthly fee) the Spend tile is dropped
-      // rather than duplicate Tokens.
+      // re-derived). Under SUBSCRIPTION it shows an implied-value MULTIPLIER
+      // ("43.5× plan value", #262) — NOT "% of cycle" and NOT raw tokens (which
+      // duplicated the Tokens tile, #247). Its sparkline/delta still track SPEND
+      // (cost_usd), since the multiplier is just spend rescaled by the plan fee
+      // — so the trend/shape are identical to spend, never raw $. LOCAL / a
+      // subscription with no declared fee have no denominator → the tile is
+      // dropped rather than duplicate Tokens.
       const deltas = resp.kpi_deltas || {};
-      const spendVal = fmtFramedDollar(kpis.spend, framing);
+      const spend = spendTileDisplay(kpis.spend, framing);
+      // A prior window with almost no activity makes period-over-period % a
+      // misleading sliver (the ▲1682% on a fresh backfill, #262). Use the prior
+      // window's session count as the universal "did anything happen" proxy.
+      const prevThin = !!resp.kpi_prev && (resp.kpi_prev.sessions || 0) < 2;
       const onMetric = (k) => setFilter('metric', k);
       const tiles = [];
-      if (spendVal !== '—') {
-        tiles.push({ key: 'spend', label: 'Spend', cost: true, value: spendVal,
+      if (spend) {
+        tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
           series: kpiSparkValues(resp, 'spend'), delta: deltas.spend });
       }
       tiles.push({ key: 'tokens', label: 'Tokens', cost: false, value: fmtTokens(kpis.tokens),
         series: kpiSparkValues(resp, 'tokens'), delta: deltas.tokens });
-      tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: String(kpis.sessions),
+      tiles.push({ key: 'sessions', label: 'Sessions', cost: false, value: fmtCount(kpis.sessions),
         series: kpiSparkValues(resp, 'sessions'), delta: deltas.sessions });
-      tiles.push({ key: 'events', label: 'Events', cost: false, value: String(kpis.events),
+      tiles.push({ key: 'events', label: 'Events', cost: false, value: fmtCount(kpis.events),
         series: kpiSparkValues(resp, 'events'), delta: deltas.events });
       return html`
         <div class="kpi-row">
           ${tiles.map(t => html`<${KpiTile} label=${t.label} value=${t.value} active=${t.key === metric}
               series=${t.series} delta=${t.delta == null ? null : t.delta} cost=${t.cost}
-              onSelect=${() => onMetric(t.key)} />`)}
+              prevThin=${prevThin} onSelect=${() => onMetric(t.key)} />`)}
         </div>
         ${kpiCaption ? html`<div class="kpi-caption">${kpiCaption}</div>` : null}`;
     })() : null}
@@ -3212,7 +3254,16 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         <div class="chart-head">
           <div class="chart-title">${(ANALYTICS_METRICS.find(m => m[0] === metric) || [, metric])[1]} by ${(ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1]}${metricSuffix}</div>
         </div>
-        ${loading ? html`<div class="shimmer" style="height:200px"></div>`
+        ${toolDimNoMetric ? html`
+          <div class="empty" style="padding:32px 16px;text-align:center">
+            <div style="font-size:13px;margin-bottom:12px">Tools don't carry ${metric === 'spend' ? 'cost' : 'tokens'} — those live on the LLM-call spans, not tool spans.</div>
+            <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+              <button class="btn" onClick=${() => setFilter('metric', 'events')}>Switch to Events</button>
+              <button class="btn" onClick=${() => setFilter('group_by', 'model')}>Group by Model</button>
+              <button class="btn" onClick=${() => setFilter('group_by', 'agent')}>Group by Agent</button>
+            </div>
+          </div>`
+          : loading ? html`<div class="shimmer" style="height:200px"></div>`
           : chart === 'hbar'
             ? (board && board.length ? html`
               <div class="leaderboard">

@@ -429,7 +429,9 @@ def test_analytics_respects_plan_tier_framing(html):
     # spend metric switches to token volume for subscription/local (dollars
     # suppressed); never re-derives the suppression rule — reads framing.
     assert "framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local'" in html
-    assert "fmtFramedDollar(kpis.spend, framing)" in html
+    # The Spend KPI tile reframes via spendTileDisplay (implied-value multiplier
+    # for subscription, #262) rather than fmtFramedDollar's "% of cycle".
+    assert "spendTileDisplay(kpis.spend, framing)" in html
 
 
 def test_analytics_leaderboard_has_inline_bars(html):
@@ -496,10 +498,11 @@ def test_kpi_series_is_server_computed_not_client_aggregated(html):
 
 def test_kpi_spend_tile_respects_framing(html):
     # The Spend tile reads the framed value from the server block (api → $,
-    # subscription → "% of cycle"), never raw $ for subscription. Its sparkline
-    # and delta track SPEND (cost_usd) — "% of cycle" is just spend rescaled, so
-    # the trend/shape match while the displayed number is never raw dollars.
-    assert "const spendVal = fmtFramedDollar(kpis.spend, framing)" in html
+    # subscription → implied-value multiplier "43.5× plan value", #262), never
+    # raw $ for subscription. Its sparkline and delta track SPEND (cost_usd) —
+    # the multiplier is just spend rescaled, so the trend/shape match while the
+    # displayed number is never raw dollars.
+    assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
     assert "series: kpiSparkValues(resp, 'spend'), delta: deltas.spend" in html
 
 
@@ -628,11 +631,12 @@ def test_kpi_tiles_clickable_select_metric(html):
 
 
 def test_spend_tile_distinct_under_subscription(html):
-    # #247: the Spend tile no longer falls back to raw tokens (which duplicated
-    # the Tokens tile). It uses the framed value (% of cycle) and is dropped when
-    # no distinct value exists.
-    assert "const spendVal = fmtFramedDollar(kpis.spend, framing)" in html
-    assert "if (spendVal !== '—')" in html
+    # #247/#262: the Spend tile no longer falls back to raw tokens (which
+    # duplicated the Tokens tile). It uses spendTileDisplay (implied-value
+    # multiplier for subscription) and is dropped when no distinct value exists
+    # (local / a subscription with no declared fee → null).
+    assert "const spend = spendTileDisplay(kpis.spend, framing)" in html
+    assert "if (spend) {" in html
     assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
 
 
@@ -853,3 +857,48 @@ def test_script_cluster_payload_token_total_is_server_side(html):
     # The cell consumes c.avg_tokens (server-provided per-cluster token total),
     # never re-aggregating in JS.
     assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
+
+
+# --- #262: Analytics spend tile = implied-value multiplier, separators, soft delta -- #
+def test_analytics_spend_tile_uses_value_multiplier_for_subscription(html):
+    # The Spend tile shows an implied-value multiplier ("43.5× plan value") for
+    # subscription, never "% of cycle" and never raw $ — plan VALUE, not spend.
+    assert "function spendTileDisplay(spendUsd, framing)" in html
+    assert "+ '× plan value'" in html
+    # multiplier == (% of cycle) / 100 == spend / plan_monthly_usd
+    assert "(spendUsd || 0) / framing.plan_monthly_usd" in html
+    # the tile no longer renders fmtFramedDollar (the "% of cycle") for spend
+    assert "const spendVal = fmtFramedDollar(kpis.spend, framing);" not in html
+    assert "const spend = spendTileDisplay(kpis.spend, framing);" in html
+
+
+def test_analytics_count_tiles_have_thousand_separators(html):
+    # Sessions / Events tiles are exact counts with separators ("23,954"), not
+    # raw String() integers.
+    assert "function fmtCount(n)" in html
+    assert "toLocaleString('en-US')" in html
+    assert "value: fmtCount(kpis.sessions)" in html
+    assert "value: fmtCount(kpis.events)" in html
+    assert "value: String(kpis.sessions)" not in html
+    assert "value: String(kpis.events)" not in html
+
+
+def test_analytics_thin_prior_window_softens_delta(html):
+    # A near-empty prior window suppresses the alarming ▲% and annotates instead.
+    assert "const prevThin = !!resp.kpi_prev && (resp.kpi_prev.sessions || 0) < 2;" in html
+    assert "vs partial prior window" in html
+    # the flag is threaded through the tile into the delta chip
+    assert "prevThin=${prevThin}" in html
+    assert "function DeltaChip({ pct, cost, prevThin })" in html
+
+
+# --- #268: tool dimension + spend/tokens → helpful empty state, not zeros ----- #
+def test_analytics_tool_dim_no_cost_metric_empty_state(html):
+    # Grouping spend/tokens by tool(_category) is structurally all-zeros (tool
+    # spans carry no tokens/cost) — show an empty state with a one-click switch.
+    assert "const toolDimNoMetric = (groupBy === 'tool' || groupBy === 'tool_category')" in html
+    assert "&& (metric === 'spend' || metric === 'tokens');" in html
+    assert "Tools don't carry" in html
+    # one-click recovery actions
+    assert "onClick=${() => setFilter('metric', 'events')}>Switch to Events" in html
+    assert "setFilter('group_by', 'model')" in html
