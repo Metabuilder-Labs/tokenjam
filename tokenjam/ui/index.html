@@ -1434,9 +1434,11 @@ function buildComponentWaste(resp, useTokens) {
 // ============================
 // The List alternative to the Status cards: one row per agent in a columned
 // table — Agent · Status · Cost today · Tokens · Tool calls · Elapsed · Actions.
-// The Cost cell goes through fmtFramedDollar(framing) exactly like the cards do,
-// so plan-tier framing (subscription → "% of cycle", local → "—") is respected
-// — never re-derived here. Reuses the existing .table-wrap/table CSS; no new lib.
+// The Cost cell goes through fmtPerItemCost(framing) exactly like the cards do:
+// per-item cost is rendered as TOKENS for subscription/local users (not "% of
+// cycle", which is a window-level aggregate — #249) and as dollars for api. The
+// suppression decision is never re-derived here. Reuses the existing
+// .table-wrap/table CSS; no new lib.
 function StatusListTable({ agents, framing }) {
   return html`
     <div class="table-wrap"><table>
@@ -1454,7 +1456,7 @@ function StatusListTable({ agents, framing }) {
           <tr>
             <td class="mono"><span class="status-dot ${a.status}" style="margin-right:7px"></span>${a.agent_id}</td>
             <td><span class="badge badge-${a.status}">${a.status}</span></td>
-            <td>${fmtFramedDollar(a.cost_today, framing)}</td>
+            <td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>
             <td>${fmtTokens(a.input_tokens)} / ${fmtTokens(a.output_tokens)}</td>
             <td>${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</td>
             <td>${a.duration_seconds != null ? fmtDurLong(a.duration_seconds * 1000) : '-'}</td>
@@ -1522,7 +1524,7 @@ function StatusView({ params }) {
             ${a.agent_id}
             <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
           </div>
-          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtFramedDollar(a.cost_today, data.framing)}</span></div>
+          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
           ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
@@ -1612,7 +1614,7 @@ function TracesListView({ params }) {
               <td>${friendlySpanName(t.name)}</td>
               <td>${fmtAgo(t.start_time)}</td>
               <td>${fmtDur(t.duration_ms)}</td>
-              <td>${fmtFramedDollar(t.cost_usd, framing)}</td>
+              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
               <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
               <td>${st ? html`<span class="status-dot ${st}" style="margin-right:5px"></span><span class="badge badge-${st}">${st}</span>` : html`<span style="color:var(--text-dim)">-</span>`}</td>
               <td>${t.span_count}</td>
@@ -1688,7 +1690,11 @@ function TraceDetailView({ traceId }) {
   const wfMaxMag = Math.max(0, ...rows.map(r => wfMagOf(r.span)));
   const wfTotalCost = spans.reduce((a, s) => a + (s.cost_usd || 0), 0);
   const wfTotalTokens = spans.reduce((a, s) => a + spanTokens(s), 0);
-  const wfTotalCostFramed = fmtFramedDollar(wfTotalCost, framing);
+  // A single trace's total is per-item, not a window aggregate (#249) — render
+  // it as in+out TOKENS for subscription/local, dollars for api/unknown. ("% of
+  // cycle" for one trace is the same category error as the per-row cells.)
+  const wfTotalInOut = spans.reduce((a, s) => a + _costVal(s, true), 0);
+  const wfTotalCostFramed = fmtPerItemCost(wfTotalCost, wfTotalInOut, framing);
 
   const sel = selected ? spans.find(s => s.span_id === selected) : null;
 
@@ -1730,7 +1736,11 @@ function TraceDetailView({ traceId }) {
           ? fmtDur(s.duration_ms)
           : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms);
         const sTok = spanTokens(s);
-        const costShown = s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
+        // Per-SPAN cost is per-item: under subscription/local "% of cycle" is
+        // nonsensical at this granularity (#249), and the adjacent token column
+        // already conveys the per-span magnitude \u2014 so only show the $ value for
+        // api/unknown. (local was already suppressed via costFramed === '\u2014'.)
+        const costShown = !wfUseTokens && s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
         const wfFrac = wfMaxMag > 0 ? (wfMagOf(s) / wfMaxMag * 100) : 0;
         const tipLines = [friendly];
         tipLines.push('Duration: ' + fmtDur(s.duration_ms));
@@ -1741,7 +1751,7 @@ function TraceDetailView({ traceId }) {
         if (s.output_tokens != null) tipLines.push('Output tokens: ' + fmtTokens(s.output_tokens));
         if (s.cache_tokens) tipLines.push('Cache read: ' + fmtTokens(s.cache_tokens));
         if (s.cache_write_tokens) tipLines.push('Cache write: ' + fmtTokens(s.cache_write_tokens));
-        if (s.cost_usd != null && costFramed !== '—') tipLines.push('Cost: ' + costFramed);
+        if (!wfUseTokens && s.cost_usd != null && costFramed !== '—') tipLines.push('Cost: ' + costFramed);
         const tooltip = tipLines.join('\n');
         return html`
           <div class="wf-row ${selected === s.span_id ? 'selected' : ''}" onClick=${() => setSelected(s.span_id)}>
@@ -1776,7 +1786,7 @@ function TraceDetailView({ traceId }) {
           ${sel.output_tokens != null ? html`<span class="dk">Output tokens</span><span class="dv">${fmtTokens(sel.output_tokens)}</span>` : null}
           ${sel.cache_tokens ? html`<span class="dk">Cache read</span><span class="dv">${fmtTokens(sel.cache_tokens)}</span>` : null}
           ${sel.cache_write_tokens ? html`<span class="dk">Cache write</span><span class="dv">${fmtTokens(sel.cache_write_tokens)}</span>` : null}
-          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtFramedDollar(sel.cost_usd, framing)}</span>` : null}
+          ${sel.cost_usd != null ? html`<span class="dk">Cost</span><span class="dv">${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}</span>` : null}
           ${sel.agent_id ? html`<span class="dk">Agent</span><span class="dv">${sel.agent_id}</span>` : null}
           ${sel.conversation_id ? html`<span class="dk">Conversation</span><span class="dv">${sel.conversation_id}</span>` : null}
           ${sel.session_id ? html`<span class="dk">Session</span><span class="dv">${sel.session_id}</span>` : null}
@@ -1804,6 +1814,22 @@ function fmtFramedDollar(v, framing) {
     return framing.plan_monthly_usd ? (100 * v / framing.plan_monthly_usd).toFixed(1) + '% of cycle' : '—';
   }
   return fmtCost(v); // api / unknown
+}
+
+// Per-ITEM (per-row) cost rendering (#249). "% of cycle" is a WINDOW-LEVEL
+// aggregate concept — applying it to a single trace / agent / span produces
+// nonsense like "466.7% of cycle". So at per-item granularity, subscription /
+// local users see the row's TOKEN total (the same in+out basis as the Cost
+// table's "Cost (tokens)" column via _costVal), while api / unknown users keep
+// dollars unchanged. WINDOW-LEVEL totals + headlines still use fmtFramedDollar.
+// `tokenTotal` must be a server-provided per-row figure (single compute path) —
+// the /traces and /status payloads carry input_tokens/output_tokens per row.
+function perItemUsesTokens(framing) {
+  return !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
+}
+function fmtPerItemCost(costUsd, tokenTotal, framing) {
+  if (perItemUsesTokens(framing)) return fmtTokens(tokenTotal || 0) + ' tok';
+  return fmtFramedDollar(costUsd, framing); // api / unknown → dollars
 }
 
 // Positive plan-tier chip(s) from the server `framing` block (#110). Distinct from

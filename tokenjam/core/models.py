@@ -220,6 +220,12 @@ class TraceRecord:
     cost_usd:   float | None  = None
     status_code: str          = "ok"
     span_count:  int          = 0
+    # Per-trace token totals so the UI can render per-row cost as TOKENS for
+    # subscription/local users (#249) — "% of cycle" is a window-level aggregate
+    # and is nonsensical at per-trace granularity. Summed server-side (single
+    # compute path) rather than re-aggregated in JS.
+    input_tokens:  int        = 0
+    output_tokens: int        = 0
 
 
 @dataclass
