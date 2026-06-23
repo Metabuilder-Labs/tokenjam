@@ -24,7 +24,8 @@ def _make_session_file(tmp_path: Path, session_id: str, cwd: str,
 
 def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: int,
                        timestamp: str, session_id: str, cwd: str,
-                       tool_uses: list[tuple[str, str]] | None = None) -> dict:
+                       tool_uses: list[tuple[str, str]] | None = None,
+                       cache_read: int = 0, cache_creation: int = 0) -> dict:
     content: list[dict] = [{"type": "text", "text": "ok"}]
     if tool_uses:
         for tu_id, tu_name in tool_uses:
@@ -41,8 +42,8 @@ def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: i
             "usage": {
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
-                "cache_read_input_tokens": 0,
-                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_creation,
             },
         },
     }
@@ -208,6 +209,211 @@ def test_backfill_plan_tier_unknown_when_config_has_no_plan(tmp_path):
     try:
         ingest_claude_code(db, root=tmp_path, config=cfg)
         assert db.get_session("sess-noplan").plan_tier == "unknown"
+    finally:
+        db.close()
+
+
+# --- #243: backfilled spans group into one session-level trace ------------- #
+
+def test_backfill_groups_session_into_one_trace(tmp_path):
+    # A conversation with two assistant turns; the first issues two tool calls.
+    # All four spans (2 LLM + 2 tool) should land in ONE trace, with the tool
+    # spans as children of their assistant message (not per-message fragments).
+    _make_session_file(
+        tmp_path, session_id="sess-trace", cwd="/Users/me/proj",
+        records=[
+            _assistant_record(
+                "msg-1", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-trace", "/Users/me/proj",
+                tool_uses=[("tu-1", "Bash"), ("tu-2", "Read")],
+            ),
+            _assistant_record(
+                "msg-2", "claude-opus-4-7", 500, 100,
+                "2026-04-01T10:00:05.000Z", "sess-trace", "/Users/me/proj",
+            ),
+        ],
+    )
+    db = InMemoryBackend()
+    try:
+        from tokenjam.core.models import TraceFilters
+
+        ingest_claude_code(db, root=tmp_path)
+
+        # Exactly one trace for the whole session.
+        trace_ids = [
+            r[0] for r in db.conn.execute(
+                "SELECT DISTINCT trace_id FROM spans"
+            ).fetchall()
+        ]
+        assert len(trace_ids) == 1
+
+        traces = db.get_traces(TraceFilters())
+        assert len(traces) == 1
+        assert traces[0].span_count == 4  # 2 LLM + 2 tool
+
+        # The trace holds both LLM calls and both tool calls, and every tool
+        # span is parented to an LLM span in the same trace.
+        spans = db.get_trace_spans(trace_ids[0])
+        llm = [s for s in spans if s.name == "gen_ai.llm.call"]
+        tools = [s for s in spans if s.name == "gen_ai.tool.call"]
+        assert len(llm) == 2
+        assert len(tools) == 2
+        llm_ids = {s.span_id for s in llm}
+        assert all(t.parent_span_id in llm_ids for t in tools)
+        assert {t.tool_name for t in tools} == {"Bash", "Read"}
+    finally:
+        db.close()
+
+
+def test_backfill_separate_sessions_get_separate_traces(tmp_path):
+    # Two distinct sessions must NOT collapse into one trace.
+    for sid in ("sess-x", "sess-y"):
+        _make_session_file(
+            tmp_path, session_id=sid, cwd="/Users/me/proj",
+            records=[_assistant_record(
+                f"m-{sid}", "claude-haiku-4-5", 100, 50,
+                "2026-04-01T10:00:00.000Z", sid, "/Users/me/proj",
+            )],
+        )
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        n_traces = db.conn.execute(
+            "SELECT COUNT(DISTINCT trace_id) FROM spans"
+        ).fetchone()[0]
+        assert n_traces == 2
+    finally:
+        db.close()
+
+
+# --- #245: backfill persists the cache read/write split -------------------- #
+
+def test_backfill_persists_cache_read_write_split(tmp_path):
+    # An assistant turn that both reads cached prefix and creates new cache.
+    _make_session_file(
+        tmp_path, session_id="sess-cache", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "msg-cache", "claude-haiku-4-5", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-cache", "/Users/me/proj",
+            cache_read=4321, cache_creation=8765,
+        )],
+    )
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        row = db.conn.execute(
+            "SELECT cache_tokens, cache_write_tokens FROM spans "
+            "WHERE name = 'gen_ai.llm.call'"
+        ).fetchone()
+        # Read in cache_tokens, creation in cache_write_tokens — NOT collapsed
+        # into one field (the #245 bug summed them and left write = 0).
+        assert row == (4321, 8765)
+    finally:
+        db.close()
+
+
+def test_backfill_session_cache_tokens_is_read_only(tmp_path):
+    # SessionRecord.cache_tokens tracks cache-READ only (it has no write field),
+    # matching the live ingest path.
+    _make_session_file(
+        tmp_path, session_id="sess-cache2", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "msg-cache2", "claude-haiku-4-5", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-cache2", "/Users/me/proj",
+            cache_read=300, cache_creation=700,
+        )],
+    )
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        assert db.get_session("sess-cache2").cache_tokens == 300
+    finally:
+        db.close()
+
+
+# --- #238: new / existing / total count reporting -------------------------- #
+
+def test_backfill_counts_match_sessions_table(tmp_path):
+    # Two distinct sessions -> two rows in the sessions table.
+    _make_session_file(
+        tmp_path, session_id="sess-1", cwd="/Users/me/proj-a",
+        records=[_assistant_record(
+            "m1", "claude-haiku-4-5", 100, 50,
+            "2026-04-01T10:00:00.000Z", "sess-1", "/Users/me/proj-a",
+        )],
+    )
+    _make_session_file(
+        tmp_path, session_id="sess-2", cwd="/Users/me/proj-b",
+        records=[_assistant_record(
+            "m2", "claude-haiku-4-5", 100, 50,
+            "2026-04-02T10:00:00.000Z", "sess-2", "/Users/me/proj-b",
+        )],
+    )
+    db = InMemoryBackend()
+    try:
+        r1 = ingest_claude_code(db, root=tmp_path)
+        table_count = db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        # First run: every session is new, total matches the table.
+        assert r1.sessions_total == table_count == 2
+        assert r1.sessions_new == 2
+        assert r1.sessions_existing == 0
+
+        # Idempotent re-run: nothing new, but total still reports the full state
+        # (not new-only, which read as "barely worked" — #238).
+        r2 = ingest_claude_code(db, root=tmp_path)
+        assert r2.sessions_total == 2
+        assert r2.sessions_new == 0
+        assert r2.sessions_existing == 2
+        assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 2
+    finally:
+        db.close()
+
+
+def test_backfill_multiple_files_one_session_does_not_inflate_count(tmp_path):
+    # Two conversation files sharing one sessionId collapse to ONE session row
+    # (Claude Code writes continuations/sidechains). conversations_seen counts
+    # files; sessions_total matches the table (#238).
+    _make_session_file(
+        tmp_path, session_id="file-a", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "m-a", "claude-haiku-4-5", 100, 50,
+            "2026-04-01T10:00:00.000Z", "sess-shared", "/Users/me/proj",
+        )],
+    )
+    _make_session_file(
+        tmp_path, session_id="file-b", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "m-b", "claude-haiku-4-5", 100, 50,
+            "2026-04-01T10:05:00.000Z", "sess-shared", "/Users/me/proj",
+        )],
+    )
+    db = InMemoryBackend()
+    try:
+        r = ingest_claude_code(db, root=tmp_path)
+        assert r.conversations_seen == 2          # two files parsed
+        assert r.sessions_total == 1              # one distinct session
+        table_count = db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        assert table_count == 1
+    finally:
+        db.close()
+
+
+def test_backfill_total_cost_is_window_total_on_rerun(tmp_path):
+    # Cost reflects the full in-window spend on every run, not just newly
+    # inserted spans (which would show $0 on an idempotent re-run) — #238.
+    _make_session_file(
+        tmp_path, session_id="sess-cost", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "m-cost", "claude-opus-4-7", 5000, 1000,
+            "2026-04-01T10:00:00.000Z", "sess-cost", "/Users/me/proj",
+        )],
+    )
+    db = InMemoryBackend()
+    try:
+        r1 = ingest_claude_code(db, root=tmp_path)
+        r2 = ingest_claude_code(db, root=tmp_path)
+        assert r1.total_cost_usd > 0
+        assert r2.total_cost_usd == r1.total_cost_usd  # not zeroed on re-run
     finally:
         db.close()
 
