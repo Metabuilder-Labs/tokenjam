@@ -408,17 +408,22 @@ def _onboard_claude_code(
                 if post_apply and not apply_msg:
                     console.print(f"  {post_apply}")
                 db.close()
-                if result.sessions_ingested > 0:
+                if result.sessions_total > 0:
                     days = None
                     if result.earliest and result.latest:
                         days = (result.latest - result.earliest).days
-                    pieces = [f"{result.sessions_ingested} sessions"]
+                    # Report new / already-present / total so a re-run reads as
+                    # "13 total" rather than "1 session" (#238).
+                    total = result.sessions_total
+                    pieces = [
+                        f"{result.sessions_new} new "
+                        f"({result.sessions_existing} already present) · "
+                        f"{total} total session{'s' if total != 1 else ''}"
+                    ]
                     if days is not None:
                         pieces.append(f"over {days} day{'s' if days != 1 else ''}")
-                    pieces.append(f"${result.total_cost_usd:.0f} total")
+                    pieces.append(f"${result.total_cost_usd:.0f} total spend")
                     backfill_msg = ", ".join(pieces)
-                elif result.sessions_seen > 0:
-                    backfill_msg = "history already up to date"
             except Exception as exc:
                 _err = str(exc).lower()
                 if "lock" in _err or "i/o error" in _err or "io error" in _err:
