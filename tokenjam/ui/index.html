@@ -598,6 +598,10 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   color: var(--text-dim);
   margin-bottom: 10px;
 }
+/* The spend headline deep-links into Analytics (#229); keep the heading look,
+   add a clickable affordance. */
+a.chart-title { text-decoration: none; cursor: pointer; }
+a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .chart { width: 100%; }
 .u-tooltip, .uplot { font-family: 'Geist Mono', monospace; }
 .chart-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; gap: 12px; }
@@ -911,6 +915,21 @@ function navigate(view, filters, defaults, param) {
   }
   const q = qs.toString();
   location.hash = '#/' + view + (param ? '/' + param : '') + (q ? '?' + q : '');
+}
+
+// Build an Analytics deep-link URL from a query object (#229). Overview tiles
+// and the spend headline flow INTO the Analytics explorer pre-filtered to the
+// relevant slice — these are just well-formed Analytics URLs, no new state
+// machine. The Analytics route already honors every param used here (metric,
+// group_by, stack, chart, since, and the agent_id/provider/model/tool dimension
+// filters — see AnalyticsView). Empty values are dropped so URLs stay clean.
+function analyticsHref(q) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(q || {})) {
+    if (v != null && v !== '') sp.set(k, v);
+  }
+  const s = sp.toString();
+  return '#/analytics' + (s ? '?' + s : '');
 }
 
 // --- Charts (uPlot, issue #112) ---
@@ -2422,6 +2441,23 @@ const ANALYZER_META = {
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
 
+// The Analytics slice each recoverable-waste analyzer opens into (#229). A
+// leaderboard (hbar) on the dimension the analyzer reasons over — so a Downsize
+// tile lands on "spend by model", Reuse/Trim on the per-agent view, Script on
+// per-tool. Unknown analyzers fall back to spend-by-model. Values are validated
+// by the Analytics route against ANALYTICS_METRICS / ANALYTICS_DIMENSIONS.
+const ANALYZER_ANALYTICS_SLICE = {
+  downsize: { metric: 'spend',    group_by: 'model', chart: 'hbar' },
+  cache:    { metric: 'tokens',   group_by: 'model', chart: 'hbar' },
+  script:   { metric: 'events',   group_by: 'tool',  chart: 'hbar' },
+  reuse:    { metric: 'sessions', group_by: 'agent', chart: 'hbar' },
+  trim:     { metric: 'tokens',   group_by: 'agent', chart: 'hbar' },
+};
+function analyzerSliceHref(name, since) {
+  const slice = ANALYZER_ANALYTICS_SLICE[name] || { metric: 'spend', group_by: 'model', chart: 'hbar' };
+  return analyticsHref({ ...slice, since });
+}
+
 // Title-case a registry key for display. Centralizes capitalization so a tile
 // for a not-yet-known analyzer still renders title-case instead of the raw
 // lowercase key (#162) — registry keys are lowercase by convention.
@@ -2659,7 +2695,8 @@ function OverviewView({ params }) {
          the tooltip, #128); drill-through is an explicit link in the header. -->
     <div class="chart-card">
       <div class="chart-head">
-        <div class="chart-title">Spend ${useTokens ? '(tokens) ' : ''}· last ${since}</div>
+        <a class="chart-title" href=${analyticsHref({ metric: 'spend', group_by: 'day', chart: 'bar', since })}
+           title="Explore spend over time in Analytics">Spend ${useTokens ? '(tokens) ' : ''}· last ${since} →</a>
         <div class="chart-meta">
           <span class="chart-total">${totalDisplay}</span>
           <${TrendChip} pct=${trendPct} />
@@ -2678,7 +2715,9 @@ function OverviewView({ params }) {
       ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates in this window.</div>`
         : tiles.map(t => {
           const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
-          const href = '#/optimize?finding=' + t.name + '&since=' + since;
+          // Deep-link into the Analytics explorer on this analyzer's slice (#229),
+          // carrying the Overview's current window. The route honors every param.
+          const href = analyzerSliceHref(t.name, since);
           // Four honest states (#127): actionable / at_ceiling / no_findings / not_ready.
           if (t.state === 'actionable') return html`
             <a class="rec-tile" href=${href}>
@@ -2698,13 +2737,14 @@ function OverviewView({ params }) {
               <div class="rec-amount dim">No candidates</div>
               <div class="rec-hint">Nothing actionable in the last ${since}.</div>
             </a>`;
-          // not_ready — the only state that uses the "not ready" framing + hint.
+          // not_ready — the analyzer hasn't run, but its underlying data slice is
+          // still explorable, so the tile stays a deep-link for consistency.
           return html`
-            <div class="rec-tile muted">
+            <a class="rec-tile muted" href=${href}>
               <div class="rec-name">${meta.title}</div>
               <div class="rec-amount dim">Not ready</div>
               <div class="rec-hint">${t.hint || meta.hint}</div>
-            </div>`;
+            </a>`;
         })}
     </div>
 

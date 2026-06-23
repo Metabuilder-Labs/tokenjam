@@ -560,3 +560,37 @@ def test_chart_palette_defines_twelve_hues_both_themes(html):
 def test_colorfor_neutral_bucket_not_a_palette_hue(html):
     # 'other'/'(none)'/'' still map to the neutral grey, never a palette color.
     assert "if (s === 'other' || s === '(none)' || s === '') return cssVar('--text-dim')" in html
+
+
+# --- #229: Overview tiles/headline deep-link into Analytics (pre-filtered) --- #
+def test_overview_recoverable_tiles_deeplink_into_analytics(html):
+    # Each recoverable-waste analyzer maps to an Analytics slice, and the tiles
+    # render that deep-link via analyzerSliceHref (not the old Optimize finding
+    # link). The route honors metric/group_by/chart/since, so these are just
+    # well-formed Analytics URLs — no new state machine.
+    assert "const ANALYZER_ANALYTICS_SLICE = {" in html
+    for analyzer in ("downsize", "cache", "script", "reuse", "trim"):
+        assert f"{analyzer}:" in html  # each analyzer has a slice mapping
+    assert "function analyzerSliceHref(name, since)" in html
+    assert "const href = analyzerSliceHref(t.name, since);" in html
+    # the tiles no longer point at the Optimize finding screen
+    assert "'#/optimize?finding=' + t.name" not in html
+
+
+def test_overview_spend_headline_deeplinks_into_analytics(html):
+    # The spend headline is an <a> deep-linking into Analytics spend-over-time.
+    assert "<a class=\"chart-title\" href=${analyticsHref({ metric: 'spend', group_by: 'day', chart: 'bar', since })}" in html
+
+
+def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
+    # The deep-link helper builds #/analytics?... URLs (offline hash links, no
+    # fetch) from a query object, dropping empty values.
+    assert "function analyticsHref(q)" in html
+    assert "return '#/analytics' + (s ? '?' + s : '');" in html
+
+
+def test_overview_remains_default_landing_no_render_time_redirect(html):
+    # #132 guard must hold: empty hash → Overview via getRoute, and there is no
+    # render-time location.hash assignment that would race the first render.
+    assert "(qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'overview'" in html
+    assert "location.hash = '#/overview'" not in html
