@@ -10,6 +10,7 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
+[![Downloads](https://img.shields.io/pypi/dm/tokenjam?color=3d8eff&labelColor=0d1117&label=downloads)](https://pypi.org/project/tokenjam/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-3d8eff?labelColor=0d1117)](https://pypi.org/project/tokenjam/)
 [![npm](https://img.shields.io/npm/v/@tokenjam/sdk?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/@tokenjam/sdk)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3d8eff?labelColor=0d1117)](LICENSE)
@@ -229,6 +230,21 @@ tj serve               # start Lens + REST API
 - [ ] Vercel AI SDK & Mastra integrations
 - [ ] Docker image
 - [ ] GitHub Actions for CI drift/cost checks
+
+---
+
+## Contributing
+
+TokenJam is MIT, and contributions are welcome — from a one-line pricing fix to a whole new framework integration. A few easy on-ramps:
+
+- 🟢 **[Good first issues →](https://github.com/Metabuilder-Labs/tokenjam/labels/good%20first%20issue)** — scoped, newcomer-friendly tasks, ready to pick up.
+- 💸 **Model pricing** — `tokenjam/pricing/models.toml` is community-maintained. Fix a rate or add a model in a single PR — no issue needed.
+- 🔌 **Framework integrations** — provider/framework patches follow one clear pattern (`tokenjam/sdk/integrations/anthropic.py` is the reference). Open an issue first to align on approach.
+- 🤖 **Built with Claude Code** — TokenJam was built by parallel Claude Code agents, and the `.claude/` task files are committed, so you can contribute the same way. [AGENTS.md](AGENTS.md) has the critical rules.
+
+Setup and the full dev workflow are in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
+If TokenJam saves you tokens, **⭐ star it** and **👁 watch for releases** — we ship often.
 
 ---
 

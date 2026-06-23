@@ -2,13 +2,23 @@
 
 TokenJam is MIT licensed and welcomes contributions. The codebase was built using parallel Claude Code agents — the `.claude/` task files are intentionally committed so contributors can use the same workflow.
 
+## Good first contributions
+
+New here? These are the lowest-friction ways to land your first PR:
+
+- 🟢 **[Good first issues](https://github.com/Metabuilder-Labs/tokenjam/labels/good%20first%20issue)** — scoped tasks tagged ready for newcomers.
+- 💸 **Model pricing** — add a missing model or correct a rate in [`tokenjam/pricing/models.toml`](tokenjam/pricing/models.toml). One file, no issue needed (details below).
+- 🔌 **A framework/provider integration** — they follow one clear pattern; `tokenjam/sdk/integrations/anthropic.py` is the reference. Open an issue first to align on approach.
+
+Questions on any of these? Open an issue — we're happy to point you at a good starting spot.
+
 ## Getting started
 
 ```bash
 git clone https://github.com/Metabuilder-Labs/tokenjam
 cd tokenjam
-pip install -e ".[dev,mcp]"   # editable install with dev tools + MCP support
-pip install anthropic          # for running the toy agent
+pip install -e ".[dev]"   # editable install with dev tools (the MCP server ships in the base install)
+pip install anthropic     # for running the toy agent
 ```
 
 ## Running tests
