@@ -2,7 +2,7 @@
 
 <img src="https://tokenjam.dev/icon.svg" alt="TokenJam" width="72" height="72">
 
-# TokenJam
+<img src="docs/screenshots/tokenjam-wordmark.png" alt="TokenJam" width="260">
 
 ### Token Efficiency For AI Agents
 
