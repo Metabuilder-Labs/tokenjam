@@ -631,6 +631,13 @@ a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .waste-name { font-family: 'Geist Mono', monospace; }
 .waste-rec { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .waste-caveat { font-size: 11px; color: var(--text-faint); margin: 0 0 6px; max-width: 70ch; }
+/* Positive "nothing recoverable" state for the component chart's right column
+   (#251) — a clean signal, not blank space. */
+.waste-none { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px;
+  font-size: 13px; color: var(--success); display: flex; align-items: center; gap: 6px; }
+.waste-none .check { font-weight: 700; }
+/* Optional dominant-component note when one token component is ~all the spend. */
+.waste-split { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
 /* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
 .u-tip {
   position: absolute; pointer-events: none; z-index: 5;
@@ -1344,22 +1351,30 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
     const tick = cssVar('--text-dim') || '#a1a1a1';
     const width = ref.current.clientWidth || 600;
     const xs = [0, 1];                          // Cost | Recoverable (est.)
+    // Drop ZERO-value segments before building the cumulative bars (#251). The
+    // back-to-front stacking trick plots each segment's CUMULATIVE total as a
+    // full bar; a zero-value segment carries the running cumulative (unchanged
+    // by its 0) and so paints a full-height bar in its own color OVER the real
+    // stack (the cache-write=0 → full-height-purple bug). Filtering first keeps
+    // every plotted bar tied to a real, non-zero contribution.
+    const costSegsNZ = (costSegs || []).filter(s => (s.value || 0) > 0);
+    const recSegsNZ = (recSegs || []).filter(s => (s.value || 0) > 0);
     // Per-column cumulative (within-column) so the back-to-front bars stack
     // independently; 0 in the other column → invisible there.
     const series = [{}];
     const cols = [];                            // data columns (cumulative)
     const meta = [];                            // {label, color, raw, col}
     let accC = 0;
-    costSegs.forEach((s, i) => {
+    costSegsNZ.forEach((s, i) => {
       accC += (s.value || 0);
       cols.push([accC, 0]);
       meta.push({ label: s.label, color: s.color || palette[i % palette.length], raw: s.value || 0, col: 0 });
     });
     let accR = 0;
-    recSegs.forEach((s, i) => {
+    recSegsNZ.forEach((s, i) => {
       accR += (s.value || 0);
       cols.push([0, accR]);
-      meta.push({ label: s.title, color: palette[(costSegs.length + i) % palette.length], raw: s.value || 0, col: 1 });
+      meta.push({ label: s.title, color: palette[(costSegsNZ.length + i) % palette.length], raw: s.value || 0, col: 1 });
     });
     // Draw tallest cumulative first (within each column) so shorter bars paint
     // on top. Sort indices by cumulative descending; cross-column order is moot.
@@ -1441,6 +1456,19 @@ function buildComponentWaste(resp, useTokens) {
   const totalCost = costSegs.reduce((s, c) => s + c.value, 0);
   if (totalCost <= 0 && recSegs.length === 0) return null;
   return { costSegs, recSegs };
+}
+
+// When one token component is essentially all the measured spend (>95%), the
+// stacked "Cost" bar reads as a single block — so surface a small explanatory
+// split label rather than leaving the reader to guess (#251). Returns null when
+// no component dominates that strongly.
+function dominantSplit(costSegs) {
+  const segs = (costSegs || []).filter(s => (s.value || 0) > 0);
+  const total = segs.reduce((s, c) => s + (c.value || 0), 0);
+  if (total <= 0 || segs.length < 2) return null;
+  const top = segs.reduce((a, b) => (b.value > a.value ? b : a), segs[0]);
+  const pct = (100 * top.value) / total;
+  return pct > 95 ? { label: top.label, pct: pct.toFixed(1) } : null;
 }
 
 // ============================
@@ -2724,7 +2752,7 @@ function OptimizeFinding({ name, opt, framing }) {
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
         <table class="opt-table"><thead><tr><th>Instances</th><th>Signature</th><th>Avg cost</th></tr></thead>
-          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtFramedDollar(c.avg_cost_usd, framing)}</td></tr>`)}</tbody></table>
+          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}</td></tr>`)}</tbody></table>
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
         : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
     } else if (name === 'trim') {
@@ -2788,6 +2816,7 @@ function OptimizeView({ params }) {
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const waste = buildComponentWaste(st.comp, useTokens);
   const wasteFmtY = useTokens ? fmtTokens : fmtCost;
+  const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;
 
   return html`
     <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -2835,7 +2864,8 @@ function OptimizeView({ params }) {
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
               `)}
-            </div>` : html`<div class="chart-foot"><span class="dim">No recoverable waste estimated in this window.</span></div>`}
+            </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window — no estimated waste from any analyzer.</div>`}
+          ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
         </div>` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}

@@ -91,6 +91,12 @@ class WorkflowCluster:
     avg_cost_usd:  float        # mean cost across the cluster
     avg_duration_seconds: float | None
     example_session_id: str | None
+    # Mean input+output tokens per instance, so the UI can render the per-cluster
+    # cost as TOKENS for subscription/local users (#260) — "% of cycle"/$ at this
+    # per-item granularity is the same category error fixed in #249/#259. Summed
+    # server-side (single compute path). Defaulted so older serialized reports
+    # round-trip through WorkflowCluster(**c).
+    avg_tokens:    int = 0
 
 
 @dataclass
@@ -183,7 +189,8 @@ def run(ctx: AnalyzerContext) -> None:
             f"COALESCE(AVG(total_cost_usd), 0.0), "
             f"COALESCE(AVG(EXTRACT(EPOCH FROM (ended_at - started_at))), 0.0), "
             f"COALESCE(SUM(total_cost_usd), 0.0), "
-            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens), 0) "
+            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens), 0), "
+            f"COALESCE(AVG(input_tokens + output_tokens), 0) "
             f"FROM sessions WHERE session_id IN ({placeholders})",
             members,
         ).fetchone()
@@ -191,6 +198,10 @@ def run(ctx: AnalyzerContext) -> None:
         avg_duration = float(agg[1] or 0.0) if agg else 0.0
         cluster_cost = float(agg[2] or 0.0) if agg else 0.0
         cluster_tokens = int(agg[3] or 0) if agg else 0
+        # Per-instance avg of input+output (the same basis the UI's _costVal uses
+        # for every other per-item token figure) so the cluster cell reads
+        # consistently with Traces/Status (#260).
+        avg_tokens = round(float(agg[4] or 0.0)) if agg else 0
         total_cluster_cost += cluster_cost
         total_cluster_tokens += cluster_tokens
 
@@ -207,6 +218,7 @@ def run(ctx: AnalyzerContext) -> None:
             avg_cost_usd=round(avg_cost, 6),
             avg_duration_seconds=round(avg_duration, 2) if avg_duration > 0 else None,
             example_session_id=members[0],
+            avg_tokens=avg_tokens,
         ))
 
     # Sort by instance count desc — the most common deterministic patterns

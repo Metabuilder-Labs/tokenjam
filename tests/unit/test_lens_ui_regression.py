@@ -275,9 +275,12 @@ def test_optimize_budget_projection_routes_through_framing(html):
 
 
 def test_optimize_cluster_avg_cost_routes_through_framing(html):
-    # The script/reuse cluster table "Avg cost" cell must reframe, not raw $.
+    # The script cluster table "Avg cost" cell is per-item, so per #260 it routes
+    # through fmtPerItemCost (tokens for subscription/local), not the raw $ nor
+    # the window-aggregate fmtFramedDollar "% of cycle".
     assert "${fmtCost(c.avg_cost_usd)}" not in html
-    assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" in html
+    assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" not in html
+    assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
 
 
 # --- Lens Visualizations Wave 1: cost charts (#211–#213) ------------------- #
@@ -697,3 +700,43 @@ def test_per_trace_token_totals_come_from_server_not_aggregated_in_js(html):
     # _costVal reads server-provided per-row input_tokens/output_tokens; the UI
     # never re-sums spans in JS for the list rows (single compute path, #249).
     assert "function _costVal(r, useTokens)" in html
+
+
+# --- #251: component-waste chart drops zero segments + positive empty state -- #
+def test_component_waste_chart_filters_zero_segments(html):
+    # The cumulative-overlap bar technique paints a zero-value segment as a
+    # full-height bar in its own color (cache-write=0 → full-height purple over
+    # the real stack). Zero-value segments must be filtered BEFORE building the
+    # cumulative bars, in both columns.
+    assert "const costSegsNZ = (costSegs || []).filter(s => (s.value || 0) > 0);" in html
+    assert "const recSegsNZ = (recSegs || []).filter(s => (s.value || 0) > 0);" in html
+    # the cumulative loops iterate the filtered lists, not the raw props
+    assert "costSegsNZ.forEach((s, i) =>" in html
+    assert "recSegsNZ.forEach((s, i) =>" in html
+    # color offset uses the filtered cost length so the palette stays aligned
+    assert "palette[(costSegsNZ.length + i) % palette.length]" in html
+
+
+def test_component_waste_empty_recoverable_is_positive_state(html):
+    # The empty "Recoverable (est.)" column shows a positive signal, not blank /
+    # dim space.
+    assert "Nothing recoverable in this window" in html
+    assert 'class="waste-none"' in html
+    # the old neutral/dim empty message is gone
+    assert "No recoverable waste estimated in this window." not in html
+
+
+def test_component_waste_dominant_split_label(html):
+    # Optional %-split note when one token component is ~all the spend (>95%),
+    # so the single-block bar is explained rather than mysterious.
+    assert "function dominantSplit(costSegs)" in html
+    assert "pct > 95 ?" in html
+    assert "const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;" in html
+    assert 'class="waste-split"' in html
+
+
+# --- #260: script cluster avg cost carries a server-side token total --------- #
+def test_script_cluster_payload_token_total_is_server_side(html):
+    # The cell consumes c.avg_tokens (server-provided per-cluster token total),
+    # never re-aggregating in JS.
+    assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html

@@ -121,6 +121,31 @@ def test_flags_cluster_at_or_above_threshold(db):
     ]
 
 
+def test_cluster_carries_avg_tokens_for_per_item_framing(db):
+    """Each cluster carries the per-instance mean of input+output tokens so the
+    UI can render the cell as TOKENS for subscription/local users (#260)."""
+    base = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    # 20 sessions, each 1000 in + 200 out → avg_tokens should be 1200.
+    for i in range(MIN_CLUSTER_INSTANCES):
+        sid = f"tok-{i}"
+        sess = make_session(session_id=sid, plan_tier="api", duration_seconds=30.0,
+                            input_tokens=1000, output_tokens=200)
+        db.upsert_session(sess)
+        span = make_tool_span(tool_name="bash")
+        span.session_id = sid
+        span.start_time = base + timedelta(minutes=i)
+        span.attributes = {GenAIAttributes.TOOL_INPUT: {"command": "git pull"}}
+        db.insert_span(span)
+
+    config = _config(tool_inputs=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["script"])
+    c = report.findings["script"].clusters[0]
+    assert c.avg_tokens == 1200
+
+
 def test_below_threshold_not_flagged(db):
     """Fewer than MIN_CLUSTER_INSTANCES sessions: no recommendation."""
     _seed_deterministic_cluster(
