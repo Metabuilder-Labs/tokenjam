@@ -644,9 +644,10 @@ def test_dashboard_triage_drills_in_place(html):
 # --- #241: Status screen Cards | List view toggle -------------------------- #
 def test_status_view_toggle_exists(html):
     # A segmented Cards | List control on the Status screen, driven by the URL
-    # view param (default 'cards', omitted from the URL via navigate defaults).
+    # view param. List is the default (#263), omitted from the URL via navigate
+    # defaults; Cards carries ?view=cards.
     assert ".view-toggle" in html  # segmented-control CSS
-    assert "const DEFAULTS = { view: 'cards', agent_id: '' };" in html
+    assert "const DEFAULTS = { view: 'list', agent_id: '' };" in html
     assert "readParam(params, 'view', DEFAULTS.view, v => ['cards', 'list'].includes(v))" in html
     assert "const setView = (v) => navigate('status', { agent_id: agentId, view: v }, DEFAULTS);" in html
     # both toggle buttons present
@@ -654,11 +655,26 @@ def test_status_view_toggle_exists(html):
     assert "onClick=${() => setView('list')}>List</button>" in html
 
 
+def test_status_list_is_default_view(html):
+    # #263: List is the default scan view (not Cards).
+    assert "const DEFAULTS = { view: 'list', agent_id: '' };" in html
+    assert "const DEFAULTS = { view: 'cards', agent_id: '' };" not in html
+
+
 def test_status_list_table_renderer_exists(html):
     # The List view is a dedicated columned-table renderer, gated behind the
-    # view mode. Cards remains the default render path.
+    # view mode (now the default render path).
     assert "function StatusListTable({ agents, framing })" in html
     assert "? StatusListTable({ agents, framing: data.framing })" in html
+
+
+def test_status_list_table_horizontally_scrolls(html):
+    # #263: the list table sits in the scrolling .table-wrap AND carries a
+    # min-width so it overflows (and scrolls) on narrow viewports instead of
+    # compressing columns and clipping the actions cell.
+    assert "<div class=\"table-wrap\"><table class=\"status-list\">" in html
+    assert ".table-wrap { overflow-x: auto; }" in html
+    assert ".table-wrap table.status-list { min-width: 760px; }" in html
 
 
 def test_status_list_cost_column_respects_framing(html):
