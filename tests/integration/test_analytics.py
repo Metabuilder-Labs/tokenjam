@@ -148,3 +148,44 @@ async def test_empty_window_is_safe():
     assert d["rows"] == [] and d["groups"] == []
     assert d["kpis"]["spend"] == 0
     assert "framing" in d
+    # #217: the sparkline/delta fields are always present. With a window set,
+    # the delta keys exist but are null (no prior data → no divide-by-zero).
+    assert d["kpi_series"] == []
+    assert set(d["kpi_deltas"]) == {"spend", "tokens", "events", "sessions"}
+    assert all(v is None for v in d["kpi_deltas"].values())
+
+
+@pytest.mark.asyncio
+async def test_kpi_series_and_deltas_for_sparklines():
+    """#217: the explorer returns a per-bucket `kpi_series` (all four metrics)
+    and a period-over-period `kpi_deltas` vs the prior equal-length window —
+    both computed server-side so the UI never aggregates per-bucket in JS."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed(db)  # 4 days of data, two models/day
+    d = await _get(db, cfg, "metric=spend&group_by=model&since=30d")
+    # Per-bucket series carries every KPI metric for each bucket.
+    assert d["kpi_series"], "expected a non-empty kpi_series"
+    for b in d["kpi_series"]:
+        assert {"bucket", "spend", "tokens", "events", "sessions"} <= set(b)
+    # Series spend reconciles with the window KPI total.
+    assert sum(b["spend"] for b in d["kpi_series"]) == pytest.approx(d["kpis"]["spend"])
+    # Prior window had no data (seed is the most recent 4 days) → prev=0 → null
+    # delta, never a divide-by-zero.
+    assert set(d["kpi_deltas"]) == {"spend", "tokens", "events", "sessions"}
+    assert d["kpi_deltas"]["spend"] is None
+    assert d["kpi_prev"]["spend"] == 0
+
+
+@pytest.mark.asyncio
+async def test_kpi_delta_non_null_when_prior_window_has_data():
+    """#217: a real period-over-period % when both the current and prior
+    equal-length windows carry data (the seed spans 4 consecutive days, so a
+    2-day window's prior 2 days are non-empty)."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed(db)
+    d = await _get(db, cfg, "metric=spend&group_by=model&since=2d")
+    assert d["kpi_prev"]["spend"] > 0, "prior window should have seeded data"
+    assert d["kpi_deltas"]["spend"] is not None
+    assert isinstance(d["kpi_deltas"]["spend"], float)
