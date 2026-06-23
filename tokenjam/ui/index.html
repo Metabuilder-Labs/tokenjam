@@ -498,6 +498,37 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .wf-cost-val { color: var(--text); min-width: 50px; text-align: right; }
 .wf-cost-tok { color: var(--text-dim); min-width: 46px; text-align: right; }
 
+/* #244: fixed span-name column (never clipped onto the bar), cost/token
+   magnitude bars, status icons, kind legend, per-span offset + value labels. */
+.wf-toolbar { display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 8px; }
+.wf-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace;
+  font-size: 10px; color: var(--text-dim); }
+.wf-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.wf-kind-dot { width: 8px; height: 8px; border-radius: 2px; flex-shrink: 0; display: inline-block; }
+.wf-kind-dot.agent { background: var(--success); }
+.wf-kind-dot.llm { background: var(--brand); }
+.wf-kind-dot.tool { background: var(--warn); }
+.wf-kind-dot.other { background: var(--text-dim); }
+/* The name column: the full span identity lives here, indented by depth — it is
+   NEVER painted onto the bar (that produced the "cla"/"Bas" clipping). */
+.wf-name { flex-shrink: 0; display: flex; align-items: center; gap: 6px;
+  overflow: hidden; padding-right: 10px; }
+.wf-name-txt { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wf-row:hover .wf-name-txt { color: var(--text); }
+.wf-row.selected .wf-name-txt { color: var(--accent); }
+.wf-status { font-size: 11px; line-height: 1; flex-shrink: 0; width: 11px; text-align: center; }
+.wf-status.ok { color: var(--success); }
+.wf-status.error { color: var(--error); }
+/* Magnitude value printed just past the bar end (flips inside near the right
+   edge so it never collides with the offset/cost columns). */
+.wf-val { position: absolute; top: 0; line-height: 18px; font-size: 10px;
+  color: var(--text-dim); padding: 0 6px; white-space: nowrap; pointer-events: none; }
+.wf-val.flip { text-align: right; }
+.wf-offset { flex-shrink: 0; width: 62px; text-align: right; padding-right: 10px;
+  font-family: 'Geist Mono', monospace; font-size: 10px; color: var(--text-faint); }
+
 /* Span detail */
 .span-detail {
   background: var(--surface);
@@ -625,12 +656,23 @@ a.chart-title:hover { color: var(--brand); text-decoration: underline; }
 .trend-chip { font-family: 'Geist Mono', monospace; font-size: 12px; }
 .chart-foot { margin-top: 10px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
 .chart-foot .dim { color: var(--text-faint); }
+/* Cache-savings headline (#246): lead with the answer above the bars. */
+.cache-headline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 12px; font-family: 'Geist Mono', monospace; font-size: 14px; color: var(--text); }
+.cache-headline b { font-weight: 600; font-size: 18px; }
+.cache-sep { color: var(--text-faint); }
 /* Per-analyzer recoverable-waste list under the #211 component chart. */
 .waste-list { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
 .waste-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; }
 .waste-name { font-family: 'Geist Mono', monospace; }
 .waste-rec { font-family: 'Geist Mono', monospace; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .waste-caveat { font-size: 11px; color: var(--text-faint); margin: 0 0 6px; max-width: 70ch; }
+/* Positive "nothing recoverable" state for the component chart's right column
+   (#251) — a clean signal, not blank space. */
+.waste-none { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px;
+  font-size: 13px; color: var(--success); display: flex; align-items: center; gap: 6px; }
+.waste-none .check { font-weight: 700; }
+/* Optional dominant-component note when one token component is ~all the spend. */
+.waste-split { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
 /* uPlot hover tooltip (#128). Positioned at the cursor; offset above-centered. */
 .u-tip {
   position: absolute; pointer-events: none; z-index: 5;
@@ -875,6 +917,15 @@ function friendlySpanName(name) {
   if (!name) return '-';
   // sentence case fallback
   return name.charAt(0).toUpperCase() + name.slice(1).replace(/[._]/g, ' ');
+}
+// The identity shown in the waterfall's fixed name column (#244): the concrete
+// model (claude-opus-4-8) or tool (Bash), falling back to the friendly span
+// kind. This is what makes the left column legible without ever clipping onto
+// the bar.
+function spanPrimaryName(s) {
+  if (s.tool_name) return s.tool_name;
+  if (s.model) return s.model;
+  return friendlySpanName(s.name);
 }
 function friendlyAlertType(type) {
   const map = {
@@ -1276,36 +1327,30 @@ function StackedBarChart({ data, labels = [], height = 200, fmtY = fmtCost, axis
 
 // Cache-savings chart (#212): cumulative CAPTURED savings (measured, area, left
 // axis) + per-bucket cache HIT-RATE (%, right axis). An optional dashed
-// "achievable" envelope = cumulative captured + estimated recoverable shows the
-// gap the cache analyzer says is still on the table — framed as "estimated
-// recoverable", never "saved" (Critical Rule 14). Plan-tier framing: captured
-// is rendered in tokens for subscription/local (dollars suppressed).
-function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
+// Per-period cache-savings bar chart (#246). ONE metric (savings) on ONE
+// y-axis — the old dual-axis (tokens left / hit-rate % right) + cumulative ramp
+// + recoverable overlay are gone; hit-rate now lives in the headline stat, not
+// an overlaid line. `data` = [xs, savingsPerBucket]. Bars via the vendored
+// uPlot. The y-axis is sized generously (size 70 + gap) so labels never clip
+// (the old "000.0M" leading-digit clip). Plan-tier framing: the caller passes
+// token-volume + token formatters for subscription/local (no raw $).
+function CacheSavingsChart({ data, height = 180, fmtY = fmtCost, axisFmtY = null, bucket = 'day' }) {
   const ref = useRef(null);
   useEffect(() => {
-    if (!ref.current || !window.uPlot || !cache || !cache[0] || cache[0].length === 0) return;
+    if (!ref.current || !window.uPlot || !data || !data[0] || data[0].length === 0) return;
     const grid = cssVar('--border') || '#1f1f1f';
     const tick = cssVar('--text-dim') || '#a1a1a1';
-    const c1 = cssVar('--chart-1') || '#3d8eff';
-    const c2 = cssVar('--chart-2') || '#22c55e';
+    const c = cssVar('--chart-2') || '#0ce490';   // green = savings
     const width = ref.current.clientWidth || 600;
     const axisFmt = axisFmtY || fmtY;
-    const xs = cache[0];
-    const chartData = [xs, cache[1], hit, env || xs.map(() => null)];
-    const series = [
-      {},
-      { label: 'Captured', stroke: c1, width: 2, fill: c1 + '22',
-        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
-      { label: 'Hit-rate', stroke: c2, width: 2, scale: 'rate', dash: [],
-        points: { show: false }, value: (u, v) => (v == null ? '-' : v.toFixed(0) + '%') },
-      { label: 'Recoverable (est.)', stroke: tick, width: 1, dash: [6, 4], _isRunRate: true,
-        points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
-    ];
+    const xs = data[0];
+    const barsPath = (window.uPlot.paths && window.uPlot.paths.bars)
+      ? window.uPlot.paths.bars({ size: [0.7, Infinity] }) : undefined;
     const opts = {
-      width, height, legend: { show: true },
-      cursor: { y: false, focus: { prox: 16 }, points: { size: 5 } },
+      width, height, legend: { show: false },
+      cursor: { y: false, focus: { prox: 16 }, points: { show: false } },
       plugins: [chartTooltipPlugin(fmtY)],
-      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] }, rate: { range: [0, 100] } },
+      scales: { x: { time: true, range: [xs[0], xs[xs.length - 1]] } },
       axes: [
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid }, space: 70,
           incrs: bucket === 'hour'
@@ -1313,17 +1358,19 @@ function CacheSavingsChart({ cache, hit, env, height = 200, fmtY = fmtCost, axis
             : [86400, 2 * 86400, 7 * 86400, 14 * 86400, 30 * 86400],
           values: (u, splits) => splits.map(s => fmtAxisTime(s, bucket)) },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
-          size: 60, values: (u, vals) => vals.map(v => axisFmt(v)) },
-        { scale: 'rate', side: 1, stroke: tick, grid: { show: false },
-          size: 50, values: (u, vals) => vals.map(v => v + '%') },
+          size: 70, gap: 6, values: (u, vals) => vals.map(v => axisFmt(v)) },
       ],
-      series,
+      series: [
+        {},
+        { label: 'Saved', stroke: c, fill: c + '66', width: 0, paths: barsPath,
+          points: { show: false }, value: (u, v) => (v == null ? '-' : fmtY(v)) },
+      ],
     };
-    const plot = new window.uPlot(opts, chartData, ref.current);
+    const plot = new window.uPlot(opts, data, ref.current);
     const onResize = () => plot.setSize({ width: ref.current.clientWidth || width, height });
     window.addEventListener('resize', onResize);
     return () => { window.removeEventListener('resize', onResize); plot.destroy(); };
-  }, [cache, hit, env, height, bucket]);
+  }, [data, height, bucket]);
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
@@ -1344,22 +1391,30 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
     const tick = cssVar('--text-dim') || '#a1a1a1';
     const width = ref.current.clientWidth || 600;
     const xs = [0, 1];                          // Cost | Recoverable (est.)
+    // Drop ZERO-value segments before building the cumulative bars (#251). The
+    // back-to-front stacking trick plots each segment's CUMULATIVE total as a
+    // full bar; a zero-value segment carries the running cumulative (unchanged
+    // by its 0) and so paints a full-height bar in its own color OVER the real
+    // stack (the cache-write=0 → full-height-purple bug). Filtering first keeps
+    // every plotted bar tied to a real, non-zero contribution.
+    const costSegsNZ = (costSegs || []).filter(s => (s.value || 0) > 0);
+    const recSegsNZ = (recSegs || []).filter(s => (s.value || 0) > 0);
     // Per-column cumulative (within-column) so the back-to-front bars stack
     // independently; 0 in the other column → invisible there.
     const series = [{}];
     const cols = [];                            // data columns (cumulative)
     const meta = [];                            // {label, color, raw, col}
     let accC = 0;
-    costSegs.forEach((s, i) => {
+    costSegsNZ.forEach((s, i) => {
       accC += (s.value || 0);
       cols.push([accC, 0]);
       meta.push({ label: s.label, color: s.color || palette[i % palette.length], raw: s.value || 0, col: 0 });
     });
     let accR = 0;
-    recSegs.forEach((s, i) => {
+    recSegsNZ.forEach((s, i) => {
       accR += (s.value || 0);
       cols.push([0, accR]);
-      meta.push({ label: s.title, color: palette[(costSegs.length + i) % palette.length], raw: s.value || 0, col: 1 });
+      meta.push({ label: s.title, color: palette[(costSegsNZ.length + i) % palette.length], raw: s.value || 0, col: 1 });
     });
     // Draw tallest cumulative first (within each column) so shorter bars paint
     // on top. Sort indices by cumulative descending; cross-column order is moot.
@@ -1441,6 +1496,19 @@ function buildComponentWaste(resp, useTokens) {
   const totalCost = costSegs.reduce((s, c) => s + c.value, 0);
   if (totalCost <= 0 && recSegs.length === 0) return null;
   return { costSegs, recSegs };
+}
+
+// When one token component is essentially all the measured spend (>95%), the
+// stacked "Cost" bar reads as a single block — so surface a small explanatory
+// split label rather than leaving the reader to guess (#251). Returns null when
+// no component dominates that strongly.
+function dominantSplit(costSegs) {
+  const segs = (costSegs || []).filter(s => (s.value || 0) > 0);
+  const total = segs.reduce((s, c) => s + (c.value || 0), 0);
+  if (total <= 0 || segs.length < 2) return null;
+  const top = segs.reduce((a, b) => (b.value > a.value ? b : a), segs[0]);
+  const pct = (100 * top.value) / total;
+  return pct > 95 ? { label: top.label, pct: pct.toFixed(1) } : null;
 }
 
 // ============================
@@ -1657,6 +1725,9 @@ function TraceDetailView({ traceId }) {
   const [spans, setSpans] = useState([]);
   const [framing, setFraming] = useState(null);
   const [selected, setSelected] = useState(null);
+  // Waterfall bar-sizing mode (#244): cost / tokens / duration. null = follow
+  // the framing-derived default (cost for api/unknown, tokens when $ suppressed).
+  const [wfMode, setWfMode] = useState(null);
 
   useEffect(() => {
     api('/traces/' + traceId).then(d => { setSpans(d.spans || []); setFraming(d.framing || null); });
@@ -1692,7 +1763,7 @@ function TraceDetailView({ traceId }) {
     return result;
   }
   const rows = flatten(roots, 0);
-  const labelW = 100;
+  const nameW = 220;
 
   // Cost-first annotation (#215). Plan-tier framing: when dollars are suppressed
   // (subscription/local), the magnitude bar + summary read on TOKEN volume, never
@@ -1702,6 +1773,17 @@ function TraceDetailView({ traceId }) {
   const wfUseTokens = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local');
   const wfMagOf = s => wfUseTokens ? spanTokens(s) : (s.cost_usd || 0);
   const wfMaxMag = Math.max(0, ...rows.map(r => wfMagOf(r.span)));
+
+  // #244 bar sizing: cost-first by default (the differentiator + the only mode
+  // that works on duration-less backfilled spans), with a tokens/duration
+  // toggle. Cost is never offered when $ is suppressed — tokens leads there.
+  const wfDefaultMode = wfUseTokens ? 'tokens' : 'cost';
+  const wfMode2 = wfMode || wfDefaultMode;
+  const wfHasDuration = rows.some(r => r.span.duration_ms != null && r.span.duration_ms > 0);
+  const magForMode = s => wfMode2 === 'duration' ? (s.duration_ms || 0)
+    : wfMode2 === 'tokens' ? spanTokens(s) : (s.cost_usd || 0);
+  const maxMagMode = Math.max(0, ...rows.map(r => magForMode(r.span)));
+
   const wfTotalCost = spans.reduce((a, s) => a + (s.cost_usd || 0), 0);
   const wfTotalTokens = spans.reduce((a, s) => a + spanTokens(s), 0);
   // A single trace's total is per-item, not a window aggregate (#249) — render
@@ -1724,40 +1806,75 @@ function TraceDetailView({ traceId }) {
       <span>Total cost <b>${wfTotalCostFramed}</b></span>
       <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
       <span>Duration <b>${fmtDur(traceDur)}</b></span>
+      <span>Started <b>${isFinite(traceStart) ? new Date(traceStart).toLocaleString() : '—'}</b></span>
       <span><b>${spans.length}</b> spans</span>
     </div>
+    <div class="wf-toolbar">
+      <div class="wf-legend">
+        <span><i class="wf-kind-dot llm"></i>LLM</span>
+        <span><i class="wf-kind-dot tool"></i>Tool</span>
+        <span><i class="wf-kind-dot agent"></i>Agent</span>
+        <span><i class="wf-kind-dot other"></i>Other</span>
+      </div>
+      <div class="view-toggle">
+        ${!wfUseTokens ? html`<button class=${wfMode2 === 'cost' ? 'active' : ''} onClick=${() => setWfMode('cost')}>By cost</button>` : null}
+        <button class=${wfMode2 === 'tokens' ? 'active' : ''} onClick=${() => setWfMode('tokens')}>By tokens</button>
+        <button class=${wfMode2 === 'duration' ? 'active' : ''} onClick=${() => setWfMode('duration')} title=${wfHasDuration ? '' : 'Backfilled spans have no latency — bars will be flat'}>By duration</button>
+      </div>
+    </div>
     <div class="wf-head">
-      <div class="wf-label" style="width:${labelW}px;padding-left:8px">Span</div>
-      <div class="wf-track">Timeline</div>
+      <div class="wf-name" style="width:${nameW}px;padding-left:8px">Span</div>
+      <div class="wf-track">${wfMode2 === 'duration' ? 'Timeline' : ('Magnitude · by ' + wfMode2)}</div>
+      <div class="wf-offset">Offset</div>
       <div class="wf-cost">Cost / tokens</div>
     </div>
     <div class="waterfall">
       ${rows.map(({ span: s, depth }) => {
         const st = new Date(s.start_time).getTime() - traceStart;
-        const dur = s.duration_ms || 0;
-        const left = (st / traceDur * 100).toFixed(2);
-        const width = Math.max(dur / traceDur * 100, 3).toFixed(2);
         const kind = spanKindClass(s.name);
         const friendly = friendlySpanName(s.name);
-        const isAgent = kind === 'agent';
-        const detail = s.model || s.tool_name || '';
-        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local \u2192 "\u2014"
-        // (suppressed; omitted from the compact bar label), api/unknown \u2192 "$X".
+        const primaryName = spanPrimaryName(s);
+        const isError = (s.status_code || '') === 'error';
+        // #244 bar geometry. Duration mode keeps the classic time-positioned bar;
+        // cost/tokens modes draw a left-anchored magnitude bar (the only thing
+        // that renders on duration-less backfill data). A minimum width keeps
+        // tiny spans visible/clickable.
+        let left, width;
+        if (wfMode2 === 'duration') {
+          left = (st / traceDur * 100);
+          width = Math.max((s.duration_ms || 0) / traceDur * 100, 1.5);
+        } else {
+          left = 0;
+          width = maxMagMode > 0 ? Math.max(magForMode(s) / maxMagMode * 100, 1.5) : 1.5;
+        }
+        left = Math.max(0, Math.min(left, 98.5));
+        width = Math.max(1.5, Math.min(width, 100 - left));
+        const barEnd = left + width;
+        const valFlip = barEnd > 72;
+        // Plan-tier framed cost (#187): subscription \u2192 "% of cycle", local
+        // \u2192 "\u2014" (suppressed), api/unknown \u2192 "$X".
         const costFramed = fmtFramedDollar(s.cost_usd, framing);
-        // Cost now lives in the dedicated annotation column (#215); the bar label
-        // stays focused on what/how-long so the two reads don't compete.
-        const barLabel = isAgent
-          ? fmtDur(s.duration_ms)
-          : (detail ? detail + ' \u2014 ' : '') + fmtDur(s.duration_ms);
-        const sTok = spanTokens(s);
-        // Per-SPAN cost is per-item: under subscription/local "% of cycle" is
-        // nonsensical at this granularity (#249), and the adjacent token column
-        // already conveys the per-span magnitude \u2014 so only show the $ value for
-        // api/unknown. (local was already suppressed via costFramed === '\u2014'.)
+        // Per-SPAN cost is per-item (#249): "% of cycle" is nonsensical at this
+        // granularity, and the token column already conveys per-span magnitude,
+        // so only show the $ value for api/unknown.
         const costShown = !wfUseTokens && s.cost_usd != null && s.cost_usd > 0 && costFramed !== '\u2014';
+        const sTok = spanTokens(s);
         const wfFrac = wfMaxMag > 0 ? (wfMagOf(s) / wfMaxMag * 100) : 0;
+        // Value printed past the bar end reflects the active mode. Duration is
+        // "\u2014" with a "not captured in backfilled data" hint when absent (#243).
+        const durMissing = wfMode2 === 'duration' && s.duration_ms == null;
+        const valLabel = wfMode2 === 'duration'
+          ? (durMissing ? '\u2014' : fmtDur(s.duration_ms))
+          : wfMode2 === 'tokens'
+            ? (sTok ? fmtTokens(sTok) : '')
+            : (costShown ? costFramed : '');
+        const valTitle = durMissing ? 'Duration not captured in backfilled data' : '';
+        const absStart = isFinite(traceStart) && s.start_time ? new Date(s.start_time).toLocaleString() : '';
+        const offsetLabel = '+' + fmtDur(st);
         const tipLines = [friendly];
-        tipLines.push('Duration: ' + fmtDur(s.duration_ms));
+        tipLines.push('Status: ' + (s.status_code || 'unset'));
+        tipLines.push('Offset: ' + offsetLabel + (absStart ? ' (' + absStart + ')' : ''));
+        tipLines.push('Duration: ' + (s.duration_ms == null ? '\u2014 (not captured in backfill)' : fmtDur(s.duration_ms)));
         if (s.provider) tipLines.push('Provider: ' + s.provider);
         if (s.model) tipLines.push('Model: ' + s.model);
         if (s.tool_name) tipLines.push('Tool: ' + s.tool_name);
@@ -1765,17 +1882,23 @@ function TraceDetailView({ traceId }) {
         if (s.output_tokens != null) tipLines.push('Output tokens: ' + fmtTokens(s.output_tokens));
         if (s.cache_tokens) tipLines.push('Cache read: ' + fmtTokens(s.cache_tokens));
         if (s.cache_write_tokens) tipLines.push('Cache write: ' + fmtTokens(s.cache_write_tokens));
-        if (!wfUseTokens && s.cost_usd != null && costFramed !== '—') tipLines.push('Cost: ' + costFramed);
+        if (!wfUseTokens && s.cost_usd != null && costFramed !== '\u2014') tipLines.push('Cost: ' + costFramed);
         const tooltip = tipLines.join('\n');
         return html`
           <div class="wf-row ${selected === s.span_id ? 'selected' : ''}" onClick=${() => setSelected(s.span_id)}>
-            <div class="wf-label" style="width:${labelW}px;padding-left:${depth * 16 + 8}px">${friendly}</div>
+            <div class="wf-name" style="width:${nameW}px;padding-left:${depth * 16 + 8}px">
+              <span class="wf-status ${isError ? 'error' : 'ok'}" title=${isError ? 'error' : 'ok'}>${isError ? '\u2715' : '\u2713'}</span>
+              <span class="wf-kind-dot ${kind}"></span>
+              <span class="wf-name-txt" title=${primaryName}>${primaryName}</span>
+            </div>
             <div class="wf-track">
-              <div class="wf-bar-wrap${left > 50 ? ' tip-flip' : ''}" style="left:${left}%;width:${width}%">
-                <div class="wf-bar ${kind}" style="width:100%">${barLabel}</div>
+              <div class="wf-bar-wrap${valFlip ? ' tip-flip' : ''}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%">
+                <div class="wf-bar ${kind}" style="width:100%"></div>
                 <div class="wf-tip">${tooltip}</div>
               </div>
+              ${valLabel ? html`<span class="wf-val ${valFlip ? 'flip' : ''}" title=${valTitle} style=${valFlip ? ('right:' + (100 - barEnd).toFixed(2) + '%') : ('left:' + barEnd.toFixed(2) + '%')}>${valLabel}</span>` : null}
             </div>
+            <div class="wf-offset" title=${absStart}>${offsetLabel}</div>
             <div class="wf-cost">
               <div class="wf-cost-bar"><div class="wf-cost-fill" style="width:${wfFrac.toFixed(1)}%"></div></div>
               <span class="wf-cost-val">${costShown ? costFramed : ''}</span>
@@ -2039,30 +2162,29 @@ function _windowGrid(resp) {
   return { xs, idx, step, bucket, coarsened, reqBucket };
 }
 
-// Build the cache-savings chart series (#212) from a /cost/cache response.
-// `useTokens` swaps captured dollars for captured tokens (subscription/local
-// framing). Returns cumulative captured, per-bucket hit-rate (%), and an
-// "achievable" envelope = cumulative captured + estimated recoverable (or null
-// when the analyzer surfaced nothing). Hit-rate is a token ratio, always shown.
+// Build the redesigned cache-savings view (#246) from a /cost/cache response.
+// Leads with the answer instead of three overlaid series: PER-PERIOD savings
+// bars are the one chart (not a cumulative ramp), the overall hit-rate is a
+// headline stat (+ a tiny sparkline for trend, NOT an overlaid axis line), and
+// the "recoverable (est.)" overlay is gone (noise here; it lives on Optimize).
+// `useTokens` (subscription/local) swaps captured $ for cached-token volume.
 function buildCacheSeries(resp, useTokens) {
   const grid = _windowGrid(resp); if (!grid) return null;
   const { xs, idx, step, bucket } = grid;
   const rows = (resp && resp.series) || [];
-  const cap = xs.map(() => 0), read = xs.map(() => 0), inp = xs.map(() => 0);
+  const sav = xs.map(() => 0), read = xs.map(() => 0), inp = xs.map(() => 0);
   rows.forEach(r => {
     const b = Math.floor(r.bucket / step) * step; if (!(b in idx)) return;
     const i = idx[b];
-    cap[i] += useTokens ? (r.captured_tokens || 0) : (r.captured_usd || 0);
+    sav[i] += useTokens ? (r.captured_tokens || 0) : (r.captured_usd || 0);
     read[i] += r.cache_read_tokens || 0; inp[i] += r.input_tokens || 0;
   });
-  const cum = xs.map(() => 0); let acc = 0;
-  for (let i = 0; i < xs.length; i++) { acc += cap[i]; cum[i] = acc; }
-  const hit = xs.map((_, i) => { const d = read[i] + inp[i]; return d > 0 ? (100 * read[i] / d) : 0; });
-  const recoverable = useTokens
-    ? (resp.estimated_recoverable_tokens || 0)
-    : (resp.estimated_recoverable_usd || 0);
-  const env = recoverable > 0 ? cum.map(v => v + recoverable) : null;
-  return { data: [xs, cum], hit, env, recoverable, bucket, coarsened: grid.coarsened };
+  // Per-bucket hit-rate feeds the small sparkline; the headline stat is the
+  // overall window ratio (cached reads / all input reads).
+  const hitSpark = xs.map((_, i) => { const d = read[i] + inp[i]; return d > 0 ? (100 * read[i] / d) : 0; });
+  const totRead = read.reduce((a, b) => a + b, 0), totInp = inp.reduce((a, b) => a + b, 0);
+  const hitRate = (totRead + totInp) > 0 ? (100 * totRead / (totRead + totInp)) : 0;
+  return { data: [xs, sav], hitSpark, hitRate, bucket, coarsened: grid.coarsened };
 }
 
 function CostView({ params }) {
@@ -2184,19 +2306,24 @@ function CostView({ params }) {
 
     ${!error && cacheSeries ? html`
       <div class="chart-card">
-        <div class="chart-head">
-          <div class="chart-title">Cache savings over time</div>
-          <div class="chart-meta">
-            <span class="chart-total">${useTokens ? (fmtTokens(cacheResp.total_captured_tokens || 0) + ' tokens captured') : (fmtCost(cacheResp.total_captured_usd || 0) + ' captured')}</span>
-          </div>
+        <div class="chart-title">Caching</div>
+        <!-- Lead with the answer (#246): hit-rate + savings this window, framed.
+             Subscription/local show cached-token volume (never raw $). -->
+        <div class="cache-headline">
+          <span class="cache-stat"><b>${cacheSeries.hitRate.toFixed(0)}%</b> cache hit-rate</span>
+          <${Sparkline} values=${cacheSeries.hitSpark} color="var(--chart-2)" width=${72} height=${22} />
+          <span class="cache-sep">·</span>
+          <span class="cache-stat">${useTokens
+            ? html`<b>${fmtTokens(cacheResp.total_captured_tokens || 0)}</b> cached reads this window`
+            : html`~<b>${fmtCost(cacheResp.total_captured_usd || 0)}</b> saved this window`}</span>
         </div>
-        ${loading ? html`<div class="shimmer" style="height:200px"></div>` : html`
-          <${CacheSavingsChart} cache=${cacheSeries.data} hit=${cacheSeries.hit} env=${cacheSeries.env}
-            height=${200} fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd}
+        ${loading ? html`<div class="shimmer" style="height:180px"></div>` : html`
+          <${CacheSavingsChart} data=${cacheSeries.data} height=${180}
+            fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtCost}
             bucket=${cacheSeries.bucket} />
           <div class="chart-foot">
-            <span class="dim">Cumulative <b>captured</b> savings (measured) + cache <b>hit-rate</b>.</span>
-            ${cacheSeries.recoverable > 0 ? html` <span class="dim">Dashed line = estimated recoverable: ~${useTokens ? (fmtTokens(cacheResp.estimated_recoverable_tokens || 0) + ' more tokens') : fmtFramedDollar(cacheResp.estimated_recoverable_usd || 0, framing)} more with better caching (estimated, not saved).</span>` : null}
+            <span class="dim">Per-${cacheSeries.bucket === 'hour' ? 'hour' : 'day'} ${useTokens ? 'cached-token volume' : 'savings'}. Cached input bills at roughly a tenth of the normal input rate — you read these tokens at that discount, ${useTokens ? 'sparing your token budget' : 'saving the difference vs paying full price'}.</span>
+            ${cacheSeries.coarsened ? html` <span class="dim">Showing ${cacheSeries.bucket} buckets.</span>` : null}
           </div>
         `}
       </div>
@@ -2724,7 +2851,7 @@ function OptimizeFinding({ name, opt, framing }) {
       body = (fd.clusters || []).length ? html`
         <div class="opt-line">${fd.clusters.length} deterministic-pattern cluster(s).</div>
         <table class="opt-table"><thead><tr><th>Instances</th><th>Signature</th><th>Avg cost</th></tr></thead>
-          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtFramedDollar(c.avg_cost_usd, framing)}</td></tr>`)}</tbody></table>
+          <tbody>${fd.clusters.map(c => html`<tr><td>${c.instances}×</td><td class="mono">${(c.signature || []).map(s => s.tool).join(' → ').slice(0, 60)}</td><td>${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}</td></tr>`)}</tbody></table>
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
         : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
     } else if (name === 'trim') {
@@ -2788,6 +2915,7 @@ function OptimizeView({ params }) {
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const waste = buildComponentWaste(st.comp, useTokens);
   const wasteFmtY = useTokens ? fmtTokens : fmtCost;
+  const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;
 
   return html`
     <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -2835,7 +2963,8 @@ function OptimizeView({ params }) {
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
               `)}
-            </div>` : html`<div class="chart-foot"><span class="dim">No recoverable waste estimated in this window.</span></div>`}
+            </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window — no estimated waste from any analyzer.</div>`}
+          ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
         </div>` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
