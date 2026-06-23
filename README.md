@@ -145,16 +145,20 @@ def run(task: str) -> str:
 
 ## Lens — the local dashboard
 
-`tj serve` runs Lens at `http://127.0.0.1:7391/`: an Overview triage screen with spend, recoverable waste, and health at a glance; an Optimize tab showing every analyzer's findings side by side; and the standard Status, Traces, Cost, Alerts, Drift, and Budget screens. Plan-tier-aware, fully offline, no signup.
+`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and health at a glance, with an embedded explorer to slice your usage any way (metric × dimension × chart); plus Status, Traces, Cost, Analytics, Alerts, Drift, Optimize, and Budget screens. Plan-tier-aware, fully offline, no signup.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status screen" /></td>
-<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost screen with spend-over-time chart" /></td>
+<td width="50%"><img src="docs/screenshots/tj-dashboard.png" alt="Dashboard — recoverable waste, health at a glance, and the embedded pivot explorer" /></td>
+<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost — spend over time + cache savings" /></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Traces table" /></td>
-<td width="50%"><img src="docs/screenshots/tj-alerts.png" alt="Alerts table" /></td>
+<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Trace waterfall — session-level spans with cost annotations" /></td>
+<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status — per-agent cards" /></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/tj-dashboard-tools.png" alt="Analytics explorer — tool-usage leaderboard" /></td>
+<td width="50%"><img src="docs/screenshots/tj-dashboard-leaderboard.png" alt="Analytics explorer — cost-by-model leaderboard" /></td>
 </tr>
 </table>
 
