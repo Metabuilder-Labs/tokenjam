@@ -503,3 +503,41 @@ def test_kpi_spend_tile_respects_framing(html):
     assert "const spendSuppressed = !!framing && (framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local')" in html
     assert "kpiSparkValues(resp, spendSuppressed ? 'tokens' : 'spend')" in html
     assert "delta: spendSuppressed ? deltas.tokens : deltas.spend" in html
+
+
+# --- #228: shared series→color map + colored leaderboard ------------------- #
+def test_shared_colorfor_helper_exists(html):
+    # ONE name-keyed color map, hashed into the shared --chart-1..5 palette, so a
+    # series is the same hue everywhere (not a per-chart positional palette).
+    assert "function colorFor(name)" in html
+    assert "h = (h * 31 + s.charCodeAt(i))" in html
+
+
+def test_leaderboard_bars_use_shared_colorfor(html):
+    # Leaderboard .lb-fill colored by the shared map, keyed by the group name.
+    assert "background:' + colorFor(e.group)" in html
+
+
+def test_dimension_charts_color_by_name(html):
+    # SpendChart + StackedBarChart color multi-series via colorFor(name), not by
+    # draw-order index — same map the leaderboard uses (ComponentWasteChart keeps
+    # its own component palette; different namespace, out of scope).
+    assert html.count("single ? (palette[0] || '#3d8eff') : colorFor(lab)") >= 2
+    # the stacked-bar tooltip dots match the bars (also via the shared map)
+    assert "colorFor(labels[k] || ('s' + k))" in html
+
+
+# --- #227: don't color by the time dimension ------------------------------- #
+def test_time_dimension_renders_single_series(html):
+    # group_by=Day with no stack must be ONE series (tokens/day, one color), not
+    # one-per-day-bucket → no raw-epoch rainbow legend.
+    assert "const timeGroup = resp.group_by === 'day'" in html
+    assert "return { data: [xs, ys], labels: ['Total']" in html
+    # the time dimension feeds the x-axis; series come from stack_by instead
+    assert "const seriesKeys = timeGroup ? (resp.stacks || []) : (resp.groups || [])" in html
+
+
+def test_time_dimension_labels_formatted_as_dates(html):
+    # A time-dimension group key renders as a date, never a raw epoch second.
+    assert "function formatGroupLabel" in html
+    assert "formatGroupLabel(e.group, groupBy)" in html
