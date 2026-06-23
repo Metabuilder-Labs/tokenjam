@@ -541,3 +541,22 @@ def test_time_dimension_labels_formatted_as_dates(html):
     # A time-dimension group key renders as a date, never a raw epoch second.
     assert "function formatGroupLabel" in html
     assert "formatGroupLabel(e.group, groupBy)" in html
+
+
+# --- #234: expanded chart palette (12 hues) reduces colorFor() collisions --- #
+def test_colorfor_palette_expanded_to_twelve(html):
+    # colorFor hashes into a 12-hue palette (was 5) so distinct series rarely
+    # collide on real data; the stable-hash mapping itself is unchanged.
+    assert "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(i => cssVar('--chart-' + i))" in html
+
+
+def test_chart_palette_defines_twelve_hues_both_themes(html):
+    # --chart-1..12 must be defined for BOTH the dark (:root) and light themes,
+    # so charts re-theme correctly.
+    for n in range(1, 13):
+        assert html.count(f"--chart-{n}:") >= 2, f"--chart-{n} not defined in both themes"
+
+
+def test_colorfor_neutral_bucket_not_a_palette_hue(html):
+    # 'other'/'(none)'/'' still map to the neutral grey, never a palette color.
+    assert "if (s === 'other' || s === '(none)' || s === '') return cssVar('--text-dim')" in html
