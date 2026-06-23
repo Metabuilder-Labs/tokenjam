@@ -49,12 +49,21 @@
   --success: #0ce490;
   --info: #3d8eff;
   /* Chart series palette (issue #113). Re-read by uPlot at draw time so charts
-     re-theme. Series colors must read in both light and dark. */
+     re-theme. Series colors must read in both light and dark. Expanded to 12
+     hues (#234) so colorFor()'s name-hash rarely collides on real data; spaced
+     ~30 deg around the wheel for visual separation. */
   --chart-1: #3d8eff;
   --chart-2: #0ce490;
   --chart-3: #f5a623;
   --chart-4: #b36bff;
   --chart-5: #ff6b9d;
+  --chart-6: #2dd4bf;
+  --chart-7: #ff5c5c;
+  --chart-8: #a3e635;
+  --chart-9: #818cf8;
+  --chart-10: #fb923c;
+  --chart-11: #e879f9;
+  --chart-12: #38bdf8;
 }
 [data-theme="light"] {
   --bg: #fff;
@@ -77,6 +86,13 @@
   --chart-3: #c47e0c;
   --chart-4: #8b3dff;
   --chart-5: #d6336c;
+  --chart-6: #0d9488;
+  --chart-7: #dc2626;
+  --chart-8: #65a30d;
+  --chart-9: #4f46e5;
+  --chart-10: #ea580c;
+  --chart-11: #c026d3;
+  --chart-12: #0284c7;
 }
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
@@ -903,16 +919,18 @@ function cssVar(name) {
 }
 
 // Shared series→color map (#228). ONE place that turns a series NAME (model /
-// agent / tool-category / …) into a stable hue from the --chart-1..5 palette,
+// agent / tool-category / …) into a stable hue from the --chart-1..12 palette,
 // so a given series is the SAME color on every chart and screen — never a
 // per-chart palette indexed by draw order. Every colored surface (leaderboard,
 // stacked bars, multi-series spend) must route through this; do not introduce a
 // second palette. 'other'/'(none)' buckets read as a neutral grey so the
 // catch-all never masquerades as a real series.
+// The palette is 12 hues (#234) so the name-hash rarely collides on real data
+// (~4+ series/chart); the stable-hash mapping is unchanged, only the size grew.
 function colorFor(name) {
   const s = String(name == null ? '' : name);
   if (s === 'other' || s === '(none)' || s === '') return cssVar('--text-dim') || '#a1a1a1';
-  const palette = [1, 2, 3, 4, 5].map(i => cssVar('--chart-' + i)).filter(Boolean);
+  const palette = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(i => cssVar('--chart-' + i)).filter(Boolean);
   if (!palette.length) return '#3d8eff';
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
