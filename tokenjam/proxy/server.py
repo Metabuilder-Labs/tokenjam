@@ -27,10 +27,17 @@ class ProxyRunner:
     def __init__(self, config: Any, observer: ProxyObserver | None = None,
                  db: Any = None) -> None:
         self.config = config
-        self.observer = observer or ProxyObserver()
-        # Shared tj-serve DB (optional) so in-process policies (budget_cap, #222)
-        # can read current-cycle spend without opening a second connection.
+        # Shared tj-serve DB (optional). Used two ways: in-process policies
+        # (budget_cap, #222) read current-cycle spend from it, AND the audit sink
+        # (#221) persists decisions + the savings ledger through it.
         self.db = db
+        if observer is None:
+            sink = None
+            if db is not None:
+                from tokenjam.proxy.audit import AuditSink
+                sink = AuditSink(db)
+            observer = ProxyObserver(sink=sink)
+        self.observer = observer
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
 
