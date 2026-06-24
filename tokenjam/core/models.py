@@ -77,6 +77,15 @@ class NormalizedSpan:
     # Provider-only billing identifier (anthropic | openai | google | bedrock
     # | local.ollama). Plan tier lives on SessionRecord, not here.
     billing_account: str | None    = None
+    # Full-request capture (issue #209) — makes a span self-contained enough to
+    # replay. `request_params` holds sampling parameters (temperature, top_p,
+    # max_tokens, stop_sequences, …); `request_tools` holds the tools /
+    # tool_choice payload as {"tools": [...], "tool_choice": ...}. Both are
+    # populated only when the corresponding [capture] toggle is on (sampling
+    # params gate with `prompts`, tools gate with `tool_inputs`) — see
+    # strip_captured_content() in core/ingest.py. Round-trip via JSON columns.
+    request_params: dict[str, Any] | None = None
+    request_tools:  dict[str, Any] | None = None
 
 
 @dataclass

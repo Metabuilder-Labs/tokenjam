@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.ids import new_uuid
 
 if TYPE_CHECKING:
@@ -72,18 +72,70 @@ def _json_depth(obj: object, current: int = 0) -> int:
     return current
 
 
+# Sampling-parameter attributes captured for full-request replay (#209). These
+# describe HOW generation was requested (not message content); they ride with
+# the request prompt and so are gated by the [capture] `prompts` toggle.
+_REQUEST_PARAM_ATTRS: tuple[str, ...] = (
+    GenAIAttributes.REQUEST_TEMPERATURE,
+    GenAIAttributes.REQUEST_TOP_P,
+    GenAIAttributes.REQUEST_TOP_K,
+    GenAIAttributes.REQUEST_MAX_TOKENS,
+    GenAIAttributes.REQUEST_STOP_SEQUENCES,
+    GenAIAttributes.REQUEST_FREQUENCY_PENALTY,
+    GenAIAttributes.REQUEST_PRESENCE_PENALTY,
+    GenAIAttributes.REQUEST_SEED,
+)
+
+
 def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
-    """Remove prompt/completion/tool content from attributes based on capture config."""
+    """Remove prompt/completion/tool content from attributes based on capture config.
+
+    This is the single ingest gate (Critical Rule 5 / issue #209). Full-request
+    capture rides through the same gate: sampling parameters are gated with the
+    request `prompts` toggle, and the tools/tool_choice payload (tool-definition
+    content) is gated with `tool_inputs`.
+    """
     stripped = dict(attributes)
     if not capture.prompts:
         stripped.pop(GenAIAttributes.PROMPT_CONTENT, None)
+        for key in _REQUEST_PARAM_ATTRS:
+            stripped.pop(key, None)
     if not capture.completions:
         stripped.pop(GenAIAttributes.COMPLETION_CONTENT, None)
     if not capture.tool_inputs:
         stripped.pop(GenAIAttributes.TOOL_INPUT, None)
+        stripped.pop(TjAttributes.REQUEST_TOOLS, None)
     if not capture.tool_outputs:
         stripped.pop(GenAIAttributes.TOOL_OUTPUT, None)
     return stripped
+
+
+def extract_request_capture(span: NormalizedSpan) -> None:
+    """Project full-request capture from span attributes into structured fields.
+
+    Runs AFTER strip_captured_content, so it only ever sees attributes the
+    [capture] config permits — when a toggle is off the keys are already gone
+    and the corresponding structured field stays None (no behavior change when
+    capture is off, acceptance criterion #1). The keys are popped out of the
+    attributes blob so the data lives in exactly one place: the structured
+    request_params / request_tools columns.
+    """
+    params: dict[str, Any] = {}
+    for key in _REQUEST_PARAM_ATTRS:
+        if key in span.attributes:
+            # Store under the short param name (strip the gen_ai.request. prefix).
+            params[key.rsplit(".", 1)[-1]] = span.attributes.pop(key)
+    if params:
+        span.request_params = params
+
+    tools = span.attributes.pop(TjAttributes.REQUEST_TOOLS, None)
+    if tools is not None:
+        if isinstance(tools, str):
+            try:
+                tools = json.loads(tools)
+            except (ValueError, TypeError):
+                tools = {"raw": tools}
+        span.request_tools = tools
 
 
 class IngestPipeline:
@@ -126,6 +178,11 @@ class IngestPipeline:
         """
         # 1. Strip captured content before sanitization/storage
         span.attributes = strip_captured_content(span.attributes, self.config.capture)
+
+        # 1b. Project the (now gated) full-request capture into structured
+        # fields. Runs after the strip so it can only ever see attributes the
+        # capture config permits (#209).
+        extract_request_capture(span)
 
         # 2. Sanitize
         self.sanitizer.validate(span.attributes, source=span.agent_id or "unknown")
