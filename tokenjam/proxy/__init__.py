@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from tokenjam.proxy.engine import (
     UNVALIDATED_LABEL,
+    PolicyContext,
     PolicyEngine,
     PolicyEnvelope,
     PolicyEvaluation,
@@ -38,6 +39,6 @@ from tokenjam.proxy.gate import (
 
 __all__ = [
     "OBSERVE_ONLY", "POLICY", "GateDecision", "classify",
-    "PolicyEngine", "PolicyEnvelope", "PolicyEvaluation", "PolicyRequest",
-    "PolicyGuardError", "register_policy", "UNVALIDATED_LABEL",
+    "PolicyContext", "PolicyEngine", "PolicyEnvelope", "PolicyEvaluation",
+    "PolicyRequest", "PolicyGuardError", "register_policy", "UNVALIDATED_LABEL",
 ]

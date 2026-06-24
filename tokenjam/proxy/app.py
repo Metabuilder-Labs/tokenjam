@@ -95,16 +95,19 @@ def _response_headers(upstream: httpx.Response) -> list[tuple[bytes, bytes]]:
 
 def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
                     client: httpx.AsyncClient | None = None,
-                    engine: PolicyEngine | None = None) -> Starlette:
+                    engine: PolicyEngine | None = None,
+                    db: Any = None) -> Starlette:
     """Build the Starlette proxy app.
 
-    ``observer``, ``client`` and ``engine`` are injectable for testing — pass an
-    ``httpx.AsyncClient`` backed by ``httpx.MockTransport`` to avoid real
+    ``observer``, ``client``, ``engine`` and ``db`` are injectable for testing —
+    pass an ``httpx.AsyncClient`` backed by ``httpx.MockTransport`` to avoid real
     network calls. When ``client`` is None a real client is created on startup
-    and closed on shutdown; when ``engine`` is None it is built from ``config``.
+    and closed on shutdown; when ``engine`` is None it is built from ``config``,
+    threading ``db`` (the shared tj-serve DuckDB) so in-process policies like
+    budget_cap (#222) can read current-cycle spend.
     """
     observer = observer or ProxyObserver()
-    engine = engine or PolicyEngine.from_config(config)
+    engine = engine or PolicyEngine.from_config(config, db=db)
     state: dict[str, Any] = {"client": client, "owns_client": client is None}
 
     async def _get_client() -> httpx.AsyncClient:

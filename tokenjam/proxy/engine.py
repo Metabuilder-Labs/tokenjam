@@ -26,6 +26,7 @@ logic stays inspectable and is unit-tested directly.
 """
 from __future__ import annotations
 
+import inspect
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
@@ -75,8 +76,11 @@ class PolicyOutcome:
     details:      dict = field(default_factory=dict)
 
 
-# A policy `kind` evaluator: pure function of (policy config, request) → outcome.
-PolicyEvaluator = Callable[[Any, PolicyRequest], PolicyOutcome]
+# A policy `kind` evaluator. Pure function of (policy config, request) → outcome,
+# or (policy, request, context) for kinds that need shared state — the engine
+# inspects the arity and passes `context` only when the evaluator accepts it, so
+# stateless kinds (noop) keep the 2-arg form.
+PolicyEvaluator = Callable[..., PolicyOutcome]
 
 POLICY_REGISTRY: dict[str, PolicyEvaluator] = {}
 
@@ -87,6 +91,61 @@ def register_policy(kind: str) -> Callable[[PolicyEvaluator], PolicyEvaluator]:
         POLICY_REGISTRY[kind] = fn
         return fn
     return _decorator
+
+
+@dataclass(frozen=True)
+class PolicyContext:
+    """Shared, engine-level state an evaluator may need beyond the request.
+
+    Stateless kinds (``noop``) ignore it; stateful kinds (``budget_cap``) read
+    the per-provider ceiling from ``config.budgets`` and current-cycle spend from
+    the telemetry DB. HTTP-free: ``db`` is the shared ``tj serve`` DuckDB backend
+    (the proxy runs in-process, so it reuses that connection — per-thread cursors
+    make this concurrency-safe, #124). ``spend_fn`` is an injectable override so
+    evaluators are unit-testable without a DB; ``now_fn`` injects the clock for
+    deterministic cycle bounds in tests.
+    """
+    config:   Any = None
+    db:       Any = None
+    spend_fn: Callable[[str], float | None] | None = None
+    now_fn:   Callable[[], Any] | None = None
+
+    def provider_budget(self, provider: str) -> Any:
+        budgets = getattr(self.config, "budgets", None) or {}
+        return budgets.get(provider)
+
+    def cycle_spend_usd(self, provider: str) -> float | None:
+        """Current billing-cycle USD spend for ``provider`` (None if unavailable).
+
+        Honors the provider's ``cycle_start_day`` + ``applies_to_services`` from
+        config, mirroring the budget-projection analyzer's window so the proxy
+        and `tj optimize` agree on what counts. Best-effort: returns None when no
+        spend source is wired (a budget_cap with no data is a no-op, not a guess).
+        """
+        if self.spend_fn is not None:
+            return self.spend_fn(provider)
+        conn = getattr(self.db, "conn", None) if self.db is not None else None
+        if conn is None:
+            return None
+        from tokenjam.core.cycle import cycle_bounds
+        budget = self.provider_budget(provider)
+        start_day = getattr(budget, "cycle_start_day", 1) if budget is not None else 1
+        services = list(getattr(budget, "applies_to_services", None) or []) if budget else []
+        now = self.now_fn() if self.now_fn is not None else utcnow()
+        cs, ce = cycle_bounds(now, start_day)
+        # Parameterised SQL only (Rule 7); provider/cost_usd/start_time per semconv.
+        clauses = ["start_time >= $1", "start_time < $2", "provider = $3"]
+        params: list = [cs, ce, provider]
+        if services:
+            ph = ",".join("$" + str(len(params) + i + 1) for i in range(len(services)))
+            clauses.append(f"agent_id IN ({ph})")  # agent_id holds service.name in tj's model
+            params.extend(services)
+        sql = "SELECT COALESCE(SUM(cost_usd), 0.0) FROM spans WHERE " + " AND ".join(clauses)
+        try:
+            row = conn.execute(sql, params).fetchone()
+        except Exception:  # noqa: BLE001 — a spend-query failure must not break eval
+            return None
+        return float(row[0] or 0.0) if row else 0.0
 
 
 @register_policy("noop")
@@ -101,6 +160,85 @@ def _noop_policy(policy: Any, request: PolicyRequest) -> PolicyOutcome:
         would_action=ACTION_NOOP,
         reason="noop example policy: observed, no action",
         details={"name": getattr(policy, "name", "")},
+    )
+
+
+# Default fraction of the ceiling at which budget_cap raises a soft "approaching
+# ceiling" warning (still a no-op action). Overridable per policy via params.
+_BUDGET_CAP_DEFAULT_WARN_AT = 0.8
+
+
+@register_policy("budget_cap")
+def _budget_cap_policy(policy: Any, request: PolicyRequest, context: PolicyContext) -> PolicyOutcome:
+    """The first concrete policy (#222): per-provider cycle-spend ceiling.
+
+    Reads the existing ``[budget.<provider>] usd`` ceiling (``ProviderBudget.usd``)
+    and compares it to the provider's current-cycle spend:
+
+    - spend **over** the ceiling → ``would_block`` (it says it WOULD block further
+      requests; SUGGEST MODE — it does not act).
+    - spend at/above ``warn_at`` × ceiling (default 0.8) but under → a no-op that
+      flags ``near_ceiling`` (a soft warning).
+    - under → ``noop``.
+
+    A ceiling is deterministic, so budget_cap has NO validation/certification
+    dependency — that's why it's first, and why it's the policy that can graduate
+    to enforce-mode first when that gate opens (NOT built here; ENFORCE stays
+    closed). The envelope's ``unvalidated`` label + suggest-only framing are
+    applied by the engine; this evaluator never says "blocked", only "would
+    block".
+    """
+    provider = request.provider
+    budget = context.provider_budget(provider) if context is not None else None
+    ceiling = getattr(budget, "usd", None) if budget is not None else None
+    if not ceiling or ceiling <= 0:
+        return PolicyOutcome(
+            would_action=ACTION_NOOP,
+            reason=f"no [budget.{provider}] usd ceiling configured — nothing to cap",
+            details={"provider": provider, "ceiling_usd": None},
+        )
+
+    spend = context.cycle_spend_usd(provider) if context is not None else None
+    if spend is None:
+        return PolicyOutcome(
+            would_action=ACTION_NOOP,
+            reason=f"current-cycle spend for {provider} unavailable — no evaluation",
+            details={"provider": provider, "ceiling_usd": ceiling, "cycle_spend_usd": None},
+        )
+
+    try:
+        warn_at = float((getattr(policy, "params", None) or {}).get("warn_at", _BUDGET_CAP_DEFAULT_WARN_AT))
+    except (TypeError, ValueError):
+        warn_at = _BUDGET_CAP_DEFAULT_WARN_AT
+    pct = (spend / ceiling) if ceiling else 0.0
+    base = {
+        "provider": provider,
+        "ceiling_usd": round(float(ceiling), 6),
+        "cycle_spend_usd": round(float(spend), 6),
+        "pct_of_ceiling": round(pct * 100, 1),
+    }
+
+    if spend > ceiling:
+        # SUGGEST MODE: report what it WOULD do, never "blocked".
+        return PolicyOutcome(
+            would_action=ACTION_WOULD_BLOCK,
+            reason=(f"{provider} cycle spend ${spend:.2f} is over the "
+                    f"${ceiling:.2f} ceiling — would block until cycle reset "
+                    "(suggest mode: not enforced)"),
+            details={**base, "over_by_usd": round(float(spend - ceiling), 6),
+                     "would_do": "block further requests until the budget cycle resets"},
+        )
+    if pct >= warn_at:
+        return PolicyOutcome(
+            would_action=ACTION_NOOP,
+            reason=(f"{provider} cycle spend ${spend:.2f} is approaching the "
+                    f"${ceiling:.2f} ceiling ({base['pct_of_ceiling']}%)"),
+            details={**base, "near_ceiling": True, "warn_at_pct": round(warn_at * 100, 1)},
+        )
+    return PolicyOutcome(
+        would_action=ACTION_NOOP,
+        reason=f"{provider} cycle spend ${spend:.2f} is under the ${ceiling:.2f} ceiling",
+        details={**base, "near_ceiling": False},
     )
 
 
@@ -180,16 +318,45 @@ def _policy_applies(policy: Any, request: PolicyRequest) -> bool:
     return True
 
 
+def _accepts_context(fn: PolicyEvaluator) -> bool:
+    """True if an evaluator takes a 3rd (context) positional arg."""
+    try:
+        params = list(inspect.signature(fn).parameters.values())
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind == p.VAR_POSITIONAL for p in params):
+        return True
+    positional = [p for p in params
+                  if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)]
+    return len(positional) >= 3
+
+
+def _call_evaluator(fn: PolicyEvaluator, policy: Any, request: PolicyRequest,
+                    context: PolicyContext) -> PolicyOutcome:
+    """Call an evaluator, passing ``context`` only to kinds that accept it."""
+    if _accepts_context(fn):
+        return fn(policy, request, context)
+    return fn(policy, request)
+
+
 class PolicyEngine:
     """Loads `[[policies]]` and evaluates eligible requests into envelopes."""
 
-    def __init__(self, policies: list[Any]):
+    def __init__(self, policies: list[Any], context: PolicyContext | None = None):
         # Only enabled policies participate.
         self.policies = [p for p in (policies or []) if getattr(p, "enabled", True)]
+        # Shared state for stateful kinds (budget_cap). Empty by default so the
+        # engine works with no config/DB (stateful kinds then no-op gracefully).
+        self.context = context or PolicyContext()
 
     @classmethod
-    def from_config(cls, config: Any) -> "PolicyEngine":
-        return cls(list(getattr(config, "policies", []) or []))
+    def from_config(cls, config: Any, *, db: Any = None) -> "PolicyEngine":
+        # `db` is the shared tj-serve DuckDB backend, threaded through so
+        # budget_cap can read current-cycle spend (the proxy runs in-process).
+        return cls(
+            list(getattr(config, "policies", []) or []),
+            context=PolicyContext(config=config, db=db),
+        )
 
     def evaluate(self, gate_decision: GateDecision, request: PolicyRequest) -> PolicyEnvelope:
         """Evaluate all applicable policies for an eligible request.
@@ -248,7 +415,7 @@ class PolicyEngine:
                 enforcement_gated=gated, details={},
             )
         try:
-            outcome = evaluator(policy, request)
+            outcome = _call_evaluator(evaluator, policy, request, self.context)
         except Exception as exc:  # noqa: BLE001 — one bad policy never breaks the rest
             return PolicyEvaluation(
                 policy_name=name, kind=kind, mode=mode, would_action=ACTION_ERROR,

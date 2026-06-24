@@ -24,15 +24,19 @@ logger = logging.getLogger("tokenjam.proxy")
 class ProxyRunner:
     """Owns the proxy's uvicorn server + its lifecycle within an event loop."""
 
-    def __init__(self, config: Any, observer: ProxyObserver | None = None) -> None:
+    def __init__(self, config: Any, observer: ProxyObserver | None = None,
+                 db: Any = None) -> None:
         self.config = config
         self.observer = observer or ProxyObserver()
+        # Shared tj-serve DB (optional) so in-process policies (budget_cap, #222)
+        # can read current-cycle spend without opening a second connection.
+        self.db = db
         self._server: uvicorn.Server | None = None
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
         """Schedule the proxy server on the running event loop (non-blocking)."""
-        app = build_proxy_app(self.config, observer=self.observer)
+        app = build_proxy_app(self.config, observer=self.observer, db=self.db)
         uconfig = uvicorn.Config(
             app,
             host=self.config.proxy.host,
