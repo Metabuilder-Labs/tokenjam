@@ -58,6 +58,7 @@ async def list_traces(
         span_name=span_name,
     )
     traces = db.get_traces(filters)
+    total_count = db.count_traces(filters) if hasattr(db, "count_traces") else len(traces)
     return {
         "traces": [
             {
@@ -77,6 +78,7 @@ async def list_traces(
             for t in traces
         ],
         "count": len(traces),
+        "total_count": total_count,
         "framing": _traces_framing(request, agent_id),
     }
 

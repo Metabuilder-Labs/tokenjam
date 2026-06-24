@@ -237,6 +237,14 @@ def test_traces_list_cost_routes_through_framing(html):
     assert "setFraming(td.framing || null)" in html
 
 
+def test_traces_list_surfaces_pagination(html):
+    assert "total_count" in html
+    assert "Showing ${traces.length} of ${totalCount} traces" in html
+    assert "Load more" in html
+    assert "load({ append: true })" in html
+    assert "offset" in html
+
+
 def test_trace_detail_costs_route_through_framing(html):
     # Waterfall bar label, tooltip line, and the span-detail panel all reframe —
     # no bare per-span fmtCost (the bar label + tooltip both used s.cost_usd).
