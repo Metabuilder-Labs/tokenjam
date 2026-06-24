@@ -200,12 +200,13 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
     earliest: datetime | None = None
     latest: datetime | None = None
 
-    spans: list[NormalizedSpan] = []
-    total_input = 0
-    total_output = 0
-    total_cache = 0
-    total_cost = 0.0
-    tool_count = 0
+    # Dedup by span_id WITHIN the session (#294). Claude Code replays/re-snapshots
+    # assistant turns into the same JSONL on resume/branch — each appended record
+    # gets a fresh `uuid` but the SAME `message.id` (the stable Anthropic API
+    # response id) and same `requestId`. Keying span_id on message.id collapses
+    # these to one span; `last-wins` keeps the finalized usage (early snapshots
+    # carry partial output_tokens; the last record has the complete generation).
+    spans_by_id: dict[str, NormalizedSpan] = {}
 
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -261,13 +262,18 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
         if input_tokens == 0 and output_tokens == 0 and cache_read == 0 and cache_creation == 0:
             continue
 
-        message_uuid = record.get("uuid") or msg.get("id") or f"{line_no}"
+        # Prefer the Anthropic API response id (`message.id`, msg_…) — it is
+        # STABLE per real call and survives resume/branch re-ingest, where the
+        # record `uuid` is regenerated (#294). Fall back to the record uuid only
+        # when message.id is absent. NEVER key on the token-usage signature:
+        # distinct real calls can share identical token counts.
+        message_key = msg.get("id") or record.get("uuid") or f"{line_no}"
         sid_str = session_id or path.stem
         # One trace per session (#243): all assistant turns + their tool calls
-        # in this conversation share a trace_id. span_id stays per-message so
-        # idempotency (deterministic span IDs) is unaffected.
+        # in this conversation share a trace_id. span_id is keyed on the stable
+        # message.id so idempotency holds across resumed/branched sessions.
         trace_id = _trace_id_for(sid_str)
-        span_id = _span_id_for_assistant(sid_str, message_uuid)
+        span_id = _span_id_for_assistant(sid_str, message_key)
 
         provider = _provider_for_model(model)
         cost = calculate_cost(
@@ -286,75 +292,80 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
 
         agent_id = _agent_id_from_cwd(cwd)
         start_time = ts or datetime.now(tz=timezone.utc)
-        # Duration unknown from on-disk format; leave None
-        spans.append(
-            NormalizedSpan(
-                span_id=span_id,
-                trace_id=trace_id,
-                name="gen_ai.llm.call",
-                kind=SpanKind.CLIENT,
-                status_code=SpanStatus.OK,
-                start_time=start_time,
-                end_time=start_time,
-                duration_ms=None,
-                agent_id=agent_id,
-                session_id=sid_str,
-                provider=provider,
-                model=model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_tokens=cache_read,
-                cache_write_tokens=cache_creation,
-                cost_usd=cost,
-                request_type="completion",
-                conversation_id=sid_str,
-                attributes={"source": "backfill.claude_code"},
-                billing_account="anthropic",
-            )
+        # Duration unknown from on-disk format; leave None.
+        # last-wins: a later replay of the same message.id overwrites earlier,
+        # partial snapshots so the finalized usage/cost is the one we keep (#294).
+        spans_by_id[span_id] = NormalizedSpan(
+            span_id=span_id,
+            trace_id=trace_id,
+            name="gen_ai.llm.call",
+            kind=SpanKind.CLIENT,
+            status_code=SpanStatus.OK,
+            start_time=start_time,
+            end_time=start_time,
+            duration_ms=None,
+            agent_id=agent_id,
+            session_id=sid_str,
+            provider=provider,
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_tokens=cache_read,
+            cache_write_tokens=cache_creation,
+            cost_usd=cost,
+            request_type="completion",
+            conversation_id=sid_str,
+            attributes={"source": "backfill.claude_code"},
+            billing_account="anthropic",
         )
-        total_input += input_tokens
-        total_output += output_tokens
-        # Session-level cache_tokens tracks cache-READ only, matching the live
-        # path (IngestPipeline aggregates span.cache_tokens) and SessionRecord's
-        # documented semantics (it has no cache_write_tokens field).
-        total_cache += cache_read
-        total_cost += cost
 
-        # Tool uses inside the assistant message become tool spans
+        # Tool uses inside the assistant message become tool spans. tool_use `id`
+        # is stable across resumes (verified in real data), so keying on it
+        # collapses replays the same way. A per-message index (not a global
+        # counter) keeps the no-id fallback deterministic across re-ingest.
         content = msg.get("content") or []
         if isinstance(content, list):
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                if item.get("type") != "tool_use":
-                    continue
+            for tool_idx, item in enumerate(b for b in content if isinstance(b, dict)
+                                            and b.get("type") == "tool_use"):
                 tool_use_id = item.get("id") or _det_id(
-                    "tool-fallback", sid_str, message_uuid, str(tool_count)
+                    "tool-fallback", sid_str, message_key, str(tool_idx)
                 )
                 tool_span_id = _span_id_for_tool(sid_str, tool_use_id)
                 tool_name = item.get("name") or "unknown"
-                spans.append(
-                    NormalizedSpan(
-                        span_id=tool_span_id,
-                        trace_id=trace_id,
-                        parent_span_id=span_id,
-                        name="gen_ai.tool.call",
-                        kind=SpanKind.INTERNAL,
-                        status_code=SpanStatus.OK,
-                        start_time=start_time,
-                        end_time=start_time,
-                        duration_ms=None,
-                        agent_id=agent_id,
-                        session_id=sid_str,
-                        tool_name=tool_name,
-                        conversation_id=sid_str,
-                        attributes={"source": "backfill.claude_code"},
-                    )
+                spans_by_id[tool_span_id] = NormalizedSpan(
+                    span_id=tool_span_id,
+                    trace_id=trace_id,
+                    parent_span_id=span_id,
+                    name="gen_ai.tool.call",
+                    kind=SpanKind.INTERNAL,
+                    status_code=SpanStatus.OK,
+                    start_time=start_time,
+                    end_time=start_time,
+                    duration_ms=None,
+                    agent_id=agent_id,
+                    session_id=sid_str,
+                    tool_name=tool_name,
+                    conversation_id=sid_str,
+                    attributes={"source": "backfill.claude_code"},
                 )
-                tool_count += 1
 
-    if not spans or session_id is None:
+    if not spans_by_id or session_id is None:
         return None
+
+    # Totals are computed from the DEDUPED spans (#294) — never from per-record
+    # accumulation, which would re-count every replayed snapshot. cache_tokens is
+    # cache-READ only, matching the live path + SessionRecord semantics.
+    spans = list(spans_by_id.values())
+    total_input = total_output = total_cache = tool_count = 0
+    total_cost = 0.0
+    for s in spans:
+        if s.name == "gen_ai.tool.call":
+            tool_count += 1
+            continue
+        total_input += s.input_tokens or 0
+        total_output += s.output_tokens or 0
+        total_cache += s.cache_tokens or 0
+        total_cost += s.cost_usd or 0.0
 
     agent_id = _agent_id_from_cwd(cwd)
     started_at = earliest or datetime.now(tz=timezone.utc)
