@@ -64,7 +64,9 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     proxy_runner = None
     if config.proxy.enabled:
         from tokenjam.proxy.server import ProxyRunner
-        proxy_runner = ProxyRunner(config)
+        # Pass the serve DB so in-process policies (budget_cap, #222) can read
+        # current-cycle spend from the same connection (per-thread cursors, #124).
+        proxy_runner = ProxyRunner(config, db=db)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
