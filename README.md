@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="https://tokenjam.dev/icon.svg" alt="TokenJam" width="72" height="72">
-
-<img src="docs/screenshots/tokenjam-wordmark.png" alt="TokenJam" width="260">
+<img src="docs/brand/tokenjam-banner.png" alt="TokenJam" width="440">
 
 ### Token Efficiency For AI Agents
 

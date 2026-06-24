@@ -1655,20 +1655,25 @@ function TracesListView({ params }) {
   const setFilter = (k, v) => navigate('traces', { since, result, agent_id: agentId, [k]: v }, DEFAULTS);
 
   const [traces, setTraces] = useState([]);
+  const [totalCount, setTotalCount] = useState(0);
   const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
+  const TRACE_PAGE_SIZE = 100;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ append = false } = {}) => {
+    const offset = append ? traces.length : 0;
     const [td, sd] = await Promise.all([
-      api('/traces', { since, status: result || undefined, agent_id: agentId || undefined, limit: 100 }),
+      api('/traces', { since, status: result || undefined, agent_id: agentId || undefined, limit: TRACE_PAGE_SIZE, offset }),
       api('/status'),
     ]);
-    setTraces(td.traces || []);
+    const nextTraces = td.traces || [];
+    setTraces(prev => append ? prev.concat(nextTraces) : nextTraces);
+    setTotalCount(td.total_count ?? nextTraces.length);
     setFraming(td.framing || null);
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
-  }, [since, result, agentId]);
+  }, [since, result, agentId, traces.length]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
@@ -1687,8 +1692,9 @@ function TracesListView({ params }) {
         <option value="error">error</option>
       </select>
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
-      <button class="btn" onClick=${load}>Refresh</button>
+      <button class="btn" onClick=${() => load()}>Refresh</button>
     </div>
+    ${traces.length > 0 ? html`<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>` : null}
     ${traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
       <div class="table-wrap"><table>
         <thead><tr><th>Agent</th><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Result <span class="info-btn">i<span class="info-tip">Shows "error" if even a single span in this trace failed</span></span></th><th>Status <span class="info-btn">i<span class="info-tip">Agent liveness: active (seen in last 5 min), stale (no recent spans), completed or idle</span></span></th><th>Spans</th><th></th></tr></thead>
@@ -1710,6 +1716,7 @@ function TracesListView({ params }) {
           `})}
         </tbody>
       </table></div>
+      ${traces.length < totalCount ? html`<button class="btn" onClick=${() => load({ append: true })}>Load more</button>` : null}
     `}
   `;
 }

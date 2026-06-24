@@ -57,6 +57,7 @@ class StorageBackend(Protocol):
     def get_session(self, session_id: str) -> SessionRecord | None: ...
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None: ...
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
+    def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
     def get_cost_summary(self, filters: CostFilters) -> list[CostRow]: ...
     def get_alerts(self, filters: AlertFilters) -> list[Alert]: ...
@@ -743,7 +744,7 @@ class DuckDBBackend:
         cols = [d[0] for d in cur.description]
         return _row_to_session(rows[0], cols)
 
-    def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
+    def _trace_filter_where(self, filters: TraceFilters) -> tuple[str, list[object], int]:
         clauses: list[str] = []
         params: list[object] = []
         idx = 1
@@ -768,6 +769,10 @@ class DuckDBBackend:
             params.append(filters.status)
             idx += 1
         where = " AND ".join(clauses) if clauses else "1=1"
+        return where, params, idx
+
+    def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
+        where, params, idx = self._trace_filter_where(filters)
         # Use FIRST(name ORDER BY start_time) to pick the root span name —
         # the previous correlated-subquery variant returned NULL for most
         # rows in DuckDB, leaving the TYPE column blank in `tj traces` (U2).
@@ -799,6 +804,11 @@ class DuckDBBackend:
             )
             for r in rows
         ]
+
+    def count_traces(self, filters: TraceFilters) -> int:
+        where, params, _ = self._trace_filter_where(filters)
+        row = self.conn.execute(f"SELECT COUNT(DISTINCT trace_id) FROM spans WHERE {where}", params).fetchone()
+        return int(row[0] or 0) if row else 0
 
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
         cur = self.conn.execute(
