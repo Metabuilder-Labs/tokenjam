@@ -262,6 +262,15 @@ MIGRATIONS: list[tuple[int, str]] = [
         "CREATE INDEX IF NOT EXISTS idx_policy_decisions_ts ON policy_decisions(ts);\n"
         "CREATE INDEX IF NOT EXISTS idx_savings_ledger_ts   ON savings_ledger(ts)"
     )),
+    # Migration 7: full-request capture on spans (#209). `request_params` holds
+    # sampling parameters (temperature, top_p, max_tokens, stop_sequences, …);
+    # `request_tools` holds the tools / tool_choice payload. Both are JSON,
+    # NULL on rows captured before this migration (and whenever the relevant
+    # [capture] toggle is off). _row_to_span coerces NULL -> None.
+    (7, (
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS request_params JSON;\n"
+        "ALTER TABLE spans ADD COLUMN IF NOT EXISTS request_tools  JSON"
+    )),
 ]
 
 
@@ -299,6 +308,12 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
     events = d.get("events") or []
     if isinstance(events, str):
         events = json.loads(events)
+    request_params = d.get("request_params")
+    if isinstance(request_params, str):
+        request_params = json.loads(request_params)
+    request_tools = d.get("request_tools")
+    if isinstance(request_tools, str):
+        request_tools = json.loads(request_tools)
     return NormalizedSpan(
         span_id=d["span_id"],
         trace_id=d["trace_id"],
@@ -325,6 +340,8 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),
         billing_account=d.get("billing_account"),
+        request_params=request_params,
+        request_tools=request_tools,
     )
 
 
@@ -489,9 +506,9 @@ class DuckDBBackend:
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
             "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens"
+            "cache_write_tokens, request_params, request_tools"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -500,6 +517,8 @@ class DuckDBBackend:
                 span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
                 span.request_type, span.conversation_id, json.dumps(span.events),
                 span.billing_account, span.cache_write_tokens,
+                json.dumps(span.request_params) if span.request_params is not None else None,
+                json.dumps(span.request_tools) if span.request_tools is not None else None,
             ],
         )
 

@@ -12,6 +12,7 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.integrations._request_capture import record_full_request
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class AnthropicIntegration:
                 GenAIAttributes.REQUEST_MODEL,
                 kwargs.get("model", "unknown"),
             )
+            record_full_request(span, kwargs)
             # Inherit agent_id from parent span (set by @watch())
             parent_span = trace.get_current_span()
             if parent_span and parent_span.is_recording():
@@ -120,6 +122,7 @@ class AnthropicIntegration:
                     GenAIAttributes.REQUEST_MODEL,
                     kwargs.get("model", "unknown"),
                 )
+                record_full_request(span, kwargs)
                 parent_span = trace.get_current_span()
                 if parent_span and parent_span.is_recording():
                     agent_id = parent_span.attributes.get(GenAIAttributes.AGENT_ID)

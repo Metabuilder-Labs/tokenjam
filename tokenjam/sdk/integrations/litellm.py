@@ -22,6 +22,7 @@ from opentelemetry import trace
 
 from tokenjam.core.pricing import provider_for_model
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.integrations._request_capture import record_full_request
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,7 @@ class LiteLLMIntegration:
                     )
 
             _record_prompt_content(span, args, kwargs)
+            record_full_request(span, kwargs)
 
             token = _tj_litellm_active.set(True)
             try:
@@ -270,6 +272,7 @@ class LiteLLMIntegration:
                     )
 
             _record_prompt_content(span, args, kwargs)
+            record_full_request(span, kwargs)
 
             token = _tj_litellm_active.set(True)
             try:
