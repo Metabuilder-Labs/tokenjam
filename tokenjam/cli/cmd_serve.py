@@ -65,7 +65,8 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     if config.proxy.enabled:
         from tokenjam.proxy.server import ProxyRunner
         # Pass the serve DB so in-process policies (budget_cap, #222) can read
-        # current-cycle spend from the same connection (per-thread cursors, #124).
+        # current-cycle spend AND policy decisions + the savings ledger are
+        # persisted (#221) — all over the same per-thread-cursor connection (#124).
         proxy_runner = ProxyRunner(config, db=db)
 
     @asynccontextmanager

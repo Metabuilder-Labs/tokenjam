@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Any, Deque
+from typing import Any, Callable, Deque, Optional
 
 from tokenjam.proxy.gate import GateDecision
 from tokenjam.utils.time_parse import utcnow
@@ -38,10 +38,18 @@ class ProxyObservation:
 
 
 class ProxyObserver:
-    """Keeps the last ``maxlen`` observations and logs each one."""
+    """Keeps the last ``maxlen`` observations, logs each, and (optionally) sinks.
 
-    def __init__(self, maxlen: int = 256) -> None:
+    ``sink`` is a best-effort persistence hook (e.g. the #221 ``AuditSink``)
+    called with each :class:`ProxyObservation` after it's recorded. It must never
+    raise into the proxy — the sink is expected to swallow its own errors, and
+    the observer guards it as well.
+    """
+
+    def __init__(self, maxlen: int = 256,
+                 sink: Optional[Callable[["ProxyObservation"], None]] = None) -> None:
         self._ring: Deque[ProxyObservation] = deque(maxlen=maxlen)
+        self._sink = sink
 
     def record(self, *, method: str, path: str, decision: GateDecision,
                forwarded: bool = True, envelope: Any = None) -> ProxyObservation:
@@ -70,6 +78,13 @@ class ProxyObserver:
             )
         except Exception:  # noqa: BLE001 — recording must never break pass-through
             pass
+        # Durable sink (#221) — persist the decision + savings ledger. Best-effort:
+        # never let a persistence failure break proxy pass-through.
+        if self._sink is not None:
+            try:
+                self._sink(obs)
+            except Exception:  # noqa: BLE001
+                logger.exception("proxy observation sink failed (ignored)")
         return obs
 
     @property

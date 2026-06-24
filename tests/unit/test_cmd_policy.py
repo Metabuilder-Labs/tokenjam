@@ -260,7 +260,9 @@ def test_list_json_includes_unvalidated_note_when_policies_present(runner):
     assert any(r["policy"] == "policies.cap" for r in payload["policies"])
 
 
-_SAMPLE_DECISIONS = {"decisions": [{
+# --- #221: `tj policy decisions` reads persisted decisions + savings from DB ---
+
+_SAMPLE_PROXY = {"decisions": [{
     "ts": "2026-06-24T00:00:00+00:00", "provider": "openai",
     "path": "/v1/chat/completions",
     "policy": {"overall_action": "would_block", "label": "unvalidated",
@@ -268,40 +270,80 @@ _SAMPLE_DECISIONS = {"decisions": [{
 }], "label": "unvalidated"}
 
 
-def test_decisions_json_surfaces_envelope_and_label(runner):
-    cfg = TjConfig(version="1")
-    with patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=_SAMPLE_DECISIONS):
-        result = _invoke(runner, cfg, ["--json", "policy", "decisions"])
-    assert result.exit_code == 0, result.output
-    payload = json.loads(result.output)
-    assert payload["label"] == "unvalidated"
-    assert payload["reachable"] is True
-    assert payload["decisions"][0]["policy"]["overall_action"] == "would_block"
+def _seed_decision_db():
+    """An InMemoryBackend with one persisted decision + savings entry (#221)."""
+    from tokenjam.core.db import InMemoryBackend
+    from tokenjam.core.models import PolicyDecisionRecord, SavingsLedgerEntry
+    from tokenjam.utils.time_parse import utcnow
+    db = InMemoryBackend()
+    db.insert_policy_decision(PolicyDecisionRecord(
+        decision_id="d1", ts=utcnow(), provider="openai", pricing_mode="api",
+        gate_decision="policy", path="/v1/chat/completions", would_action="would_block",
+        policy_name="blocker", policy_kind="noop",
+        envelope={"overall_action": "would_block", "label": "unvalidated"}))
+    db.insert_savings_entry(SavingsLedgerEntry(
+        ledger_id="l1", decision_id="d1", ts=utcnow(), provider="openai",
+        pricing_mode="api", would_action="would_block",
+        estimated_recoverable_usd=0.50, estimate_basis="stub", billing_period="2026-06"))
+    return db
 
 
-def test_decisions_renders_recent_envelopes(runner):
-    # The human table renders without error; width-robust assertions only (Rich
-    # truncates cells under the narrow CliRunner terminal).
+def test_decisions_reads_persisted_from_db(runner):
     cfg = TjConfig(version="1")
-    with patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=_SAMPLE_DECISIONS):
+    db = _seed_decision_db()
+    with patch("tokenjam.core.db.open_db", return_value=db):
         result = _invoke(runner, cfg, ["policy", "decisions"])
     assert result.exit_code == 0, result.output
     assert "openai" in result.output
     assert "unvalidated" in result.output
+    # The savings meter is shown and is ESTIMATED / RECOVERABLE — never "saved".
+    assert "Estimated recoverable" in result.output
 
 
-def test_decisions_graceful_when_proxy_unreachable(runner):
+def test_decisions_savings_never_says_saved(runner):
     cfg = TjConfig(version="1")
-    with patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=None):
+    db = _seed_decision_db()
+    with patch("tokenjam.core.db.open_db", return_value=db):
+        result = _invoke(runner, cfg, ["--json", "policy", "decisions"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["source"] == "db"
+    assert payload["label"] == "unvalidated"
+    sv = payload["savings"]
+    assert sv["realized"] is False
+    assert sv["estimated_recoverable_usd"] == 0.5
+    # Honesty: the meter never claims realized savings.
+    assert "saved" not in json.dumps(sv).lower().replace("would-have-saved", "")
+    assert "not realized" in sv["disclaimer"].lower()
+
+
+def test_decisions_falls_back_to_proxy_when_db_locked(runner):
+    cfg = TjConfig(version="1")
+    with patch("tokenjam.core.db.open_db", side_effect=RuntimeError("locked")), \
+         patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=_SAMPLE_PROXY):
+        result = _invoke(runner, cfg, ["--json", "policy", "decisions"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["source"] == "proxy"
+    assert payload["decisions"][0]["would_action"] == "would_block"
+
+
+def test_decisions_unreachable_when_db_locked_and_no_proxy(runner):
+    cfg = TjConfig(version="1")
+    with patch("tokenjam.core.db.open_db", side_effect=RuntimeError("locked")), \
+         patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=None):
         result = _invoke(runner, cfg, ["policy", "decisions"])
     assert result.exit_code == 0, result.output
-    assert "No running proxy reachable" in result.output
+    assert "no running proxy reachable" in result.output.lower()
 
 
-def test_decisions_does_not_open_db(runner):
+def test_decisions_startup_does_not_open_db(runner):
+    # `policy` is in no_db_commands: STARTUP must not open the DB (main.open_db).
+    # The command opens its OWN connection lazily, which is allowed.
     cfg = TjConfig(version="1")
     with patch("tokenjam.cli.main.load_config", return_value=cfg), \
-         patch("tokenjam.cli.main.open_db", side_effect=AssertionError("must not open db")), \
+         patch("tokenjam.cli.main.open_db", side_effect=AssertionError("startup must not open db")), \
+         patch("tokenjam.core.db.open_db", side_effect=RuntimeError("locked")), \
          patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=None):
         result = runner.invoke(cli, ["policy", "decisions"])
     assert result.exit_code == 0, result.output

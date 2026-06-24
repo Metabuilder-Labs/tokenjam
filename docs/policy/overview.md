@@ -91,14 +91,33 @@ policies.demo-cap kind=noop, mode=suggest, label=unvalidated, provider=openai  [
 ...
 Enforcement-plane policies ([[policies]]) run 'unvalidated' (suggest mode only — ...).
 
-$ tj policy decisions        # recent decisions from a running `tj serve` proxy
-TIME       PROVIDER  PATH                  WOULD-DO  POLICIES   LABEL
-2026-…     openai    /v1/chat/completions  noop      demo-cap   unvalidated
+$ tj policy decisions        # persisted decisions + the estimated-recoverable meter
+TIME       PROVIDER  PATH                  WOULD-DO  POLICY    LABEL
+2026-…     openai    /v1/chat/completions  noop      demo-cap  unvalidated
+
+Estimated recoverable: ~$0.0000 vs actual spend $12.3400 (3 decisions, label=unvalidated)
+Estimated recoverable — suggest mode enforces nothing, so this is what these
+policies WOULD have recovered if enforced, not realized savings. Unvalidated.
 ```
 
-`tj policy decisions` reads the recent in-memory decisions from a running proxy
-(`tj proxy enable` + `tj serve`); without one it prints a hint. The
-`add | edit | apply` lifecycle remains out of scope this sprint.
+### Audit log + savings meter (#221)
+
+Every recorded decision is persisted to an append-only DuckDB audit log
+(`policy_decisions`), and each eligible POLICY-path decision also writes a
+`savings_ledger` row. The audit log records **both** paths: `gate_decision` +
+`passthrough_tos` distinguish "we *chose* not to act" (policy path, action
+`noop`) from "we were *not permitted* to act" (subscription, TOS).
+
+**The savings meter is estimated-recoverable, never realized.** Suggest mode
+enforces nothing, so `tj policy decisions` shows what these policies *would have
+recovered if enforced* — reconciled against actual spend from the same source
+`tj cost` reads — and `realized` is always `False`. It never says "saved", and
+the `unvalidated` label rides through to every persisted row.
+
+`tj policy decisions` reads the **persisted** decisions + meter from the DB; if
+a running `tj serve` holds the DB lock, it falls back to the proxy's recent
+in-memory ring. The `add | edit | apply` lifecycle remains out of scope this
+sprint.
 
 ## Why a preview?
 
