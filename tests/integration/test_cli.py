@@ -611,6 +611,18 @@ def test_budget_show_displays_defaults(runner, db, config):
     assert "5.00" in result.output  # fixture has daily_usd=5.0
 
 
+def test_budget_show_json_outputs_valid_budget_rows(runner, db, config):
+    """tj budget --json emits machine-readable rows."""
+    result = _invoke(runner, db, config, ["budget", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    test_agent = next(r for r in data if r["agent_id"] == "test-agent")
+    assert data[0]["scope"] == "defaults"
+    assert test_agent["daily_usd"] == 5.0
+    assert test_agent["effective_daily_usd"] == 5.0
+
+
 def test_budget_set_global_writes_config(runner, db, config, tmp_path):
     """tj budget --daily updates global defaults and writes config."""
     config_file = tmp_path / "config.toml"
@@ -626,6 +638,29 @@ def test_budget_set_global_writes_config(runner, db, config, tmp_path):
     assert mock_write.called
     saved_config = mock_write.call_args[0][0]
     assert saved_config.defaults.budget.daily_usd == 8.0
+
+
+def test_budget_set_json_outputs_updated_values(runner, db, config, tmp_path):
+    """tj budget --daily --json emits the updated budget values."""
+    config_file = tmp_path / "config.toml"
+    config_file.write_text("")
+
+    with patch("tokenjam.cli.main.load_config", return_value=config), \
+         patch("tokenjam.cli.main.open_db", return_value=db), \
+         patch("tokenjam.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tokenjam.cli.cmd_budget.write_config"):
+        result = runner.invoke(cli, ["budget", "--daily", "8.0", "--json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data == {
+        "scope": "defaults",
+        "agent_id": None,
+        "daily_usd": 8.0,
+        "session_usd": None,
+        "effective_daily_usd": 8.0,
+        "effective_session_usd": None,
+    }
 
 
 def test_budget_set_agent_writes_config(runner, db, config, tmp_path):
