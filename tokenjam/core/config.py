@@ -155,6 +155,29 @@ class ProxyConfig:
 
 
 @dataclass
+class PolicyConfig:
+    """A data-driven enforcement-plane policy (#220), defined in `[[policies]]`.
+
+    A policy is DATA, not code: it binds a ``kind`` (a registered evaluator) to
+    a target (provider / agent) with kind-specific ``params``. The proxy's
+    policy engine loads these and evaluates eligible (api/usage-billed) requests.
+
+    ``mode`` is ``suggest`` (evaluate + record what it WOULD do, enforce nothing)
+    or ``enforce`` (gated OFF in the OSS rails — scaffolded, never acts). All
+    OSS policies are user-authored and run **unvalidated** — there is no
+    certification engine in the open tree, so no policy decision is ever implied
+    to have been validated as safe.
+    """
+    name:            str
+    kind:            str
+    enabled:         bool = True
+    mode:            str  = "suggest"          # suggest | enforce (enforce gated off)
+    target_provider: str | None = None          # anthropic | openai | None (any)
+    target_agent:    str | None = None          # agent id | None (any)
+    params:          dict = field(default_factory=dict)
+
+
+@dataclass
 class CaptureConfig:
     prompts:      bool = False
     completions:  bool = False
@@ -200,6 +223,7 @@ class TjConfig:
     proxy:    ProxyConfig             = field(default_factory=ProxyConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
+    policies: list[PolicyConfig]      = field(default_factory=list)
     # Path to the config file on disk; set by load_config() so that relative
     # paths in the config (e.g. output_schema) can be resolved correctly.
     config_path: Path | None          = field(default=None, repr=False, compare=False)
@@ -439,6 +463,22 @@ def _parse(raw: dict) -> TjConfig:
             plan=prov_raw.get("plan"),
         )
 
+    # [[policies]] — data-driven enforcement-plane policies (#220). Each binds a
+    # registered evaluator `kind` to a target with kind-specific params.
+    policies: list[PolicyConfig] = []
+    for pol_raw in raw.get("policies", []):
+        if not isinstance(pol_raw, dict) or "name" not in pol_raw or "kind" not in pol_raw:
+            continue
+        policies.append(PolicyConfig(
+            name=str(pol_raw["name"]),
+            kind=str(pol_raw["kind"]),
+            enabled=bool(pol_raw.get("enabled", True)),
+            mode=str(pol_raw.get("mode", PolicyConfig.mode)),
+            target_provider=pol_raw.get("target_provider"),
+            target_agent=pol_raw.get("target_agent"),
+            params=dict(pol_raw.get("params", {})),
+        ))
+
     return TjConfig(
         version=raw.get("version", "1"),
         defaults=defaults,
@@ -451,6 +491,7 @@ def _parse(raw: dict) -> TjConfig:
         proxy=proxy,
         capture=capture,
         budgets=budgets,
+        policies=policies,
     )
 
 

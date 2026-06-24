@@ -1,12 +1,15 @@
 """
-`tj policy` — read-only preview of the unified policy surface.
+`tj policy` — read-only view of the unified + enforcement-plane policy surface.
 
-This sprint ships `tj policy list` only: a consolidated view of existing
-alerts / drift / schema / budget / sensitive-actions configuration under
-the unified "policy" framing. The underlying config structure is NOT
-migrated — each row points back to the TOML section it was read from.
+`tj policy list` consolidates existing alerts / drift / schema / budget /
+sensitive-actions configuration under the unified "policy" framing AND the
+data-driven `[[policies]]` enforcement-plane policies (#220) the proxy engine
+loads. Each row points back to the TOML section it was read from.
 
-`tj policy add | edit | apply | remove | test` land next sprint.
+`tj policy decisions` shows recent policy decisions (what each policy WOULD do)
+from a running `tj serve` proxy.
+
+`tj policy add | edit | apply | remove | test` remain out of scope this sprint.
 """
 from __future__ import annotations
 
@@ -15,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import click
+from rich.markup import escape
 
 from tokenjam.core.config import (
     AgentConfig,
@@ -23,15 +27,24 @@ from tokenjam.core.config import (
     BudgetConfig,
     CaptureConfig,
     DriftConfig,
+    PolicyConfig,
     ProviderBudget,
     TjConfig,
 )
+from tokenjam.proxy.engine import UNVALIDATED_LABEL
 from tokenjam.utils.formatting import console
 
 
 PREVIEW_NOTE = (
     "Note: this is a read-only preview. The unified "
     "`tj policy add|edit|apply` surface lands next sprint."
+)
+
+# Every OSS enforcement-plane policy runs unvalidated — there is no certification
+# engine in the open tree, so a suggestion is never implied to be validated safe.
+UNVALIDATED_NOTE = (
+    f"Enforcement-plane policies ([[policies]]) run '{UNVALIDATED_LABEL}' "
+    "(suggest mode only — they record what they WOULD do; nothing is enforced)."
 )
 
 
@@ -62,12 +75,15 @@ def cmd_policy_list(ctx: click.Context, output_json_flag: bool) -> None:
     output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
 
     rows = _collect_rows(config)
+    has_engine_policies = bool(config.policies)
 
     if output_json:
-        payload = {
+        payload: dict[str, Any] = {
             "policies": [r.to_dict() for r in rows],
             "note": PREVIEW_NOTE,
         }
+        if has_engine_policies:
+            payload["unvalidated_note"] = UNVALIDATED_NOTE
         click.echo(json.dumps(payload, indent=2))
         return
 
@@ -77,7 +93,6 @@ def cmd_policy_list(ctx: click.Context, output_json_flag: bool) -> None:
         console.print(f"[dim]{PREVIEW_NOTE}[/dim]")
         return
 
-    from rich.markup import escape
     from rich.table import Table
 
     table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
@@ -90,18 +105,120 @@ def cmd_policy_list(ctx: click.Context, output_json_flag: bool) -> None:
 
     console.print(table)
     console.print()
+    if has_engine_policies:
+        console.print(f"[yellow]{escape(UNVALIDATED_NOTE)}[/yellow]")
     console.print(f"[dim]{PREVIEW_NOTE}[/dim]")
+
+
+def _fetch_proxy_json(config: TjConfig, path: str) -> dict | None:
+    """GET a tj-internal read endpoint from the running proxy (None if down).
+
+    The proxy keeps recent decisions in memory, so `tj policy decisions` reads
+    them from the live `tj serve` proxy. Best-effort: any failure (proxy not
+    running, connection refused) returns None and the caller renders a hint.
+    """
+    import httpx
+    url = f"http://{config.proxy.host}:{config.proxy.port}{path}"
+    try:
+        resp = httpx.get(url, timeout=2.0)
+        if resp.status_code == 200:
+            return resp.json()
+    except Exception:  # noqa: BLE001 — proxy may simply be down
+        return None
+    return None
+
+
+@cmd_policy.command("decisions")
+@click.option("--json", "output_json_flag", is_flag=True,
+              help="Emit machine-readable JSON.")
+@click.option("--limit", default=20, show_default=True,
+              help="Max number of recent decisions to show.")
+@click.pass_context
+def cmd_policy_decisions(ctx: click.Context, output_json_flag: bool, limit: int) -> None:
+    """Show recent policy decisions (what each policy WOULD do) from the proxy."""
+    config: TjConfig = ctx.obj["config"]
+    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+
+    payload = _fetch_proxy_json(config, "/__tj/policy/decisions")
+    decisions = (payload or {}).get("decisions", [])
+    decisions = decisions[-limit:] if limit and len(decisions) > limit else decisions
+
+    if output_json:
+        click.echo(json.dumps({
+            "decisions": decisions,
+            "label": UNVALIDATED_LABEL,
+            "reachable": payload is not None,
+        }, indent=2))
+        return
+
+    if payload is None:
+        console.print(
+            "[dim]No running proxy reachable at "
+            f"http://{config.proxy.host}:{config.proxy.port}. "
+            "Start it with `tj proxy enable` + `tj serve`.[/dim]"
+        )
+        return
+    if not decisions:
+        console.print("[dim]No policy decisions recorded yet "
+                      "(suggest mode — eligible api traffic only).[/dim]")
+        console.print()
+        console.print(f"[yellow]{escape(UNVALIDATED_NOTE)}[/yellow]")
+        return
+
+    from rich.table import Table
+
+    table = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    for col in ("TIME", "PROVIDER", "PATH", "WOULD-DO", "POLICIES", "LABEL"):
+        table.add_column(col, style="dim" if col in ("TIME", "LABEL") else None)
+    for d in decisions:
+        pol = d.get("policy") or {}
+        evals = pol.get("evaluations", [])
+        table.add_row(
+            escape(str(d.get("ts", ""))[:19]),
+            escape(str(d.get("provider", ""))),
+            escape(str(d.get("path", ""))),
+            escape(str(pol.get("overall_action", "-"))),
+            escape(", ".join(e.get("policy_name", "") for e in evals) or "-"),
+            escape(str(pol.get("label", UNVALIDATED_LABEL))),
+        )
+    console.print(table)
+    console.print()
+    console.print(f"[yellow]{escape(UNVALIDATED_NOTE)}[/yellow]")
 
 
 def _collect_rows(config: TjConfig) -> list[PolicyRow]:
     rows: list[PolicyRow] = []
 
+    rows.extend(_policy_engine_rows(config.policies))
     rows.extend(_alerts_rows(config.alerts))
     rows.extend(_defaults_budget_rows(config.defaults.budget))
     rows.extend(_provider_budget_rows(config.budgets))
     rows.extend(_agents_rows(config.agents))
     rows.extend(_capture_rows(config.capture))
 
+    return rows
+
+
+def _policy_engine_rows(policies: list[PolicyConfig]) -> list[PolicyRow]:
+    """Rows for the data-driven `[[policies]]` enforcement-plane policies (#220).
+
+    Each carries the explicit `unvalidated` label so the surface never implies a
+    policy has been certified safe.
+    """
+    rows: list[PolicyRow] = []
+    for idx, p in enumerate(policies):
+        parts = [f"kind={p.kind}", f"mode={p.mode}", f"label={UNVALIDATED_LABEL}"]
+        if not p.enabled:
+            parts.append("enabled=false")
+        if p.target_provider:
+            parts.append(f"provider={p.target_provider}")
+        if p.target_agent:
+            parts.append(f"agent={p.target_agent}")
+        rows.append(PolicyRow(
+            f"policies.{p.name}",
+            ", ".join(parts),
+            f"[[policies]][{idx}]",
+        ))
     return rows
 
 
