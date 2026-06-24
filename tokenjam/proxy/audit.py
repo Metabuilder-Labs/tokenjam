@@ -25,12 +25,19 @@ from typing import Any
 
 from tokenjam.core.models import (
     CostFilters,
+    NormalizedSpan,
     PolicyDecisionFilters,
     PolicyDecisionRecord,
     SavingsLedgerEntry,
+    SpanKind,
+    SpanStatus,
 )
-from tokenjam.utils.ids import new_uuid
+from tokenjam.otel.semconv import TjAttributes
+from tokenjam.utils.ids import new_span_id, new_trace_id, new_uuid
 from tokenjam.utils.time_parse import utcnow
+
+# Span name for the proxy's self-observation spans (#223).
+POLICY_DECISION_SPAN_NAME = "tokenjam.policy.decision"
 
 logger = logging.getLogger("tokenjam.proxy")
 
@@ -78,8 +85,12 @@ class AuditSink:
     failure is logged and swallowed so it never breaks proxy pass-through.
     """
 
-    def __init__(self, db: Any) -> None:
+    def __init__(self, db: Any, pipeline: Any = None) -> None:
         self.db = db
+        # Optional IngestPipeline (#223): when provided, the self-observation
+        # span flows through it (running the cost/etc. hooks) exactly like any
+        # other span. Falls back to a direct db.insert_span otherwise.
+        self.pipeline = pipeline
 
     def __call__(self, obs: Any) -> None:
         try:
@@ -97,6 +108,8 @@ class AuditSink:
         # Observe-only due to provider TOS (subscription) = "not permitted to act",
         # distinct from a policy-path noop = "we chose not to act".
         passthrough_tos = (not is_policy) and obs.pricing_mode == "subscription"
+
+        usd, tokens, basis = _extract_savings(env) if is_policy else (0.0, 0, "")
 
         decision_id = new_uuid()
         self.db.insert_policy_decision(PolicyDecisionRecord(
@@ -118,7 +131,6 @@ class AuditSink:
         # Savings accrue ONLY on the POLICY path (api/usage-billed). Observe-only
         # traffic is never acted on, so it can never "would-have-saved".
         if is_policy:
-            usd, tokens, basis = _extract_savings(env)
             self.db.insert_savings_entry(SavingsLedgerEntry(
                 ledger_id=new_uuid(),
                 decision_id=decision_id,
@@ -134,6 +146,61 @@ class AuditSink:
                 label=(env or {}).get("label", UNVALIDATED_LABEL),
                 realized=False,  # suggest mode: NEVER realized
             ))
+
+        # Self-observation span (#223): TokenJam observing its own policy decision,
+        # under the tokenjam.policy.* attribute namespace, so the web UI + drift
+        # see enforcement activity. Best-effort — never break the proxy.
+        try:
+            span = policy_decision_span(obs, ts=ts, estimated_recoverable_usd=usd)
+            if self.pipeline is not None:
+                self.pipeline.process(span)
+            else:
+                self.db.insert_span(span)
+        except Exception:  # noqa: BLE001
+            logger.exception("policy self-observation span emit failed (ignored)")
+
+
+def policy_decision_span(obs: Any, *, ts: Any = None,
+                         estimated_recoverable_usd: float = 0.0) -> NormalizedSpan:
+    """Build the `tokenjam.policy.decision` self-observation span for a decision.
+
+    Pure: carries the gate/policy outcome under the `tokenjam.policy.*` attribute
+    namespace (semconv constants — never hardcoded strings). Suggest mode only,
+    so REALIZED is always False and ESTIMATED_RECOVERABLE_USD is would-have-saved.
+    """
+    ts = ts or utcnow()
+    env = getattr(obs, "policy", None)
+    evals = (env or {}).get("evaluations", []) if env else []
+    primary = evals[0] if evals else {}
+    is_policy = obs.decision == "policy"
+    attrs = {
+        TjAttributes.POLICY_DECISION: obs.decision,
+        TjAttributes.POLICY_ACTION: (env or {}).get("overall_action", "noop") if env else "noop",
+        TjAttributes.POLICY_MODE: "suggest",
+        TjAttributes.POLICY_LABEL: (env or {}).get("label", UNVALIDATED_LABEL),
+        TjAttributes.POLICY_PRICING_MODE: obs.pricing_mode,
+        TjAttributes.POLICY_PASSTHROUGH_TOS: (not is_policy) and obs.pricing_mode == "subscription",
+        TjAttributes.POLICY_REALIZED: False,  # suggest mode: never realized
+    }
+    if primary.get("policy_name"):
+        attrs[TjAttributes.POLICY_NAME] = primary["policy_name"]
+    if primary.get("kind"):
+        attrs[TjAttributes.POLICY_KIND] = primary["kind"]
+    if is_policy:
+        attrs[TjAttributes.POLICY_ESTIMATED_RECOVERABLE_USD] = estimated_recoverable_usd
+    return NormalizedSpan(
+        span_id=new_span_id(),
+        trace_id=new_trace_id(),
+        name=POLICY_DECISION_SPAN_NAME,
+        kind=SpanKind.INTERNAL,
+        status_code=SpanStatus.OK,
+        start_time=ts,
+        end_time=ts,
+        duration_ms=0.0,
+        attributes=attrs,
+        provider=obs.provider,
+        billing_account=obs.provider,
+    )
 
 
 @dataclass(frozen=True)
