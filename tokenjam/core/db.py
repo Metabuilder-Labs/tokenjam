@@ -21,6 +21,9 @@ from tokenjam.core.models import (
     CostRow,
     DriftBaseline,
     NormalizedSpan,
+    PolicyDecisionFilters,
+    PolicyDecisionRecord,
+    SavingsLedgerEntry,
     SchemaValidationResult,
     SessionRecord,
     SpanKind,
@@ -40,6 +43,14 @@ class StorageBackend(Protocol):
     def insert_span(self, span: NormalizedSpan) -> None: ...
     def insert_alert(self, alert: Alert) -> None: ...
     def insert_validation(self, result: SchemaValidationResult) -> None: ...
+    def insert_policy_decision(self, decision: PolicyDecisionRecord) -> None: ...
+    def insert_savings_entry(self, entry: SavingsLedgerEntry) -> None: ...
+    def get_policy_decisions(
+        self, filters: PolicyDecisionFilters,
+    ) -> list[PolicyDecisionRecord]: ...
+    def get_savings_entries(
+        self, filters: PolicyDecisionFilters,
+    ) -> list[SavingsLedgerEntry]: ...
     def upsert_session(self, session: SessionRecord) -> None: ...
     def upsert_agent(self, agent: AgentRecord) -> None: ...
     def upsert_baseline(self, baseline: DriftBaseline) -> None: ...
@@ -208,6 +219,50 @@ MIGRATIONS: list[tuple[int, str]] = [
     # _row_to_span helper coerces NULL -> None and ingest writes 0 for
     # spans that don't carry the count.
     (5, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT"),
+    # Migration 6: enforcement-plane audit log + savings meter (#221).
+    # `policy_decisions` is the append-only audit log — one row per recorded
+    # proxy observation (both the POLICY path and observe-only). `gate_decision`
+    # + `passthrough_tos` let the log distinguish "we CHOSE not to act" (policy
+    # path, action=noop) from "we were NOT PERMITTED to act" (subscription TOS).
+    # `savings_ledger` records what each policy decision WOULD have recovered —
+    # SUGGEST MODE ENFORCES NOTHING, so `realized` is always FALSE and the
+    # figures are estimated-recoverable / would-have-saved, NEVER realized
+    # savings (Critical Rule 14). The `label` ('unvalidated') rides through from
+    # the envelope on both tables.
+    (6, (
+        "CREATE TABLE IF NOT EXISTS policy_decisions (\n"
+        "    decision_id     TEXT PRIMARY KEY,\n"
+        "    ts              TIMESTAMPTZ NOT NULL,\n"
+        "    provider        TEXT,\n"
+        "    pricing_mode    TEXT,\n"
+        "    gate_decision   TEXT,\n"
+        "    path            TEXT,\n"
+        "    policy_name     TEXT,\n"
+        "    policy_kind     TEXT,\n"
+        "    would_action    TEXT,\n"
+        "    passthrough_tos BOOLEAN DEFAULT FALSE,\n"
+        "    label           TEXT,\n"
+        "    suggest_only    BOOLEAN DEFAULT TRUE,\n"
+        "    envelope        JSON\n"
+        ");\n"
+        "CREATE TABLE IF NOT EXISTS savings_ledger (\n"
+        "    ledger_id                    TEXT PRIMARY KEY,\n"
+        "    decision_id                  TEXT NOT NULL,\n"
+        "    ts                           TIMESTAMPTZ NOT NULL,\n"
+        "    provider                     TEXT,\n"
+        "    pricing_mode                 TEXT,\n"
+        "    policy_name                  TEXT,\n"
+        "    would_action                 TEXT,\n"
+        "    estimated_recoverable_usd    DOUBLE DEFAULT 0.0,\n"
+        "    estimated_recoverable_tokens BIGINT DEFAULT 0,\n"
+        "    estimate_basis               TEXT,\n"
+        "    billing_period               TEXT,\n"
+        "    label                        TEXT,\n"
+        "    realized                     BOOLEAN DEFAULT FALSE\n"
+        ");\n"
+        "CREATE INDEX IF NOT EXISTS idx_policy_decisions_ts ON policy_decisions(ts);\n"
+        "CREATE INDEX IF NOT EXISTS idx_savings_ledger_ts   ON savings_ledger(ts)"
+    )),
 ]
 
 
@@ -467,6 +522,104 @@ class DuckDBBackend:
                 result.validated_at, result.passed, json.dumps(result.errors),
             ],
         )
+
+    def insert_policy_decision(self, decision: PolicyDecisionRecord) -> None:
+        # Append-only audit log (#221). Named columns so future migrations stay safe.
+        self.conn.execute(
+            "INSERT INTO policy_decisions ("
+            "decision_id, ts, provider, pricing_mode, gate_decision, path, "
+            "policy_name, policy_kind, would_action, passthrough_tos, label, "
+            "suggest_only, envelope"
+            ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            [
+                decision.decision_id, decision.ts, decision.provider,
+                decision.pricing_mode, decision.gate_decision, decision.path,
+                decision.policy_name, decision.policy_kind, decision.would_action,
+                decision.passthrough_tos, decision.label, decision.suggest_only,
+                json.dumps(decision.envelope) if decision.envelope is not None else None,
+            ],
+        )
+
+    def insert_savings_entry(self, entry: SavingsLedgerEntry) -> None:
+        self.conn.execute(
+            "INSERT INTO savings_ledger ("
+            "ledger_id, decision_id, ts, provider, pricing_mode, policy_name, "
+            "would_action, estimated_recoverable_usd, estimated_recoverable_tokens, "
+            "estimate_basis, billing_period, label, realized"
+            ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            [
+                entry.ledger_id, entry.decision_id, entry.ts, entry.provider,
+                entry.pricing_mode, entry.policy_name, entry.would_action,
+                entry.estimated_recoverable_usd, entry.estimated_recoverable_tokens,
+                entry.estimate_basis, entry.billing_period, entry.label,
+                entry.realized,
+            ],
+        )
+
+    def _decision_where(self, filters: PolicyDecisionFilters) -> tuple[str, list]:
+        clauses: list[str] = ["1=1"]
+        params: list[object] = []
+        idx = 1
+        if filters.since:
+            clauses.append(f"ts >= ${idx}")
+            params.append(filters.since)
+            idx += 1
+        if filters.until:
+            clauses.append(f"ts <= ${idx}")
+            params.append(filters.until)
+            idx += 1
+        if filters.provider:
+            clauses.append(f"provider = ${idx}")
+            params.append(filters.provider)
+            idx += 1
+        return " AND ".join(clauses), params
+
+    def get_policy_decisions(
+        self, filters: PolicyDecisionFilters,
+    ) -> list[PolicyDecisionRecord]:
+        where, params = self._decision_where(filters)
+        rows = self.conn.execute(
+            "SELECT decision_id, ts, provider, pricing_mode, gate_decision, path, "
+            "policy_name, policy_kind, would_action, passthrough_tos, label, "
+            "suggest_only, envelope "
+            f"FROM policy_decisions WHERE {where} ORDER BY ts DESC LIMIT ${len(params)+1}",
+            [*params, filters.limit],
+        ).fetchall()
+        out: list[PolicyDecisionRecord] = []
+        for r in rows:
+            env = r[12]
+            if isinstance(env, str):
+                env = json.loads(env)
+            out.append(PolicyDecisionRecord(
+                decision_id=r[0], ts=r[1], provider=r[2], pricing_mode=r[3],
+                gate_decision=r[4], path=r[5], policy_name=r[6], policy_kind=r[7],
+                would_action=r[8], passthrough_tos=bool(r[9]), label=r[10],
+                suggest_only=bool(r[11]), envelope=env,
+            ))
+        return out
+
+    def get_savings_entries(
+        self, filters: PolicyDecisionFilters,
+    ) -> list[SavingsLedgerEntry]:
+        where, params = self._decision_where(filters)
+        rows = self.conn.execute(
+            "SELECT ledger_id, decision_id, ts, provider, pricing_mode, policy_name, "
+            "would_action, estimated_recoverable_usd, estimated_recoverable_tokens, "
+            "estimate_basis, billing_period, label, realized "
+            f"FROM savings_ledger WHERE {where} ORDER BY ts DESC LIMIT ${len(params)+1}",
+            [*params, filters.limit],
+        ).fetchall()
+        return [
+            SavingsLedgerEntry(
+                ledger_id=r[0], decision_id=r[1], ts=r[2], provider=r[3],
+                pricing_mode=r[4], policy_name=r[5], would_action=r[6],
+                estimated_recoverable_usd=float(r[7] or 0.0),
+                estimated_recoverable_tokens=int(r[8] or 0),
+                estimate_basis=r[9] or "", billing_period=r[10] or "",
+                label=r[11], realized=bool(r[12]),
+            )
+            for r in rows
+        ]
 
     def upsert_session(self, session: SessionRecord) -> None:
         # plan_tier: promote unknown → known on conflict; never overwrite a

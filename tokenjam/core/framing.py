@@ -153,6 +153,22 @@ def config_declared_plan_labels(config: Any) -> list[str]:
     return labels
 
 
+def provider_pricing_mode(config: Any, provider: str) -> tuple[str | None, str]:
+    """Resolve ``(plan_tier, pricing_mode)`` for a single provider's declared plan.
+
+    The proxy's pricing-mode gate (#219) needs the mode for the *specific*
+    provider a request targets (anthropic vs openai), not the dominant mix. This
+    reuses the existing declared-plan lookup (:func:`_declared_budget_plans`,
+    with the #106 global-config fallback) and :func:`pricing_mode_for` — the
+    pricing-mode rule is never re-derived. Returns ``(None, "unknown")`` when no
+    plan is declared for that provider, so the gate fails safe to observe-only.
+    """
+    for prov, tier in _declared_budget_plans(config):
+        if prov == provider:
+            return tier, pricing_mode_for(tier)
+    return None, "unknown"
+
+
 def config_declared_plan(config: Any) -> str | None:
     """Return the user's declared plan tier from config.
 
