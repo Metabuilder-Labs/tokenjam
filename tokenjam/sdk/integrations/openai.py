@@ -15,6 +15,7 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.integrations._request_capture import record_full_request
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class OpenAIIntegration:
                 GenAIAttributes.REQUEST_MODEL,
                 kwargs.get("model", "unknown"),
             )
+            record_full_request(span, kwargs)
             is_stream = kwargs.get("stream", False)
             try:
                 response = integration._original_create(self_comp, *args, **kwargs)

@@ -13,6 +13,7 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.sdk.integrations._request_capture import record_full_request_bedrock
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class BedrockIntegration:
                 span.set_attribute(GenAIAttributes.PROVIDER_NAME, "aws.bedrock")
                 model_id = kwargs.get("modelId", "unknown")
                 span.set_attribute(GenAIAttributes.REQUEST_MODEL, model_id)
+                record_full_request_bedrock(span, kwargs)
                 try:
                     response = method(self_client, *args, **kwargs)
                     _extract_bedrock_usage(response, span)
