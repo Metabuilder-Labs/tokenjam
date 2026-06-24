@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Deque
+from typing import Any, Deque
 
 from tokenjam.proxy.gate import GateDecision
 from tokenjam.utils.time_parse import utcnow
@@ -32,6 +32,9 @@ class ProxyObservation:
     reason:       str
     forwarded:    bool         # always True in suggest mode
     suggest_only: bool = True  # suggest mode enforces nothing
+    # On the POLICY path, the round-trippable policy envelope (#220) — what each
+    # policy WOULD do. None on the observe-only path (the engine never runs).
+    policy:       dict | None = None
 
 
 class ProxyObserver:
@@ -41,7 +44,9 @@ class ProxyObserver:
         self._ring: Deque[ProxyObservation] = deque(maxlen=maxlen)
 
     def record(self, *, method: str, path: str, decision: GateDecision,
-               forwarded: bool = True) -> ProxyObservation:
+               forwarded: bool = True, envelope: Any = None) -> ProxyObservation:
+        # `envelope` is a PolicyEnvelope (POLICY path) or None (observe-only) —
+        # typed as Any to keep the observer free of an engine import cycle.
         obs = ProxyObservation(
             ts=utcnow().isoformat(),
             method=method,
@@ -51,14 +56,17 @@ class ProxyObserver:
             decision=decision.path,
             reason=decision.reason,
             forwarded=forwarded,
+            policy=envelope.to_dict() if envelope is not None else None,
         )
         self._ring.append(obs)
         # Suggest mode: log what the gate decided; never raise out of recording.
         try:
             logger.info(
-                "proxy %s %s provider=%s mode=%s decision=%s reason=%s forwarded=%s",
+                "proxy %s %s provider=%s mode=%s decision=%s reason=%s "
+                "forwarded=%s policy_action=%s",
                 method, path, obs.provider, obs.pricing_mode, obs.decision,
                 obs.reason, forwarded,
+                (obs.policy or {}).get("overall_action"),
             )
         except Exception:  # noqa: BLE001 — recording must never break pass-through
             pass

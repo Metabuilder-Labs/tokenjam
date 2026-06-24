@@ -56,6 +56,50 @@ Rows are only emitted when something is actually configured. A bare config witho
 any per-agent overrides still produces the default `alerts` rows (every config
 ships with at least one channel) but nothing else.
 
+## Enforcement-plane policies (`[[policies]]`, #220)
+
+The proxy's policy engine (#220) loads **data-driven** policies from `[[policies]]`
+and evaluates *eligible* requests through the proxy substrate (#219). A policy is
+data, not code — it binds a registered `kind` (an evaluator) to a target with
+kind-specific `params`:
+
+```toml
+[[policies]]
+name = "demo-cap"
+kind = "noop"            # the reference example kind (ships); budget_cap is #222
+mode = "suggest"         # suggest only — enforce is gated off in the OSS rails
+target_provider = "openai"
+```
+
+**Suggest mode only.** The engine *evaluates and records* what each policy WOULD
+do, then the request is forwarded **unmodified** — nothing is enforced. The
+enforce-mode path is scaffolded but gated off behind the certification gate (a
+separate, private track).
+
+**API-only.** The engine only ever sees `api`/usage-billed traffic. Subscription /
+`unknown` traffic is observe-only at the gate (#219) and never reaches the engine —
+enforced belt-and-suspenders by an api-only guard inside the engine itself.
+
+**Unvalidated.** There is no certification engine in the open tree, so every policy
+decision carries an explicit `unvalidated` label. `tj policy list` and
+`tj policy decisions` surface it — a suggestion is never implied to be validated safe.
+
+```
+$ tj policy list
+POLICY            SETTING                                                  SOURCE
+policies.demo-cap kind=noop, mode=suggest, label=unvalidated, provider=openai  [[policies]][0]
+...
+Enforcement-plane policies ([[policies]]) run 'unvalidated' (suggest mode only — ...).
+
+$ tj policy decisions        # recent decisions from a running `tj serve` proxy
+TIME       PROVIDER  PATH                  WOULD-DO  POLICIES   LABEL
+2026-…     openai    /v1/chat/completions  noop      demo-cap   unvalidated
+```
+
+`tj policy decisions` reads the recent in-memory decisions from a running proxy
+(`tj proxy enable` + `tj serve`); without one it prints a hint. The
+`add | edit | apply` lifecycle remains out of scope this sprint.
+
 ## Why a preview?
 
 The unified policy framing is what the next sprint's `tj policy add | edit | apply`

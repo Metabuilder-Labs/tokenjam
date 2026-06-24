@@ -20,6 +20,15 @@ through from the caller.
 """
 from __future__ import annotations
 
+from tokenjam.proxy.engine import (
+    UNVALIDATED_LABEL,
+    PolicyEngine,
+    PolicyEnvelope,
+    PolicyEvaluation,
+    PolicyGuardError,
+    PolicyRequest,
+    register_policy,
+)
 from tokenjam.proxy.gate import (
     OBSERVE_ONLY,
     POLICY,
@@ -27,4 +36,8 @@ from tokenjam.proxy.gate import (
     classify,
 )
 
-__all__ = ["OBSERVE_ONLY", "POLICY", "GateDecision", "classify"]
+__all__ = [
+    "OBSERVE_ONLY", "POLICY", "GateDecision", "classify",
+    "PolicyEngine", "PolicyEnvelope", "PolicyEvaluation", "PolicyRequest",
+    "PolicyGuardError", "register_policy", "UNVALIDATED_LABEL",
+]

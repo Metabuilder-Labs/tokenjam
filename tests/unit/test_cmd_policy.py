@@ -222,3 +222,86 @@ def test_policy_list_does_not_require_db(runner):
 def test_policyrow_to_dict_round_trips():
     row = PolicyRow(policy="a", setting="b", source="c")
     assert row.to_dict() == {"policy": "a", "setting": "b", "source": "c"}
+
+
+# --- #220: enforcement-plane [[policies]] + decisions surface ---
+
+def test_list_shows_engine_policies_with_unvalidated_label():
+    from tokenjam.core.config import PolicyConfig
+    from tokenjam.cli.cmd_policy import _policy_engine_rows
+
+    rows = _policy_engine_rows([
+        PolicyConfig(name="cap", kind="noop", mode="suggest", target_provider="openai"),
+    ])
+    assert len(rows) == 1
+    assert rows[0].policy == "policies.cap"
+    assert "kind=noop" in rows[0].setting
+    assert "label=unvalidated" in rows[0].setting       # honesty: never implied validated
+    assert rows[0].source == "[[policies]][0]"
+
+
+def test_list_command_renders_engine_policies_and_note(runner):
+    from tokenjam.core.config import PolicyConfig
+    cfg = TjConfig(version="1",
+                   policies=[PolicyConfig(name="cap", kind="noop", mode="suggest")])
+    result = _invoke(runner, cfg, ["policy", "list"])
+    assert result.exit_code == 0, result.output
+    assert "policies.cap" in result.output
+    assert "unvalidated" in result.output
+
+
+def test_list_json_includes_unvalidated_note_when_policies_present(runner):
+    from tokenjam.core.config import PolicyConfig
+    cfg = TjConfig(version="1", policies=[PolicyConfig(name="cap", kind="noop")])
+    result = _invoke(runner, cfg, ["--json", "policy", "list"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "unvalidated" in payload["unvalidated_note"]
+    assert any(r["policy"] == "policies.cap" for r in payload["policies"])
+
+
+_SAMPLE_DECISIONS = {"decisions": [{
+    "ts": "2026-06-24T00:00:00+00:00", "provider": "openai",
+    "path": "/v1/chat/completions",
+    "policy": {"overall_action": "would_block", "label": "unvalidated",
+               "evaluations": [{"policy_name": "blocker"}]},
+}], "label": "unvalidated"}
+
+
+def test_decisions_json_surfaces_envelope_and_label(runner):
+    cfg = TjConfig(version="1")
+    with patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=_SAMPLE_DECISIONS):
+        result = _invoke(runner, cfg, ["--json", "policy", "decisions"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["label"] == "unvalidated"
+    assert payload["reachable"] is True
+    assert payload["decisions"][0]["policy"]["overall_action"] == "would_block"
+
+
+def test_decisions_renders_recent_envelopes(runner):
+    # The human table renders without error; width-robust assertions only (Rich
+    # truncates cells under the narrow CliRunner terminal).
+    cfg = TjConfig(version="1")
+    with patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=_SAMPLE_DECISIONS):
+        result = _invoke(runner, cfg, ["policy", "decisions"])
+    assert result.exit_code == 0, result.output
+    assert "openai" in result.output
+    assert "unvalidated" in result.output
+
+
+def test_decisions_graceful_when_proxy_unreachable(runner):
+    cfg = TjConfig(version="1")
+    with patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=None):
+        result = _invoke(runner, cfg, ["policy", "decisions"])
+    assert result.exit_code == 0, result.output
+    assert "No running proxy reachable" in result.output
+
+
+def test_decisions_does_not_open_db(runner):
+    cfg = TjConfig(version="1")
+    with patch("tokenjam.cli.main.load_config", return_value=cfg), \
+         patch("tokenjam.cli.main.open_db", side_effect=AssertionError("must not open db")), \
+         patch("tokenjam.cli.cmd_policy._fetch_proxy_json", return_value=None):
+        result = runner.invoke(cli, ["policy", "decisions"])
+    assert result.exit_code == 0, result.output

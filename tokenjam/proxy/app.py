@@ -23,6 +23,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
+from tokenjam.proxy.engine import POLICY, PolicyEngine, PolicyRequest
 from tokenjam.proxy.gate import classify
 from tokenjam.proxy.observer import ProxyObserver
 
@@ -45,6 +46,28 @@ _HOP_BY_HOP = frozenset({
 
 def _provider_for(path: str) -> str:
     return _ROUTE_PROVIDER.get(path, "unknown")
+
+
+def _policy_request(request: Request, body: bytes) -> PolicyRequest:
+    """Build the pure (HTTP-free) policy-evaluation context from a request.
+
+    The body is parsed best-effort for kind-specific evaluators to read (e.g. a
+    future budget_cap reading the model); a malformed body is simply None.
+    """
+    import json
+    parsed: dict | None = None
+    try:
+        loaded = json.loads(body or b"{}")
+        if isinstance(loaded, dict):
+            parsed = loaded
+    except Exception:  # noqa: BLE001 — body parsing never breaks the request
+        parsed = None
+    return PolicyRequest(
+        provider=_provider_for(request.url.path),
+        path=request.url.path,
+        agent=None,  # the proxy does not resolve the agent at request time (MVP)
+        body=parsed,
+    )
 
 
 def _base_url_for(config: Any, provider: str) -> str | None:
@@ -71,15 +94,17 @@ def _response_headers(upstream: httpx.Response) -> list[tuple[bytes, bytes]]:
 
 
 def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
-                    client: httpx.AsyncClient | None = None) -> Starlette:
+                    client: httpx.AsyncClient | None = None,
+                    engine: PolicyEngine | None = None) -> Starlette:
     """Build the Starlette proxy app.
 
-    ``observer`` and ``client`` are injectable for testing — pass an
+    ``observer``, ``client`` and ``engine`` are injectable for testing — pass an
     ``httpx.AsyncClient`` backed by ``httpx.MockTransport`` to avoid real
     network calls. When ``client`` is None a real client is created on startup
-    and closed on shutdown.
+    and closed on shutdown; when ``engine`` is None it is built from ``config``.
     """
     observer = observer or ProxyObserver()
+    engine = engine or PolicyEngine.from_config(config)
     state: dict[str, Any] = {"client": client, "owns_client": client is None}
 
     async def _get_client() -> httpx.AsyncClient:
@@ -87,12 +112,11 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
             state["client"] = httpx.AsyncClient(timeout=httpx.Timeout(600.0))
         return state["client"]
 
-    async def _forward(request: Request, base_url: str) -> StreamingResponse:
+    async def _forward(request: Request, base_url: str, body: bytes) -> StreamingResponse:
         client_ = await _get_client()
         url = base_url + request.url.path
         if request.url.query:
             url += "?" + request.url.query
-        body = await request.body()
         upstream_req = client_.build_request(
             request.method, url, headers=_forward_headers(request), content=body,
         )
@@ -119,23 +143,63 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
         except Exception:  # noqa: BLE001 — never let our logic break traffic
             logger.exception("proxy gate classification failed; forwarding unmodified")
 
+        # Read the body once — needed both for forwarding and for policy context.
+        body = await request.body()
+
+        # POLICY-path branch (#220): ONLY api/usage-billed traffic reaches the
+        # engine — the api-only guard inside the engine is belt-and-suspenders
+        # with this check. Observe-only traffic NEVER builds an envelope. Pass-
+        # through is sacred: any engine error forwards unmodified anyway.
+        envelope = None
+        if decision is not None and decision.path == POLICY:
+            try:
+                envelope = engine.evaluate(decision, _policy_request(request, body))
+            except Exception:  # noqa: BLE001 — engine never breaks traffic
+                logger.exception("policy engine failed; forwarding unmodified")
+
         # No upstream known (unrecognised path) → nothing to forward to.
         if base_url is None:
-            _safe_record(observer, request, decision, forwarded=False)
+            _safe_record(observer, request, decision, forwarded=False, envelope=envelope)
             return JSONResponse(
                 {"error": "tj proxy: unrecognised path; no upstream configured",
                  "path": request.url.path},
                 status_code=404,
             )
 
-        # Forward UNMODIFIED (suggest mode enforces nothing on either path).
-        response = await _forward(request, base_url)
-        _safe_record(observer, request, decision, forwarded=True)
+        # Forward UNMODIFIED. Suggest mode enforces nothing on EITHER path — the
+        # envelope only records what a policy WOULD do; the request is untouched.
+        response = await _forward(request, base_url, body)
+        _safe_record(observer, request, decision, forwarded=True, envelope=envelope)
         return response
+
+    async def _policies(_request: Request) -> JSONResponse:
+        """Read-only: the defined policies the engine loaded (#220 tj policy)."""
+        return JSONResponse({
+            "policies": [
+                {"name": getattr(p, "name", ""), "kind": getattr(p, "kind", ""),
+                 "mode": getattr(p, "mode", "suggest"),
+                 "target_provider": getattr(p, "target_provider", None),
+                 "target_agent": getattr(p, "target_agent", None),
+                 "enabled": getattr(p, "enabled", True)}
+                for p in engine.policies
+            ],
+            "label": "unvalidated",
+            "note": "Suggest mode only — policies record what they WOULD do; "
+                    "nothing is enforced. OSS policies run unvalidated.",
+        })
+
+    async def _decisions(_request: Request) -> JSONResponse:
+        """Read-only: recent policy decisions from the observer ring (#220)."""
+        policy_obs = [o for o in observer.as_dicts() if o.get("policy") is not None]
+        return JSONResponse({"decisions": policy_obs, "label": "unvalidated"})
 
     routes = [
         Route("/v1/messages", _handle, methods=["POST"]),
         Route("/v1/chat/completions", _handle, methods=["POST"]),
+        # tj-internal read surfaces (namespaced so they never collide with a
+        # provider path). Consumed by `tj policy policies|decisions`.
+        Route("/__tj/policy/policies", _policies, methods=["GET"]),
+        Route("/__tj/policy/decisions", _decisions, methods=["GET"]),
         Route("/{path:path}", _handle, methods=["GET", "POST", "PUT", "DELETE", "PATCH"]),
     ]
 
@@ -156,7 +220,7 @@ def build_proxy_app(config: Any, observer: ProxyObserver | None = None,
 
 
 def _safe_record(observer: ProxyObserver, request: Request, decision: Any,
-                 *, forwarded: bool) -> None:
+                 *, forwarded: bool, envelope: Any = None) -> None:
     """Record the observation; recording must never break pass-through."""
     try:
         if decision is None:
@@ -170,7 +234,7 @@ def _safe_record(observer: ProxyObserver, request: Request, decision: Any,
             )
         observer.record(
             method=request.method, path=request.url.path,
-            decision=decision, forwarded=forwarded,
+            decision=decision, forwarded=forwarded, envelope=envelope,
         )
     except Exception:  # noqa: BLE001
         logger.exception("proxy observation recording failed (ignored)")
