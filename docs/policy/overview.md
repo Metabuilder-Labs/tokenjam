@@ -119,6 +119,31 @@ a running `tj serve` holds the DB lock, it falls back to the proxy's recent
 in-memory ring. The `add | edit | apply` lifecycle remains out of scope this
 sprint.
 
+### MCP tools + self-observation spans (#223)
+
+Three read-only MCP tools surface the same data inside the coding agent:
+
+- **`get_policy_status`** — defined policies + recent decisions (suggest-mode,
+  `unvalidated`).
+- **`get_savings_summary`** — the estimated-recoverable meter. Its description +
+  output are explicit that this is *would-have-saved*, never realized: `realized`
+  is always `false`, dollars are api-only, and the result is `unvalidated`.
+- **`suggest_policies`** — recommends a `budget_cap` ceiling for an api-billed
+  provider with cycle spend but no ceiling yet, framed as a starting point to
+  review (not validated-safe).
+
+They read the read-only DuckDB connection, or the `GET /api/v1/policy/*` routes
+when `tj serve` holds the lock. The MCP layer never bypasses the api-only /
+pricing-mode invariants — it only reports what the gated, suggest-mode engine
+recorded.
+
+**Self-observation:** the proxy emits one `tokenjam.policy.decision` OTel span
+per recorded decision (attributes under the `tokenjam.policy.*` namespace),
+through the existing IngestPipeline — so the web UI (Lens) and drift detection
+see enforcement activity with no new plumbing. Suggest mode only:
+`tokenjam.policy.realized` is always `false` and
+`tokenjam.policy.estimated_recoverable_usd` is would-have-saved.
+
 ## Why a preview?
 
 The unified policy framing is what the next sprint's `tj policy add | edit | apply`

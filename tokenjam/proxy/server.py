@@ -25,17 +25,19 @@ class ProxyRunner:
     """Owns the proxy's uvicorn server + its lifecycle within an event loop."""
 
     def __init__(self, config: Any, observer: ProxyObserver | None = None,
-                 db: Any = None) -> None:
+                 db: Any = None, pipeline: Any = None) -> None:
         self.config = config
-        # Shared tj-serve DB (optional). Used two ways: in-process policies
-        # (budget_cap, #222) read current-cycle spend from it, AND the audit sink
-        # (#221) persists decisions + the savings ledger through it.
+        # Shared tj-serve DB (optional). Used three ways: in-process policies
+        # (budget_cap, #222) read current-cycle spend from it, the audit sink
+        # (#221) persists decisions + the savings ledger through it, and the
+        # self-observation span (#223) is emitted through `pipeline` (or the db).
         self.db = db
+        self.pipeline = pipeline
         if observer is None:
             sink = None
             if db is not None:
                 from tokenjam.proxy.audit import AuditSink
-                sink = AuditSink(db)
+                sink = AuditSink(db, pipeline=pipeline)
             observer = ProxyObserver(sink=sink)
         self.observer = observer
         self._server: uvicorn.Server | None = None

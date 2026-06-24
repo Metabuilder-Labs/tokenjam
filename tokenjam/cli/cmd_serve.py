@@ -67,7 +67,9 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         # Pass the serve DB so in-process policies (budget_cap, #222) can read
         # current-cycle spend AND policy decisions + the savings ledger are
         # persisted (#221) — all over the same per-thread-cursor connection (#124).
-        proxy_runner = ProxyRunner(config, db=db)
+        # Pass the pipeline so the policy self-observation span (#223) flows
+        # through the ingest hooks like any other span.
+        proxy_runner = ProxyRunner(config, db=db, pipeline=pipeline)
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:

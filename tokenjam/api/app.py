@@ -78,6 +78,7 @@ def create_app(
     from tokenjam.api.routes.cost_compare import router as cost_compare_router
     from tokenjam.api.routes.analytics import router as analytics_router
     from tokenjam.api.routes.version import router as version_router, health_router
+    from tokenjam.api.routes.policy import router as policy_router
 
     app.include_router(spans_router, prefix="/api/v1")
     app.include_router(traces_router, prefix="/api/v1")
@@ -93,6 +94,7 @@ def create_app(
     app.include_router(cost_compare_router, prefix="/api/v1")
     app.include_router(analytics_router, prefix="/api/v1")
     app.include_router(version_router, prefix="/api/v1")
+    app.include_router(policy_router, prefix="/api/v1")  # /policy/* enforcement reads (#223)
     app.include_router(health_router)  # /health — no prefix, for uptime probes
     app.include_router(metrics_router)  # /metrics — no prefix
     app.include_router(otlp_router)  # /v1/traces, /v1/metrics, /v1/logs — no prefix

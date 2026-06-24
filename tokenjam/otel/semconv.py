@@ -166,6 +166,22 @@ class TjAttributes:
     # the [capture] `tool_inputs` toggle (see strip_captured_content).
     REQUEST_TOOLS    = "tokenjam.request.tools"
 
+    # Enforcement-plane self-observation (#223). The proxy emits one span per
+    # recorded policy decision under this namespace so the web UI + drift see
+    # enforcement activity. Suggest mode only: ACTION is what a policy WOULD do,
+    # REALIZED is always False, and ESTIMATED_RECOVERABLE_USD is would-have-saved
+    # (never realized). LABEL carries the `unvalidated` honesty marker.
+    POLICY_DECISION   = "tokenjam.policy.decision"        # observe_only | policy
+    POLICY_NAME       = "tokenjam.policy.name"
+    POLICY_KIND       = "tokenjam.policy.kind"
+    POLICY_ACTION     = "tokenjam.policy.action"          # would_action
+    POLICY_MODE       = "tokenjam.policy.mode"            # suggest (enforce gated off)
+    POLICY_LABEL      = "tokenjam.policy.label"           # unvalidated
+    POLICY_PRICING_MODE = "tokenjam.policy.pricing_mode"
+    POLICY_PASSTHROUGH_TOS = "tokenjam.policy.passthrough_tos"
+    POLICY_ESTIMATED_RECOVERABLE_USD = "tokenjam.policy.estimated_recoverable_usd"
+    POLICY_REALIZED   = "tokenjam.policy.realized"        # always False (suggest mode)
+
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"
     EGRESS_HOST      = "tokenjam.sandbox.egress_host"
