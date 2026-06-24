@@ -54,6 +54,9 @@ def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
 
+    # 11. Proxy base-URL wiring consistency (issue #219)
+    checks.append(_check_proxy_wiring(config))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -136,6 +139,35 @@ def _check_prometheus(config: object) -> dict:
                 "message": f"Enabled on port {config.export.prometheus.port}"}
     return {"name": "Prometheus", "level": "info",
             "message": "Prometheus export disabled."}
+
+
+def _check_proxy_wiring(config: object) -> dict:
+    """Flag orphaned proxy base-URL wiring (#219).
+
+    The dangerous state: an agent's provider base-URL points at the proxy port
+    but the proxy is disabled — traffic would hit a dead listener. Reuses the
+    proxy wiring helper so the check and `tj proxy` agree.
+    """
+    from tokenjam.proxy.wiring import find_orphaned_wiring, proxy_base_url
+    try:
+        orphaned = find_orphaned_wiring(config)
+    except Exception:  # noqa: BLE001 — best-effort; never fail doctor on this
+        orphaned = []
+    if orphaned:
+        return {
+            "name": "Proxy wiring", "level": "warning",
+            "message": (
+                f"{', '.join(orphaned)} point at the tj proxy "
+                f"({proxy_base_url(config)}) but the proxy is disabled. Agent "
+                "traffic would hit a dead port. Run `tj proxy enable` to start "
+                "the listener or `tj proxy disable` to remove the wiring."
+            ),
+        }
+    if getattr(config.proxy, "enabled", False):
+        return {"name": "Proxy wiring", "level": "ok",
+                "message": f"Proxy enabled on {proxy_base_url(config)} (suggest mode)."}
+    return {"name": "Proxy wiring", "level": "ok",
+            "message": "Proxy disabled; no orphaned base-URL wiring."}
 
 
 def _check_schema_vs_capture(config: object) -> dict:

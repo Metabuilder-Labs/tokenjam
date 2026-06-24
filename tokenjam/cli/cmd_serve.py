@@ -58,10 +58,20 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     import json as _json
     _state_path = Path.home() / ".local" / "share" / "tj" / "server.state"
 
+    # Optional enforcement-plane proxy (#219) — a second in-process listener on
+    # config.proxy.port, started/stopped with the server's lifespan. Suggest
+    # mode only; the pricing-mode gate forwards subscription/unknown unmodified.
+    proxy_runner = None
+    if config.proxy.enabled:
+        from tokenjam.proxy.server import ProxyRunner
+        proxy_runner = ProxyRunner(config)
+
     @asynccontextmanager
     async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # startup
         scheduler.start()
+        if proxy_runner is not None:
+            proxy_runner.start()
         # Stamp unknown sessions from declared [budget.*].plan on startup so
         # historical/backfilled rows match config without a separate onboard pass.
         from tokenjam.core.framing import apply_declared_plans_to_sessions
@@ -84,6 +94,8 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
             yield
         finally:
             # shutdown
+            if proxy_runner is not None:
+                await proxy_runner.stop()
             scheduler.shutdown(wait=False)
 
     app = create_app(config, db, pipeline, lifespan=_lifespan)
@@ -92,6 +104,12 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     console.print(f"  API docs:    http://{bind_host}:{bind_port}/docs")
     if config.export.prometheus.enabled:
         console.print(f"  Metrics:     http://{bind_host}:{bind_port}/metrics")
+    if config.proxy.enabled:
+        _ks = " [yellow](killswitch: pass-through)[/yellow]" if config.proxy.killswitch else ""
+        console.print(
+            f"  Proxy:       http://{config.proxy.host}:{config.proxy.port} "
+            f"(suggest mode){_ks}"
+        )
     console.print()
 
     if reload:

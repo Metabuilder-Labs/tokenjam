@@ -131,6 +131,30 @@ class ApiConfig:
 
 
 @dataclass
+class ProxyConfig:
+    """Optional in-process enforcement-plane proxy (#219), off by default.
+
+    When ``enabled``, ``tj serve`` runs a second listener on ``port`` that sits
+    between an agent and its LLM provider, speaking the Anthropic
+    (``/v1/messages``) and OpenAI (``/v1/chat/completions``) APIs. It ships in
+    SUGGEST MODE ONLY — it records what a policy *would* do and enforces nothing.
+
+    The pricing-mode gate is a built-in invariant (not a toggle): subscription
+    and ``unknown`` traffic is always forwarded unmodified (observe-only), and
+    only api/usage-billed traffic reaches the policy path. ``killswitch`` flips
+    the proxy to pass-through-everything while keeping the listener alive.
+    """
+    enabled:            bool = False
+    host:               str  = "127.0.0.1"
+    port:               int  = 7392
+    # "suggest" only for now; the enforce-mode path lands behind a later gate (#220).
+    mode:               str  = "suggest"
+    killswitch:         bool = False
+    anthropic_base_url: str  = "https://api.anthropic.com"
+    openai_base_url:    str  = "https://api.openai.com"
+
+
+@dataclass
 class CaptureConfig:
     prompts:      bool = False
     completions:  bool = False
@@ -173,6 +197,7 @@ class TjConfig:
     alerts:   AlertsConfig            = field(default_factory=AlertsConfig)
     security: SecurityConfig          = field(default_factory=SecurityConfig)
     api:      ApiConfig               = field(default_factory=ApiConfig)
+    proxy:    ProxyConfig             = field(default_factory=ProxyConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     # Path to the config file on disk; set by load_config() so that relative
@@ -378,6 +403,17 @@ def _parse(raw: dict) -> TjConfig:
         auth=api_auth,
     )
 
+    proxy_raw = raw.get("proxy", {})
+    proxy = ProxyConfig(
+        enabled=proxy_raw.get("enabled", False),
+        host=proxy_raw.get("host", ProxyConfig.host),
+        port=proxy_raw.get("port", ProxyConfig.port),
+        mode=proxy_raw.get("mode", ProxyConfig.mode),
+        killswitch=proxy_raw.get("killswitch", False),
+        anthropic_base_url=proxy_raw.get("anthropic_base_url", ProxyConfig.anthropic_base_url),
+        openai_base_url=proxy_raw.get("openai_base_url", ProxyConfig.openai_base_url),
+    )
+
     capture_raw = raw.get("capture", {})
     capture = CaptureConfig(
         prompts=capture_raw.get("prompts", False),
@@ -412,6 +448,7 @@ def _parse(raw: dict) -> TjConfig:
         alerts=alerts,
         security=security,
         api=api,
+        proxy=proxy,
         capture=capture,
         budgets=budgets,
     )

@@ -199,6 +199,20 @@ class TestSerialise:
         assert restored.security.ingest_secret == "secret123"
         assert restored.capture.prompts is True
 
+    def test_proxy_roundtrip(self):
+        """[proxy] config round-trips through serialise/parse (#219)."""
+        config = TjConfig(version="1")
+        config.proxy.enabled = True
+        config.proxy.killswitch = True
+        config.proxy.port = 7392
+        restored = _parse(_serialise(config))
+        assert restored.proxy.enabled is True
+        assert restored.proxy.killswitch is True
+        assert restored.proxy.port == 7392
+        assert restored.proxy.mode == "suggest"
+        # Defaults when [proxy] is absent.
+        assert _parse({"version": "1"}).proxy.enabled is False
+
     def test_serialise_excludes_config_path(self):
         """Regression: config_path is a Path object which is not TOML
         serializable. _serialise() must exclude it. See v0.1.7 fix."""
