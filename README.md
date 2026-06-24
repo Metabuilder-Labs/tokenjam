@@ -2,7 +2,7 @@
 
 <img src="https://tokenjam.dev/icon.svg" alt="TokenJam" width="72" height="72">
 
-# TokenJam
+<img src="docs/screenshots/tokenjam-wordmark.png" alt="TokenJam" width="260">
 
 ### Token Efficiency For AI Agents
 
@@ -124,6 +124,23 @@ tj optimize          # cost-saving candidates from your actual usage
 tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
+That's it. Run `tj` any time and it points you to the next best action:
+
+```text
+ _____    _              _
+|_   _|__| |_____ _ _   | |__ _ _ __
+  | |/ _ \ / / -_) ' \  | / _` | '  \
+  |_|\___/_\_\___|_||_|_/ \__,_|_|_|_|
+                     |__/
+  TokenJam · cost-optimization for AI agents · local-first, OTel-native · no signup
+
+You're set up. Next best actions:
+  tj status      agent overview — what's running, recent cost
+  tj tokenmaxx   your shareable spend tier
+  tj optimize    cost-saving candidates from your usage
+  tj serve       open Lens (web UI) at http://127.0.0.1:7391/
+```
+
 To upgrade later: `pipx upgrade tokenjam` (then `tj stop && tj serve &` to reload the daemon, and `tj --version` to verify). See [docs/installation.md](docs/installation.md#upgrading).
 
 For any Python agent:
@@ -145,16 +162,20 @@ def run(task: str) -> str:
 
 ## Lens — the local dashboard
 
-`tj serve` runs Lens at `http://127.0.0.1:7391/`: an Overview triage screen with spend, recoverable waste, and health at a glance; an Optimize tab showing every analyzer's findings side by side; and the standard Status, Traces, Cost, Alerts, Drift, and Budget screens. Plan-tier-aware, fully offline, no signup.
+`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and health at a glance, with an embedded explorer to slice your usage any way (metric × dimension × chart); plus Status, Traces, Cost, Analytics, Alerts, Drift, Optimize, and Budget screens. Plan-tier-aware, fully offline, no signup.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status screen" /></td>
-<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost screen with spend-over-time chart" /></td>
+<td width="50%"><img src="docs/screenshots/tj-dashboard.png" alt="Dashboard — recoverable waste, health at a glance, and the embedded pivot explorer" /></td>
+<td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost — spend over time + cache savings" /></td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Traces table" /></td>
-<td width="50%"><img src="docs/screenshots/tj-alerts.png" alt="Alerts table" /></td>
+<td width="50%"><img src="docs/screenshots/tj-traces.png" alt="Trace waterfall — session-level spans with cost annotations" /></td>
+<td width="50%"><img src="docs/screenshots/tj-status.png" alt="Status — per-agent cards" /></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/tj-dashboard-tools.png" alt="Analytics explorer — tool-usage leaderboard" /></td>
+<td width="50%"><img src="docs/screenshots/tj-dashboard-leaderboard.png" alt="Analytics explorer — cost-by-model leaderboard" /></td>
 </tr>
 </table>
 
