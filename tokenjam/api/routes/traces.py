@@ -42,7 +42,7 @@ async def list_traces(
     agent_id: str | None = None,
     since: str | None = None,
     until: str | None = None,
-    limit: int = 50,
+    limit: int = 200,
     offset: int = 0,
     status: str | None = None,
     span_name: str | None = None,
