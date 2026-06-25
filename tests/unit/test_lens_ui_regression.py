@@ -19,6 +19,16 @@ def html() -> str:
     return _UI.read_text(encoding="utf-8")
 
 
+def test_traces_window_select_exposes_longer_supported_windows(html):
+    # Traces honors these URL/API windows already; keep the filter dropdown in sync
+    # so #/traces?since=30d and #/traces?since=90d render selected options.
+    traces_start = html.index("function TracesListView")
+    traces_end = html.index("function dedup", traces_start)
+    traces_view = html[traces_start:traces_end]
+    assert '<option value="30d">Last 30d</option>' in traces_view
+    assert '<option value="90d">Last 90d</option>' in traces_view
+
+
 # --- #126: Downsize typed slot always rendered ----------------------------- #
 def test_downsize_section_always_renders(html):
     # The no-candidates branch renders a literal Downsize section id instead of

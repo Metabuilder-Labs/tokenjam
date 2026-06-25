@@ -1685,6 +1685,8 @@ function TracesListView({ params }) {
         <option value="1h">Last 1h</option>
         <option value="24h">Last 24h</option>
         <option value="7d">Last 7d</option>
+        <option value="30d">Last 30d</option>
+        <option value="90d">Last 90d</option>
       </select>
       <select value=${result} onChange=${e => setFilter('result', e.target.value)}>
         <option value="">All results</option>
