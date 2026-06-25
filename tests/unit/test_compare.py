@@ -92,7 +92,7 @@ def test_compute_window_totals_aggregates(db):
         db.insert_span(span)
 
     totals = compute_window_totals(
-        db.conn,
+        db,
         since=base - timedelta(hours=1),
         until=base + timedelta(hours=1),
     )
