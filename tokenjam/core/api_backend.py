@@ -232,7 +232,7 @@ class ApiBackend:
             sessions_sampled=int(b.get("sessions_sampled", 0)),
             computed_at=(
                 datetime.fromisoformat(b["computed_at"])
-                if b.get("computed_at") else datetime.now()
+                if b.get("computed_at") else utcnow()
             ),
             avg_input_tokens=b.get("avg_input_tokens"),
             stddev_input_tokens=b.get("stddev_input_tokens"),
