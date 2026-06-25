@@ -29,6 +29,15 @@ def test_traces_window_select_exposes_longer_supported_windows(html):
     assert '<option value="90d">Last 90d</option>' in traces_view
 
 
+def test_dashboard_recent_activity_drills_into_matching_traces_window(html):
+    # The Dashboard defaults to 30d while Traces defaults to 24h. Keep the Recent
+    # activity drill-through tied to the Dashboard window so the tile count and
+    # destination list use the same basis (#299).
+    assert "function tracesHrefForWindow" in html
+    assert "tracesHrefForWindow(since)" in html
+    assert 'label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href="#/traces"' not in html
+
+
 # --- #126: Downsize typed slot always rendered ----------------------------- #
 def test_downsize_section_always_renders(html):
     # The no-candidates branch renders a literal Downsize section id instead of

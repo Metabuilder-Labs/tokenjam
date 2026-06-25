@@ -1387,6 +1387,13 @@ function analyticsHref(q, route = 'analytics') {
   return '#/' + route + (s ? '?' + s : '');
 }
 
+function tracesHrefForWindow(since) {
+  const sp = new URLSearchParams();
+  if (since && since !== '24h') sp.set('since', since);
+  const s = sp.toString();
+  return '#/traces' + (s ? '?' + s : '');
+}
+
 // --- Charts (uPlot, issue #112) ---
 function cssVar(name) {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -4815,7 +4822,7 @@ function DashboardView({ params }) {
                     sub=${driftN ? 'review baselines' : 'within baseline'} />
                   <${HealthTile} label="Budgets at risk" value=${budgetAttn} attention=${budgetAttn > 0} href="#/budget"
                     sub=${budgets.length ? (budgetAttn ? 'over / near ceiling' : 'within ceiling') : 'none configured'} />
-                  <${HealthTile} label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href="#/traces"
+                  <${HealthTile} label="Recent activity" value=${(d.traces || []).length} attention=${errTraces > 0} href=${tracesHrefForWindow(since)}
                     sub=${errTraces ? (errTraces + ' with errors') : 'last sessions'} />
                 </div>
               </div>
