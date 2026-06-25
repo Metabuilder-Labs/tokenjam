@@ -70,6 +70,23 @@ class StorageBackend(Protocol):
     def get_daily_cost(self, agent_id: str, date: date) -> float: ...
     def get_session_cost(self, session_id: str) -> float: ...
     def get_recent_spans(self, session_id: str, limit: int) -> list[NormalizedSpan]: ...
+    # Issue #309: methods that callers (CostEngine, cmd_status, cost compare)
+    # used to satisfy by reaching into `db.conn` directly. Having them on the
+    # protocol keeps those paths behind the abstraction and lets InMemoryBackend
+    # exercise them in unit tests.
+    def update_span_cost(self, span_id: str, cost_usd: float) -> None: ...
+    def increment_session_cost(self, session_id: str, delta_usd: float) -> None: ...
+    def get_distinct_agent_ids(self) -> list[str]: ...
+    def get_active_session(self, agent_id: str) -> SessionRecord | None: ...
+    def get_session_active_seconds(self, session_id: str) -> float | None: ...
+    def count_unknown_plan_tier_sessions(self) -> int: ...
+    def get_window_cost_totals(
+        self, since: datetime, until: datetime, agent_id: str | None = None,
+    ) -> tuple[int, int, int, int, float]: ...
+    def get_cost_delta_by_group(
+        self, group_col: str, current_since: datetime, current_until: datetime,
+        prev_since: datetime, prev_until: datetime, top_n: int,
+    ) -> list[dict]: ...
     def delete_spans_before(self, cutoff: datetime) -> int: ...
     def close(self) -> None: ...
 
@@ -1036,6 +1053,106 @@ class DuckDBBackend:
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         return [_row_to_span(r, cols) for r in rows]
+
+    # -- issue #309: queries moved off direct db.conn access in callers --
+
+    def update_span_cost(self, span_id: str, cost_usd: float) -> None:
+        self.conn.execute(
+            "UPDATE spans SET cost_usd = $1 WHERE span_id = $2",
+            [cost_usd, span_id],
+        )
+
+    def increment_session_cost(self, session_id: str, delta_usd: float) -> None:
+        self.conn.execute(
+            "UPDATE sessions SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 "
+            "WHERE session_id = $2",
+            [delta_usd, session_id],
+        )
+
+    def get_distinct_agent_ids(self) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT agent_id FROM sessions WHERE agent_id IS NOT NULL "
+            "ORDER BY agent_id"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_active_session(self, agent_id: str) -> SessionRecord | None:
+        cur = self.conn.execute(
+            "SELECT * FROM sessions WHERE agent_id = $1 AND status = 'active' "
+            "ORDER BY started_at DESC LIMIT 1",
+            [agent_id],
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return None
+        cols = [d[0] for d in cur.description]
+        return _row_to_session(rows[0], cols)
+
+    def get_session_active_seconds(self, session_id: str) -> float | None:
+        return session_active_seconds(self.conn, session_id)
+
+    def count_unknown_plan_tier_sessions(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE plan_tier IS NULL OR plan_tier = 'unknown'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def get_window_cost_totals(
+        self, since: datetime, until: datetime, agent_id: str | None = None,
+    ) -> tuple[int, int, int, int, float]:
+        clauses = ["start_time >= $1", "start_time < $2"]
+        params: list = [since, until]
+        if agent_id:
+            clauses.append(f"agent_id = ${len(params) + 1}")
+            params.append(agent_id)
+        where = " AND ".join(clauses)
+        row = self.conn.execute(
+            f"SELECT COUNT(DISTINCT session_id) AS sessions, "
+            f"COALESCE(SUM(input_tokens), 0)   AS in_tok, "
+            f"COALESCE(SUM(output_tokens), 0)  AS out_tok, "
+            f"COALESCE(SUM(cache_tokens), 0)   AS cache_tok, "
+            f"COALESCE(SUM(cost_usd), 0.0)     AS cost "
+            f"FROM spans WHERE {where}",
+            params,
+        ).fetchone()
+        if row is None:  # COALESCE aggregate always returns a row; guard for typing
+            return (0, 0, 0, 0, 0.0)
+        return (
+            int(row[0] or 0), int(row[1] or 0), int(row[2] or 0),
+            int(row[3] or 0), float(row[4] or 0.0),
+        )
+
+    def get_cost_delta_by_group(
+        self, group_col: str, current_since: datetime, current_until: datetime,
+        prev_since: datetime, prev_until: datetime, top_n: int,
+    ) -> list[dict]:
+        # group_col is an internal, fixed identifier (never user input); the
+        # allow-list keeps it that way so the interpolation below stays safe.
+        if group_col not in ("agent_id", "model"):
+            raise ValueError(f"Unsupported group_col {group_col!r}")
+        sql = f"""
+            SELECT {group_col} AS grp,
+                   COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
+                                     THEN cost_usd ELSE 0 END), 0.0) AS cur_cost,
+                   COALESCE(SUM(CASE WHEN start_time >= $3 AND start_time < $4
+                                     THEN cost_usd ELSE 0 END), 0.0) AS prev_cost
+            FROM spans
+            WHERE (start_time >= $3 AND start_time < $2)
+              AND {group_col} IS NOT NULL
+            GROUP BY {group_col}
+            HAVING ABS(cur_cost - prev_cost) > 0.0001
+            ORDER BY ABS(cur_cost - prev_cost) DESC
+            LIMIT $5
+        """
+        rows = self.conn.execute(
+            sql, [current_since, current_until, prev_since, prev_until, top_n],
+        ).fetchall()
+        return [
+            {"group": r[0], "current_cost": float(r[1]), "previous_cost": float(r[2]),
+             "delta": float(r[1]) - float(r[2])}
+            for r in rows
+        ]
 
     def delete_spans_before(self, cutoff: datetime) -> int:
         result = self.conn.execute(
