@@ -491,6 +491,19 @@ def test_analytics_empty_cross_tab_offers_clear_stack(html):
     assert "Clear stack" in html
 
 
+# --- #313: leaderboard surfaces its total + reconciles the partial-dim gap --- #
+def test_analytics_leaderboard_shows_total_and_gap(html):
+    # The leaderboard ranks items but used to show no sum; it now surfaces its
+    # own item count + subtotal, and when grouping by a PARTIAL dimension (only
+    # some spans carry it, e.g. tool) it reconciles the gap against the all-events
+    # KPI so the smaller subtotal doesn't look contradictory (#313).
+    assert "const boardTotal = board ? board.reduce" in html
+    assert "const boardGap = kpiCount != null" in html
+    assert "Total: ${fmtVal(boardTotal)}" in html
+    assert "${boardCount} ${boardCount === 1 ? dimName : dimNamePlural}" in html
+    assert "have a ${dimName}" in html
+
+
 # --- #215: cost-annotated trace waterfall ---------------------------------- #
 def test_trace_waterfall_cost_summary(html):
     # A cost-first trace summary header (total cost + tokens + duration + spans).
