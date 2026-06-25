@@ -254,6 +254,10 @@ def report_from_dict(d: dict) -> OptimizeReport:
             estimated_recoverable_tokens=dd.get("estimated_recoverable_tokens"),
             estimate_basis=str(dd.get("estimate_basis", "")),
             estimate_confidence=str(dd.get("estimate_confidence", "heuristic")),
+            # Sampling confidence (#308) — round-trip n + the CI bounds.
+            n_sessions=int(dd.get("n_sessions", 0)),
+            ci_low=dd.get("ci_low"),
+            ci_high=dd.get("ci_high"),
         )
 
     budgets = []

@@ -79,6 +79,16 @@ class DowngradeFinding:
     estimated_recoverable_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
+    # Sampling confidence (#308). `n_sessions` is the candidate-session sample
+    # the projection rests on; `ci_low`/`ci_high` are the 95% bootstrap interval
+    # on `monthly_savings_usd`, so a 5-session estimate shows a visibly wider
+    # band than a 500-session one. This is SAMPLING confidence on the projection,
+    # NOT a claim the model swap preserves quality — the MODEL_DOWNGRADE_CAVEAT
+    # still governs that. ci_low/ci_high are None when n < 2 (no spread to
+    # estimate from a single point).
+    n_sessions:                   int          = 0
+    ci_low:                       float | None = None
+    ci_high:                      float | None = None
 
 
 @dataclass
