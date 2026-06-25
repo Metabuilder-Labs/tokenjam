@@ -35,6 +35,7 @@ ANALYZER_ORDER: list[str] = [
     "script",
     "reuse",
     "trim",
+    "subagent",
 ]
 
 THIN_DATA_DAYS = 7
@@ -322,6 +323,10 @@ def _build_finding_constructors() -> dict:
         WorkflowCluster,
         WorkflowRestructureFinding,
     )
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        SubagentRightsizingFinding,
+        SubagentRow,
+    )
     from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
@@ -403,12 +408,34 @@ def _build_finding_constructors() -> dict:
             hint=d.get("hint", ""),
         )
 
+    def _subagent(d: dict) -> SubagentRightsizingFinding:
+        rows = [SubagentRow(**r) for r in d.get("rows") or []]
+        flagged = [SubagentRow(**r) for r in d.get("flagged") or []]
+        return SubagentRightsizingFinding(
+            sessions_with_subagents=int(d.get("sessions_with_subagents", 0)),
+            total_subagents=int(d.get("total_subagents", 0)),
+            subagent_cost_usd=float(d.get("subagent_cost_usd", 0.0)),
+            subagent_tokens=int(d.get("subagent_tokens", 0)),
+            window_cost_usd=float(d.get("window_cost_usd", 0.0)),
+            percent_of_cost=float(d.get("percent_of_cost", 0.0)),
+            flagged_cost_usd=float(d.get("flagged_cost_usd", 0.0)),
+            rows=rows,
+            flagged=flagged,
+            confidence=d.get("confidence", "structural"),
+            caveat=d.get("caveat", ""),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
+        )
+
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
         "script": _workflow_restructure,
         "reuse": _reuse,
         "trim": _prompt_bloat,
+        "subagent": _subagent,
     }
 
 

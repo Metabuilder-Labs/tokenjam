@@ -416,7 +416,7 @@ def test_onboard_claude_code_writes_settings(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     assert result.exit_code == 0
     assert settings_path.exists()
@@ -440,7 +440,7 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
     with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     data = json.loads(settings_path.read_text())
     # Original top-level key preserved
@@ -460,7 +460,7 @@ def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     # write_config should have been called with an TjConfig containing a claude-code-* agent
     assert mock_write.called
@@ -477,13 +477,98 @@ def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x"], input="7.0\n")
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x", "--project", "aquanode"], input="7.0\n")
 
     assert result.exit_code == 0
     assert mock_write.called
     saved_config = mock_write.call_args[0][0]
     agent_id = next(k for k in saved_config.agents if k.startswith("claude-code-"))
     assert saved_config.agents[agent_id].budget.daily_usd == 7.0
+
+
+def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
+    """--project sets [agents.<id>].project in config and does NOT write
+    OTEL_RESOURCE_ATTRIBUTES into project settings (the claude wrapper owns it)."""
+    from tokenjam.core.config import load_config
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    with runner.isolated_filesystem() as cwd, \
+         patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ])
+        assert result.exit_code == 0
+        env = json.loads(
+            (Path(cwd) / ".claude" / "settings.json").read_text()
+        ).get("env", {})
+        assert "OTEL_RESOURCE_ATTRIBUTES" not in env
+
+    cfg = load_config(str(fake_home / ".config" / "tj" / "config.toml"))
+    agent_id = next(k for k in cfg.agents if k.startswith("claude-code-"))
+    assert cfg.agents[agent_id].project == "aquanode"
+
+
+def test_onboard_claude_code_defaults_project_when_flag_absent(runner, tmp_path):
+    """Without --project, onboard does NOT prompt for a project name — the
+    plan-first flow (#240) keeps "How do you pay?" the opener. The project
+    defaults to the derived repo/cwd name; --project (covered above) overrides
+    it non-interactively."""
+    from tokenjam.core.config import load_config
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    with runner.isolated_filesystem() as cwd, \
+         patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        # No input fed: there is no interactive project prompt to satisfy.
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x",
+        ])
+        assert result.exit_code == 0, result.output
+        env = json.loads(
+            (Path(cwd) / ".claude" / "settings.json").read_text()
+        ).get("env", {})
+        assert "OTEL_RESOURCE_ATTRIBUTES" not in env
+
+    cfg = load_config(str(fake_home / ".config" / "tj" / "config.toml"))
+    agent_id = next(k for k in cfg.agents if k.startswith("claude-code-"))
+    # Project defaulted to the derived name (the agent_id suffix), never blank.
+    assert cfg.agents[agent_id].project
+    assert cfg.agents[agent_id].project == agent_id[len("claude-code-"):]
+
+
+def test_onboard_claude_code_removes_existing_resource_attrs(runner, tmp_path):
+    """A pre-existing env.OTEL_RESOURCE_ATTRIBUTES in project settings is removed
+    (migrated); other env keys are preserved."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    with runner.isolated_filesystem() as cwd, \
+         patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        proj_settings = Path(cwd) / ".claude" / "settings.json"
+        proj_settings.parent.mkdir(parents=True)
+        proj_settings.write_text(json.dumps({
+            "env": {"OTEL_RESOURCE_ATTRIBUTES": "service.name=old", "KEEP": "yes"}
+        }) + "\n")
+
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ])
+        assert result.exit_code == 0
+        env = json.loads(proj_settings.read_text())["env"]
+        assert "OTEL_RESOURCE_ATTRIBUTES" not in env   # migrated away
+        assert env["KEEP"] == "yes"                    # other keys untouched
 
 
 def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
@@ -527,7 +612,7 @@ def test_onboard_claude_code_resyncs_secret_on_rerun(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -573,7 +658,7 @@ def test_onboard_claude_code_preserves_custom_otlp_headers(runner, tmp_path):
          patch("tokenjam.core.config.write_config"), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x"])
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
 
     assert result.exit_code == 0
     data = json.loads(settings_path.read_text())
@@ -940,6 +1025,181 @@ def test_budget_set_negative_daily_rejected(runner, db, config, tmp_path):
     assert result.exit_code != 0
     assert "non-negative" in result.output.lower()
     mock_write.assert_not_called()
+
+
+# -- otel-resource-attrs tests --
+
+def test_otel_resource_attrs_includes_namespace_for_configured_project(runner):
+    """When the repo's agent has a project set, namespace is appended."""
+    cfg = TjConfig(
+        version="1",
+        agents={"claude-code-myrepo": AgentConfig(project="aquanode")},
+    )
+    with patch("tokenjam.cli.cmd_otel._derive_project_name", return_value="myrepo"), \
+         patch("tokenjam.cli.main.load_config", return_value=cfg):
+        result = runner.invoke(cli, ["otel-resource-attrs"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == (
+        "service.name=claude-code-myrepo,service.namespace=aquanode"
+    )
+
+
+def test_otel_resource_attrs_omits_namespace_without_config(runner):
+    """No config / no project => service.name only, single line, nothing else."""
+    cfg = TjConfig(version="1")  # no agents configured
+    with patch("tokenjam.cli.cmd_otel._derive_project_name", return_value="myrepo"), \
+         patch("tokenjam.cli.main.load_config", return_value=cfg):
+        result = runner.invoke(cli, ["otel-resource-attrs"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == "service.name=claude-code-myrepo"
+    # Single bare line — safe to embed in $(tj otel-resource-attrs).
+    assert "service.namespace" not in result.output
+    assert result.output.count("\n") == 1
+
+
+# -- onboard --claude-code per-terminal wrapper tests --
+
+def test_onboard_claude_code_installs_claude_wrapper(runner, tmp_path):
+    """--claude-code installs the per-terminal `claude` wrapper into ~/.zshrc."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+
+    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ])
+
+    assert result.exit_code == 0
+    assert zshrc.exists()
+    text = zshrc.read_text()
+    assert "# tj per-terminal naming" in text
+    assert "claude() {" in text
+    # The wrapper sources project attrs from the new utility command and tags
+    # a per-terminal instance id, invoking the real binary without recursion.
+    assert "tj otel-resource-attrs" in text
+    assert "service.instance.id=" in text
+    assert "command claude" in text
+    assert "--as" in text
+    # Close-signal: reports the session ended on exit and on interrupt.
+    assert "tj session-end --instance" in text
+    assert "trap " in text
+
+
+def test_onboard_claude_code_wrapper_is_idempotent(runner, tmp_path):
+    """Re-running --claude-code does not duplicate the wrapper block."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+
+    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        args = [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ]
+        first = runner.invoke(cli, args)
+        second = runner.invoke(cli, args)
+
+    assert first.exit_code == 0
+    assert second.exit_code == 0
+    text = zshrc.read_text()
+    assert text.count("claude() {") == 1
+    assert text.count("# tj per-terminal naming") == 1
+    assert text.count("# end tj per-terminal naming") == 1
+
+
+def test_onboard_claude_code_wrapper_writes_bashrc_when_present(runner, tmp_path):
+    """~/.bashrc gets the wrapper only when it already exists."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    bashrc = fake_home / ".bashrc"
+    bashrc.write_text("# existing bashrc\n")
+
+    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ])
+
+    assert result.exit_code == 0
+    bashrc_text = bashrc.read_text()
+    assert "# existing bashrc" in bashrc_text  # preserved
+    assert "claude() {" in bashrc_text
+
+
+# -- session-end tests --
+
+def test_session_end_posts_to_endpoint(runner):
+    """`tj session-end --instance` POSTs to /api/v1/sessions/close with auth."""
+    from tokenjam.core.config import ApiConfig, SecurityConfig
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret="sek"),
+        api=ApiConfig(host="127.0.0.1", port=7391),
+    )
+    captured: dict = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self):
+            return b'{"closed": 1}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["data"] = req.data
+        captured["auth"] = req.headers.get("Authorization")
+        return _Resp()
+
+    with patch("tokenjam.cli.main.load_config", return_value=cfg), \
+         patch("tokenjam.cli.main.open_db", side_effect=AssertionError("must not open DB")), \
+         patch("tokenjam.cli.cmd_session_end.urllib.request.urlopen",
+               side_effect=fake_urlopen):
+        result = runner.invoke(cli, ["session-end", "--instance", "term-x"])
+
+    assert result.exit_code == 0
+    assert captured["url"].endswith("/api/v1/sessions/close")
+    assert b"term-x" in captured["data"]
+    assert captured["auth"] == "Bearer sek"
+
+
+def test_session_end_silent_when_daemon_unreachable(runner):
+    """Daemon down -> exit 0, nothing printed (must never break the shell)."""
+    import urllib.error
+    from tokenjam.core.config import SecurityConfig
+
+    cfg = TjConfig(version="1", security=SecurityConfig(ingest_secret="sek"))
+    with patch("tokenjam.cli.main.load_config", return_value=cfg), \
+         patch("tokenjam.cli.cmd_session_end.urllib.request.urlopen",
+               side_effect=urllib.error.URLError("connection refused")):
+        result = runner.invoke(cli, ["session-end", "--instance", "term-x"])
+
+    assert result.exit_code == 0
+    assert result.output.strip() == ""
+
+
+def test_session_end_requires_an_id(runner):
+    """Neither --instance nor --session -> usage error."""
+    cfg = TjConfig(version="1")
+    with patch("tokenjam.cli.main.load_config", return_value=cfg):
+        result = runner.invoke(cli, ["session-end"])
+    assert result.exit_code != 0
 
 
 # ---------------------------------------------------------------------------

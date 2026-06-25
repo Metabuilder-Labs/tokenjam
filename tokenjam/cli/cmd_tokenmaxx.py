@@ -1,17 +1,26 @@
 """
-`tj tokenmaxx` — single-shot "how hard are you tokenmaxxing?" command.
+`tj tokenmaxx` — the shareable quota/efficiency card.
 
-Designed as a shareable, screenshottable artifact for social posts.
+Designed as a screenshottable artifact for social posts ("quota Wrapped"),
+reframed for June-2026 sentiment: the cultural tide turned from *tokenmaxxing*
+(brag about spend) to *tokenminimizing* (brag about efficiency). A spend-brag
+card now repels; an efficiency/quota card aligns — and it's quota-native, so it
+works for the subscription majority who have no dollar spend at all.
 
-Reads the last 30 days of spend (via the existing cost-summary path, so it
-works under both direct-DB and API-shim modes), classifies it into a tier,
-computes a plan-multiplier when a subscription plan is declared in config,
-and runs the downsize analyzer for the headline savings figure.
+The card leads with the **context-composition** headline from the #4 diagnostic:
+what fraction of your quota went to *overhead* (re-reading history, CLAUDE.md,
+accumulated tool output) versus *real work* (uncached input + output). The hook
+is "how lean is your context?"; the payoff is "here's what you reclaimed and how
+to reclaim more (`tj context` / `tj optimize`)".
 
-Honesty discipline: the tier names are intentionally ironic — escalating
-labels for higher spend — but every tier output is paired with the downsize
-savings figure on the next line, so the command is always actionable, not
-just a flex. Score is the hook; savings is the payoff.
+Framing is quota-native (mirrors `tj quota-audit`, #5): the headline is always a
+token share / "% of cycle tokens"; dollar figures are demoted to a secondary
+API-only line and suppressed for subscription / local / unknown plans. No dollar
+spend-brag for subscription users.
+
+Honesty discipline (CLAUDE.md Rule 14): the efficiency number is a *measured*
+token share, never a guaranteed saving. Re-read tokens are real billed quota
+(cache reads at a reduced rate, not free).
 """
 from __future__ import annotations
 
@@ -20,314 +29,320 @@ from dataclasses import dataclass
 
 import click
 
-from tokenjam.core.framing import PLAN_LABEL_AND_FEE, config_declared_plan
-from tokenjam.utils.formatting import console, format_cost  # noqa: F401  (kept for back-compat imports)
+from tokenjam.core.context_diagnostic import (
+    ContextDiagnostic,
+    compute_context_diagnostic,
+)
+from tokenjam.core.framing import (
+    Framing,
+    WindowSummary,
+    compute_framing,
+    plan_determination_mix,
+)
+from tokenjam.utils.formatting import console, format_tokens
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 
-# Tier table — multiplier thresholds (×plan-fee) → (label, one-liner).
-# The `threshold` field is interpreted as a multiplier when the user has a
-# subscription plan declared, or as an absolute USD/mo amount when they
-# don't (API users, no plan set). The fallback thresholds in _SPEND_TIERS
-# below mirror the multiplier ladder calibrated against the Max-5x plan
-# ($100/mo) so the tier names mean roughly the same thing across paths.
-# Order matters: classify walks high-to-low; first match wins.
+# Efficiency-tier table — keyed on the *overhead* (re-read) share of the
+# window, low-to-high. Lower overhead = leaner context = the thing to brag
+# about in the tokenminimizing era. The labels celebrate efficiency, not spend.
+# Order matters: classify walks low overhead → high overhead; first match wins.
 @dataclass(frozen=True)
 class Tier:
-    threshold: float
+    max_overhead: float  # upper bound (inclusive) of re-read share for this tier
     label: str
     emoji: str
     quip: str
 
 
+# Boundaries chosen against the diagnostic's HIGH_REREAD_SHARE = 0.80 signal:
+# steady-state CC turns drift well past 80% overhead once history + CLAUDE.md
+# grow, so the leaner bands are the achievement.
 _TIERS: list[Tier] = [
-    Tier(0,  "TokenSipper",      "💧",      "Are you even using AI?"),
-    Tier(1,  "TokenModerator",   "🥱",      "Mostly reasonable. Try harder."),
-    Tier(4,  "TokenMaxxer",      "💸",      "You're paying Anthropic's rent."),
-    Tier(10, "TokenSuperMaxxer", "🔥",      "You're paying their interns' rent too."),
-    Tier(20, "TokenMegaMaxxer",  "🔥🔥",    "Touch grass. Then run `tj optimize`."),
-    Tier(50, "TokenGigaMaxxer",  "🔥🔥🔥",  "Anthropic's CFO knows your name."),
+    Tier(0.30, "TokenMinimizer",   "🧘", "Surgical context. Teach the rest of us."),
+    Tier(0.50, "LeanOperator",     "🌿", "Tight loop. Most of your quota does real work."),
+    Tier(0.70, "SteadyState",      "⚖️",  "Normal drift. A `/compact` habit keeps it lean."),
+    Tier(0.85, "ContextHeavy",     "🪨", "Overhead is winning. Run `tj context`."),
+    Tier(1.01, "QuotaSink",        "🕳️",  "Re-reading is eating your quota. Run `tj context`."),
 ]
 
-# Absolute USD/mo fallback for users without a subscription plan (API users).
-# Calibrated against Max-5x = $100/mo: each threshold is the multiplier × $100.
-# This way a $400/mo API user and a 4× Pro/Max-5x/Max-20x user both end up
-# in TokenMaxxer — the tier name reflects "shocking spend" in either world.
-_SPEND_TIER_THRESHOLDS_USD: list[float] = [0, 100, 400, 1000, 2000, 5000]
 
+def _classify(overhead_share: float) -> Tier:
+    """Pick an efficiency tier from the overhead (re-read) share.
 
-def _classify(monthly_spend: float, multiplier: float | None = None) -> Tier:
+    Walks tiers lean → heavy; the first tier whose ``max_overhead`` the share
+    falls at or below wins. The final tier's bound is >1.0 so every share lands.
     """
-    Pick a tier. Prefer the multiplier path when the user has a subscription
-    plan with a declared fee; fall back to absolute monthly spend when not.
-    Walks tiers high-to-low; first matching threshold wins.
-    """
-    if multiplier is not None:
-        for tier in reversed(_TIERS):
-            if multiplier >= tier.threshold:
-                return tier
-        return _TIERS[0]
-    # API / no-plan path — map onto the same tier labels via absolute USD.
-    for tier, threshold_usd in zip(reversed(_TIERS), reversed(_SPEND_TIER_THRESHOLDS_USD)):
-        if monthly_spend >= threshold_usd:
+    for tier in _TIERS:
+        if overhead_share <= tier.max_overhead:
             return tier
-    return _TIERS[0]
+    return _TIERS[-1]
 
 
 @click.command("tokenmaxx")
+@click.option("--agent", default=None, help="Filter to a specific agent_id.")
 @click.option("--since", default="30d", help="Window for analysis (default 30d).")
+@click.option("--weekly", is_flag=True,
+              help="Weekly 'quota Wrapped' recap mode (last 7 days, recap copy).")
 @click.option("--json", "output_json", is_flag=True,
               help="Emit machine-readable JSON.")
 @click.pass_context
-def cmd_tokenmaxx(ctx: click.Context, since: str, output_json: bool) -> None:
-    """How hard are you TokenMaxxing? Find out in one command."""
+def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
+                  weekly: bool, output_json: bool) -> None:
+    """Your quota/efficiency card: how lean is your context? (screenshottable)"""
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
+    agent = agent or ctx.obj.get("agent")
     if db is None or config is None:
         raise click.ClickException("tokenmaxx requires a database connection.")
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        raise click.ClickException(
+            "tj tokenmaxx needs a direct database connection (it reads context "
+            "composition). It can't run against a live `tj serve` — stop the "
+            "daemon (`tj stop`) and re-run, or run from a project without the "
+            "daemon up."
+        )
+
+    # --weekly is a recap preset: a 7-day window with recap framing. An explicit
+    # --since still wins if the user narrows it themselves.
+    if weekly and since == "30d":
+        since = "7d"
 
     try:
         since_dt = parse_since(since)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
-
     until_dt = utcnow()
-    window_days = max((until_dt - since_dt).days, 1)
 
-    # Pull spend + downsize savings via the same paths optimize uses, so this
-    # works whether the daemon is up (API shim) or not (direct DuckDB).
-    spend_usd, savings_usd, sessions = _fetch(db, config, since_dt, until_dt, since)
+    capture = getattr(config, "capture", None)
+    tool_inputs_captured = bool(getattr(capture, "tool_inputs", False))
 
-    # Normalise to monthly (the tier thresholds are monthly).
-    monthly_spend = spend_usd * (30.0 / window_days)
+    diag = compute_context_diagnostic(
+        conn,
+        since_dt,
+        until_dt,
+        agent_id=agent,
+        tool_inputs_captured=tool_inputs_captured,
+    )
+    framing = _framing_for(conn, config, diag, agent)
 
-    # Plan multiplier — only for subscription users with a declared plan.
-    declared_plan = config_declared_plan(config)
-    plan_info = PLAN_LABEL_AND_FEE.get(declared_plan) if declared_plan else None
-    multiplier = None
-    if plan_info and plan_info[1]:
-        multiplier = monthly_spend / plan_info[1]
-
-    tier = _classify(monthly_spend, multiplier)
+    overhead_share = diag.reread_share
+    work_share = (
+        diag.total_work_tokens / diag.total_tokens if diag.total_tokens else 0.0
+    )
+    tier = _classify(overhead_share)
 
     if output_json:
         click.echo(json.dumps({
-            "window_days": window_days,
-            "sessions": sessions,
-            "spend_usd": round(spend_usd, 2),
-            "monthly_spend_usd": round(monthly_spend, 2),
+            "since": since,
+            "weekly": weekly,
+            "sessions": diag.sessions,
+            "turns": diag.turns,
+            "overhead_share": round(overhead_share, 4),
+            "work_share": round(work_share, 4),
+            "total_reread_tokens": diag.total_reread_tokens,
+            "total_work_tokens": diag.total_work_tokens,
+            "total_tokens": diag.total_tokens,
             "tier": tier.label,
             "tier_emoji": tier.emoji,
             "tier_quip": tier.quip,
-            "plan_tier": declared_plan,
-            "plan_label": plan_info[0] if plan_info else None,
-            "plan_monthly_usd": plan_info[1] if plan_info else None,
-            "plan_multiplier": round(multiplier, 1) if multiplier else None,
-            "downsize_monthly_savings_usd": round(savings_usd, 2),
-        }))
+            "plan_tier": framing.plan_tier,
+            "pricing_mode": framing.pricing_mode,
+            "plan_label": framing.plan_label,
+        }, default=str))
         return
 
     _render(
-        tier=tier, spend_usd=spend_usd, monthly_spend=monthly_spend,
-        window_days=window_days, sessions=sessions,
-        plan_info=plan_info, multiplier=multiplier,
-        savings_usd=savings_usd,
+        diag=diag, framing=framing, tier=tier,
+        overhead_share=overhead_share, work_share=work_share,
+        since=since, weekly=weekly,
     )
 
 
-# ───────────────────────────── data fetching ──────────────────────────────
+# ───────────────────────────── framing ────────────────────────────────────
 
-def _fetch(db, config, since_dt, until_dt, since_str) -> tuple[float, float, int]:
-    """
-    Returns (spend_usd, monthly_savings_usd, sessions) over the window.
-
-    Two code paths to handle the daemon-up case where db is an ApiBackend
-    without a `.conn` attribute. The optimize report payload already includes
-    the window total + downsize finding, so we can fetch it in one round trip
-    rather than running a second cost query.
-    """
-    from tokenjam.core.optimize import build_report
-
-    conn = getattr(db, "conn", None)
-    if conn is None:
-        # API-shim path
-        from tokenjam.core.api_backend import ApiBackend
-        if not isinstance(db, ApiBackend):
-            raise click.ClickException(
-                "tokenmaxx requires either a direct DuckDB connection or a "
-                "running tj serve at the configured api.{host,port}."
-            )
-        report_dict = db.fetch_optimize_report(
-            since=since_str,
-            findings=["downsize"],
-        )
-        if report_dict.get("error") == "no_data":
-            return 0.0, 0.0, 0
-        window = report_dict.get("window") or {}
-        downgrade = report_dict.get("downgrade") or {}
-        return (
-            float(window.get("total_cost_usd") or 0.0),
-            float(downgrade.get("monthly_savings_usd") or 0.0),
-            int(window.get("sessions") or 0),
-        )
-
-    # Direct-DB path
-    row = conn.execute(
-        "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
-    ).fetchone()
-    if not row or not row[0]:
-        return 0.0, 0.0, 0
-
-    report = build_report(
-        db=db, config=config,
-        since=since_dt, until=until_dt,
-        findings=["downsize"],
+def _framing_for(conn, config, diag: ContextDiagnostic,
+                 agent: str | None) -> Framing:
+    """Plan-tier framing for the window (window-independent plan, per #177)."""
+    mix = plan_determination_mix(conn, agent)
+    summary = WindowSummary(
+        total_cost_usd=diag.total_cost_usd,
+        total_tokens=diag.total_tokens,
+        sessions=diag.sessions,
+        plan_tier_mix=mix,
     )
-    spend = float(report.window.total_cost_usd or 0.0)
-    sessions = int(report.window.sessions or 0)
-    savings = 0.0
-    if report.downgrade is not None:
-        savings = float(report.downgrade.monthly_savings_usd or 0.0)
-    return spend, savings, sessions
+    return compute_framing(config, summary)
 
 
 # ───────────────────────────── helpers ────────────────────────────────────
 
+def _pct(value: float) -> str:
+    return f"{value * 100:.1f}%"
+
+
+def _quota_share(tokens: int, framing: Framing) -> str:
+    """Render a token figure as a quota share on a subscription plan.
+
+    Mirrors ``cmd_context._quota_share``: subscription users see "X% of cycle
+    tokens" against the window total — the quota-native headline. API / local /
+    unknown users see the raw token count (dollars surfaced separately, if at
+    all).
+    """
+    total = framing.window_total_tokens
+    if framing.pricing_mode == "subscription" and total > 0:
+        return f"{100.0 * tokens / total:.1f}% of cycle tokens"
+    return f"{format_tokens(tokens)} tokens"
+
+
 # ───────────────────────────── rendering ──────────────────────────────────
 
-def _fmt_spend(usd: float) -> str:
-    """Spend / savings: always 2 decimals — readable, screenshot-friendly.
-
-    The default `format_cost` helper uses 4 decimals (precision for the cost
-    engine internals); for the tokenmaxx social artifact we want $4044.57,
-    not $4044.5774.
-    """
-    return f"${usd:.2f}"
-
-
-def _fmt_fee(usd: float) -> str:
-    """Plan fee: drop the decimals when the fee is a round dollar.
-
-    Anthropic / OpenAI subscription tiers (Pro $20, Max-5x $100, Max-20x $200)
-    are all whole-dollar — `$100.00` reads worse than `$100`. Falls back to
-    2 decimals for anything fractional.
-    """
-    if usd == int(usd):
-        return f"${int(usd)}"
-    return f"${usd:.2f}"
-
-
 def _render(
-    *, tier: Tier, spend_usd: float, monthly_spend: float,
-    window_days: int, sessions: int,
-    plan_info: tuple[str, float | None] | None,
-    multiplier: float | None,
-    savings_usd: float,
+    *, diag: ContextDiagnostic, framing: Framing, tier: Tier,
+    overhead_share: float, work_share: float, since: str, weekly: bool,
 ) -> None:
     """
-    Big-headline render. Designed to be a clean screenshot artifact:
-    bordered Panel with a heading, the tier callout up top, the spend
-    breakdown in the middle, the action line at the bottom, and the
-    share prompt OUTSIDE the panel.
+    Big-headline render. A clean PNG-screenshot artifact: a bordered Panel with
+    the efficiency tier callout up top, the overhead-vs-work composition in the
+    middle, the reclaimed figure, and the action line at the bottom. The share
+    prompt sits OUTSIDE the panel. Readable without any surrounding context.
     """
-    if sessions == 0:
+    if not diag.has_data:
         console.print(
-            "\n[yellow]No usage data found.[/yellow]\n"
-            "[dim]Run [bold]tj onboard --claude-code[/bold] to ingest your existing "
-            "Claude Code sessions, or wait for new spans to land.[/dim]\n"
+            "\n[yellow]No Claude Code turns found in this window.[/yellow]\n"
+            "[dim]Run [bold]tj onboard --claude-code[/bold] to ingest your "
+            "existing Claude Code sessions, then re-run "
+            "[bold]tj tokenmaxx[/bold].[/dim]\n"
         )
         return
 
-    # Build the inside-the-panel content as one rich Text/markup string.
-    # Rich Panel doesn't have native sub-spacing primitives, so we hand-pad
-    # with newlines to get the visual rhythm we want in the screenshot.
+    from rich.align import Align
     from rich.console import Group
     from rich.panel import Panel
     from rich.text import Text
-    from rich.align import Align
 
-    # Tier callout — the headline, plus a larger non-dim quip (no quotes)
-    # with `tj optimize` highlighted green-bold when it appears in the quip.
+    window_label = "this week" if weekly else f"last {since}"
+
+    # ── Tier callout — the headline + a non-dim quip with `tj context` /
+    #    `tj optimize` recolored green-bold where they appear. ──
     headline = Text()
     headline.append(f"{tier.emoji} ", style="")
     headline.append("You're a ", style="bold")
     headline.append(tier.label, style="bold")
     headline.append(".", style="bold")
 
-    quip_text = Text()
-    # Walk the quip and recolor any `tj optimize` backtick-wrapped token green.
-    # Rich doesn't auto-parse backticks, so we do it manually with split.
-    parts = tier.quip.split("`tj optimize`")
-    for i, p in enumerate(parts):
-        if p:
-            quip_text.append(p, style="")
-        if i < len(parts) - 1:
-            quip_text.append("tj optimize", style="bold green")
+    quip_text = _highlight_commands(tier.quip)
 
-    # The spend / multiplier block — same content as before but with the
-    # cleaner formatters and a slightly tighter line structure.
+    # ── Composition block — overhead vs real work, quota-framed. ──
     body = Text()
-    actual_label = f"last {window_days}d" if window_days < 30 else "last 30d"
-    body.append(_fmt_spend(spend_usd), style="bold")
-    body.append(f" in {actual_label} across ")
-    body.append(str(sessions), style="bold")
-    body.append(" sessions.")
-    if window_days != 30:
-        body.append("  (≈ ", style="dim")
-        body.append(_fmt_spend(monthly_spend), style="bold")
-        body.append("/mo at this rate)", style="dim")
+    body.append(f"{_pct(overhead_share)} ", style="bold red")
+    body.append("of your quota went to ")
+    body.append("overhead", style="bold")
+    body.append(" — re-reading history, CLAUDE.md, tool output.", style="dim")
+    body.append("\n")
+    body.append(f"{_pct(work_share)} ", style="bold green")
+    body.append("did ")
+    body.append("real work", style="bold")
+    body.append(" — uncached input + output.", style="dim")
 
-    if plan_info and multiplier:
-        plan_label, fee = plan_info
-        body.append("\nThat's ")
-        body.append(f"{multiplier:.1f}×", style="bold")
-        body.append(" your ")
-        body.append(plan_label, style="bold")
-        body.append(f" cost ({_fmt_fee(fee)}/mo flat).")
-    elif plan_info:
-        plan_label, _ = plan_info
-        body.append("\nPlan: ")
-        body.append(plan_label, style="bold")
-        body.append(".")
+    # Quota-native breakdown (subscription → "% of cycle"; else token counts).
+    body.append("\n\nOverhead:  ", style="dim")
+    body.append(_quota_share(diag.total_reread_tokens, framing), style="bold")
+    body.append(f"  ({format_tokens(diag.total_reread_tokens)} cache reads)",
+                style="dim")
+    body.append("\nReal work: ", style="dim")
+    body.append(_quota_share(diag.total_work_tokens, framing), style="bold")
+    body.append(f"  ({format_tokens(diag.total_work_tokens)} tokens)",
+                style="dim")
+    body.append(
+        f"\n\nAcross {diag.sessions} sessions, {diag.turns} turns ({window_label}).",
+        style="dim",
+    )
 
-    # Action line — savings recoverable, or fall through to "no obvious
-    # savings yet". `tj optimize` rendered green-bold either way so the
-    # eye lands on the verb.
+    # Secondary implied-dollar calibration for API users ONLY — never the
+    # headline, suppressed for subscription / local / unknown (mirrors #5).
+    if framing.pricing_mode == "api" and diag.total_cost_usd > 0:
+        body.append("\nImplied API value: ", style="dim")
+        body.append(f"${diag.total_cost_usd:,.2f}", style="bold")
+        body.append(" over the window (calibration only)", style="dim")
+
+    # ── Action line — what you can reclaim, never a guaranteed saving. ──
     action = Text("💡 ")
-    if savings_usd > 0:
-        action.append(_fmt_spend(savings_usd) + "/mo", style="bold")
-        action.append(" of that looks recoverable. Run ")
-        action.append("tj optimize", style="bold green")
-        action.append(" to see candidates.")
+    if diag.compact_candidates:
+        reclaimable = sum(c.reread_tokens for c in diag.compact_candidates)
+        action.append(_quota_share(reclaimable, framing), style="bold")
+        action.append(" sits in ")
+        action.append(f"{len(diag.compact_candidates)}", style="bold")
+        action.append(" compactable session"
+                      f"{'s' if len(diag.compact_candidates) != 1 else ''}. Run ")
+        action.append("tj context", style="bold green")
+        action.append(" to see where to reclaim it.")
+    elif overhead_share >= 0.50:
+        action.append("Run ")
+        action.append("tj context", style="bold green")
+        action.append(" to see exactly which files are re-read every session.")
     else:
-        action.append("No obvious savings flagged yet — run ")
+        action.append("Lean context. Run ")
         action.append("tj optimize", style="bold green")
-        action.append(" for the full report once you have more data.")
+        action.append(" for the full savings report.")
 
-    # Compose with deliberate vertical spacing.
     panel_body = Group(
         headline,
-        Text(""),            # blank line under headline
+        Text(""),
         Align.left(quip_text),
-        Text(""),            # blank line under quip
+        Text(""),
         body,
-        Text(""),            # blank line before action
+        Text(""),
         action,
     )
 
+    title = ("[bold]TokenJam Quota Wrapped — Weekly Recap[/bold]" if weekly
+             else "[bold]TokenJam Quota / Efficiency Card[/bold]")
     console.print()
     console.print(Panel(
         panel_body,
-        title="[bold]TokenJam TokenMaxxing Report[/bold]",
+        title=title,
         title_align="left",
         border_style="dim",
         padding=(1, 2),
     ))
 
-    # Share prompt — outside the panel, teal, points at the brand handle so
-    # the social mechanic routes to a real account we can amplify from.
+    # Qualifier banner (plan-tier framing) + honesty caveat, below the panel.
+    if framing.qualifier_text:
+        console.print(f"  [dim]{framing.qualifier_text}[/dim]")
+    console.print(f"  [dim]{diag.caveat}[/dim]")
+
+    # Share prompt — outside the panel, teal, points at the brand handle.
     console.print(
-        "  [cyan]Share your tier: screenshot the above and tag "
+        "  [cyan]Share your card: screenshot the above and tag "
         "[bold]@tokenjamdev[/bold][/cyan]"
     )
     console.print()
+
+
+def _highlight_commands(quip: str):
+    """Recolor backtick-wrapped `tj context` / `tj optimize` tokens green-bold.
+
+    Rich doesn't auto-parse backticks, so we split on the known command tokens
+    and re-style them. Any other backticked token is left as plain text.
+    """
+    from rich.text import Text
+
+    text = Text()
+    remaining = quip
+    commands = ("`tj context`", "`tj optimize`", "`/compact`")
+    while remaining:
+        # Find the earliest command token in the remaining string.
+        idx, hit = min(
+            ((remaining.find(c), c) for c in commands if c in remaining),
+            default=(-1, ""),
+        )
+        if idx < 0:
+            text.append(remaining)
+            break
+        if idx:
+            text.append(remaining[:idx])
+        text.append(hit.strip("`"), style="bold green")
+        remaining = remaining[idx + len(hit):]
+    return text

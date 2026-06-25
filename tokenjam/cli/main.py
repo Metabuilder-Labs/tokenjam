@@ -40,8 +40,12 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         config.storage.path = db_path
 
     # Commands that don't need a database connection
-    no_db_commands = {"stop", "uninstall", "onboard", "mcp", "demo", "policy", "proxy"}
+    no_db_commands = {
+        "stop", "uninstall", "onboard", "mcp", "demo", "policy", "proxy",
+        "otel-resource-attrs", "session-end", "quickstart",
+    }
     invoked = ctx.invoked_subcommand
+
     if invoked in no_db_commands:
         ctx.obj["config"] = config
         ctx.obj["db"] = None
@@ -103,6 +107,11 @@ from tokenjam.cli.cmd_tokenmaxx import cmd_tokenmaxx  # noqa: E402
 from tokenjam.cli.cmd_backfill import cmd_backfill  # noqa: E402
 from tokenjam.cli.cmd_report import cmd_report  # noqa: E402
 from tokenjam.cli.cmd_policy import cmd_policy  # noqa: E402
+from tokenjam.cli.cmd_otel import cmd_otel_resource_attrs  # noqa: E402
+from tokenjam.cli.cmd_session_end import cmd_session_end  # noqa: E402
+from tokenjam.cli.cmd_context import cmd_context  # noqa: E402
+from tokenjam.cli.cmd_quota_audit import cmd_quota_audit  # noqa: E402
+from tokenjam.cli.cmd_quickstart import cmd_quickstart  # noqa: E402
 from tokenjam.cli.cmd_proxy import cmd_proxy  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
@@ -124,6 +133,11 @@ cli.add_command(cmd_tokenmaxx, name="tokenmaxx")
 cli.add_command(cmd_backfill, name="backfill")
 cli.add_command(cmd_report, name="report")
 cli.add_command(cmd_policy, name="policy")
+cli.add_command(cmd_otel_resource_attrs, name="otel-resource-attrs")
+cli.add_command(cmd_session_end, name="session-end")
+cli.add_command(cmd_context, name="context")
+cli.add_command(cmd_quota_audit, name="quota-audit")
+cli.add_command(cmd_quickstart, name="quickstart")
 cli.add_command(cmd_proxy, name="proxy")
 
 # cmd_drift is provided by task 05 — register if available

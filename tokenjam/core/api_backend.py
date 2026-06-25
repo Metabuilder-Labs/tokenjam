@@ -197,6 +197,7 @@ class ApiBackend:
             input_tokens=a.get("input_tokens", 0) or 0,
             output_tokens=a.get("output_tokens", 0) or 0,
             cache_tokens=0,
+            cache_write_tokens=0,
             tool_call_count=a.get("tool_call_count", 0) or 0,
             error_count=a.get("error_count", 0) or 0,
         )][:limit]
@@ -359,6 +360,7 @@ def _dict_to_span(d: dict) -> NormalizedSpan:
         input_tokens=d.get("input_tokens"),
         output_tokens=d.get("output_tokens"),
         cache_tokens=d.get("cache_tokens"),
+        cache_write_tokens=d.get("cache_write_tokens"),
         cost_usd=d.get("cost_usd"),
         request_type=d.get("request_type"),
         conversation_id=d.get("conversation_id"),

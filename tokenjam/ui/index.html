@@ -232,9 +232,10 @@ code, .mono {
 }
 .status-dot.active { background: var(--success); }
 .status-dot.completed { background: var(--success); }
-.status-dot.idle { background: var(--text-dim); }
+.status-dot.idle { background: var(--warn); }
 .status-dot.error { background: var(--error); }
-.status-dot.stale { background: var(--warn); }
+.status-dot.stale { background: var(--text-dim); }
+.status-dot.closed { background: var(--text-dim); }
 .card-row {
   display: flex;
   justify-content: space-between;
@@ -340,7 +341,9 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .badge-ok, .badge-completed { background: rgba(12,228,144,0.15); color: var(--success); }
 .badge-error { background: rgba(238,0,0,0.15); color: var(--error); }
 .badge-active { background: rgba(12,228,144,0.15); color: var(--success); }
-.badge-stale { background: rgba(245,166,35,0.15); color: var(--warn); }
+.badge-idle { background: rgba(245,166,35,0.15); color: var(--warn); }
+.badge-stale { background: rgba(140,140,140,0.15); color: var(--text-dim); }
+.badge-closed { background: rgba(140,140,140,0.15); color: var(--text-dim); }
 .badge-critical { background: rgba(238,0,0,0.15); color: var(--error); }
 .badge-warning { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge-info { background: rgba(61,142,255,0.15); color: var(--info); }
@@ -400,6 +403,61 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 }
 .btn:hover { border-color: var(--accent); color: var(--accent); }
 .btn-back { margin-bottom: 16px; }
+.btn-restore { padding: 3px 8px; font-size: 11px; white-space: nowrap; position: relative; display: inline-flex; align-items: center; gap: 5px; }
+.btn-restore.copied { border-color: var(--success); color: var(--success); }
+.btn-restore svg { width: 12px; height: 12px; flex-shrink: 0; }
+.btn-restore .restore-tip {
+  display: none;
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 7px 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: 'Geist Mono', monospace;
+  font-weight: normal;
+  white-space: normal;
+  text-align: left;
+  max-width: 280px;
+  z-index: 100;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+}
+.btn-restore:hover .restore-tip { display: block; }
+.btn-restore .restore-cmd { display: block; margin-top: 4px; color: var(--text-dim); word-break: break-all; }
+
+/* Tab bar (session detail) */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  margin-bottom: -1px;
+  cursor: pointer;
+  font-family: 'Geist Mono', monospace;
+  font-size: 13px;
+  font-weight: 500;
+  transition: color 0.15s, border-color 0.15s;
+}
+.tab:hover { color: var(--text); }
+.tab:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
 
 /* Segmented view toggle (Cards | List), e.g. the Status screen (#241). */
 .view-toggle { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
@@ -633,6 +691,287 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   color: var(--text-dim);
 }
 
+/* Session Story */
+.story-callout {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.story-callout .story-callout-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  margin-bottom: 6px;
+}
+.story-callout .story-callout-body {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.story-steps { display: flex; flex-direction: column; gap: 2px; }
+/* User prompt in the Timeline — just a distinct color (brand) so human asks
+   stand out from the agent's steps. No box, no label. */
+.story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand); white-space: pre-wrap; }
+.story-ask.clickable { cursor: pointer; }
+/* Compact single-line row (356 steps must stay scannable, not a wall of cards) */
+.story-step {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+}
+/* Errored steps aren't boxed in red — the ✗ chip carries the signal, and the
+   error message is shown in the expanded body (click to see why it failed). */
+.story-step-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  cursor: pointer;
+  border-radius: 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+.story-step-row:hover { background: var(--surface2); }
+.story-caret {
+  color: var(--text-dim);
+  width: 10px;
+  flex: 0 0 auto;
+  font-size: 10px;
+}
+.story-step-n {
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+.story-step-time {
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px;
+  flex: 0 0 auto;
+}
+.story-retry { color: var(--warn); flex: 0 0 auto; font-size: 11px; }
+.story-model-tag {
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  font-size: 10px;
+  opacity: 0.7;
+  flex: 0 0 auto;
+}
+.story-line {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.story-line.dim { color: var(--text-dim); font-style: italic; }
+/* A pure tool step (no narration) shows the tool's command/path inline instead
+   of a dim "(no narration)" — rendered monospace so it reads as the action. */
+.story-line.tool { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 12px; }
+/* Expanded body */
+.story-step-body {
+  padding: 2px 8px 10px 26px;
+}
+.story-text {
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.story-text.clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.story-expand {
+  font-size: 11px;
+  color: var(--brand);
+  cursor: pointer;
+  font-family: 'Geist Mono', monospace;
+  margin-top: 4px;
+  display: inline-block;
+}
+.story-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.story-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-family: 'Geist Mono', monospace;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  max-width: 100%;
+}
+.story-chip.error { border-color: var(--error); color: var(--error); }
+.story-chip.inline { padding: 1px 6px; }
+.story-chip-name { font-weight: 600; }
+.story-chip-label { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.story-chip-status { margin-left: 2px; }
+.story-chip-status.ok { color: var(--info); }
+.story-chip-status.error { color: var(--error); }
+/* The transcript error message for a failed tool, shown in the expanded body. */
+.story-error { margin-top: 8px; padding: 8px 10px; border-left: 2px solid var(--error); background: rgba(238,0,0,0.05); border-radius: 0 6px 6px 0; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text); white-space: pre-wrap; word-break: break-word; }
+.story-error-tool { display: block; color: var(--error); font-weight: 600; margin-bottom: 3px; }
+.story-omitted {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  padding: 6px 0;
+}
+.story-unavailable {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-family: 'Geist Mono', monospace;
+  margin: -8px 0 12px;
+}
+/* Nested subagent stories (the COMPLETE log of everything a session spawned) */
+.story-subagent { margin-top: 8px; }
+.story-subagent-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-family: 'Geist Mono', monospace;
+  padding: 5px 8px;
+  border-radius: 6px;
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  user-select: none;
+}
+.story-subagent-head.error { border-color: var(--error); }
+.story-subagent-caret { color: var(--brand); width: 10px; display: inline-block; }
+.story-subagent-label { font-weight: 600; }
+.story-subagent-meta { color: var(--text-dim); margin-left: auto; }
+.story-subagent-body {
+  margin: 8px 0 4px 6px;
+  padding-left: 12px;
+  border-left: 2px solid var(--border);
+}
+
+/* Work map (the "Map" tab): the nested main + subagent tree. Indent comes from
+   per-row padding (node.depth) so the DOM can nest without compounding margins. */
+/* Map header: title on the left, the Distill-titles button on the right. */
+.wm-map-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.wm-distill-btn { margin-top: 24px; white-space: nowrap; }
+.wm-distill-btn:disabled { opacity: 0.6; cursor: default; }
+.wm-distill-btn:disabled:hover { border-color: var(--border); color: var(--text); }
+.wm-distill-note { color: var(--text-dim); opacity: 0.8; }
+/* Brief highlight on the headlines right after a successful distill, so the
+   swap is visible (otherwise an 11s call can look like nothing happened). */
+@keyframes wmDistillFlash { 0% { background: rgba(61,142,255,0.22); } 100% { background: transparent; } }
+.wm-flash .wm-ask-did { animation: wmDistillFlash 1.3s ease-out; border-radius: 4px; }
+.wm-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); margin: -6px 0 12px; flex-wrap: wrap; }
+/* Summary band: the 5-second read above the asks list — totals + biggest
+   fan-outs. Subtle bordered panel, mono/dim like the other wm-* meta. */
+.wm-summary-band { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
+.wm-summary-stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text); }
+.wm-summary-stats span { color: var(--text-dim); }
+.wm-summary-fanouts { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
+.wm-summary-fanout { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Launcher -> run card: when a session spawned (or belongs to) a multi-session
+   run, surface a breadcrumb to the run + its worker sessions. */
+.wm-run-card { border: 1px solid var(--brand); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
+.wm-run-card.inferred { border-style: dashed; }
+.wm-run-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.wm-run-title { font-size: 13px; color: var(--text); }
+.wm-run-title .wm-run-id { color: var(--brand); }
+.wm-run-src { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; margin-left: 6px; }
+.wm-run-meta { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+.wm-run-workers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.wm-run-chip { font-size: 11px; color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 2px 9px; cursor: pointer; background: var(--bg); }
+.wm-run-chip:hover { border-color: var(--brand); }
+.wm-run-chip.self { border-color: var(--brand); color: var(--brand); cursor: default; }
+.wm-run-view { font-size: 12px; color: var(--brand); cursor: pointer; white-space: nowrap; }
+/* The asks render as a STORYLINE on a continuous vertical spine (see the
+   approved Option-A mock): a left border line runs the height of the list and
+   each ask is a milestone with a status dot sitting ON the spine. No bordered
+   cards — the spine + dots + generous spacing carry the structure. */
+.wm-spine { border-left: 2px solid var(--border); margin-left: 7px; padding-left: 22px; }
+/* Each milestone is position:relative so its dot can be absolutely placed back
+   onto the spine. Generous vertical rhythm gives the story breathing room. */
+.wm-milestone { position: relative; margin-bottom: 16px; }
+.wm-milestone:last-child { margin-bottom: 0; }
+.wm-milestone.idle { opacity: 0.7; }
+/* The status dot sits on the spine (left:-30px lands it over the border line).
+   Color comes from deterministic status; the glyph is the status icon. */
+.wm-dot-spine { position: absolute; left: -30px; top: -1px; font-family: 'Geist Mono', monospace; font-size: 14px; width: 16px; text-align: center; }
+.wm-dot-spine.work { color: var(--brand); }
+.wm-dot-spine.flag { color: #f5a623; }
+.wm-dot-spine.err  { color: var(--error); }
+.wm-dot-spine.idle { color: var(--text-dim); }
+/* Headline row: bold "what the agent did" on the left, right-aligned meta. */
+.wm-milestone-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.wm-milestone-head.clickable { cursor: pointer; }
+.wm-milestone-head.clickable:hover .wm-ask-did { color: var(--brand); }
+.wm-ask-did { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.wm-ask-ctx { color: var(--text-dim); font-size: 12.5px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Phases: the agent's own narrated arc within a long ask (the journey, not just
+   the destination). A light inner storyline under the milestone headline. */
+.wm-phases { margin-top: 6px; padding-left: 4px; display: flex; flex-direction: column; gap: 2px; }
+.wm-phase { display: flex; align-items: baseline; gap: 8px; font-size: 12px; color: var(--text); line-height: 1.5; }
+.wm-phase-title { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 0 1 auto; }
+.wm-phase-tools { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 10.5px; flex: 0 0 auto; }
+.wm-phase-err { color: var(--error); font-family: 'Geist Mono', monospace; font-size: 10.5px; flex: 0 0 auto; }
+.wm-phase-omitted { color: var(--text-dim); font-style: italic; }
+.wm-phase-toggle { color: var(--text-dim); cursor: pointer; opacity: 0.85; }
+.wm-phase-toggle:hover { opacity: 1; color: var(--brand); }
+.wm-chat { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; min-width: 0; }
+.wm-ask-meta { display: flex; align-items: baseline; gap: 8px; flex: 0 0 auto; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
+.wm-subs { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; white-space: nowrap; }
+.wm-ask-caret { color: var(--text-dim); font-size: 11px; flex: 0 0 auto; width: 10px; }
+/* Inline branch block: an indented, dashed-bordered list of the fan-out
+   subagents, shown inline (not behind a click) — mirrors the mock's branch box. */
+.wm-branch { margin-top: 8px; padding: 8px 12px; border-left: 2px dashed var(--border); background: var(--surface2); border-radius: 0 6px 6px 0; font-family: 'Geist Mono', monospace; font-size: 11.5px; color: var(--text-dim); line-height: 1.8; }
+.wm-branch-row { display: flex; justify-content: space-between; gap: 10px; }
+.wm-branch-row.flagged { color: #f5a623; }
+.wm-branch-row .wm-branch-tok { color: var(--text-dim); flex: 0 0 auto; }
+.wm-branch-row.flagged .wm-branch-tok { color: #f5a623; }
+.wm-branch-more { color: var(--text-dim); cursor: pointer; opacity: 0.85; }
+.wm-branch-more:hover { opacity: 1; color: var(--brand); }
+/* Collapsed run of quick chat exchanges: a single clickable dim divider that
+   expands into the individual chat rows. Sits as its own milestone on the spine. */
+.wm-chat-divider { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); cursor: pointer; opacity: 0.7; }
+.wm-chat-divider:hover { opacity: 1; color: var(--brand); }
+.wm-ask-body { margin-top: 6px; }
+.wm-ask-body .wm-tree { margin-top: 6px; }
+.wm-tree { display: flex; flex-direction: column; gap: 2px; margin-bottom: 4px; }
+.wm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  font-size: 12px;
+}
+.wm-row.flagged { background: rgba(245,166,35,0.06); border-color: rgba(245,166,35,0.35); }
+.wm-row.clickable { cursor: pointer; }
+.wm-row.clickable:hover { background: var(--surface2); }
+.wm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); flex: 0 0 auto; }
+.wm-dot.root { background: var(--brand); }
+.wm-dot.capped { background: transparent; border: 1px solid var(--text-dim); }
+.wm-name { font-weight: 600; }
+.wm-model { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; }
+.wm-summary { color: var(--text-dim); font-family: 'Geist Mono', monospace; font-size: 11px; }
+.wm-spacer { margin-left: auto; }
+.wm-tokens { font-family: 'Geist Mono', monospace; font-size: 12px; }
+.wm-flag { color: #f5a623; font-size: 11px; white-space: nowrap; }
+.wm-detail { font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; margin: 1px 0 3px; padding: 4px 0; }
+.wm-detail div { margin: 1px 0; }
+.wm-detail .k { color: var(--brand); margin-right: 6px; }
+
 /* Charts (uPlot, issue #112). The vendored uplot.css styles the canvas/cursor;
    these style the container card and re-theme uPlot via CSS variables. */
 .chart-card {
@@ -823,8 +1162,8 @@ a.health-tile.attn { border-color: var(--warn); }
 // Source code is unchanged from when it was loaded from esm.sh — the
 // importmap just redirects the bare specifiers to vendored local files
 // under /ui/vendor/ so the dashboard works fully offline. (Issue #87.)
-import { h, render, Component } from 'preact';
-import { useState, useEffect, useCallback, useRef } from 'preact/hooks';
+import { h, render, Component, Fragment } from 'preact';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'preact/hooks';
 import htm from 'htm';
 
 const html = htm.bind(h);
@@ -867,6 +1206,42 @@ function fmtTokens(n) {
   if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
   return String(n);
+}
+// Shorten a long file path to its last two segments ("…/dir/file.ext") for
+// readable display; the full path goes in a hover title. URLs and non-path
+// strings (search queries, etc.) are returned unchanged.
+function shortPath(s) {
+  if (typeof s !== 'string' || s.indexOf('/') < 0 || s.indexOf('://') >= 0) return s;
+  const parts = s.split('/').filter(Boolean);
+  return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : s;
+}
+// Reduce a multi-sentence, markdown-flecked outcome to one glanceable headline:
+// strip leading bullet/heading/quote markers and the inline marker characters of
+// **/__/`/##/---, collapse whitespace, then return the first sentence (cut at
+// '.'/'!'/'?' + space or end). Hard-cap at ~90 chars on a word boundary. Append
+// '…' whenever the text was cut. Pure/defensive — non-strings yield ''.
+const FIRST_SENTENCE_MAX = 90;
+function firstSentence(text) {
+  if (typeof text !== 'string') return '';
+  let s = text
+    .replace(/^[\s>#*\-]+/, '')   // leading bullets / headings / quotes
+    .replace(/##+|---+/g, '')     // heading / rule runs
+    .replace(/[*_`]+/g, '')       // emphasis/code markers (single or double)
+    .replace(/\s+/g, ' ')         // collapse all whitespace
+    .trim();
+  if (!s) return '';
+  const m = s.match(/^.*?[.!?](?=\s|$)/);
+  let out = m ? m[0] : s;
+  let cut = out.length < s.length;
+  if (out.length > FIRST_SENTENCE_MAX) {
+    const slice = out.slice(0, FIRST_SENTENCE_MAX);
+    const sp = slice.lastIndexOf(' ');
+    out = (sp > 0 ? slice.slice(0, sp) : slice).replace(/[.!?,;:]+$/, '');
+    cut = true;
+  } else {
+    out = out.replace(/[.!?]+$/, '');
+  }
+  return cut ? out + '…' : out;
 }
 function fmtDur(ms) {
   if (ms == null) return '-';
@@ -1241,6 +1616,64 @@ function SpendChart({ data, labels = ['Total'], height = 160, fmtY = fmtCost, ax
   return html`<div class="chart" ref=${ref}></div>`;
 }
 
+// Remember the window scroll position per list view so returning from a detail
+// page (e.g. clicking an archived session then "Back to status") lands you
+// where you were, not at the top. The window scrolls (.main#app has no own
+// overflow). Saved across remounts via a module-level map; restored once the
+// list has rendered (`ready`), since the list loads async and a too-early
+// scrollTo would clamp against the still-empty page.
+const _scrollMem = {};
+function useScrollMemory(key, ready) {
+  const restored = useRef(false);
+  useEffect(() => {
+    const onScroll = () => { _scrollMem[key] = window.scrollY; };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, [key]);
+  useLayoutEffect(() => {
+    if (ready && !restored.current && _scrollMem[key] != null) {
+      restored.current = true;
+      window.scrollTo(0, _scrollMem[key]);
+    }
+  }, [ready, key]);
+}
+
+// "restore session" button — copies `claude --resume <id>` to the clipboard so
+// an archived/idle Claude Code session can be picked back up in the terminal.
+// stopPropagation so it doesn't trigger the row/tile navigation it sits inside.
+function RestoreButton({ sessionId }) {
+  const [copied, setCopied] = useState(false);
+  if (!sessionId) return null;
+  const cmd = 'claude --resume ' + sessionId;
+  const copy = (e) => {
+    e.stopPropagation();
+    // execCommand is the reliable workhorse inside a click gesture (works even
+    // when the async Clipboard API hangs on a permission prompt). Then a
+    // best-effort, non-blocking upgrade to navigator.clipboard. Feedback fires
+    // synchronously regardless so the button never appears stuck.
+    const ta = document.createElement('textarea');
+    ta.value = cmd;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) { /* ignore */ }
+    document.body.removeChild(ta);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try { navigator.clipboard.writeText(cmd).catch(() => {}); } catch (_) { /* ignore */ }
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  const copyIcon = html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>`;
+  return html`<button class=${'btn btn-restore' + (copied ? ' copied' : '')} onClick=${copy}>
+    ${copyIcon}
+    <span>${copied ? 'copied ✓' : 'restore session'}</span>
+    <span class="restore-tip">Paste & run in your terminal to resume this session:<span class="restore-cmd">${cmd}</span></span>
+  </button>`;
+}
+
 // Tooltip for the stacked bar chart (#213): maps the cursor back to each
 // segment's ORIGINAL (non-cumulative) value, since the plotted series carry
 // cumulative totals for the back-to-front stacking trick.
@@ -1590,10 +2023,59 @@ function StatusView({ params }) {
 
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
+  // Restore scroll position when returning from a session/run detail page.
+  useScrollMemory('status', !!data);
+
   if (!data) return html`<div class="empty">Loading...</div>`;
-  if (!data.agents.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
+  if (!data.agents.length && !(data.archived || []).length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
   const agents = agentId ? data.agents.filter(a => a.agent_id === agentId) : data.agents;
+
+  // Group agent tiles by project (service.namespace). Agents whose telemetry
+  // carried no namespace fall under "Ungrouped".
+  const UNGROUPED = ' ungrouped';
+  const groups = {};
+  for (const a of agents) {
+    const key = a.namespace || UNGROUPED;
+    (groups[key] = groups[key] || []).push(a);
+  }
+  const groupKeys = Object.keys(groups).sort((x, y) =>
+    x === UNGROUPED ? 1 : y === UNGROUPED ? -1 : x.localeCompare(y));
+  // Only show project headers when at least one agent has a real namespace.
+  const showHeadings = groupKeys.some(k => k !== UNGROUPED);
+
+  const archived = data.archived || [];
+  // Per-group count of current sessions hidden by the per-agent tile cap.
+  // `overflow` is duplicated across an agent's tiles, so dedupe by agent_id.
+  const groupOverflow = (key) => {
+    const seen = {};
+    let total = 0;
+    for (const a of groups[key]) {
+      if (a.overflow && !seen[a.agent_id]) { seen[a.agent_id] = 1; total += a.overflow; }
+    }
+    return total;
+  };
+
+  // Cards-view tile. The whole card is clickable through to the session detail
+  // (or traces when there's no session_id yet). Cost goes through the same
+  // fmtPerItemCost(framing) path as the list view.
+  const agentCard = (a) => html`
+        <div class="card clickable" onClick=${() => { location.hash = a.session_id ? '#/sessions/' + a.session_id : '#/traces'; }}>
+          <div class="card-header">
+            <span class="status-dot ${a.status}"></span>
+            ${a.label || a.agent_id}
+            <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
+          </div>
+          ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
+          ${a.session_id ? html`<div class="card-row"><span class="label">Session</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.session_id.slice(0, 8)}</span></div>` : null}
+          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
+          <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
+          <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
+          ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
+          ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
+          ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
+          ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
+        </div>`;
 
   return html`
     <div class="page-title">Status</div>
@@ -1610,28 +2092,36 @@ function StatusView({ params }) {
     </div>
     ${viewMode === 'list'
       ? StatusListTable({ agents, framing: data.framing })
-      : html`<div class="cards">
-      ${agents.map(a => html`
-        <div class="card">
-          <div class="card-header">
-            <span class="status-dot ${a.status}"></span>
-            ${a.agent_id}
-            <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
-          </div>
-          <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
-          <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
-          <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
-          ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
-          ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
-          ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
-          ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
-          <div class="card-links">
-            <a href=${'#/cost?agent_id=' + encodeURIComponent(a.agent_id)}>View cost →</a>
-            <a href=${'#/traces?agent_id=' + encodeURIComponent(a.agent_id)}>View traces →</a>
-          </div>
-        </div>
-      `)}
-    </div>`}
+      : html`
+    ${groupKeys.map(key => html`
+      ${(showHeadings || groupOverflow(key) > 0) ? html`
+        <div style="display:flex;align-items:baseline;gap:10px;margin:18px 0 10px;font-family:'Geist Mono',monospace">
+          <span style="font-size:13px;font-weight:600;color:var(--text)">${key === UNGROUPED ? 'Ungrouped' : key}</span>
+          <span style="font-size:12px;color:var(--text-dim)">${groups[key].length} session${groups[key].length > 1 ? 's' : ''} · ${fmtCost(Object.values(groups[key].reduce((m, a) => (m[a.agent_id] = a.cost_today || 0, m), {})).reduce((s, c) => s + c, 0))} today${groupOverflow(key) > 0 ? ' · +' + groupOverflow(key) + ' more' : ''}</span>
+        </div>` : null}
+      <div class="cards">
+        ${groups[key].map(agentCard)}
+      </div>
+    `)}
+    ${archived.length > 0 ? html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Archived sessions</div>
+      <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Closed or stale terminals — no longer live</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Session</th><th>Project</th><th>Status</th><th>Last seen</th><th>Tokens</th><th>Cost</th></tr></thead>
+        <tbody>
+          ${archived.map(s => html`
+            <tr class=${s.session_id ? 'clickable' : ''} onClick=${() => { if (s.session_id) location.hash = '#/sessions/' + s.session_id; }}>
+              <td class="mono">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')}</td>
+              <td>${s.namespace || '-'}</td>
+              <td><span class="status-dot ${s.status}" style="margin-right:5px"></span><span class="badge badge-${s.status}">${s.status}</span></td>
+              <td>${fmtAgo(s.last_span_time || s.started_at)}</td>
+              <td>${fmtTokens(s.input_tokens)} in / ${fmtTokens(s.output_tokens)} out</td>
+              <td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    ` : null}`}
     ${alerts.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>
@@ -1651,6 +2141,881 @@ function StatusView({ params }) {
 }
 
 // ============================
+// Session Detail View
+// ============================
+function SubagentBlock({ subagent }) {
+  const [open, setOpen] = useState(false);
+  const name = subagent.name || ('agent ' + (subagent.agent_id || '').slice(0, 8));
+  const steps = subagent.steps || [];
+  const count = subagent.step_count != null ? subagent.step_count : steps.length;
+  const status = subagent.is_error ? 'error' : 'ok';
+  // A capped/cycle ref has no expandable story — show a dim note instead.
+  const capped = subagent.depth_capped || subagent.budget_capped || subagent.cycle;
+  const cappedNote = subagent.cycle ? '… already shown above (cycle) …'
+    : subagent.depth_capped ? '… deeper subagents omitted (depth cap) …'
+    : subagent.budget_capped ? '… deeper subagents omitted (size cap) …'
+    : null;
+  return html`
+    <div class="story-subagent">
+      <div class=${'story-subagent-head' + (status === 'error' ? ' error' : '')}
+           onClick=${() => !capped && setOpen(o => !o)}
+           style=${capped ? 'cursor:default' : 'cursor:pointer'}>
+        <span class="story-subagent-caret">${capped ? '·' : (open ? '▾' : '▸')}</span>
+        <span class="story-subagent-label">subagent: ${name}</span>
+        ${!capped ? html`<span class="story-subagent-meta">${count} step${count === 1 ? '' : 's'} · ${status === 'error' ? '✗' : '✓'}</span>` : null}
+      </div>
+      ${cappedNote ? html`<div class="story-omitted">${cappedNote}</div>` : null}
+      ${(open && !capped) ? html`
+        <div class="story-subagent-body">
+          ${subagent.task ? html`
+            <div class="story-callout" style="margin-bottom:8px">
+              <div class="story-callout-label">Task</div>
+              <div class="story-callout-body">${subagent.task}</div>
+            </div>` : null}
+          <div class="story-steps">${renderTimelineSteps(steps)}</div>
+          ${subagent.outcome ? html`
+            <div class="story-callout" style="margin-top:8px">
+              <div class="story-callout-label">Outcome</div>
+              <div class="story-callout-body">${subagent.outcome}</div>
+            </div>` : null}
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
+// First line of the narration (for the collapsed dense row).
+function firstLine(text) {
+  if (!text) return '';
+  const nl = text.indexOf('\n');
+  return nl === -1 ? text : text.slice(0, nl);
+}
+
+// Render a step list NEWEST-FIRST (data is canonical oldest-first; we reverse in
+// render only). prevModel is the chronologically-previous step's model so the
+// "model changed" dim tag tracks the real timeline, not the reversed order.
+function renderTimelineSteps(steps) {
+  // Newest ask on top (like an inbox), but each ask reads top-down in order —
+  // the prompt, then its responses chronologically — so input/output pair the
+  // way the terminal shows them.
+  const groups = [];
+  let cur = null;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    if (cur === null || step.ask != null) {
+      cur = { ask: step.ask != null ? step.ask : null, items: [] };
+      groups.push(cur);
+    }
+    cur.items.push({ step, i });
+  }
+  const out = [];
+  for (let g = groups.length - 1; g >= 0; g--) {
+    const grp = groups[g];
+    if (grp.ask != null) out.push(html`<${StoryAsk} prompt=${grp.ask} key=${'ask' + g} />`);
+    let prevModel = null;
+    for (const { step, i } of grp.items) {
+      if (step.omitted != null) {
+        out.push(html`<div class="story-omitted" key=${'om' + i}>… ${step.omitted} step${step.omitted === 1 ? '' : 's'} omitted …</div>`);
+      } else {
+        out.push(html`<${StoryStep} step=${step} prevModel=${prevModel} key=${step.n} />`);
+        prevModel = step.model || prevModel;
+      }
+    }
+  }
+  return out;
+}
+
+// A user prompt in the Timeline — the human ask that began an exchange, shown
+// in a distinct color (no box/label) so it reads as a section marker.
+function StoryAsk({ prompt }) {
+  const [expanded, setExpanded] = useState(false);
+  const long = prompt.length > 200;
+  const short = long ? prompt.slice(0, 200) + '…' : prompt;
+  return html`<div class=${'story-ask' + (long ? ' clickable' : '')} onClick=${long ? (() => setExpanded(e => !e)) : null}>${expanded ? prompt : short}</div>`;
+}
+
+function StoryStep({ step, prevModel }) {
+  const [expanded, setExpanded] = useState(false);
+  const text = step.text || '';
+  const tools = step.tools || [];
+  const subagents = step.subagents || (step.subagent ? [step.subagent] : []);
+  // Show the model only when it CHANGES from the previous step (noise on every row otherwise).
+  const showModel = step.model && step.model !== prevModel;
+  const preview = firstLine(text);
+  // When a step is a pure tool action (no narration), surface the tool's
+  // command/path inline instead of a dim "(no narration)" — the thing you'd
+  // otherwise have to expand to see. Joins each tool's label (or its name when
+  // unlabelled); the inline chips still carry the tool name + ok/error status.
+  const toolLine = !preview && tools.length
+    ? tools.map(t => (t.label || t.name || '').trim()).filter(Boolean).join(' · ')
+    : '';
+  const hasMore = subagents.length > 0 || tools.length > 0 || (text && (step.text_truncated || text.indexOf('\n') !== -1 || text.length > preview.length));
+  return html`
+    <div class=${'story-step' + (step.is_error ? ' error' : '')}>
+      <div class="story-step-row" onClick=${() => setExpanded(e => !e)}>
+        <span class="story-caret">${hasMore ? (expanded ? '▾' : '▸') : ''}</span>
+        <span class="story-step-n">#${step.n}</span>
+        ${step.ts ? html`<span class="story-step-time" title=${step.ts}>${fmtAgo(step.ts)}</span>` : null}
+        ${step.is_retry ? html`<span class="story-retry" title="retry">↻</span>` : null}
+        ${tools.map(t => html`
+          <span class=${'story-chip inline' + (t.status === 'error' ? ' error' : '')} title=${t.label || t.name}>
+            <span class="story-chip-name">${t.name}</span>
+            <span class=${'story-chip-status ' + t.status}>${t.status === 'error' ? '✗' : '✓'}</span>
+          </span>
+        `)}
+        ${showModel ? html`<span class="story-model-tag" title=${step.model}>${step.model}</span>` : null}
+        <span class=${'story-line' + (preview ? '' : (toolLine ? ' tool' : ' dim'))} title=${toolLine || ''}>${preview || toolLine || '(no narration)'}</span>
+      </div>
+      ${expanded ? html`
+        <div class="story-step-body">
+          ${text ? html`<div class="story-text">${text}</div>` : null}
+          ${tools.length > 0 ? html`
+            <div class="story-chips" style="margin-top:8px">
+              ${tools.map(t => html`
+                <span class=${'story-chip' + (t.status === 'error' ? ' error' : '')} title=${t.label || t.name}>
+                  <span class="story-chip-name">${t.name}</span>
+                  ${t.label ? html`<span class="story-chip-label">${t.label}</span>` : null}
+                  <span class=${'story-chip-status ' + t.status}>${t.status === 'error' ? '✗' : '✓'}</span>
+                </span>
+              `)}
+            </div>
+          ` : null}
+          ${tools.filter(t => t.error).map(t => html`
+            <div class="story-error"><span class="story-error-tool">${t.name} failed</span>${t.error}</div>
+          `)}
+          ${subagents.map((sa, i) => html`<${SubagentBlock} subagent=${sa} key=${'sa' + (sa.agent_id || i)} />`)}
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
+function StorySection({ sessionId }) {
+  const [story, setStory] = useState(null);
+
+  // Poll like every other view on this route so a live session's Timeline
+  // updates in place. The /story endpoint re-parses the on-disk transcript on
+  // each call, so new steps appear without remounting (switching tabs / leaving
+  // and returning to the route). On a transient poll failure, keep the last
+  // good Timeline — only fall back to the unavailable state on the first load.
+  const load = useCallback(() => {
+    api('/sessions/' + sessionId + '/story')
+      .then(d => setStory(d))
+      .catch(() => setStory(prev => prev || { available: false }));
+  }, [sessionId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  if (!story) return null;
+
+  if (!story.available) {
+    return html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
+      <div class="story-unavailable">No transcript on disk — Timeline is available for Claude Code sessions.</div>
+    `;
+  }
+
+  const steps = story.steps || [];
+
+  // No pinned Task/Outcome summary: in a long-running session the first prompt
+  // and last narration go stale (new prompts get sent, work continues). The
+  // newest ask on top; within each ask the steps read in order (prompt first).
+  return html`
+    <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest ask first — each reads in order${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
+
+    ${steps.length === 0
+      ? html`<div class="story-unavailable">Transcript found but no narrated steps.</div>`
+      : html`<div class="story-steps">${renderTimelineSteps(steps)}</div>`}
+  `;
+}
+
+// One subagent node in an ask's subtree. Collapsed by default; expands to show
+// its own task/outcome + files. Indent is per-row padding off node.depth so
+// recursive DOM nesting doesn't compound the offset.
+function WorkMapNode({ node }) {
+  const a = node.activity || {};
+  const files = a.files || [];
+  const hasDetail = !!(node.task || node.outcome || files.length);
+  const [open, setOpen] = useState(false);
+  const flagged = node.flags && node.flags.length;
+  const pad = (node.depth || 1) * 16;
+  const model = (node.model || '').replace('claude-', '');
+  return html`
+    <div class="wm-node">
+      <div class="wm-row ${flagged ? 'flagged' : ''} ${hasDetail ? 'clickable' : ''}" style=${'padding-left:' + (pad + 10) + 'px'} onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
+        <span class="wm-dot ${node.capped ? 'capped' : ''}"></span>
+        <span class="wm-name">${node.name}</span>
+        ${model ? html`<span class="wm-model">${model}</span>` : null}
+        <span class="wm-summary">${node.summary}</span>
+        <span class="wm-spacer"></span>
+        ${node.tokens != null ? html`<span class="wm-tokens" title=${node.cost_usd != null ? ('est. ' + fmtCost(node.cost_usd)) : ''}>${fmtTokens(node.tokens)} tok</span>` : null}
+        ${flagged ? node.flags.map(f => html`<span class="wm-flag">${f.replace(/_/g, '-')}</span>`) : null}
+      </div>
+      ${open && hasDetail ? html`
+        <div class="wm-detail" style=${'padding-left:' + (pad + 26) + 'px'}>
+          ${node.task ? html`<div><span class="k">task</span>${node.task}</div>` : null}
+          ${node.outcome ? html`<div><span class="k">outcome</span>${node.outcome}</div>` : null}
+          ${files.length ? html`<div><span class="k">files</span>${files.map((f, i) => html`<span title=${f}>${shortPath(f)}</span>${i < files.length - 1 ? ', ' : ''}`)}${a.file_count > files.length ? ' +' + (a.file_count - files.length) + ' more' : ''}</div>` : null}
+        </div>
+      ` : null}
+      ${(node.children || []).map(c => html`<${WorkMapNode} node=${c} />`)}
+    </div>
+  `;
+}
+
+// Deterministic status for an ask: from flags/errors/activity only — never an
+// inferred intent. Drives the icon + left-border color.
+function askStatus(ask) {
+  const a = ask.activity || {};
+  const subCount = ask.subagent_count != null ? ask.subagent_count : (ask.subagents || []).length;
+  const hasWork = subCount > 0 || a.file_count > 0 || a.search_count > 0 || a.bash_count > 0;
+  if (ask.flagged) return { cls: 'flag', icon: '⚠', hasWork, subCount };
+  if (a.error_count) return { cls: 'err', icon: '✗', hasWork, subCount };
+  if (hasWork) return { cls: 'work', icon: '●', hasWork, subCount };
+  return { cls: 'idle', icon: '·', hasWork, subCount };
+}
+
+// One ask (exchange) as a milestone on the storyline spine: a status dot sits on
+// the spine, the bold line is WHAT THE AGENT DID (its own outcome narration), the
+// dim line is your prompt as context, and fan-outs list inline in a branch block
+// (top 5 always visible). No-work chat asks recede to a single dim line. The
+// deeper subagent subtree stays expandable.
+// How many phases of a long ask to show before the "show all" toggle.
+const PHASE_PREVIEW = 6;
+
+// "Bash, Read ×3" — a phase's tool tally, ordered by first use.
+function phaseTools(p) {
+  return (p.tools || []).map(t => t.name + (t.count > 1 ? ' ×' + t.count : '')).join(', ');
+}
+
+function WorkMapAsk({ ask, sessionSubs, distilled }) {
+  const a = ask.activity || {};
+  const files = a.files || [];
+  const subs = ask.subagents || [];
+  const { cls, icon, hasWork, subCount } = askStatus(ask);
+  // A per-ask fan-out can never exceed the session total; ask.subagent_count is
+  // an upstream estimate that can drift slightly above it, so clamp for display.
+  const subShown = sessionSubs != null ? Math.min(subCount, sessionSubs) : subCount;
+  // The inline branch lists the top 5 subagents; deeper subtree expands on click.
+  const branchTop = subs.slice(0, 5);
+  const branchMore = (ask.subagent_count != null ? ask.subagent_count : subs.length) - branchTop.length;
+  const hasSubtree = subs.some(s => (s.children || []).length);
+  const hasDetail = !!(files.length || hasSubtree || (ask.outcome && ask.outcome.length > 120));
+  // Phases: the descriptive arc within a long ask (Task E). Server returns the
+  // agent's own narrated phases (capped head+tail with an {omitted} marker).
+  // Show a short preview by default; expand to the full arc on click.
+  const phases = ask.phases || [];
+  const [phasesOpen, setPhasesOpen] = useState(false);
+  // "show all N phases" counts the phases the toggle actually reveals (the
+  // real phase rows in the payload); any {omitted} middle is surfaced by its
+  // own marker, not promised by this label.
+  const phaseTotalLabel = phases.filter(p => !p.omitted).length;
+  const [open, setOpen] = useState(false);
+  const prompt = (ask.prompt || '(no prompt)').replace(/\s+/g, ' ');
+  const promptShort = prompt.length > 100 ? prompt.slice(0, 100) + '…' : prompt;
+  // Prefer an LLM-distilled title when present (Distill titles button); else the
+  // deterministic first sentence of the outcome.
+  const headline = (distilled && distilled[String(ask.n)])
+    || firstSentence(ask.outcome || ask.summary || '');
+  const tokenTag = ask.tokens != null
+    ? html`<span class="wm-tokens" title=${ask.cost_usd != null ? ('est. ' + fmtCost(ask.cost_usd)) : ''}>${fmtTokens(ask.tokens)} tok</span>`
+    : null;
+
+  // Conversational ask (no work): one compact dim line on the spine.
+  if (!hasWork) {
+    return html`
+      <div class="wm-milestone idle">
+        <span class="wm-dot-spine idle">·</span>
+        <div class="wm-milestone-head ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
+          <span class="wm-chat" title=${prompt}>you: ${promptShort}${headline ? ' — ' + headline : ''}</span>
+          <span class="wm-ask-meta">${tokenTag}</span>
+        </div>
+        ${open && hasDetail ? html`<div class="wm-ask-body"><div class="wm-detail"><span class="k">full</span>${ask.outcome}</div></div>` : null}
+      </div>
+    `;
+  }
+
+  const outcomeShort = headline || '(did work — no narration)';
+  return html`
+    <div class="wm-milestone ${cls}">
+      <span class="wm-dot-spine ${cls}">${icon}</span>
+      <div class="wm-milestone-head ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
+        <span class="wm-ask-did" title=${ask.outcome || ''}>${outcomeShort}</span>
+        <span class="wm-ask-meta">
+          ${tokenTag}
+          ${subCount ? html`<span class="wm-subs">${subShown} sub${subShown === 1 ? '' : 's'}</span>` : null}
+          ${ask.flagged ? html`<span class="wm-flag">${ask.flagged} flagged</span>` : null}
+          ${hasDetail ? html`<span class="wm-ask-caret">${open ? '▾' : '▸'}</span>` : null}
+        </span>
+      </div>
+      <div class="wm-ask-ctx" title=${prompt}>you: ${promptShort}</div>
+      ${phases.length ? html`
+        <div class="wm-phases">
+          ${(phasesOpen ? phases : phases.slice(0, PHASE_PREVIEW)).map(p => p.omitted
+            ? html`<div class="wm-phase wm-phase-omitted">⋯ ${p.omitted} more phase${p.omitted === 1 ? '' : 's'}</div>`
+            : html`<div class="wm-phase"><span class="wm-phase-title" title=${p.title}>↳ ${p.title || '(tool step)'}</span>${p.tool_count ? html`<span class="wm-phase-tools">${phaseTools(p)}</span>` : null}${p.error_count ? html`<span class="wm-phase-err" title=${p.error_count + ' failed'}>${p.error_count}✗</span>` : null}</div>`)}
+          ${phases.length > PHASE_PREVIEW ? html`<div class="wm-phase wm-phase-toggle" onClick=${() => setPhasesOpen(o => !o)}>${phasesOpen ? '▾ fewer phases' : '▸ show all ' + phaseTotalLabel + ' phases'}</div>` : null}
+        </div>
+      ` : null}
+      ${branchTop.length ? html`
+        <div class="wm-branch">
+          ${branchTop.map((s, i) => {
+            const flagged = s.flags && s.flags.length;
+            const lead = i === branchTop.length - 1 && branchMore <= 0 ? '└ ' : '├ ';
+            return html`<div class="wm-branch-row ${flagged ? 'flagged' : ''}"><span>${lead}${flagged ? '⚠ ' : ''}${s.name}</span>${s.tokens != null ? html`<span class="wm-branch-tok">${fmtTokens(s.tokens)} tok</span>` : null}</div>`;
+          })}
+          ${branchMore > 0 ? html`<div class="wm-branch-row"><span class="wm-branch-more" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>└ +${branchMore} more</span></div>` : null}
+        </div>
+      ` : null}
+      ${open && hasDetail ? html`
+        <div class="wm-ask-body">
+          ${ask.outcome && ask.outcome.length > 160 ? html`<div class="wm-detail"><span class="k">outcome</span>${ask.outcome}</div>` : null}
+          ${files.length ? html`<div class="wm-detail"><span class="k">files</span>${files.map((f, i) => html`<span title=${f}>${shortPath(f)}</span>${i < files.length - 1 ? ', ' : ''}`)}${a.file_count > files.length ? ' +' + (a.file_count - files.length) + ' more' : ''}</div>` : null}
+          ${subs.length ? html`<div class="wm-tree">${subs.map(c => html`<${WorkMapNode} node=${c} />`)}</div>` : null}
+        </div>
+      ` : null}
+    </div>
+  `;
+}
+
+// A run of 2+ consecutive no-work "chat" asks, collapsed to a single divider so
+// the storyline isn't drowned by quick exchanges. Sits as a dim milestone on the
+// spine; click to expand into the individual chat-ask milestones. (A lone chat
+// ask renders as a normal WorkMapAsk.)
+function WorkMapChatRun({ asks, sessionSubs, distilled }) {
+  const [open, setOpen] = useState(false);
+  if (open) {
+    return html`
+      <${Fragment}>
+        <div class="wm-milestone idle">
+          <span class="wm-dot-spine idle">·</span>
+          <div class="wm-chat-divider" onClick=${() => setOpen(false)}>▾ hide ${asks.length} quick exchanges</div>
+        </div>
+        ${asks.map(ask => html`<${WorkMapAsk} ask=${ask} sessionSubs=${sessionSubs} distilled=${distilled} />`)}
+      </${Fragment}>
+    `;
+  }
+  return html`
+    <div class="wm-milestone idle">
+      <span class="wm-dot-spine idle">·</span>
+      <div class="wm-chat-divider" onClick=${() => setOpen(true)}>⋯ ${asks.length} quick exchanges</div>
+    </div>
+  `;
+}
+
+// Group a chronological asks list into render segments: each work ask stays on
+// its own; a run of 2+ consecutive no-work chat asks collapses into one
+// WorkMapChatRun; a lone chat ask renders as a normal WorkMapAsk.
+function groupAsks(asks) {
+  const out = [];
+  let run = [];
+  const flushRun = () => {
+    if (run.length >= 2) out.push({ kind: 'chat-run', asks: run });
+    else run.forEach(a => out.push({ kind: 'ask', ask: a }));
+    run = [];
+  };
+  asks.forEach(ask => {
+    if (askStatus(ask).hasWork) { flushRun(); out.push({ kind: 'ask', ask }); }
+    else run.push(ask);
+  });
+  flushRun();
+  return out;
+}
+
+// Glyph for a worker session's status in the run card (descriptive only).
+function runWorkerGlyph(status) {
+  if (status === 'active') return '⏳';
+  if (status === 'closed' || status === 'completed') return '✓';
+  return '·';  // idle / stale
+}
+
+// Launcher -> run breadcrumb. `run` is the workmap's `launched_run` block:
+// { run_id, source, session_count, total_cost_usd, tool_call_count,
+//   sessions: [{session_id, label, status, is_self}] }. `source: "inferred"`
+// is marked as a best-effort guess (honesty — it was scraped from the
+// transcript, not declared by the harness).
+function WorkMapRunCard({ run }) {
+  if (!run || !run.run_id) return null;
+  const inferred = run.source === 'inferred';
+  const count = run.session_count || (run.sessions ? run.sessions.length : 0);
+  const goRun = () => { location.hash = '#/runs/' + run.run_id; };
+  return html`
+    <div class="wm-run-card ${inferred ? 'inferred' : ''}">
+      <div class="wm-run-head">
+        <div class="wm-run-title">↳ Launched run <span class="wm-run-id">${run.run_id}</span>${inferred ? html`<span class="wm-run-src" title="Scraped from this session's transcript and matched to a real run — best-effort, not declared by the harness.">inferred</span>` : null}</div>
+        <span class="wm-run-view" onClick=${goRun}>View run →</span>
+      </div>
+      <div class="wm-run-meta">${count} worker${count === 1 ? '' : 's'} · ${fmtCost(run.total_cost_usd)} · ${run.tool_call_count || 0} tool calls</div>
+      <div class="wm-run-workers">
+        ${(run.sessions || []).map(s => s.is_self
+          ? html`<span class="wm-run-chip self" title="this session">${runWorkerGlyph(s.status)} ${s.label || s.session_id.slice(0, 8)}</span>`
+          : html`<span class="wm-run-chip" title=${'Open ' + s.session_id} onClick=${() => { location.hash = '#/sessions/' + s.session_id; }}>${runWorkerGlyph(s.status)} ${s.label || s.session_id.slice(0, 8)}</span>`)}
+      </div>
+    </div>
+  `;
+}
+
+function WorkMapSection({ sessionId }) {
+  const [map, setMap] = useState(null);
+  // On-demand LLM-distilled titles (the Distill titles button). `distilled` is
+  // the applied titles map (or null = deterministic titles in use). `distillState`
+  // drives the button + note: idle | running | applied | nothing | failed.
+  const [distilled, setDistilled] = useState(null);
+  const [distillState, setDistillState] = useState('idle');
+  const [distillFlash, setDistillFlash] = useState(false);
+
+  // Poll like the Timeline so a live session's map fills in as it runs. On a
+  // transient failure keep the last good map; only fall back to unavailable on
+  // the first load.
+  const load = useCallback(() => {
+    api('/sessions/' + sessionId + '/workmap')
+      .then(d => setMap(d))
+      .catch(() => setMap(prev => prev || { available: false }));
+  }, [sessionId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  // Auto-apply an already-distilled session on load (cache-only — never calls
+  // claude, zero cost), so a press sticks across reloads/navigation.
+  useEffect(() => {
+    let cancelled = false;
+    setDistilled(null); setDistillState('idle');
+    api('/sessions/' + sessionId + '/distill', { cached_only: 1 })
+      .then(r => {
+        if (cancelled) return;
+        if (r && r.titles && Object.keys(r.titles).length) {
+          setDistilled(r.titles); setDistillState('applied');
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
+  // Distill crisp titles via the user's local claude CLI (~10-40s; cached).
+  // Distinguish a real failure from "nothing long enough to distill" so the note
+  // never lies. A successful apply briefly flashes the headlines.
+  const distill = useCallback(() => {
+    setDistillState('running');
+    api('/sessions/' + sessionId + '/distill')
+      .then(r => {
+        const titles = (r && r.titles) || {};
+        if (Object.keys(titles).length) {
+          setDistilled(titles); setDistillState('applied');
+          setDistillFlash(true); setTimeout(() => setDistillFlash(false), 1300);
+        } else if (r && r.candidate_count === 0) {
+          setDistillState('nothing');
+        } else {
+          setDistillState('failed');
+        }
+      })
+      .catch(() => setDistillState('failed'));
+  }, [sessionId]);
+
+  if (!map) return null;
+
+  if (!map.available) {
+    return html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
+      <div class="story-unavailable">No transcript on disk — the work map is available for Claude Code sessions.</div>
+    `;
+  }
+
+  // The API returns asks newest-first; the Map reads as a STORY, so show it
+  // chronologically (oldest first) — distinct from the Timeline's live tail.
+  const asks = (map.asks || []).slice().reverse();
+  const n = map.ask_count != null ? map.ask_count : asks.length;
+  const sub = map.subagent_count || 0;
+  const flagged = map.flagged || 0;
+  const meta = n + ' ask' + (n === 1 ? '' : 's')
+    + ' · ' + sub + ' subagent' + (sub === 1 ? '' : 's')
+    + (flagged ? ' · ' + flagged + ' flagged for right-sizing' : '')
+    + (map.session_tokens != null ? ' · ' + fmtTokens(map.session_tokens) + ' tok total' : '');
+
+  // 5-second read: totals + the biggest fan-outs (asks that spawned the most
+  // subagents). Sort a copy by subagent_count desc; keep the top 2 with any subs.
+  const topFanouts = asks.slice()
+    .sort((x, y) => askStatus(y).subCount - askStatus(x).subCount)
+    .filter(a => askStatus(a).subCount > 0)
+    .slice(0, 2);
+
+  // Note under the button — distinct states so it never conflates failure with
+  // "nothing to distill".
+  const distillNote =
+    distillState === 'running' ? html`<span class="wm-distill-note">✨ distilling with your local Claude… (~10s)</span>`
+    : distillState === 'applied' ? html`<span class="wm-distill-note">titles distilled by your local Claude · haiku · cached</span>`
+    : distillState === 'nothing' ? html`<span class="wm-distill-note">titles already concise — nothing to distill</span>`
+    : distillState === 'failed' ? html`<span class="wm-distill-note">couldn't reach your local claude — showing raw titles</span>`
+    : null;
+  const distillBusy = distillState === 'running';
+  const distillBtnLabel = distillBusy ? '✨ Distilling…'
+    : distillState === 'applied' ? '✨ Distilled ✓' : '✨ Distill titles';
+
+  return html`
+    <div class="wm-map-head">
+      <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
+      <button class="btn wm-distill-btn" onClick=${distill} disabled=${distillBusy} title="Crunch each headline into a crisp title via your local Claude (cached).">
+        ${distillBtnLabel}
+      </button>
+    </div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first) — bold line is what the agent did, dim line is your prompt. ${meta}.${distillNote ? html` ${distillNote}` : null}</div>
+    ${map.launched_run ? html`<${WorkMapRunCard} run=${map.launched_run} />` : null}
+    ${asks.length === 0 ? null : html`
+      <div class="wm-summary-band">
+        <div class="wm-summary-stats">
+          <span>${map.session_tokens != null ? fmtTokens(map.session_tokens) : '-'} tok</span>
+          <span>${n} ask${n === 1 ? '' : 's'}</span>
+          <span>${sub} subagent${sub === 1 ? '' : 's'}</span>
+          <span>${flagged} flagged</span>
+        </div>
+        ${topFanouts.length ? html`<div class="wm-summary-fanouts">
+          ${topFanouts.map(a => html`<div class="wm-summary-fanout" title=${a.outcome || ''}>${Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)}×: ${firstSentence(a.outcome || a.summary || '') || '(did work — no narration)'}</div>`)}
+        </div>` : null}
+      </div>
+    `}
+    <div class="wm-legend"><span><span style="color:var(--brand)">●</span> did work</span><span><span style="color:#f5a623">⚠</span> flagged</span><span><span style="color:var(--error)">✗</span> error</span><span>· chat</span></div>
+    ${asks.length === 0
+      ? html`<div class="story-unavailable">Transcript found but no asks.</div>`
+      : html`<div class="wm-spine ${distillFlash ? 'wm-flash' : ''}">${groupAsks(asks).map(seg => seg.kind === 'chat-run'
+          ? html`<${WorkMapChatRun} asks=${seg.asks} sessionSubs=${sub} distilled=${distilled} />`
+          : html`<${WorkMapAsk} ask=${seg.ask} sessionSubs=${sub} distilled=${distilled} />`)}</div>`}
+    ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not attributed to an ask (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
+    <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Each ask is one thing you asked; structure + activity from the transcript, tokens from spans. Descriptive only — tj reports what happened, you judge the approach.</div>
+  `;
+}
+
+function SessionDetailView({ sessionId }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [tab, setTab] = useState('map');
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api('/sessions/' + sessionId);
+      setData(d);
+      setError(null);
+    } catch (e) {
+      setError(e && e.message ? e.message : 'Failed to load session');
+    }
+  }, [sessionId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+
+  const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/status'}>← Back to status</button>`;
+
+  if (error) return html`<div>${backBtn}<div class="empty">Session not found.<code>${sessionId}</code></div></div>`;
+  if (!data) return html`<div>${backBtn}<div class="empty">Loading session...</div></div>`;
+
+  const s = data.session;
+  const tools = data.tools || [];
+  const alerts = data.alerts || [];
+  const traces = data.traces || [];
+  const drift = data.drift;
+  const modelMix = data.model_mix || [];
+  const contextSeries = data.context_series || [];
+  const subagents = data.subagents || { rows: [], total: 0, cost_usd: 0, tokens: 0, flagged: 0 };
+  const ctxMax = contextSeries.reduce((m, p) => Math.max(m, p.input_tokens || 0), 0);
+  const isSub = s.pricing_mode === 'subscription';
+  const isLocal = s.pricing_mode === 'local';
+  // Plan-tier framing for this session's cost cells. The /sessions/<id> payload
+  // may not carry a framing block yet, in which case fmtFramedDollar falls back
+  // to raw fmtCost — never re-derive the suppression rules in JS (#191).
+  const framing = data.framing || null;
+  const title = s.label || s.agent_id;
+
+  return html`
+    ${backBtn}
+    <div style="display:flex;align-items:center;gap:16px">
+      <div class="page-title" style="margin-bottom:0">${title}</div>
+      ${s.status !== 'active' && s.session_id ? html`<div style="margin-left:auto"><${RestoreButton} sessionId=${s.session_id} /></div>` : null}
+    </div>
+    <div style="font-size:12px;color:var(--text-dim);margin:6px 0 16px;font-family:'Geist Mono',monospace">Session ${s.session_id}</div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">
+          <span class="status-dot ${s.status}"></span>
+          Overview
+          <span class="badge badge-${s.status}" style="margin-left:auto">${s.status}</span>
+        </div>
+        <div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${s.agent_id}</span></div>
+        ${s.namespace ? html`<div class="card-row"><span class="label">Project</span><span class="value">${s.namespace}</span></div>` : null}
+        ${s.run_id ? html`<div class="card-row"><span class="label">Run</span><span class="value clickable" onClick=${() => location.hash = '#/runs/' + s.run_id} title=${'Run ' + s.run_id} style="cursor:pointer;color:var(--brand);font-family:'Geist Mono',monospace;font-size:12px">${s.run_id.slice(0, 12)} →</span></div>` : null}
+        <div class="card-row"><span class="label">Plan</span><span class="value">${s.plan_tier}</span></div>
+        ${s.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed</span><span class="value">${fmtDurLong(s.duration_seconds * 1000)}</span></div>` : null}
+        ${s.started_at ? html`<div class="card-row"><span class="label">Started</span><span class="value">${fmtAgo(s.started_at)}</span></div>` : null}
+        ${s.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(s.last_span_time)}</span></div>` : null}
+        <div class="card-row"><span class="label">Conversations</span><span class="value">${s.conversation_count}</span></div>
+        <div class="card-row"><span class="label">LLM calls</span><span class="value">${data.turn_count || 0}</span></div>
+        ${s.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${s.active_alerts} active</span></div>` : null}
+      </div>
+
+      <div class="card">
+        <div class="card-header">Cost & Tokens</div>
+        ${isLocal
+          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
+          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">This session's estimated cost from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtFramedDollar(s.total_cost_usd, framing)}</span></div>`}
+        <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(s.input_tokens)}</span></div>
+        <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(s.output_tokens)}</span></div>
+        ${((s.cache_tokens || 0) + (s.cache_write_tokens || 0)) ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens((s.cache_tokens || 0) + (s.cache_write_tokens || 0))}</span></div>` : null}
+        <div class="card-row"><span class="label">Tool calls</span><span class="value">${s.tool_call_count}${s.error_count ? ' (' + s.error_count + ' failed)' : ''}</span></div>
+      </div>
+    </div>
+
+    <div class="tab-bar" role="tablist">
+      <button class="tab ${tab === 'map' ? 'active' : ''}" role="tab" aria-selected=${tab === 'map'} onClick=${() => setTab('map')}>Map</button>
+      <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Timeline</button>
+      <button class="tab ${tab === 'models' ? 'active' : ''}" role="tab" aria-selected=${tab === 'models'} onClick=${() => setTab('models')}>Models & context</button>
+      ${subagents.total > 0 ? html`<button class="tab ${tab === 'subagents' ? 'active' : ''}" role="tab" aria-selected=${tab === 'subagents'} onClick=${() => setTab('subagents')}>Subagents${subagents.flagged ? ' (' + subagents.flagged + ')' : ''}</button>` : null}
+      <button class="tab ${tab === 'alerts' ? 'active' : ''}" role="tab" aria-selected=${tab === 'alerts'} onClick=${() => setTab('alerts')}>Alerts</button>
+      <button class="tab ${tab === 'traces' ? 'active' : ''}" role="tab" aria-selected=${tab === 'traces'} onClick=${() => setTab('traces')}>Traces</button>
+    </div>
+
+    ${tab === 'map' ? html`<${WorkMapSection} sessionId=${sessionId} />` : null}
+
+    ${tab === 'story' ? html`<${StorySection} sessionId=${sessionId} />` : null}
+
+    ${tab === 'models' ? html`
+    ${(modelMix.length > 0 || contextSeries.length > 0) ? html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Models & context</div>
+      <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How this session split across models${data.turn_count ? ' · ' + data.turn_count + ' LLM call' + (data.turn_count === 1 ? '' : 's') : ''}</div>
+      ${modelMix.length > 0 ? html`
+        <div class="table-wrap"><table>
+          <thead><tr><th>Model</th><th>Calls</th><th>Input</th><th>Output</th><th>Cache</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th></tr></thead>
+          <tbody>
+            ${modelMix.map(m => html`
+              <tr>
+                <td class="mono">${m.model}</td>
+                <td>${m.calls}</td>
+                <td>${fmtTokens(m.input_tokens)}</td>
+                <td>${fmtTokens(m.output_tokens)}</td>
+                <td>${((m.cache_tokens || 0) + (m.cache_write_tokens || 0)) ? fmtTokens((m.cache_tokens || 0) + (m.cache_write_tokens || 0)) : '-'}</td>
+                <td>${fmtCost(m.cost_usd)}</td>
+              </tr>
+            `)}
+          </tbody>
+        </table></div>
+      ` : null}
+      ${contextSeries.length > 0 ? html`
+        <div style="margin-top:16px">
+          <div style="display:flex;align-items:flex-end;gap:2px;height:80px;padding:4px 0;border-bottom:1px solid var(--border);overflow:hidden">
+            ${contextSeries.map(p => html`
+              <div style=${'flex:1 1 0;min-width:1px;background:var(--brand);opacity:0.7;height:' + (ctxMax > 0 ? Math.max(2, Math.round((p.input_tokens / ctxMax) * 100)) : 2) + '%'} title=${fmtTokens(p.input_tokens) + ' input tokens' + (p.t ? ' · ' + fmtAgo(p.t) : '')}></div>
+            `)}
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-dim);margin-top:4px;font-family:'Geist Mono',monospace">
+            <span>0</span>
+            <span>peak ${fmtTokens(ctxMax)}</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-dim);margin-top:4px;font-family:'Geist Mono',monospace">Input (context) tokens per LLM call over the session.</div>
+        </div>
+      ` : html`<div style="font-size:12px;color:var(--text-dim);margin:-4px 0 12px;font-family:'Geist Mono',monospace">No LLM calls recorded.</div>`}
+    ` : null}
+
+    ${tools.length > 0 ? html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Tools used</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Tool</th><th>Calls</th><th>Failed</th></tr></thead>
+        <tbody>
+          ${tools.map(t => html`
+            <tr>
+              <td class="mono">${t.tool_name}</td>
+              <td>${t.count}</td>
+              <td>${t.error_count ? html`<span style="color:var(--error)">${t.error_count}</span>` : '0'}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    ` : null}
+    ` : null}
+
+    ${tab === 'subagents' ? html`
+    <div class="page-title" style="font-size:14px;margin-top:24px">Subagents</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">${subagents.total} subagent${subagents.total === 1 ? '' : 's'}${s.total_cost_usd > 0 ? ' · ' + Math.round(subagents.cost_usd / s.total_cost_usd * 100) + '% of session ' + (isSub ? 'implied value' : 'cost') : ''}${subagents.flagged ? ' · ' + subagents.flagged + ' flagged for right-sizing' : ''}</div>
+    ${subagents.rows.length > 0 ? html`
+      <div class="table-wrap"><table>
+        <thead><tr><th>Subagent</th><th>Model</th><th>Calls</th><th>Tools</th><th>Input</th><th>Cache</th><th>Output</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Right-sizing</th></tr></thead>
+        <tbody>
+          ${subagents.rows.map(r => html`
+            <tr style=${r.flags.length ? 'background:rgba(245,166,35,0.06)' : ''}>
+              <td class="mono">${r.sub_agent_id.slice(0, 12)}</td>
+              <td class="mono">${r.model}</td>
+              <td>${r.llm_calls}</td>
+              <td>${r.tool_calls}</td>
+              <td>${fmtTokens(r.input_tokens)}</td>
+              <td>${(r.cache_tokens + r.cache_write_tokens) ? fmtTokens(r.cache_tokens + r.cache_write_tokens) : '-'}</td>
+              <td>${fmtTokens(r.output_tokens)}</td>
+              <td>${fmtFramedDollar(r.cost_usd, framing)}</td>
+              <td>${r.flags.length ? r.flags.map(f => html`<span style="color:#f5a623;font-size:11px;white-space:nowrap;margin-right:6px">${f.replace(/_/g, '-')}</span>`) : html`<span style="color:var(--text-dim)">-</span>`}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Candidate-flagging heuristic, not a quality judgment — review before changing how subagents are dispatched.</div>
+    ` : html`<div class="empty">No subagents in this session.</div>`}
+    ` : null}
+
+    ${tab === 'alerts' ? html`
+    ${alerts.length > 0 ? html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Alerts</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Severity</th><th>Type</th><th>Title</th></tr></thead>
+        <tbody>
+          ${alerts.map(a => html`
+            <tr>
+              <td>${fmtAgo(a.fired_at)}</td>
+              <td><span class="badge badge-${a.severity}">${a.severity}</span></td>
+              <td>${friendlyAlertType(a.type)}</td>
+              <td>${a.title}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    ` : null}
+
+    <div class="page-title" style="font-size:14px;margin-top:24px">Behavioral drift</div>
+    ${drift ? html`
+      <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Baseline computed from ${drift.sessions_sampled} session${drift.sessions_sampled === 1 ? '' : 's'}${drift.computed_at ? ' · ' + fmtAgo(drift.computed_at) : ''}</div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Dimension</th><th>Baseline avg</th></tr></thead>
+        <tbody>
+          <tr><td>Input tokens</td><td>${drift.avg_input_tokens != null ? fmtTokens(Math.round(drift.avg_input_tokens)) : '-'}</td></tr>
+          <tr><td>Output tokens</td><td>${drift.avg_output_tokens != null ? fmtTokens(Math.round(drift.avg_output_tokens)) : '-'}</td></tr>
+          <tr><td>Tool calls</td><td>${drift.avg_tool_call_count != null ? drift.avg_tool_call_count.toFixed(1) : '-'}</td></tr>
+          <tr><td>Duration</td><td>${drift.avg_session_duration_s != null ? fmtDur(drift.avg_session_duration_s * 1000) : '-'}</td></tr>
+        </tbody>
+      </table></div>
+    ` : html`<div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">No drift recorded for this agent.</div>`}
+    ` : null}
+
+    ${tab === 'traces' ? html`
+    <div class="page-title" style="font-size:14px;margin-top:24px">Traces</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Click a trace row to drill into its waterfall</div>
+    ${traces.length === 0 ? html`<div class="empty">No traces recorded for this session yet.</div>` : html`
+      <div class="table-wrap"><table>
+        <thead><tr><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Result</th><th>Spans</th><th></th></tr></thead>
+        <tbody>
+          ${traces.map(t => html`
+            <tr class="clickable" onClick=${() => location.hash = '#/traces/' + t.trace_id} title=${'Trace ' + t.trace_id}>
+              <td>${friendlySpanName(t.name)}</td>
+              <td>${fmtAgo(t.start_time)}</td>
+              <td>${fmtDur(t.duration_ms)}</td>
+              <td>${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}</td>
+              <td><span class="badge badge-${t.status_code}">${t.status_code}</span></td>
+              <td>${t.span_count}</td>
+              <td class="chevron">→</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    `}
+    ` : null}
+  `;
+}
+
+// ============================
+// Run Detail View
+// ============================
+function RunDetailView({ runId }) {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await api('/runs/' + runId);
+      setData(d);
+      setError(null);
+    } catch (e) {
+      setError(e && e.message ? e.message : 'Failed to load run');
+    }
+  }, [runId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
+
+  const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/status'}>← Back to status</button>`;
+
+  if (error) return html`<div>${backBtn}<div class="empty">Run not found.<code>${runId}</code></div></div>`;
+  if (!data) return html`<div>${backBtn}<div class="empty">Loading run...</div></div>`;
+
+  const r = data.run;
+  const sessions = data.sessions || [];
+  const tree = data.tree || [];
+  // Honest cost framing: a run aggregates member sessions; pricing_mode is
+  // 'subscription' / 'local' / 'api' / 'unknown' / 'mixed'. Treat 'mixed' like
+  // subscription for safety (show implied value, never a hard spend claim).
+  const isLocal = r.pricing_mode === 'local';
+  const isSub = r.pricing_mode === 'subscription' || r.pricing_mode === 'mixed';
+  const costTip = "Aggregated from member sessions' token usage. If any session is on a subscription plan (e.g. Claude Max), actual spend may differ.";
+
+  // Map session_id -> summary for tree rendering.
+  const byId = {};
+  for (const s of sessions) byId[s.session_id] = s;
+  // Has any real parent edge? (a node with children) -> render indented tree.
+  const hasEdges = tree.some(n => (n.children || []).length > 0);
+
+  const sessionRow = (s, depth) => html`
+    <tr class="clickable" onClick=${() => location.hash = '#/sessions/' + s.session_id} title=${'Session ' + s.session_id}>
+      <td class="mono" style=${'padding-left:' + (12 + depth * 18) + 'px'}>${depth > 0 ? '↳ ' : ''}${s.label || s.session_id.slice(0, 8)}</td>
+      <td><span class="status-dot ${s.status}" style="margin-right:5px"></span><span class="badge badge-${s.status}">${s.status}</span></td>
+      <td>${s.namespace || '-'}</td>
+      <td>${fmtTokens(s.input_tokens)} in / ${fmtTokens(s.output_tokens)} out</td>
+      <td>${s.tool_call_count}${s.error_count ? ' (' + s.error_count + ' failed)' : ''}</td>
+      <td>${isLocal ? '-' : fmtCost(s.total_cost_usd)}</td>
+      <td>${fmtAgo(s.last_span_time || s.started_at)}</td>
+      <td class="chevron">→</td>
+    </tr>`;
+
+  // Flatten the tree depth-first when parent edges exist; otherwise list flat.
+  const walk = (nodes, depth, out) => {
+    for (const n of nodes) {
+      const s = byId[n.session_id];
+      if (s) out.push(sessionRow(s, depth));
+      walk(n.children || [], depth + 1, out);
+    }
+    return out;
+  };
+  const rows = hasEdges ? walk(tree, 0, []) : sessions.map(s => sessionRow(s, 0));
+
+  return html`
+    ${backBtn}
+    <div class="page-title">Run</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 16px;font-family:'Geist Mono',monospace">${runId} · ${r.session_count} session${r.session_count === 1 ? '' : 's'}</div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-header">Overview</div>
+        <div class="card-row"><span class="label">Sessions</span><span class="value">${r.session_count}</span></div>
+        ${r.started_at ? html`<div class="card-row"><span class="label">Started</span><span class="value">${fmtAgo(r.started_at)}</span></div>` : null}
+        ${r.last_activity ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(r.last_activity)}</span></div>` : null}
+        ${r.time_span_seconds != null ? html`<div class="card-row"><span class="label">Time span</span><span class="value">${fmtDur(r.time_span_seconds * 1000)}</span></div>` : null}
+        <div class="card-row"><span class="label">Spans</span><span class="value">${r.span_count}</span></div>
+        <div class="card-row"><span class="label">Tool calls</span><span class="value">${r.tool_call_count}${r.error_count ? ' (' + r.error_count + ' failed)' : ''}</span></div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">Cost & Tokens</div>
+        ${isLocal
+          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
+          : html`<div class="card-row"><span class="label">${isSub ? 'Implied API value' : 'Cost'} <span class="info-btn">i<span class="info-tip">${costTip}</span></span></span><span class="value">${fmtCost(r.total_cost_usd)}</span></div>`}
+        <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(r.input_tokens)}</span></div>
+        <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(r.output_tokens)}</span></div>
+        ${((r.cache_tokens || 0) + (r.cache_write_tokens || 0)) ? html`<div class="card-row"><span class="label">Cache tokens</span><span class="value">${fmtTokens((r.cache_tokens || 0) + (r.cache_write_tokens || 0))}</span></div>` : null}
+      </div>
+    </div>
+
+    <div class="page-title" style="font-size:14px;margin-top:24px">Sessions in this run</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">${hasEdges ? 'Indented by spawn parent · click a row to open the session' : 'Click a session row to open its detail'}</div>
+    ${sessions.length <= 1 ? html`<div style="font-size:12px;color:var(--text-dim);margin:-6px 0 12px;font-family:'Geist Mono',monospace">This run has only one session so far.</div>` : null}
+    <div class="table-wrap"><table>
+      <thead><tr><th>Session</th><th>Status</th><th>Project</th><th>Tokens</th><th>Tool calls</th><th>Cost <span class="info-btn">i<span class="info-tip">${costTip}</span></span></th><th>Last seen</th><th></th></tr></thead>
+      <tbody>
+        ${rows}
+      </tbody>
+    </table></div>
+  `;
+}
+
+// ============================
 // Traces View
 // ============================
 function TracesListView({ params }) {
@@ -1665,6 +3030,11 @@ function TracesListView({ params }) {
   const [totalCount, setTotalCount] = useState(0);
   const [framing, setFraming] = useState(null);
   const [agentStatus, setAgentStatus] = useState({});
+  // Distinguish "first fetch in flight" from "fetch resolved with zero rows":
+  // until the first /traces fetch settles, show a loading shimmer rather than
+  // the "No traces yet" empty-state, which otherwise flashes on initial paint
+  // while real rows are still loading (issue #20).
+  const [loaded, setLoaded] = useState(false);
   const TRACE_PAGE_SIZE = 100;
 
   const load = useCallback(async ({ append = false } = {}) => {
@@ -1680,6 +3050,7 @@ function TracesListView({ params }) {
     const map = {};
     for (const a of (sd.agents || [])) map[a.agent_id] = a.status;
     setAgentStatus(map);
+    setLoaded(true);
   }, [since, result, agentId, traces.length]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
@@ -1703,8 +3074,9 @@ function TracesListView({ params }) {
       ${agentId ? html`<button class="btn" onClick=${() => setFilter('agent_id', '')}>agent: ${agentId} ✕</button>` : null}
       <button class="btn" onClick=${() => load()}>Refresh</button>
     </div>
-    ${traces.length > 0 ? html`<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>` : null}
-    ${traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
+    ${loaded && traces.length > 0 ? html`<div class="meta">Showing ${traces.length} of ${totalCount} traces</div>` : null}
+    ${!loaded ? html`<div class="shimmer" style="height:200px"></div>`
+      : traces.length === 0 ? html`<div class="empty">No traces yet. Run an agent with ${'`@watch()`'} to start recording.</div>` : html`
       <div class="table-wrap"><table>
         <thead><tr><th>Agent</th><th>Type</th><th>Time</th><th>Duration</th><th>Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th><th>Result <span class="info-btn">i<span class="info-tip">Shows "error" if even a single span in this trace failed</span></span></th><th>Status <span class="info-btn">i<span class="info-tip">Agent liveness: active (seen in last 5 min), stale (no recent spans), completed or idle</span></span></th><th>Spans</th><th></th></tr></thead>
         <tbody>
@@ -1750,9 +3122,13 @@ function TraceDetailView({ traceId }) {
   // the framing-derived default (cost for api/unknown, tokens when $ suppressed).
   const [wfMode, setWfMode] = useState(null);
 
-  useEffect(() => {
-    api('/traces/' + traceId).then(d => { setSpans(d.spans || []); setFraming(d.framing || null); });
+  // Poll so a live trace's spans appear without re-navigating. Selection is
+  // tracked by span_id, so replacing the spans array preserves it.
+  const load = useCallback(() => {
+    api('/traces/' + traceId).then(d => { setSpans(d.spans || []); setFraming(d.framing || null); }).catch(() => {});
   }, [traceId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
   if (!spans.length) return html`<div class="empty">Loading trace...</div>`;
 
@@ -3326,19 +4702,27 @@ function DashboardView({ params }) {
   // fetches independently, so a triage failure never blanks the explorer.
   const load = useCallback(async () => {
     try {
-      const status = await api('/status');
-      if (!status.agents || status.agents.length === 0) {
-        setD({ loading: false, empty: true, error: null });
-        return;
-      }
-      const [cost, compare, opt, al, drift, traces] = await Promise.all([
+      const [cost, compare, opt, al, drift, traces, status] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
         api('/optimize', { since, fast: 'true' }).catch(() => null),
         api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
         api('/drift').catch(() => ({ agents: [] })),
         api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
+        api('/status').catch(() => ({ agents: [], archived: [] })),
       ]);
+      // #19: the empty-state must key off whether ANY data exists — window totals
+      // (the same signal Cost/Analytics/Traces use) OR any historical/live session
+      // in /status — not the LIVE-agents list alone. An all-backfilled DB (no live
+      // agents but real spend) used to read as "No data yet": a false data-loss
+      // scare on the front door. /status is fetched non-fatally so a failing
+      // /status can't blank the Dashboard.
+      const hasWindowData = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;
+      const hasAnySession = (status.agents || []).length > 0 || (status.archived || []).length > 0;
+      if (!hasWindowData && !hasAnySession) {
+        setD({ loading: false, empty: true, error: null });
+        return;
+      }
       setD({ loading: false, empty: false, error: null, cost, compare, opt,
         alerts: al.alerts || [], drift, traces: traces.traces || [] });
     } catch (e) {
@@ -3490,6 +4874,12 @@ function App() {
     case 'traces':
       if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;
       return html`<${TracesListView} params=${p} />`;
+    case 'sessions':
+      if (route.param) return html`<${SessionDetailView} sessionId=${route.param} />`;
+      return html`<${StatusView} params=${p} />`;
+    case 'runs':
+      if (route.param) return html`<${RunDetailView} runId=${route.param} />`;
+      return html`<${StatusView} params=${p} />`;
     case 'cost': return html`<${CostView} params=${p} />`;
     case 'analytics': return html`<${AnalyticsView} params=${p} />`;
     case 'alerts': return html`<${AlertsView} params=${p} />`;

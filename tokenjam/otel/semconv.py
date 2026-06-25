@@ -143,6 +143,19 @@ class CodexEvents:
     OUTPUT    = "output"
 
 
+class ResourceAttributes:
+    """OTel standard resource attributes (set per process / service)."""
+    SERVICE_NAME      = "service.name"
+    # Logical grouping above service.name. tj uses it as the "project" a
+    # service belongs to, so the dashboard can roll up every repo under one
+    # project tile (e.g. all `Aquanodeio/*` repos -> namespace "aquanode").
+    SERVICE_NAMESPACE = "service.namespace"
+    # Per-instance identifier (one process / terminal). tj uses it as the
+    # human label for a session's terminal (e.g. "founder-os") when set at
+    # launch via OTEL_RESOURCE_ATTRIBUTES.
+    SERVICE_INSTANCE_ID = "service.instance.id"
+
+
 class TjAttributes:
     """tj-specific span attributes (non-standard extensions)."""
     COST_USD         = "tokenjam.cost_usd"
@@ -158,6 +171,21 @@ class TjAttributes:
     # on individual spans. Analyzers JOIN through SessionRecord to read it.
     BILLING_ACCOUNT  = "tokenjam.billing_account"
     PLAN_TIER        = "tokenjam.plan_tier"
+
+    # Cross-session run grouping (declared by the spawner, not inferred).
+    # `run_id` is an OTel *resource* attribute stamped by a fan-out harness
+    # (e.g. the governor) on every worker session it spawns — one id per run,
+    # shared by all its workers. `parent_session_id` is optional: the spawning
+    # session's id, for nested spawns. Both are persisted on SessionRecord so
+    # the dashboard can group a run's member sessions and render a parent tree.
+    RUN_ID            = "tokenjam.run_id"
+    PARENT_SESSION_ID = "tokenjam.parent_session_id"
+
+    # Privacy-safe hash of a tool call's arguments, computed at ingest BEFORE the
+    # raw `gen_ai.tool.input` is stripped per capture config. Lets retry-loop
+    # detection tell an identical repeated call from normal repeated tool use
+    # without retaining the (potentially sensitive) raw input.
+    TOOL_ARG_SIG      = "tokenjam.tool_arg_sig"
 
     # Full tools / tool_choice payload for the request (issue #209). OTel GenAI
     # has no single attribute for the tool-definition list, so this is a

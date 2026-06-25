@@ -2,6 +2,14 @@
 # Prices in USD per million tokens.
 # Submit a PR when provider prices change.
 
+# Claude Fable 5 — Anthropic's most capable widely released model.
+# See https://platform.claude.com/docs/en/pricing (cache_write = 5-minute write).
+[anthropic.claude-fable-5]
+input_per_mtok = 10.00
+output_per_mtok = 50.00
+cache_read_per_mtok = 1.00
+cache_write_per_mtok = 12.50
+
 [anthropic.claude-opus-4-8]
 input_per_mtok = 5.00
 output_per_mtok = 25.00
@@ -32,11 +40,21 @@ output_per_mtok = 15.00
 cache_read_per_mtok = 0.30
 cache_write_per_mtok = 3.75
 
+# Claude Sonnet 4.5 — same published rates as Sonnet 4.6.
+[anthropic.claude-sonnet-4-5]
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+cache_read_per_mtok = 0.30
+cache_write_per_mtok = 3.75
+
+# Claude Haiku 4.5 — current published rates (cache_write = 5-minute write).
+# See https://platform.claude.com/docs/en/about-claude/pricing. Do NOT
+# copy the retired Haiku 3.5 rates below (0.80/4.00/0.08/1.00) — issue #14.
 [anthropic.claude-haiku-4-5]
-input_per_mtok = 0.80
-output_per_mtok = 4.00
-cache_read_per_mtok = 0.08
-cache_write_per_mtok = 1.00
+input_per_mtok = 1.00
+output_per_mtok = 5.00
+cache_read_per_mtok = 0.10
+cache_write_per_mtok = 1.25
 
 # ─── Deprecated Anthropic base models ──────────────────────────────────────
 # These rows exist so dated variants (e.g. `claude-sonnet-4-20250514`,

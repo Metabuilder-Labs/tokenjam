@@ -38,16 +38,20 @@ from tokenjam.utils.formatting import console
               help="Plan tier for the provider being onboarded. Skips the "
                    "interactive plan prompt when set. Choices: api / pro / "
                    "max_5x / max_20x (Anthropic), plus / team / enterprise (OpenAI).")
+@click.option("--project", "project_override", default=None,
+              help="Project name to group this repo under in the dashboard "
+                   "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
+                   "'aquanode'). Defaults to the git org. Used with --claude-code.")
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
-                reconfigure: bool, plan: str | None) -> None:
+                reconfigure: bool, plan: str | None, project_override: str | None) -> None:
     """Interactive setup wizard for tj."""
     # Branded welcome moment (#240) — shown once at the top of every onboard
     # flow (plain / --claude-code / --codex) before any prompt or config check.
     print_welcome_banner()
     if claude_code:
-        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan)
+        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan, project_override)
         return
     if codex:
         _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan)
@@ -325,6 +329,7 @@ def _onboard_claude_code(
     force: bool,
     reconfigure: bool = False,
     plan_override: str | None = None,
+    project_override: str | None = None,
 ) -> None:
     """Configure Claude Code to send telemetry to tj."""
     from tokenjam.core.config import (
@@ -340,6 +345,11 @@ def _onboard_claude_code(
 
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
+    # Project name = OTel service.namespace, the key the dashboard groups by.
+    # Defaults to the repo/cwd name; `--project` overrides it. No interactive
+    # prompt: the plan-first onboard flow (#240) keeps "How do you pay?" as the
+    # opener, and the namespace defaults sensibly without an extra question.
+    namespace = project_override or project_name
 
     # Plan-first (#240): resolve the plan tier before prompting for the daily
     # budget — "How do you pay?" is the more important, more natural opener.
@@ -347,6 +357,9 @@ def _onboard_claude_code(
         config = load_config(str(global_config_path))
         if agent_id not in config.agents:
             config.agents[agent_id] = AgentConfig()
+        # Server-side project mapping so already-running sessions group by
+        # project without restarting the agent (see AgentConfig.project).
+        config.agents[agent_id].project = namespace
 
         existing_plan = (
             config.budgets["anthropic"].plan
@@ -406,7 +419,7 @@ def _onboard_claude_code(
                 usd = ceiling
         budget = _prompt_daily_budget(budget)
         daily_usd = budget if budget and budget > 0 else None
-        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
+        agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd), project=namespace)}
         config = TjConfig(
             version="1",
             agents=agents,
@@ -534,8 +547,15 @@ def _onboard_claude_code(
         except (json_mod.JSONDecodeError, OSError):
             project_settings = {}
 
+    # The `claude` shell wrapper (installed below) now owns
+    # OTEL_RESOURCE_ATTRIBUTES, exporting a distinct service.instance.id per
+    # terminal. Claude Code's settings.json `env` block OVERRIDES shell env, so
+    # a value hardcoded here would clobber the wrapper's per-terminal value and
+    # silently collapse every terminal back into one dashboard tile. Do not
+    # write it, and delete any pre-existing one to migrate older setups (other
+    # env keys are left untouched).
     project_env: dict = project_settings.get("env", {})
-    project_env["OTEL_RESOURCE_ATTRIBUTES"] = f"service.name={agent_id}"
+    removed_resource_attr = project_env.pop("OTEL_RESOURCE_ATTRIBUTES", None) is not None
     project_settings["env"] = project_env
     project_settings_path.write_text(json_mod.dumps(project_settings, indent=2) + "\n")
 
@@ -579,6 +599,12 @@ def _onboard_claude_code(
         )
         zshrc.write_text(updated)
 
+    # --- Per-terminal naming: install the `claude` shell wrapper ---
+    # Tags each terminal with a distinct service.instance.id so concurrent
+    # Claude Code sessions render as separate dashboard tiles, without the user
+    # hand-editing their shell rc. Idempotent across re-onboards.
+    wrapper_files = _install_claude_wrapper()
+
     want_daemon = not no_daemon
     _finish_onboard_serve(
         str(config_path.resolve()),
@@ -594,7 +620,22 @@ def _onboard_claude_code(
     console.print("[bold green]Claude Code observability configured.[/bold green]")
     console.print(f"  Global settings:     {global_settings_path}")
     console.print(f"  Project settings:    {project_settings_path}")
+    if removed_resource_attr:
+        console.print(
+            "  [yellow]Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from project "
+            "settings[/yellow] (the claude wrapper now sets it per terminal)."
+        )
     console.print("  Shell env:           ~/.zshrc (harness-compatible endpoint)")
+    if wrapper_files:
+        console.print(
+            f"  claude wrapper:      {', '.join(wrapper_files)} "
+            "(per-terminal naming)"
+        )
+        console.print(
+            "  [dim]The claude wrapper controls OTEL_RESOURCE_ATTRIBUTES per "
+            "terminal (service.instance.id); project settings.json no longer "
+            "sets it.[/dim]"
+        )
     console.print(f"  Agent ID:            {agent_id}")
     if budget and budget > 0:
         console.print(f"  Daily budget:        ${budget:.2f}")
@@ -624,6 +665,11 @@ def _onboard_claude_code(
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")
     _print_restart_banner("Claude Code")
+    console.print(
+        "[dim]Open a new terminal, then launch with[/dim]  claude  "
+        "[dim](each terminal becomes its own dashboard tile;[/dim] "
+        "claude --as <name> [dim]to label it).[/dim]"
+    )
     console.print(f"[dim]After restarting, run:[/dim]  tj status --agent {agent_id}")
 
 
@@ -1216,6 +1262,107 @@ def _sync_secret_to_claude_code(secret: str) -> bool:
     settings["env"] = env
     settings_path.write_text(json_mod.dumps(settings, indent=2) + "\n")
     return True
+
+
+_WRAPPER_MARKER = "# tj per-terminal naming"
+_WRAPPER_END_MARKER = "# end tj per-terminal naming"
+
+
+def _claude_wrapper_block() -> str:
+    """Return the idempotent ``claude`` shell-wrapper block.
+
+    The wrapper tags each terminal with a distinct ``service.instance.id`` so
+    concurrent Claude Code sessions show as separate dashboard tiles. It:
+
+    - consumes an optional ``--as <name>`` flag and passes the rest through,
+    - derives the instance id from ``--as`` else the tty basename else
+      ``unknown``,
+    - exports ``OTEL_RESOURCE_ATTRIBUTES`` (project attrs from
+      ``tj otel-resource-attrs`` + the instance id),
+    - runs the real binary via ``command claude`` so it never recurses,
+    - reports the session closed (``tj session-end``) when claude exits or is
+      interrupted, so the dashboard archives the tile (Claude Code emits no
+      close event of its own). Best-effort and idempotent.
+
+    Written portably so it works in both zsh and bash.
+    """
+    return (
+        f"{_WRAPPER_MARKER}\n"
+        f"# Tags each terminal with a distinct service.instance.id so concurrent\n"
+        f"# Claude Code sessions appear as separate TokenJam dashboard tiles.\n"
+        f"# Override the label with: claude --as <name>\n"
+        f"claude() {{\n"
+        f'  local _tj_as=""\n'
+        f"  local -a _tj_args=()\n"
+        f'  while [ "$#" -gt 0 ]; do\n'
+        f'    case "$1" in\n'
+        f'      --as) _tj_as="$2"; shift 2 ;;\n'
+        f'      --as=*) _tj_as="${{1#--as=}}"; shift ;;\n'
+        f'      *) _tj_args+=("$1"); shift ;;\n'
+        f"    esac\n"
+        f"  done\n"
+        f'  local _tj_inst="$_tj_as"\n'
+        f'  if [ -z "$_tj_inst" ]; then\n'
+        f'    local _tj_tty\n'
+        f'    _tj_tty="$(tty 2>/dev/null)"\n'
+        f'    case "$_tj_tty" in\n'
+        f'      /dev/*) _tj_inst="${{_tj_tty#/dev/}}"; _tj_inst="${{_tj_inst//\\//-}}" ;;\n'
+        f"    esac\n"
+        f"  fi\n"
+        f'  [ -z "$_tj_inst" ] && _tj_inst="unknown"\n'
+        f'  export OTEL_RESOURCE_ATTRIBUTES="$(tj otel-resource-attrs),service.instance.id=$_tj_inst"\n'
+        f"  # Report this terminal's session closed on exit/interrupt so the\n"
+        f"  # dashboard archives its tile. Idempotent — double-fire is harmless.\n"
+        f"  trap 'tj session-end --instance \"$_tj_inst\" >/dev/null 2>&1 || true' INT TERM HUP\n"
+        f'  command claude "${{_tj_args[@]}}"\n'
+        f"  local _tj_status=$?\n"
+        f"  trap - INT TERM HUP\n"
+        f'  tj session-end --instance "$_tj_inst" >/dev/null 2>&1 || true\n'
+        f"  return $_tj_status\n"
+        f"}}\n"
+        f"{_WRAPPER_END_MARKER}\n"
+    )
+
+
+def _install_claude_wrapper() -> list[str]:
+    """Install the idempotent ``claude`` wrapper into the user's shell rc files.
+
+    Always writes ``~/.zshrc`` (created if absent); also writes ``~/.bashrc``
+    only when it already exists. Re-running replaces the existing block in place
+    (matched between the begin/end markers) so onboards never duplicate it.
+
+    Returns the list of rc files that were written.
+    """
+    import re as _re
+
+    block = _claude_wrapper_block()
+    written: list[str] = []
+
+    zshrc = Path.home() / ".zshrc"
+    zshrc.touch(exist_ok=True)
+    targets = [zshrc]
+    bashrc = Path.home() / ".bashrc"
+    if bashrc.exists():
+        targets.append(bashrc)
+
+    for rc in targets:
+        text = rc.read_text()
+        if _WRAPPER_MARKER not in text:
+            with rc.open("a") as f:
+                # Ensure a blank line before the block for readability.
+                f.write(("" if text.endswith("\n") or not text else "\n") + "\n" + block)
+        else:
+            # Replace the existing block (begin marker .. end marker) in place.
+            updated = _re.sub(
+                _re.escape(_WRAPPER_MARKER) + r".*?" + _re.escape(_WRAPPER_END_MARKER) + r"\n",
+                block,
+                text,
+                flags=_re.DOTALL,
+            )
+            rc.write_text(updated)
+        written.append(str(rc))
+
+    return written
 
 
 def _derive_project_name() -> str:

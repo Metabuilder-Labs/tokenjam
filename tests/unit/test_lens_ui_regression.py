@@ -159,6 +159,215 @@ def test_cache_write_rendered(html):
     assert "Cache write" in html
 
 
+# --- Work map: graphical "what did my agent do" tab ------------------------ #
+def test_work_map_tab_present_and_default(html):
+    # Map is the default session tab and renders before Timeline.
+    assert "function WorkMapSection" in html
+    assert "function WorkMapNode" in html
+    assert "useState('map')" in html
+    assert "/sessions/' + sessionId + '/workmap'" in html
+    # Tab order: the Map button must appear before the Timeline button.
+    map_btn = html.index("setTab('map')")
+    story_btn = html.index("setTab('story')")
+    assert map_btn < story_btn, "Map tab must render before Timeline"
+
+
+def test_work_map_is_descriptive_not_evaluative(html):
+    # Honesty discipline: the map reports, it does not judge the approach.
+    assert "you judge the approach" in html
+
+
+def test_work_map_node_metric_is_tokens_not_dollars(html):
+    # User preference: the visible per-node metric is tokens; the dollar figure
+    # moved to a hover title only.
+    assert "fmtTokens(node.tokens)" in html
+    assert 'class="wm-tokens"' in html
+    assert ">${fmtCost(node.cost_usd)}</span>" not in html  # no bare $ in the row
+
+
+def test_work_map_files_shortened_for_readability(html):
+    # Long absolute file paths are shortened to "…/dir/file" with the full path
+    # on hover, so the files list is readable.
+    assert "function shortPath" in html
+    assert "shortPath(f)" in html
+
+
+def test_work_map_is_ask_segmented(html):
+    # A session is a sequence of asks (exchanges): the Map renders map.asks via a
+    # per-ask component, read as a story ("ask by ask").
+    assert "function WorkMapAsk" in html
+    assert "map.asks" in html
+    assert "ask by ask" in html
+
+
+def test_work_map_is_a_storyline(html):
+    # The Map headlines each ask by WHAT THE AGENT DID (its outcome) with a
+    # deterministic status icon, and reads chronologically (oldest first) so it
+    # tells the session's story rather than a reverse-time log.
+    assert "function askStatus" in html
+    assert "wm-ask-did" in html                       # bold "what it did" headline
+    assert "wm-ask-ctx" in html                       # dim prompt-as-context line
+    assert "(map.asks || []).slice().reverse()" in html  # chronological order
+
+
+def test_work_map_renders_spine_with_milestone_dots(html):
+    # Map v2 layout (approved Option-A mock): the asks render on a continuous
+    # vertical spine — a left-border line — with each ask a milestone carrying a
+    # status dot positioned ON the spine, not as a bordered card.
+    assert ".wm-spine {" in html
+    assert "border-left: 2px solid var(--border)" in html  # the spine line
+    assert ".wm-milestone {" in html
+    assert "position: relative" in html
+    assert 'class="wm-spine' in html
+    # The dot sits on the spine (negative offset lands it over the border line).
+    assert ".wm-dot-spine {" in html
+    assert "left: -30px" in html
+    # The old bordered-card framing is gone.
+    assert ".wm-ask {" not in html
+    assert 'class="wm-asks"' not in html
+
+
+def test_work_map_has_inline_branch_block(html):
+    # Fan-out asks list their top subagents inline in an indented branch block
+    # (dashed left border, like the mock) — visible without a click; only the
+    # deeper subtree stays expandable.
+    assert ".wm-branch {" in html
+    assert "border-left: 2px dashed var(--border)" in html
+    assert 'class="wm-branch"' in html
+    # Top 5 subagents shown inline, with a "+N more" overflow line.
+    assert "subs.slice(0, 5)" in html
+    assert "+${branchMore} more" in html
+
+
+def test_user_prompts_visually_marked_on_both_views(html):
+    # Timeline marks user prompts (grouped by ask) in a distinct brand color —
+    # no box/label; the Map's work milestones carry a brand status dot on the
+    # spine (other statuses recolor it: amber flagged, red error, dim chat).
+    assert "function StoryAsk" in html
+    assert "step.ask" in html
+    assert ".story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand)" in html
+    assert ".wm-dot-spine.work { color: var(--brand)" in html
+
+
+# --- Map v1.1: glanceable storyline (first-sentence, chat collapse, summary) - #
+def test_work_map_headlines_use_first_sentence(html):
+    # Verbose run-on outcomes are reduced to one clean sentence for the headline;
+    # the old raw 160-char truncation of the outcome is gone.
+    assert "function firstSentence" in html
+    assert "firstSentence(ask.outcome || ask.summary || '')" in html
+    assert "outcome.slice(0, 160)" not in html  # the old raw truncation is gone
+
+
+def test_work_map_collapses_chat_runs(html):
+    # Runs of 2+ consecutive no-work chat asks collapse into one clickable
+    # divider that expands into the individual rows.
+    assert "function WorkMapChatRun" in html
+    assert "function groupAsks" in html
+    assert 'class="wm-chat-divider"' in html
+    assert "quick exchanges" in html
+    # The collapse decision keys off askStatus(...).hasWork being false.
+    assert "askStatus(ask).hasWork" in html
+
+
+def test_work_map_has_summary_band(html):
+    # A 5-second-read summary band sits above the asks list: totals + the top
+    # fan-outs (biggest subagent counts).
+    assert 'class="wm-summary-band"' in html
+    assert ".wm-summary-band {" in html
+    assert ".wm-chat-divider {" in html
+
+
+def test_first_sentence_strips_single_and_double_emphasis(html):
+    # firstSentence must strip single AND double * / _ plus backticks anywhere,
+    # so no stray emphasis markers leak into a headline (e.g. "*cheaper*"). The
+    # old strip that only removed the paired forms (\*\*|__) is gone.
+    assert r".replace(/[*_`]+/g, '')" in html
+    assert r".replace(/\*\*|__|`|##+|---+/g, '')" not in html
+
+
+def test_work_map_subagent_count_clamped_to_session_total(html):
+    # A per-ask fan-out can never exceed the session total; both the ask row and
+    # the summary fan-out clamp the displayed number with Math.min(..., session).
+    # The ask row threads the session total down as the sessionSubs prop.
+    assert "sessionSubs" in html
+    assert "Math.min(subCount, sessionSubs)" in html
+    assert "Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)" in html
+    # The row's displayed count uses the clamped value, not the raw subCount.
+    assert "${subShown} sub${subShown === 1 ? '' : 's'}" in html
+
+
+# --- Map: on-demand LLM-distilled titles ----------------------------------- #
+def test_work_map_has_distill_control(html):
+    # The Map carries a "Distill titles" button that calls /distill and threads
+    # the result into the ask headlines (prefer distilled[n] over firstSentence).
+    assert "Distill titles" in html
+    assert "setDistilled" in html
+    assert "/distill" in html
+    # The distilled title is preferred over the deterministic first sentence.
+    assert "distilled[String(ask.n)]" in html
+
+
+# --- Map: launcher -> run linkage card (Task A) ---------------------------- #
+def test_work_map_has_run_card(html):
+    # The Map renders a run card from the workmap's `launched_run` block with a
+    # working "View run" link into #/runs/<id> and clickable worker chips.
+    assert "function WorkMapRunCard" in html
+    assert "map.launched_run" in html
+    assert "Launched run" in html
+    assert "#/runs/' + run.run_id" in html
+    assert "#/sessions/' + s.session_id" in html
+    # Inferred (transcript-scraped) runs are visibly marked as a best-effort guess.
+    assert "run.source === 'inferred'" in html
+
+
+# --- Map: per-ask phase breakdown (Task E) --------------------------------- #
+def test_work_map_renders_phases(html):
+    # A long ask's journey renders as the agent's narrated phases under the
+    # milestone, with a tool tally and a show-all toggle past the preview.
+    assert "function phaseTools" in html
+    assert "ask.phases || []" in html
+    assert 'class="wm-phases"' in html
+    assert "PHASE_PREVIEW" in html
+    # The honest omitted marker (no silent drop) is rendered.
+    assert "more phase" in html
+
+
+# --- Timeline: tool-only steps show the command inline ---------------------- #
+def test_timeline_tool_step_shows_command_inline(html):
+    # A step with no narration but a tool call surfaces the tool's label/command
+    # inline instead of a bare "(no narration)".
+    assert "const toolLine = !preview && tools.length" in html
+    assert "preview || toolLine || '(no narration)'" in html
+    assert ".story-line.tool" in html
+
+
+# --- Timeline: failed steps show the error, not a red box ------------------- #
+def test_timeline_error_step_shows_message_not_red_box(html):
+    # The red border around an errored step is gone; the expanded body surfaces
+    # the transcript error message instead.
+    assert ".story-step.error { border-color: var(--error)" not in html
+    assert "tools.filter(t => t.error)" in html
+    assert "story-error" in html
+
+
+# --- Map: distill UX (auto-apply cached, honest note, feedback) ------------- #
+def test_distill_auto_applies_cached_and_has_honest_states(html):
+    # Cache-only auto-apply on load (press once, sticks; zero cost).
+    assert "cached_only: 1" in html
+    # The note distinguishes failure from "nothing to distill" (no longer lies).
+    assert "nothing to distill" in html
+    assert "candidate_count === 0" in html
+    # A visible post-distill flash so a successful run is obvious.
+    assert "wm-flash" in html
+    assert "@keyframes wmDistillFlash" in html
+
+
+def test_index_html_has_no_nul_bytes():
+    # Guards the NUL-byte corruption fixed alongside the work map (it broke
+    # `node --check` and made `file` mis-detect the SPA as binary).
+    assert b"\x00" not in _UI.read_bytes()
+
+
 # --- #139: buildCostSeries coarsens instead of silently emptying ----------- #
 def test_cost_series_coarsens_not_silently_empty(html):
     # The silent "too many buckets -> null" guard is gone; the chart coarsens up
@@ -189,6 +398,27 @@ def test_overview_error_handling_is_asymmetric(html):
     assert "api('/cost/compare', { since, compare: 'previous' }).catch(() => null)" in html
     assert "api('/optimize', { since, fast: 'true' }).catch(() => null)" in html
     assert "api('/drift').catch(() => ({ agents: [] }))" in html
+
+
+# --- #19: Overview empty-state gated on real has-data, not live agents ------ #
+def test_dashboard_empty_state_not_gated_on_live_agents_alone(html):
+    # The old gate showed the onboarding empty-state whenever the LIVE-agents
+    # list was empty, so an all-historical/backfilled DB (no live agents) read
+    # as "No data yet" while Cost/Analytics/Traces all showed real totals — a
+    # false data-loss scare on the front door (#19). The buggy gate is gone.
+    # (#19 was originally fixed on the Overview screen; with Overview retired in
+    # favor of the Dashboard, the same has-data gate lives in DashboardView.)
+    assert "if (!status.agents || status.agents.length === 0) {" not in html
+    # The decision now keys off whether ANY data exists: window totals (the same
+    # signal the other screens use) OR any historical/live session in /status.
+    assert "const hasWindowData =" in html
+    assert "cost.total_tokens" in html
+    assert "const hasAnySession =" in html
+    assert "status.archived" in html
+    assert "if (!hasWindowData && !hasAnySession) {" in html
+    # /status is fetched non-fatally inside the parallel fan-out (a failing
+    # /status must not blank the Overview).
+    assert "api('/status').catch(() => ({ agents: [], archived: [] }))" in html
 
 
 # --- #147: status tile shows Active (compute) time + relabeled Elapsed ----- #
@@ -308,6 +538,28 @@ def test_optimize_cluster_avg_cost_routes_through_framing(html):
     assert "${fmtCost(c.avg_cost_usd)}" not in html
     assert "${fmtFramedDollar(c.avg_cost_usd, framing)}" not in html
     assert "${fmtPerItemCost(c.avg_cost_usd, c.avg_tokens, framing)}" in html
+
+
+# --- #17: #2 shipped incomplete — SessionDetailView + Status cost cells ----- #
+# #2 added the /sessions/{id} framing block but left two dollar-bearing cells
+# still calling bare fmtCost, so a Max-subscription user saw raw "$198.9709"
+# under "Implied API value" and raw "$0.0000" in the Status table. Route both
+# through fmtFramedDollar(value, framing) so subscription users see "% of cycle"
+# and only api-plan users see raw $ — matching Traces/Cost/Optimize.
+def test_session_detail_cost_cell_routes_through_framing(html):
+    # The "Cost & Tokens" / "Implied API value" panel must consume the
+    # /sessions/{id} framing block, not render raw fmtCost(s.total_cost_usd).
+    assert "<span class=\"value\">${fmtCost(s.total_cost_usd)}</span>" not in html
+    assert "<span class=\"value\">${fmtFramedDollar(s.total_cost_usd, framing)}</span>" in html
+    # The view actually pulls the framing block off the /sessions/{id} response.
+    assert "const framing = data.framing || null;" in html
+
+
+def test_status_archived_table_cost_routes_through_framing(html):
+    # The Status "Archived sessions" table cost column must consume the /status
+    # framing block (data.framing), not render raw fmtCost(s.total_cost_usd).
+    assert "<td>${fmtCost(s.total_cost_usd)}</td>" not in html
+    assert "<td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>" in html
 
 
 # --- Lens Visualizations Wave 1: cost charts (#211–#213) ------------------- #
@@ -612,6 +864,25 @@ def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
     assert "function analyticsHref(q, route = 'analytics')" in html
     assert "return '#/' + route + (s ? '?' + s : '');" in html
 
+
+# --- #20: Traces empty-state must not flash before the first fetch -------- #
+def test_traces_distinguishes_loading_from_loaded_empty(html):
+    # The Traces view tracks a `loaded` flag that flips true only once the first
+    # /traces fetch resolves; until then it renders a loading shimmer. The
+    # "No traces yet" empty-state is gated on `loaded` so it can only appear
+    # after a fetch genuinely returned zero rows — never on initial paint.
+    assert "const [loaded, setLoaded] = useState(false);" in html
+    assert "setLoaded(true);" in html
+    # Empty-state is now downstream of the `!loaded` shimmer branch, so the
+    # bare "traces.length === 0 ? <empty>" first-branch pattern must be gone.
+    assert (
+        "${traces.length === 0 ? html`<div class=\"empty\">No traces yet."
+        not in html
+    )
+    assert (
+        "${!loaded ? html`<div class=\"shimmer\" style=\"height:200px\"></div>`"
+        in html
+    )
 
 
 def test_dashboard_is_default_landing(html):
