@@ -5,7 +5,11 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from click.testing import CliRunner
+
+from tokenjam.cli import cmd_backfill as cmd_backfill_module
 from tokenjam.core.backfill import (
+    BackfillResult,
     ingest_claude_code,
     iter_claude_code_sessions,
     parse_claude_code_session,
@@ -441,6 +445,61 @@ def test_iter_skips_files_before_since(tmp_path):
     cutoff = datetime(2025, 1, 1, tzinfo=timezone.utc)
     sessions = list(iter_claude_code_sessions(root=tmp_path, since=cutoff))
     assert sessions == []
+
+
+def test_claude_code_backfill_accepts_since_window(tmp_path, monkeypatch):
+    captured: dict[str, datetime | None] = {}
+    fixed_now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
+
+    def fake_ingest(db, *, root, since, progress, config):
+        captured["since"] = since
+        return BackfillResult()
+
+    monkeypatch.setattr("tokenjam.utils.time_parse.utcnow", lambda: fixed_now)
+    monkeypatch.setattr(cmd_backfill_module, "ingest_claude_code", fake_ingest)
+
+    result = CliRunner().invoke(
+        cmd_backfill_module.claude_code,
+        ["--root", str(tmp_path), "--since", "30d", "--quiet"],
+        obj={"db": object(), "config": None},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["since"] == datetime(2026, 5, 25, 12, 0, tzinfo=timezone.utc)
+
+
+def test_claude_code_backfill_keeps_since_days_alias(tmp_path, monkeypatch):
+    captured: dict[str, datetime | None] = {}
+    fixed_now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
+
+    def fake_ingest(db, *, root, since, progress, config):
+        captured["since"] = since
+        return BackfillResult()
+
+    monkeypatch.setattr(cmd_backfill_module, "utcnow", lambda: fixed_now)
+    monkeypatch.setattr(cmd_backfill_module, "ingest_claude_code", fake_ingest)
+
+    result = CliRunner().invoke(
+        cmd_backfill_module.claude_code,
+        ["--root", str(tmp_path), "--since-days", "7", "--quiet"],
+        obj={"db": object(), "config": None},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["since"] == datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc)
+
+
+def test_claude_code_backfill_rejects_two_since_flags(tmp_path, monkeypatch):
+    monkeypatch.setattr(cmd_backfill_module, "ingest_claude_code", lambda **kwargs: BackfillResult())
+
+    result = CliRunner().invoke(
+        cmd_backfill_module.claude_code,
+        ["--root", str(tmp_path), "--since", "30d", "--since-days", "7", "--quiet"],
+        obj={"db": object(), "config": None},
+    )
+
+    assert result.exit_code != 0
+    assert "Use either --since or --since-days" in result.output
 
 
 # --- #294: dedup resumed/branched sessions (over-counted tokens) -------------- #
