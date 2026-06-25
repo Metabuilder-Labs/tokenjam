@@ -468,6 +468,29 @@ def test_analytics_leaderboard_has_inline_bars(html):
     assert ".lb-bar" in html
 
 
+# --- #295: Stack gated to stacking charts; empty cross-tab gets a clear state - #
+def test_analytics_stack_gated_to_stacking_charts(html):
+    # Stack only applies to the multi-series charts (bar/line). The Leaderboard
+    # (hbar) ignores stack, so the control is hidden AND stack_by is dropped from
+    # the query for non-stacking charts — otherwise a stale stack strands the
+    # leaderboard on an empty cross-tab ("No data", #295).
+    assert "const stackApplies = chart === 'bar' || chart === 'line'" in html
+    assert "const effStack = stackApplies ? stack : ''" in html
+    # query drops stack_by when the chart doesn't stack
+    assert "stack_by: effStack || undefined" in html
+    assert "stack_by: stack || undefined" not in html  # the buggy unconditional form is gone
+    # the Stack control is conditionally rendered (hidden on the leaderboard)
+    assert "${stackApplies ? html`<label class=\"ctl\">Stack" in html
+
+
+def test_analytics_empty_cross_tab_offers_clear_stack(html):
+    # A structurally-empty stacked breakdown (e.g. Model x Tool category, since a
+    # span carries a model OR a tool, never both) shows a "Clear stack" affordance
+    # instead of a bare "No data in this window" (#295).
+    assert "const emptyFromStack" in html
+    assert "Clear stack" in html
+
+
 # --- #215: cost-annotated trace waterfall ---------------------------------- #
 def test_trace_waterfall_cost_summary(html):
     # A cost-first trace summary header (total cost + tokens + duration + spans).

@@ -3148,13 +3148,22 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const setFilter = (k, v) => navigate(route, { ...cur, [k]: v }, DEFAULTS);
   const applyPreset = (q) => navigate(route, { ...cur, ...q }, DEFAULTS);
 
+  // #295: Stack only makes sense on the multi-series charts (bar/line). The
+  // Leaderboard (hbar) collapses the time dimension into a single per-group
+  // total and ignores stack entirely, so a stale stack there just strands the
+  // view on an empty cross-tab ("No data"). Gate it: hide the Stack control AND
+  // drop stack_by from the query for non-stacking charts. The chosen stack stays
+  // in the URL, so it returns when the user switches back to a bar/line chart.
+  const stackApplies = chart === 'bar' || chart === 'line';
+  const effStack = stackApplies ? stack : '';
+
   const [st, setSt] = useState({ loading: true, error: null, resp: null });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.resp, error: null }));
     try {
       const resp = await api('/analytics', {
-        metric, group_by: groupBy, stack_by: stack || undefined, since,
+        metric, group_by: groupBy, stack_by: effStack || undefined, since,
         agent_id: fAgent || undefined, provider: fProvider || undefined,
         model: fModel || undefined, tool: fTool || undefined,
       });
@@ -3188,6 +3197,15 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const toolDimNoMetric = (groupBy === 'tool' || groupBy === 'tool_category')
     && (metric === 'spend' || metric === 'tokens');
 
+  // #295: a stacked breakdown can be structurally empty even when the metric has
+  // plenty of data — e.g. Model × Tool category, since a span is either an LLM
+  // call or a tool call, never both. Detect that so we can prompt the user to
+  // clear the stack instead of stranding them on a bare "No data" chart. (Only
+  // bar/line carry a stack — effStack is '' for the leaderboard.)
+  const noRows = !!resp && Array.isArray(resp.rows) && resp.rows.length === 0;
+  const emptyFromStack = !!effStack && noRows;
+  const labelOf = dim => (ANALYTICS_DIMENSIONS.find(d => d[0] === dim) || [, dim])[1];
+
   return html`
     ${embedded ? null : html`<div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Analytics <${PlanBadge} framing=${framing} />
@@ -3202,11 +3220,11 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         <select value=${groupBy} onChange=${e => setFilter('group_by', e.target.value)}>
           ${ANALYTICS_DIMENSIONS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
         </select></label>
-      <label class="ctl">Stack
+      ${stackApplies ? html`<label class="ctl">Stack
         <select value=${stack} onChange=${e => setFilter('stack', e.target.value)}>
           <option value="">none</option>
           ${ANALYTICS_DIMENSIONS.filter(d => d[0] !== groupBy).map(([v, l]) => html`<option value=${v}>${l}</option>`)}
-        </select></label>
+        </select></label>` : null}
       <label class="ctl">Chart
         <select value=${chart} onChange=${e => setFilter('chart', e.target.value)}>
           ${ANALYTICS_CHARTS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
@@ -3280,6 +3298,11 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
             </div>
           </div>`
           : loading ? html`<div class="shimmer" style="height:200px"></div>`
+          : emptyFromStack ? html`
+            <div class="empty" style="padding:32px 16px;text-align:center">
+              <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these — e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
+              <button class="btn" onClick=${() => setFilter('stack', '')}>Clear stack</button>
+            </div>`
           : chart === 'hbar'
             ? (board && board.length ? html`
               <div class="leaderboard">
