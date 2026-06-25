@@ -25,27 +25,33 @@ def _make_session_file(tmp_path: Path, session_id: str, cwd: str,
 def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: int,
                        timestamp: str, session_id: str, cwd: str,
                        tool_uses: list[tuple[str, str]] | None = None,
-                       cache_read: int = 0, cache_creation: int = 0) -> dict:
+                       cache_read: int = 0, cache_creation: int = 0,
+                       message_id: str | None = None) -> dict:
     content: list[dict] = [{"type": "text", "text": "ok"}]
     if tool_uses:
         for tu_id, tu_name in tool_uses:
             content.append({"type": "tool_use", "id": tu_id, "name": tu_name})
+    message: dict = {
+        "model": model,
+        "content": content,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+        },
+    }
+    # The Anthropic API response id — stable per real call, regenerated `uuid`
+    # notwithstanding (#294). Optional so existing tests use the uuid fallback.
+    if message_id is not None:
+        message["id"] = message_id
     return {
         "type": "assistant",
         "uuid": uuid,
         "timestamp": timestamp,
         "sessionId": session_id,
         "cwd": cwd,
-        "message": {
-            "model": model,
-            "content": content,
-            "usage": {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "cache_read_input_tokens": cache_read,
-                "cache_creation_input_tokens": cache_creation,
-            },
-        },
+        "message": message,
     }
 
 
@@ -435,3 +441,159 @@ def test_iter_skips_files_before_since(tmp_path):
     cutoff = datetime(2025, 1, 1, tzinfo=timezone.utc)
     sessions = list(iter_claude_code_sessions(root=tmp_path, since=cutoff))
     assert sessions == []
+
+
+# --- #294: dedup resumed/branched sessions (over-counted tokens) -------------- #
+
+_CWD = "/Users/me/proj"
+
+
+def test_resumed_session_dedups_same_call_by_message_id(tmp_path):
+    """The same logical call replayed under a NEW record uuid (same message.id)
+    on resume must collapse to ONE span with single-call totals (#294)."""
+    path = _make_session_file(
+        tmp_path, session_id="sess-resume", cwd=_CWD,
+        records=[
+            # Original turn.
+            _assistant_record("uuid-A", "claude-opus-4-7", 3289, 692,
+                              "2026-04-01T10:00:00.000Z", "sess-resume", _CWD,
+                              cache_creation=42981, message_id="msg_stable_1"),
+            # A user turn in between (ignored).
+            {"type": "user", "message": {"role": "user", "content": "more"}},
+            # Resume replays the SAME assistant turn — fresh uuid, SAME message.id.
+            _assistant_record("uuid-B", "claude-opus-4-7", 3289, 692,
+                              "2026-04-01T10:05:00.000Z", "sess-resume", _CWD,
+                              cache_creation=42981, message_id="msg_stable_1"),
+            # …and a third replay (the 3–4× repeat seen in real data).
+            _assistant_record("uuid-C", "claude-opus-4-7", 3289, 692,
+                              "2026-04-01T10:05:01.000Z", "sess-resume", _CWD,
+                              cache_creation=42981, message_id="msg_stable_1"),
+        ],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    llm_spans = [s for s in parsed.spans if s.name == "gen_ai.llm.call"]
+    assert len(llm_spans) == 1, "the same message.id must collapse to one span"
+    # Totals reflect a SINGLE call, not 3×.
+    assert parsed.total_input_tokens == 3289
+    assert parsed.total_output_tokens == 692
+    assert llm_spans[0].cache_write_tokens == 42981
+
+
+def test_resume_last_wins_keeps_finalized_usage(tmp_path):
+    """Early replay snapshots carry partial output_tokens; the LAST record has the
+    complete generation. Dedup keeps the finalized usage (last-wins, #294)."""
+    path = _make_session_file(
+        tmp_path, session_id="sess-snap", cwd=_CWD,
+        records=[
+            # Partial snapshot: tiny output.
+            _assistant_record("uuid-1", "claude-opus-4-7", 2, 1,
+                              "2026-04-01T10:00:00.000Z", "sess-snap", _CWD,
+                              cache_read=15764, cache_creation=4317,
+                              message_id="msg_snap"),
+            # Finalized: full output.
+            _assistant_record("uuid-2", "claude-opus-4-7", 2, 575,
+                              "2026-04-01T10:00:02.000Z", "sess-snap", _CWD,
+                              cache_read=15764, cache_creation=4317,
+                              message_id="msg_snap"),
+        ],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    llm_spans = [s for s in parsed.spans if s.name == "gen_ai.llm.call"]
+    assert len(llm_spans) == 1
+    # The complete output (575), not the partial snapshot (1) nor their sum (576).
+    assert parsed.total_output_tokens == 575
+    assert llm_spans[0].output_tokens == 575
+
+
+def test_distinct_calls_with_identical_usage_not_deduped(tmp_path):
+    """Two REAL calls can legitimately share identical token counts. Dedup keys on
+    the stable message.id, never on a usage signature, so both survive (#294)."""
+    path = _make_session_file(
+        tmp_path, session_id="sess-twins", cwd=_CWD,
+        records=[
+            _assistant_record("uuid-x", "claude-opus-4-7", 2, 691,
+                              "2026-04-01T10:00:00.000Z", "sess-twins", _CWD,
+                              message_id="msg_call_A"),
+            _assistant_record("uuid-y", "claude-opus-4-7", 2, 691,
+                              "2026-04-01T10:00:03.000Z", "sess-twins", _CWD,
+                              message_id="msg_call_B"),
+        ],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    llm_spans = [s for s in parsed.spans if s.name == "gen_ai.llm.call"]
+    assert len(llm_spans) == 2, "distinct message.ids are distinct calls"
+    assert parsed.total_output_tokens == 1382  # 691 + 691, not deduped
+
+
+def test_tool_use_dedups_on_resume(tmp_path):
+    """A tool_use replayed on resume (stable tool_use id) collapses to one span."""
+    path = _make_session_file(
+        tmp_path, session_id="sess-tool", cwd=_CWD,
+        records=[
+            _assistant_record("uuid-a", "claude-opus-4-7", 10, 5,
+                              "2026-04-01T10:00:00.000Z", "sess-tool", _CWD,
+                              tool_uses=[("toolu_stable", "Read")],
+                              message_id="msg_tool"),
+            _assistant_record("uuid-b", "claude-opus-4-7", 10, 5,
+                              "2026-04-01T10:05:00.000Z", "sess-tool", _CWD,
+                              tool_uses=[("toolu_stable", "Read")],
+                              message_id="msg_tool"),
+        ],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    tool_spans = [s for s in parsed.spans if s.name == "gen_ai.tool.call"]
+    assert len(tool_spans) == 1
+    assert parsed.tool_call_count == 1
+
+
+def test_falls_back_to_uuid_when_message_id_absent(tmp_path):
+    """Without message.id (older logs), distinct uuids stay distinct calls."""
+    path = _make_session_file(
+        tmp_path, session_id="sess-noid", cwd=_CWD,
+        records=[
+            _assistant_record("uuid-p", "claude-opus-4-7", 100, 20,
+                              "2026-04-01T10:00:00.000Z", "sess-noid", _CWD),
+            _assistant_record("uuid-q", "claude-opus-4-7", 100, 20,
+                              "2026-04-01T10:00:03.000Z", "sess-noid", _CWD),
+        ],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    assert len([s for s in parsed.spans if s.name == "gen_ai.llm.call"]) == 2
+
+
+def test_ingest_resumed_session_writes_one_span_per_call(tmp_path):
+    """End-to-end through ingest: a resumed session lands deduped in the DB with
+    single-call session totals (#294)."""
+    _make_session_file(
+        tmp_path, session_id="sess-e2e", cwd=_CWD,
+        records=[
+            _assistant_record("u1", "claude-opus-4-7", 1000, 200,
+                              "2026-04-01T10:00:00.000Z", "sess-e2e", _CWD,
+                              message_id="msg_e2e_1"),
+            _assistant_record("u2", "claude-opus-4-7", 1000, 200,
+                              "2026-04-01T10:05:00.000Z", "sess-e2e", _CWD,
+                              message_id="msg_e2e_1"),  # resume replay
+            _assistant_record("u3", "claude-opus-4-7", 500, 80,
+                              "2026-04-01T10:06:00.000Z", "sess-e2e", _CWD,
+                              message_id="msg_e2e_2"),  # a second real call
+        ],
+    )
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        rows = db.conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(output_tokens),0) FROM spans "
+            "WHERE name = 'gen_ai.llm.call'"
+        ).fetchone()
+        assert rows[0] == 2, "two distinct calls, not three records"
+        assert rows[1] == 280, "200 + 80, not 200 + 200 + 80"
+        sess = db.get_session("sess-e2e")
+        assert sess is not None
+        assert sess.output_tokens == 280
+    finally:
+        db.close()
