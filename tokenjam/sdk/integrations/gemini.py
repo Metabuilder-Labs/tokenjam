@@ -12,9 +12,23 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
-from tokenjam.sdk.integrations._request_capture import record_full_request_gemini
+from tokenjam.sdk.integrations._request_capture import (
+    extract_gemini_completion,
+    record_completion_content,
+    record_full_request_gemini,
+    record_prompt_content,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _gemini_contents(args: tuple, kwargs: dict) -> object | None:
+    """The request ``contents`` for ``generate_content`` — first positional arg
+    or the ``contents`` kwarg (a str, a Content, or a list thereof)."""
+    contents = kwargs.get("contents")
+    if contents is None and args:
+        contents = args[0]
+    return contents
 
 
 class GeminiIntegration:
@@ -52,6 +66,7 @@ class GeminiIntegration:
                 getattr(self_model, "model_name", "unknown"),
             )
             record_full_request_gemini(span, kwargs)
+            record_prompt_content(span, _gemini_contents(args, kwargs))
             try:
                 response = integration._original_generate(self_model, *args, **kwargs)
                 meta = getattr(response, "usage_metadata", None)
@@ -64,6 +79,7 @@ class GeminiIntegration:
                         GenAIAttributes.OUTPUT_TOKENS,
                         getattr(meta, "candidates_token_count", 0),
                     )
+                record_completion_content(span, extract_gemini_completion(response))
                 span.set_status(trace.Status(trace.StatusCode.OK))
                 return response
             except Exception as exc:
@@ -84,6 +100,7 @@ class GeminiIntegration:
                     getattr(self_model, "model_name", "unknown"),
                 )
                 record_full_request_gemini(span, kwargs)
+                record_prompt_content(span, _gemini_contents(args, kwargs))
                 try:
                     response = await integration._original_generate_async(
                         self_model, *args, **kwargs,
@@ -98,6 +115,7 @@ class GeminiIntegration:
                             GenAIAttributes.OUTPUT_TOKENS,
                             getattr(meta, "candidates_token_count", 0),
                         )
+                    record_completion_content(span, extract_gemini_completion(response))
                     span.set_status(trace.Status(trace.StatusCode.OK))
                     return response
                 except Exception as exc:
