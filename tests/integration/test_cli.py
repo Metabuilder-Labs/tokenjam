@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -272,6 +271,96 @@ def test_doctor_warns_on_schema_without_capture(runner, db, config, tmp_path):
     checks = json.loads(result.output)
     schema_checks = [c for c in checks if c["name"] == "Schema vs capture"]
     assert any(c["level"] == "warning" for c in schema_checks)
+
+
+def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
+    # Set up a fake home directory and fake cwd
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    fake_cwd = tmp_path / "fake_cwd"
+    fake_cwd.mkdir()
+
+    # Stub doctor config to avoid other warning noise
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+
+    # Case 1: No files, no executables -> should be level: "info"
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 0
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "info"
+
+    # Case 2: Claude Code CLI is on PATH (shutil.which returns True), but no registration -> should be level: "warning"
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", side_effect=lambda cmd: "/bin/claude" if cmd == "claude" else None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 1
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "warning"
+        assert "Claude Code" in mcp_checks[0]["message"]
+
+    # Case 3: MCP registered globally in Codex (~/.codex/config.toml) -> should be level: "ok"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    codex_config = codex_dir / "config.toml"
+    codex_config.write_text("[mcp_servers.tj]\ncommand = 'tj'\nargs = ['mcp']\n")
+
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 0
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert "Codex" in mcp_checks[0]["message"]
+
+    # Clean up codex file
+    codex_config.unlink()
+    codex_dir.rmdir()
+
+    # Case 4: MCP registered globally in Claude Code (~/.claude.json) -> should be level: "ok"
+    claude_json = fake_home / ".claude.json"
+    claude_json.write_text('{"mcpServers": {"tj": {"command": "tj"}}}')
+
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 0
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert "Claude Code" in mcp_checks[0]["message"]
+
+    # Clean up claude json file
+    claude_json.unlink()
+
+    # Case 5: MCP registered locally in project-level .mcp.json -> should be level: "ok"
+    project_mcp = fake_cwd / ".mcp.json"
+    project_mcp.write_text('{"mcpServers": {"tj": {"command": "tj"}}}')
+
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 0
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert "project scope" in mcp_checks[0]["message"]
 
 
 # -- since flag parsing --
