@@ -58,6 +58,42 @@ def record_request_params(span: Any, kwargs: dict[str, Any]) -> None:
                 break
 
 
+def record_prompt_content(span: Any, messages: Any) -> None:
+    """Set ``gen_ai.prompt.content`` (the request messages) on the span (#320).
+
+    Serialized as ``json.dumps(messages)`` — the SAME shape every other capture
+    path uses (``litellm._record_prompt_content``, ``sdk/agent.py``) so a replay
+    harness / backfill reading ``gen_ai.prompt.content`` gets one consistent
+    shape. Set UNCONDITIONALLY here; ``strip_captured_content`` drops it at
+    ingest when the ``[capture] prompts`` toggle is off (same pattern litellm
+    uses). ``messages`` is usually a list of message dicts but may be any
+    JSON-shaped request body; ``None`` is a no-op.
+    """
+    if messages is None:
+        return
+    try:
+        content = json.dumps(messages, default=str)
+    except (TypeError, ValueError):
+        content = str(messages)
+    span.set_attribute(GenAIAttributes.PROMPT_CONTENT, content)
+
+
+def record_completion_content(span: Any, text: Any) -> None:
+    """Set ``gen_ai.completion.content`` (the assistant response text) (#320).
+
+    Set UNCONDITIONALLY; ``strip_captured_content`` drops it at ingest when the
+    ``[capture] completions`` toggle is off. ``text`` is the assistant text;
+    ``None`` (e.g. a tool-only response, or a shape we couldn't extract) is a
+    no-op so we never write an empty/placeholder completion.
+    """
+    if text is None:
+        return
+    span.set_attribute(
+        GenAIAttributes.COMPLETION_CONTENT,
+        text if isinstance(text, str) else str(text),
+    )
+
+
 def record_request_tools(span: Any, kwargs: dict[str, Any]) -> None:
     """Set the ``tokenjam.request.tools`` attribute (JSON) from call kwargs.
 
@@ -85,6 +121,58 @@ def record_full_request(span: Any, kwargs: dict[str, Any]) -> None:
     """Convenience: capture both sampling params and the tools payload."""
     record_request_params(span, kwargs)
     record_request_tools(span, kwargs)
+
+
+# --- Response completion-text extraction, per provider response shape (#320).
+# Defensive getattr/get access — a shape we don't recognise yields None (no
+# completion recorded) rather than raising into the patched call.
+
+def extract_anthropic_completion(response: Any) -> str | None:
+    """Assistant text from an Anthropic Messages response (``.content`` blocks).
+
+    ``content`` is a list of blocks; text blocks carry ``.text`` (or
+    ``["text"]``). Tool-use blocks have no text. Concatenate the text blocks so
+    a mixed text+tool response still yields the prose.
+    """
+    content = getattr(response, "content", None)
+    if content is None and isinstance(response, dict):
+        content = response.get("content")
+    if not isinstance(content, (list, tuple)):
+        return None
+    parts: list[str] = []
+    for block in content:
+        text = getattr(block, "text", None)
+        if text is None and isinstance(block, dict):
+            text = block.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    return "".join(parts) if parts else None
+
+
+def extract_openai_completion(response: Any) -> str | None:
+    """Assistant text from an OpenAI chat response (``choices[0].message.content``)."""
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return None
+    try:
+        choice = choices[0]
+    except (IndexError, TypeError):
+        return None
+    message = getattr(choice, "message", None)
+    content = getattr(message, "content", None) if message is not None else None
+    if content is None:
+        content = getattr(choice, "text", None)  # legacy completions shape
+    if content is None:
+        return None
+    return content if isinstance(content, str) else str(content)
+
+
+def extract_gemini_completion(response: Any) -> str | None:
+    """Assistant text from a Gemini ``generate_content`` response (``.text``)."""
+    text = getattr(response, "text", None)
+    if isinstance(text, str):
+        return text
+    return None
 
 
 # Gemini fields surfaced from generation_config (dict or GenerationConfig obj).
