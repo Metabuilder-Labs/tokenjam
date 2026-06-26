@@ -15,14 +15,17 @@ from __future__ import annotations
 
 import contextvars
 import functools
-import json
 import logging
 
 from opentelemetry import trace
 
 from tokenjam.core.pricing import provider_for_model
 from tokenjam.otel.semconv import GenAIAttributes
-from tokenjam.sdk.integrations._request_capture import record_full_request
+from tokenjam.sdk.integrations._request_capture import (
+    record_completion_content,
+    record_full_request,
+    record_prompt_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,32 +80,24 @@ def _strip_provider_prefix(model: str) -> str:
 # capture is disabled. Without them, cache-recommend / Reuse text / trim get no
 # content and the cache analyzer always reads 0% efficacy for LiteLLM spans.
 
-def _serialize_prompt(args: tuple, kwargs: dict) -> str | None:
-    """Serialize a completion call's request messages/prompt to a string.
+def _record_prompt_content(span, args: tuple, kwargs: dict) -> None:
+    """Set PROMPT_CONTENT on the span (stripped at ingest if capture is off).
 
-    OTel attributes can't hold a list-of-dicts, so chat ``messages`` are
-    JSON-encoded; the analyzers' ``_stringify_prompt`` accepts a string. Falls
-    back to a text-completion ``prompt`` kwarg.
+    Delegates the serialization to the shared ``record_prompt_content`` helper
+    (#320) so every capture path (provider patches + litellm) agrees on the
+    ``json.dumps(messages)`` shape a replay harness / backfill expects. LiteLLM's
+    extra ``messages``-positional / text-``prompt`` fallbacks are resolved here
+    before handing the resolved request object to the shared helper.
     """
     messages = kwargs.get("messages")
     if messages is None and len(args) > 1:
         messages = args[1]
     if messages is not None:
-        try:
-            return json.dumps(messages, default=str)
-        except Exception:
-            return str(messages)
+        record_prompt_content(span, messages)
+        return
     prompt = kwargs.get("prompt")
     if prompt is not None:
-        return prompt if isinstance(prompt, str) else str(prompt)
-    return None
-
-
-def _record_prompt_content(span, args: tuple, kwargs: dict) -> None:
-    """Set PROMPT_CONTENT on the span (stripped at ingest if capture is off)."""
-    content = _serialize_prompt(args, kwargs)
-    if content is not None:
-        span.set_attribute(GenAIAttributes.PROMPT_CONTENT, content)
+        record_prompt_content(span, prompt if isinstance(prompt, str) else str(prompt))
 
 
 def _extract_completion_text(response: object) -> str | None:
@@ -324,9 +319,7 @@ def _record_usage(response: object, span, model: str) -> None:
     if usage:
         _set_usage_attributes(usage, span)
 
-    completion = _extract_completion_text(response)
-    if completion is not None:
-        span.set_attribute(GenAIAttributes.COMPLETION_CONTENT, completion)
+    record_completion_content(span, _extract_completion_text(response))
 
 
 class _SyncStreamWrapper:

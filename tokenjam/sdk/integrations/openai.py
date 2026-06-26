@@ -15,7 +15,12 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
-from tokenjam.sdk.integrations._request_capture import record_full_request
+from tokenjam.sdk.integrations._request_capture import (
+    extract_openai_completion,
+    record_completion_content,
+    record_full_request,
+    record_prompt_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,10 @@ class OpenAIIntegration:
                 kwargs.get("model", "unknown"),
             )
             record_full_request(span, kwargs)
+            # Prompt content (#320). Set unconditionally; stripped at ingest
+            # unless [capture] prompts is on. Set before the call so it's present
+            # even on the streaming path (completion text isn't aggregated there).
+            record_prompt_content(span, kwargs.get("messages"))
             is_stream = kwargs.get("stream", False)
             try:
                 response = integration._original_create(self_comp, *args, **kwargs)
@@ -70,6 +79,9 @@ class OpenAIIntegration:
                         GenAIAttributes.OUTPUT_TOKENS,
                         response.usage.completion_tokens,
                     )
+                # Completion content (#320). Stripped at ingest unless
+                # [capture] completions is on.
+                record_completion_content(span, extract_openai_completion(response))
                 span.set_status(trace.Status(trace.StatusCode.OK))
                 span.end()
                 return response
