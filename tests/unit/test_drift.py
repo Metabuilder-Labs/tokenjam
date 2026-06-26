@@ -76,3 +76,45 @@ class TestDriftDetectorAgentFallback:
 
         # Baseline should have been built despite no agent config
         assert db.upsert_baseline.called
+
+
+class TestApiBackendGetBaseline:
+    def test_get_baseline_computed_at_fallback(self, monkeypatch):
+        from tokenjam.core.api_backend import ApiBackend
+        from datetime import datetime
+        from tokenjam.utils.time_parse import utcnow
+
+        backend = ApiBackend("http://localhost:8000")
+
+        # Test case 1: computed_at is present in the API response
+        mock_data = {
+            "baseline": {
+                "sessions_sampled": 5,
+                "computed_at": "2026-06-25T19:00:00+00:00",
+                "avg_input_tokens": 100
+            }
+        }
+        monkeypatch.setattr(backend, "_get", lambda *args, **kwargs: mock_data)
+        baseline = backend.get_baseline("test-agent")
+        assert baseline is not None
+        assert baseline.sessions_sampled == 5
+        assert baseline.computed_at == datetime.fromisoformat("2026-06-25T19:00:00+00:00")
+
+        # Test case 2: computed_at is missing from the API response
+        mock_data_missing = {
+            "baseline": {
+                "sessions_sampled": 3,
+                "avg_input_tokens": 50
+            }
+        }
+        monkeypatch.setattr(backend, "_get", lambda *args, **kwargs: mock_data_missing)
+
+        now = utcnow()
+        baseline_missing = backend.get_baseline("test-agent")
+        assert baseline_missing is not None
+        assert baseline_missing.sessions_sampled == 3
+        # Should be timezone-aware (tzinfo is not None)
+        assert baseline_missing.computed_at.tzinfo is not None
+        # Difference should be very small
+        assert abs((baseline_missing.computed_at - now).total_seconds()) < 5
+
