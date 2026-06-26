@@ -2507,7 +2507,7 @@ function DriftView({ params }) {
 
   // /drift returns a single-agent shape when agent_id is set; normalize to a list.
   const agents = data.agents || (data.agent_id ? [data] : []);
-  if (!agents.length) return html`<div class="empty">No baselines built yet. Run at least 10 sessions to establish a behavioral baseline.</div>`;
+  if (!agents.length) return html`<div class="empty">No drift baselines built yet. Run at least 10 completed live sessions for a single agent to establish its behavioral baseline (note: drift baselines are computed per-agent, and only from live sessions, so historical backfilled sessions will not build a baseline).</div>`;
 
   const metrics = [
     ['Input tokens', 'avg_input_tokens', 'stddev_input_tokens', 'input_tokens'],
