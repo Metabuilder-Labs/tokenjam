@@ -3206,6 +3206,20 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const emptyFromStack = !!effStack && noRows;
   const labelOf = dim => (ANALYTICS_DIMENSIONS.find(d => d[0] === dim) || [, dim])[1];
 
+  // #313: surface the leaderboard's own total + item count (a ranked list with
+  // no sum is confusing), and reconcile the gap when grouping by a PARTIAL
+  // dimension — only some spans carry it (e.g. a tool), so the breakdown subtotal
+  // is legitimately smaller than the all-events KPI and otherwise looks
+  // contradictory. Purely additive: only the leaderboard (hbar) branch reads
+  // these; nothing else changes.
+  const boardTotal = board ? board.reduce((s, e) => s + (e.value || 0), 0) : 0;
+  const boardCount = board ? board.length : 0;
+  const dimName = (ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1].toLowerCase();
+  const dimNamePlural = (/y$/.test(dimName) && !/[aeiou]y$/.test(dimName)) ? dimName.slice(0, -1) + 'ies' : dimName + 's';
+  const countMetric = (metric === 'events' || metric === 'sessions') ? metric : null;
+  const kpiCount = (countMetric && kpis) ? kpis[countMetric] : null;
+  const boardGap = kpiCount != null && boardTotal > 0 && boardTotal < kpiCount;
+
   return html`
     ${embedded ? null : html`<div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Analytics <${PlanBadge} framing=${framing} />
@@ -3305,6 +3319,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
             </div>`
           : chart === 'hbar'
             ? (board && board.length ? html`
+              <div class="dim" style="font-size:12px;margin:2px 0 8px">Total: ${fmtVal(boardTotal)} · ${boardCount} ${boardCount === 1 ? dimName : dimNamePlural}</div>
               <div class="leaderboard">
                 ${board.map((e, i) => {
                   const label = formatGroupLabel(e.group, groupBy);
@@ -3316,7 +3331,9 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
                     <span class="lb-val">${fmtVal(e.value)}</span>
                   </div>`;
                 })}
-              </div>` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
+              </div>
+              ${boardGap ? html`<div class="chart-foot"><span class="dim">Only ${fmtCount(boardTotal)} of ${fmtCount(kpiCount)} ${countMetric} have a ${dimName} — the rest aren't in this breakdown.</span></div>` : null}
+              ` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
             : (series ? html`
               ${chart === 'line'
                 ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} showLegend=${series.labels.length > 1} bucket=${series.bucket} />`
