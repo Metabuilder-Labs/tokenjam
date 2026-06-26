@@ -403,6 +403,12 @@ def test_drift_no_baselines_exits_0(runner, db, config):
     assert data["agents"] == []
 
 
+def test_drift_no_baselines_warning_message(runner, db, config):
+    result = _invoke(runner, db, config, ["drift"])
+    assert result.exit_code == 0
+    assert "No drift baselines found." in result.output
+
+
 def test_drift_with_baseline_no_violations(runner, db, config):
     """Normal session (tokens within threshold) -> exit 0."""
     # Use a baseline without tool sequences so Jaccard doesn't fire

@@ -381,6 +381,9 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .kpi-tile .delta-chip { font-family: 'Geist Mono', monospace; font-size: 11px; margin-top: 6px; display: inline-block; }
 .kpi-val { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 600; }
 .kpi-lab { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.kpi-sub { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.kpi-sub-val { font-family: 'Geist Mono', monospace; font-size: 15px; font-weight: 600; color: var(--text); }
+.kpi-sub-lab { font-size: 11px; color: var(--text-dim); margin-left: 5px; }
 .leaderboard { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
 .lb-row { display: grid; grid-template-columns: 24px minmax(80px, 160px) 1fr auto; align-items: center; gap: 10px; font-size: 13px; }
 .lb-rank { color: var(--text-faint); font-family: 'Geist Mono', monospace; text-align: right; }
@@ -2084,16 +2087,19 @@ function Sparkline({ values, color = 'var(--accent)', width = 92, height = 26 })
 // `onSelect` makes the tile the metric selector (#247): the kpi-active border
 // already implied it was clickable; wiring onClick fulfills that. Falls back to
 // a static tile when no handler is given.
-function KpiTile({ label, value, active, series, delta, cost, prevThin, onSelect }) {
+function KpiTile({ label, value, active, series, delta, cost, prevThin, onSelect, sub = null }) {
   const cls = 'kpi-tile' + (active ? ' kpi-active' : '') + (onSelect ? ' kpi-clickable' : '');
   const props = onSelect
     ? { class: cls, role: 'button', tabindex: '0', 'aria-pressed': String(!!active),
         onClick: onSelect,
         onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } } }
     : { class: cls };
+  // #318: optional secondary line — the breakdown subtotal on the active tile
+  // when grouping by a partial dimension (defaults null, so other callers are
+  // unaffected).
   return html`<div ...${props}>
     <div class="kpi-top">
-      <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div></div>
+      <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div>${sub ? html`<div class="kpi-sub"><span class="kpi-sub-val">${sub.value}</span><span class="kpi-sub-lab">${sub.label}</span></div>` : null}</div>
       <${Sparkline} values=${series} />
     </div>
     <${DeltaChip} pct=${delta} cost=${cost} prevThin=${prevThin} />
@@ -2501,7 +2507,7 @@ function DriftView({ params }) {
 
   // /drift returns a single-agent shape when agent_id is set; normalize to a list.
   const agents = data.agents || (data.agent_id ? [data] : []);
-  if (!agents.length) return html`<div class="empty">No baselines built yet. Run at least 10 sessions to establish a behavioral baseline.</div>`;
+  if (!agents.length) return html`<div class="empty">No drift baselines built yet. Run at least 10 completed live sessions for a single agent to establish its behavioral baseline (note: drift baselines are computed per-agent, and only from live sessions, so historical backfilled sessions will not build a baseline).</div>`;
 
   const metrics = [
     ['Input tokens', 'avg_input_tokens', 'stddev_input_tokens', 'input_tokens'],
@@ -3277,6 +3283,16 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
       // window's session count as the universal "did anything happen" proxy.
       const prevThin = !!resp.kpi_prev && (resp.kpi_prev.sessions || 0) < 2;
       const onMetric = (k) => setFilter('metric', k);
+      // #318: the ACTIVE count-metric tile shows the breakdown subtotal next to
+      // the window total when grouping by a PARTIAL dimension (only some spans
+      // carry it, e.g. tool), so the window-wide tile reconciles with the smaller
+      // chart subtotal. Count metrics only (events/sessions — spend/tokens framing
+      // is more complex); only when there's an actual gap.
+      const breakdownTotal = (resp.rows || []).reduce((s, r) => s + (r.value || 0), 0);
+      const breakdownDim = (ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1].toLowerCase();
+      const activeSub = ((metric === 'events' || metric === 'sessions')
+        && breakdownTotal > 0 && breakdownTotal < (kpis[metric] || 0))
+        ? { value: fmtCount(breakdownTotal), label: `by ${breakdownDim}` } : null;
       const tiles = [];
       if (spend) {
         tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
@@ -3292,6 +3308,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         <div class="kpi-row">
           ${tiles.map(t => html`<${KpiTile} label=${t.label} value=${t.value} active=${t.key === metric}
               series=${t.series} delta=${t.delta == null ? null : t.delta} cost=${t.cost}
+              sub=${t.key === metric ? activeSub : null}
               prevThin=${prevThin} onSelect=${() => onMetric(t.key)} />`)}
         </div>
         ${kpiCaption ? html`<div class="kpi-caption">${kpiCaption}</div>` : null}`;

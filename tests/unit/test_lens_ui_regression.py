@@ -468,6 +468,21 @@ def test_analytics_leaderboard_has_inline_bars(html):
     assert ".lb-bar" in html
 
 
+# --- #318: active tile shows the breakdown subtotal for a partial dimension --- #
+def test_analytics_active_tile_shows_breakdown_subtotal(html):
+    # When grouping by a PARTIAL dimension (only some spans carry it, e.g. tool),
+    # the active count-metric tile shows the breakdown subtotal beneath the window
+    # total so the tile reconciles with the smaller chart subtotal (#318). Count
+    # metrics only; only when there's an actual gap.
+    assert "const breakdownTotal = (resp.rows || []).reduce" in html
+    assert "const activeSub = ((metric === 'events' || metric === 'sessions')" in html
+    assert "by ${breakdownDim}" in html
+    # KpiTile renders the optional sub-line; defaults null so other callers (e.g.
+    # the Dashboard preview) are unaffected.
+    assert "onSelect, sub = null }" in html
+    assert "kpi-sub-val" in html
+
+
 # --- #295: Stack gated to stacking charts; empty cross-tab gets a clear state - #
 def test_analytics_stack_gated_to_stacking_charts(html):
     # Stack only applies to the multi-series charts (bar/line). The Leaderboard
