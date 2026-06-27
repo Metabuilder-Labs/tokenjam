@@ -3127,7 +3127,7 @@ function analyticsCsv(resp) {
     'bucket_epoch',
     'bucket_iso',
     resp.group_by,
-    ...(hasStack ? [resp.stack_by] : []),
+    resp.stack_by || 'stack',
     'cost',
     'cycle_share_pct',
     'input_tokens',
@@ -3144,31 +3144,21 @@ function analyticsCsv(resp) {
     const iso = new Date(r.bucket * 1000).toISOString();
     const cell = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 
-    let costVal = '';
-    let cycleShareVal = '';
     const rawCost = r.cost || 0;
 
-    if (mode === 'local') {
-      costVal = '0';
-      cycleShareVal = '0';
-    } else if (mode === 'subscription') {
-      costVal = String(rawCost);
-      if (monthlyUsd > 0) {
-        cycleShareVal = String((rawCost / monthlyUsd) * 100.0);
-      } else {
-        cycleShareVal = '';
-      }
-    } else {
-      // api / unknown
-      costVal = String(rawCost);
-      cycleShareVal = '';
+    // Route through existing helper rather than inline mode derivation to prevent leaks
+    const costVal = perItemUsesTokens(framing) ? '' : String(rawCost);
+    
+    let cycleShareVal = '';
+    if (framing.pricing_mode === 'subscription' && framing.plan_monthly_usd > 0) {
+      cycleShareVal = String((rawCost / framing.plan_monthly_usd) * 100.0);
     }
 
     const rowData = [
       r.bucket,
       iso,
       cell(r.group),
-      ...(hasStack ? [cell(r.stack)] : []),
+      cell(r.stack),
       costVal,
       cycleShareVal,
       r.input_tokens || 0,
@@ -3237,7 +3227,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   }, [metric, groupBy, stack, chart, since, fAgent, fProvider, fModel, fTool]);
 
   useEffect(() => {
-    setSt({ loading: true, error: null, resp: null });
+    setSt(s => ({ ...s, loading: true, error: null }));
     load();
   }, [load]);
 
@@ -3386,7 +3376,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
     })() : null}
 
     ${!error ? html`
-      <div class="chart-card">
+      <div class="chart-card" style=${loading ? 'opacity: 0.5; pointer-events: none; transition: opacity 0.2s' : 'transition: opacity 0.2s'}>
         <div class="chart-head">
           <div class="chart-title">${(ANALYTICS_METRICS.find(m => m[0] === metric) || [, metric])[1]} by ${(ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1]}${metricSuffix}</div>
         </div>
@@ -3399,7 +3389,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
               <button class="btn" onClick=${() => setFilter('group_by', 'agent')}>Group by Agent</button>
             </div>
           </div>`
-          : loading ? html`<div class="shimmer" style="height:200px"></div>`
+          : loading && !resp ? html`<div class="shimmer" style="height:200px"></div>`
           : emptyFromStack ? html`
             <div class="empty" style="padding:32px 16px;text-align:center">
               <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these — e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
