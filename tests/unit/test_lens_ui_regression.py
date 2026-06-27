@@ -429,9 +429,24 @@ def test_analytics_presets_and_csv_export(html):
     assert "function analyticsCsv" in html
     assert "function downloadCsv" in html
     assert "Export CSV" in html
+    assert "disabled=${loading}" in html
     # the leaderboard preset closes #214; spend-by-model line closes #216
     assert "'leaderboard'" in html
     assert "'spend-by-model'" in html
+
+    # Richer CSV columns assertions
+    assert "'cycle_share_pct'" in html
+    assert "'input_tokens'" in html
+    assert "'output_tokens'" in html
+    assert "'cache_read_tokens'" in html
+    assert "'cache_write_tokens'" in html
+    assert "'sessions'" in html
+    assert "'events'" in html
+    # Filename generation check
+    assert "getFilename" in html
+    assert "tokenjam-analytics.csv" in html
+    assert "tokenjam-analytics_${startStr}_${endStr}.csv" in html
+
 
 
 def test_analytics_url_is_source_of_truth(html):
