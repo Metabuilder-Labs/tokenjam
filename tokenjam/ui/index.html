@@ -401,7 +401,8 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   font-family: 'Geist Mono', monospace;
   font-size: 12px;
 }
-.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-back { margin-bottom: 16px; }
 
 /* Segmented view toggle (Cards | List), e.g. the Status screen (#241). */
@@ -3116,13 +3117,71 @@ function buildLeaderboard(resp, useTokens) {
 // CSV from the current pivot — built client-side from the response (offline,
 // no server round-trip), downloaded via a Blob object URL.
 function analyticsCsv(resp) {
-  const head = ['bucket_epoch', 'bucket_iso', resp.group_by, resp.stack_by || 'stack', resp.metric, 'tokens'];
+  const framing = resp.framing || {};
+  const mode = framing.pricing_mode || 'unknown';
+  const monthlyUsd = framing.plan_monthly_usd || 0;
+
+  const hasStack = !!resp.stack_by;
+
+  const head = [
+    'bucket_epoch',
+    'bucket_iso',
+    resp.group_by,
+    ...(hasStack ? [resp.stack_by] : []),
+    'cost',
+    'cycle_share_pct',
+    'input_tokens',
+    'output_tokens',
+    'cache_read_tokens',
+    'cache_write_tokens',
+    'sessions',
+    'events'
+  ];
+
   const lines = [head.join(',')];
+
   (resp.rows || []).forEach(r => {
     const iso = new Date(r.bucket * 1000).toISOString();
     const cell = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    lines.push([r.bucket, iso, cell(r.group), cell(r.stack), r.value, r.tokens].join(','));
+
+    let costVal = '';
+    let cycleShareVal = '';
+    const rawCost = r.cost || 0;
+
+    if (mode === 'local') {
+      costVal = '0';
+      cycleShareVal = '0';
+    } else if (mode === 'subscription') {
+      costVal = String(rawCost);
+      if (monthlyUsd > 0) {
+        cycleShareVal = String((rawCost / monthlyUsd) * 100.0);
+      } else {
+        cycleShareVal = '';
+      }
+    } else {
+      // api / unknown
+      costVal = String(rawCost);
+      cycleShareVal = '';
+    }
+
+    const rowData = [
+      r.bucket,
+      iso,
+      cell(r.group),
+      ...(hasStack ? [cell(r.stack)] : []),
+      costVal,
+      cycleShareVal,
+      r.input_tokens || 0,
+      r.output_tokens || 0,
+      r.cache_read_tokens || 0,
+      r.cache_write_tokens || 0,
+      r.sessions || 0,
+      r.events || 0
+    ];
+
+    lines.push(rowData.join(','));
   });
+
   return lines.join('\n');
 }
 
@@ -3166,7 +3225,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const [st, setSt] = useState({ loading: true, error: null, resp: null });
 
   const load = useCallback(async () => {
-    setSt(s => ({ ...s, loading: !s.resp, error: null }));
+    setSt(s => ({ ...s, loading: true, error: null }));
     try {
       const resp = await api('/analytics', {
         metric, group_by: groupBy, stack_by: effStack || undefined, since,
@@ -3177,7 +3236,10 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [metric, groupBy, stack, chart, since, fAgent, fProvider, fModel, fTool]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    setSt({ loading: true, error: null, resp: null });
+    load();
+  }, [load]);
 
   const { loading, error, resp } = st;
   const framing = resp ? resp.framing : null;
@@ -3226,6 +3288,15 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const kpiCount = (countMetric && kpis) ? kpis[countMetric] : null;
   const boardGap = kpiCount != null && boardTotal > 0 && boardTotal < kpiCount;
 
+  const getFilename = () => {
+    if (!resp) return 'tokenjam-analytics.csv';
+    const startStr = resp.window_start ? new Date(resp.window_start * 1000).toISOString().split('T')[0] : '';
+    const endStr = resp.window_end ? new Date(resp.window_end * 1000).toISOString().split('T')[0] : '';
+    return startStr && endStr ? `tokenjam-analytics_${startStr}_${endStr}.csv` : 'tokenjam-analytics.csv';
+  };
+
+
+
   return html`
     ${embedded ? null : html`<div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Analytics <${PlanBadge} framing=${framing} />
@@ -3254,7 +3325,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         <option value="30d">Last 30d</option><option value="90d">Last 90d</option>
       </select>`}
       <button class="btn" onClick=${load}>Refresh</button>
-      <button class="btn" onClick=${() => resp && downloadCsv('tokenjam-analytics.csv', analyticsCsv(resp))}>Export CSV</button>
+      <button class="btn" onClick=${() => resp && downloadCsv(getFilename(), analyticsCsv(resp))} disabled=${loading}>Export CSV</button>
     </div>
 
     <div class="filters preset-row">
