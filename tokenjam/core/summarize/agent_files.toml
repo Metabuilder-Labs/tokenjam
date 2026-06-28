@@ -1,0 +1,36 @@
+# Catalog of known AI-agent prompt-file locations (where `tj summarize` looks).
+# Curated data — PRs welcome, like tokenjam/pricing/models.toml. Anil decides what ships.
+# Per tool:
+#   project_files = bare filenames checked at the scan root (and matched while --recursive walks)
+#   project_globs = root-relative globs for "obvious" prompt folders (shallow, no deep walk)
+#   global_paths  = user/system locations loaded regardless of project ("~" is expanded)
+# Users can extend/override locally at ~/.config/tj/agent_files.toml (merged over this).
+
+[claude]                 # Claude Code
+project_files = ["CLAUDE.md", "CLAUDE.local.md"]   # .local = historical local override
+project_globs = [
+    ".claude/rules/*.md",
+    ".claude/skills/*/SKILL.md",
+    ".claude/commands/*.md",
+    ".claude/agents/*.md",
+]
+global_paths = [
+    "~/.claude/CLAUDE.md", "/etc/claude-code/CLAUDE.md",
+    "~/.claude/agents/*.md", "~/.claude/skills/*/SKILL.md", "~/.claude/commands/*.md",
+]
+
+[gemini]                 # Gemini CLI
+project_files = ["GEMINI.md"]
+project_globs = []
+global_paths = ["~/.gemini/GEMINI.md"]
+
+[codex]                  # Codex CLI (AGENTS.md = cross-tool universal standard)
+project_files = ["AGENTS.md", "codex.md"]                          # codex.md = historical
+project_globs = []
+global_paths = ["~/.codex/AGENTS.md", "~/.codex/instructions.md"]  # instructions.md = historical
+
+[safety]
+# Extra dirs (depth >= 2) to never treat as a repo root. The core gates — filesystem
+# root, the user's home, and any bare top-level dir — live in code and cannot be
+# disabled here; this list only ADDS boundaries.
+forbidden_roots = []

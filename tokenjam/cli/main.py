@@ -40,7 +40,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         config.storage.path = db_path
 
     # Commands that don't need a database connection
-    no_db_commands = {"stop", "uninstall", "onboard", "mcp", "demo", "policy", "proxy"}
+    no_db_commands = {"stop", "uninstall", "onboard", "mcp", "demo", "policy", "proxy", "summarize"}
     invoked = ctx.invoked_subcommand
     if invoked in no_db_commands:
         ctx.obj["config"] = config
@@ -138,3 +138,6 @@ cli.add_command(cmd_mcp, name="mcp")
 
 from tokenjam.cli.cmd_demo import cmd_demo  # noqa: E402
 cli.add_command(cmd_demo, name="demo")
+
+from tokenjam.cli.cmd_summarize import cmd_summarize  # noqa: E402
+cli.add_command(cmd_summarize, name="summarize")
