@@ -38,7 +38,7 @@ def _print_verdict(config: TjConfig, verdict: CheckVerdict) -> None:
     never surfaced to the user here.)"""
     if verdict.structure_ok:
         console.print(f"[green]✓[/green] {escape(verdict.path)} — structure preserved, "
-                      f"~{format_tokens(verdict.est_tokens_saved)} tok_out/call "
+                      f"~{format_tokens(verdict.est_tokens_saved)} prompt tok/call "
                       f"({verdict.words_before}→{verdict.words_after} words)")
     else:
         console.print(f"[red]✗[/red] {escape(verdict.path)} — {escape(verdict.reason)} (not staged)")
