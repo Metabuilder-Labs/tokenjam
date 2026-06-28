@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from unittest.mock import patch
 
 import pytest
@@ -39,6 +40,50 @@ def config():
 @pytest.fixture
 def runner():
     return CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_world_side_effects(tmp_path_factory, monkeypatch):
+    """Keep every CLI test off real user/daemon state so the file runs to
+    completion deterministically, in any order (#23).
+
+    The ``tj onboard``/``tj onboard --claude-code`` path otherwise reaches out
+    to live, machine-global resources as a side effect of the command — none of
+    which these tests are actually asserting on:
+
+    * runs the real ``ingest_claude_code`` against ``~/.claude/projects`` (6 GB+
+      on a dev box) and writes the real ``~/.tj/telemetry.duckdb``;
+    * registers the real ``claude`` MCP server via ``subprocess``;
+    * pokes the real ``tj serve`` daemon to release the DuckDB write lock.
+
+    Because the DuckDB write lock is process- and order-dependent, whenever the
+    daemon (or a sibling test) is holding it, ``ingest_claude_code`` blocks on
+    ``upsert_session`` forever — so the file passes test-by-test but hangs when
+    run as a group. Pointing every machine-global resource at a throwaway temp
+    location (and stubbing the daemon/MCP shell-outs) makes the suite hermetic.
+    """
+    iso = tmp_path_factory.mktemp("cli-iso")
+
+    # No Claude Code logs to ingest -> onboard skips the open_db + ingest block
+    # entirely, so it never touches the real telemetry DB or its write lock.
+    monkeypatch.setattr(
+        "tokenjam.core.backfill.CLAUDE_CODE_PROJECTS_ROOT",
+        iso / "no-such-claude-projects",
+        raising=False,
+    )
+    # Never shell out to the real `claude` CLI to register the MCP server.
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard.subprocess.run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, b"", b""),
+    )
+    # Never touch the real `tj serve` daemon lifecycle.
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard._stop_serve_for_db_write", lambda: False
+    )
+    # Storage paths resolve via os.path.expanduser($HOME); redirect them at the
+    # default ``~/.tj/telemetry.duckdb`` so any stray open_db lands in tmp.
+    monkeypatch.setenv("HOME", str(iso))
 
 
 def _invoke(runner, db, config, args):
