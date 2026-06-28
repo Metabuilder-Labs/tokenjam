@@ -122,6 +122,119 @@ tj export --format otlp
 tj export --format openevals --output traces.json
 ```
 
+### `tj optimize`
+
+Analyze recent usage for cost-saving candidates, cache opportunities, prompt trimming, workflow reuse, and budget exposure.
+
+```bash
+tj optimize                                # run all analyzers
+tj optimize downsize cache reuse           # run selected analyzers
+tj optimize --since 7d --agent my-agent    # scope the analysis window
+tj optimize --compare last-7d              # compare against a prior window
+tj optimize --export-config claude-code    # write advisory routing recommendations
+tj optimize --json                         # machine-readable report
+```
+
+Key flags: `--since`, `--agent`, `--budget`, `--budget-usd`, `--compare`, `--export-config`, `--export-templates`, `--json`.
+
+### `tj route`
+
+Compile advisory router configs from downsize findings. Exports are written under the TokenJam config directory for manual review and are not applied automatically.
+
+```bash
+tj route export --target ccr
+tj route export --target litellm --since 7d
+tj route export --check
+tj route export --target ccr --json
+```
+
+Key flags on `tj route export`: `--target ccr|litellm`, `--check`, `--agent`, `--since`, `--json`.
+
+### `tj tokenmaxx`
+
+Show a shareable spend-tier summary for the selected usage window, paired with the downsize savings figure.
+
+```bash
+tj tokenmaxx
+tj tokenmaxx --since 7d
+tj tokenmaxx --json
+```
+
+Key flags: `--since`, `--json`.
+
+### `tj backfill`
+
+Ingest historical telemetry from local Claude Code logs or external observability exports.
+
+```bash
+tj backfill claude-code
+tj backfill claude-code --since 30d --quiet
+tj backfill langfuse --source-file observations.json
+tj backfill helicone --source-url https://api.helicone.ai --api-key <key>
+tj backfill otlp --source-file spans.ndjson
+```
+
+Subcommands: `claude-code`, `langfuse`, `helicone`, `otlp`.
+
+Key flags: `--since` on all sources; `--root`, `--since-days`, and `--quiet` for `claude-code`; `--source-url`, `--source-file`, and `--api-key` for Langfuse and Helicone; `--source-url` and `--source-file` for OTLP.
+
+### `tj report`
+
+Generate standalone HTML reports for analyzer findings. Reuse reports can also write Markdown skeleton sidecars.
+
+```bash
+tj report --trim
+tj report --trim my-agent --since 7d
+tj report --reuse
+tj report --reuse my-agent --no-open
+```
+
+Key flags: `--trim [agent_id]`, `--reuse [agent_id]`, `--since`, `--no-open`.
+
+### `tj policy`
+
+Inspect policy-adjacent configuration and recent suggest-mode policy decisions.
+
+```bash
+tj policy list
+tj policy list --json
+tj policy decisions
+tj policy decisions --since 7d --limit 50
+tj policy decisions --json
+```
+
+Subcommands: `list`, `decisions`.
+
+Key flags: `--json` for both subcommands; `--limit` and `--since` for `decisions`.
+
+### `tj proxy`
+
+Manage the optional suggest-mode proxy and its provider base-URL wiring.
+
+```bash
+tj proxy status
+tj proxy enable
+tj proxy disable
+tj proxy killswitch
+tj proxy killswitch --off
+```
+
+Subcommands: `enable`, `disable`, `status`, `killswitch`.
+
+Key flag: `--off` on `killswitch` releases pass-through mode.
+
+### `tj demo`
+
+Run reproducible Agent Incident Library scenarios without API keys or external services.
+
+```bash
+tj demo                         # list available scenarios
+tj demo retry-loop              # run one scenario
+tj demo retry-loop --json       # machine-readable scenario output
+```
+
+Key flag: `--json`.
+
 ### `tj mcp`
 
 Start the MCP server (stdio transport for Claude Code). Registered automatically by `tj onboard --claude-code`.
