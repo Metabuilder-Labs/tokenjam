@@ -550,27 +550,77 @@ def test_list_alerts_http_mode():
 # --- test_list_active_sessions_http_mode ---
 
 def test_list_active_sessions_http_mode():
+    # Serve mode now proxies to /api/v1/sessions?status=active, which returns
+    # one row per active session (not one per agent).
     fake_response = {
-        "agents": [
+        "sessions": [
             {
-                "agent_id": "alpha",
-                "status": "active",
                 "session_id": "s1",
+                "agent_id": "alpha",
+                "started_at": "2026-04-11T10:00:00+00:00",
+                "total_cost_usd": 1.23,
                 "input_tokens": 100,
                 "output_tokens": 50,
                 "tool_call_count": 5,
                 "error_count": 0,
-                "cost_today": 1.23,
-                "active_alerts": 0,
             }
         ],
-        "has_active_alerts": False,
+        "count": 1,
     }
     _set_serve_url("http://127.0.0.1:7391")
     try:
         with patch("tokenjam.mcp.server._http_get", return_value=fake_response):
             result = _tool_list_active_sessions(None)
         assert result["count"] == 1
+        assert result["sessions"][0]["session_id"] == "s1"
+    finally:
+        _set_serve_url(None)
+
+
+def test_list_active_sessions_http_mode_enumerates_per_session():
+    """Serve mode must surface EVERY active session, including multiple
+    concurrent sessions for the same agent — matching the direct-DB path (#35).
+    The old code proxied to /api/v1/status (one record per agent) and
+    undercounted; it must now hit a per-session endpoint."""
+    sessions_response = {
+        "sessions": [
+            {
+                "session_id": "s1", "agent_id": "alpha",
+                "started_at": "2026-04-11T10:00:00+00:00", "total_cost_usd": 1.0,
+                "input_tokens": 10, "output_tokens": 5,
+                "tool_call_count": 1, "error_count": 0,
+            },
+            {
+                "session_id": "s2", "agent_id": "alpha",
+                "started_at": "2026-04-11T10:05:00+00:00", "total_cost_usd": 2.0,
+                "input_tokens": 20, "output_tokens": 8,
+                "tool_call_count": 2, "error_count": 0,
+            },
+        ],
+        "count": 2,
+    }
+    # /status collapses alpha's two concurrent sessions to one record — the
+    # shape the broken serve path used to read.
+    status_response = {
+        "agents": [
+            {"agent_id": "alpha", "status": "active", "session_id": "s2"}
+        ],
+        "has_active_alerts": False,
+    }
+
+    def fake_http_get(path, params=None):
+        if "/sessions" in path:
+            assert params and params.get("status") == "active"
+            return sessions_response
+        return status_response
+
+    _set_serve_url("http://127.0.0.1:7391")
+    try:
+        with patch("tokenjam.mcp.server._http_get", side_effect=fake_http_get):
+            result = _tool_list_active_sessions(None)
+        assert result["count"] == 2
+        ids = {s["session_id"] for s in result["sessions"]}
+        assert ids == {"s1", "s2"}
     finally:
         _set_serve_url(None)
 

@@ -505,24 +505,26 @@ def _tool_list_agents(conn) -> dict:
 
 
 def _tool_list_active_sessions(conn) -> dict:
-    # HTTP mode: proxy to serve status endpoint and filter for active
+    # HTTP mode: proxy to the per-session endpoint so concurrent sessions for
+    # the same agent are all surfaced. /api/v1/status collapses to one record
+    # per agent and undercounted parallel sessions (#35); /api/v1/sessions
+    # returns one row per session, matching the direct-DB path below.
     if conn is None:
         if _serve_url is None:
             return _no_config()
-        data = _http_get("/api/v1/status")
+        data = _http_get("/api/v1/sessions", {"status": "active"})
         sessions = [
             {
-                "session_id": a.get("session_id"),
-                "agent_id": a["agent_id"],
-                "started_at": a.get("started_at"),
-                "total_cost_usd": float(a.get("total_cost_usd", 0.0)),
-                "input_tokens": a.get("input_tokens", 0),
-                "output_tokens": a.get("output_tokens", 0),
-                "tool_call_count": a.get("tool_call_count", 0),
-                "error_count": a.get("error_count", 0),
+                "session_id": s.get("session_id"),
+                "agent_id": s.get("agent_id"),
+                "started_at": s.get("started_at"),
+                "total_cost_usd": float(s.get("total_cost_usd", 0.0)),
+                "input_tokens": s.get("input_tokens", 0),
+                "output_tokens": s.get("output_tokens", 0),
+                "tool_call_count": s.get("tool_call_count", 0),
+                "error_count": s.get("error_count", 0),
             }
-            for a in data.get("agents", [])
-            if a.get("status") == "active"
+            for s in data.get("sessions", [])
         ]
         return {"sessions": sessions, "count": len(sessions)}
 
