@@ -189,3 +189,30 @@ async def test_kpi_delta_non_null_when_prior_window_has_data():
     assert d["kpi_prev"]["spend"] > 0, "prior window should have seeded data"
     assert d["kpi_deltas"]["spend"] is not None
     assert isinstance(d["kpi_deltas"]["spend"], float)
+
+
+@pytest.mark.asyncio
+async def test_session_spanning_buckets_counted_once_in_totals_by_group():
+    """#45: a session active across multiple time buckets must count once in
+    `totals_by_group` for the sessions metric (COUNT(DISTINCT) is non-additive),
+    so the grouped totals reconcile with the window-wide Sessions KPI rather than
+    inflating to the per-bucket sum."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    now = utcnow()
+    sid = "spanning"
+    db.upsert_session(make_session(session_id=sid, plan_tier="api", agent_id="cc"))
+    # One session with two LLM spans on consecutive days -> two daily buckets.
+    for d in (0, 1):
+        db.insert_span(make_llm_span(
+            session_id=sid, agent_id="cc", model="claude-opus-4-7",
+            provider="anthropic", input_tokens=1000, output_tokens=100,
+            cost_usd=0.05, start_time=now - timedelta(days=d),
+        ))
+    d = await _get(db, cfg, "metric=sessions&group_by=agent&since=30d")
+    assert d["metric"] == "sessions"
+    # True window-wide distinct session count per group is 1, not the 2 you get
+    # by summing the per-bucket distinct counts.
+    assert d["totals_by_group"]["cc"] == 1
+    # And it reconciles with the Sessions KPI tile on the same screen.
+    assert d["totals_by_group"]["cc"] == d["kpis"]["sessions"]
