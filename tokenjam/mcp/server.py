@@ -1316,3 +1316,57 @@ def list_summarize_candidates(
         )
     except Exception as e:
         return {"error": str(e)}
+
+
+def _tool_summarize_prep(config, path, ratio) -> dict:
+    """Wrap a prompt's structure → wrapped prompt + rules + source hash (no DB, no writes, no scratch)."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.session import prepare
+    return prepare(path=path, ratio=ratio).to_dict()
+
+
+@mcp.tool()
+def summarize_prep(path: str, ratio: float = 0.5) -> dict:
+    """
+    Prepare a prompt file for structure-aware summarization. Wraps every structured
+    region (fenced & inline code incl. fenced JSON, tag blocks, templates, tables)
+    behind <tj-keep> markers so they're preserved VERBATIM, and returns the
+    `wrapped_prompt`, the `system_rules` for rewriting ONLY the prose to about `ratio`
+    of its length, and a `source_sha256` of the file.
+
+    Summarize the wrapped prompt per the rules (keep every marker exactly, once, in
+    order), then call summarize_check(path, your_summary, source_sha256) to verify the
+    structure survived and stage the result for review (diff + estimated per-call token
+    saving, which amortizes across every reuse of the cached prompt). Advisory only —
+    nothing is written to the file.
+    """
+    try:
+        return _tool_summarize_prep(_config, path, ratio)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _tool_summarize_check(config, path, summary, prepped_hash) -> dict:
+    """Hash-guard + restore + stage; return the verdict. Powers summarize_check."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.session import check
+    # MCP front door = Claude rewrote the prompt in-session (DEC-027/028) — record the provenance.
+    return check(config, path, summary, prepped_hash, produced_by="in-session").to_dict()
+
+
+@mcp.tool()
+def summarize_check(path: str, summary: str, prepped_hash: str) -> dict:
+    """
+    Verify a summary produced from summarize_prep's wrapped prompt. Re-reads the file
+    and **refuses if it changed or vanished since prep** (pass the `prepped_hash`
+    summarize_prep returned), then restores each protected block verbatim by id and
+    reports `structure_ok` (the hard gate — every block present once, in order, none
+    invented), a unified `diff`, and the word/token reduction. On success the restored
+    candidate is **staged** for review; nothing is written over the original.
+    """
+    try:
+        return _tool_summarize_check(_config, path, summary, prepped_hash)
+    except Exception as e:
+        return {"error": str(e)}

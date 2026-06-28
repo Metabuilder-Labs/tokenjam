@@ -97,3 +97,83 @@ def test_repo_recursive_mutually_exclusive(runner):
     result, _ = _invoke(runner, ["summarize", "list", "--repo", "--recursive"])
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
+
+
+# --- prep / check (mechanism via the CLI; no DB, no writes) ---
+
+def _prep_and_markers(runner, config, f):
+    data = json.loads(_invoke_cfg(runner, ["summarize", "prep", str(f), "--json"], config).output)
+    import re
+    markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', data["wrapped_prompt"], re.DOTALL)
+    return data, "Act carefully; never skip a step. " + " ".join(markers)
+
+
+def test_prep_then_check_roundtrip(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+
+    data, summary = _prep_and_markers(runner, config, f)
+    assert data["source_sha256"] and "<tj-keep" in data["wrapped_prompt"]
+
+    chk = _invoke_cfg(
+        runner,
+        ["summarize", "check", str(f), "--summary", "-", "--prepped-hash", data["source_sha256"], "--json"],
+        config, inp=summary,
+    )
+    assert chk.exit_code == 0, chk.output
+    verdict = json.loads(chk.output)
+    assert verdict["structure_ok"] is True and verdict["staged"] is True
+    assert "x = 1" in verdict["restored"]
+
+
+def test_prep_below_gate_note(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "tiny.md"
+    f.write_text("short prompt with only a few words")
+    res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--json"], config)
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["wrapped_prompt"] == "" and "gate" in data["note"]
+
+
+def test_check_human_output_shows_structure(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    data, summary = _prep_and_markers(runner, config, f)
+    chk = _invoke_cfg(
+        runner,
+        ["summarize", "check", str(f), "--summary", "-", "--prepped-hash", data["source_sha256"]],
+        config, inp=summary,
+    )
+    assert chk.exit_code == 0, chk.output
+    assert "structure preserved" in chk.output and "staged for review" in chk.output
+
+
+def test_check_refuses_changed_file(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30)
+    data, _ = _prep_and_markers(runner, config, f)
+    f.write_text("edited after prep")                 # changed since prep → house-voice refuse
+    chk = _invoke_cfg(
+        runner,
+        ["summarize", "check", str(f), "--summary", "-", "--prepped-hash", data["source_sha256"]],
+        config, inp="anything",
+    )
+    assert chk.exit_code != 0
+    assert "changed since" in chk.output
+
+
+def test_prep_human_emits_wrapped_prompt_and_rules(runner, tmp_path):
+    """Manual/copy path: bare `prep` (human) prints the rewrite rules + wrapped prompt to copy —
+    not just metadata — so the workflow is usable without --json."""
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    res = _invoke_cfg(runner, ["summarize", "prep", str(f)], config)
+    assert res.exit_code == 0, res.output
+    assert "<tj-keep" in res.output                    # the wrapped prompt (the payload to copy)
+    assert "compress AI system prompts" in res.output  # the rewrite rules (WRAP_SUMM_SYS)
+    assert "summarize check" in res.output             # the next-step hint
