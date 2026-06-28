@@ -4,8 +4,9 @@
 per-call token saving. Bare = the known-location catalog (globals + this dir).
 A scope-widening input — a PATH, `--repo`, `--recursive`, or `--ext` — opens it
 to all `*.md`; the scanned location is shown first, the catalog globals after a
-divider. `prep` wraps a prompt's structure and emits it for you to rewrite; `check`
-verifies the rewrite preserved every structure block (a hard gate) and stages it; `apply`
+divider. `prep` wraps a prompt's structure and emits it for you to rewrite (or `--via
+claude-p`/`--via api` to have a model do it in one shot); `check` verifies the rewrite
+preserved every structure block (a hard gate) and stages it; `apply`
 writes a staged result (taking a backup first), `undo` reverts — both default to a dry-run,
 `--go` writes. See DEC-020/021/024/025.
 """
@@ -20,6 +21,7 @@ from rich.markup import escape
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize.apply import apply_staged, undo
 from tokenjam.core.summarize.candidates import list_candidates
+from tokenjam.core.summarize.delivery import Amortization, DeliveryError, summarize_via
 from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO
 from tokenjam.core.summarize.session import CheckVerdict, SummarizeRefused, check, prepare
 from tokenjam.utils.formatting import console, format_tokens
@@ -61,6 +63,23 @@ def _print_diff(diff: str) -> None:
             console.print(f"[cyan]{escape(line)}[/cyan]")
         else:
             console.print(f"[dim]{escape(line)}[/dim]")
+
+
+def _print_amortization(amort: Amortization) -> None:
+    """The api 'pays for itself' line — real charge (or default-rate estimate) ÷ Estimate saving (DEC-029)."""
+    charge = "real charge" if amort.rates_known else "estimated, default rates"
+    line = f"[dim]~${amort.rewrite_usd:.4f} to rewrite ({charge})"
+    if amort.saving_usd_per_call > 0:
+        line += f" · ~${amort.saving_usd_per_call:.4f}/call saved (Estimate)"
+    else:
+        line += " · no staged saving to amortize"
+    if amort.break_even_calls is not None:
+        if amort.rates_known:
+            line += f" · pays for itself in ~{amort.break_even_calls} use(s) at {escape(amort.model)} rates"
+        else:
+            line += (f" · pays for itself in ~{amort.break_even_calls} use(s) — "
+                     f"add pricing for {escape(amort.model)} for the real charge")
+    console.print(line + "[/dim]")
 
 
 @click.group("summarize", invoke_without_command=False)
@@ -165,15 +184,53 @@ def cmd_summarize_list(
 
 @cmd_summarize.command("prep")
 @click.argument("path")
+@click.option("--via", "via", type=click.Choice(["claude-p", "api"]), default=None,
+              help="Let TJ run the rewrite for you: 'claude-p' drives your local Claude Code "
+                   "(headless `claude -p`); 'api' calls Anthropic with your TJ_ANTHROPIC_API_KEY "
+                   "(needs [summarize] api_model). Omit it to rewrite the prompt yourself, then `check`.")
 @click.option("--ratio", default=DEFAULT_TARGET_RATIO, show_default=True, type=float,
               help="Target prose ratio (0.5 = keep ~half the prose words).")
 @click.option("--json", "output_json_flag", is_flag=True, help="Emit machine-readable JSON.")
 @click.pass_context
-def cmd_summarize_prep(ctx: click.Context, path: str, ratio: float, output_json_flag: bool) -> None:
-    """Wrap a prompt's structure → emit the wrapped prompt + rules + hash for you to rewrite, then `check`."""
+def cmd_summarize_prep(
+    ctx: click.Context, path: str, via: str | None, ratio: float, output_json_flag: bool,
+) -> None:
+    """Wrap a prompt's structure. Bare: emit the wrapped prompt + rules + hash for you to rewrite,
+    then `check`. With --via: TJ runs the rewrite, verifies, and stages it in one shot."""
+    config: TjConfig = ctx.obj["config"]
     output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+
+    if via is not None:                             # automated: wrap → rewrite → check → stage
+        on_progress = None if output_json else (
+            lambda m: console.print(f"[dim]{escape(m)}…[/dim]"))
+        try:
+            outcome = summarize_via(config, path, via, ratio=ratio, on_progress=on_progress)
+        except (DeliveryError, SummarizeRefused) as e:
+            raise click.ClickException(str(e)) from e
+        if outcome.verdict is None:                 # below the worth-it prose gate (note from the one prep)
+            if output_json:
+                click.echo(json.dumps(
+                    {"path": path, "staged": False, "note": outcome.skipped_note}, indent=2))
+            else:
+                console.print(f"[yellow]{escape(outcome.skipped_note or '')}[/yellow]")
+            return
+        if output_json:
+            payload = outcome.verdict.to_dict()
+            if outcome.amortization is not None:
+                payload["amortization"] = outcome.amortization.to_dict()
+            elif outcome.cost_unknown:
+                payload["cost"] = "unknown"          # api call was billed, but the response had no usage
+            click.echo(json.dumps(payload, indent=2))
+            return
+        _print_verdict(outcome.verdict)
+        if outcome.amortization is not None:
+            _print_amortization(outcome.amortization)
+        elif outcome.cost_unknown:
+            console.print("[dim]api rewrite — cost unknown (the response carried no usage)[/dim]")
+        return
+
     try:
-        result = prepare(path=path, ratio=ratio)
+        result = prepare(path=path, ratio=ratio)    # manual: emit for the user to rewrite
     except SummarizeRefused as e:
         raise click.ClickException(str(e)) from e   # e.g. a symlink — house-voice refuse
     if output_json:

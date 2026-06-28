@@ -211,6 +211,18 @@ class ProviderBudget:
 
 
 @dataclass
+class SummarizeConfig:
+    """`[summarize]` — config for structure-aware prompt summarization.
+
+    `api_model` is the model `tj summarize prep --via api` calls (with the user's own
+    `TJ_ANTHROPIC_API_KEY`). There is NO default: only frontier models are validated to
+    preserve structure (DEC-029 / DEF-010), and a weak model just fails the structure
+    check and stages nothing — so the user must choose one explicitly.
+    """
+    api_model: str | None = None
+
+
+@dataclass
 class TjConfig:
     version:  str
     defaults: DefaultsConfig          = field(default_factory=DefaultsConfig)
@@ -222,6 +234,7 @@ class TjConfig:
     api:      ApiConfig               = field(default_factory=ApiConfig)
     proxy:    ProxyConfig             = field(default_factory=ProxyConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
+    summarize: SummarizeConfig        = field(default_factory=SummarizeConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     policies: list[PolicyConfig]      = field(default_factory=list)
     # Path to the config file on disk; set by load_config() so that relative
@@ -446,6 +459,8 @@ def _parse(raw: dict) -> TjConfig:
         tool_outputs=capture_raw.get("tool_outputs", False),
     )
 
+    summarize = SummarizeConfig(api_model=raw.get("summarize", {}).get("api_model"))
+
     defaults_raw = raw.get("defaults", {})
     defaults_budget_raw = defaults_raw.get("budget", {})
     defaults = DefaultsConfig(budget=BudgetConfig(**defaults_budget_raw))
@@ -490,6 +505,7 @@ def _parse(raw: dict) -> TjConfig:
         api=api,
         proxy=proxy,
         capture=capture,
+        summarize=summarize,
         budgets=budgets,
         policies=policies,
     )
