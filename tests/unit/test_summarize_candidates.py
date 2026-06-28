@@ -190,3 +190,30 @@ def test_explicit_missing_path_notes_not_found_recursive(tmp_path, iso):
     assert "PATH not found" in res2.note and "globals only" in res2.note
     assert "no safe root" not in res2.note
     assert res2.candidates                                     # the iso global is present
+
+
+def test_skip_already_summarized(tmp_path, monkeypatch, iso):
+    """A file we summarized + applied, unchanged since, drops out of the scan; an edit brings it back."""
+    import re as _re
+
+    from tokenjam.core.config import StorageConfig, TjConfig
+    from tokenjam.core.summarize.apply import apply_staged
+    from tokenjam.core.summarize.session import check, prepare
+
+    cfg = TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    f = proj / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step here. " * 30 + "\n```\nx=1\n```\n")
+    monkeypatch.chdir(proj)
+    assert str(f) in [c.path for c in candidates.list_candidates(config=cfg).candidates]   # candidate
+
+    res = prepare(path=str(f))
+    markers = _re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', res.wrapped_prompt, _re.DOTALL)
+    big = "Careful and never skip a required step in any response you give here today. " * 20  # > gate
+    check(cfg, str(f), big + " ".join(markers), res.source_sha256)
+    apply_staged(cfg, go=True)
+    assert str(f) not in [c.path for c in candidates.list_candidates(config=cfg).candidates]  # we wrote it → skip
+
+    f.write_text(f.read_text() + "\nEDITED LATER\n")
+    assert str(f) in [c.path for c in candidates.list_candidates(config=cfg).candidates]      # edit → back

@@ -5,9 +5,9 @@ per-call token saving. Bare = the known-location catalog (globals + this dir).
 A scope-widening input — a PATH, `--repo`, `--recursive`, or `--ext` — opens it
 to all `*.md`; the scanned location is shown first, the catalog globals after a
 divider. `prep` wraps a prompt's structure and emits it for you to rewrite; `check`
-verifies the rewrite preserved every structure block (a hard gate) and stages it for
-review. Reads, reports, and stages — never rewrites a file (apply lands in a later PR).
-See DEC-020/021/024.
+verifies the rewrite preserved every structure block (a hard gate) and stages it; `apply`
+writes a staged result (taking a backup first), `undo` reverts — both default to a dry-run,
+`--go` writes. See DEC-020/021/024/025.
 """
 from __future__ import annotations
 
@@ -18,9 +18,10 @@ import click
 from rich.markup import escape
 
 from tokenjam.core.config import TjConfig
+from tokenjam.core.summarize.apply import apply_staged, undo
 from tokenjam.core.summarize.candidates import list_candidates
 from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO
-from tokenjam.core.summarize.session import CheckVerdict, SummarizeRefused, check, prepare, results_dir
+from tokenjam.core.summarize.session import CheckVerdict, SummarizeRefused, check, prepare
 from tokenjam.utils.formatting import console, format_tokens
 
 # Honesty discipline (CLAUDE.md Rule 14): every candidate is a suggestion to
@@ -32,8 +33,8 @@ CANDIDATE_NOTE = (
 )
 
 
-def _print_verdict(config: TjConfig, verdict: CheckVerdict) -> None:
-    """Human-readable check verdict: the ✓/✗ line and, when staged, where it landed.
+def _print_verdict(verdict: CheckVerdict) -> None:
+    """Human-readable check verdict: the ✓/✗ line and, when staged, how to review it.
     (must-keep word movement is recorded on the staged result for later metrics — collected,
     never surfaced to the user here.)"""
     if verdict.structure_ok:
@@ -43,7 +44,23 @@ def _print_verdict(config: TjConfig, verdict: CheckVerdict) -> None:
     else:
         console.print(f"[red]✗[/red] {escape(verdict.path)} — {escape(verdict.reason)} (not staged)")
     if verdict.staged:
-        console.print(f"[dim]staged for review in {escape(str(results_dir(config)))}[/dim]")
+        console.print(f"[dim]review it: tj summarize apply {escape(verdict.path)} "
+                      f"(dry-run shows the diff), then --go to write.[/dim]")
+
+
+def _print_diff(diff: str) -> None:
+    """Render a unified diff with +/- coloring — the dry-run preview of a staged rewrite."""
+    for line in diff.splitlines():
+        if line.startswith(("+++", "---")):
+            console.print(f"[dim]{escape(line)}[/dim]")
+        elif line.startswith("+"):
+            console.print(f"[green]{escape(line)}[/green]")
+        elif line.startswith("-"):
+            console.print(f"[red]{escape(line)}[/red]")
+        elif line.startswith("@@"):
+            console.print(f"[cyan]{escape(line)}[/cyan]")
+        else:
+            console.print(f"[dim]{escape(line)}[/dim]")
 
 
 @click.group("summarize", invoke_without_command=False)
@@ -207,4 +224,75 @@ def cmd_summarize_check(
     if output_json:
         click.echo(json.dumps(verdict.to_dict(), indent=2))
         return
-    _print_verdict(config, verdict)
+    _print_verdict(verdict)
+
+
+@cmd_summarize.command("apply")
+@click.argument("path", required=False, default=None)
+@click.option("--go", is_flag=True,
+              help="Write the files (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@click.option("--json", "output_json_flag", is_flag=True, help="Emit machine-readable JSON.")
+@click.pass_context
+def cmd_summarize_apply(
+    ctx: click.Context, path: str | None, go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Apply staged results to their files — take-all, or one PATH. Default dry-run; --go writes."""
+    config: TjConfig = ctx.obj["config"]
+    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    if dry_run and go:
+        raise click.UsageError("Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    if path is not None and Path(path).expanduser().is_dir():
+        raise click.UsageError("PATH is a directory — accept all (no PATH) or specify one file.")
+
+    report = apply_staged(config, path, go=go)          # default dry-run; --go writes (both rejected above)
+    if output_json:
+        click.echo(json.dumps(report, indent=2))
+        return
+
+    verb = "applied" if go else "would apply"
+    for a in report["applied"]:
+        if not go and a["diff"]:                        # dry-run = preview the actual change
+            _print_diff(a["diff"])
+        console.print(f"[green]✓[/green] {verb} {escape(a['path'])} "
+                      f"(~{format_tokens(a['est_tokens_saved'])} prompt tok/call)")
+    for s in report["skipped"]:
+        console.print(f"[yellow]skip[/yellow] {escape(s['path'])} — {escape(s['reason'])}")
+    if not report["applied"] and not report["skipped"]:
+        console.print("[dim]nothing staged.[/dim]")
+    elif report["dry_run"]:
+        console.print("[dim]dry-run — nothing written. Re-run with --go to apply.[/dim]")
+
+
+@cmd_summarize.command("undo")
+@click.argument("path")
+@click.option("--go", is_flag=True,
+              help="Restore the file (default is dry-run; can't combine with --dry-run).")
+@click.option("--dry-run", "dry_run", is_flag=True,
+              help="Preview only; the default (can't combine with --go).")
+@click.option("--json", "output_json_flag", is_flag=True, help="Emit machine-readable JSON.")
+@click.pass_context
+def cmd_summarize_undo(
+    ctx: click.Context, path: str, go: bool, dry_run: bool, output_json_flag: bool,
+) -> None:
+    """Restore a file from its summarize backup. Default dry-run; --go writes. Refuses on drift."""
+    config: TjConfig = ctx.obj["config"]
+    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    if dry_run and go:
+        raise click.UsageError("Choose one of --dry-run or --go (--dry-run is the default with neither).")
+    if Path(path).expanduser().is_dir():
+        raise click.UsageError("PATH is a directory — undo takes one file.")
+
+    try:
+        result = undo(config, path, go=go)              # default dry-run; --go writes (both rejected above)
+    except SummarizeRefused as e:
+        raise click.ClickException(str(e)) from e        # missing backup / changed since apply
+
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    if result["dry_run"]:
+        console.print(f"[dim]would restore {escape(result['path'])} from backup — re-run with --go.[/dim]")
+    else:
+        console.print(f"[green]✓[/green] restored {escape(result['path'])} from backup")

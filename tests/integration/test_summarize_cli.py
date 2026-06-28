@@ -148,7 +148,7 @@ def test_check_human_output_shows_structure(runner, tmp_path):
         config, inp=summary,
     )
     assert chk.exit_code == 0, chk.output
-    assert "structure preserved" in chk.output and "staged for review" in chk.output
+    assert "structure preserved" in chk.output and "summarize apply" in chk.output
 
 
 def test_check_refuses_changed_file(runner, tmp_path):
@@ -177,3 +177,63 @@ def test_prep_human_emits_wrapped_prompt_and_rules(runner, tmp_path):
     assert "<tj-keep" in res.output                    # the wrapped prompt (the payload to copy)
     assert "compress AI system prompts" in res.output  # the rewrite rules (WRAP_SUMM_SYS)
     assert "summarize check" in res.output             # the next-step hint
+
+
+def test_apply_then_undo_cli_roundtrip(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    original = "Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n"
+    f.write_text(original)
+    data, summary = _prep_and_markers(runner, config, f)
+    chk = _invoke_cfg(
+        runner,
+        ["summarize", "check", str(f), "--summary", "-", "--prepped-hash", data["source_sha256"], "--json"],
+        config, inp=summary)
+    assert json.loads(chk.output)["staged"] is True
+
+    dry = _invoke_cfg(runner, ["summarize", "apply", "--json"], config)        # default = dry-run
+    assert json.loads(dry.output)["dry_run"] is True and f.read_text() == original
+    go = _invoke_cfg(runner, ["summarize", "apply", "--go", "--json"], config)  # --go writes
+    assert json.loads(go.output)["applied"] and f.read_text() != original
+    undone = _invoke_cfg(runner, ["summarize", "undo", str(f), "--go"], config)
+    assert undone.exit_code == 0, undone.output
+    assert f.read_text() == original                                            # back to original
+
+
+def test_apply_rejects_directory(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    res = _invoke_cfg(runner, ["summarize", "apply", str(tmp_path)], config)     # a directory
+    assert res.exit_code != 0
+    assert "directory" in res.output
+
+
+def test_apply_dry_run_shows_diff(runner, tmp_path):
+    """Dry-run apply previews the actual diff — reviewing a staged rewrite needs no JSON hand-parsing."""
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    data, summary = _prep_and_markers(runner, config, f)
+    _invoke_cfg(
+        runner,
+        ["summarize", "check", str(f), "--summary", "-", "--prepped-hash", data["source_sha256"]],
+        config, inp=summary)
+    res = _invoke_cfg(runner, ["summarize", "apply", str(f)], config)        # dry-run (default)
+    assert res.exit_code == 0, res.output
+    assert "would apply" in res.output and "@@" in res.output                # the diff is shown
+
+
+def test_apply_rejects_dry_run_and_go_together(runner, tmp_path):
+    """--dry-run and --go are mutually exclusive — passing both is a usage error, not '--go wins'."""
+    config = _tmp_storage_config(tmp_path)
+    res = _invoke_cfg(runner, ["summarize", "apply", "--dry-run", "--go"], config)
+    assert res.exit_code != 0
+    assert "Choose one of --dry-run or --go" in res.output
+
+
+def test_undo_rejects_dry_run_and_go_together(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("hello")
+    res = _invoke_cfg(runner, ["summarize", "undo", str(f), "--dry-run", "--go"], config)
+    assert res.exit_code != 0
+    assert "Choose one of --dry-run or --go" in res.output

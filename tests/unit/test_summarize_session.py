@@ -13,6 +13,7 @@ import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.summarize import wrap
+from tokenjam.core.summarize.apply import apply_staged, undo
 from tokenjam.core.summarize.session import (
     SummarizeRefused, check, clear, list_staged, prepare, read_staged,
 )
@@ -259,3 +260,29 @@ def test_check_fails_when_model_invents_beyond_source(cfg, tmp_path):
                + " ".join(_MARKER_RE.findall(res.wrapped_prompt)))
     verdict = check(cfg, path, summary, res.source_sha256)
     assert not verdict.structure_ok and verdict.integrity["malformed"]
+
+
+# --- apply / undo: symlink + TOCTOU safety (DEF-013) ---
+
+def test_apply_skips_symlink_toctou(cfg, tmp_path):
+    """If a staged file becomes a symlink before apply, apply skips it — never rewrites through a link."""
+    f = _write(tmp_path, "CLAUDE.md", PROSE + "\n```\nx = 1\n```\n")
+    res = prepare(path=f)
+    check(cfg, f, _perfect_summary(res.wrapped_prompt, "Short."), res.source_sha256)   # staged
+    other = tmp_path / "other.md"
+    other.write_text("other")
+    Path(f).unlink()
+    Path(f).symlink_to(other)                                  # TOCTOU: file → symlink after staging
+    report = apply_staged(cfg, None, go=True)                  # take-all
+    assert not report["applied"]
+    assert any("symlink" in s["reason"] for s in report["skipped"])
+    assert other.read_text() == "other"                        # the link target was NOT rewritten
+
+
+def test_undo_refuses_symlink(cfg, tmp_path):
+    real = tmp_path / "real.md"
+    real.write_text("hello")
+    link = tmp_path / "link.md"
+    link.symlink_to(real)
+    with pytest.raises(SummarizeRefused, match="symlink"):
+        undo(cfg, str(link))
