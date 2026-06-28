@@ -1364,9 +1364,55 @@ def summarize_check(path: str, summary: str, prepped_hash: str) -> dict:
     summarize_prep returned), then restores each protected block verbatim by id and
     reports `structure_ok` (the hard gate — every block present once, in order, none
     invented), a unified `diff`, and the word/token reduction. On success the restored
-    candidate is **staged** for review; nothing is written over the original.
+    candidate is **staged** for review; nothing is written over the original (that's the
+    separate `summarize_apply` step — default dry-run; `summarize_undo` reverts).
     """
     try:
         return _tool_summarize_check(_config, path, summary, prepped_hash)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _tool_summarize_apply(config, path, go) -> dict:
+    """Apply staged results (take-all, or one path). Default dry-run. Powers summarize_apply."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.apply import apply_staged
+    return apply_staged(config, path, go=go)
+
+
+@mcp.tool()
+def summarize_apply(path: str | None = None, go: bool = False) -> dict:
+    """
+    Apply staged summarize results to their files. **Default is a DRY-RUN** (reports
+    what would change, writes nothing) — pass `go=true` to actually write. Take-all
+    when `path` is omitted, else just that file. Each applied file is backed up
+    (one-level undo) and written atomically, preserving its mode. Files changed since
+    `summarize_check`, owned by another user, or whose structure check didn't pass are
+    skipped and reported — no flag bypasses those guards.
+    """
+    try:
+        return _tool_summarize_apply(_config, path, go)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _tool_summarize_undo(config, path, go) -> dict:
+    """Restore a summarize backup. Default dry-run. Powers summarize_undo."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.apply import undo
+    return undo(config, path, go=go)
+
+
+@mcp.tool()
+def summarize_undo(path: str, go: bool = False) -> dict:
+    """
+    Restore the most recent summarize backup for a file. **Default is a DRY-RUN**;
+    pass `go=true` to write. Refuses if the file changed since `summarize_apply` wrote
+    it (newer edits would be lost) or there is no backup.
+    """
+    try:
+        return _tool_summarize_undo(_config, path, go)
     except Exception as e:
         return {"error": str(e)}

@@ -234,6 +234,25 @@ def _walk_targets(root: Path, ext_set: set[str]) -> tuple[list[Path], bool]:
     return out, False
 
 
+def _already_summarized(config: "TjConfig | None", path: str) -> bool:
+    """True if we previously summarized ``path`` and it's unchanged since — skip it (PR3).
+
+    Only re-reads the file when a backup actually exists for it (cheap for the common case).
+    """
+    if config is None:
+        return False
+    from tokenjam.core.summarize import backup
+    from tokenjam.core.summarize.session import sha256
+    out = backup.recorded_output(config, path)
+    if out is None:
+        return False
+    try:
+        current = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return sha256(current) == out
+
+
 # --------------------------------------------------------------------------- #
 # Public API
 # --------------------------------------------------------------------------- #
@@ -268,7 +287,7 @@ def list_candidates(
             return
         seen.add(key)
         c = _candidate(p, mode, scope, min_prose_words, ratio)
-        if c is not None:
+        if c is not None and not _already_summarized(config, c.path):
             cands.append(c)
 
     # 1) Globals (the floor) — always catalog prompts, unless suppressed.

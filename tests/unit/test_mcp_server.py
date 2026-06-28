@@ -28,6 +28,8 @@ from tokenjam.mcp.server import (
     _tool_list_summarize_candidates,
     _tool_summarize_prep,
     _tool_summarize_check,
+    _tool_summarize_apply,
+    _tool_summarize_undo,
 )
 
 
@@ -836,3 +838,25 @@ def test_summarize_prep_no_config():
 
 def test_summarize_check_no_config():
     assert "error" in _tool_summarize_check(None, "x.md", "summary", "deadbeef")
+
+
+def test_summarize_apply_then_undo_roundtrip(tmp_path):
+    config = _summarize_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    original = "Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n"
+    f.write_text(original)
+    prep = _tool_summarize_prep(config, str(f), 0.5)
+    import re
+    markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', prep["wrapped_prompt"], re.DOTALL)
+    _tool_summarize_check(config, str(f), "Careful; never skip. " + " ".join(markers), prep["source_sha256"])
+
+    dry = _tool_summarize_apply(config, str(f), False)           # default dry-run writes nothing
+    assert dry["dry_run"] is True and f.read_text() == original
+    done = _tool_summarize_apply(config, str(f), True)           # go writes
+    assert done["applied"] and "x = 1" in f.read_text() and f.read_text() != original
+    _tool_summarize_undo(config, str(f), True)                   # undo restores
+    assert f.read_text() == original
+
+
+def test_summarize_apply_no_config():
+    assert "error" in _tool_summarize_apply(None, None, False)
