@@ -26,6 +26,8 @@ from tokenjam.mcp.server import (
     _tool_acknowledge_alert,
     _tool_setup_project,
     _tool_list_summarize_candidates,
+    _tool_summarize_prep,
+    _tool_summarize_check,
 )
 
 
@@ -779,3 +781,58 @@ def test_summarize_candidates_recursive_passthrough(tmp_path, _iso_summarize_cat
 def test_summarize_candidates_no_config():
     result = _tool_list_summarize_candidates(None)
     assert "error" in result and "config" in result["error"].lower()  # _no_config sentinel
+
+
+# --- summarize_prep / summarize_check (no scratch; re-derive + hash + staging) ---
+
+def _summarize_config(tmp_path):
+    """Config whose summarize anchor is a tmp dir — never the real ~/.tj."""
+    from tokenjam.core.config import StorageConfig
+    return TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
+
+
+def test_summarize_prep_then_check_roundtrip(tmp_path):
+    config = _summarize_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    prep = _tool_summarize_prep(config, str(f), 0.5)
+    assert prep["source_sha256"] and "<tj-keep" in prep["wrapped_prompt"]
+    import re
+    markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', prep["wrapped_prompt"], re.DOTALL)
+    summary = "Be careful; never skip a step. " + " ".join(markers)
+    verdict = _tool_summarize_check(config, str(f), summary, prep["source_sha256"])
+    assert verdict["structure_ok"] is True and verdict["staged"] is True
+    assert "x = 1" in verdict["restored"]             # structure restored verbatim through the MCP layer
+    assert verdict["est_tokens_saved"] > 0
+
+
+def test_summarize_check_refuses_changed_file(tmp_path):
+    from tokenjam.core.summarize.session import SummarizeRefused
+    config = _summarize_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30)
+    prep = _tool_summarize_prep(config, str(f), 0.5)
+    f.write_text("edited after prep")                 # file changed since prep
+    with pytest.raises(SummarizeRefused, match="changed since"):
+        _tool_summarize_check(config, str(f), "anything", prep["source_sha256"])
+
+
+def test_summarize_check_records_in_session_provenance(tmp_path):
+    """MCP front door = Claude rewrote the prompt in-session → produced_by == 'in-session' (DEC-027/028)."""
+    config = _summarize_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    prep = _tool_summarize_prep(config, str(f), 0.5)
+    import re
+    markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', prep["wrapped_prompt"], re.DOTALL)
+    verdict = _tool_summarize_check(config, str(f), "Careful; never skip. " + " ".join(markers),
+                                    prep["source_sha256"])
+    assert verdict["produced_by"] == "in-session"     # the MCP layer stamps the seam, not 'manual'
+
+
+def test_summarize_prep_no_config():
+    assert "error" in _tool_summarize_prep(None, "x.md", 0.5)
+
+
+def test_summarize_check_no_config():
+    assert "error" in _tool_summarize_check(None, "x.md", "summary", "deadbeef")
