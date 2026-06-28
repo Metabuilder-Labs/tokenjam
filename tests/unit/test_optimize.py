@@ -80,6 +80,26 @@ def test_summarize_window_counts_and_costs(db):
     assert abs(s.total_cost_usd - (0.030 + 1.500)) < 1e-6
 
 
+def test_summarize_window_total_includes_cache_read_tokens(db):
+    """Window header total must include cache-read tokens, sharing one basis
+    with the downsize denominator + the canonical WindowTotals (#33)."""
+    start = utcnow() - timedelta(days=2)
+    db.insert_span(make_llm_span(
+        model="claude-opus-4-7",
+        provider="anthropic",
+        input_tokens=1000,
+        output_tokens=200,
+        cache_tokens=5000,
+        cost_usd=0.030,
+        session_id="cache-heavy",
+        start_time=start,
+    ))
+    since = utcnow() - timedelta(days=30)
+    until = utcnow() + timedelta(hours=1)
+    s = summarize_window(db.conn, since, until)
+    assert s.total_tokens == 1000 + 200 + 5000
+
+
 def test_downgrade_flags_small_opus_but_not_large(db):
     _insert_small_opus_session(db, session_id="a")
     _insert_large_opus_session(db, session_id="b")
