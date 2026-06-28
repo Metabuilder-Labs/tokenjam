@@ -194,6 +194,19 @@ TokenJam is also a full observability stack. The five analyzers and Lens ride on
 
 ---
 
+## Prove a swap holds — TokenJam Bench
+
+`tj optimize downsize` flags *candidates*: cheaper models worth a look. It never claims the cheaper model would have produced the same answer. **[TokenJam Bench](https://github.com/Metabuilder-Labs/tokenjam-bench)** is the companion that checks. It runs your original and candidate models against real task suites and reports the pass-rate difference with statistics (Wilson CI + McNemar), so you get a hedged verdict ("holds" or "regressed") instead of a guess.
+
+```bash
+pip install tokenjam-bench
+tjb run --original anthropic:claude-opus-4-7 --candidate anthropic:claude-haiku-4-5
+```
+
+Bench reports measured pass-rate on a suite, never "certified" or "quality preserved." Open source and local, like TokenJam. [Learn more →](https://github.com/Metabuilder-Labs/tokenjam-bench)
+
+---
+
 ## CLI
 
 ```bash
@@ -219,6 +232,7 @@ tj serve               # start Lens + REST API
 |---|---|
 | 🪶 Downsize / Cache / Script / Trim deep-dives | [docs/optimize/](docs/optimize/) |
 | 🔁 Reuse analyzer deep-dive | [docs/optimize/reuse.md](docs/optimize/reuse.md) |
+| 🧪 Prove a downsize candidate holds (TokenJam Bench) | [tokenjam-bench](https://github.com/Metabuilder-Labs/tokenjam-bench) |
 | Claude Code & Codex integration | [docs/claude-code-integration.md](docs/claude-code-integration.md) |
 | Python SDK reference | [docs/python-sdk.md](docs/python-sdk.md) |
 | TypeScript SDK reference | [docs/typescript-sdk.md](docs/typescript-sdk.md) |
@@ -277,7 +291,7 @@ If TokenJam saves you tokens, **⭐ star it** and **👁 watch for releases** �
 
 <div align="center">
 
-**[tokenjam.dev](https://tokenjam.dev)** · [PyPI](https://pypi.org/project/tokenjam/) · [npm](https://www.npmjs.com/package/@tokenjam/sdk) · [Issues](https://github.com/Metabuilder-Labs/tokenjam/issues)
+**[tokenjam.dev](https://tokenjam.dev)** · [PyPI](https://pypi.org/project/tokenjam/) · [npm](https://www.npmjs.com/package/@tokenjam/sdk) · [TokenJam Bench](https://github.com/Metabuilder-Labs/tokenjam-bench) · [Issues](https://github.com/Metabuilder-Labs/tokenjam/issues)
 
 MIT License · Built by [Metabuilder Labs](https://github.com/Metabuilder-Labs)
 
