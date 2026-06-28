@@ -25,6 +25,7 @@ from tokenjam.mcp.server import (
     _tool_get_drift_report,
     _tool_acknowledge_alert,
     _tool_setup_project,
+    _tool_list_summarize_candidates,
 )
 
 
@@ -642,3 +643,41 @@ def test_get_budget_headroom_http_mode_reads_live_limits():
         assert abs(result["daily_remaining_usd"] - 17.0) < 0.01
     finally:
         _set_serve_url(None)
+
+
+# --- list_summarize_candidates (advisory scan; no DB) ---
+
+@pytest.fixture
+def _iso_summarize_catalog(monkeypatch):
+    """Controlled catalog (no real ~/.claude globals) so the MCP scan is deterministic."""
+    from tokenjam.core.summarize import candidates as _cand
+    from tokenjam.core.summarize.catalog import Catalog
+    fake = Catalog(project_files=frozenset({"CLAUDE.md", "AGENTS.md"}),
+                   project_globs=(), global_paths=(), forbidden_roots=())
+    monkeypatch.setattr(_cand, "load_catalog", lambda: fake)
+
+
+def test_summarize_candidates_lists_prompt(tmp_path, _iso_summarize_catalog):
+    (tmp_path / "CLAUDE.md").write_text("instructions " * 200)
+    result = _tool_list_summarize_candidates(_make_config(), path=str(tmp_path))
+    assert result["count"] == len(result["candidates"]) >= 1
+    claude = [c for c in result["candidates"] if Path(c["path"]).name == "CLAUDE.md"]
+    assert claude and claude[0]["kind"] == "prompt"
+    assert claude[0]["est_tokens_saved"] > 0
+    assert "review before adopting" in result["note"]   # honesty caveat survives the MCP layer
+
+
+def test_summarize_candidates_recursive_passthrough(tmp_path, _iso_summarize_catalog):
+    nested = tmp_path / "sub" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "CLAUDE.md").write_text("instructions " * 200)
+    flat = _tool_list_summarize_candidates(_make_config(), path=str(tmp_path))
+    deep = _tool_list_summarize_candidates(_make_config(), path=str(tmp_path), recursive=True)
+    assert not any("deep" in c["path"] for c in flat["candidates"])   # no walk without -r
+    assert any("deep" in c["path"] for c in deep["candidates"])       # recursive flag reaches core
+    assert deep["recursive"] is True
+
+
+def test_summarize_candidates_no_config():
+    result = _tool_list_summarize_candidates(None)
+    assert "error" in result and "config" in result["error"].lower()  # _no_config sentinel
