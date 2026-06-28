@@ -283,7 +283,15 @@ def list_candidates(
     explicit = path is not None
     target = Path(path).expanduser() if explicit else Path.cwd()
 
-    if explicit and target.is_file():
+    if explicit and not target.exists():
+        # A typo'd / missing PATH shouldn't silently show only globals. This MUST be
+        # checked before the --recursive branch: with an explicit PATH, walk_root is
+        # the (non-existent) target rather than None, so _walk_targets() just returns
+        # [] and the error gets swallowed. Single source of truth for the note.
+        tail = "showing globals only" if cands else "nothing to show"
+        note = f"PATH not found: {target} — {tail}."
+        root_used = target
+    elif explicit and target.is_file():
         # NOTE: a specific file still invokes the catalog globals (added above as
         # the floor) unless --no-global; scoping to JUST the named file is deferred
         # (DEF-005).
@@ -311,9 +319,6 @@ def list_candidates(
         else:
             scope_root = target
             scope = "path" if explicit else "project"
-            if explicit and not target.exists():    # a typo'd PATH shouldn't silently show only globals
-                tail = "showing globals only" if cands else "nothing to show"
-                note = f"PATH not found: {target} — {tail}."
         root_used = scope_root
         for p in _project_targets(scope_root, ext_set):
             _add(p, scope)

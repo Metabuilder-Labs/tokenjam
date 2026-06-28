@@ -173,3 +173,20 @@ def test_explicit_missing_path_notes_not_found(tmp_path, iso):
     res2 = candidates.list_candidates(str(missing), config=None, include_global=True)
     assert "not found" in res2.note.lower() and "globals only" in res2.note
     assert res2.candidates                                     # the iso global is present
+
+
+def test_explicit_missing_path_notes_not_found_recursive(tmp_path, iso):
+    """Regression: a missing explicit PATH must surface the same 'not found' note even
+    with --recursive. Previously the recursive branch ran first, set walk_root to the
+    non-existent target (not None), walked it to [], and swallowed the error silently."""
+    missing = tmp_path / "nope" / "ghost_dir"
+    res = candidates.list_candidates(str(missing), config=None, recursive=True,
+                                     include_global=False)
+    assert "PATH not found" in res.note and "nothing to show" in res.note
+    assert res.candidates == []
+    # globals still surface; the note must be the not-found one, NOT "--recursive needs a repo"
+    res2 = candidates.list_candidates(str(missing), config=None, recursive=True,
+                                      include_global=True)
+    assert "PATH not found" in res2.note and "globals only" in res2.note
+    assert "no safe root" not in res2.note
+    assert res2.candidates                                     # the iso global is present
