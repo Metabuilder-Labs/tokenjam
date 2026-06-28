@@ -255,8 +255,10 @@ def cmd_optimize(
         d = payload.get("downgrade") or {}
         if d and pricing_mode in {"subscription", "local"}:
             d["monthly_tokens_freed"] = d.get("monthly_tokens_in_candidates", 0)
-            if pricing_mode == "local":
-                d["monthly_savings_usd"] = 0
+            # Zero the misleading dollar projection for BOTH flat-fee
+            # subscription tiers and local (zero-marginal-cost) inference —
+            # matching the token-share framing the human renderer applies.
+            d["monthly_savings_usd"] = 0
         click.echo(json.dumps(payload, default=str))
         return
 
