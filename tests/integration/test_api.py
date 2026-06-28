@@ -700,6 +700,35 @@ async def test_status_exposes_active_seconds(client, db):
     assert a["active_seconds"] == pytest.approx(6.0)
 
 
+# ── Sessions ───────────────────────────────────────────────────────────────
+
+async def test_sessions_active_enumerates_per_session(client, db):
+    """GET /api/v1/sessions?status=active returns one row per active session,
+    including multiple concurrent sessions for the same agent (#35) — unlike
+    /status which collapses to one record per agent."""
+    db.upsert_session(make_session(agent_id="alpha", session_id="s1", status="active"))
+    db.upsert_session(make_session(agent_id="alpha", session_id="s2", status="active"))
+    db.upsert_session(make_session(agent_id="beta", session_id="s3", status="active"))
+    db.upsert_session(make_session(agent_id="alpha", session_id="s4", status="completed"))
+
+    resp = await client.get("/api/v1/sessions", params={"status": "active"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["count"] == 3
+    ids = {s["session_id"] for s in data["sessions"]}
+    assert ids == {"s1", "s2", "s3"}  # both alpha sessions present; completed excluded
+
+
+async def test_sessions_filter_by_agent_id(client, db):
+    db.upsert_session(make_session(agent_id="alpha", session_id="s1", status="active"))
+    db.upsert_session(make_session(agent_id="beta", session_id="s2", status="active"))
+
+    resp = await client.get("/api/v1/sessions", params={"agent_id": "alpha"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert {s["session_id"] for s in data["sessions"]} == {"s1"}
+
+
 # ── Budget ─────────────────────────────────────────────────────────────────
 
 async def test_post_budget_zero_clears_limit(db):

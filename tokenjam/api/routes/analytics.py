@@ -255,6 +255,21 @@ async def get_analytics(
         if g2v is not None:
             stacks[str(g2v)] = stacks.get(str(g2v), 0.0) + val
 
+    # `sessions` is COUNT(DISTINCT session_id) — non-additive (#45). Summing the
+    # per-bucket distinct counts above double-counts a session spanning buckets,
+    # so the per-group total must instead come from a SEPARATE window-wide
+    # GROUP BY <dimension> distinct count, mirroring how the Sessions KPI below
+    # counts a spanning session once. Additive metrics keep the rollup above.
+    if metric == "sessions":
+        totals = {}
+        tbg_sql = (
+            "SELECT " + g1 + " AS g1, COUNT(DISTINCT session_id) AS s"
+            + " FROM spans WHERE " + where + " GROUP BY g1"
+        )
+        for tr in conn.execute(tbg_sql, params).fetchall():
+            g1v = tr[0] if tr[0] is not None else "(none)"
+            totals[str(g1v)] = float(tr[1] or 0)
+
     groups = sorted(totals, key=lambda k: totals[k], reverse=True)
     stack_keys = sorted(stacks, key=lambda k: stacks[k], reverse=True)
 

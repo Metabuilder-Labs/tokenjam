@@ -551,27 +551,77 @@ def test_list_alerts_http_mode():
 # --- test_list_active_sessions_http_mode ---
 
 def test_list_active_sessions_http_mode():
+    # Serve mode now proxies to /api/v1/sessions?status=active, which returns
+    # one row per active session (not one per agent).
     fake_response = {
-        "agents": [
+        "sessions": [
             {
-                "agent_id": "alpha",
-                "status": "active",
                 "session_id": "s1",
+                "agent_id": "alpha",
+                "started_at": "2026-04-11T10:00:00+00:00",
+                "total_cost_usd": 1.23,
                 "input_tokens": 100,
                 "output_tokens": 50,
                 "tool_call_count": 5,
                 "error_count": 0,
-                "cost_today": 1.23,
-                "active_alerts": 0,
             }
         ],
-        "has_active_alerts": False,
+        "count": 1,
     }
     _set_serve_url("http://127.0.0.1:7391")
     try:
         with patch("tokenjam.mcp.server._http_get", return_value=fake_response):
             result = _tool_list_active_sessions(None)
         assert result["count"] == 1
+        assert result["sessions"][0]["session_id"] == "s1"
+    finally:
+        _set_serve_url(None)
+
+
+def test_list_active_sessions_http_mode_enumerates_per_session():
+    """Serve mode must surface EVERY active session, including multiple
+    concurrent sessions for the same agent — matching the direct-DB path (#35).
+    The old code proxied to /api/v1/status (one record per agent) and
+    undercounted; it must now hit a per-session endpoint."""
+    sessions_response = {
+        "sessions": [
+            {
+                "session_id": "s1", "agent_id": "alpha",
+                "started_at": "2026-04-11T10:00:00+00:00", "total_cost_usd": 1.0,
+                "input_tokens": 10, "output_tokens": 5,
+                "tool_call_count": 1, "error_count": 0,
+            },
+            {
+                "session_id": "s2", "agent_id": "alpha",
+                "started_at": "2026-04-11T10:05:00+00:00", "total_cost_usd": 2.0,
+                "input_tokens": 20, "output_tokens": 8,
+                "tool_call_count": 2, "error_count": 0,
+            },
+        ],
+        "count": 2,
+    }
+    # /status collapses alpha's two concurrent sessions to one record — the
+    # shape the broken serve path used to read.
+    status_response = {
+        "agents": [
+            {"agent_id": "alpha", "status": "active", "session_id": "s2"}
+        ],
+        "has_active_alerts": False,
+    }
+
+    def fake_http_get(path, params=None):
+        if "/sessions" in path:
+            assert params and params.get("status") == "active"
+            return sessions_response
+        return status_response
+
+    _set_serve_url("http://127.0.0.1:7391")
+    try:
+        with patch("tokenjam.mcp.server._http_get", side_effect=fake_http_get):
+            result = _tool_list_active_sessions(None)
+        assert result["count"] == 2
+        ids = {s["session_id"] for s in result["sessions"]}
+        assert ids == {"s1", "s2"}
     finally:
         _set_serve_url(None)
 
@@ -606,6 +656,54 @@ def test_acknowledge_alert_http_mode_proxies_patch():
         assert result["acknowledged"] is True
     finally:
         _set_serve_url(None)
+        _srv._config = None
+
+
+def test_acknowledge_alert_read_only_fallback_returns_actionable_error(tmp_path):
+    """In read-only DuckDB fallback (tj serve unreachable, _ro_conn open, no
+    _serve_url) acknowledge_alert must NOT open a conflicting read-write
+    connection to the same file — that raises a raw DuckDB ConnectionException.
+    It should return a clear, actionable message instead (#34)."""
+    import duckdb
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.db import DuckDBBackend
+
+    db_file = tmp_path / "telemetry.duckdb"
+    # Seed the DB (schema + one alert) via a normal read-write backend, then
+    # close it so the read-only connection below is the only one in process.
+    backend = DuckDBBackend(StorageConfig(path=str(db_file)))
+    alert = Alert(
+        alert_id=new_uuid(),
+        fired_at=utcnow(),
+        type=AlertType.RETRY_LOOP,
+        severity=Severity.WARNING,
+        title="Retry loop",
+        detail={},
+        agent_id="a",
+        session_id=None,
+        span_id=None,
+        acknowledged=False,
+        suppressed=False,
+    )
+    backend.insert_alert(alert)
+    backend._conn.close()
+
+    ro_conn = duckdb.connect(str(db_file), read_only=True)
+    config = _make_config("a")
+    config.storage = StorageConfig(path=str(db_file))
+    _srv._ro_conn = ro_conn
+    _srv._config = config
+    _set_serve_url(None)
+    try:
+        result = _srv.acknowledge_alert(alert.alert_id)
+        assert "error" in result
+        msg = result["error"].lower()
+        # Actionable guidance — not a raw DuckDB connection exception.
+        assert "read-only" in msg or "dashboard" in msg
+        assert "configuration" not in msg  # raw DuckDB conflict phrasing
+    finally:
+        ro_conn.close()
+        _srv._ro_conn = None
         _srv._config = None
 
 

@@ -95,36 +95,11 @@ class StorageBackend(Protocol):
 # Schema & migrations
 # ---------------------------------------------------------------------------
 
-INITIAL_SCHEMA_SQL = """\
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version     INTEGER PRIMARY KEY,
-    applied_at  TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS agents (
-    agent_id    TEXT PRIMARY KEY,
-    name        TEXT,
-    version     TEXT,
-    provider    TEXT,
-    first_seen  TIMESTAMPTZ NOT NULL,
-    last_seen   TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id          TEXT PRIMARY KEY,
-    agent_id            TEXT NOT NULL,
-    conversation_id     TEXT,
-    started_at          TIMESTAMPTZ NOT NULL,
-    ended_at            TIMESTAMPTZ,
-    status              TEXT NOT NULL DEFAULT 'active',
-    total_cost_usd      DOUBLE,
-    input_tokens        BIGINT DEFAULT 0,
-    output_tokens       BIGINT DEFAULT 0,
-    cache_tokens        BIGINT DEFAULT 0,
-    tool_call_count     INTEGER DEFAULT 0,
-    error_count         INTEGER DEFAULT 0
-);
-
+# Canonical spans table DDL. Single-sourced here so the repair path
+# (`repair_spans_stats`) can rebuild a table that is schema-identical to a
+# freshly-migrated one — PRIMARY KEY, NOT NULL constraints and all. Referenced
+# by INITIAL_SCHEMA_SQL below; do not inline a second copy.
+SPANS_TABLE_SQL = """\
 CREATE TABLE IF NOT EXISTS spans (
     span_id             TEXT PRIMARY KEY,
     trace_id            TEXT NOT NULL,
@@ -154,6 +129,52 @@ CREATE TABLE IF NOT EXISTS spans (
     -- different rates. See models.py::NormalizedSpan for the read/write split.
     cache_write_tokens  BIGINT
 );
+"""
+
+# Secondary indexes on spans. Single-sourced so migration 3 and the repair path
+# create the same set; keep in sync with the DROPs in migration 2.
+SPANS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_spans_trace_id    ON spans(trace_id);\n"
+    "CREATE INDEX IF NOT EXISTS idx_spans_agent_id    ON spans(agent_id);\n"
+    "CREATE INDEX IF NOT EXISTS idx_spans_start_time  ON spans(start_time);\n"
+    "CREATE INDEX IF NOT EXISTS idx_spans_tool_name   ON spans(tool_name);\n"
+    "CREATE INDEX IF NOT EXISTS idx_spans_conv_id     ON spans(conversation_id)"
+)
+
+INITIAL_SCHEMA_SQL = (
+    """\
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version     INTEGER PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+    agent_id    TEXT PRIMARY KEY,
+    name        TEXT,
+    version     TEXT,
+    provider    TEXT,
+    first_seen  TIMESTAMPTZ NOT NULL,
+    last_seen   TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id          TEXT PRIMARY KEY,
+    agent_id            TEXT NOT NULL,
+    conversation_id     TEXT,
+    started_at          TIMESTAMPTZ NOT NULL,
+    ended_at            TIMESTAMPTZ,
+    status              TEXT NOT NULL DEFAULT 'active',
+    total_cost_usd      DOUBLE,
+    input_tokens        BIGINT DEFAULT 0,
+    output_tokens       BIGINT DEFAULT 0,
+    cache_tokens        BIGINT DEFAULT 0,
+    tool_call_count     INTEGER DEFAULT 0,
+    error_count         INTEGER DEFAULT 0
+);
+
+"""
+    + SPANS_TABLE_SQL
+    + """\
 
 CREATE TABLE IF NOT EXISTS alerts (
     alert_id        TEXT PRIMARY KEY,
@@ -199,6 +220,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_conv_id   ON sessions(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_agent_id    ON alerts(agent_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_fired_at    ON alerts(fired_at);
 """
+)
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, INITIAL_SCHEMA_SQL),
@@ -209,13 +231,7 @@ MIGRATIONS: list[tuple[int, str]] = [
         "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
         "DROP INDEX IF EXISTS idx_spans_conv_id"
     )),
-    (3, (
-        "CREATE INDEX IF NOT EXISTS idx_spans_trace_id    ON spans(trace_id);\n"
-        "CREATE INDEX IF NOT EXISTS idx_spans_agent_id    ON spans(agent_id);\n"
-        "CREATE INDEX IF NOT EXISTS idx_spans_start_time  ON spans(start_time);\n"
-        "CREATE INDEX IF NOT EXISTS idx_spans_tool_name   ON spans(tool_name);\n"
-        "CREATE INDEX IF NOT EXISTS idx_spans_conv_id     ON spans(conversation_id)"
-    )),
+    (3, SPANS_INDEX_SQL),
     # Migration 4: billing_account on spans, plan_tier on sessions.
     # `billing_account` is provider-only (anthropic | openai | google |
     # bedrock | local.ollama). Plan tier lives on sessions, not spans.
@@ -467,10 +483,45 @@ def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
     Idempotent — safe to call when the table is healthy. Data is preserved.
     Caller is responsible for ensuring no other process holds a write lock on
     the database file (DuckDB enforces exclusive write access).
+
+    The rebuild recreates the table from the canonical DDL rather than a bare
+    `CREATE TABLE … AS SELECT` (#38). A CTAS copies DATA ONLY — it would drop the
+    `span_id` PRIMARY KEY, the NOT NULL constraints, and every `idx_spans_*`
+    index, permanently (migrations are already marked applied, so nothing
+    recreates them). Instead we move the live rows aside, recreate `spans` with
+    its full schema, copy the rows back, and re-issue the indexes — leaving the
+    repaired table schema-identical to a freshly-migrated one.
     """
+    # Stash the live rows + their column layout in a constraint-free holder, then
+    # drop spans (which also drops its dependent indexes) so it can be rebuilt.
     conn.execute("CREATE TABLE _spans_repair AS SELECT * FROM spans")
+    live_cols = conn.execute(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_name = '_spans_repair' ORDER BY ordinal_position"
+    ).fetchall()
     conn.execute("DROP TABLE spans")
-    conn.execute("ALTER TABLE _spans_repair RENAME TO spans")
+    # Recreate the constraint-bearing base table from the canonical DDL.
+    conn.execute(SPANS_TABLE_SQL)
+    # Re-add any columns later migrations appended to spans (e.g. billing_account,
+    # request_params, request_tools), reading their definitions from the holder
+    # so the rebuild tracks the live schema without duplicating the list.
+    base_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'spans'"
+        ).fetchall()
+    }
+    for name, data_type in live_cols:
+        if name not in base_cols:
+            conn.execute(f'ALTER TABLE spans ADD COLUMN "{name}" {data_type}')
+    # Column sets now match; BY NAME copy is order-independent.
+    conn.execute("INSERT INTO spans BY NAME SELECT * FROM _spans_repair")
+    conn.execute("DROP TABLE _spans_repair")
+    for statement in SPANS_INDEX_SQL.split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
     conn.execute("CHECKPOINT")
 
 

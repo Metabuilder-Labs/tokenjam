@@ -505,24 +505,26 @@ def _tool_list_agents(conn) -> dict:
 
 
 def _tool_list_active_sessions(conn) -> dict:
-    # HTTP mode: proxy to serve status endpoint and filter for active
+    # HTTP mode: proxy to the per-session endpoint so concurrent sessions for
+    # the same agent are all surfaced. /api/v1/status collapses to one record
+    # per agent and undercounted parallel sessions (#35); /api/v1/sessions
+    # returns one row per session, matching the direct-DB path below.
     if conn is None:
         if _serve_url is None:
             return _no_config()
-        data = _http_get("/api/v1/status")
+        data = _http_get("/api/v1/sessions", {"status": "active"})
         sessions = [
             {
-                "session_id": a.get("session_id"),
-                "agent_id": a["agent_id"],
-                "started_at": a.get("started_at"),
-                "total_cost_usd": float(a.get("total_cost_usd", 0.0)),
-                "input_tokens": a.get("input_tokens", 0),
-                "output_tokens": a.get("output_tokens", 0),
-                "tool_call_count": a.get("tool_call_count", 0),
-                "error_count": a.get("error_count", 0),
+                "session_id": s.get("session_id"),
+                "agent_id": s.get("agent_id"),
+                "started_at": s.get("started_at"),
+                "total_cost_usd": float(s.get("total_cost_usd", 0.0)),
+                "input_tokens": s.get("input_tokens", 0),
+                "output_tokens": s.get("output_tokens", 0),
+                "tool_call_count": s.get("tool_call_count", 0),
+                "error_count": s.get("error_count", 0),
             }
-            for a in data.get("agents", [])
-            if a.get("status") == "active"
+            for s in data.get("sessions", [])
         ]
         return {"sessions": sessions, "count": len(sessions)}
 
@@ -1081,6 +1083,20 @@ def acknowledge_alert(alert_id: str) -> dict:
                 req.add_header("Authorization", f"Bearer {_config.api.auth.api_key}")
             with _urlreq.urlopen(req, timeout=5) as resp:
                 return _json.loads(resp.read())
+        if _ro_conn is not None:
+            # Read-only DuckDB fallback: a module-global read-only connection is
+            # already open against this file. DuckDB forbids opening the same
+            # file read-write while a read-only connection exists in the same
+            # process, so attempting the UPDATE here raises a raw
+            # ConnectionException (#34). Return actionable guidance instead.
+            return {
+                "error": (
+                    "Acknowledging alerts requires a writable database, but it's "
+                    "open read-only because tj serve holds the lock (or wasn't "
+                    "reachable). Acknowledge from the dashboard, or stop tj serve "
+                    "and retry."
+                )
+            }
         from pathlib import Path
         import duckdb as _duckdb
         db_path = str(Path(_config.storage.path).expanduser())

@@ -225,10 +225,13 @@ class LiteLLMIntegration:
             record_full_request(span, kwargs)
 
             token = _tj_litellm_active.set(True)
+            handed_off = False
             try:
                 response = integration._original_completion(*args, **kwargs)
                 if is_stream:
-                    return _SyncStreamWrapper(response, span, raw_model, token)
+                    wrapper = _SyncStreamWrapper(response, span, raw_model, token)
+                    handed_off = True
+                    return wrapper
                 _record_usage(response, span, raw_model)
                 span.set_status(trace.Status(trace.StatusCode.OK))
                 return response
@@ -238,7 +241,10 @@ class LiteLLMIntegration:
                 )
                 raise
             finally:
-                if not is_stream:
+                # Clean up unless the stream wrapper took ownership; this also
+                # covers a streaming call that raised before the wrapper was
+                # built, which would otherwise leak the contextvar + span (#48).
+                if not handed_off:
                     span.end()
                     _tj_litellm_active.reset(token)
 
@@ -270,12 +276,17 @@ class LiteLLMIntegration:
             record_full_request(span, kwargs)
 
             token = _tj_litellm_active.set(True)
+            handed_off = False
             try:
                 response = await integration._original_acompletion(
                     *args, **kwargs,
                 )
                 if is_stream:
-                    return _AsyncStreamWrapper(response, span, raw_model, token)
+                    wrapper = _AsyncStreamWrapper(
+                        response, span, raw_model, token,
+                    )
+                    handed_off = True
+                    return wrapper
                 _record_usage(response, span, raw_model)
                 span.set_status(trace.Status(trace.StatusCode.OK))
                 return response
@@ -285,7 +296,10 @@ class LiteLLMIntegration:
                 )
                 raise
             finally:
-                if not is_stream:
+                # Clean up unless the stream wrapper took ownership; this also
+                # covers a streaming call that raised before the wrapper was
+                # built, which would otherwise leak the contextvar + span (#48).
+                if not handed_off:
                     span.end()
                     _tj_litellm_active.reset(token)
 
