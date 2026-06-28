@@ -1277,3 +1277,42 @@ def suggest_policies() -> dict:
         return _tool_suggest_policies(_ro_db, _config)
     except Exception as e:
         return {"error": str(e)}
+
+
+def _tool_list_summarize_candidates(config, path=None, recursive=False, repo=False) -> dict:
+    """Advisory summarize scan (no DB, config-only). Powers list_summarize_candidates."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.candidates import list_candidates
+    result = list_candidates(path, config=config, recursive=recursive, repo=repo)
+    payload = result.to_dict()
+    if not payload.get("note"):
+        payload["note"] = (
+            "Candidates only — review before adopting. The figure is the "
+            "estimated per-call token reduction (amortizes across reuse)."
+        )
+    return payload
+
+
+@mcp.tool()
+def list_summarize_candidates(
+    path: str | None = None, recursive: bool = False, repo: bool = False,
+) -> dict:
+    """
+    List prompt files worth summarizing — large, prose-heavy CLAUDE.md / AGENTS.md
+    / *.md files under `path` (default: the current project). Returns each
+    candidate's prose word count and the ESTIMATED per-call token reduction from
+    summarizing its prose (structure — fenced & inline code, tags, templates, and
+    tables — is preserved verbatim). Use this when the user asks what prompts they could shrink, where
+    token bloat lives in their static prompts, or wants summarize candidates.
+
+    Advisory only: reads and reports, never rewrites a file. Savings are an
+    estimated per-call reduction that amortizes across every reuse of the cached
+    prompt — candidates to review, not a guarantee the rewrite is safe.
+    """
+    try:
+        return _tool_list_summarize_candidates(
+            _config, path, recursive=recursive, repo=repo,
+        )
+    except Exception as e:
+        return {"error": str(e)}
