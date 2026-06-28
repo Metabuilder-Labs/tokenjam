@@ -608,6 +608,54 @@ def test_acknowledge_alert_http_mode_proxies_patch():
         _srv._config = None
 
 
+def test_acknowledge_alert_read_only_fallback_returns_actionable_error(tmp_path):
+    """In read-only DuckDB fallback (tj serve unreachable, _ro_conn open, no
+    _serve_url) acknowledge_alert must NOT open a conflicting read-write
+    connection to the same file — that raises a raw DuckDB ConnectionException.
+    It should return a clear, actionable message instead (#34)."""
+    import duckdb
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.db import DuckDBBackend
+
+    db_file = tmp_path / "telemetry.duckdb"
+    # Seed the DB (schema + one alert) via a normal read-write backend, then
+    # close it so the read-only connection below is the only one in process.
+    backend = DuckDBBackend(StorageConfig(path=str(db_file)))
+    alert = Alert(
+        alert_id=new_uuid(),
+        fired_at=utcnow(),
+        type=AlertType.RETRY_LOOP,
+        severity=Severity.WARNING,
+        title="Retry loop",
+        detail={},
+        agent_id="a",
+        session_id=None,
+        span_id=None,
+        acknowledged=False,
+        suppressed=False,
+    )
+    backend.insert_alert(alert)
+    backend._conn.close()
+
+    ro_conn = duckdb.connect(str(db_file), read_only=True)
+    config = _make_config("a")
+    config.storage = StorageConfig(path=str(db_file))
+    _srv._ro_conn = ro_conn
+    _srv._config = config
+    _set_serve_url(None)
+    try:
+        result = _srv.acknowledge_alert(alert.alert_id)
+        assert "error" in result
+        msg = result["error"].lower()
+        # Actionable guidance — not a raw DuckDB connection exception.
+        assert "read-only" in msg or "dashboard" in msg
+        assert "configuration" not in msg  # raw DuckDB conflict phrasing
+    finally:
+        ro_conn.close()
+        _srv._ro_conn = None
+        _srv._config = None
+
+
 # --- test_get_budget_headroom_http_mode ---
 
 def test_get_budget_headroom_http_mode_reads_live_limits():

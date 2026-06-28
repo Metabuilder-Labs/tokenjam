@@ -1081,6 +1081,20 @@ def acknowledge_alert(alert_id: str) -> dict:
                 req.add_header("Authorization", f"Bearer {_config.api.auth.api_key}")
             with _urlreq.urlopen(req, timeout=5) as resp:
                 return _json.loads(resp.read())
+        if _ro_conn is not None:
+            # Read-only DuckDB fallback: a module-global read-only connection is
+            # already open against this file. DuckDB forbids opening the same
+            # file read-write while a read-only connection exists in the same
+            # process, so attempting the UPDATE here raises a raw
+            # ConnectionException (#34). Return actionable guidance instead.
+            return {
+                "error": (
+                    "Acknowledging alerts requires a writable database, but it's "
+                    "open read-only because tj serve holds the lock (or wasn't "
+                    "reachable). Acknowledge from the dashboard, or stop tj serve "
+                    "and retry."
+                )
+            }
         from pathlib import Path
         import duckdb as _duckdb
         db_path = str(Path(_config.storage.path).expanduser())
