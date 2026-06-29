@@ -2396,3 +2396,70 @@ async def test_get_session_distill_unavailable(config, db, tmp_path):
     body = resp.json()
     assert body["available"] is False
     assert "reason" in body
+
+
+@pytest.mark.asyncio
+async def test_close_captures_method_and_story_falls_back_after_prune(
+    config, db, tmp_path
+):
+    """End-to-end M1: closing a session snapshots its method; after the transcript
+    is pruned, /story serves the snapshot (from_snapshot) instead of 404-ing."""
+    from tokenjam.utils.time_parse import utcnow
+
+    _write_story_transcript(tmp_path, "ephemeral")
+    transcript = tmp_path / "-Users-test-project" / "ephemeral.jsonl"
+    db.upsert_session(make_session(
+        agent_id="claude-code", session_id="ephemeral", status="active",
+        service_instance_id="term-1", started_at=utcnow(), ended_at=utcnow()))
+
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        # Live transcript present -> behavior is unchanged (no snapshot marker).
+        live = await c.get("/api/v1/sessions/ephemeral/story")
+        assert live.status_code == 200
+        assert live.json()["available"] is True
+        assert "from_snapshot" not in live.json()
+
+        # The `claude` wrapper reports the terminal closed (by instance_id).
+        closed = await c.post(
+            "/api/v1/sessions/close",
+            json={"instance_id": "term-1"},
+            headers={"Authorization": f"Bearer {INGEST_SECRET}"},
+        )
+        assert closed.status_code == 200
+        assert closed.json()["closed"] == 1
+
+        # Claude Code prunes the on-disk transcript.
+        transcript.unlink()
+
+        # /story now serves the persisted snapshot.
+        story = await c.get("/api/v1/sessions/ephemeral/story")
+        assert story.status_code == 200
+        body = story.json()
+        assert body["available"] is True
+        assert body["from_snapshot"] is True
+        assert body["outcome"] == "Done — it works."
+
+        # /workmap likewise falls back to the snapshot's ask-segmented story.
+        workmap = await c.get("/api/v1/sessions/ephemeral/workmap")
+        assert workmap.status_code == 200
+        wm = workmap.json()
+        assert wm["available"] is True
+        assert wm["from_snapshot"] is True
+        assert wm["ask_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_story_still_404s_when_no_transcript_and_no_snapshot(config, db, tmp_path):
+    """Read-through fallback doesn't paper over genuinely-absent sessions."""
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/nonexistent/story")
+    assert resp.status_code == 200
+    assert resp.json()["available"] is False
