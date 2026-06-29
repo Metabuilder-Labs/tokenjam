@@ -45,6 +45,7 @@ from tokenjam.core.framing import (
     compute_framing,
     plan_determination_mix,
 )
+from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.models import AlertFilters, SessionRecord
 from tokenjam.core.runlink import scan_transcript_run_ids
 from tokenjam.core.transcript import (
@@ -644,6 +645,54 @@ async def get_session_story(
     snapshot = load_session_method(request.app.state.db, session_id)
     if snapshot and snapshot.get("story"):
         return {"available": True, "from_snapshot": True, **snapshot["story"]}
+
+    return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
+
+
+def _approach_payload(story: dict[str, Any]) -> dict[str, Any]:
+    """Render-ready Approach body from a Story dict (the method spine + mandate)."""
+    return {
+        "available": True,
+        "spine": build_method_spine(story),
+        "task": story.get("task") or "",
+        "outcome": story.get("outcome") or "",
+        "name": story.get("name"),
+    }
+
+
+@router.get(
+    "/sessions/{session_id}/approach",
+    response_model=None,
+    dependencies=[Depends(require_api_key)],
+)
+async def get_session_approach(request: Request, session_id: str):
+    """Deterministic **method spine** for a session — the *how* of the work.
+
+    Folds the session's reconstructed Story into an ordered list of intent-tagged
+    moves (``core/method_spine.build_method_spine``): ``delegate`` /
+    ``dead_end`` / ``verify`` / ``act``, recursively for subagents. Honesty-bounded
+    (Critical Rule 14): only structurally-determinable intent is emitted — richer
+    labels are the opt-in distill layer, not this route.
+
+    Found -> ``{"available": true, "spine": [...], "task": ..., ...}``. When the
+    live transcript is gone, falls back to the method snapshot persisted at
+    session close (M1), marked ``"from_snapshot": true``. Neither ->
+    ``{"available": false, "reason": ...}`` with HTTP 200 (same contract as
+    ``/story``).
+    """
+    override = getattr(request.app.state, "claude_projects_root", None)
+    projects_root = resolve_projects_root(override)
+
+    story = build_session_story(
+        session_id, projects_root=projects_root, include_subagents=True
+    )
+    if story is not None:
+        return _approach_payload(story)
+
+    # Transcript pruned -> read-through the persisted snapshot's story slice (M1).
+    snapshot = load_session_method(request.app.state.db, session_id)
+    if snapshot and snapshot.get("story"):
+        return {"from_snapshot": True, **_approach_payload(snapshot["story"])}
 
     return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
 

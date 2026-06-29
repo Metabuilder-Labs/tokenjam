@@ -2463,3 +2463,90 @@ async def test_story_still_404s_when_no_transcript_and_no_snapshot(config, db, t
         resp = await c.get("/api/v1/sessions/nonexistent/story")
     assert resp.status_code == 200
     assert resp.json()["available"] is False
+
+
+# --- Approach (method spine) endpoint ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_session_approach_returns_spine(config, db, tmp_path):
+    """A session with a transcript yields a deterministic method spine; the Task
+    step reads as a ``delegate`` move recursing into its subagent's spine."""
+    _write_story_with_subagent(tmp_path, "approach-parent")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/approach-parent/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert "from_snapshot" not in body
+    spine = body["spine"]
+    # The orchestrator's Task step is a delegate move carrying the child's spine.
+    delegate = next(m for m in spine if m["kind"] == "delegate")
+    assert delegate["source"] == "agent_words"
+    assert delegate["label"] == "Spawning a worker."
+    assert len(delegate["children"]) == 1
+    assert delegate["children"][0]["kind"] == "act"
+
+
+@pytest.mark.asyncio
+async def test_get_session_approach_unavailable(config, db, tmp_path):
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/no-such/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "reason" in body
+
+
+@pytest.mark.asyncio
+async def test_approach_falls_back_to_snapshot_after_prune(config, db, tmp_path):
+    """End-to-end: closing a session snapshots its method; after the transcript
+    is pruned, /approach serves the spine from the snapshot (from_snapshot)."""
+    from tokenjam.utils.time_parse import utcnow
+
+    _write_story_transcript(tmp_path, "approach-eph")
+    transcript = tmp_path / "-Users-test-project" / "approach-eph.jsonl"
+    db.upsert_session(make_session(
+        agent_id="claude-code", session_id="approach-eph", status="active",
+        service_instance_id="term-ap", started_at=utcnow(), ended_at=utcnow()))
+
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        # Live transcript present -> spine, no snapshot marker.
+        live = await c.get("/api/v1/sessions/approach-eph/approach")
+        assert live.status_code == 200
+        assert live.json()["available"] is True
+        assert "from_snapshot" not in live.json()
+        assert len(live.json()["spine"]) >= 1
+
+        # The `claude` wrapper reports the terminal closed -> method snapshotted.
+        closed = await c.post(
+            "/api/v1/sessions/close",
+            json={"instance_id": "term-ap"},
+            headers={"Authorization": f"Bearer {INGEST_SECRET}"},
+        )
+        assert closed.status_code == 200
+        assert closed.json()["closed"] == 1
+
+        # Claude Code prunes the on-disk transcript.
+        transcript.unlink()
+
+        # /approach now serves the persisted snapshot's spine.
+        approach = await c.get("/api/v1/sessions/approach-eph/approach")
+        assert approach.status_code == 200
+        body = approach.json()
+        assert body["available"] is True
+        assert body["from_snapshot"] is True
+        assert len(body["spine"]) >= 1
