@@ -1,0 +1,40 @@
+# VCS
+.git
+.gitignore
+
+# CI / Deployment config
+.github
+Dockerfile
+.dockerignore
+
+# Local TokenJam runtime state (untracked; .tj/config.toml holds a live ingest_secret)
+.tj
+.tj-test-data
+*.duckdb
+
+# Python caches / build artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+.eggs
+build
+dist
+.mypy_cache
+.ruff_cache
+.pytest_cache
+
+# Test + docs (not needed in the image; incidents/ IS needed and is not ignored)
+tests
+docs
+examples
+growth
+traffic
+
+# TypeScript SDK (independent package)
+sdk-ts/node_modules
+sdk-ts/dist
+
+# Editor / OS cruft
+.DS_Store
+.vscode
+.idea
