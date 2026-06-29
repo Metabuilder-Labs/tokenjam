@@ -6,7 +6,10 @@ nodes, newest first. These tests drive it with hand-built dicts — no I/O.
 """
 from __future__ import annotations
 
-from tokenjam.core.workmap import build_work_map
+from tokenjam.core.workmap import (
+    PROVENANCE_IN_SESSION,
+    build_work_map,
+)
 
 
 def _tool(name: str, label: str = "", status: str = "ok") -> dict:
@@ -110,6 +113,41 @@ def test_unmapped_subagents_reported_not_dropped():
     assert m["subagent_count"] == 0
     assert m["unmapped_count"] == 1
     assert m["unmapped_tokens"] == 5000
+
+
+def test_subagent_node_carries_provenance_and_completeness():
+    asks = {"asks": [_ask(1, "orchestrate", [
+        _step([_tool("Task", "worker")], subagent={
+            "agent_id": "A", "name": "worker", "task": "build", "outcome": "done",
+            "steps": [_step([_tool("Edit", "x.py")])],
+        }),
+    ])]}
+    child = build_work_map(asks, None)["asks"][0]["subagents"][0]
+    # Every node the work map builds is an in-session sidechain (Scope A); a fully
+    # expanded story is complete.
+    assert child["provenance"] == PROVENANCE_IN_SESSION
+    assert child["capture_completeness"] == "full"
+
+
+def test_capped_node_completeness_is_capped():
+    asks = {"asks": [_ask(1, "x", [
+        _step([_tool("Task", "deep")],
+              subagent={"agent_id": "D", "name": "deep", "depth_capped": True}),
+    ])]}
+    child = build_work_map(asks, None)["asks"][0]["subagents"][0]
+    assert child["provenance"] == PROVENANCE_IN_SESSION
+    assert child["capture_completeness"] == "capped"
+
+
+def test_truncated_story_completeness_is_capped():
+    asks = {"asks": [_ask(1, "x", [
+        _step([_tool("Task", "w")], subagent={
+            "agent_id": "T", "name": "w", "truncated": True,
+            "steps": [_step([_tool("Read", "a.py")])],
+        }),
+    ])]}
+    child = build_work_map(asks, None)["asks"][0]["subagents"][0]
+    assert child["capture_completeness"] == "capped"
 
 
 def test_empty_session_has_no_asks():

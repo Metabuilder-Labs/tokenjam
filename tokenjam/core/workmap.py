@@ -43,6 +43,13 @@ _SPAWN_TOOLS = frozenset({"Task", "Agent"})
 #: Cap on the distinct file paths listed per node (the count stays exact).
 MAX_FILES_PER_NODE = 8
 
+#: Node provenance — how the agent was deployed, so the UI can mark in-session
+#: subagents (full method, rebuilt from the transcript) apart from cross-terminal
+#: child sessions (M2: spliced from the run tree, method may be session-level
+#: only). Every node the work map builds today is an in-session sidechain.
+PROVENANCE_IN_SESSION = "in_session_subagent"
+PROVENANCE_CROSS_TERMINAL = "cross_terminal_child"
+
 #: A subagent object carries one of these instead of an expanded story when the
 #: story hit a recursion guard. Mapped to a short node ``capped`` marker.
 _CAP_MARKERS = {
@@ -213,6 +220,8 @@ def _node_from_story(
         "flags": flags,
         "capped": None,
         "truncated": bool(story.get("truncated")),
+        "provenance": PROVENANCE_IN_SESSION,
+        "capture_completeness": "capped" if story.get("truncated") else "full",
         "children": _children_from_steps(steps, depth + 1, sub_index),
     }
 
@@ -241,7 +250,9 @@ def _child_node(
             "id": agent_id, "name": name, "depth": depth, "model": row.get("model") if row else None,
             "task": "", "outcome": "", "activity": _empty_activity(), "summary": _CAP_SUMMARY[cap],
             "cost_usd": cost_usd, "tokens": tokens, "flags": flags,
-            "capped": cap, "truncated": False, "children": [],
+            "capped": cap, "truncated": False,
+            "provenance": PROVENANCE_IN_SESSION, "capture_completeness": "capped",
+            "children": [],
         }
 
     return _node_from_story(
@@ -371,4 +382,9 @@ def build_work_map(
     }
 
 
-__all__ = ["build_work_map", "MAX_FILES_PER_NODE"]
+__all__ = [
+    "build_work_map",
+    "MAX_FILES_PER_NODE",
+    "PROVENANCE_IN_SESSION",
+    "PROVENANCE_CROSS_TERMINAL",
+]
