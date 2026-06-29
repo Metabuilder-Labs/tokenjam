@@ -246,6 +246,7 @@ def report_from_dict(d: dict) -> OptimizeReport:
             examples=examples,
             suggestions=dict(dd.get("suggestions") or {}),
             caveat=str(dd.get("caveat", "")),
+            bench_command=dd.get("bench_command"),
             candidate_tokens=int(dd.get("candidate_tokens", 0)),
             window_total_tokens=int(dd.get("window_total_tokens", 0)),
             percent_of_tokens=float(dd.get("percent_of_tokens", 0.0)),

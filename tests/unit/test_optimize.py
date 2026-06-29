@@ -112,6 +112,7 @@ def test_downgrade_flags_small_opus_but_not_large(db):
     assert finding.candidate_sessions == 1
     assert finding.total_sessions == 2
     assert finding.suggestions.get("claude-opus-4-7") == "claude-haiku-4-5"
+    assert finding.bench_command == "tjb run --original anthropic:claude-opus-4-7 --candidate anthropic:claude-haiku-4-5"
     # Caveat must be present as the dataclass default
     assert finding.caveat == MODEL_DOWNGRADE_CAVEAT
 

@@ -61,6 +61,7 @@ class DowngradeFinding:
     examples:           list[DowngradeExample]
     suggestions:        dict[str, str]
     caveat:             str = MODEL_DOWNGRADE_CAVEAT
+    bench_command:      str | None = None
     # Token-share fields. Same model swap doesn't reduce token count, but for
     # subscription users (who pay a flat fee) the meaningful framing is
     # "candidate sessions are X% of your cycle's tokens — routing those to a

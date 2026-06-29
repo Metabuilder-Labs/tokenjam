@@ -128,6 +128,7 @@ def analyze_model_downgrade(
     window_total_tokens = 0
     examples: list[DowngradeExample] = []
     suggestions: dict[str, str] = {}
+    swaps: list[tuple[str, str, str]] = []
     # Per-candidate-session window savings, for the sampling-confidence interval
     # (#308). One value per candidate session = (actual cost − cheaper-model cost).
     per_session_savings: list[float] = []
@@ -164,6 +165,8 @@ def analyze_model_downgrade(
         # never costs more in our candidate set, but guard against pricing noise).
         per_session_savings.append(max(float(cost or 0.0) - alt_unit, 0.0))
         suggestions[model] = alt
+        if (provider, model, alt) not in swaps:
+            swaps.append((provider, model, alt))
 
         if len(examples) < 3:
             duration = None
@@ -204,6 +207,9 @@ def analyze_model_downgrade(
         int(candidate_tokens / window_days * 30.0) if window_days > 0 else 0
     )
 
+    commands = [f"tjb run --original {p}:{orig} --candidate {p}:{alt}" for p, orig, alt in swaps]
+    bench_command = "\n".join(commands) if commands else None
+
     return DowngradeFinding(
         candidate_sessions=candidate_sessions,
         total_sessions=total_sessions,
@@ -213,6 +219,7 @@ def analyze_model_downgrade(
         percent_of_sessions=round(percent, 1),
         examples=examples,
         suggestions=suggestions,
+        bench_command=bench_command,
         candidate_tokens=candidate_tokens,
         window_total_tokens=window_total_tokens,
         percent_of_tokens=round(percent_tokens, 1),
