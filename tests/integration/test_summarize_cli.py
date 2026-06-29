@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -237,3 +239,179 @@ def test_undo_rejects_dry_run_and_go_together(runner, tmp_path):
     res = _invoke_cfg(runner, ["summarize", "undo", str(f), "--dry-run", "--go"], config)
     assert res.exit_code != 0
     assert "Choose one of --dry-run or --go" in res.output
+
+
+# --- prep --via claude-p (the automated one-shot: wrap → claude -p → check → stage) ---
+
+_RUN = "tokenjam.core.summarize.delivery.subprocess.run"
+
+
+def _fake_claude():
+    """`subprocess.run` stand-in for the CLI: echo every marker so restore() succeeds (no real claude)."""
+    def _run(cmd, *, input, capture_output, text, timeout=None):
+        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', input, re.DOTALL)
+        return SimpleNamespace(returncode=0, stdout="Be careful; never skip. " + " ".join(markers), stderr="")
+    return _run
+
+
+def test_prep_via_claude_oneshot_stages(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    with patch(_RUN, _fake_claude()):
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "claude-p", "--json"], config)
+    assert res.exit_code == 0, res.output
+    verdict = json.loads(res.output)
+    assert verdict["structure_ok"] is True and verdict["staged"] is True
+    assert verdict["produced_by"] == "claude-p"        # provenance flows to the staged result
+    assert "x = 1" in verdict["restored"]
+
+
+def test_prep_via_claude_human_output(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    with patch(_RUN, _fake_claude()):
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "claude-p"], config)
+    assert res.exit_code == 0, res.output
+    assert "structure preserved" in res.output and "summarize apply" in res.output
+
+
+def test_prep_via_claude_not_installed_errors(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30)
+    with patch(_RUN, side_effect=FileNotFoundError()):
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "claude-p"], config)
+    assert res.exit_code != 0
+    assert "isn't installed" in res.output and "manual mode" in res.output
+
+
+def test_prep_via_claude_below_gate_skips_model(runner, tmp_path):
+    config = _tmp_storage_config(tmp_path)
+    f = tmp_path / "tiny.md"
+    f.write_text("short prompt with only a few words")
+    with patch(_RUN) as run:
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "claude-p"], config)
+    assert res.exit_code == 0, res.output
+    assert "gate" in res.output
+    run.assert_not_called()                            # below the prose floor → no model spend
+
+
+# --- prep --via api (one-shot through Anthropic with the user's own key) ---
+
+def _api_storage_config(tmp_path, model="claude-opus-4-8"):
+    from tokenjam.core.config import StorageConfig, SummarizeConfig
+    return TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")),
+                    summarize=SummarizeConfig(api_model=model))
+
+
+_POST = "httpx.post"
+
+
+def _fake_api():
+    """`httpx.post` stand-in for the CLI api path: echo markers + report usage (no network)."""
+    def _post(url, *, timeout, headers, json):
+        wrapped = json["messages"][0]["content"]
+        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', wrapped, re.DOTALL)
+        return SimpleNamespace(
+            status_code=200, text="",
+            json=lambda: {"content": [{"type": "text", "text": "Be careful; never skip. " + " ".join(markers)}],
+                          "stop_reason": "end_turn",
+                          "usage": {"input_tokens": 1200, "output_tokens": 400}})
+    return _post
+
+
+def test_prep_via_api_oneshot_stages_and_amortizes(runner, tmp_path, monkeypatch):
+    monkeypatch.setenv("TJ_ANTHROPIC_API_KEY", "sk-test")
+    config = _api_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    with patch(_POST, _fake_api()):
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "api", "--json"], config)
+    assert res.exit_code == 0, res.output
+    verdict = json.loads(res.output)
+    assert verdict["structure_ok"] is True and verdict["staged"] is True
+    assert verdict["produced_by"] == "api"
+    assert verdict["amortization"]["break_even_calls"] >= 1     # the pays-for-itself economics rode along
+
+
+def test_prep_via_api_human_shows_pays_for_itself(runner, tmp_path, monkeypatch):
+    monkeypatch.setenv("TJ_ANTHROPIC_API_KEY", "sk-test")
+    config = _api_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    with patch(_POST, _fake_api()):
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "api"], config)
+    assert res.exit_code == 0, res.output
+    out = " ".join(res.output.split())             # Rich wraps at the console width — normalize first
+    assert "pays for itself" in out and "Estimate" in out and "real charge" in out
+
+
+def test_prep_via_api_no_key_errors(runner, tmp_path, monkeypatch):
+    monkeypatch.delenv("TJ_ANTHROPIC_API_KEY", raising=False)
+    config = _api_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30)
+    res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "api"], config)
+    assert res.exit_code != 0
+    assert "TJ_ANTHROPIC_API_KEY" in res.output        # house-voice refuse — no key, no spend
+
+
+def test_prep_via_api_unknown_model_labels_estimate(runner, tmp_path, monkeypatch):
+    monkeypatch.setenv("TJ_ANTHROPIC_API_KEY", "sk-test")
+    config = _api_storage_config(tmp_path, model="totally-made-up-model-2099")
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    with patch(_POST, _fake_api()):
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "api"], config)
+    assert res.exit_code == 0, res.output
+    out = " ".join(res.output.split())
+    assert "default rates" in out and "add pricing for" in out   # honest fallback label (#4)
+
+
+def test_prep_via_api_failed_structure_json_reports_cost(runner, tmp_path, monkeypatch):
+    """Even a rejected API rewrite spent tokens, so JSON still exposes amortization metadata."""
+    monkeypatch.setenv("TJ_ANTHROPIC_API_KEY", "sk-test")
+    config = _api_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+
+    def _bad_api(url, *, timeout, headers, json):
+        return SimpleNamespace(
+            status_code=200, text="",
+            json=lambda: {"content": [{"type": "text", "text": "summary with no markers"}],
+                          "stop_reason": "end_turn",
+                          "usage": {"input_tokens": 1200, "output_tokens": 400}})
+
+    with patch(_POST, _bad_api):
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "api", "--json"], config)
+    assert res.exit_code == 0, res.output
+    verdict = json.loads(res.output)
+    assert verdict["structure_ok"] is False and verdict["staged"] is False
+    assert verdict["amortization"]["rewrite_usd"] > 0
+    assert verdict["amortization"]["saving_usd_per_call"] == 0
+    assert verdict["amortization"]["break_even_calls"] is None
+
+
+def test_prep_via_api_missing_usage_json_omits_amortization(runner, tmp_path, monkeypatch):
+    """No usage in the API response means unknown cost, so use the no-amortization fallback."""
+    monkeypatch.setenv("TJ_ANTHROPIC_API_KEY", "sk-test")
+    config = _api_storage_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+
+    def _api_without_usage(url, *, timeout, headers, json):
+        wrapped = json["messages"][0]["content"]
+        markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', wrapped, re.DOTALL)
+        return SimpleNamespace(
+            status_code=200, text="",
+            json=lambda: {"content": [{"type": "text", "text": "Be careful. " + " ".join(markers)}],
+                          "stop_reason": "end_turn"})
+
+    with patch(_POST, _api_without_usage):
+        res = _invoke_cfg(runner, ["summarize", "prep", str(f), "--via", "api", "--json"], config)
+    assert res.exit_code == 0, res.output
+    verdict = json.loads(res.output)
+    assert verdict["structure_ok"] is True and verdict["staged"] is True
+    assert "amortization" not in verdict and verdict["cost"] == "unknown"   # api billed, usage absent (#2)
