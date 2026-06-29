@@ -552,6 +552,14 @@ def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
     console.print(
         f"     [yellow]![/yellow] [italic]{MODEL_DOWNGRADE_CAVEAT}[/italic]"
     )
+    if d.bench_command:
+        console.print()
+        console.print(
+            "     [bold]Candidate only — prove it holds before switching:[/bold]"
+        )
+        console.print("       pip install tokenjam-bench")
+        for line in d.bench_command.split("\n"):
+            console.print(f"       {line}")
 
 
 def _render_budget(p: BudgetProjection) -> None:

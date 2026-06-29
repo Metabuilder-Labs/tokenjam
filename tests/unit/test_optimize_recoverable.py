@@ -185,10 +185,14 @@ def test_recoverable_fields_survive_report_to_dict_round_trip(db):
             assert "estimated_recoverable_usd" in payload["findings"][name]
             assert "estimate_confidence" in payload["findings"][name]
 
+    assert "bench_command" in payload["downgrade"]
+
     # and they round-trip back through report_from_dict
     rebuilt = report_from_dict(payload)
     assert (rebuilt.downgrade.estimated_recoverable_usd
             == report.downgrade.estimated_recoverable_usd)
+    assert rebuilt.downgrade.bench_command == report.downgrade.bench_command
+    assert rebuilt.downgrade.bench_command is not None
 
 
 def test_trim_recoverable_helper_prices_tokens():
