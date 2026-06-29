@@ -29,6 +29,7 @@ from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _run_sessions
 from tokenjam.core.db import session_token_cost_rollup
 from tokenjam.core.distill import distill_titles_cached, peek_cached_titles
+from tokenjam.core.method_capture import capture_session_method, load_session_method
 from tokenjam.core.framing import (
     WindowSummary,
     compute_framing,
@@ -86,11 +87,38 @@ async def close_sessions(request: Request) -> JSONResponse:
         )
 
     db = request.app.state.db
+
+    # Identify the sessions we're about to close BEFORE closing them, so we can
+    # snapshot each one's reconstructed method (M1). The `claude` wrapper closes
+    # by instance_id, so resolve that to its currently-active session ids; an
+    # explicit session_id is included directly.
+    target_ids: set[str] = set()
+    if session_id:
+        target_ids.add(session_id)
+    if instance_id and hasattr(db, "conn"):
+        rows = db.conn.execute(
+            "SELECT session_id FROM sessions "
+            "WHERE service_instance_id = $1 AND status = 'active'",
+            [instance_id],
+        ).fetchall()
+        target_ids.update(r[0] for r in rows if r[0])
+
     closed = 0
     if instance_id:
         closed += db.close_sessions_by_instance(instance_id)
     if session_id:
         closed += db.close_session_by_id(session_id)
+
+    # Persist a method snapshot for each closed session so an ephemeral agent's
+    # Story survives Claude Code pruning the on-disk transcript. Best-effort:
+    # capture_session_method never raises, so it can't break the close.
+    if target_ids:
+        override = getattr(request.app.state, "claude_projects_root", None)
+        projects_root = resolve_projects_root(override)
+        for sid in target_ids:
+            capture_session_method(
+                db, sid, projects_dir=projects_root, source="live-transcript"
+            )
 
     return JSONResponse(status_code=200, content={"closed": closed})
 
@@ -523,10 +551,17 @@ async def get_session_story(
     story = build_session_story(
         session_id, projects_root=projects_root, include_subagents=subagents
     )
-    if story is None:
-        return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
+    if story is not None:
+        # Live transcript present -> unchanged behavior (byte-identical to before).
+        return {"available": True, **story}
 
-    return {"available": True, **story}
+    # Transcript gone (pruned). Fall back to a method snapshot persisted at
+    # session close (M1), so a killed agent's method survives the prune.
+    snapshot = load_session_method(request.app.state.db, session_id)
+    if snapshot and snapshot.get("story"):
+        return {"available": True, "from_snapshot": True, **snapshot["story"]}
+
+    return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
 
 
 def _parse_iso(ts: Any) -> datetime | None:
@@ -681,13 +716,22 @@ async def get_session_workmap(request: Request, session_id: str):
     override = getattr(request.app.state, "claude_projects_root", None)
     projects_root = resolve_projects_root(override)
 
+    db = request.app.state.db
+
     asks_payload = build_session_asks(
         session_id, projects_root=projects_root, include_subagents=True
     )
+    from_snapshot = False
     if asks_payload is None:
-        return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
+        # Transcript gone (pruned). Fall back to the method snapshot persisted at
+        # session close (M1); the span-derived rollups below still come from the DB.
+        snapshot = load_session_method(db, session_id)
+        if snapshot and snapshot.get("asks"):
+            asks_payload = snapshot["asks"]
+            from_snapshot = True
+        else:
+            return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
 
-    db = request.app.state.db
     subagents = _session_subagents(db, session_id)
     ask_tokens, ask_costs = _bucket_tokens_by_ask(
         db, session_id, asks_payload["asks"]
@@ -710,6 +754,8 @@ async def get_session_workmap(request: Request, session_id: str):
         session_tokens=session_tokens, session_cost_usd=session_cost,
     )
     result: dict[str, Any] = {"available": True, **workmap}
+    if from_snapshot:
+        result["from_snapshot"] = True
     if session is not None:
         launched = _launched_run(db, session, projects_root)
         if launched is not None:

@@ -322,6 +322,27 @@ MIGRATIONS: list[tuple[int, str]] = [
     # keeps them attributable per subagent. Populated by the backfill parser
     # from each record's top-level agentId when isSidechain is true.
     (13, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_id TEXT"),
+    # Migration 14: session_story — a persisted snapshot of a session's
+    # reconstructed Story (the recursive method/narration + subagent subtree,
+    # core/transcript.py). /story and /workmap recompute that Story from the
+    # on-disk Claude Code JSONL transcript on every request and never store it;
+    # Claude Code PRUNES those transcripts, so a killed ephemeral agent's method
+    # dies with the file. This table captures it at session close (M1,
+    # core/method_capture.py) so it outlives the prune and can serve as a
+    # read-through fallback. One row per session (session_id PRIMARY KEY);
+    # `source` records provenance ('live-transcript' | 'backfill') and
+    # `schema_version` the snapshot payload shape. story_json is the full
+    # snapshot ({"story": ..., "asks": ...}); the depth_capped/budget_capped/
+    # cycle markers ride through it unchanged.
+    (14, (
+        "CREATE TABLE IF NOT EXISTS session_story (\n"
+        "    session_id     TEXT PRIMARY KEY,\n"
+        "    story_json     JSON NOT NULL,\n"
+        "    captured_at    TIMESTAMPTZ NOT NULL,\n"
+        "    source         TEXT NOT NULL,\n"
+        "    schema_version INTEGER NOT NULL DEFAULT 1\n"
+        ")"
+    )),
 ]
 
 
