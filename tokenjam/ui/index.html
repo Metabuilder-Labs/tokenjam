@@ -2289,7 +2289,9 @@ function StatusView({ params }) {
       <div class="cards">
         ${groups[key].map(agentCard)}
       </div>
-    `)}
+    `)}`}
+    ${(viewMode === 'list' && agents.length === 0) ? html`
+      <div style="font-size:12px;color:var(--text-dim);margin:8px 0 4px;font-family:'Geist Mono',monospace">No active sessions</div>` : null}
     ${archived.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Archived sessions</div>
       <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">Closed or stale terminals — no longer live</div>
@@ -2308,7 +2310,7 @@ function StatusView({ params }) {
           `)}
         </tbody>
       </table></div>
-    ` : null}`}
+    ` : null}
     ${alerts.length > 0 ? html`
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>

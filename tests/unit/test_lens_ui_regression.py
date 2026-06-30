@@ -1483,3 +1483,32 @@ def test_approach_splices_cross_terminal_spine(html):
     assert "const crossTerminal = data.cross_terminal || [];" in html
     assert "cross-terminal children" in html  # the divider label
     assert ".ap-deleg.ap-xterm { border-color: var(--warn); }" in html
+
+
+# --- StatusView: archived sessions render in List view too ----------------- #
+def test_status_archived_renders_regardless_of_view_mode(html):
+    # The archived-sessions table was nested INSIDE the Cards-mode branch of the
+    # `${viewMode === 'list' ? StatusListTable(...) : html`...`}` ternary, so in
+    # List view it was never rendered. With 0 active sessions in List view the
+    # whole Status page went blank. The archived block must live at the SAME
+    # level as the ternary (after it closes), not gated on cards mode.
+    start = html.index("function StatusView")
+    end = html.index("function ", start + 1)
+    view = html[start:end]
+
+    assert "Archived sessions" in view
+    # The cards-only branch terminates with this token (groupKeys map close +
+    # html`` close + ternary close). The archived block must come AFTER it.
+    cards_branch_close = view.index("`)}`}")
+    archived_block = view.index("${archived.length > 0 ? html`")
+    assert archived_block > cards_branch_close, (
+        "archived block must render after the cards-only branch closes, "
+        "not be nested inside it"
+    )
+    # Belt-and-suspenders: the StatusListTable (List) branch must not itself
+    # contain the archived table — it renders only the active rows.
+    list_branch = view[view.index("viewMode === 'list'"):cards_branch_close]
+    assert "Archived sessions" not in list_branch
+    # Empty-active note shown when List view has no active sessions.
+    assert "viewMode === 'list' && agents.length === 0" in view
+    assert "No active sessions" in view
