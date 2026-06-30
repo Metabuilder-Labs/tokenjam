@@ -1281,7 +1281,7 @@ a.health-tile.attn { border-color: var(--warn); }
 .ap-node + .ap-node { margin-top: 2px; }
 .ap-node.d1 { margin-left: 14px; } .ap-node.d2 { margin-left: 28px; } .ap-node.d3 { margin-left: 42px; }
 .ap-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; }
-.ap-dot.main { background: var(--brand); } .ap-dot.sub { background: var(--chart-5); } .ap-dot.term { background: var(--warn); }
+.ap-dot.is-main { background: var(--brand); } .ap-dot.is-sub { background: var(--chart-5); } .ap-dot.is-term { background: var(--warn); }
 .ap-nname { font-size: 11.5px; font-weight: 600; font-family: 'Geist Mono', monospace; }
 .ap-nmeta { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
 .ap-badge { display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 10px; margin-top: 4px; font-family: 'Geist Mono', monospace; border: 1px solid var(--border); color: var(--text-dim); }
@@ -3136,7 +3136,7 @@ function ApproachRail({ agents }) {
       ${agents.map(a => {
         const isMain = a.depth === 0;
         const isCapped = a.capture_completeness !== 'full';
-        const dotClass = isMain ? 'main' : (isCapped ? 'term' : 'sub');
+        const dotClass = isMain ? 'is-main' : (isCapped ? 'is-term' : 'is-sub');
         const dCls = a.depth ? ('d' + Math.min(a.depth, 3)) : '';
         const meta = (a.tokens != null ? fmtTokens(a.tokens) + ' tok' : ('depth ' + (a.depth || 0)))
           + (a.cost_usd != null ? ' · ' + fmtCost(a.cost_usd) : '');
