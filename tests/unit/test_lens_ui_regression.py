@@ -350,6 +350,43 @@ def test_timeline_error_step_shows_message_not_red_box(html):
     assert "story-error" in html
 
 
+# --- Timeline: subagents nest + expand recursively (like Approach/Map) ------- #
+def test_timeline_renders_subagents_recursively(html):
+    # Requirement: EVERY delegation in the Timeline is expandable to recurse into
+    # the child's own work. The recursion is a closed cycle of three pieces:
+    #   1. a StoryStep renders a SubagentBlock for each subagent it spawned,
+    #   2. a SubagentBlock renders the child's steps via renderTimelineSteps,
+    #   3. renderTimelineSteps renders a StoryStep per step — back to (1).
+    # So a subagent's steps that spawned their OWN subagents nest arbitrarily
+    # deep, each level independently expandable. Assert the whole cycle is wired.
+    assert "function SubagentBlock(" in html
+    assert "function StoryStep(" in html
+    assert "function renderTimelineSteps(" in html
+    # (1) StoryStep reads the step's subagents and renders a SubagentBlock each.
+    assert "const subagents = step.subagents || (step.subagent ? [step.subagent] : []);" in html
+    assert "subagents.map((sa, i) => html`<${SubagentBlock} subagent=${sa}" in html
+    # (2) SubagentBlock recurses into the child's steps with the SAME renderer.
+    assert '<div class="story-steps">${renderTimelineSteps(steps)}</div>' in html
+    # (3) renderTimelineSteps renders a StoryStep per step (closes the cycle).
+    assert "html`<${StoryStep} step=${step}" in html
+
+
+def test_timeline_subagent_is_expandable_with_honest_caps(html):
+    # Each subagent block has a clickable head with a caret affordance (collapsed
+    # ▸ / open ▾), consistent with the Approach/Map nodes — NOT a flat dump.
+    assert "const [open, setOpen] = useState(false);" in html
+    assert "onClick=${() => !capped && setOpen(o => !o)}" in html
+    assert "${capped ? '·' : (open ? '▾' : '▸')}" in html
+    # Caps are surfaced as honest notes, never silent drops: depth / size / cycle
+    # each map to an explicit "… omitted …" / "… already shown …" marker, and a
+    # capped ref is non-expandable (shows the note in place of the subtree).
+    assert "const capped = subagent.depth_capped || subagent.budget_capped || subagent.cycle;" in html
+    assert "deeper subagents omitted (depth cap)" in html
+    assert "deeper subagents omitted (size cap)" in html
+    assert "already shown above (cycle)" in html
+    assert "${cappedNote ? html`<div class=\"story-omitted\">${cappedNote}</div>` : null}" in html
+
+
 # --- Map: distill UX (auto-apply cached, honest note, feedback) ------------- #
 def test_distill_auto_applies_cached_and_has_honest_states(html):
     # Cache-only auto-apply on load (press once, sticks; zero cost).
