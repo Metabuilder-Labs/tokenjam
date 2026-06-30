@@ -328,6 +328,12 @@ tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: rgba(var(--accent-rgb),0.06); }
 td.chevron { color: var(--text-dim); font-size: 14px; text-align: center; width: 24px; }
 tr.clickable:hover td.chevron { color: var(--accent); }
+/* Status-list row actions: unify the two secondary links (View cost / View
+   traces) into one inline group with consistent spacing, clearly subordinate
+   to the now-clickable row. Mirrors the .card-links link treatment. */
+.row-actions { display: inline-flex; gap: 14px; }
+.row-actions a { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; }
+.row-actions a:hover { text-decoration: underline; }
 
 /* Badges */
 .badge {
@@ -2170,7 +2176,7 @@ function StatusListTable({ agents, framing }) {
       </tr></thead>
       <tbody>
         ${agents.map(a => html`
-          <tr>
+          <tr class="clickable" onClick=${() => { location.hash = a.session_id ? '#/sessions/' + a.session_id : '#/traces?agent_id=' + encodeURIComponent(a.agent_id); }}>
             <td class="mono"><span class="status-dot ${a.status}" style="margin-right:7px"></span>${a.agent_id}</td>
             <td><span class="badge badge-${a.status}">${a.status}</span></td>
             <td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>
@@ -2178,8 +2184,10 @@ function StatusListTable({ agents, framing }) {
             <td>${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</td>
             <td>${a.duration_seconds != null ? fmtDurLong(a.duration_seconds * 1000) : '-'}</td>
             <td style="white-space:nowrap">
-              <a href=${'#/cost?agent_id=' + encodeURIComponent(a.agent_id)}>View cost →</a>
-              <a href=${'#/traces?agent_id=' + encodeURIComponent(a.agent_id)} style="margin-left:10px">View traces →</a>
+              <div class="row-actions">
+                <a href=${'#/cost?agent_id=' + encodeURIComponent(a.agent_id)} onClick=${e => e.stopPropagation()}>View cost →</a>
+                <a href=${'#/traces?agent_id=' + encodeURIComponent(a.agent_id)} onClick=${e => e.stopPropagation()}>View traces →</a>
+              </div>
             </td>
           </tr>
         `)}
