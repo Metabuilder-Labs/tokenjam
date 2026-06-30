@@ -1067,7 +1067,8 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .mb-gutter { width: 78px; flex: 0 0 78px; display: flex; align-items: center; padding: 0 10px; font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; border-right: 1px solid var(--border); background: var(--surface); }
 .mb-plot { position: relative; flex: 1 1 auto; }
 .mb-lane.phase { height: 30px; }
-.mb-seg { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; justify-content: center; font-size: 10.5px; color: var(--text); border-right: 1px solid var(--border); overflow: hidden; white-space: nowrap; }
+.mb-seg { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; justify-content: flex-start; font-size: 10.5px; color: var(--text); border-right: 1px solid var(--border); overflow: hidden; white-space: nowrap; }
+.mb-seg-lab { padding: 0 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mb-lane.tools { height: 52px; }
 .mb-ev { position: absolute; bottom: 16px; width: 3px; border-radius: 1px; transform: translateX(-50%); }
 .mb-ev.retry { outline: 1px dashed var(--error); outline-offset: 1px; }
@@ -1095,10 +1096,11 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .mb-sec-cap { font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; }
 .mb-tree { border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); padding: 12px; }
 .mb-root { font-size: 10.5px; color: var(--text-dim); margin-bottom: 9px; font-family: 'Geist Mono', monospace; }
-.mb-dirs { display: flex; gap: 10px; align-items: stretch; flex-wrap: wrap; }
-.mb-dir { border: 1px solid var(--border); border-radius: 8px; padding: 9px; background: var(--surface); display: flex; flex-direction: column; min-width: 150px; }
-.mb-dh { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; font-family: 'Geist Mono', monospace; }
-.mb-files { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.mb-dirs { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+.mb-dir { border: 1px solid var(--border); border-radius: 8px; padding: 9px; background: var(--surface); display: flex; flex-direction: column; min-width: 150px; max-width: 340px; }
+.mb-dh { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; font-family: 'Geist Mono', monospace; display: flex; align-items: baseline; gap: 6px; }
+.mb-dh .mb-dh-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-files { display: flex; flex-direction: column; gap: 6px; }
 .mb-file { position: relative; display: flex; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 6px; font-size: 11.5px; font-family: 'Geist Mono', monospace; border: 1px solid var(--border); }
 .mb-ord { flex: 0 0 auto; width: 17px; height: 17px; border-radius: 50%; background: var(--surface3); color: var(--text-dim); font-size: 9px; display: flex; align-items: center; justify-content: center; }
 .mb-nm { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -2994,6 +2996,9 @@ const MB_CAT_COLOR = {
 // Subtle phase-band tints, cycled across phase spans.
 const MB_PHASE_TINTS = ['--chart-1', '--chart-4', '--chart-2', '--chart-3', '--chart-6', '--chart-5'];
 const MB_GUTTER = 78; // px — keep in sync with .mb-gutter width so the crosshair lands in the plot.
+const MB_PHASE_LABEL_MIN = 60; // px — only print a phase-band label when the band is at least this wide.
+const MB_EVLAB_MAX = 90;       // px — keep in sync with .mb-evlab max-width (used to clamp labels inside the lane).
+const MB_EVLAB_GAP = 70;       // px — minimum spacing between two printed tool labels (skip ones that would collide).
 
 const mbColor = (cat) => 'var(' + (MB_CAT_COLOR[cat] || '--text-dim') + ')';
 // A theme color at a given alpha, via color-mix (no rgba(hex) — keeps theming live).
@@ -3039,10 +3044,20 @@ function mbBuildTerritory(events) {
   const groups = new Map();
   list.forEach((f) => {
     const dir = dirOf(f.path);
-    const rest = dir.split('/').filter(Boolean).slice(prefLen).join('/');
-    const label = (rest || '(root)') + '/';
-    let g = groups.get(label);
-    if (!g) { g = { label, totalTouches: 0, files: [] }; groups.set(label, g); }
+    const restSegs = dir.split('/').filter(Boolean).slice(prefLen);
+    const rest = restSegs.join('/');
+    const key = rest || '(root)';           // group by the full (prefix-stripped) dir so distinct dirs never merge
+    let g = groups.get(key);
+    if (!g) {
+      // Header shows only the last 1–2 path segments (ellipsized in CSS); the full
+      // dir is kept for the hover title. When dirs share no common prefix (mixed
+      // absolute roots) the prefix strip is a no-op, so this is what keeps headers short.
+      const shortLabel = restSegs.length === 0
+        ? '(root)'
+        : (restSegs.length > 2 ? '…/' + restSegs.slice(-2).join('/') : rest);
+      g = { label: shortLabel + '/', full: (dir || '(root)'), totalTouches: 0, files: [] };
+      groups.set(key, g);
+    }
     g.totalTouches += f.touches;
     g.files.push({ ...f, base: baseOf(f.path) });
   });
@@ -3076,6 +3091,18 @@ function MapBoardSection({ sessionId }) {
   }, [sessionId]);
 
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  // Measured plot width (board minus gutter) — drives px-based label thinning/clamping
+  // so phase + tool labels never overlap or overflow the lane regardless of zoom/width.
+  const [plotW, setPlotW] = useState(0);
+  useLayoutEffect(() => {
+    const measure = () => { const el = boardRef.current; if (el) setPlotW(Math.max(0, el.clientWidth - MB_GUTTER)); };
+    measure();
+    const ro = (typeof ResizeObserver !== 'undefined') ? new ResizeObserver(measure) : null;
+    if (ro && boardRef.current) ro.observe(boardRef.current);
+    window.addEventListener('resize', measure);
+    return () => { if (ro) ro.disconnect(); window.removeEventListener('resize', measure); };
+  }, [data]);
 
   if (!data) return null; // loading — render nothing (mirrors ApproachSection)
 
@@ -3147,13 +3174,24 @@ function MapBoardSection({ sessionId }) {
     last: i === sortedPhases.length - 1,
   }));
 
-  // Which tool ticks get a printed label: always retries/errors, plus an evenly
-  // sampled handful of the rest (keeps the lane readable).
-  const labelIdx = new Set();
-  events.forEach((e, i) => { if (e.is_retry || e.category === 'error') labelIdx.add(i); });
-  const labelable = events.map((e, i) => i).filter((i) => events[i].label);
-  const sampleStep = Math.max(1, Math.ceil(labelable.length / 8));
-  labelable.forEach((i, k) => { if (k % sampleStep === 0) labelIdx.add(i); });
+  // Which tool ticks get a printed label: walk the labelable events left→right and
+  // keep one only when it sits at least MB_EVLAB_GAP px past the last kept label, so
+  // the printed subset is sparse and never overlaps (dense regions lean on hover).
+  // Each kept label's x is clamped so the (max-width) box stays inside the lane.
+  const labelPx = (i) => (evX(events[i], i) / 100) * plotW;
+  const half = MB_EVLAB_MAX / 2;
+  const shownLabels = [];
+  if (plotW > 0) {
+    let lastPx = -Infinity;
+    events.forEach((e, i) => {
+      if (!e.label) return;
+      const px = labelPx(i);
+      if (px - lastPx < MB_EVLAB_GAP) return;
+      lastPx = px;
+      const clampedPx = Math.max(half, Math.min(plotW - half, px));
+      shownLabels.push({ i, leftPct: (clampedPx / plotW) * 100 });
+    });
+  }
 
   // Context area+line (cumulative tokens) and cost bars (per-span burn) as inline
   // SVG on a shared 0..100 x — NOT uPlot — so the lanes stay pixel-aligned.
@@ -3230,7 +3268,11 @@ function MapBoardSection({ sessionId }) {
 
     <div class="mb-board" ref=${boardRef} onMouseMove=${onMove} onMouseLeave=${onLeave}>
       <div class="mb-lane phase"><div class="mb-gutter">phase</div><div class="mb-plot">
-        ${phaseBands.map((b) => html`<div class="mb-seg" style=${'left:' + b.left + '%;width:' + Math.max(0, b.right - b.left) + '%;background:' + b.tint + (b.last ? ';border-right:none' : '')}>${b.name}</div>`)}
+        ${phaseBands.map((b) => {
+          const wpct = Math.max(0, b.right - b.left);
+          const showLabel = (wpct / 100) * plotW >= MB_PHASE_LABEL_MIN;
+          return html`<div class="mb-seg" title=${b.name} style=${'left:' + b.left + '%;width:' + wpct + '%;background:' + b.tint + (b.last ? ';border-right:none' : '')}>${showLabel ? html`<span class="mb-seg-lab">${b.name}</span>` : null}</div>`;
+        })}
       </div></div>
 
       <div class="mb-lane tools"><div class="mb-gutter">tools</div><div class="mb-plot">
@@ -3240,7 +3282,7 @@ function MapBoardSection({ sessionId }) {
           const h = e.category === 'error' ? 13 : e.category === 'task' ? 12 : 10;
           return html`<div class="mb-ev ${e.is_retry ? 'retry' : ''}" style=${'left:' + x + '%;background:' + col + ';height:' + h + 'px;' + (e.category === 'task' ? 'width:5px;' : '')}></div>`;
         })}
-        ${[...labelIdx].map((i) => html`<div class="mb-evlab" style=${'left:' + evX(events[i], i) + '%'}>${shortPath(events[i].label)}</div>`)}
+        ${shownLabels.map(({ i, leftPct }) => html`<div class="mb-evlab" title=${events[i].label} style=${'left:' + leftPct + '%'}>${shortPath(events[i].label)}</div>`)}
       </div></div>
 
       <div class="mb-lane ctx"><div class="mb-gutter">context</div><div class="mb-plot">
@@ -3265,7 +3307,12 @@ function MapBoardSection({ sessionId }) {
       </div></div>
 
       <div class="mb-xaxis"><div class="mb-gutter mono">${mode === 'time' ? '0s' : 'step 1'}</div><div class="mb-ticks">
-        ${ticks.map((t) => html`<div class="mb-tick" style=${'left:' + t.x + '%'}>${t.label}</div>`)}
+        ${ticks.map((t) => {
+          // The final tick sits at x=100% — right-align it (no centering transform) so
+          // it stays inside the lane instead of being clipped past the right edge.
+          const pos = t.x >= 100 ? 'right:0;left:auto;transform:none' : (t.x <= 0 ? 'left:0;transform:none' : 'left:' + t.x + '%');
+          return html`<div class="mb-tick" style=${pos}>${t.label}</div>`;
+        })}
       </div></div>
 
       <div class="mb-cross" ref=${crossRef}><div class="mb-crosslabel" ref=${crossLabelRef}></div></div>
@@ -3292,7 +3339,7 @@ function MapBoardSection({ sessionId }) {
           <div class="mb-dirs">
             ${territory.dirs.map((d) => html`
               <div class="mb-dir" style=${'flex:' + Math.max(0.6, d.totalTouches)}>
-                <div class="mb-dh">${d.label} <span class="mb-meta">${d.totalTouches} touch${d.totalTouches === 1 ? '' : 'es'}</span></div>
+                <div class="mb-dh"><span class="mb-dh-nm" title=${d.full}>${d.label}</span> <span class="mb-meta">${d.totalTouches} touch${d.totalTouches === 1 ? '' : 'es'}</span></div>
                 <div class="mb-files">
                   ${d.files.map((f) => {
                     const inten = territory.maxTouches > 0 ? f.touches / territory.maxTouches : 0;
@@ -3301,7 +3348,7 @@ function MapBoardSection({ sessionId }) {
                     const metaTxt = f.edits
                       ? (f.touches + '× · ' + f.edits + ' edit' + (f.edits === 1 ? '' : 's'))
                       : (f.reads + ' read' + (f.reads === 1 ? '' : 's'));
-                    return html`<div class="mb-file" title=${f.path} style=${'flex:' + Math.max(0.7, f.touches) + ';background:' + mbTint(cvar, pct)}>
+                    return html`<div class="mb-file" title=${f.path} style=${'background:' + mbTint(cvar, pct)}>
                       <span class="mb-ord">${f.rank}</span>
                       <span class="mb-nm">${f.base}</span>
                       ${f.edited ? html`<span class="mb-edt">✎</span>` : null}
