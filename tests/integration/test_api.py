@@ -2380,6 +2380,56 @@ async def test_get_session_sessionmap(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sessionmap_subagents_from_transcript_without_spans(tmp_path):
+    """The sub-agents lane lists every transcript subagent — even one with no
+    ``sub_agent_id``-tagged spans — so it matches the Approach rail instead of
+    under-counting delegation.
+
+    The parent transcript spawns one subagent (``build-it``) via a Task tool; no
+    span carries ``sub_agent_id``. Pre-fix the lane (span-grouped) was empty;
+    post-fix the subagent appears, sourced from the transcript subtree, with a
+    transcript-derived window and ``null`` tokens/cost (no spans to sum).
+    """
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-tx-sub"
+        _write_story_with_subagent(tmp_path, sid)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            map_resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+            ap_resp = await c.get(f"/api/v1/sessions/{sid}/approach")
+
+        assert map_resp.status_code == 200
+        body = map_resp.json()
+        assert body["available"] is True
+
+        subs = body["subagents"]
+        assert len(subs) == 1
+        sub = subs[0]
+        assert sub["name"] == "build-it"
+        assert sub["agent_id"] == "abcabcabcabcabc12"
+        # No sub_agent_id spans -> tokens/cost unknown (null), not a phantom 0.
+        assert sub["tokens"] is None
+        assert sub["cost_usd"] is None
+        # Window falls back to the subagent's own transcript step ts.
+        assert sub["start_ts"] is not None and sub["end_ts"] is not None
+
+        # Parity: the lane lists the same in-session subagent the rail does.
+        ap = ap_resp.json()
+        rail_subs = [
+            a for a in ap["agents"]
+            if a["provenance"] == "in_session_subagent"
+        ]
+        assert {s["agent_id"] for s in subs} == {a["agent_id"] for a in rail_subs}
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_sessionmap_unified_axis_skew(tmp_path):
     """A backfilled/resumed session whose spans postdate the transcript shares
     ONE clock: the board's t0 is the earliest EVENT ts (not the span start), so

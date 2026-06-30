@@ -1347,6 +1347,98 @@ def _map_window_to_ordinals(
     return (s, e) if s <= e else (e, s)
 
 
+def _transcript_subagent_index(
+    asks_payload: dict[str, Any] | None,
+) -> dict[str, dict[str, Any]]:
+    """Index every in-session subagent the transcript carries, by ``agent_id``.
+
+    Walks the same nested subagent subtree the Approach rail is built from (each
+    ``Task``/``Agent`` step's ``subagent``/``subagents`` node), so the Map lane's
+    subagent SET matches the rail's — not just the couple that happen to have
+    ``sub_agent_id``-tagged spans. For each subagent records its display
+    ``name``, the ``spawn_ts`` (the parent step's timestamp, i.e. when it was
+    delegated), and the ``first_ts``/``last_ts`` of its OWN steps when present —
+    the transcript-timing fallback for a subagent that carries no spans. First
+    node seen for an id wins. Empty when there's no story.
+    """
+    index: dict[str, dict[str, Any]] = {}
+    if not asks_payload:
+        return index
+
+    def _own_ts_bounds(steps: Any) -> tuple[str | None, str | None]:
+        first: str | None = None
+        last: str | None = None
+        for step in steps or []:
+            if not isinstance(step, dict) or "omitted" in step:
+                continue
+            ts = step.get("ts")
+            if ts:
+                if first is None:
+                    first = ts
+                last = ts
+        return first, last
+
+    def walk(steps: Any) -> None:
+        for step in steps or []:
+            if not isinstance(step, dict) or "omitted" in step:
+                continue
+            spawn_ts = step.get("ts")
+            subs: list[dict[str, Any]] = []
+            if isinstance(step.get("subagent"), dict):
+                subs.append(step["subagent"])
+            for sub in step.get("subagents") or []:
+                if isinstance(sub, dict):
+                    subs.append(sub)
+            for sub in subs:
+                aid = str(sub.get("agent_id") or "")
+                if not aid:
+                    continue
+                child_steps = sub.get("steps") or []
+                if aid not in index:
+                    first_ts, last_ts = _own_ts_bounds(child_steps)
+                    index[aid] = {
+                        "name": sub.get("name"),
+                        "spawn_ts": spawn_ts,
+                        "first_ts": first_ts,
+                        "last_ts": last_ts,
+                    }
+                walk(child_steps)
+
+    for ask in asks_payload.get("asks") or []:
+        if isinstance(ask, dict):
+            walk(ask.get("steps") or [])
+    return index
+
+
+def _subagent_window(
+    aid: str,
+    span_windows: dict[str, dict[str, Any]],
+    tx_index: dict[str, dict[str, Any]],
+) -> tuple[datetime | None, datetime | None]:
+    """Resolve a subagent's [start, end] window (tz-aware UTC), span-first.
+
+    Prefers the real span footprint (``MIN(start_time)``/``MAX(end_time)`` by
+    ``sub_agent_id``) when the subagent has spans; otherwise falls back to its
+    transcript timing — the ts of its own first/last step, then its spawn ts.
+    Returns ``(None, None)`` when neither is resolvable (the bar is then counted
+    but window-less, which the UI hides in both step and time modes).
+    """
+    win = span_windows.get(aid)
+    if win is not None:
+        start_dt = _coerce_utc(win["start_ts"])
+        end_dt = _coerce_utc(win["end_ts"] or win["start_ts"])
+        return start_dt, (end_dt or start_dt)
+
+    meta = tx_index.get(aid, {})
+    start_dt = _parse_iso(meta.get("first_ts") or meta.get("spawn_ts"))
+    end_dt = _parse_iso(
+        meta.get("last_ts") or meta.get("first_ts") or meta.get("spawn_ts")
+    )
+    if start_dt is not None and end_dt is None:
+        end_dt = start_dt
+    return start_dt, end_dt
+
+
 def _session_map_subagents(
     db: Any,
     session_id: str,
@@ -1355,31 +1447,53 @@ def _session_map_subagents(
 ) -> list[dict[str, Any]]:
     """In-session subagents as positioned time windows for the Map's sub lane.
 
-    One entry per ``sub_agent_id`` with a usable span window: its name (from the
-    story, else ``agent-<id[:8]>``), absolute ts range, the window mapped onto
+    Sources the subagent SET from the transcript subagent subtree (every
+    ``Task``/``Agent`` delegation, the same set the Approach rail surfaces) so
+    the lane no longer silently under-counts delegation — previously it was
+    built purely from spans grouped by ``sub_agent_id``, dropping every subagent
+    whose spans aren't ``sub_agent_id``-tagged (set only by backfill from
+    ``isSidechain``+``agentId``). Any span-only ``sub_agent_id`` with no
+    transcript node is unioned in too, so real recorded usage is never dropped.
+
+    One entry per distinct ``agent_id`` (de-duped): its name (from the story,
+    else ``agent-<id[:8]>``), absolute ts range, the window mapped onto
     main-thread event ordinals (``None`` when it can't map cleanly), and its
-    summed tokens/cost (reusing ``_session_subagents``). Sorted by start ts.
-    Empty when the session spawned no subagents.
+    summed tokens/cost from ``_session_subagents`` (``None`` when that subagent
+    has no ``sub_agent_id`` spans). The window comes from spans when available,
+    else from transcript timing; a subagent with neither is still counted with a
+    null window. Sorted by start ts (window-less entries last). Empty when the
+    session spawned no subagents.
     """
-    windows = _session_map_subagent_windows(db, session_id)
-    if not windows:
+    span_windows = _session_map_subagent_windows(db, session_id)
+    tx_index = _transcript_subagent_index(asks_payload)
+    if not tx_index and not span_windows:
         return []
     by_id = {r["sub_agent_id"]: r for r in _session_subagents(db, session_id)["rows"]}
     names = _subagent_name_index(asks_payload)
 
+    # Union: every transcript subagent, plus any span-only id with no story node.
+    agent_ids = list(tx_index.keys())
+    agent_ids.extend(aid for aid in span_windows if aid not in tx_index)
+
     out: list[dict[str, Any]] = []
-    for aid, win in windows.items():
-        start_dt = win["start_ts"]
-        end_dt = win["end_ts"] or start_dt
+    for aid in agent_ids:
+        start_dt, end_dt = _subagent_window(aid, span_windows, tx_index)
         row = by_id.get(aid)
         tokens = (
             row["input_tokens"] + row["output_tokens"]
             + row["cache_tokens"] + row["cache_write_tokens"]
-        ) if row else 0
-        cost = float(row["cost_usd"]) if row else 0.0
-        start_ord, end_ord = _map_window_to_ordinals(events, start_dt, end_dt)
+        ) if row else None
+        cost = float(row["cost_usd"]) if row else None
+        if start_dt is not None and end_dt is not None:
+            start_ord, end_ord = _map_window_to_ordinals(events, start_dt, end_dt)
+        else:
+            start_ord, end_ord = None, None
         out.append({
-            "name": names.get(aid) or f"agent-{aid[:8]}",
+            "name": (
+                names.get(aid)
+                or tx_index.get(aid, {}).get("name")
+                or f"agent-{aid[:8]}"
+            ),
             "agent_id": aid,
             "start_ts": start_dt.isoformat() if start_dt else None,
             "end_ts": end_dt.isoformat() if end_dt else None,
@@ -1388,7 +1502,7 @@ def _session_map_subagents(
             "tokens": tokens,
             "cost_usd": cost,
         })
-    out.sort(key=lambda s: s["start_ts"] or "")
+    out.sort(key=lambda s: (s["start_ts"] is None, s["start_ts"] or ""))
     return out
 
 
@@ -1409,8 +1523,9 @@ async def get_session_map(request: Request, session_id: str):
 
     Returns ``{"available": true, "events", "phases", "subagents",
     "context_series", "cost_series", "meta", "from_snapshot"}``. ``subagents`` is
-    one entry per in-session subagent with a usable span window (name, ts range,
-    the window mapped onto event ordinals, summed tokens/cost); ``[]`` when none.
+    one entry per in-session subagent the transcript carries (the same set the
+    Approach rail surfaces, not just the span-tagged few): name, ts range, the
+    window mapped onto event ordinals, summed tokens/cost; ``[]`` when none.
     When the session has neither a Story nor any spans ->
     ``{"available": false, "reason": ...}`` with HTTP 200 (the same contract as
     ``/story`` and ``/workmap``).
