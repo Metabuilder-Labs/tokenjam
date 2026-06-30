@@ -1073,6 +1073,12 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .mb-ev { position: absolute; bottom: 16px; width: 3px; border-radius: 1px; transform: translateX(-50%); }
 .mb-ev.retry { outline: 1px dashed var(--error); outline-offset: 1px; }
 .mb-evlab { position: absolute; bottom: 2px; font-size: 8.5px; color: var(--text-faint); transform: translateX(-50%); white-space: nowrap; font-family: 'Geist Mono', monospace; max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+/* sub-agents lane (mock .lane.sub / .subbar): each in-session subagent as a
+   horizontal bar positioned by its time window; color mapped to --chart-5. */
+.mb-lane.sub { height: 40px; }
+.mb-subbar { position: absolute; height: 13px; border-radius: 3px; display: flex; align-items: center; justify-content: space-between; padding: 0 6px; gap: 5px; font-size: 9px; font-family: 'Geist Mono', monospace; color: var(--text); white-space: nowrap; overflow: hidden; box-sizing: border-box; }
+.mb-subbar .mb-subnm { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-subbar .mb-subcost { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); }
 .mb-lane.ctx { height: 120px; }
 .mb-lane.cost { height: 78px; }
 .mb-board svg { display: block; width: 100%; height: 100%; }
@@ -2999,6 +3005,10 @@ const MB_GUTTER = 78; // px — keep in sync with .mb-gutter width so the crossh
 const MB_PHASE_LABEL_MIN = 60; // px — only print a phase-band label when the band is at least this wide.
 const MB_EVLAB_MAX = 90;       // px — keep in sync with .mb-evlab max-width (used to clamp labels inside the lane).
 const MB_EVLAB_GAP = 70;       // px — minimum spacing between two printed tool labels (skip ones that would collide).
+const MB_SUBBAR_MIN = 7;       // % — minimum subagent-bar width so its label stays legible at any zoom.
+const MB_SUBBAR_GAP = 1.5;     // % — gap required before two bars share a row (else they stack).
+const MB_SUB_MAX_ROWS = 3;     // max stacked rows in the sub-agents lane (overflow reuses the earliest-ending row).
+const MB_SUB_ROW_H = 16;       // px — vertical pitch per stacked subagent row.
 
 const mbColor = (cat) => 'var(' + (MB_CAT_COLOR[cat] || '--text-dim') + ')';
 // A theme color at a given alpha, via color-mix (no rgba(hex) — keeps theming live).
@@ -3068,12 +3078,50 @@ function mbBuildTerritory(events) {
   return { root: (pref.join('/') || 'workspace') + '/', dirs, maxTouches };
 }
 
-// The Map tab's board: phase / tools / context / cost lanes share one x-axis with
-// a time⇄step toggle and a shared crosshair, plus the territory treemap below.
-// When /sessionmap has no board data we fall back to the nested WorkMapSection so
-// nothing is lost for sessions without it.
-// NOTE: a subagent lane (and recursion into sub-runs) is a deliberate follow-up —
-// /sessionmap events don't carry sub_agent_id yet, so we don't fake one here.
+// Lay out the sub-agents lane: position each subagent as a [left,right]% bar on
+// the SAME axis the other lanes use (time → ts offset / duration; step →
+// start/end ordinal), then greedily pack non-overlapping bars onto one row and
+// stack the rest (capped at MB_SUB_MAX_ROWS). In step mode a subagent with no
+// mapped ordinals is hidden (it has no step-grid position). Returns the placed
+// items (with `.row`) and the row count for sizing the lane.
+function mbLayoutSubagents(subs, mode, started, duration, n) {
+  const clamp01 = (f) => Math.max(0, Math.min(1, f));
+  const items = [];
+  (subs || []).forEach((sa) => {
+    let l, r;
+    if (mode === 'time') {
+      const so = (sa.start_ts && !isNaN(started)) ? (Date.parse(sa.start_ts) - started) / 1000 : null;
+      const eo = (sa.end_ts && !isNaN(started)) ? (Date.parse(sa.end_ts) - started) / 1000 : null;
+      if (so == null || duration <= 0) return; // no usable time position
+      l = clamp01(so / duration);
+      r = clamp01((eo != null ? eo : so) / duration);
+    } else {
+      if (sa.start_ordinal == null || sa.end_ordinal == null || n <= 1) return; // hide: no step-grid position
+      l = clamp01(sa.start_ordinal / (n - 1));
+      r = clamp01(sa.end_ordinal / (n - 1));
+    }
+    const left = l * 100;
+    items.push({ sa, left, right: Math.max(left + MB_SUBBAR_MIN, r * 100) });
+  });
+  items.sort((a, b) => a.left - b.left);
+  const rowEnds = []; // right edge (%) of the last bar placed on each row
+  items.forEach((it) => {
+    let row = rowEnds.findIndex((end, idx) => idx < MB_SUB_MAX_ROWS && it.left >= end + MB_SUBBAR_GAP);
+    if (row < 0) {
+      if (rowEnds.length < MB_SUB_MAX_ROWS) { row = rowEnds.length; rowEnds.push(0); }
+      else { row = 0; for (let k = 1; k < rowEnds.length; k++) if (rowEnds[k] < rowEnds[row]) row = k; }
+    }
+    rowEnds[row] = it.right;
+    it.row = row;
+  });
+  return { items, rows: Math.max(1, rowEnds.length) };
+}
+
+// The Map tab's board: phase / tools / sub-agents / context / cost lanes share one
+// x-axis with a time⇄step toggle and a shared crosshair, plus the territory
+// treemap below. When /sessionmap has no board data we fall back to the nested
+// WorkMapSection so nothing is lost for sessions without it. The sub-agents lane
+// (between tools and context) renders only when the session spawned subagents.
 function MapBoardSection({ sessionId }) {
   const [data, setData] = useState(null);
   const [mode, setMode] = useState('time'); // 'time' | 'step'
@@ -3248,6 +3296,11 @@ function MapBoardSection({ sessionId }) {
 
   const territory = mbBuildTerritory(events);
 
+  // Sub-agents lane: positioned bars on the shared axis (re-spaced by the
+  // time⇄step toggle). Rendered only when the session spawned subagents.
+  const subLayout = mbLayoutSubagents(data.subagents || [], mode, started, duration, n);
+  const subLaneH = 10 + subLayout.rows * MB_SUB_ROW_H;
+
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 0;font-family:'Geist Mono',monospace">How this run worked — phase, tool-events, context growth and cost burn on one axis. Toggle time⇄step to re-space every lane; hover for the exemplar.</div>
@@ -3284,6 +3337,21 @@ function MapBoardSection({ sessionId }) {
         })}
         ${shownLabels.map(({ i, leftPct }) => html`<div class="mb-evlab" title=${events[i].label} style=${'left:' + leftPct + '%'}>${shortPath(events[i].label)}</div>`)}
       </div></div>
+
+      ${(data.subagents || []).length ? html`
+      <div class="mb-lane sub" style=${'height:' + subLaneH + 'px'}><div class="mb-gutter">sub-<br/>agents</div><div class="mb-plot">
+        ${subLayout.items.map(({ sa, left, right, row }) => {
+          const w = Math.min(100, Math.max(MB_SUBBAR_MIN, right - left));
+          const l = Math.max(0, Math.min(left, 100 - w)); // keep the bar inside the plot
+          const costTxt = fmtTokens(sa.tokens) + '·' + fmtCost(sa.cost_usd);
+          return html`<div class="mb-subbar" title=${sa.name + '  ' + costTxt}
+            style=${'left:' + l + '%;width:' + w + '%;top:' + (5 + row * MB_SUB_ROW_H) + 'px;'
+              + 'background:' + mbTint('--chart-5', 16) + ';border:1px solid ' + mbTint('--chart-5', 50)}>
+            <span class="mb-subnm">${sa.name}</span><span class="mb-subcost">${costTxt}</span>
+          </div>`;
+        })}
+      </div></div>
+      ` : null}
 
       <div class="mb-lane ctx"><div class="mb-gutter">context</div><div class="mb-plot">
         <svg viewBox="0 0 100 30" preserveAspectRatio="none">

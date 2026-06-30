@@ -2317,6 +2317,12 @@ async def test_get_session_sessionmap(tmp_path):
                 agent_id="cc", session_id=sid, model="claude-opus-4-8",
                 input_tokens=inp, output_tokens=10, cost_usd=cost,
                 start_time=started + timedelta(seconds=i * 10)))
+        # Two subagent spans (same sub_agent_id) -> one window in the sub lane.
+        for i in range(2):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-haiku-4-5",
+                sub_agent_id="sub-A", input_tokens=200, output_tokens=20,
+                cost_usd=0.04, start_time=started + timedelta(seconds=5 + i * 6)))
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
@@ -2331,17 +2337,36 @@ async def test_get_session_sessionmap(tmp_path):
         assert [e["category"] for e in body["events"]] == ["read"]
         assert body["events"][0]["ordinal"] == 0
 
-        # context_series: running (cumulative) context size on a 10s-spaced axis.
+        # subagents: one window per sub_agent_id, with summed tokens/cost and a
+        # ts range. (No story delegation matches "sub-A", so the name falls back
+        # to agent-<id[:8]>.) The subagent window is "now" while the only event is
+        # the 2026-06-15 transcript Read, so the window sits after every event and
+        # the ordinal bracket clamps to the lone ordinal 0.
+        subs = body["subagents"]
+        assert len(subs) == 1
+        sub = subs[0]
+        assert sub["agent_id"] == "sub-A"
+        assert sub["name"] == "agent-sub-A"
+        assert sub["tokens"] == 2 * (200 + 20)
+        assert sub["cost_usd"] == pytest.approx(0.08)
+        assert sub["start_ts"] is not None and sub["end_ts"] is not None
+        assert sub["start_ordinal"] == 0 and sub["end_ordinal"] == 0
+
+        # context_series: running (cumulative) context size over ALL the session's
+        # LLM-call spans (main + subagent), ordered by start_time. The subagent
+        # spans at t=5s/11s interleave with the main spans at t=0/10/20s.
         ctx = body["context_series"]
-        assert [p["tokens"] for p in ctx] == [100, 600, 900]
-        assert [p["t_s"] for p in ctx] == [0.0, 10.0, 20.0]
+        assert [p["tokens"] for p in ctx] == [100, 300, 800, 1000, 1300]
+        assert [p["t_s"] for p in ctx] == [0.0, 5.0, 10.0, 11.0, 20.0]
 
         # cost_series: per-span burn (NOT cumulative).
-        assert [round(p["usd"], 2) for p in body["cost_series"]] == [0.01, 0.02, 0.03]
+        assert [round(p["usd"], 2) for p in body["cost_series"]] == [
+            0.01, 0.04, 0.02, 0.04, 0.03,
+        ]
 
         meta = body["meta"]
         assert meta["model"] == "claude-opus-4-8"
-        assert meta["total_cost_usd"] == pytest.approx(0.06)
+        assert meta["total_cost_usd"] == pytest.approx(0.14)
         assert meta["started_at"] is not None
     finally:
         db.close()
@@ -2351,7 +2376,6 @@ async def test_get_session_sessionmap(tmp_path):
 async def test_sessionmap_spans_only_available(tmp_path):
     """A session with spans but no transcript is still available: events empty,
     series populated."""
-    from datetime import timedelta
     from tokenjam.utils.time_parse import utcnow
 
     db, app = _lifecycle_app(tmp_path)
@@ -2375,6 +2399,7 @@ async def test_sessionmap_spans_only_available(tmp_path):
         assert body["available"] is True
         assert body["events"] == []
         assert body["phases"] == []
+        assert body["subagents"] == []
         assert len(body["context_series"]) == 1
         assert body["context_series"][0]["tokens"] == 42
     finally:
