@@ -1449,3 +1449,23 @@ def test_map_board_category_colors_use_theme_vars(html):
     assert "read: '--chart-1'" in html
     assert "edit: '--chart-2'" in html
     assert "error: '--error'" in html
+
+
+def test_approach_rail_marks_cross_terminal_children(html):
+    # M2b: a cross-terminal child (a separate run-linked session) renders amber
+    # (is-term) with a run-linked provenance sub-line, distinct from the pink
+    # in-session subagent nodes — never claiming more than capture_completeness.
+    assert "a.provenance === 'cross_terminal_child'" in html
+    assert "cross-terminal child · run-linked" in html
+    # Honest completeness: session-level node vs method-kept when the child's own
+    # method was recoverable.
+    assert "a.capture_completeness === 'full' ? '⏏ ended · method kept' : 'session-level'" in html
+
+
+def test_approach_splices_cross_terminal_spine(html):
+    # When a child's own method is available the backend ships a `cross_terminal`
+    # spine list; the UI renders each under a divider with recursive ApproachMove.
+    assert "function ApproachCrossTerminal" in html
+    assert "const crossTerminal = data.cross_terminal || [];" in html
+    assert "cross-terminal children" in html  # the divider label
+    assert ".ap-deleg.ap-xterm { border-color: var(--warn); }" in html

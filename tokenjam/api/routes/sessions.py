@@ -36,7 +36,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.api.routes.runs import _run_sessions
+from tokenjam.api.routes.runs import _child_sessions, _run_sessions
 from tokenjam.core.db import delete_session_label, set_session_label
 from tokenjam.core.distill import distill_titles_cached, peek_cached_titles
 from tokenjam.core.method_capture import capture_session_method, load_session_method
@@ -776,12 +776,120 @@ def _session_meta(session: SessionRecord | None) -> dict[str, Any]:
     }
 
 
+def _child_method_spine(
+    db: Any, child: SessionRecord, projects_root: Any
+) -> list[dict[str, Any]]:
+    """The cross-terminal child's OWN method spine, or ``[]`` when none.
+
+    A cross-terminal child is a separate session, so its method comes from its
+    own live transcript (``build_session_story``) or — once the transcript is
+    pruned — the M1 snapshot persisted at its close (``load_session_method``),
+    exactly the read-through ``/approach`` uses for the parent. Returns the folded
+    spine when a story is recoverable, else ``[]`` (the honest "session-level
+    only" signal — no method to splice).
+    """
+    story = build_session_story(
+        child.session_id, projects_root=projects_root, include_subagents=True
+    )
+    if story is None:
+        snapshot = load_session_method(db, child.session_id)
+        if snapshot and snapshot.get("story"):
+            story = snapshot["story"]
+    if not story:
+        return []
+    return build_method_spine(story)
+
+
+def _cross_terminal_children(
+    db: Any, session_id: str, projects_root: Any
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Cross-terminal child sessions spliced into the Approach view (M2b).
+
+    In-session subagents (Task sidechains) already live in the spine + rail; a
+    cross-terminal child is a *separate* ``SessionRecord`` a harness spawned in
+    another terminal, linked only by a declared ``parent_session_id``. For each
+    such child this returns:
+
+    * a rail-agent summary — ``{name, agent_id (the child session_id), depth 1,
+      provenance "cross_terminal_child", status, cost_usd, tokens,
+      capture_completeness}``. ``capture_completeness`` is ``"full"`` when the
+      child's own method is recoverable (live transcript or M1 snapshot) else
+      ``"session_level"`` (we have the cost/identity but not the *how*).
+    * — only when its method IS available — a ``cross_terminal`` spine entry
+      ``{name, agent_id, provenance, spine}`` so its method nests like an
+      in-session delegation.
+
+    Returns ``([], [])`` when the session launched no cross-terminal children
+    (the common case), so the payload's ``cross_terminal`` is ``[]`` and no extra
+    rail agents are added.
+    """
+    children = _child_sessions(db, session_id)
+    agents: list[dict[str, Any]] = []
+    cross_terminal: list[dict[str, Any]] = []
+    for child in children:
+        spine = _child_method_spine(db, child, projects_root)
+        completeness = "full" if spine else "session_level"
+        status = "active" if child.effective_status == "active" else "ended"
+        name = (
+            child.service_instance_id or child.agent_id or child.session_id[:8]
+        )
+        tokens = (
+            child.input_tokens + child.output_tokens
+            + child.cache_tokens + child.cache_write_tokens
+        )
+        cost = (
+            float(child.total_cost_usd)
+            if child.total_cost_usd is not None else None
+        )
+        agents.append({
+            "name": name,
+            "agent_id": child.session_id,
+            "depth": 1,
+            "provenance": "cross_terminal_child",
+            "status": status,
+            "cost_usd": cost,
+            "tokens": tokens,
+            "capture_completeness": completeness,
+        })
+        if spine:
+            cross_terminal.append({
+                "name": name,
+                "agent_id": child.session_id,
+                "provenance": "cross_terminal_child",
+                "spine": spine,
+            })
+    return agents, cross_terminal
+
+
+def _add_cross_terminal_counts(
+    counts: dict[str, int], cross_terminal: list[dict[str, Any]]
+) -> None:
+    """Fold each spliced cross-terminal child's spine into the header ``counts``.
+
+    Each child counts as one delegation (the splice edge) plus the moves /
+    dead-ends / verifies / nested delegations of its own spine, so the Approach
+    header totals stay honest once a child's method is nested in. No-op when
+    nothing was spliced (the common case)."""
+    for child in cross_terminal:
+        child_counts = _spine_counts(child.get("spine") or [])
+        counts["moves"] += child_counts["moves"]
+        counts["dead_ends"] += child_counts["dead_ends"]
+        counts["verifies"] += child_counts["verifies"]
+        counts["delegations"] += child_counts["delegations"] + 1
+
+
 def _approach_payload(
-    story: dict[str, Any], db: Any, session_id: str, *, from_snapshot: bool = False
+    story: dict[str, Any],
+    db: Any,
+    session_id: str,
+    *,
+    from_snapshot: bool = False,
+    projects_root: Any = None,
 ) -> dict[str, Any]:
     """Render-ready Approach body: the recursive method spine joined to the
     span-derived per-subagent cost/status, plus the delegation-tree rail summary
-    (``agents``), the header ``counts``, and session ``meta``.
+    (``agents``), the header ``counts``, session ``meta``, and the cross-terminal
+    children (``cross_terminal``, M2b) spliced in.
 
     The UI reads everything it draws straight from this payload (repo rule: the
     UI never aggregates) — the rail, the header stats, and the per-delegation
@@ -796,6 +904,15 @@ def _approach_payload(
     session = db.get_session(session_id)
     main = _main_agent_summary(story, session)
     agents = [main, *_flatten_delegation_agents(spine)]
+    counts = _spine_counts(spine)
+
+    # M2b: splice cross-terminal child sessions (separate SessionRecords linked by
+    # parent_session_id) into the rail + spine, honestly marked by completeness.
+    ct_agents, cross_terminal = _cross_terminal_children(
+        db, session_id, projects_root
+    )
+    agents.extend(ct_agents)
+    _add_cross_terminal_counts(counts, cross_terminal)
 
     payload: dict[str, Any] = {
         "available": True,
@@ -804,7 +921,8 @@ def _approach_payload(
         "outcome": story.get("outcome") or "",
         "spine": spine,
         "agents": agents,
-        "counts": _spine_counts(spine),
+        "cross_terminal": cross_terminal,
+        "counts": counts,
         "meta": _session_meta(session),
     }
     if from_snapshot:
@@ -845,13 +963,16 @@ async def get_session_approach(request: Request, session_id: str):
         session_id, projects_root=projects_root, include_subagents=True
     )
     if story is not None:
-        return _approach_payload(story, db, session_id)
+        return _approach_payload(
+            story, db, session_id, projects_root=projects_root
+        )
 
     # Transcript pruned -> read-through the persisted snapshot's story slice (M1).
     snapshot = load_session_method(db, session_id)
     if snapshot and snapshot.get("story"):
         return _approach_payload(
-            snapshot["story"], db, session_id, from_snapshot=True
+            snapshot["story"], db, session_id,
+            from_snapshot=True, projects_root=projects_root,
         )
 
     return {"available": False, "reason": _NO_TRANSCRIPT_REASON}

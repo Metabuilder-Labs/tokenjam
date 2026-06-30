@@ -57,6 +57,30 @@ def _run_sessions(db: Any, run_id: str) -> list[SessionRecord]:
     return [_row_to_session(r, cols) for r in rows]
 
 
+def _child_sessions(db: Any, parent_session_id: str) -> list[SessionRecord]:
+    """Cross-terminal child sessions a harness declared under this session.
+
+    Returns every ``SessionRecord`` whose ``parent_session_id`` points at
+    ``parent_session_id`` — separate sessions a harness spawned in another
+    terminal and linked via the ``tokenjam.parent_session_id`` resource attr (not
+    in-session Task sidechains, which carry no own SessionRecord). Newest activity
+    first. Self-references are excluded. Reads ``db.conn`` directly (the
+    ``StorageBackend`` protocol has no parent dimension), mirroring
+    ``_run_sessions``.
+    """
+    if not hasattr(db, "conn") or not parent_session_id:
+        return []
+    cur = db.conn.execute(
+        "SELECT * FROM sessions "
+        "WHERE parent_session_id = $1 AND session_id != $1 "
+        "ORDER BY COALESCE(ended_at, started_at) DESC",
+        [parent_session_id],
+    )
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description]
+    return [_row_to_session(r, cols) for r in rows]
+
+
 def _session_span_tool_counts(db: Any, session_id: str) -> tuple[int, int]:
     """(span_count, tool_call_count) over a session's spans."""
     if not hasattr(db, "conn"):

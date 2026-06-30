@@ -2761,3 +2761,103 @@ async def test_approach_falls_back_to_snapshot_after_prune(config, db, tmp_path)
         assert body["available"] is True
         assert body["from_snapshot"] is True
         assert len(body["spine"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_approach_no_cross_terminal_children_is_empty(config, db, tmp_path):
+    """The common case: a session that launched no cross-terminal children ships
+    an empty ``cross_terminal`` and adds no cross-terminal rail agents."""
+    _write_story_with_subagent(tmp_path, "xt-solo")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/xt-solo/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cross_terminal"] == []
+    assert not any(
+        a["provenance"] == "cross_terminal_child" for a in body["agents"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_approach_splices_cross_terminal_child_with_method(
+    config, db, tmp_path
+):
+    """A run-linked child session whose OWN method is recoverable surfaces as a
+    ``cross_terminal_child`` rail node (capture_completeness ``full``) AND has its
+    own spine spliced into ``cross_terminal``."""
+    _write_story_transcript(tmp_path, "xt-parent")
+    _write_story_transcript(tmp_path, "xt-child")  # the child's own method
+    db.upsert_session(make_session(
+        agent_id="cc", session_id="xt-child", run_id="run-xt",
+        parent_session_id="xt-parent", service_instance_id="child-term",
+        input_tokens=400, output_tokens=80, total_cost_usd=0.21,
+        status="completed"))
+
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/xt-parent/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # Rail: the cross-terminal child node, honestly full (method recovered).
+    child_agents = [
+        a for a in body["agents"]
+        if a["provenance"] == "cross_terminal_child"
+    ]
+    assert len(child_agents) == 1
+    child = child_agents[0]
+    assert child["agent_id"] == "xt-child"
+    assert child["name"] == "child-term"
+    assert child["depth"] == 1
+    assert child["capture_completeness"] == "full"
+    assert child["cost_usd"] == 0.21
+    assert child["tokens"] == 480
+
+    # Spine: the child's own method is spliced under cross_terminal.
+    assert len(body["cross_terminal"]) == 1
+    ct = body["cross_terminal"][0]
+    assert ct["agent_id"] == "xt-child"
+    assert ct["provenance"] == "cross_terminal_child"
+    assert len(ct["spine"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_approach_cross_terminal_child_session_level_only(
+    config, db, tmp_path
+):
+    """A run-linked child with NO recoverable method (no transcript, no snapshot)
+    surfaces as a session-level rail node and is NOT spliced into the spine."""
+    _write_story_transcript(tmp_path, "xt2-parent")
+    db.upsert_session(make_session(
+        agent_id="cc", session_id="xt2-child", run_id="run-xt2",
+        parent_session_id="xt2-parent", service_instance_id="child2-term",
+        input_tokens=100, output_tokens=20, status="completed"))
+
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/xt2-parent/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    child_agents = [
+        a for a in body["agents"]
+        if a["provenance"] == "cross_terminal_child"
+    ]
+    assert len(child_agents) == 1
+    assert child_agents[0]["agent_id"] == "xt2-child"
+    assert child_agents[0]["capture_completeness"] == "session_level"
+    # No method -> nothing spliced into the spine list.
+    assert body["cross_terminal"] == []
