@@ -19,7 +19,7 @@ GET /api/v1/sessions/{session_id} — per-session detail rollup for the dashboar
 from __future__ import annotations
 
 import bisect
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -783,6 +783,19 @@ def _parse_iso(ts: Any) -> datetime | None:
         return None
 
 
+def _coerce_utc(dt: datetime | None) -> datetime | None:
+    """Coerce a datetime to tz-aware UTC (naive -> assume UTC), or pass None.
+
+    The Map board mixes transcript timestamps (parsed tz-aware via
+    ``_parse_iso``) with DB span timestamps (DuckDB hands back naive datetimes).
+    Coercing both to UTC-aware lets them be compared/subtracted on one axis
+    without a naive-vs-aware ``TypeError``.
+    """
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _bucket_tokens_by_ask(
     db: Any, session_id: str, asks: list[dict]
 ) -> tuple[dict[int, int], dict[int, float]]:
@@ -1025,7 +1038,7 @@ def _session_map_series(
     model_freq: dict[str, int] = {}
 
     for span in spans:
-        start = span["start_time"]
+        start = _coerce_utc(span["start_time"])
         if start is None:
             continue
         t_s = (start - t0).total_seconds() if t0 is not None else 0.0
@@ -1061,6 +1074,48 @@ def _session_map_series(
         "model": dominant_model,
     }
     return context_series, cost_series, meta
+
+
+def _session_map_axis(
+    events: list[dict[str, Any]],
+    spans: list[dict[str, Any]],
+    session: SessionRecord | None,
+) -> tuple[datetime | None, float]:
+    """Unified ``(t0, duration_s)`` for the Map board over the UNION of event +
+    span timestamps, so every lane shares one clock.
+
+    The board overlays two clocks: the tool/phase *event* lanes carry transcript
+    timestamps (``event.ts``), while the context/cost series + subagent windows
+    carry *span* timestamps. On a backfilled/resumed session whose span
+    ``start_time`` postdates (or otherwise diverges from) its transcript, a
+    span-only ``t0`` drives every event's wall-clock offset negative — the UI
+    clamps those to 0 and the whole event lane collapses to the left edge while
+    the series spread out. Anchoring instead on::
+
+        t0   = min(earliest event ts, earliest span start_time)
+        tEnd = max(latest   event ts, latest   span start_time)
+
+    gives both lanes a common origin and span, so they line up. ``duration_s`` is
+    ``(tEnd - t0)`` seconds, floored to ``1.0`` (empty / zero-width -> ``1.0``) so
+    downstream division is always safe. All datetimes are coerced to tz-aware UTC
+    first (``_coerce_utc``) so naive DB spans and tz-aware transcript ts compare
+    cleanly. When nothing carries a usable time, falls back to the session start.
+    """
+    times: list[datetime] = []
+    for event in events:
+        dt = _parse_iso(event.get("ts"))
+        if dt is not None:
+            times.append(dt)
+    for span in spans:
+        dt = _coerce_utc(span.get("start_time"))
+        if dt is not None:
+            times.append(dt)
+    if not times:
+        fallback = _coerce_utc(session.started_at) if session else None
+        return fallback, 1.0
+    t0 = min(times)
+    duration = (max(times) - t0).total_seconds()
+    return t0, duration if duration > 0 else 1.0
 
 
 def _subagent_name_index(asks_payload: dict[str, Any] | None) -> dict[str, str]:
@@ -1270,14 +1325,14 @@ async def get_session_map(request: Request, session_id: str):
     if asks_payload is None and not spans:
         return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
 
-    if session is not None and session.started_at is not None:
-        t0: datetime | None = session.started_at
-    elif spans:
-        t0 = spans[0]["start_time"]
-    else:
-        t0 = None
+    # One axis basis over the UNION of event (transcript) + span timestamps, so
+    # the event/phase lanes and the context/cost series share a single clock. A
+    # span-only t0 collapses the event lane to x=0 on backfilled/resumed sessions
+    # whose spans postdate the transcript (see _session_map_axis).
+    t0, duration_s = _session_map_axis(events, spans, session)
 
     context_series, cost_series, meta = _session_map_series(spans, t0, session)
+    meta["duration_s"] = duration_s
     subagents = _session_map_subagents(db, session_id, events, asks_payload)
 
     return {
