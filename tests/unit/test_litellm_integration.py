@@ -303,6 +303,62 @@ class TestLiteLLMIntegration:
         integration.uninstall()
         assert litellm.completion is original
 
+    def test_sync_streaming_error_resets_suppression(self, tracer_and_spans):
+        """A streaming call that raises before the wrapper is built must still
+        reset the suppression contextvar and end the span (regression #48)."""
+        tracer, spans = tracer_and_spans
+        import litellm
+        from tokenjam.sdk.integrations.litellm import _tj_litellm_active
+
+        litellm.completion = MagicMock(side_effect=RuntimeError("stream boom"))
+
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
+        integration = LiteLLMIntegration()
+        integration.install(tracer)
+
+        with pytest.raises(RuntimeError, match="stream boom"):
+            litellm.completion(
+                model="openai/gpt-4o-mini", messages=[], stream=True,
+            )
+
+        try:
+            # Suppression must be reset so later provider calls are captured.
+            assert _tj_litellm_active.get(False) is False
+            span = spans[0]
+            span.end.assert_called_once()
+        finally:
+            # Hygiene: if the bug is present the contextvar leaks True and
+            # would pollute sibling tests in this thread.
+            _tj_litellm_active.set(False)
+
+    def test_async_streaming_error_resets_suppression(self, tracer_and_spans):
+        """Async streaming call that raises before the wrapper is built must
+        still reset the suppression contextvar and end the span (#48)."""
+        tracer, spans = tracer_and_spans
+        import litellm
+        from tokenjam.sdk.integrations.litellm import _tj_litellm_active
+
+        async def _boom(*a, **kw):
+            raise RuntimeError("astream boom")
+
+        litellm.acompletion = _boom
+
+        from tokenjam.sdk.integrations.litellm import LiteLLMIntegration
+        integration = LiteLLMIntegration()
+        integration.install(tracer)
+
+        async def _run():
+            with pytest.raises(RuntimeError, match="astream boom"):
+                await litellm.acompletion(
+                    model="anthropic/claude-haiku-4-5", messages=[], stream=True,
+                )
+            # Assert inside the coroutine's context where the leak would live.
+            return _tj_litellm_active.get(False)
+
+        leaked = asyncio.run(_run())
+        assert leaked is False
+        spans[0].end.assert_called_once()
+
     def test_context_var_suppresses_openai_patch(self, tracer_and_spans):
         """When litellm patch is active, the openai patch skips span creation."""
         from tokenjam.sdk.integrations.litellm import _tj_litellm_active

@@ -734,9 +734,24 @@ def test_analytics_presets_and_csv_export(html):
     assert "function analyticsCsv" in html
     assert "function downloadCsv" in html
     assert "Export CSV" in html
+    assert "disabled=${loading}" in html
     # the leaderboard preset closes #214; spend-by-model line closes #216
     assert "'leaderboard'" in html
     assert "'spend-by-model'" in html
+
+    # Richer CSV columns assertions
+    assert "'cycle_share_pct'" in html
+    assert "'input_tokens'" in html
+    assert "'output_tokens'" in html
+    assert "'cache_read_tokens'" in html
+    assert "'cache_write_tokens'" in html
+    assert "'sessions'" in html
+    assert "'events'" in html
+    # Filename generation check
+    assert "getFilename" in html
+    assert "tokenjam-analytics.csv" in html
+    assert "tokenjam-analytics_${startStr}_${endStr}.csv" in html
+
 
 
 def test_analytics_url_is_source_of_truth(html):
@@ -771,6 +786,57 @@ def test_analytics_leaderboard_has_inline_bars(html):
     assert "function buildLeaderboard" in html
     assert "lb-fill" in html
     assert ".lb-bar" in html
+
+
+# --- #318: active tile shows the breakdown subtotal for a partial dimension --- #
+def test_analytics_active_tile_shows_breakdown_subtotal(html):
+    # When grouping by a PARTIAL dimension (only some spans carry it, e.g. tool),
+    # the active count-metric tile shows the breakdown subtotal beneath the window
+    # total so the tile reconciles with the smaller chart subtotal (#318). Count
+    # metrics only; only when there's an actual gap.
+    assert "const breakdownTotal = (resp.rows || []).reduce" in html
+    assert "const activeSub = ((metric === 'events' || metric === 'sessions')" in html
+    assert "by ${breakdownDim}" in html
+    # KpiTile renders the optional sub-line; defaults null so other callers (e.g.
+    # the Dashboard preview) are unaffected.
+    assert "onSelect, sub = null }" in html
+    assert "kpi-sub-val" in html
+
+
+# --- #295: Stack gated to stacking charts; empty cross-tab gets a clear state - #
+def test_analytics_stack_gated_to_stacking_charts(html):
+    # Stack only applies to the multi-series charts (bar/line). The Leaderboard
+    # (hbar) ignores stack, so the control is hidden AND stack_by is dropped from
+    # the query for non-stacking charts — otherwise a stale stack strands the
+    # leaderboard on an empty cross-tab ("No data", #295).
+    assert "const stackApplies = chart === 'bar' || chart === 'line'" in html
+    assert "const effStack = stackApplies ? stack : ''" in html
+    # query drops stack_by when the chart doesn't stack
+    assert "stack_by: effStack || undefined" in html
+    assert "stack_by: stack || undefined" not in html  # the buggy unconditional form is gone
+    # the Stack control is conditionally rendered (hidden on the leaderboard)
+    assert "${stackApplies ? html`<label class=\"ctl\">Stack" in html
+
+
+def test_analytics_empty_cross_tab_offers_clear_stack(html):
+    # A structurally-empty stacked breakdown (e.g. Model x Tool category, since a
+    # span carries a model OR a tool, never both) shows a "Clear stack" affordance
+    # instead of a bare "No data in this window" (#295).
+    assert "const emptyFromStack" in html
+    assert "Clear stack" in html
+
+
+# --- #313: leaderboard surfaces its total + reconciles the partial-dim gap --- #
+def test_analytics_leaderboard_shows_total_and_gap(html):
+    # The leaderboard ranks items but used to show no sum; it now surfaces its
+    # own item count + subtotal, and when grouping by a PARTIAL dimension (only
+    # some spans carry it, e.g. tool) it reconciles the gap against the all-events
+    # KPI so the smaller subtotal doesn't look contradictory (#313).
+    assert "const boardTotal = board ? board.reduce" in html
+    assert "const boardGap = kpiCount != null" in html
+    assert "Total: ${fmtVal(boardTotal)}" in html
+    assert "${boardCount} ${boardCount === 1 ? dimName : dimNamePlural}" in html
+    assert "have a ${dimName}" in html
 
 
 # --- #215: cost-annotated trace waterfall ---------------------------------- #

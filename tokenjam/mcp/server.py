@@ -505,24 +505,26 @@ def _tool_list_agents(conn) -> dict:
 
 
 def _tool_list_active_sessions(conn) -> dict:
-    # HTTP mode: proxy to serve status endpoint and filter for active
+    # HTTP mode: proxy to the per-session endpoint so concurrent sessions for
+    # the same agent are all surfaced. /api/v1/status collapses to one record
+    # per agent and undercounted parallel sessions (#35); /api/v1/sessions
+    # returns one row per session, matching the direct-DB path below.
     if conn is None:
         if _serve_url is None:
             return _no_config()
-        data = _http_get("/api/v1/status")
+        data = _http_get("/api/v1/sessions", {"status": "active"})
         sessions = [
             {
-                "session_id": a.get("session_id"),
-                "agent_id": a["agent_id"],
-                "started_at": a.get("started_at"),
-                "total_cost_usd": float(a.get("total_cost_usd", 0.0)),
-                "input_tokens": a.get("input_tokens", 0),
-                "output_tokens": a.get("output_tokens", 0),
-                "tool_call_count": a.get("tool_call_count", 0),
-                "error_count": a.get("error_count", 0),
+                "session_id": s.get("session_id"),
+                "agent_id": s.get("agent_id"),
+                "started_at": s.get("started_at"),
+                "total_cost_usd": float(s.get("total_cost_usd", 0.0)),
+                "input_tokens": s.get("input_tokens", 0),
+                "output_tokens": s.get("output_tokens", 0),
+                "tool_call_count": s.get("tool_call_count", 0),
+                "error_count": s.get("error_count", 0),
             }
-            for a in data.get("agents", [])
-            if a.get("status") == "active"
+            for s in data.get("sessions", [])
         ]
         return {"sessions": sessions, "count": len(sessions)}
 
@@ -1167,6 +1169,20 @@ def acknowledge_alert(alert_id: str) -> dict:
                 req.add_header("Authorization", f"Bearer {_config.api.auth.api_key}")
             with _urlreq.urlopen(req, timeout=5) as resp:
                 return _json.loads(resp.read())
+        if _ro_conn is not None:
+            # Read-only DuckDB fallback: a module-global read-only connection is
+            # already open against this file. DuckDB forbids opening the same
+            # file read-write while a read-only connection exists in the same
+            # process, so attempting the UPDATE here raises a raw
+            # ConnectionException (#34). Return actionable guidance instead.
+            return {
+                "error": (
+                    "Acknowledging alerts requires a writable database, but it's "
+                    "open read-only because tj serve holds the lock (or wasn't "
+                    "reachable). Acknowledge from the dashboard, or stop tj serve "
+                    "and retry."
+                )
+            }
         from pathlib import Path
         import duckdb as _duckdb
         db_path = str(Path(_config.storage.path).expanduser())
@@ -1396,5 +1412,144 @@ def suggest_policies() -> dict:
         return _no_config()
     try:
         return _tool_suggest_policies(_ro_db, _config)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _tool_list_summarize_candidates(config, path=None, recursive=False, repo=False) -> dict:
+    """Advisory summarize scan (no DB, config-only). Powers list_summarize_candidates."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.candidates import list_candidates
+    result = list_candidates(path, config=config, recursive=recursive, repo=repo)
+    payload = result.to_dict()
+    if not payload.get("note"):
+        payload["note"] = (
+            "Candidates only — review before adopting. The figure is the "
+            "estimated per-call token reduction (amortizes across reuse)."
+        )
+    return payload
+
+
+@mcp.tool()
+def list_summarize_candidates(
+    path: str | None = None, recursive: bool = False, repo: bool = False,
+) -> dict:
+    """
+    List prompt files worth summarizing — large, prose-heavy CLAUDE.md / AGENTS.md
+    / *.md files under `path` (default: the current project). Returns each
+    candidate's prose word count and the ESTIMATED per-call token reduction from
+    summarizing its prose (structure — fenced & inline code, tags, templates, and
+    tables — is preserved verbatim). Use this when the user asks what prompts they could shrink, where
+    token bloat lives in their static prompts, or wants summarize candidates.
+
+    Advisory only: reads and reports, never rewrites a file. Savings are an
+    estimated per-call reduction that amortizes across every reuse of the cached
+    prompt — candidates to review, not a guarantee the rewrite is safe.
+    """
+    try:
+        return _tool_list_summarize_candidates(
+            _config, path, recursive=recursive, repo=repo,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _tool_summarize_prep(config, path, ratio) -> dict:
+    """Wrap a prompt's structure → wrapped prompt + rules + source hash (no DB, no writes, no scratch)."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.session import prepare
+    return prepare(path=path, ratio=ratio).to_dict()
+
+
+@mcp.tool()
+def summarize_prep(path: str, ratio: float = 0.5) -> dict:
+    """
+    Prepare a prompt file for structure-aware summarization. Wraps every structured
+    region (fenced & inline code incl. fenced JSON, tag blocks, templates, tables)
+    behind <tj-keep> markers so they're preserved VERBATIM, and returns the
+    `wrapped_prompt`, the `system_rules` for rewriting ONLY the prose to about `ratio`
+    of its length, and a `source_sha256` of the file.
+
+    Summarize the wrapped prompt per the rules (keep every marker exactly, once, in
+    order), then call summarize_check(path, your_summary, source_sha256) to verify the
+    structure survived and stage the result for review (diff + estimated per-call token
+    saving, which amortizes across every reuse of the cached prompt). Advisory only —
+    nothing is written to the file.
+    """
+    try:
+        return _tool_summarize_prep(_config, path, ratio)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _tool_summarize_check(config, path, summary, prepped_hash) -> dict:
+    """Hash-guard + restore + stage; return the verdict. Powers summarize_check."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.session import check
+    # MCP front door = Claude rewrote the prompt in-session (DEC-027/028) — record the provenance.
+    return check(config, path, summary, prepped_hash, produced_by="in-session").to_dict()
+
+
+@mcp.tool()
+def summarize_check(path: str, summary: str, prepped_hash: str) -> dict:
+    """
+    Verify a summary produced from summarize_prep's wrapped prompt. Re-reads the file
+    and **refuses if it changed or vanished since prep** (pass the `prepped_hash`
+    summarize_prep returned), then restores each protected block verbatim by id and
+    reports `structure_ok` (the hard gate — every block present once, in order, none
+    invented), a unified `diff`, and the word/token reduction. On success the restored
+    candidate is **staged** for review; nothing is written over the original (that's the
+    separate `summarize_apply` step — default dry-run; `summarize_undo` reverts).
+    """
+    try:
+        return _tool_summarize_check(_config, path, summary, prepped_hash)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _tool_summarize_apply(config, path, go) -> dict:
+    """Apply staged results (take-all, or one path). Default dry-run. Powers summarize_apply."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.apply import apply_staged
+    return apply_staged(config, path, go=go)
+
+
+@mcp.tool()
+def summarize_apply(path: str | None = None, go: bool = False) -> dict:
+    """
+    Apply staged summarize results to their files. **Default is a DRY-RUN** (reports
+    what would change, writes nothing) — pass `go=true` to actually write. Take-all
+    when `path` is omitted, else just that file. Each applied file is backed up
+    (one-level undo) and written atomically, preserving its mode. Files changed since
+    `summarize_check`, owned by another user, or whose structure check didn't pass are
+    skipped and reported — no flag bypasses those guards.
+    """
+    try:
+        return _tool_summarize_apply(_config, path, go)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _tool_summarize_undo(config, path, go) -> dict:
+    """Restore a summarize backup. Default dry-run. Powers summarize_undo."""
+    if config is None:
+        return _no_config()
+    from tokenjam.core.summarize.apply import undo
+    return undo(config, path, go=go)
+
+
+@mcp.tool()
+def summarize_undo(path: str, go: bool = False) -> dict:
+    """
+    Restore the most recent summarize backup for a file. **Default is a DRY-RUN**;
+    pass `go=true` to write. Refuses if the file changed since `summarize_apply` wrote
+    it (newer edits would be lost) or there is no backup.
+    """
+    try:
+        return _tool_summarize_undo(_config, path, go)
     except Exception as e:
         return {"error": str(e)}

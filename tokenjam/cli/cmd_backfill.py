@@ -15,7 +15,7 @@ from tokenjam.core.ingest_adapters.helicone import ingest_helicone
 from tokenjam.core.ingest_adapters.langfuse import ingest_langfuse
 from tokenjam.core.ingest_adapters.otlp import ingest_otlp
 from tokenjam.utils.formatting import console, format_cost
-from tokenjam.utils.time_parse import utcnow
+from tokenjam.utils.time_parse import parse_since, utcnow
 
 
 @click.group("backfill")
@@ -26,8 +26,10 @@ def cmd_backfill() -> None:
 @cmd_backfill.command("claude-code")
 @click.option("--root", "root_path", default=None,
               help=f"Override Claude Code projects root (default {CLAUDE_CODE_PROJECTS_ROOT}).")
+@click.option("--since", "since_value", default=None,
+              help="Only ingest sessions since a window like 30d, 7d, or YYYY-MM-DD.")
 @click.option("--since-days", type=int, default=None,
-              help="Only ingest sessions whose end time is within the last N days.")
+              help="Deprecated alias for --since Nd.")
 @click.option("--quiet", is_flag=True, help="Suppress per-session progress output.")
 @click.option("--reingest", is_flag=True,
               help="Update spans already in the DB in place (never duplicated): "
@@ -36,8 +38,8 @@ def cmd_backfill() -> None:
                    "spans when [capture] was enabled after they were first "
                    "ingested. Run this after turning on [capture].")
 @click.pass_context
-def claude_code(ctx: click.Context, root_path: str | None, since_days: int | None,
-                quiet: bool, reingest: bool) -> None:
+def claude_code(ctx: click.Context, root_path: str | None, since_value: str | None,
+                since_days: int | None, quiet: bool, reingest: bool) -> None:
     """Ingest Claude Code session logs from ~/.claude/projects/."""
     db = ctx.obj.get("db")
     if db is None:
@@ -53,7 +55,16 @@ def claude_code(ctx: click.Context, root_path: str | None, since_days: int | Non
         return
 
     since = None
-    if since_days is not None and since_days > 0:
+    if since_value and since_days is not None:
+        raise click.UsageError("Use either --since or --since-days, not both.")
+    if since_value:
+        try:
+            since = parse_since(since_value)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="'--since'") from exc
+    elif since_days is not None:
+        if since_days <= 0:
+            raise click.BadParameter("amount must be > 0", param_hint="'--since-days'")
         since = utcnow() - timedelta(days=since_days)
 
     state = {"last_print": 0}

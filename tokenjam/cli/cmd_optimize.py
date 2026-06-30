@@ -255,8 +255,10 @@ def cmd_optimize(
         d = payload.get("downgrade") or {}
         if d and pricing_mode in {"subscription", "local"}:
             d["monthly_tokens_freed"] = d.get("monthly_tokens_in_candidates", 0)
-            if pricing_mode == "local":
-                d["monthly_savings_usd"] = 0
+            # Zero the misleading dollar projection for BOTH flat-fee
+            # subscription tiers and local (zero-marginal-cost) inference —
+            # matching the token-share framing the human renderer applies.
+            d["monthly_savings_usd"] = 0
         click.echo(json.dumps(payload, default=str))
         return
 
@@ -440,6 +442,27 @@ def _render_report(
         )
 
 
+def _sampling_ci_suffix(d: DowngradeFinding) -> str:
+    """Sampling-confidence suffix for the savings line (#308).
+
+    Renders " (n=42, 95% CI $Y–$Z)" so a 5-session projection visibly differs
+    from a 500-session one. This is SAMPLING confidence — how much usage the
+    estimate rests on — NOT a claim the model swap is safe (the
+    MODEL_DOWNGRADE_CAVEAT governs that). The CI bounds are None when n < 2.
+    """
+    if d.n_sessions <= 0:
+        return ""
+    if d.ci_low is None or d.ci_high is None:
+        # Too few sessions to bracket the projection — surface n alone so the
+        # thinness is still visible, without inventing an interval.
+        return f"  [dim](n={d.n_sessions} sessions; too few to bracket)[/dim]"
+    return (
+        f"  [dim](n={d.n_sessions} sessions, 95% CI "
+        f"{format_cost(d.ci_low)}–{format_cost(d.ci_high)}/mo — sampling "
+        f"confidence, not a safety claim)[/dim]"
+    )
+
+
 def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
     """
     Render the downsize finding for the given pricing mode.
@@ -496,6 +519,7 @@ def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
         console.print(
             f"     • Projected savings if pattern holds: "
             f"[bold]{format_cost(d.monthly_savings_usd)}/mo[/bold]"
+            f"{_sampling_ci_suffix(d)}"
         )
     if d.suggestions:
         pairs = ", ".join(f"{k} → {v}" for k, v in d.suggestions.items())
@@ -528,6 +552,14 @@ def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
     console.print(
         f"     [yellow]![/yellow] [italic]{MODEL_DOWNGRADE_CAVEAT}[/italic]"
     )
+    if d.bench_command:
+        console.print()
+        console.print(
+            "     [bold]Candidate only — prove it holds before switching:[/bold]"
+        )
+        console.print("       pip install tokenjam-bench")
+        for line in d.bench_command.split("\n"):
+            console.print(f"       {line}")
 
 
 def _render_budget(p: BudgetProjection) -> None:

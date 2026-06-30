@@ -80,6 +80,26 @@ def test_summarize_window_counts_and_costs(db):
     assert abs(s.total_cost_usd - (0.030 + 1.500)) < 1e-6
 
 
+def test_summarize_window_total_includes_cache_read_tokens(db):
+    """Window header total must include cache-read tokens, sharing one basis
+    with the downsize denominator + the canonical WindowTotals (#33)."""
+    start = utcnow() - timedelta(days=2)
+    db.insert_span(make_llm_span(
+        model="claude-opus-4-7",
+        provider="anthropic",
+        input_tokens=1000,
+        output_tokens=200,
+        cache_tokens=5000,
+        cost_usd=0.030,
+        session_id="cache-heavy",
+        start_time=start,
+    ))
+    since = utcnow() - timedelta(days=30)
+    until = utcnow() + timedelta(hours=1)
+    s = summarize_window(db.conn, since, until)
+    assert s.total_tokens == 1000 + 200 + 5000
+
+
 def test_downgrade_flags_small_opus_but_not_large(db):
     _insert_small_opus_session(db, session_id="a")
     _insert_large_opus_session(db, session_id="b")
@@ -92,6 +112,7 @@ def test_downgrade_flags_small_opus_but_not_large(db):
     assert finding.candidate_sessions == 1
     assert finding.total_sessions == 2
     assert finding.suggestions.get("claude-opus-4-7") == "claude-haiku-4-5"
+    assert finding.bench_command == "tjb run --original anthropic:claude-opus-4-7 --candidate anthropic:claude-haiku-4-5"
     # Caveat must be present as the dataclass default
     assert finding.caveat == MODEL_DOWNGRADE_CAVEAT
 
@@ -209,3 +230,44 @@ def test_downgrade_candidates_have_pricing_for_alternative():
             assert get_rates(provider, alt) is not None, (
                 f"Pricing missing for {provider}/{alt}"
             )
+
+
+def test_subscription_json_zeros_monthly_savings_usd(db, monkeypatch, tmp_path):
+    """`tj optimize --json` must not leak a dollar `monthly_savings_usd` for
+    subscription users — the same suppression the human render applies (#32).
+
+    The renderer reframes downgrade savings as a token share for flat-fee
+    plans, so the machine payload must agree: `monthly_savings_usd == 0`.
+    """
+    import json
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from tokenjam.cli.main import cli
+    from tokenjam.core.config import ApiAuthConfig, ApiConfig, TjConfig
+    from tests.factories import make_session
+
+    # Keep config_declared_plan's global fallback off this dev machine.
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+    # One subscription-tier session whose spans match the downgrade heuristic
+    # (small Opus session → projected dollar savings the renderer suppresses).
+    db.upsert_session(make_session(
+        agent_id="claude-code-x", session_id="s-small", plan_tier="max_5x",
+    ))
+    _insert_small_opus_session(db, session_id="s-small")
+
+    config = TjConfig(version="1", api=ApiConfig(auth=ApiAuthConfig(enabled=False)))
+
+    runner = CliRunner()
+    with patch("tokenjam.cli.main.load_config", return_value=config), \
+         patch("tokenjam.cli.main.open_db", return_value=db):
+        result = runner.invoke(cli, ["optimize", "--since", "30d", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["pricing_mode"] == "subscription"
+    downgrade = payload["downgrade"]
+    assert downgrade is not None
+    assert downgrade["monthly_savings_usd"] == 0

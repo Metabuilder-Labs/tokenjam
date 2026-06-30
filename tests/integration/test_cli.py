@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -40,6 +41,50 @@ def config():
 @pytest.fixture
 def runner():
     return CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_real_world_side_effects(tmp_path_factory, monkeypatch):
+    """Keep every CLI test off real user/daemon state so the file runs to
+    completion deterministically, in any order (#23).
+
+    The ``tj onboard``/``tj onboard --claude-code`` path otherwise reaches out
+    to live, machine-global resources as a side effect of the command — none of
+    which these tests are actually asserting on:
+
+    * runs the real ``ingest_claude_code`` against ``~/.claude/projects`` (6 GB+
+      on a dev box) and writes the real ``~/.tj/telemetry.duckdb``;
+    * registers the real ``claude`` MCP server via ``subprocess``;
+    * pokes the real ``tj serve`` daemon to release the DuckDB write lock.
+
+    Because the DuckDB write lock is process- and order-dependent, whenever the
+    daemon (or a sibling test) is holding it, ``ingest_claude_code`` blocks on
+    ``upsert_session`` forever — so the file passes test-by-test but hangs when
+    run as a group. Pointing every machine-global resource at a throwaway temp
+    location (and stubbing the daemon/MCP shell-outs) makes the suite hermetic.
+    """
+    iso = tmp_path_factory.mktemp("cli-iso")
+
+    # No Claude Code logs to ingest -> onboard skips the open_db + ingest block
+    # entirely, so it never touches the real telemetry DB or its write lock.
+    monkeypatch.setattr(
+        "tokenjam.core.backfill.CLAUDE_CODE_PROJECTS_ROOT",
+        iso / "no-such-claude-projects",
+        raising=False,
+    )
+    # Never shell out to the real `claude` CLI to register the MCP server.
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _name: None)
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard.subprocess.run",
+        lambda *a, **k: subprocess.CompletedProcess(a[0] if a else [], 0, b"", b""),
+    )
+    # Never touch the real `tj serve` daemon lifecycle.
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard._stop_serve_for_db_write", lambda: False
+    )
+    # Storage paths resolve via os.path.expanduser($HOME); redirect them at the
+    # default ``~/.tj/telemetry.duckdb`` so any stray open_db lands in tmp.
+    monkeypatch.setenv("HOME", str(iso))
 
 
 def _invoke(runner, db, config, args):
@@ -274,6 +319,96 @@ def test_doctor_warns_on_schema_without_capture(runner, db, config, tmp_path):
     assert any(c["level"] == "warning" for c in schema_checks)
 
 
+def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
+    # Set up a fake home directory and fake cwd
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    fake_cwd = tmp_path / "fake_cwd"
+    fake_cwd.mkdir()
+
+    # Stub doctor config to avoid other warning noise
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+
+    # Case 1: No files, no executables -> should be level: "info"
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 0
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "info"
+
+    # Case 2: Claude Code CLI is on PATH (shutil.which returns True), but no registration -> should be level: "warning"
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", side_effect=lambda cmd: "/bin/claude" if cmd == "claude" else None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 1
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "warning"
+        assert "Claude Code" in mcp_checks[0]["message"]
+
+    # Case 3: MCP registered globally in Codex (~/.codex/config.toml) -> should be level: "ok"
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    codex_config = codex_dir / "config.toml"
+    codex_config.write_text("[mcp_servers.tj]\ncommand = 'tj'\nargs = ['mcp']\n")
+
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 0
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert "Codex" in mcp_checks[0]["message"]
+
+    # Clean up codex file
+    codex_config.unlink()
+    codex_dir.rmdir()
+
+    # Case 4: MCP registered globally in Claude Code (~/.claude.json) -> should be level: "ok"
+    claude_json = fake_home / ".claude.json"
+    claude_json.write_text('{"mcpServers": {"tj": {"command": "tj"}}}')
+
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 0
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert "Claude Code" in mcp_checks[0]["message"]
+
+    # Clean up claude json file
+    claude_json.unlink()
+
+    # Case 5: MCP registered locally in project-level .mcp.json -> should be level: "ok"
+    project_mcp = fake_cwd / ".mcp.json"
+    project_mcp.write_text('{"mcpServers": {"tj": {"command": "tj"}}}')
+
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+        assert result.exit_code == 0
+        checks = json.loads(result.output)
+        mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
+        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert "project scope" in mcp_checks[0]["message"]
+
+
 # -- since flag parsing --
 
 def test_since_flag_parses_all_formats(runner, db, config):
@@ -312,6 +447,12 @@ def test_drift_no_baselines_exits_0(runner, db, config):
     data = json.loads(result.output)
     assert data["drifted"] is False
     assert data["agents"] == []
+
+
+def test_drift_no_baselines_warning_message(runner, db, config):
+    result = _invoke(runner, db, config, ["drift"])
+    assert result.exit_code == 0
+    assert "No drift baselines found." in result.output
 
 
 def test_drift_with_baseline_no_violations(runner, db, config):

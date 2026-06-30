@@ -12,7 +12,12 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
-from tokenjam.sdk.integrations._request_capture import record_full_request
+from tokenjam.sdk.integrations._request_capture import (
+    extract_anthropic_completion,
+    record_completion_content,
+    record_full_request,
+    record_prompt_content,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +60,9 @@ class AnthropicIntegration:
                 kwargs.get("model", "unknown"),
             )
             record_full_request(span, kwargs)
+            # Prompt content (#320). Set unconditionally; stripped at ingest
+            # unless [capture] prompts is on. Same serialization as litellm.
+            record_prompt_content(span, kwargs.get("messages"))
             # Inherit agent_id from parent span (set by @watch())
             parent_span = trace.get_current_span()
             if parent_span and parent_span.is_recording():
@@ -81,6 +89,9 @@ class AnthropicIntegration:
                     cache_create = getattr(response.usage, "cache_creation_input_tokens", None)
                     if cache_create:
                         span.set_attribute(GenAIAttributes.CACHE_CREATE_TOKENS, cache_create)
+                # Completion content (#320). Stripped at ingest unless
+                # [capture] completions is on.
+                record_completion_content(span, extract_anthropic_completion(response))
                 span.set_status(trace.Status(trace.StatusCode.OK))
                 return response
             except TypeError as exc:
@@ -123,6 +134,10 @@ class AnthropicIntegration:
                     kwargs.get("model", "unknown"),
                 )
                 record_full_request(span, kwargs)
+                # Prompt content (#320). Completion content for the streaming
+                # path would need buffering the stream (the wrapper doesn't
+                # aggregate text) — out of scope; the request is captured here.
+                record_prompt_content(span, kwargs.get("messages"))
                 parent_span = trace.get_current_span()
                 if parent_span and parent_span.is_recording():
                     agent_id = parent_span.attributes.get(GenAIAttributes.AGENT_ID)

@@ -25,6 +25,11 @@ from tokenjam.mcp.server import (
     _tool_get_drift_report,
     _tool_acknowledge_alert,
     _tool_setup_project,
+    _tool_list_summarize_candidates,
+    _tool_summarize_prep,
+    _tool_summarize_check,
+    _tool_summarize_apply,
+    _tool_summarize_undo,
 )
 
 
@@ -592,27 +597,77 @@ def test_list_alerts_http_mode():
 # --- test_list_active_sessions_http_mode ---
 
 def test_list_active_sessions_http_mode():
+    # Serve mode now proxies to /api/v1/sessions?status=active, which returns
+    # one row per active session (not one per agent).
     fake_response = {
-        "agents": [
+        "sessions": [
             {
-                "agent_id": "alpha",
-                "status": "active",
                 "session_id": "s1",
+                "agent_id": "alpha",
+                "started_at": "2026-04-11T10:00:00+00:00",
+                "total_cost_usd": 1.23,
                 "input_tokens": 100,
                 "output_tokens": 50,
                 "tool_call_count": 5,
                 "error_count": 0,
-                "cost_today": 1.23,
-                "active_alerts": 0,
             }
         ],
-        "has_active_alerts": False,
+        "count": 1,
     }
     _set_serve_url("http://127.0.0.1:7391")
     try:
         with patch("tokenjam.mcp.server._http_get", return_value=fake_response):
             result = _tool_list_active_sessions(None)
         assert result["count"] == 1
+        assert result["sessions"][0]["session_id"] == "s1"
+    finally:
+        _set_serve_url(None)
+
+
+def test_list_active_sessions_http_mode_enumerates_per_session():
+    """Serve mode must surface EVERY active session, including multiple
+    concurrent sessions for the same agent — matching the direct-DB path (#35).
+    The old code proxied to /api/v1/status (one record per agent) and
+    undercounted; it must now hit a per-session endpoint."""
+    sessions_response = {
+        "sessions": [
+            {
+                "session_id": "s1", "agent_id": "alpha",
+                "started_at": "2026-04-11T10:00:00+00:00", "total_cost_usd": 1.0,
+                "input_tokens": 10, "output_tokens": 5,
+                "tool_call_count": 1, "error_count": 0,
+            },
+            {
+                "session_id": "s2", "agent_id": "alpha",
+                "started_at": "2026-04-11T10:05:00+00:00", "total_cost_usd": 2.0,
+                "input_tokens": 20, "output_tokens": 8,
+                "tool_call_count": 2, "error_count": 0,
+            },
+        ],
+        "count": 2,
+    }
+    # /status collapses alpha's two concurrent sessions to one record — the
+    # shape the broken serve path used to read.
+    status_response = {
+        "agents": [
+            {"agent_id": "alpha", "status": "active", "session_id": "s2"}
+        ],
+        "has_active_alerts": False,
+    }
+
+    def fake_http_get(path, params=None):
+        if "/sessions" in path:
+            assert params and params.get("status") == "active"
+            return sessions_response
+        return status_response
+
+    _set_serve_url("http://127.0.0.1:7391")
+    try:
+        with patch("tokenjam.mcp.server._http_get", side_effect=fake_http_get):
+            result = _tool_list_active_sessions(None)
+        assert result["count"] == 2
+        ids = {s["session_id"] for s in result["sessions"]}
+        assert ids == {"s1", "s2"}
     finally:
         _set_serve_url(None)
 
@@ -650,6 +705,54 @@ def test_acknowledge_alert_http_mode_proxies_patch():
         _srv._config = None
 
 
+def test_acknowledge_alert_read_only_fallback_returns_actionable_error(tmp_path):
+    """In read-only DuckDB fallback (tj serve unreachable, _ro_conn open, no
+    _serve_url) acknowledge_alert must NOT open a conflicting read-write
+    connection to the same file — that raises a raw DuckDB ConnectionException.
+    It should return a clear, actionable message instead (#34)."""
+    import duckdb
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.db import DuckDBBackend
+
+    db_file = tmp_path / "telemetry.duckdb"
+    # Seed the DB (schema + one alert) via a normal read-write backend, then
+    # close it so the read-only connection below is the only one in process.
+    backend = DuckDBBackend(StorageConfig(path=str(db_file)))
+    alert = Alert(
+        alert_id=new_uuid(),
+        fired_at=utcnow(),
+        type=AlertType.RETRY_LOOP,
+        severity=Severity.WARNING,
+        title="Retry loop",
+        detail={},
+        agent_id="a",
+        session_id=None,
+        span_id=None,
+        acknowledged=False,
+        suppressed=False,
+    )
+    backend.insert_alert(alert)
+    backend._conn.close()
+
+    ro_conn = duckdb.connect(str(db_file), read_only=True)
+    config = _make_config("a")
+    config.storage = StorageConfig(path=str(db_file))
+    _srv._ro_conn = ro_conn
+    _srv._config = config
+    _set_serve_url(None)
+    try:
+        result = _srv.acknowledge_alert(alert.alert_id)
+        assert "error" in result
+        msg = result["error"].lower()
+        # Actionable guidance — not a raw DuckDB connection exception.
+        assert "read-only" in msg or "dashboard" in msg
+        assert "configuration" not in msg  # raw DuckDB conflict phrasing
+    finally:
+        ro_conn.close()
+        _srv._ro_conn = None
+        _srv._config = None
+
+
 # --- test_get_budget_headroom_http_mode ---
 
 def test_get_budget_headroom_http_mode_reads_live_limits():
@@ -684,3 +787,118 @@ def test_get_budget_headroom_http_mode_reads_live_limits():
         assert abs(result["daily_remaining_usd"] - 17.0) < 0.01
     finally:
         _set_serve_url(None)
+
+
+# --- list_summarize_candidates (advisory scan; no DB) ---
+
+@pytest.fixture
+def _iso_summarize_catalog(monkeypatch):
+    """Controlled catalog (no real ~/.claude globals) so the MCP scan is deterministic."""
+    from tokenjam.core.summarize import candidates as _cand
+    from tokenjam.core.summarize.catalog import Catalog
+    fake = Catalog(project_files=frozenset({"CLAUDE.md", "AGENTS.md"}),
+                   project_globs=(), global_paths=(), forbidden_roots=())
+    monkeypatch.setattr(_cand, "load_catalog", lambda: fake)
+
+
+def test_summarize_candidates_lists_prompt(tmp_path, _iso_summarize_catalog):
+    (tmp_path / "CLAUDE.md").write_text("instructions " * 200)
+    result = _tool_list_summarize_candidates(_make_config(), path=str(tmp_path))
+    assert result["count"] == len(result["candidates"]) >= 1
+    claude = [c for c in result["candidates"] if Path(c["path"]).name == "CLAUDE.md"]
+    assert claude and claude[0]["kind"] == "prompt"
+    assert claude[0]["est_tokens_saved"] > 0
+    assert "review before adopting" in result["note"]   # honesty caveat survives the MCP layer
+
+
+def test_summarize_candidates_recursive_passthrough(tmp_path, _iso_summarize_catalog):
+    nested = tmp_path / "sub" / "deep"
+    nested.mkdir(parents=True)
+    (nested / "CLAUDE.md").write_text("instructions " * 200)
+    flat = _tool_list_summarize_candidates(_make_config(), path=str(tmp_path))
+    deep = _tool_list_summarize_candidates(_make_config(), path=str(tmp_path), recursive=True)
+    assert not any("deep" in c["path"] for c in flat["candidates"])   # no walk without -r
+    assert any("deep" in c["path"] for c in deep["candidates"])       # recursive flag reaches core
+    assert deep["recursive"] is True
+
+
+def test_summarize_candidates_no_config():
+    result = _tool_list_summarize_candidates(None)
+    assert "error" in result and "config" in result["error"].lower()  # _no_config sentinel
+
+
+# --- summarize_prep / summarize_check (no scratch; re-derive + hash + staging) ---
+
+def _summarize_config(tmp_path):
+    """Config whose summarize anchor is a tmp dir — never the real ~/.tj."""
+    from tokenjam.core.config import StorageConfig
+    return TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
+
+
+def test_summarize_prep_then_check_roundtrip(tmp_path):
+    config = _summarize_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    prep = _tool_summarize_prep(config, str(f), 0.5)
+    assert prep["source_sha256"] and "<tj-keep" in prep["wrapped_prompt"]
+    import re
+    markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', prep["wrapped_prompt"], re.DOTALL)
+    summary = "Be careful; never skip a step. " + " ".join(markers)
+    verdict = _tool_summarize_check(config, str(f), summary, prep["source_sha256"])
+    assert verdict["structure_ok"] is True and verdict["staged"] is True
+    assert "x = 1" in verdict["restored"]             # structure restored verbatim through the MCP layer
+    assert verdict["est_tokens_saved"] > 0
+
+
+def test_summarize_check_refuses_changed_file(tmp_path):
+    from tokenjam.core.summarize.session import SummarizeRefused
+    config = _summarize_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30)
+    prep = _tool_summarize_prep(config, str(f), 0.5)
+    f.write_text("edited after prep")                 # file changed since prep
+    with pytest.raises(SummarizeRefused, match="changed since"):
+        _tool_summarize_check(config, str(f), "anything", prep["source_sha256"])
+
+
+def test_summarize_check_records_in_session_provenance(tmp_path):
+    """MCP front door = Claude rewrote the prompt in-session → produced_by == 'in-session' (DEC-027/028)."""
+    config = _summarize_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    f.write_text("Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n")
+    prep = _tool_summarize_prep(config, str(f), 0.5)
+    import re
+    markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', prep["wrapped_prompt"], re.DOTALL)
+    verdict = _tool_summarize_check(config, str(f), "Careful; never skip. " + " ".join(markers),
+                                    prep["source_sha256"])
+    assert verdict["produced_by"] == "in-session"     # the MCP layer stamps the seam, not 'manual'
+
+
+def test_summarize_prep_no_config():
+    assert "error" in _tool_summarize_prep(None, "x.md", 0.5)
+
+
+def test_summarize_check_no_config():
+    assert "error" in _tool_summarize_check(None, "x.md", "summary", "deadbeef")
+
+
+def test_summarize_apply_then_undo_roundtrip(tmp_path):
+    config = _summarize_config(tmp_path)
+    f = tmp_path / "CLAUDE.md"
+    original = "Always act carefully and never skip a required step. " * 30 + "\n```\nx = 1\n```\n"
+    f.write_text(original)
+    prep = _tool_summarize_prep(config, str(f), 0.5)
+    import re
+    markers = re.findall(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', prep["wrapped_prompt"], re.DOTALL)
+    _tool_summarize_check(config, str(f), "Careful; never skip. " + " ".join(markers), prep["source_sha256"])
+
+    dry = _tool_summarize_apply(config, str(f), False)           # default dry-run writes nothing
+    assert dry["dry_run"] is True and f.read_text() == original
+    done = _tool_summarize_apply(config, str(f), True)           # go writes
+    assert done["applied"] and "x = 1" in f.read_text() and f.read_text() != original
+    _tool_summarize_undo(config, str(f), True)                   # undo restores
+    assert f.read_text() == original
+
+
+def test_summarize_apply_no_config():
+    assert "error" in _tool_summarize_apply(None, None, False)

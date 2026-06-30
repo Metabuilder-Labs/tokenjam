@@ -22,11 +22,8 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
     if agent_filter:
         agent_ids = [agent_filter]
     elif hasattr(db, "conn"):
-        # Direct DB access
-        rows = db.conn.execute(
-            "SELECT DISTINCT agent_id FROM sessions WHERE agent_id IS NOT NULL ORDER BY agent_id"
-        ).fetchall()
-        agent_ids = [r[0] for r in rows]
+        # Local DB mode
+        agent_ids = db.get_distinct_agent_ids()
     else:
         # API mode — discover agents from recent traces
         from tokenjam.core.models import TraceFilters
@@ -46,18 +43,11 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
     for aid in agent_ids:
         session = None
         if hasattr(db, "conn"):
-            # Direct DB access
+            # Local DB mode — prefer the live active session, fall back to the
+            # most recent completed one.
             sessions = db.get_completed_sessions(aid, limit=1)
-            active_rows = db.conn.execute(
-                "SELECT * FROM sessions WHERE agent_id = $1 AND status = 'active' "
-                "ORDER BY started_at DESC LIMIT 1",
-                [aid],
-            ).fetchall()
-            if active_rows:
-                cols = [d[0] for d in db.conn.description]
-                from tokenjam.core.db import _row_to_session
-                session = _row_to_session(active_rows[0], cols)
-            elif sessions:
+            session = db.get_active_session(aid)
+            if session is None and sessions:
                 session = sessions[0]
         else:
             # API mode — limited session info
@@ -70,8 +60,7 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
         # (issue #147).
         active_seconds = None
         if session is not None and hasattr(db, "conn"):
-            from tokenjam.core.db import session_active_seconds
-            active_seconds = session_active_seconds(db.conn, session.session_id)
+            active_seconds = db.get_session_active_seconds(session.session_id)
 
         today_cost = db.get_daily_cost(aid, utcnow().date())
 
@@ -115,10 +104,7 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
     unknown_count = 0
     if hasattr(db, "conn"):
         try:
-            row = db.conn.execute(
-                "SELECT COUNT(*) FROM sessions WHERE plan_tier IS NULL OR plan_tier = 'unknown'"
-            ).fetchone()
-            unknown_count = int(row[0]) if row else 0
+            unknown_count = db.count_unknown_plan_tier_sessions()
         except Exception:
             unknown_count = 0
 

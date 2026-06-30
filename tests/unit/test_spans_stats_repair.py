@@ -102,3 +102,75 @@ class TestRepairSpansStats:
         repair_spans_stats(conn)
         repair_spans_stats(conn)
         assert conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 3
+
+
+class TestRepairPreservesSchema:
+    """Regression for #38: the repair must not strip the spans table's
+    PRIMARY KEY, NOT NULL constraints, or secondary indexes."""
+
+    @staticmethod
+    def _constraints(conn) -> list[str]:
+        return [
+            r[0]
+            for r in conn.execute(
+                "SELECT constraint_type FROM duckdb_constraints() "
+                "WHERE table_name = 'spans'"
+            ).fetchall()
+        ]
+
+    @staticmethod
+    def _index_names(conn) -> set[str]:
+        return {
+            r[0]
+            for r in conn.execute(
+                "SELECT index_name FROM duckdb_indexes() WHERE table_name = 'spans'"
+            ).fetchall()
+        }
+
+    def test_primary_key_survives_repair(self, conn):
+        _insert_minimal_span(conn, trace_id="t1", span_id="s1")
+        repair_spans_stats(conn)
+        assert "PRIMARY KEY" in self._constraints(conn)
+
+    def test_not_null_constraints_survive_repair(self, conn):
+        _insert_minimal_span(conn, trace_id="t1", span_id="s1")
+        repair_spans_stats(conn)
+        assert "NOT NULL" in self._constraints(conn)
+
+    def test_secondary_indexes_survive_repair(self, conn):
+        _insert_minimal_span(conn, trace_id="t1", span_id="s1")
+        repair_spans_stats(conn)
+        expected = {
+            "idx_spans_trace_id",
+            "idx_spans_agent_id",
+            "idx_spans_start_time",
+            "idx_spans_tool_name",
+            "idx_spans_conv_id",
+        }
+        assert expected <= self._index_names(conn)
+
+    def test_duplicate_span_id_rejected_after_repair(self, conn):
+        _insert_minimal_span(conn, trace_id="t1", span_id="dup")
+        repair_spans_stats(conn)
+        with pytest.raises(duckdb.ConstraintException):
+            _insert_minimal_span(conn, trace_id="t2", span_id="dup")
+
+    def test_schema_identical_to_freshly_migrated(self, conn, tmp_path):
+        """After repair, the spans columns match a freshly-migrated table."""
+        _insert_minimal_span(conn, trace_id="t1", span_id="s1")
+        repair_spans_stats(conn)
+        repaired = conn.execute(
+            "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'spans' ORDER BY ordinal_position"
+        ).fetchall()
+
+        fresh = duckdb.connect(str(tmp_path / "fresh.duckdb"))
+        try:
+            run_migrations(fresh)
+            expected = fresh.execute(
+                "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+                "WHERE table_name = 'spans' ORDER BY ordinal_position"
+            ).fetchall()
+        finally:
+            fresh.close()
+        assert repaired == expected

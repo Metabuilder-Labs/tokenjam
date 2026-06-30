@@ -13,9 +13,54 @@ import logging
 from opentelemetry import trace
 
 from tokenjam.otel.semconv import GenAIAttributes
-from tokenjam.sdk.integrations._request_capture import record_full_request_bedrock
+from tokenjam.sdk.integrations._request_capture import (
+    extract_anthropic_completion,
+    record_completion_content,
+    record_full_request_bedrock,
+    record_prompt_content,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _bedrock_body_dict(body: object) -> dict | None:
+    """Parse a Bedrock request/response ``body`` (str/bytes/dict) to a dict."""
+    if isinstance(body, (str, bytes)):
+        try:
+            body = json.loads(body)
+        except (ValueError, TypeError):
+            return None
+    return body if isinstance(body, dict) else None
+
+
+def _bedrock_request_messages(kwargs: dict) -> object | None:
+    """The request prompt from a Bedrock ``invoke_model`` body. Anthropic-on-
+    Bedrock uses ``messages``; other model schemas use ``prompt`` / ``inputText``."""
+    body = _bedrock_body_dict(kwargs.get("body"))
+    if body is None:
+        return None
+    for key in ("messages", "prompt", "inputText"):
+        if body.get(key) is not None:
+            return body[key]
+    return None
+
+
+def _bedrock_completion_text(body_dict: dict) -> str | None:
+    """Assistant text from a parsed Bedrock response body. Anthropic-on-Bedrock
+    carries ``content`` blocks; other schemas use scalar text keys."""
+    text = extract_anthropic_completion(body_dict)  # Anthropic content blocks
+    if text:
+        return text
+    for key in ("completion", "outputText", "generation"):
+        value = body_dict.get(key)
+        if isinstance(value, str):
+            return value
+    results = body_dict.get("results")
+    if isinstance(results, list) and results and isinstance(results[0], dict):
+        out = results[0].get("outputText")
+        if isinstance(out, str):
+            return out
+    return None
 
 
 class BedrockIntegration:
@@ -51,6 +96,10 @@ class BedrockIntegration:
                 model_id = kwargs.get("modelId", "unknown")
                 span.set_attribute(GenAIAttributes.REQUEST_MODEL, model_id)
                 record_full_request_bedrock(span, kwargs)
+                # Prompt content (#320). Stripped at ingest unless [capture]
+                # prompts is on. Completion is set in _extract_bedrock_usage,
+                # which already parses the response body (avoids re-reading it).
+                record_prompt_content(span, _bedrock_request_messages(kwargs))
                 try:
                     response = method(self_client, *args, **kwargs)
                     _extract_bedrock_usage(response, span)
@@ -95,6 +144,10 @@ def _extract_bedrock_usage(response: dict, span) -> None:
             span.set_attribute(GenAIAttributes.INPUT_TOKENS, usage["input_tokens"])
         if "output_tokens" in usage:
             span.set_attribute(GenAIAttributes.OUTPUT_TOKENS, usage["output_tokens"])
+
+    # Completion content (#320), from the already-parsed body. Stripped at
+    # ingest unless [capture] completions is on.
+    record_completion_content(span, _bedrock_completion_text(body_dict))
 
 
 def patch_bedrock() -> None:

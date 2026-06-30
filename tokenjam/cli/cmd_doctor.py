@@ -57,6 +57,9 @@ def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
     # 11. Proxy base-URL wiring consistency (issue #219)
     checks.append(_check_proxy_wiring(config))
 
+    # 12. MCP server wiring (issue #285)
+    checks.append(_check_mcp_wiring(config))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -386,6 +389,98 @@ def _is_local_url(url: str) -> bool:
     from urllib.parse import urlparse
     hostname = urlparse(url).hostname
     return hostname in ("localhost", "127.0.0.1", "::1", "0.0.0.0") if hostname else False
+
+
+def _check_mcp_wiring(config: object) -> dict:
+    """Check if the tj MCP server is wired into Claude Code or Codex."""
+    import sys
+    if sys.version_info >= (3, 11):
+        import tomllib
+    else:
+        import tomli as tomllib  # type: ignore[no-redef]
+    import shutil
+    from pathlib import Path
+
+    codex_config_path = Path.home() / ".codex" / "config.toml"
+    claude_config_path = Path.home() / ".claude.json"
+
+    has_codex = False
+    has_claude = False
+
+    # Check Codex config
+    if codex_config_path.exists():
+        try:
+            with open(codex_config_path, "rb") as f:
+                codex_data = tomllib.load(f)
+            has_codex = bool(codex_data.get("mcp_servers", {}).get("tj"))
+        except Exception:
+            pass
+
+    # Check Claude Code global config
+    if claude_config_path.exists():
+        try:
+            with open(claude_config_path, "r", encoding="utf-8") as f:
+                claude_data = json.load(f)
+            has_claude = bool(claude_data.get("mcpServers", {}).get("tj"))
+        except Exception:
+            pass
+
+    # Check project-level configs in current directory
+    has_project = False
+    for name in (".mcp.json", ".claude.json"):
+        project_path = Path.cwd() / name
+        if project_path.exists():
+            try:
+                with open(project_path, "r", encoding="utf-8") as f:
+                    proj_data = json.load(f)
+                if bool(proj_data.get("mcpServers", {}).get("tj")):
+                    has_project = True
+                    break
+            except Exception:
+                pass
+
+    if has_codex or has_claude or has_project:
+        found_locations = []
+        if has_codex:
+            found_locations.append("Codex (global)")
+        if has_claude:
+            found_locations.append("Claude Code (global)")
+        if has_project:
+            found_locations.append("project scope")
+        return {
+            "name": "MCP wiring",
+            "level": "ok",
+            "message": f"MCP server registered in {', '.join(found_locations)}.",
+        }
+
+    # If not registered anywhere, decide level based on agent presence
+    codex_present = bool(shutil.which("codex")) or (Path.home() / ".codex").exists()
+    claude_present = bool(shutil.which("claude")) or (Path.home() / ".claude").exists()
+
+    if codex_present or claude_present:
+        agents = []
+        if claude_present:
+            agents.append("Claude Code")
+        if codex_present:
+            agents.append("Codex")
+        return {
+            "name": "MCP wiring",
+            "level": "warning",
+            "message": (
+                f"MCP server not registered in {', '.join(agents)}. Coding agents "
+                "won't be able to query TokenJam telemetry. Run `tj onboard --claude-code` "
+                "or `tj onboard --codex` to register it."
+            ),
+        }
+
+    return {
+        "name": "MCP wiring",
+        "level": "info",
+        "message": (
+            "MCP server is not registered in Claude Code or Codex. Run `tj onboard "
+            "--claude-code` or `tj onboard --codex` if using a coding agent."
+        ),
+    }
 
 
 def _print_check(check: dict) -> None:

@@ -72,6 +72,23 @@ class StorageBackend(Protocol):
     def get_daily_cost(self, agent_id: str, date: date) -> float: ...
     def get_session_cost(self, session_id: str) -> float: ...
     def get_recent_spans(self, session_id: str, limit: int) -> list[NormalizedSpan]: ...
+    # Issue #309: methods that callers (CostEngine, cmd_status, cost compare)
+    # used to satisfy by reaching into `db.conn` directly. Having them on the
+    # protocol keeps those paths behind the abstraction and lets InMemoryBackend
+    # exercise them in unit tests.
+    def update_span_cost(self, span_id: str, cost_usd: float) -> None: ...
+    def increment_session_cost(self, session_id: str, delta_usd: float) -> None: ...
+    def get_distinct_agent_ids(self) -> list[str]: ...
+    def get_active_session(self, agent_id: str) -> SessionRecord | None: ...
+    def get_session_active_seconds(self, session_id: str) -> float | None: ...
+    def count_unknown_plan_tier_sessions(self) -> int: ...
+    def get_window_cost_totals(
+        self, since: datetime, until: datetime, agent_id: str | None = None,
+    ) -> tuple[int, int, int, int, float]: ...
+    def get_cost_delta_by_group(
+        self, group_col: str, current_since: datetime, current_until: datetime,
+        prev_since: datetime, prev_until: datetime, top_n: int,
+    ) -> list[dict]: ...
     def delete_spans_before(self, cutoff: datetime) -> int: ...
     def close(self) -> None: ...
 
@@ -80,36 +97,11 @@ class StorageBackend(Protocol):
 # Schema & migrations
 # ---------------------------------------------------------------------------
 
-INITIAL_SCHEMA_SQL = """\
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version     INTEGER PRIMARY KEY,
-    applied_at  TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS agents (
-    agent_id    TEXT PRIMARY KEY,
-    name        TEXT,
-    version     TEXT,
-    provider    TEXT,
-    first_seen  TIMESTAMPTZ NOT NULL,
-    last_seen   TIMESTAMPTZ NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id          TEXT PRIMARY KEY,
-    agent_id            TEXT NOT NULL,
-    conversation_id     TEXT,
-    started_at          TIMESTAMPTZ NOT NULL,
-    ended_at            TIMESTAMPTZ,
-    status              TEXT NOT NULL DEFAULT 'active',
-    total_cost_usd      DOUBLE,
-    input_tokens        BIGINT DEFAULT 0,
-    output_tokens       BIGINT DEFAULT 0,
-    cache_tokens        BIGINT DEFAULT 0,
-    tool_call_count     INTEGER DEFAULT 0,
-    error_count         INTEGER DEFAULT 0
-);
-
+# Canonical spans table DDL. Single-sourced here so the repair path
+# (`repair_spans_stats`) can rebuild a table that is schema-identical to a
+# freshly-migrated one — PRIMARY KEY, NOT NULL constraints and all. Referenced
+# by INITIAL_SCHEMA_SQL below; do not inline a second copy.
+SPANS_TABLE_SQL = """\
 CREATE TABLE IF NOT EXISTS spans (
     span_id             TEXT PRIMARY KEY,
     trace_id            TEXT NOT NULL,
@@ -139,6 +131,52 @@ CREATE TABLE IF NOT EXISTS spans (
     -- different rates. See models.py::NormalizedSpan for the read/write split.
     cache_write_tokens  BIGINT
 );
+"""
+
+# Secondary indexes on spans. Single-sourced so migration 3 and the repair path
+# create the same set; keep in sync with the DROPs in migration 2.
+SPANS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_spans_trace_id    ON spans(trace_id);\n"
+    "CREATE INDEX IF NOT EXISTS idx_spans_agent_id    ON spans(agent_id);\n"
+    "CREATE INDEX IF NOT EXISTS idx_spans_start_time  ON spans(start_time);\n"
+    "CREATE INDEX IF NOT EXISTS idx_spans_tool_name   ON spans(tool_name);\n"
+    "CREATE INDEX IF NOT EXISTS idx_spans_conv_id     ON spans(conversation_id)"
+)
+
+INITIAL_SCHEMA_SQL = (
+    """\
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version     INTEGER PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+    agent_id    TEXT PRIMARY KEY,
+    name        TEXT,
+    version     TEXT,
+    provider    TEXT,
+    first_seen  TIMESTAMPTZ NOT NULL,
+    last_seen   TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    session_id          TEXT PRIMARY KEY,
+    agent_id            TEXT NOT NULL,
+    conversation_id     TEXT,
+    started_at          TIMESTAMPTZ NOT NULL,
+    ended_at            TIMESTAMPTZ,
+    status              TEXT NOT NULL DEFAULT 'active',
+    total_cost_usd      DOUBLE,
+    input_tokens        BIGINT DEFAULT 0,
+    output_tokens       BIGINT DEFAULT 0,
+    cache_tokens        BIGINT DEFAULT 0,
+    tool_call_count     INTEGER DEFAULT 0,
+    error_count         INTEGER DEFAULT 0
+);
+
+"""
+    + SPANS_TABLE_SQL
+    + """\
 
 CREATE TABLE IF NOT EXISTS alerts (
     alert_id        TEXT PRIMARY KEY,
@@ -184,6 +222,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_conv_id   ON sessions(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_agent_id    ON alerts(agent_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_fired_at    ON alerts(fired_at);
 """
+)
 
 MIGRATIONS: list[tuple[int, str]] = [
     (1, INITIAL_SCHEMA_SQL),
@@ -194,13 +233,7 @@ MIGRATIONS: list[tuple[int, str]] = [
         "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
         "DROP INDEX IF EXISTS idx_spans_conv_id"
     )),
-    (3, (
-        "CREATE INDEX IF NOT EXISTS idx_spans_trace_id    ON spans(trace_id);\n"
-        "CREATE INDEX IF NOT EXISTS idx_spans_agent_id    ON spans(agent_id);\n"
-        "CREATE INDEX IF NOT EXISTS idx_spans_start_time  ON spans(start_time);\n"
-        "CREATE INDEX IF NOT EXISTS idx_spans_tool_name   ON spans(tool_name);\n"
-        "CREATE INDEX IF NOT EXISTS idx_spans_conv_id     ON spans(conversation_id)"
-    )),
+    (3, SPANS_INDEX_SQL),
     # Migration 4: billing_account on spans, plan_tier on sessions.
     # `billing_account` is provider-only (anthropic | openai | google |
     # bedrock | local.ollama). Plan tier lives on sessions, not spans.
@@ -597,10 +630,45 @@ def repair_spans_stats(conn: duckdb.DuckDBPyConnection) -> None:
     Idempotent — safe to call when the table is healthy. Data is preserved.
     Caller is responsible for ensuring no other process holds a write lock on
     the database file (DuckDB enforces exclusive write access).
+
+    The rebuild recreates the table from the canonical DDL rather than a bare
+    `CREATE TABLE … AS SELECT` (#38). A CTAS copies DATA ONLY — it would drop the
+    `span_id` PRIMARY KEY, the NOT NULL constraints, and every `idx_spans_*`
+    index, permanently (migrations are already marked applied, so nothing
+    recreates them). Instead we move the live rows aside, recreate `spans` with
+    its full schema, copy the rows back, and re-issue the indexes — leaving the
+    repaired table schema-identical to a freshly-migrated one.
     """
+    # Stash the live rows + their column layout in a constraint-free holder, then
+    # drop spans (which also drops its dependent indexes) so it can be rebuilt.
     conn.execute("CREATE TABLE _spans_repair AS SELECT * FROM spans")
+    live_cols = conn.execute(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_name = '_spans_repair' ORDER BY ordinal_position"
+    ).fetchall()
     conn.execute("DROP TABLE spans")
-    conn.execute("ALTER TABLE _spans_repair RENAME TO spans")
+    # Recreate the constraint-bearing base table from the canonical DDL.
+    conn.execute(SPANS_TABLE_SQL)
+    # Re-add any columns later migrations appended to spans (e.g. billing_account,
+    # request_params, request_tools), reading their definitions from the holder
+    # so the rebuild tracks the live schema without duplicating the list.
+    base_cols = {
+        row[0]
+        for row in conn.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'spans'"
+        ).fetchall()
+    }
+    for name, data_type in live_cols:
+        if name not in base_cols:
+            conn.execute(f'ALTER TABLE spans ADD COLUMN "{name}" {data_type}')
+    # Column sets now match; BY NAME copy is order-independent.
+    conn.execute("INSERT INTO spans BY NAME SELECT * FROM _spans_repair")
+    conn.execute("DROP TABLE _spans_repair")
+    for statement in SPANS_INDEX_SQL.split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
     conn.execute("CHECKPOINT")
 
 
@@ -1283,6 +1351,106 @@ class DuckDBBackend:
         rows = cur.fetchall()
         cols = [d[0] for d in cur.description]
         return [_row_to_span(r, cols) for r in rows]
+
+    # -- issue #309: queries moved off direct db.conn access in callers --
+
+    def update_span_cost(self, span_id: str, cost_usd: float) -> None:
+        self.conn.execute(
+            "UPDATE spans SET cost_usd = $1 WHERE span_id = $2",
+            [cost_usd, span_id],
+        )
+
+    def increment_session_cost(self, session_id: str, delta_usd: float) -> None:
+        self.conn.execute(
+            "UPDATE sessions SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 "
+            "WHERE session_id = $2",
+            [delta_usd, session_id],
+        )
+
+    def get_distinct_agent_ids(self) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT agent_id FROM sessions WHERE agent_id IS NOT NULL "
+            "ORDER BY agent_id"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def get_active_session(self, agent_id: str) -> SessionRecord | None:
+        cur = self.conn.execute(
+            "SELECT * FROM sessions WHERE agent_id = $1 AND status = 'active' "
+            "ORDER BY started_at DESC LIMIT 1",
+            [agent_id],
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return None
+        cols = [d[0] for d in cur.description]
+        return _row_to_session(rows[0], cols)
+
+    def get_session_active_seconds(self, session_id: str) -> float | None:
+        return session_active_seconds(self.conn, session_id)
+
+    def count_unknown_plan_tier_sessions(self) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE plan_tier IS NULL OR plan_tier = 'unknown'"
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def get_window_cost_totals(
+        self, since: datetime, until: datetime, agent_id: str | None = None,
+    ) -> tuple[int, int, int, int, float]:
+        clauses = ["start_time >= $1", "start_time < $2"]
+        params: list = [since, until]
+        if agent_id:
+            clauses.append(f"agent_id = ${len(params) + 1}")
+            params.append(agent_id)
+        where = " AND ".join(clauses)
+        row = self.conn.execute(
+            f"SELECT COUNT(DISTINCT session_id) AS sessions, "
+            f"COALESCE(SUM(input_tokens), 0)   AS in_tok, "
+            f"COALESCE(SUM(output_tokens), 0)  AS out_tok, "
+            f"COALESCE(SUM(cache_tokens), 0)   AS cache_tok, "
+            f"COALESCE(SUM(cost_usd), 0.0)     AS cost "
+            f"FROM spans WHERE {where}",
+            params,
+        ).fetchone()
+        if row is None:  # COALESCE aggregate always returns a row; guard for typing
+            return (0, 0, 0, 0, 0.0)
+        return (
+            int(row[0] or 0), int(row[1] or 0), int(row[2] or 0),
+            int(row[3] or 0), float(row[4] or 0.0),
+        )
+
+    def get_cost_delta_by_group(
+        self, group_col: str, current_since: datetime, current_until: datetime,
+        prev_since: datetime, prev_until: datetime, top_n: int,
+    ) -> list[dict]:
+        # group_col is an internal, fixed identifier (never user input); the
+        # allow-list keeps it that way so the interpolation below stays safe.
+        if group_col not in ("agent_id", "model"):
+            raise ValueError(f"Unsupported group_col {group_col!r}")
+        sql = f"""
+            SELECT {group_col} AS grp,
+                   COALESCE(SUM(CASE WHEN start_time >= $1 AND start_time < $2
+                                     THEN cost_usd ELSE 0 END), 0.0) AS cur_cost,
+                   COALESCE(SUM(CASE WHEN start_time >= $3 AND start_time < $4
+                                     THEN cost_usd ELSE 0 END), 0.0) AS prev_cost
+            FROM spans
+            WHERE (start_time >= $3 AND start_time < $2)
+              AND {group_col} IS NOT NULL
+            GROUP BY {group_col}
+            HAVING ABS(cur_cost - prev_cost) > 0.0001
+            ORDER BY ABS(cur_cost - prev_cost) DESC
+            LIMIT $5
+        """
+        rows = self.conn.execute(
+            sql, [current_since, current_until, prev_since, prev_until, top_n],
+        ).fetchall()
+        return [
+            {"group": r[0], "current_cost": float(r[1]), "previous_cost": float(r[2]),
+             "delta": float(r[1]) - float(r[2])}
+            for r in rows
+        ]
 
     def delete_spans_before(self, cutoff: datetime) -> int:
         result = self.conn.execute(

@@ -61,7 +61,7 @@ def summarize_window(
     row = conn.execute(
         f"SELECT COUNT(*) AS spans, "
         f"COUNT(DISTINCT session_id) AS sessions, "
-        f"COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0)), 0) AS tokens, "
+        f"COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0) + COALESCE(cache_tokens,0)), 0) AS tokens, "
         f"COALESCE(SUM(cost_usd), 0.0) AS cost "
         f"FROM spans WHERE {where}",
         params,
@@ -247,6 +247,7 @@ def report_from_dict(d: dict) -> OptimizeReport:
             examples=examples,
             suggestions=dict(dd.get("suggestions") or {}),
             caveat=str(dd.get("caveat", "")),
+            bench_command=dd.get("bench_command"),
             candidate_tokens=int(dd.get("candidate_tokens", 0)),
             window_total_tokens=int(dd.get("window_total_tokens", 0)),
             percent_of_tokens=float(dd.get("percent_of_tokens", 0.0)),
@@ -255,6 +256,10 @@ def report_from_dict(d: dict) -> OptimizeReport:
             estimated_recoverable_tokens=dd.get("estimated_recoverable_tokens"),
             estimate_basis=str(dd.get("estimate_basis", "")),
             estimate_confidence=str(dd.get("estimate_confidence", "heuristic")),
+            # Sampling confidence (#308) — round-trip n + the CI bounds.
+            n_sessions=int(dd.get("n_sessions", 0)),
+            ci_low=dd.get("ci_low"),
+            ci_high=dd.get("ci_high"),
         )
 
     budgets = []

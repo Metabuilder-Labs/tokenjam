@@ -200,6 +200,13 @@ async def get_analytics(
         group_cols.append("g2")
     select_cols.append(metric_expr + " AS val")
     select_cols.append(_TOKENS_EXPR + " AS toks")
+    select_cols.append("COALESCE(SUM(cost_usd), 0.0) AS cost")
+    select_cols.append("COALESCE(SUM(input_tokens), 0) AS input_toks")
+    select_cols.append("COALESCE(SUM(output_tokens), 0) AS output_toks")
+    select_cols.append("COALESCE(SUM(cache_tokens), 0) AS cache_read_toks")
+    select_cols.append("COALESCE(SUM(cache_write_tokens), 0) AS cache_write_toks")
+    select_cols.append("COUNT(*) AS events")
+    select_cols.append("COUNT(DISTINCT session_id) AS sessions")
 
     sql = (
         "SELECT " + ", ".join(select_cols) + " FROM spans WHERE " + where
@@ -217,16 +224,51 @@ async def get_analytics(
             g2v = r[2] if r[2] is not None else "(none)"
             val = float(r[3] or 0.0)
             toks = int(r[4] or 0)
+            cost = float(r[5] or 0.0)
+            input_toks = int(r[6] or 0)
+            output_toks = int(r[7] or 0)
+            cache_read = int(r[8] or 0)
+            cache_write = int(r[9] or 0)
+            events = int(r[10] or 0)
+            sessions = int(r[11] or 0)
         else:
             g2v = None
             val = float(r[2] or 0.0)
             toks = int(r[3] or 0)
-        rows.append({"bucket": b, "group": str(g1v),
-                     "stack": (str(g2v) if g2v is not None else None),
-                     "value": val, "tokens": toks})
+            cost = float(r[4] or 0.0)
+            input_toks = int(r[5] or 0)
+            output_toks = int(r[6] or 0)
+            cache_read = int(r[7] or 0)
+            cache_write = int(r[8] or 0)
+            events = int(r[9] or 0)
+            sessions = int(r[10] or 0)
+        rows.append({
+            "bucket": b, "group": str(g1v),
+            "stack": (str(g2v) if g2v is not None else None),
+            "value": val, "tokens": toks,
+            "cost": cost, "input_tokens": input_toks,
+            "output_tokens": output_toks, "cache_read_tokens": cache_read,
+            "cache_write_tokens": cache_write, "events": events,
+            "sessions": sessions,
+        })
         totals[str(g1v)] = totals.get(str(g1v), 0.0) + val
         if g2v is not None:
             stacks[str(g2v)] = stacks.get(str(g2v), 0.0) + val
+
+    # `sessions` is COUNT(DISTINCT session_id) — non-additive (#45). Summing the
+    # per-bucket distinct counts above double-counts a session spanning buckets,
+    # so the per-group total must instead come from a SEPARATE window-wide
+    # GROUP BY <dimension> distinct count, mirroring how the Sessions KPI below
+    # counts a spanning session once. Additive metrics keep the rollup above.
+    if metric == "sessions":
+        totals = {}
+        tbg_sql = (
+            "SELECT " + g1 + " AS g1, COUNT(DISTINCT session_id) AS s"
+            + " FROM spans WHERE " + where + " GROUP BY g1"
+        )
+        for tr in conn.execute(tbg_sql, params).fetchall():
+            g1v = tr[0] if tr[0] is not None else "(none)"
+            totals[str(g1v)] = float(tr[1] or 0)
 
     groups = sorted(totals, key=lambda k: totals[k], reverse=True)
     stack_keys = sorted(stacks, key=lambda k: stacks[k], reverse=True)

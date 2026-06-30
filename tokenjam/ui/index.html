@@ -384,6 +384,9 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .kpi-tile .delta-chip { font-family: 'Geist Mono', monospace; font-size: 11px; margin-top: 6px; display: inline-block; }
 .kpi-val { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 600; }
 .kpi-lab { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.kpi-sub { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+.kpi-sub-val { font-family: 'Geist Mono', monospace; font-size: 15px; font-weight: 600; color: var(--text); }
+.kpi-sub-lab { font-size: 11px; color: var(--text-dim); margin-left: 5px; }
 .leaderboard { display: flex; flex-direction: column; gap: 6px; padding: 6px 0; }
 .lb-row { display: grid; grid-template-columns: 24px minmax(80px, 160px) 1fr auto; align-items: center; gap: 10px; font-size: 13px; }
 .lb-rank { color: var(--text-faint); font-family: 'Geist Mono', monospace; text-align: right; }
@@ -401,7 +404,8 @@ tr.clickable:hover td.chevron { color: var(--accent); }
   font-family: 'Geist Mono', monospace;
   font-size: 12px;
 }
-.btn:hover { border-color: var(--accent); color: var(--accent); }
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-back { margin-bottom: 16px; }
 .btn-restore { padding: 3px 8px; font-size: 11px; white-space: nowrap; position: relative; display: inline-flex; align-items: center; gap: 5px; }
 .btn-restore.copied { border-color: var(--success); color: var(--success); }
@@ -4356,16 +4360,19 @@ function Sparkline({ values, color = 'var(--accent)', width = 92, height = 26 })
 // `onSelect` makes the tile the metric selector (#247): the kpi-active border
 // already implied it was clickable; wiring onClick fulfills that. Falls back to
 // a static tile when no handler is given.
-function KpiTile({ label, value, active, series, delta, cost, prevThin, onSelect }) {
+function KpiTile({ label, value, active, series, delta, cost, prevThin, onSelect, sub = null }) {
   const cls = 'kpi-tile' + (active ? ' kpi-active' : '') + (onSelect ? ' kpi-clickable' : '');
   const props = onSelect
     ? { class: cls, role: 'button', tabindex: '0', 'aria-pressed': String(!!active),
         onClick: onSelect,
         onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(); } } }
     : { class: cls };
+  // #318: optional secondary line — the breakdown subtotal on the active tile
+  // when grouping by a partial dimension (defaults null, so other callers are
+  // unaffected).
   return html`<div ...${props}>
     <div class="kpi-top">
-      <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div></div>
+      <div class="kpi-num"><div class="kpi-val">${value}</div><div class="kpi-lab">${label}</div>${sub ? html`<div class="kpi-sub"><span class="kpi-sub-val">${sub.value}</span><span class="kpi-sub-lab">${sub.label}</span></div>` : null}</div>
       <${Sparkline} values=${series} />
     </div>
     <${DeltaChip} pct=${delta} cost=${cost} prevThin=${prevThin} />
@@ -4773,7 +4780,7 @@ function DriftView({ params }) {
 
   // /drift returns a single-agent shape when agent_id is set; normalize to a list.
   const agents = data.agents || (data.agent_id ? [data] : []);
-  if (!agents.length) return html`<div class="empty">No baselines built yet. Run at least 10 sessions to establish a behavioral baseline.</div>`;
+  if (!agents.length) return html`<div class="empty">No drift baselines built yet. Run at least 10 completed live sessions for a single agent to establish its behavioral baseline (note: drift baselines are computed per-agent, and only from live sessions, so historical backfilled sessions will not build a baseline).</div>`;
 
   const metrics = [
     ['Input tokens', 'avg_input_tokens', 'stddev_input_tokens', 'input_tokens'],
@@ -5382,13 +5389,61 @@ function buildLeaderboard(resp, useTokens) {
 // CSV from the current pivot — built client-side from the response (offline,
 // no server round-trip), downloaded via a Blob object URL.
 function analyticsCsv(resp) {
-  const head = ['bucket_epoch', 'bucket_iso', resp.group_by, resp.stack_by || 'stack', resp.metric, 'tokens'];
+  const framing = resp.framing || {};
+  const mode = framing.pricing_mode || 'unknown';
+  const monthlyUsd = framing.plan_monthly_usd || 0;
+
+  const hasStack = !!resp.stack_by;
+
+  const head = [
+    'bucket_epoch',
+    'bucket_iso',
+    resp.group_by,
+    resp.stack_by || 'stack',
+    'cost',
+    'cycle_share_pct',
+    'input_tokens',
+    'output_tokens',
+    'cache_read_tokens',
+    'cache_write_tokens',
+    'sessions',
+    'events'
+  ];
+
   const lines = [head.join(',')];
+
   (resp.rows || []).forEach(r => {
     const iso = new Date(r.bucket * 1000).toISOString();
     const cell = v => { const s = String(v == null ? '' : v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-    lines.push([r.bucket, iso, cell(r.group), cell(r.stack), r.value, r.tokens].join(','));
+
+    const rawCost = r.cost || 0;
+
+    // Route through existing helper rather than inline mode derivation to prevent leaks
+    const costVal = perItemUsesTokens(framing) ? '' : String(rawCost);
+    
+    let cycleShareVal = '';
+    if (framing.pricing_mode === 'subscription' && framing.plan_monthly_usd > 0) {
+      cycleShareVal = String((rawCost / framing.plan_monthly_usd) * 100.0);
+    }
+
+    const rowData = [
+      r.bucket,
+      iso,
+      cell(r.group),
+      cell(r.stack),
+      costVal,
+      cycleShareVal,
+      r.input_tokens || 0,
+      r.output_tokens || 0,
+      r.cache_read_tokens || 0,
+      r.cache_write_tokens || 0,
+      r.sessions || 0,
+      r.events || 0
+    ];
+
+    lines.push(rowData.join(','));
   });
+
   return lines.join('\n');
 }
 
@@ -5420,13 +5475,22 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const setFilter = (k, v) => navigate(route, { ...cur, [k]: v }, DEFAULTS);
   const applyPreset = (q) => navigate(route, { ...cur, ...q }, DEFAULTS);
 
+  // #295: Stack only makes sense on the multi-series charts (bar/line). The
+  // Leaderboard (hbar) collapses the time dimension into a single per-group
+  // total and ignores stack entirely, so a stale stack there just strands the
+  // view on an empty cross-tab ("No data"). Gate it: hide the Stack control AND
+  // drop stack_by from the query for non-stacking charts. The chosen stack stays
+  // in the URL, so it returns when the user switches back to a bar/line chart.
+  const stackApplies = chart === 'bar' || chart === 'line';
+  const effStack = stackApplies ? stack : '';
+
   const [st, setSt] = useState({ loading: true, error: null, resp: null });
 
   const load = useCallback(async () => {
-    setSt(s => ({ ...s, loading: !s.resp, error: null }));
+    setSt(s => ({ ...s, loading: true, error: null }));
     try {
       const resp = await api('/analytics', {
-        metric, group_by: groupBy, stack_by: stack || undefined, since,
+        metric, group_by: groupBy, stack_by: effStack || undefined, since,
         agent_id: fAgent || undefined, provider: fProvider || undefined,
         model: fModel || undefined, tool: fTool || undefined,
       });
@@ -5434,7 +5498,10 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [metric, groupBy, stack, chart, since, fAgent, fProvider, fModel, fTool]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    setSt(s => ({ ...s, loading: true, error: null }));
+    load();
+  }, [load]);
 
   const { loading, error, resp } = st;
   const framing = resp ? resp.framing : null;
@@ -5460,6 +5527,38 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
   const toolDimNoMetric = (groupBy === 'tool' || groupBy === 'tool_category')
     && (metric === 'spend' || metric === 'tokens');
 
+  // #295: a stacked breakdown can be structurally empty even when the metric has
+  // plenty of data — e.g. Model × Tool category, since a span is either an LLM
+  // call or a tool call, never both. Detect that so we can prompt the user to
+  // clear the stack instead of stranding them on a bare "No data" chart. (Only
+  // bar/line carry a stack — effStack is '' for the leaderboard.)
+  const noRows = !!resp && Array.isArray(resp.rows) && resp.rows.length === 0;
+  const emptyFromStack = !!effStack && noRows;
+  const labelOf = dim => (ANALYTICS_DIMENSIONS.find(d => d[0] === dim) || [, dim])[1];
+
+  // #313: surface the leaderboard's own total + item count (a ranked list with
+  // no sum is confusing), and reconcile the gap when grouping by a PARTIAL
+  // dimension — only some spans carry it (e.g. a tool), so the breakdown subtotal
+  // is legitimately smaller than the all-events KPI and otherwise looks
+  // contradictory. Purely additive: only the leaderboard (hbar) branch reads
+  // these; nothing else changes.
+  const boardTotal = board ? board.reduce((s, e) => s + (e.value || 0), 0) : 0;
+  const boardCount = board ? board.length : 0;
+  const dimName = (ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1].toLowerCase();
+  const dimNamePlural = (/y$/.test(dimName) && !/[aeiou]y$/.test(dimName)) ? dimName.slice(0, -1) + 'ies' : dimName + 's';
+  const countMetric = (metric === 'events' || metric === 'sessions') ? metric : null;
+  const kpiCount = (countMetric && kpis) ? kpis[countMetric] : null;
+  const boardGap = kpiCount != null && boardTotal > 0 && boardTotal < kpiCount;
+
+  const getFilename = () => {
+    if (!resp) return 'tokenjam-analytics.csv';
+    const startStr = resp.window_start ? new Date(resp.window_start * 1000).toISOString().split('T')[0] : '';
+    const endStr = resp.window_end ? new Date(resp.window_end * 1000).toISOString().split('T')[0] : '';
+    return startStr && endStr ? `tokenjam-analytics_${startStr}_${endStr}.csv` : 'tokenjam-analytics.csv';
+  };
+
+
+
   return html`
     ${embedded ? null : html`<div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Analytics <${PlanBadge} framing=${framing} />
@@ -5474,11 +5573,11 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         <select value=${groupBy} onChange=${e => setFilter('group_by', e.target.value)}>
           ${ANALYTICS_DIMENSIONS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
         </select></label>
-      <label class="ctl">Stack
+      ${stackApplies ? html`<label class="ctl">Stack
         <select value=${stack} onChange=${e => setFilter('stack', e.target.value)}>
           <option value="">none</option>
           ${ANALYTICS_DIMENSIONS.filter(d => d[0] !== groupBy).map(([v, l]) => html`<option value=${v}>${l}</option>`)}
-        </select></label>
+        </select></label>` : null}
       <label class="ctl">Chart
         <select value=${chart} onChange=${e => setFilter('chart', e.target.value)}>
           ${ANALYTICS_CHARTS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
@@ -5488,7 +5587,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         <option value="30d">Last 30d</option><option value="90d">Last 90d</option>
       </select>`}
       <button class="btn" onClick=${load}>Refresh</button>
-      <button class="btn" onClick=${() => resp && downloadCsv('tokenjam-analytics.csv', analyticsCsv(resp))}>Export CSV</button>
+      <button class="btn" onClick=${() => resp && downloadCsv(getFilename(), analyticsCsv(resp))} disabled=${loading}>Export CSV</button>
     </div>
 
     <div class="filters preset-row">
@@ -5517,6 +5616,16 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
       // window's session count as the universal "did anything happen" proxy.
       const prevThin = !!resp.kpi_prev && (resp.kpi_prev.sessions || 0) < 2;
       const onMetric = (k) => setFilter('metric', k);
+      // #318: the ACTIVE count-metric tile shows the breakdown subtotal next to
+      // the window total when grouping by a PARTIAL dimension (only some spans
+      // carry it, e.g. tool), so the window-wide tile reconciles with the smaller
+      // chart subtotal. Count metrics only (events/sessions — spend/tokens framing
+      // is more complex); only when there's an actual gap.
+      const breakdownTotal = (resp.rows || []).reduce((s, r) => s + (r.value || 0), 0);
+      const breakdownDim = (ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1].toLowerCase();
+      const activeSub = ((metric === 'events' || metric === 'sessions')
+        && breakdownTotal > 0 && breakdownTotal < (kpis[metric] || 0))
+        ? { value: fmtCount(breakdownTotal), label: `by ${breakdownDim}` } : null;
       const tiles = [];
       if (spend) {
         tiles.push({ key: 'spend', label: spend.label, cost: true, value: spend.value,
@@ -5532,13 +5641,14 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         <div class="kpi-row">
           ${tiles.map(t => html`<${KpiTile} label=${t.label} value=${t.value} active=${t.key === metric}
               series=${t.series} delta=${t.delta == null ? null : t.delta} cost=${t.cost}
+              sub=${t.key === metric ? activeSub : null}
               prevThin=${prevThin} onSelect=${() => onMetric(t.key)} />`)}
         </div>
         ${kpiCaption ? html`<div class="kpi-caption">${kpiCaption}</div>` : null}`;
     })() : null}
 
     ${!error ? html`
-      <div class="chart-card">
+      <div class="chart-card" style=${loading ? 'opacity: 0.5; pointer-events: none; transition: opacity 0.2s' : 'transition: opacity 0.2s'}>
         <div class="chart-head">
           <div class="chart-title">${(ANALYTICS_METRICS.find(m => m[0] === metric) || [, metric])[1]} by ${(ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1]}${metricSuffix}</div>
         </div>
@@ -5551,9 +5661,15 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
               <button class="btn" onClick=${() => setFilter('group_by', 'agent')}>Group by Agent</button>
             </div>
           </div>`
-          : loading ? html`<div class="shimmer" style="height:200px"></div>`
+          : loading && !resp ? html`<div class="shimmer" style="height:200px"></div>`
+          : emptyFromStack ? html`
+            <div class="empty" style="padding:32px 16px;text-align:center">
+              <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these — e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
+              <button class="btn" onClick=${() => setFilter('stack', '')}>Clear stack</button>
+            </div>`
           : chart === 'hbar'
             ? (board && board.length ? html`
+              <div class="dim" style="font-size:12px;margin:2px 0 8px">Total: ${fmtVal(boardTotal)} · ${boardCount} ${boardCount === 1 ? dimName : dimNamePlural}</div>
               <div class="leaderboard">
                 ${board.map((e, i) => {
                   const label = formatGroupLabel(e.group, groupBy);
@@ -5565,7 +5681,9 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
                     <span class="lb-val">${fmtVal(e.value)}</span>
                   </div>`;
                 })}
-              </div>` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
+              </div>
+              ${boardGap ? html`<div class="chart-foot"><span class="dim">Only ${fmtCount(boardTotal)} of ${fmtCount(kpiCount)} ${countMetric} have a ${dimName} — the rest aren't in this breakdown.</span></div>` : null}
+              ` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
             : (series ? html`
               ${chart === 'line'
                 ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} showLegend=${series.labels.length > 1} bucket=${series.bucket} />`

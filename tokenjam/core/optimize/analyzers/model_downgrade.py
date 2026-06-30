@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Any
 
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.stats import bootstrap_ci
 from tokenjam.core.optimize.types import (
     AnalyzerContext,
     DowngradeExample,
@@ -139,6 +140,10 @@ def analyze_model_downgrade(
     window_total_tokens = 0
     examples: list[DowngradeExample] = []
     suggestions: dict[str, str] = {}
+    swaps: list[tuple[str, str, str]] = []
+    # Per-candidate-session window savings, for the sampling-confidence interval
+    # (#308). One value per candidate session = (actual cost − cheaper-model cost).
+    per_session_savings: list[float] = []
 
     for row in llm_rows:
         session_id, trace_id, _agent, start_time, end_time, provider, model, \
@@ -168,7 +173,12 @@ def analyze_model_downgrade(
         actual_cost += float(cost or 0.0)
         alt_cost += alt_unit
         candidate_tokens += int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
+        # This session's recoverable saving (clamped at 0 — a cheaper model
+        # never costs more in our candidate set, but guard against pricing noise).
+        per_session_savings.append(max(float(cost or 0.0) - alt_unit, 0.0))
         suggestions[model] = alt
+        if (provider, model, alt) not in swaps:
+            swaps.append((provider, model, alt))
 
         if len(examples) < 3:
             duration = None
@@ -192,6 +202,15 @@ def analyze_model_downgrade(
     savings_window = max(actual_cost - alt_cost, 0.0)
     monthly_savings = (savings_window / window_days * 30.0) if window_days > 0 else 0.0
     percent = (candidate_sessions / total_sessions * 100.0) if total_sessions else 0.0
+
+    # Sampling confidence on the monthly projection (#308). Resample the
+    # candidate sessions with replacement and recompute the projected monthly
+    # savings, so the interval widens when the estimate rests on few sessions.
+    # Same `scale` as monthly_savings so the CI brackets that exact figure.
+    monthly_scale = (30.0 / window_days) if window_days > 0 else 1.0
+    ci = bootstrap_ci(per_session_savings, scale=monthly_scale)
+    ci_low = round(ci[0], 2) if ci else None
+    ci_high = round(ci[1], 2) if ci else None
     percent_tokens = (
         candidate_tokens / window_total_tokens * 100.0
         if window_total_tokens > 0 else 0.0
@@ -199,6 +218,9 @@ def analyze_model_downgrade(
     monthly_tokens_in_candidates = (
         int(candidate_tokens / window_days * 30.0) if window_days > 0 else 0
     )
+
+    commands = [f"tjb run --original {p}:{orig} --candidate {p}:{alt}" for p, orig, alt in swaps]
+    bench_command = "\n".join(commands) if commands else None
 
     return DowngradeFinding(
         candidate_sessions=candidate_sessions,
@@ -209,6 +231,7 @@ def analyze_model_downgrade(
         percent_of_sessions=round(percent, 1),
         examples=examples,
         suggestions=suggestions,
+        bench_command=bench_command,
         candidate_tokens=candidate_tokens,
         window_total_tokens=window_total_tokens,
         percent_of_tokens=round(percent_tokens, 1),
@@ -224,6 +247,9 @@ def analyze_model_downgrade(
             "candidate sessions routed to a cheaper model over the window — "
             "structural fit only, no quality validation"
         ),
+        n_sessions=candidate_sessions,
+        ci_low=ci_low,
+        ci_high=ci_high,
     )
 
 

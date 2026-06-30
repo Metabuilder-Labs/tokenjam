@@ -45,7 +45,8 @@ def cmd_drift(ctx: click.Context, agent: str | None, output_json: bool) -> None:
         else:
             console.print(
                 "[dim]No drift baselines found. "
-                "Need at least 10 completed sessions to build a baseline.[/dim]"
+                "Need at least 10 completed live sessions for a single agent to build its baseline "
+                "(note: drift baselines are computed per-agent and only from live sessions, so historical backfilled sessions will not build a baseline).[/dim]"
             )
         ctx.exit(0)
         return
