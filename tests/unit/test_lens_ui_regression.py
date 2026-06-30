@@ -1336,3 +1336,55 @@ def test_approach_handles_unavailable(html):
     # snapshot for this session).
     assert "data.reason" in html
     assert "No transcript or snapshot for this session" in html
+
+
+# --- Map board: ①+③ swimlanes + territory (GET /sessions/{id}/sessionmap) ---- #
+def test_map_board_section_present_and_wired(html):
+    # The Map tab renders the ①+③ board from the dedicated /sessionmap endpoint.
+    assert "function MapBoardSection" in html
+    assert "/sessions/' + sessionId + '/sessionmap'" in html
+    # The Map tab dispatches to the board (no longer straight to WorkMapSection).
+    assert "tab === 'map' ? html`<${MapBoardSection} sessionId=${sessionId} />`" in html
+
+
+def test_map_board_has_four_synchronized_lanes(html):
+    # Four lanes share one x-axis, each with a left gutter label.
+    for lane in ("phase", "tools", "context", "cost"):
+        assert f'<div class="mb-gutter">{lane}</div>' in html, f"missing {lane} lane gutter"
+    # Context is an inline SVG area chart, cost is inline SVG bars — NOT uPlot —
+    # so the lanes stay pixel-aligned (the mock's approach).
+    assert 'viewBox="0 0 100 30" preserveAspectRatio="none"' in html
+    # A shared crosshair binds the lanes.
+    assert 'class="mb-cross"' in html
+
+
+def test_map_board_has_time_step_toggle(html):
+    # The time⇄step toggle re-spaces every lane (useState-driven).
+    assert "const [mode, setMode] = useState('time')" in html
+    assert "setMode('time')" in html
+    assert "setMode('step')" in html
+    assert 'class="mb-toggle"' in html
+
+
+def test_map_board_renders_territory_treemap(html):
+    # The ③ codebase-territory treemap aggregates read/edit events into per-file
+    # touch counts, grouped by directory, with order badges + an edited marker.
+    assert "function mbBuildTerritory" in html
+    assert 'class="mb-tree"' in html
+    assert 'class="mb-file"' in html
+    assert 'class="mb-ord"' in html  # first-touch order badge
+
+
+def test_map_board_falls_back_to_work_map_when_unavailable(html):
+    # When /sessionmap has no board data, the board falls back to the existing
+    # WorkMapSection so nothing is lost — and WorkMapSection stays defined.
+    assert "function WorkMapSection" in html
+    assert "return html`<${WorkMapSection} sessionId=${sessionId} />`" in html
+
+
+def test_map_board_category_colors_use_theme_vars(html):
+    # Category → theme chart var map (offline; no hardcoded hexes — Rule 18).
+    assert "const MB_CAT_COLOR = {" in html
+    assert "read: '--chart-1'" in html
+    assert "edit: '--chart-2'" in html
+    assert "error: '--error'" in html
