@@ -66,9 +66,11 @@ durably capture.
 - **`core/method_capture.py`:** `capture_session_method(db, session_id, projects_dir, ...)` builds the Story
   via `transcript.py` and upserts the snapshot. Idempotent (re-capture overwrites with the latest, fuller
   read). Pure-ish: reads files, writes one row; no analysis.
-- **Wire-in:** capture at session close (`cli/cmd_session_end` / close-signal route) and at the end of
-  `tj backfill claude-code`. Capture is best-effort and error-tolerant (a missing/pruned transcript logs and
-  no-ops — never raises into ingest).
+- **Wire-in:** capture at session close (`cli/cmd_session_end` / close-signal route) **and** per
+  newly-ingested session at the end of `tj backfill claude-code` (`core/backfill.py:ingest_claude_code`,
+  `source="backfill"`) — both now wired. This is what makes historical sessions (the ones most likely to be
+  pruned later) keep their method. Capture is best-effort and error-tolerant (a missing/pruned transcript
+  logs and no-ops — never raises into ingest).
 - **Read-through:** `/story` and `/workmap` prefer the persisted snapshot, falling back to live transcript
   reconstruction when none exists. Persisted snapshots make a *killed* agent's method survive a later
   transcript prune.

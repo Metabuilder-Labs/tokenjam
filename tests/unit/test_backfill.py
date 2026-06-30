@@ -1178,3 +1178,84 @@ def test_ingest_resumed_session_writes_one_span_per_call(tmp_path):
         assert sess.output_tokens == 280
     finally:
         db.close()
+
+
+# --- method snapshot is captured at backfill so it survives a later prune ----- #
+
+def test_backfill_captures_method_snapshot_for_ingested_session(tmp_path):
+    """Backfill snapshots each newly-ingested session's reconstructed method into
+    `session_story`, with source='backfill', so a historical session keeps its
+    method even after Claude Code prunes the transcript."""
+    from tokenjam.core.method_capture import load_session_method
+
+    _make_session_file(
+        tmp_path, session_id="sess-snap", cwd="/Users/me/proj",
+        records=[
+            {"type": "user", "message": {"role": "user", "content": "Do the thing."}},
+            _assistant_record(
+                "m-snap", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-snap", "/Users/me/proj",
+                tool_uses=[("tu-snap", "Read")],
+            ),
+        ],
+    )
+    db = InMemoryBackend()
+    try:
+        r = ingest_claude_code(db, root=tmp_path)
+        assert "sess-snap" in r.new_session_ids
+
+        # A snapshot row exists and is tagged as a backfill capture.
+        row = db.conn.execute(
+            "SELECT source FROM session_story WHERE session_id = $1", ["sess-snap"],
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "backfill"
+
+        # And load_session_method returns the reconstructed Story.
+        snapshot = load_session_method(db, "sess-snap")
+        assert snapshot is not None
+        assert snapshot["story"] is not None
+        assert snapshot["story"]["task"] == "Do the thing."
+    finally:
+        db.close()
+
+
+def test_backfill_capture_is_noop_without_transcript_text(tmp_path):
+    """A session whose transcript yields no reconstructable Story (SDK-style /
+    no on-disk content for the parser) leaves no session_story row and does not
+    raise — capture stays best-effort on the backfill path."""
+    from tokenjam.core.method_capture import load_session_method
+
+    # Ingest a normal session, then point capture at a DIFFERENT empty root so
+    # the per-session re-read finds no transcript: no row, no raise.
+    _make_session_file(
+        tmp_path, session_id="sess-ghost", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "m-ghost", "claude-haiku-4-5", 100, 50,
+            "2026-04-01T10:00:00.000Z", "sess-ghost", "/Users/me/proj",
+        )],
+    )
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+
+    db = InMemoryBackend()
+    try:
+        # Parse from the real root, but the second arg here is what capture re-reads.
+        # Simulate the no-transcript case by ingesting then capturing a session id
+        # that has no file under the capture root.
+        r = ingest_claude_code(db, root=tmp_path)
+        assert "sess-ghost" in r.new_session_ids
+
+        # The ingested session got a snapshot (transcript present)...
+        assert load_session_method(db, "sess-ghost") is not None
+
+        # ...but a session with no transcript under the root yields nothing and
+        # never raises when capture re-reads it.
+        from tokenjam.core.method_capture import capture_session_method
+
+        assert capture_session_method(
+            db, "no-such-session", projects_dir=empty_root, source="backfill"
+        ) is False
+        assert load_session_method(db, "no-such-session") is None
+    finally:
+        db.close()
