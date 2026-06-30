@@ -242,28 +242,32 @@ def _cap_marker(sub: dict[str, Any]) -> str | None:
     return next((label for key, label in _CAP_MARKERS.items() if sub.get(key)), None)
 
 
-def _delegate_children(
-    step: dict[str, Any],
-) -> tuple[list[dict[str, Any]], str | None]:
-    """Recursively build the spine(s) of a delegate step's subagent child stories.
+def _delegations(step: dict[str, Any], depth: int) -> list[dict[str, Any]]:
+    """One delegation entry per subagent child of a delegate ``step``.
 
-    Returns ``(children, capped)`` — the concatenated child spines, plus the cap
-    reason when a child hit a recursion guard (depth/budget/cycle) and so has no
-    expanded story. Capped children contribute no moves (the marker carries the
-    honest "not expanded" signal instead of inventing one).
+    Each entry is ``{name, agent_id, depth, task, capped, spine}`` — the child's
+    identity, its spawn ``depth`` (parent depth + 1), its mandate (``task``), the
+    cap reason (``depth``/``budget``/``cycle``) when a recursion guard tripped, and
+    the child's own recursively-built method ``spine``. A capped child carries an
+    empty ``spine`` and a non-null ``capped`` (the honest "not expanded" signal
+    instead of inventing moves it never captured).
     """
-    children: list[dict[str, Any]] = []
-    capped: str | None = None
+    child_depth = depth + 1
+    delegations: list[dict[str, Any]] = []
     for sub in _subagent_dicts(step):
         cap = _cap_marker(sub)
-        if cap is not None:
-            capped = capped or cap
-            continue
-        children.extend(build_method_spine(sub))
-    return children, capped
+        delegations.append({
+            "name": sub.get("name"),
+            "agent_id": sub.get("agent_id"),
+            "depth": child_depth,
+            "task": sub.get("task"),
+            "capped": cap,
+            "spine": [] if cap is not None else build_method_spine(sub, child_depth),
+        })
+    return delegations
 
 
-def _move(step: dict[str, Any]) -> dict[str, Any]:
+def _move(step: dict[str, Any], depth: int = 0) -> dict[str, Any]:
     """Fold one Story step into one method-spine move (deterministic)."""
     tools = step.get("tools") or []
     text = step.get("text") or ""
@@ -291,28 +295,31 @@ def _move(step: dict[str, Any]) -> dict[str, Any]:
     }
 
     if kind == "delegate":
-        children, capped = _delegate_children(step)
-        move["children"] = children
-        if capped is not None:
-            move["capped"] = capped
+        move["delegations"] = _delegations(step, depth)
 
     return move
 
 
-def build_method_spine(story: dict[str, Any]) -> list[dict[str, Any]]:
+def build_method_spine(
+    story: dict[str, Any], depth: int = 0
+) -> list[dict[str, Any]]:
     """Fold a session Story into an ordered list of intent-tagged moves.
 
     ``story`` is the dict from ``core/transcript.build_session_story`` (or a
     persisted snapshot of it, or a nested subagent story — same schema). Each
     real step becomes one move; ``{"omitted": N}`` cap markers are skipped.
-    ``delegate`` moves carry the recursively-built spines of their subagents
-    under ``children`` (with a ``capped`` marker when a child wasn't expanded).
+    ``delegate`` moves carry a ``delegations`` list — one entry per spawned
+    subagent (``{name, agent_id, depth, task, capped, spine}``), each with the
+    child's recursively-built ``spine`` (or an empty one + ``capped`` reason when
+    a recursion guard tripped).
 
-    Deterministic and honesty-bounded: see the module docstring. Returns ``[]``
-    for an empty/absent story.
+    ``depth`` is this story's spawn depth (0 for the main agent); each
+    delegation's child spine recurses at ``depth + 1`` so every move's tree depth
+    is recoverable. Deterministic and honesty-bounded: see the module docstring.
+    Returns ``[]`` for an empty/absent story.
     """
     steps = story.get("steps") or []
-    return [_move(step) for step in steps if "omitted" not in step]
+    return [_move(step, depth) for step in steps if "omitted" not in step]
 
 
 __all__ = ["build_method_spine"]

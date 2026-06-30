@@ -1227,13 +1227,57 @@ def test_approach_source_tags_present(html):
 
 
 def test_approach_renders_recursively(html):
-    # A delegate move with children renders the SAME move renderer (recursion),
-    # behind a collapsed-by-default caret toggle; a capped delegate shows a note.
+    # A delegate move renders one rich card per `delegations` entry; expanding a
+    # card recurses into the child's own spine via the SAME move renderer. A
+    # capped delegation shows a "not expanded" note instead of expanding.
     assert "function ApproachMove" in html
-    assert "children.map(c => html`<${ApproachMove} move=${c} />`)" in html
-    assert "kind === 'delegate' && children.length > 0" in html
-    assert "move.capped" in html
-    assert "not expanded — ${move.capped}" in html
+    assert "function ApproachDelegation" in html
+    assert "delegations.map(d => html`<${ApproachDelegation} deleg=${d} />`)" in html
+    assert "spine.map(m => html`<${ApproachMove} move=${m} />`)" in html
+    assert "not expanded — ${capped}" in html
+
+
+def test_approach_delegation_cards_show_cost_and_depth(html):
+    # Each delegation card carries the child's identity, spawn depth, and the
+    # span-joined token/cost/status chips (read straight off the payload).
+    assert "function ApproachDelegation" in html
+    assert "↳ ${deleg.name}" in html
+    assert "depth ${deleg.depth}" in html
+    assert "deleg.tokens != null ? fmtTokens(deleg.tokens)" in html
+    assert "deleg.cost_usd != null ? fmtCost(deleg.cost_usd)" in html
+    # The expanded block carries the child's "how it solved its piece" header.
+    assert "how the subagent solved its piece" in html
+
+
+def test_approach_delegation_tree_rail_present(html):
+    # The left rail renders data.agents — a status dot + name + meta + badge +
+    # provenance line per agent, indented by spawn depth, with the ephemeral
+    # capture caption at the foot.
+    assert "function ApproachRail" in html
+    assert "<${ApproachRail} agents=${agents} />" in html
+    assert "Delegation tree" in html
+    assert 'class="ap-dot ${dotClass}"' in html
+    assert "in-session subagent · from transcript" in html
+    assert "ended · method kept" in html
+    assert "rebuilds" in html  # the ephemeral-capture caption
+
+
+def test_approach_header_stats_and_layout(html):
+    # Two-column grid (rail + panel) and a right-aligned header stats block from
+    # counts + meta.
+    assert 'class="ap-grid"' in html
+    assert "data.counts" in html
+    assert "data.meta" in html
+    assert "moves<br/><b>${counts.delegations}</b> delegations" in html
+
+
+def test_approach_legend_present(html):
+    # The bottom "source of each line" legend names all three sources.
+    assert 'class="ap-legend"' in html
+    assert "source of each line:" in html
+    assert "narration / TodoWrite" in html
+    assert "revert / retry / spawn" in html
+    assert "LLM, opt-in" in html
 
 
 def test_approach_handles_unavailable(html):
