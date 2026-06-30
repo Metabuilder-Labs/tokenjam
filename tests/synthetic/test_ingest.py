@@ -6,7 +6,7 @@ from datetime import datetime
 
 import pytest
 
-from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
+from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig, AgentConfig
 from tokenjam.core.ingest import (
     IngestPipeline,
     SpanRejectedError,
@@ -15,7 +15,12 @@ from tokenjam.core.ingest import (
 )
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.otel.semconv import GenAIAttributes
-from tests.factories import make_llm_span, make_session, make_tool_span
+from tests.factories import (
+    make_invoke_agent_span,
+    make_llm_span,
+    make_session,
+    make_tool_span,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +78,7 @@ def _make_pipeline(
     security: SecurityConfig | None = None,
     capture: CaptureConfig | None = None,
     db: InMemoryBackend | None = None,
+    agents: dict | None = None,
 ) -> tuple[IngestPipeline, InMemoryBackend]:
     """Create an IngestPipeline with sensible defaults for testing."""
     db = db or InMemoryBackend()
@@ -80,6 +86,7 @@ def _make_pipeline(
         version="1",
         security=security or SecurityConfig(),
         capture=capture or CaptureConfig(),
+        agents=agents or {},
     )
     pipeline = IngestPipeline(
         db=db,
@@ -179,6 +186,23 @@ class TestSessionResolution:
         pipeline.process(span)
 
         assert db.spans[-1].session_id == "my-session"
+
+    def test_cache_write_tokens_aggregate_separately_from_reads(self):
+        # Cache reads accumulate into cache_tokens; cache writes/creation into
+        # cache_write_tokens. The two must never be conflated.
+        pipeline, db = _make_pipeline()
+
+        pipeline.process(make_llm_span(
+            conversation_id="conv-cache", cache_tokens=100, cache_write_tokens=40,
+        ))
+        pipeline.process(make_llm_span(
+            conversation_id="conv-cache", cache_tokens=200, cache_write_tokens=10,
+        ))
+
+        session = db.get_session_by_conversation("conv-cache")
+        assert session is not None
+        assert session.cache_tokens == 300            # reads only
+        assert session.cache_write_tokens == 50    # writes only
 
     def test_span_without_session_or_conversation_gets_new_session(self):
         pipeline, db = _make_pipeline()
@@ -349,3 +373,111 @@ class TestErrorHandling:
         # Should NOT raise even though cost engine fails
         pipeline.process(span)
         assert len(db.spans) == 1
+
+
+# ===========================================================================
+# Session lifecycle tests
+#
+# Regression coverage for the Claude Code / Codex logs path, where each
+# user_prompt event is mapped to a zero-duration invoke_agent span. Treating
+# those turn-start markers as session completions force-completed every live
+# session on its first prompt — the dashboard showed active work as
+# "completed" with 0 duration, and the drift/alert session-end hooks fired on
+# every turn.
+# ===========================================================================
+
+class TestSessionLifecycle:
+
+    def test_zero_duration_invoke_agent_marker_keeps_session_active(self):
+        # Claude Code maps each user_prompt to a zero-duration invoke_agent
+        # span (end_time == start_time). It marks the START of a turn.
+        pipeline, db = _make_pipeline()
+        marker = make_invoke_agent_span(session_id="s1", duration_ms=0.0)
+
+        pipeline.process(marker)
+
+        session = db.get_session("s1")
+        assert session is not None
+        assert session.status == "active"
+
+    def test_streaming_activity_keeps_session_active(self):
+        # A marker followed by real LLM activity is still an ongoing session.
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_invoke_agent_span(session_id="s1", duration_ms=0.0))
+        pipeline.process(make_llm_span(session_id="s1"))
+
+        assert db.get_session("s1").status == "active"
+
+    def test_real_invoke_agent_span_completes_session(self):
+        # The SDK @watch() path emits one invoke_agent span that brackets the
+        # whole run (end_time strictly after start_time). That DOES complete it.
+        pipeline, db = _make_pipeline()
+        end_span = make_invoke_agent_span(session_id="s1", duration_ms=5000.0)
+
+        pipeline.process(end_span)
+
+        assert db.get_session("s1").status == "completed"
+
+    def test_activity_reactivates_mistakenly_completed_session(self):
+        # An in-flight session left "completed" (e.g. by the old bug, or a
+        # prior restart) must self-heal when new activity arrives.
+        pipeline, db = _make_pipeline()
+        db.upsert_session(make_session(session_id="s1", status="completed"))
+
+        pipeline.process(make_llm_span(session_id="s1"))
+
+        assert db.get_session("s1").status == "active"
+
+
+class TestServiceNamespace:
+    """service.namespace (project grouping) capture on the session."""
+
+    def test_session_captures_service_namespace(self):
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_llm_span(session_id="s1", service_namespace="aquanode"))
+
+        assert db.get_session("s1").service_namespace == "aquanode"
+
+    def test_namespace_late_resolves_from_later_span(self):
+        # A tool span with no namespace creates the session; a later LLM span
+        # that carries the namespace backfills it.
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_invoke_agent_span(session_id="s1", service_namespace=None))
+        assert db.get_session("s1").service_namespace is None
+
+        pipeline.process(make_llm_span(session_id="s1", service_namespace="aquanode"))
+        assert db.get_session("s1").service_namespace == "aquanode"
+
+    def test_namespace_absent_stays_none(self):
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_llm_span(session_id="s1"))
+
+        assert db.get_session("s1").service_namespace is None
+
+    def test_namespace_falls_back_to_configured_project(self):
+        # An already-running agent never sends service.namespace; the agent's
+        # configured project supplies it server-side (no restart needed).
+        pipeline, db = _make_pipeline(
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+        )
+        pipeline.process(make_llm_span(agent_id="claude-code-harness", session_id="s1"))
+
+        assert db.get_session("s1").service_namespace == "aquanode"
+
+    def test_wire_namespace_wins_over_configured_project(self):
+        pipeline, db = _make_pipeline(
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+        )
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="s1",
+            service_namespace="explicit-ns"))
+
+        assert db.get_session("s1").service_namespace == "explicit-ns"
+
+    def test_session_captures_service_instance_id(self):
+        # The per-terminal instance id (e.g. "founder-os") is persisted on the
+        # session for use as its display label.
+        pipeline, db = _make_pipeline()
+        pipeline.process(make_llm_span(session_id="s1", service_instance_id="founder-os"))
+
+        assert db.get_session("s1").service_instance_id == "founder-os"

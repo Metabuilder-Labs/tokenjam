@@ -27,12 +27,16 @@ from pathlib import Path
 from typing import Iterator
 
 from tokenjam.core.cost import calculate_cost
+from tokenjam.core.config import CaptureConfig
+from tokenjam.core.method_capture import capture_session_method
 from tokenjam.core.models import (
     NormalizedSpan,
     SessionRecord,
     SpanKind,
     SpanStatus,
 )
+from tokenjam.core.transcript import _block_text
+from tokenjam.otel.semconv import GenAIAttributes
 
 logger = logging.getLogger(__name__)
 
@@ -73,12 +77,17 @@ class BackfillResult:
     sessions_ingested: int = 0
     spans_ingested: int = 0
     spans_skipped_existing: int = 0
+    spans_retagged: int = 0
     files_failed: int = 0
     earliest: datetime | None = None
     latest: datetime | None = None
     total_cost_usd: float = 0.0
     project_count: int = 0
     sample_errors: list[str] = field(default_factory=list)
+    # True when a `max_sessions` cap was hit, so callers know more sessions exist
+    # on disk than were ingested (the #13 quickstart first-run cap). The full
+    # `tj backfill claude-code` path passes no cap, so this stays False there.
+    limit_reached: bool = False
     # Distinct session_ids seen in the window, and the subset that received at
     # least one newly-inserted span this run. These match the `sessions` table
     # (which is upserted by session_id), so the summary can report
@@ -118,6 +127,7 @@ class ParsedSession:
     total_input_tokens: int
     total_output_tokens: int
     total_cache_tokens: int
+    total_cache_write_tokens: int
     total_cost_usd: float
     tool_call_count: int
 
@@ -174,6 +184,21 @@ def _parse_ts(value: str | None) -> datetime | None:
         return None
 
 
+def _user_prompt_text(record: dict) -> str:
+    """Extract the human prompt text from a Claude Code ``user`` record.
+
+    A ``user`` record's ``message.content`` is either a plain string (the
+    prompt) or a list of ``tool_result`` blocks (a tool turn, no prompt). We
+    surface only the former — ``_block_text`` returns the string as-is and the
+    empty string for a tool-result-only turn. Used to attach the triggering
+    prompt to the next assistant span when ``capture.prompts`` is on.
+    """
+    msg = record.get("message")
+    if not isinstance(msg, dict):
+        return ""
+    return _block_text(msg.get("content"))
+
+
 def _provider_for_model(model: str) -> str:
     """Best-effort provider inference from a Claude Code model name."""
     if model.startswith("claude"):
@@ -187,14 +212,34 @@ def _provider_for_model(model: str) -> str:
 
 # --- Claude Code parser ------------------------------------------------------
 
-def parse_claude_code_session(path: Path) -> ParsedSession | None:
+def parse_claude_code_session(
+    path: Path, capture: CaptureConfig | None = None,
+) -> ParsedSession | None:
     """
     Parse a single Claude Code JSONL session file.
 
     Returns None when the file contains no assistant turns (e.g. session
     ended before the first model call). Returns a ParsedSession with
     spans ready to be inserted.
+
+    ``capture`` gates per-message content extraction (#3), honoring the same
+    four ``[capture]`` toggles the live ingest path enforces via
+    ``strip_captured_content``. Default ``None`` (and the all-False default)
+    leaves every span's ``attributes`` exactly as before — content extraction
+    is strictly opt-in and stays 100% local:
+      - ``capture.prompts``     -> ``gen_ai.prompt.content`` (the triggering
+                                   human prompt) on the assistant LLM span.
+      - ``capture.completions`` -> ``gen_ai.completion.content`` (the agent's
+                                   narration text) on the assistant LLM span.
+      - ``capture.tool_inputs`` -> ``gen_ai.tool.input`` (the raw tool args)
+                                   on each tool span.
+    The transcript carries no per-call tool *output*, so ``capture.tool_outputs``
+    has nothing to extract on the backfill path.
     """
+    capture = capture or CaptureConfig()
+    # The user prompt that triggered the next assistant turn; reset after it is
+    # consumed so a prompt is attributed to exactly one assistant span.
+    pending_prompt: str = ""
     session_id: str | None = None
     cwd: str | None = None
     earliest: datetime | None = None
@@ -232,6 +277,13 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
             cwd = record.get("cwd")
 
         rtype = record.get("type")
+        if rtype == "user" and capture.prompts and not record.get("isMeta"):
+            # Remember the latest genuine human prompt so the next assistant
+            # span can carry it. Tool-result-only user turns yield "" and are
+            # ignored (no prompt to attribute).
+            prompt_text = _user_prompt_text(record)
+            if prompt_text.strip():
+                pending_prompt = prompt_text
         if rtype != "assistant":
             continue
 
@@ -275,6 +327,13 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
         trace_id = _trace_id_for(sid_str)
         span_id = _span_id_for_assistant(sid_str, message_key)
 
+        # Subagent attribution: Claude Code marks Task-tool (sidechain) turns
+        # with a top-level `isSidechain` flag plus the subagent's own `agentId`.
+        # Records in <session>/subagents/agent-<id>.jsonl carry these; main-thread
+        # records don't. Stamp every span from this turn so a session's cost can
+        # be broken down per subagent. None on the main thread.
+        sub_agent_id = record.get("agentId") if record.get("isSidechain") else None
+
         provider = _provider_for_model(model)
         cost = calculate_cost(
             provider=provider,
@@ -292,6 +351,20 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
 
         agent_id = _agent_id_from_cwd(cwd)
         start_time = ts or datetime.now(tz=timezone.utc)
+        # Per-message content (opt-in, gated by [capture]). Default-off leaves
+        # llm_attrs == {"source": ...} so existing behavior is byte-for-byte
+        # unchanged. Keys match GenAIAttributes so downstream consumers (and
+        # alert content-stripping) treat backfilled content like live content.
+        llm_attrs: dict = {"source": "backfill.claude_code"}
+        if capture.prompts and pending_prompt.strip():
+            llm_attrs[GenAIAttributes.PROMPT_CONTENT] = pending_prompt
+        if capture.completions:
+            completion_text = _block_text(msg.get("content"))
+            if completion_text.strip():
+                llm_attrs[GenAIAttributes.COMPLETION_CONTENT] = completion_text
+        # The prompt is consumed by exactly one assistant span.
+        pending_prompt = ""
+
         # Duration unknown from on-disk format; leave None.
         # last-wins: a later replay of the same message.id overwrites earlier,
         # partial snapshots so the finalized usage/cost is the one we keep (#294).
@@ -305,6 +378,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
             end_time=start_time,
             duration_ms=None,
             agent_id=agent_id,
+            sub_agent_id=sub_agent_id,
             session_id=sid_str,
             provider=provider,
             model=model,
@@ -315,7 +389,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
             cost_usd=cost,
             request_type="completion",
             conversation_id=sid_str,
-            attributes={"source": "backfill.claude_code"},
+            attributes=llm_attrs,
             billing_account="anthropic",
         )
 
@@ -332,6 +406,15 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                 )
                 tool_span_id = _span_id_for_tool(sid_str, tool_use_id)
                 tool_name = item.get("name") or "unknown"
+
+                tool_attrs: dict = {"source": "backfill.claude_code"}
+                if capture.tool_inputs:
+                    tool_input = item.get("input")
+                    # Persist whatever shape CC emitted (usually a dict);
+                    # None/absent inputs add nothing.
+                    if tool_input is not None:
+                        tool_attrs[GenAIAttributes.TOOL_INPUT] = tool_input
+
                 spans_by_id[tool_span_id] = NormalizedSpan(
                     span_id=tool_span_id,
                     trace_id=trace_id,
@@ -343,10 +426,11 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
                     end_time=start_time,
                     duration_ms=None,
                     agent_id=agent_id,
+                    sub_agent_id=sub_agent_id,
                     session_id=sid_str,
                     tool_name=tool_name,
                     conversation_id=sid_str,
-                    attributes={"source": "backfill.claude_code"},
+                    attributes=tool_attrs,
                 )
 
     if not spans_by_id or session_id is None:
@@ -356,7 +440,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
     # accumulation, which would re-count every replayed snapshot. cache_tokens is
     # cache-READ only, matching the live path + SessionRecord semantics.
     spans = list(spans_by_id.values())
-    total_input = total_output = total_cache = tool_count = 0
+    total_input = total_output = total_cache = total_cache_write = tool_count = 0
     total_cost = 0.0
     for s in spans:
         if s.name == "gen_ai.tool.call":
@@ -365,6 +449,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
         total_input += s.input_tokens or 0
         total_output += s.output_tokens or 0
         total_cache += s.cache_tokens or 0
+        total_cache_write += s.cache_write_tokens or 0
         total_cost += s.cost_usd or 0.0
 
     agent_id = _agent_id_from_cwd(cwd)
@@ -381,6 +466,7 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
         total_input_tokens=total_input,
         total_output_tokens=total_output,
         total_cache_tokens=total_cache,
+        total_cache_write_tokens=total_cache_write,
         total_cost_usd=round(total_cost, 8),
         tool_call_count=tool_count,
     )
@@ -389,17 +475,51 @@ def parse_claude_code_session(path: Path) -> ParsedSession | None:
 def iter_claude_code_sessions(
     root: Path | None = None,
     since: datetime | None = None,
+    capture: CaptureConfig | None = None,
+    max_sessions: int | None = None,
 ) -> Iterator[ParsedSession]:
     """
     Walk a Claude Code projects directory and yield ParsedSession objects.
 
     `since` filters out files whose mtime is before the cutoff (cheap pre-filter);
     the actual session start_time is checked again per-file.
+
+    `capture` is forwarded to `parse_claude_code_session` to gate per-message
+    content extraction (#3); None/all-False means no content is extracted.
+
+    `max_sessions` caps how many sessions are parsed+yielded. When set, files are
+    walked **most-recent first** (by mtime) and parsing stops once `max_sessions`
+    sessions have been yielded — so the work this generator does (and the inserts
+    its caller performs) is bounded regardless of how large `~/.claude` is. This
+    powers the `tj quickstart` first-run cap (#13): a brand-new user with
+    thousands of sessions sees the headline over their most-recent N sessions in
+    bounded time, with the full picture available on demand. `None` (the default)
+    keeps the original deterministic path-sorted, unbounded walk so the full
+    `tj backfill claude-code` ingest is byte-for-byte unchanged.
     """
     base = root or CLAUDE_CODE_PROJECTS_ROOT
     if not base.exists() or not base.is_dir():
         return
-    for jsonl_path in sorted(base.rglob("*.jsonl")):
+
+    paths = list(base.rglob("*.jsonl"))
+    if max_sessions is not None:
+        # Most-recent first so the cap keeps the freshest sessions. We sort by
+        # mtime (cheap, no parse) and read the stat once, reusing it for the
+        # `since` pre-filter below.
+        def _mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        paths = sorted(paths, key=_mtime, reverse=True)
+    else:
+        paths = sorted(paths)
+
+    yielded = 0
+    for jsonl_path in paths:
+        if max_sessions is not None and yielded >= max_sessions:
+            return
         try:
             if since is not None:
                 mtime = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=timezone.utc)
@@ -407,12 +527,13 @@ def iter_claude_code_sessions(
                     continue
         except OSError:
             continue
-        parsed = parse_claude_code_session(jsonl_path)
+        parsed = parse_claude_code_session(jsonl_path, capture=capture)
         if parsed is None:
             continue
         if since is not None and parsed.ended_at < since:
             continue
         yield parsed
+        yielded += 1
 
 
 def session_record_from_parsed(
@@ -429,6 +550,7 @@ def session_record_from_parsed(
         input_tokens=parsed.total_input_tokens,
         output_tokens=parsed.total_output_tokens,
         cache_tokens=parsed.total_cache_tokens,
+        cache_write_tokens=parsed.total_cache_write_tokens,
         tool_call_count=parsed.tool_call_count,
         error_count=0,
         plan_tier=plan_tier,
@@ -442,7 +564,9 @@ def ingest_claude_code(
     root: Path | None = None,
     since: datetime | None = None,
     progress=None,
+    reingest: bool = False,
     config=None,
+    max_sessions: int | None = None,
 ) -> BackfillResult:
     """
     Ingest Claude Code sessions into the storage backend.
@@ -454,18 +578,35 @@ def ingest_claude_code(
     carry the same `plan_tier` the live ingest path would set (#176). When None
     or no plan is configured, sessions fall back to "unknown" (prior behavior).
 
+    `config.capture` also gates per-message content extraction (#3): the same
+    four `[capture]` toggles the live ingest path honors. Default-off (the
+    config default, and when `config` is None) extracts no content, so a
+    default backfill is byte-for-byte unchanged.
+
+    `max_sessions` caps the number of (most-recent) sessions ingested so the
+    work is bounded on a large `~/.claude` history — the #13 quickstart first-run
+    cap. When the cap is hit, `result.limit_reached` is set True. `None` (the
+    default, used by the full `tj backfill claude-code` path) ingests everything
+    in window, unchanged.
+
     `progress(parsed_session, result)` is called once per session if provided.
     """
     result = BackfillResult()
     projects_seen: set[str] = set()
+    seen_session_ids: set[str] = set()
     plan_tier = _plan_tier_for_provider(config, _CLAUDE_CODE_PROVIDER)
-    for parsed in iter_claude_code_sessions(root=root, since=since):
+    capture = getattr(config, "capture", None) if config is not None else None
+    for parsed in iter_claude_code_sessions(
+        root=root, since=since, capture=capture, max_sessions=max_sessions,
+    ):
         result.sessions_seen += 1
         result.seen_session_ids.add(parsed.session_id)
         if parsed.cwd:
             projects_seen.add(parsed.cwd)
         try:
-            inserted = _insert_session_idempotent(db, parsed, plan_tier=plan_tier)
+            inserted, retagged = _insert_session_idempotent(
+                db, parsed, reingest=reingest, plan_tier=plan_tier
+            )
         except Exception as exc:
             result.files_failed += 1
             if len(result.sample_errors) < 5:
@@ -473,7 +614,9 @@ def ingest_claude_code(
             continue
 
         result.spans_ingested += inserted
-        result.spans_skipped_existing += len(parsed.spans) - inserted
+        result.spans_retagged += retagged
+        result.spans_skipped_existing += len(parsed.spans) - inserted - retagged
+        seen_session_ids.add(parsed.session_id)
         if inserted > 0:
             result.sessions_ingested += 1
             result.new_session_ids.add(parsed.session_id)
@@ -493,19 +636,154 @@ def ingest_claude_code(
             except Exception:
                 pass
 
+    # A Claude Code session is split across files that share one session_id
+    # (main thread + subagents/agent-*.jsonl). The per-file upsert above uses
+    # replace semantics, so each touched session row must be reconciled to the
+    # SUM of its spans -- otherwise it holds only the last file's totals.
+    # Idempotent: a re-run also repairs rows written by an earlier backfill.
+    recompute = getattr(db, "recompute_session_totals_from_spans", None)
+    if recompute is not None and seen_session_ids:
+        recompute(sorted(seen_session_ids))
+
+    # Snapshot each newly-ingested session's reconstructed method into
+    # `session_story` so it survives Claude Code pruning the transcript later
+    # (the whole point of the persistence path — historical sessions are the
+    # ones most likely to lose their on-disk file). We capture ONLY the sessions
+    # that gained new spans this run (`new_session_ids`); an idempotent re-run
+    # re-captures nothing. Cost: one extra Story build per ingested session,
+    # re-reading the transcript backfill just parsed off `root`. Best-effort —
+    # capture_session_method swallows its own errors and never raises, so it
+    # cannot change backfill's result or break the ingest.
+    for sid in sorted(result.new_session_ids):
+        capture_session_method(db, sid, projects_dir=root, source="backfill")
+
     result.project_count = len(projects_seen)
+    # The iterator stops yielding once the cap is reached, so seeing exactly
+    # `max_sessions` means there may be older sessions on disk we skipped.
+    if max_sessions is not None and result.sessions_seen >= max_sessions:
+        result.limit_reached = True
     return result
 
 
+def _merge_attributes(exists_attributes: dict, parsed_attributes: dict) -> dict:
+    """Overlay freshly-parsed attributes over the stored ones (parsed wins
+    per key), returning a NEW dict (the stored row is never mutated in place).
+
+    This is the #10 backfill: when `[capture]` is enabled after a span was
+    first ingested, the parsed span now carries content keys
+    (`gen_ai.prompt.content` etc.) the stored row lacks. Merging ADDS those
+    without dropping any keys the stored row already had. Capture-off reingest
+    is a no-op because the parsed attributes are just `{"source": ...}`.
+    """
+    return {**exists_attributes, **parsed_attributes}
+
+
+# Column order for the bulk span INSERT — kept in lock-step with the named-column
+# INSERT in `DuckDBBackend.insert_span`. A named-column list (not positional) so a
+# future migration adding a column at the end doesn't silently shift binding order.
+_SPAN_INSERT_SQL = (
+    "INSERT INTO spans ("
+    "span_id, trace_id, parent_span_id, session_id, agent_id, "
+    "name, kind, status_code, status_message, start_time, end_time, "
+    "duration_ms, attributes, provider, model, tool_name, "
+    "input_tokens, output_tokens, cache_tokens, cost_usd, "
+    "request_type, conversation_id, events, billing_account, "
+    "cache_write_tokens, sub_agent_id"
+    ") VALUES "
+    "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)"
+)
+
+
+def _span_insert_params(span: NormalizedSpan) -> list:
+    """Positional bind params for `_SPAN_INSERT_SQL`, in column order."""
+    return [
+        span.span_id, span.trace_id, span.parent_span_id, span.session_id,
+        span.agent_id, span.name, span.kind.value, span.status_code.value,
+        span.status_message, span.start_time, span.end_time, span.duration_ms,
+        json.dumps(span.attributes), span.provider, span.model, span.tool_name,
+        span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
+        span.request_type, span.conversation_id, json.dumps(span.events),
+        span.billing_account, span.cache_write_tokens, span.sub_agent_id,
+    ]
+
+
+def _existing_span_ids(conn, span_ids: list[str]) -> set[str]:
+    """Return the subset of `span_ids` that already exist in `spans`, in ONE
+    query (replacing the per-span existence SELECT). Chunked so an enormous
+    session can't blow past DuckDB's bind-parameter ceiling.
+    """
+    found: set[str] = set()
+    if not span_ids:
+        return found
+    chunk = 5000
+    for start in range(0, len(span_ids), chunk):
+        batch = span_ids[start:start + chunk]
+        placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
+        rows = conn.execute(
+            f"SELECT span_id FROM spans WHERE span_id IN ({placeholders})", batch
+        ).fetchall()
+        found.update(r[0] for r in rows)
+    return found
+
+
+def _load_attrs_bulk(conn, span_ids: list[str]) -> dict[str, dict]:
+    """Read stored `attributes` for many span_ids in chunked queries (replacing
+    the per-span existence SELECT on the reingest path). A missing/malformed/
+    non-dict value degrades to `{}` so a reingest never raises.
+    """
+    out: dict[str, dict] = {}
+    if not span_ids:
+        return out
+    chunk = 5000
+    for start in range(0, len(span_ids), chunk):
+        batch = span_ids[start:start + chunk]
+        placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
+        rows = conn.execute(
+            f"SELECT span_id, attributes FROM spans WHERE span_id IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for sid, value in rows:
+            if value is None:
+                out[sid] = {}
+                continue
+            if isinstance(value, str):
+                try:
+                    value = json.loads(value)
+                except json.JSONDecodeError:
+                    out[sid] = {}
+                    continue
+            out[sid] = value if isinstance(value, dict) else {}
+    return out
+
+
 def _insert_session_idempotent(
-    db, parsed: ParsedSession, plan_tier: str = "unknown",
-) -> int:
+    db, parsed: ParsedSession, reingest: bool = False, plan_tier: str = "unknown",
+) -> tuple[int, int]:
     """
     Insert spans + session record; skip spans already present.
-    Returns the number of newly-inserted spans.
+    Returns (newly_inserted, retagged).
+
+    Bulk path (#15): instead of one SELECT + one INSERT per span (~2 round-trips
+    × N spans → ~100s over a large history), the whole session is processed in a
+    bounded number of statements regardless of span count:
+      1. ONE (chunked) `WHERE span_id IN (...)` partitions spans into new-vs-existing.
+      2. The new spans are inserted in a single `executemany`.
+      3. On `--reingest`, existing rows' attributes are loaded in ONE (chunked)
+         query, the per-key attribute merge is computed in Python, then the
+         updates are applied in a single `executemany`.
+
+    The idempotency + `--reingest` contract (#10) is preserved EXACTLY:
+      - New spans: inserted.
+      - Existing spans, no `--reingest`: untouched (skipped).
+      - Existing spans, `--reingest`: `sub_agent_id` updated + `attributes`
+        per-key merged (overlay, parsed wins, never wipes a stored key).
+    The overlay is `{**stored, **parsed}`, so a capture-off reingest (parsed
+    attrs are just `{"source": ...}`) is a no-op that never drops content a
+    prior capture-on backfill stored. Other span fields are left untouched.
     """
     conn = getattr(db, "conn", None)
     inserted = 0
+    retagged = 0
     if conn is None:
         # Fall back to plain inserts when running against a backend that has no conn
         for span in parsed.spans:
@@ -515,41 +793,40 @@ def _insert_session_idempotent(
             except Exception:
                 continue
         db.upsert_session(session_record_from_parsed(parsed, plan_tier))
-        return inserted
+        return inserted, retagged
 
-    for span in parsed.spans:
-        # PRIMARY KEY conflicts on (span_id) mean a previous backfill (or live ingest)
-        # has already covered this span. Skip silently — the row count returned by
-        # DuckDB's execute() isn't reliable for ON CONFLICT, so we pre-check.
-        exists = conn.execute(
-            "SELECT 1 FROM spans WHERE span_id = $1", [span.span_id]
-        ).fetchone()
-        if exists:
-            continue
-        conn.execute(
-            "INSERT INTO spans ("
-            "span_id, trace_id, parent_span_id, session_id, agent_id, "
-            "name, kind, status_code, status_message, start_time, end_time, "
-            "duration_ms, attributes, provider, model, tool_name, "
-            "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens"
-            ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)",
-            [
-                span.span_id, span.trace_id, span.parent_span_id, span.session_id,
-                span.agent_id, span.name, span.kind.value, span.status_code.value,
-                span.status_message, span.start_time, span.end_time, span.duration_ms,
-                json.dumps(span.attributes), span.provider, span.model, span.tool_name,
-                span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
-                span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account, span.cache_write_tokens,
-            ],
+    span_ids = [s.span_id for s in parsed.spans]
+    existing = _existing_span_ids(conn, span_ids)
+
+    new_spans = [s for s in parsed.spans if s.span_id not in existing]
+    if new_spans:
+        conn.executemany(
+            _SPAN_INSERT_SQL, [_span_insert_params(s) for s in new_spans]
         )
-        inserted += 1
+        inserted = len(new_spans)
+
+    if reingest and existing:
+        # Re-tag history from before the sub_agent_id column existed AND overlay
+        # any freshly-parsed captured content (#10) onto already-ingested spans.
+        existing_spans = [s for s in parsed.spans if s.span_id in existing]
+        stored_attrs = _load_attrs_bulk(conn, [s.span_id for s in existing_spans])
+        update_params = []
+        for span in existing_spans:
+            merged_attrs = _merge_attributes(
+                exists_attributes=stored_attrs.get(span.span_id, {}),
+                parsed_attributes=span.attributes,
+            )
+            update_params.append(
+                [span.sub_agent_id, json.dumps(merged_attrs), span.span_id]
+            )
+        conn.executemany(
+            "UPDATE spans SET sub_agent_id = $1, attributes = $2 WHERE span_id = $3",
+            update_params,
+        )
+        retagged = len(existing_spans)
 
     db.upsert_session(session_record_from_parsed(parsed, plan_tier))
-    return inserted
+    return inserted, retagged
 
 
 __all__ = [

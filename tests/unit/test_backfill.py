@@ -29,6 +29,8 @@ def _make_session_file(tmp_path: Path, session_id: str, cwd: str,
 def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: int,
                        timestamp: str, session_id: str, cwd: str,
                        tool_uses: list[tuple[str, str]] | None = None,
+                       is_sidechain: bool = False,
+                       agent_id: str | None = None,
                        cache_read: int = 0, cache_creation: int = 0,
                        message_id: str | None = None) -> dict:
     content: list[dict] = [{"type": "text", "text": "ok"}]
@@ -49,7 +51,7 @@ def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: i
     # notwithstanding (#294). Optional so existing tests use the uuid fallback.
     if message_id is not None:
         message["id"] = message_id
-    return {
+    record = {
         "type": "assistant",
         "uuid": uuid,
         "timestamp": timestamp,
@@ -57,6 +59,14 @@ def _assistant_record(uuid: str, model: str, input_tokens: int, output_tokens: i
         "cwd": cwd,
         "message": message,
     }
+    # Claude Code marks subagent (Task-tool) turns with these top-level fields;
+    # records in a session's subagents/agent-<id>.jsonl carry isSidechain=true
+    # plus the subagent's own agentId.
+    if is_sidechain:
+        record["isSidechain"] = True
+    if agent_id is not None:
+        record["agentId"] = agent_id
+    return record
 
 
 def test_parse_extracts_assistant_turns_and_tool_uses(tmp_path):
@@ -447,11 +457,582 @@ def test_iter_skips_files_before_since(tmp_path):
     assert sessions == []
 
 
+def test_parse_tags_subagent_spans_with_sub_agent_id(tmp_path):
+    """Spans from a sidechain (Task-tool) turn carry the subagent's agentId;
+    main-thread spans carry None. This is what lets a session's cost be broken
+    down per subagent."""
+    path = _make_session_file(
+        tmp_path,
+        session_id="sess-sa",
+        cwd="/Users/me/proj",
+        records=[
+            _assistant_record(
+                "m-main", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-sa", "/Users/me/proj",
+            ),
+            _assistant_record(
+                "m-sub", "claude-haiku-4-5", 5000, 500,
+                "2026-04-01T10:00:01.000Z", "sess-sa", "/Users/me/proj",
+                tool_uses=[("tu-s", "Read")], is_sidechain=True, agent_id="ag-1",
+            ),
+        ],
+    )
+    parsed = parse_claude_code_session(path)
+    assert parsed is not None
+    # Main-thread LLM span -> no subagent id
+    main_llm = [s for s in parsed.spans
+                if s.name == "gen_ai.llm.call" and s.sub_agent_id is None]
+    assert len(main_llm) == 1
+    # Subagent LLM span + its tool span -> tagged with the subagent's agentId
+    sub_spans = [s for s in parsed.spans if s.sub_agent_id == "ag-1"]
+    assert len(sub_spans) == 2
+    assert {s.name for s in sub_spans} == {"gen_ai.llm.call", "gen_ai.tool.call"}
+
+
+def test_ingest_attributes_tokens_per_subagent(tmp_path):
+    """End-to-end: a session whose subagent lives in subagents/agent-*.jsonl
+    gets its tokens folded under the parent session_id AND remains attributable
+    per subagent via sub_agent_id."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path,
+        session_id="sess-x",
+        cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-x", proj,
+        )],
+    )
+    # Subagent transcript: <project>/<sid>/subagents/agent-<id>.jsonl
+    sub_dir = tmp_path / proj.replace("/", "-") / "sess-x" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-ag1.jsonl").write_text(json.dumps(_assistant_record(
+        "m-sub", "claude-haiku-4-5", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-x", proj,
+        is_sidechain=True, agent_id="ag1",
+    )))
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        rows = db.conn.execute(
+            "SELECT sub_agent_id, SUM(input_tokens) FROM spans "
+            "WHERE session_id = $1 AND name = $2 GROUP BY sub_agent_id",
+            ["sess-x", "gen_ai.llm.call"],
+        ).fetchall()
+        per_subagent = {r[0]: r[1] for r in rows}
+        assert per_subagent.get(None) == 1000     # main thread
+        assert per_subagent.get("ag1") == 5000     # subagent, attributable
+        # Span-derived session cost includes the subagent's spend (fold-in).
+        assert db.get_session_cost("sess-x") > 0
+    finally:
+        db.close()
+
+
+def test_ingest_session_row_totals_include_subagents(tmp_path):
+    """Regression: the sessions table row must reflect main + ALL subagent files,
+    not just the last-processed one. Backfill upserts the row once per file with
+    replace semantics, so without reconciliation the row held only one file's
+    totals. Two subagents make the bug unambiguous (replace would leave 3000)."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-tot", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-tot", proj,
+        )],
+    )
+    sub_dir = tmp_path / proj.replace("/", "-") / "sess-tot" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-s1.jsonl").write_text(json.dumps(_assistant_record(
+        "m-s1", "claude-haiku-4-5", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-tot", proj, is_sidechain=True, agent_id="s1",
+    )))
+    (sub_dir / "agent-s2.jsonl").write_text(json.dumps(_assistant_record(
+        "m-s2", "claude-haiku-4-5", 3000, 300,
+        "2026-04-01T10:00:02.000Z", "sess-tot", proj, is_sidechain=True, agent_id="s2",
+    )))
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        sess = db.get_session("sess-tot")
+        assert sess is not None
+        assert sess.input_tokens == 1000 + 5000 + 3000   # main + both subagents
+        assert sess.output_tokens == 200 + 500 + 300
+        # The stored row total now matches the span-derived total (both include
+        # every subagent), and a second ingest is idempotent (no double-count).
+        assert abs((sess.total_cost_usd or 0) - db.get_session_cost("sess-tot")) < 1e-9
+        ingest_claude_code(db, root=tmp_path)
+        sess2 = db.get_session("sess-tot")
+        assert sess2 is not None
+        assert sess2.input_tokens == 9000
+    finally:
+        db.close()
+
+
+# --- #3: capture-gated per-message content + tool_input on backfill --------- #
+
+from tokenjam.core.config import CaptureConfig  # noqa: E402
+from tokenjam.otel.semconv import GenAIAttributes  # noqa: E402
+
+
+def _content_session_file(tmp_path: Path) -> Path:
+    """A session with a human prompt, an assistant narration + a tool_use with
+    real input args — exactly what the context-cost diagnostic (#4) needs."""
+    return _make_session_file(
+        tmp_path,
+        session_id="sess-cap",
+        cwd="/Users/me/proj",
+        records=[
+            {"type": "user", "message": {"role": "user",
+                                         "content": "please read the config"}},
+            {
+                "type": "assistant",
+                "uuid": "msg-cap",
+                "timestamp": "2026-04-01T10:00:00.000Z",
+                "sessionId": "sess-cap",
+                "cwd": "/Users/me/proj",
+                "message": {
+                    "model": "claude-opus-4-7",
+                    "content": [
+                        {"type": "text", "text": "Reading the config file now."},
+                        {"type": "tool_use", "id": "tu-cap", "name": "Read",
+                         "input": {"file_path": "/etc/app/config.toml"}},
+                    ],
+                    "usage": {
+                        "input_tokens": 1000, "output_tokens": 200,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            },
+        ],
+    )
+
+
+def _llm_and_tool(parsed):
+    llm = next(s for s in parsed.spans if s.name == "gen_ai.llm.call")
+    tool = next(s for s in parsed.spans if s.name == "gen_ai.tool.call")
+    return llm, tool
+
+
+def test_capture_off_leaves_attributes_unchanged(tmp_path):
+    """Default (no capture / all-False) extracts NO content — attributes stay
+    exactly {"source": ...} on both the LLM and tool span (#3 default-off)."""
+    path = _content_session_file(tmp_path)
+
+    # Both the explicit None default and an all-False CaptureConfig.
+    for capture in (None, CaptureConfig()):
+        parsed = parse_claude_code_session(path, capture=capture)
+        assert parsed is not None
+        llm, tool = _llm_and_tool(parsed)
+        assert llm.attributes == {"source": "backfill.claude_code"}
+        assert tool.attributes == {"source": "backfill.claude_code"}
+
+
+def test_capture_on_populates_prompt_completion_and_tool_input(tmp_path):
+    """With every toggle on, a backfilled span carries the human prompt, the
+    agent narration, and the raw tool_input — the data #4 needs for per-message
+    / per-inclusion token attribution."""
+    path = _content_session_file(tmp_path)
+    parsed = parse_claude_code_session(
+        path,
+        capture=CaptureConfig(
+            prompts=True, completions=True, tool_inputs=True, tool_outputs=True,
+        ),
+    )
+    assert parsed is not None
+    llm, tool = _llm_and_tool(parsed)
+    assert llm.attributes[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+    assert llm.attributes[GenAIAttributes.COMPLETION_CONTENT] == \
+        "Reading the config file now."
+    assert tool.attributes[GenAIAttributes.TOOL_INPUT] == \
+        {"file_path": "/etc/app/config.toml"}
+
+
+def test_capture_flags_are_independent(tmp_path):
+    """Each toggle gates only its own field — flipping one never leaks another."""
+    path = _content_session_file(tmp_path)
+
+    parsed = parse_claude_code_session(path, capture=CaptureConfig(tool_inputs=True))
+    llm, tool = _llm_and_tool(parsed)
+    assert GenAIAttributes.TOOL_INPUT in tool.attributes
+    assert GenAIAttributes.PROMPT_CONTENT not in llm.attributes
+    assert GenAIAttributes.COMPLETION_CONTENT not in llm.attributes
+
+    parsed = parse_claude_code_session(path, capture=CaptureConfig(completions=True))
+    llm, tool = _llm_and_tool(parsed)
+    assert GenAIAttributes.COMPLETION_CONTENT in llm.attributes
+    assert GenAIAttributes.PROMPT_CONTENT not in llm.attributes
+    assert GenAIAttributes.TOOL_INPUT not in tool.attributes
+
+
+def test_ingest_persists_captured_content_when_config_enables_it(tmp_path):
+    """End-to-end through ingest: with config.capture enabled, the stored span's
+    attributes column carries the content; default config stores nothing."""
+    from tokenjam.core.config import TjConfig
+
+    _content_session_file(tmp_path)
+
+    # Default config -> capture all-False -> no content persisted.
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"))
+        attrs = db.conn.execute(
+            "SELECT attributes FROM spans WHERE name = $1",
+            ["gen_ai.llm.call"],
+        ).fetchone()[0]
+        parsed_attrs = json.loads(attrs) if isinstance(attrs, str) else attrs
+        assert GenAIAttributes.PROMPT_CONTENT not in parsed_attrs
+        assert GenAIAttributes.COMPLETION_CONTENT not in parsed_attrs
+    finally:
+        db.close()
+
+    # Capture-enabled config -> content persisted on the backfilled span.
+    cfg = TjConfig(version="1")
+    cfg.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path, config=cfg)
+        llm_attrs = db.conn.execute(
+            "SELECT attributes FROM spans WHERE name = $1",
+            ["gen_ai.llm.call"],
+        ).fetchone()[0]
+        llm_attrs = json.loads(llm_attrs) if isinstance(llm_attrs, str) else llm_attrs
+        assert llm_attrs[GenAIAttributes.COMPLETION_CONTENT] == \
+            "Reading the config file now."
+        assert llm_attrs[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+
+        tool_attrs = db.conn.execute(
+            "SELECT attributes FROM spans WHERE name = $1",
+            ["gen_ai.tool.call"],
+        ).fetchone()[0]
+        tool_attrs = json.loads(tool_attrs) if isinstance(tool_attrs, str) else tool_attrs
+        assert tool_attrs[GenAIAttributes.TOOL_INPUT] == \
+            {"file_path": "/etc/app/config.toml"}
+    finally:
+        db.close()
+
+
+def test_reingest_retags_existing_spans(tmp_path):
+    """--reingest re-populates sub_agent_id on spans an older backfill ingested
+    before the column existed; a plain idempotent re-run leaves them NULL."""
+    proj = "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id="sess-rt", cwd=proj,
+        records=[_assistant_record(
+            "m-main", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", "sess-rt", proj,
+        )],
+    )
+    sub_dir = tmp_path / proj.replace("/", "-") / "sess-rt" / "subagents"
+    sub_dir.mkdir(parents=True, exist_ok=True)
+    (sub_dir / "agent-rt1.jsonl").write_text(json.dumps(_assistant_record(
+        "m-rt1", "claude-haiku-4-5", 5000, 500,
+        "2026-04-01T10:00:01.000Z", "sess-rt", proj,
+        tool_uses=[("tu-rt", "Read")], is_sidechain=True, agent_id="rt1",
+    )))
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        # Simulate a pre-column backfill: blank the tags.
+        db.conn.execute("UPDATE spans SET sub_agent_id = NULL")
+
+        # Plain re-run is idempotent -> existing spans skipped -> still NULL.
+        r_plain = ingest_claude_code(db, root=tmp_path)
+        assert r_plain.spans_ingested == 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id IS NOT NULL"
+        ).fetchone()[0] == 0
+
+        # --reingest re-tags in place: no new rows, no duplicates.
+        before = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+        r_re = ingest_claude_code(db, root=tmp_path, reingest=True)
+        assert r_re.spans_ingested == 0
+        assert r_re.spans_retagged > 0
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before
+        # The subagent's LLM span + its tool span are both re-tagged.
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id = 'rt1'"
+        ).fetchone()[0] == 2
+    finally:
+        db.close()
+
+
+def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
+    """#10: enabling [capture] AFTER a session is already ingested, then
+    re-running backfill with --reingest, populates content / tool_input onto the
+    EXISTING spans — no fresh DB required. Without this, #4's recurring-inclusion
+    detection (which reads that content) only worked against a fresh DB."""
+    from tokenjam.core.config import TjConfig
+
+    _content_session_file(tmp_path)
+
+    db = InMemoryBackend()
+    try:
+        # 1. First ingest with capture OFF (default config) — spans land with
+        #    NO content, exactly the pre-#10 already-ingested state.
+        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"))
+
+        def _attrs(name: str) -> dict:
+            raw = db.conn.execute(
+                "SELECT attributes FROM spans WHERE name = $1", [name],
+            ).fetchone()[0]
+            return json.loads(raw) if isinstance(raw, str) else raw
+
+        llm_before = _attrs("gen_ai.llm.call")
+        tool_before = _attrs("gen_ai.tool.call")
+        assert GenAIAttributes.PROMPT_CONTENT not in llm_before
+        assert GenAIAttributes.COMPLETION_CONTENT not in llm_before
+        assert GenAIAttributes.TOOL_INPUT not in tool_before
+
+        # 2. A plain (non-reingest) re-run with capture ON still does NOT touch
+        #    existing rows — the conflict path skips them. This is the gap #10
+        #    fixes: --reingest is required.
+        cfg = TjConfig(version="1")
+        cfg.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
+        r_plain = ingest_claude_code(db, root=tmp_path, config=cfg)
+        assert r_plain.spans_ingested == 0
+        assert GenAIAttributes.PROMPT_CONTENT not in _attrs("gen_ai.llm.call")
+
+        before_rows = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+
+        # 3. --reingest WITH capture on backfills content in place: no new rows.
+        r_re = ingest_claude_code(db, root=tmp_path, config=cfg, reingest=True)
+        assert r_re.spans_ingested == 0
+        assert r_re.spans_retagged > 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans"
+        ).fetchone()[0] == before_rows
+
+        llm_after = _attrs("gen_ai.llm.call")
+        tool_after = _attrs("gen_ai.tool.call")
+        assert llm_after[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+        assert llm_after[GenAIAttributes.COMPLETION_CONTENT] == \
+            "Reading the config file now."
+        assert tool_after[GenAIAttributes.TOOL_INPUT] == \
+            {"file_path": "/etc/app/config.toml"}
+        # The pre-existing "source" key is preserved through the merge.
+        assert llm_after["source"] == "backfill.claude_code"
+    finally:
+        db.close()
+
+
+def test_reingest_capture_off_does_not_wipe_existing_content(tmp_path):
+    """#10 safety: a --reingest run with capture OFF must NOT delete content a
+    prior capture-on backfill already stored — the merge overlays parsed keys,
+    it never blanks the stored attributes."""
+    from tokenjam.core.config import TjConfig
+
+    _content_session_file(tmp_path)
+
+    db = InMemoryBackend()
+    try:
+        # Seed with capture ON so the stored spans already carry content.
+        cfg_on = TjConfig(version="1")
+        cfg_on.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
+        ingest_claude_code(db, root=tmp_path, config=cfg_on)
+
+        # Reingest with capture OFF (default config): content must survive.
+        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"), reingest=True)
+
+        raw = db.conn.execute(
+            "SELECT attributes FROM spans WHERE name = $1", ["gen_ai.llm.call"],
+        ).fetchone()[0]
+        attrs = json.loads(raw) if isinstance(raw, str) else raw
+        assert attrs[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+        assert attrs[GenAIAttributes.COMPLETION_CONTENT] == \
+            "Reading the config file now."
+    finally:
+        db.close()
+
+
+# --- #15: bulk insert/update path --------------------------------------------
+
+class _CountingConn:
+    """Wraps a DuckDB cursor and counts execute / executemany calls so a test
+    can assert the bulk path issues a BOUNDED number of statements for a large
+    session (not ~2 per span). Bind-param *rows* passed to executemany don't
+    each count as a statement — that's the whole point of the bulk path.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.execute_calls = 0
+        self.executemany_calls = 0
+
+    def execute(self, *args, **kwargs):
+        self.execute_calls += 1
+        return self._inner.execute(*args, **kwargs)
+
+    def executemany(self, *args, **kwargs):
+        self.executemany_calls += 1
+        return self._inner.executemany(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+class _CountingBackend(InMemoryBackend):
+    """InMemoryBackend whose `conn` property hands back a `_CountingConn` so a
+    test can count execute/executemany calls. `conn` is a data-descriptor
+    property on DuckDBBackend, so wrapping must be done at the property level —
+    setting an instance attribute would never be seen by `getattr(db, "conn")`.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._counting = _CountingConn(super().conn)
+
+    @property
+    def conn(self):  # type: ignore[override]
+        return self._counting
+
+
+def _big_session_file(tmp_path: Path, n_assistant: int, session_id: str = "sess-big",
+                      cwd: str = "/Users/me/big") -> Path:
+    """A single session with `n_assistant` assistant turns, each carrying one
+    tool_use — so 2*n spans land from one file."""
+    records = []
+    for i in range(n_assistant):
+        records.append(_assistant_record(
+            f"m-{i}", "claude-haiku-4-5", 1000 + i, 100 + i,
+            f"2026-04-01T10:{i // 60:02d}:{i % 60:02d}.000Z", session_id, cwd,
+            tool_uses=[(f"tu-{i}", "Read")],
+        ))
+    return _make_session_file(tmp_path, session_id=session_id, cwd=cwd, records=records)
+
+
+def test_bulk_insert_issues_bounded_statements_not_per_span(tmp_path):
+    """#15: a large session must NOT do a SELECT+INSERT round-trip per span.
+    The bulk path partitions existence in ONE query and inserts via a single
+    executemany, so the statement count is BOUNDED regardless of span count.
+    """
+    n = 200  # 200 assistant turns * (1 llm + 1 tool) = 400 spans
+    _big_session_file(tmp_path, n_assistant=n)
+
+    db = _CountingBackend()
+    try:
+        counting = db.conn
+        r = ingest_claude_code(db, root=tmp_path)
+        assert r.spans_ingested == 2 * n  # all spans inserted
+
+        # The per-span path would issue ~2*N execute() calls (one SELECT + one
+        # INSERT each). The bulk path issues a small bounded number: a handful of
+        # partition SELECTs + a SINGLE bulk-insert executemany. Assert we're FAR
+        # below per-span — well under N, and the insert went through executemany.
+        assert counting.executemany_calls >= 1
+        assert counting.execute_calls < n, (
+            f"expected bounded statements, got {counting.execute_calls} "
+            f"execute() calls for {2 * n} spans"
+        )
+    finally:
+        db.close()
+
+
+def test_bulk_path_new_spans_insert_correctly(tmp_path):
+    """#15: the bulk insert lands every new span with correct content."""
+    _big_session_file(tmp_path, n_assistant=50)
+    db = InMemoryBackend()
+    try:
+        r = ingest_claude_code(db, root=tmp_path)
+        assert r.spans_ingested == 100
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 100
+        # Spot-check a known row round-tripped.
+        row = db.conn.execute(
+            "SELECT input_tokens, output_tokens, tool_name FROM spans "
+            "WHERE name = 'gen_ai.tool.call' LIMIT 1"
+        ).fetchone()
+        assert row[2] == "Read"
+    finally:
+        db.close()
+
+
+def test_bulk_path_existing_spans_untouched_without_reingest(tmp_path):
+    """#15: existing spans are skipped (not re-inserted, not duplicated) on a
+    plain re-run — the bulk partition preserves the no-reingest skip contract."""
+    _big_session_file(tmp_path, n_assistant=30)
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path)
+        before = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+        # Blank sub_agent_id to prove a non-reingest re-run leaves rows untouched.
+        db.conn.execute("UPDATE spans SET sub_agent_id = 'sentinel'")
+
+        r2 = ingest_claude_code(db, root=tmp_path)
+        assert r2.spans_ingested == 0
+        assert r2.spans_skipped_existing == before
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before
+        # Untouched: the sentinel survives (no UPDATE ran without --reingest).
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE sub_agent_id = 'sentinel'"
+        ).fetchone()[0] == before
+    finally:
+        db.close()
+
+
+def test_bulk_reingest_merges_attributes_and_updates_subagent(tmp_path):
+    """#15: the bulk UPDATE path preserves the #10 reingest contract — existing
+    spans get sub_agent_id updated AND attributes per-key merged (overlay, no
+    wipe) — and does so in batched executemany, not one UPDATE per span."""
+    from tokenjam.core.config import TjConfig
+
+    _content_session_file(tmp_path)
+    db = _CountingBackend()
+    counting = db.conn
+    try:
+        # 1. First ingest capture OFF -> spans land with no content.
+        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"))
+        # Simulate pre-column history: blank the tag, add a stored-only key that
+        # the merge must PRESERVE (parsed wins per-key, never wipes).
+        counting.execute("UPDATE spans SET sub_agent_id = NULL")
+        counting.execute(
+            "UPDATE spans SET attributes = $1 WHERE name = 'gen_ai.llm.call'",
+            [json.dumps({"source": "backfill.claude_code", "keepme": "yes"})],
+        )
+
+        before_rows = counting.execute("SELECT COUNT(*) FROM spans").fetchone()[0]
+
+        # 2. --reingest with capture ON; assert the UPDATEs are batched.
+        cfg = TjConfig(version="1")
+        cfg.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
+        counting.executemany_calls = 0  # reset; count only the reingest's writes
+
+        r = ingest_claude_code(db, root=tmp_path, config=cfg, reingest=True)
+        assert r.spans_ingested == 0
+        assert r.spans_retagged > 0
+        # No new rows.
+        assert counting.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == before_rows
+        # The UPDATEs went through executemany (batched), not per-span execute().
+        assert counting.executemany_calls >= 1
+
+        def _attrs(name: str) -> dict:
+            raw = counting.execute(
+                "SELECT attributes FROM spans WHERE name = $1", [name]
+            ).fetchone()[0]
+            return json.loads(raw) if isinstance(raw, str) else raw
+
+        llm = _attrs("gen_ai.llm.call")
+        # Parsed content was overlaid...
+        assert llm[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
+        assert llm[GenAIAttributes.COMPLETION_CONTENT] == "Reading the config file now."
+        # ...the stored-only key survived (overlay, never wipe)...
+        assert llm["keepme"] == "yes"
+        assert llm["source"] == "backfill.claude_code"
+        # ...and tool_input landed on the tool span.
+        assert _attrs("gen_ai.tool.call")[GenAIAttributes.TOOL_INPUT] == \
+            {"file_path": "/etc/app/config.toml"}
+    finally:
+        db.close()
+
+
 def test_claude_code_backfill_accepts_since_window(tmp_path, monkeypatch):
     captured: dict[str, datetime | None] = {}
     fixed_now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
 
-    def fake_ingest(db, *, root, since, progress, config):
+    def fake_ingest(db, *, root, since, progress, config, reingest=False):
         captured["since"] = since
         return BackfillResult()
 
@@ -472,7 +1053,7 @@ def test_claude_code_backfill_keeps_since_days_alias(tmp_path, monkeypatch):
     captured: dict[str, datetime | None] = {}
     fixed_now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
 
-    def fake_ingest(db, *, root, since, progress, config):
+    def fake_ingest(db, *, root, since, progress, config, reingest=False):
         captured["since"] = since
         return BackfillResult()
 
@@ -654,5 +1235,86 @@ def test_ingest_resumed_session_writes_one_span_per_call(tmp_path):
         sess = db.get_session("sess-e2e")
         assert sess is not None
         assert sess.output_tokens == 280
+    finally:
+        db.close()
+
+
+# --- method snapshot is captured at backfill so it survives a later prune ----- #
+
+def test_backfill_captures_method_snapshot_for_ingested_session(tmp_path):
+    """Backfill snapshots each newly-ingested session's reconstructed method into
+    `session_story`, with source='backfill', so a historical session keeps its
+    method even after Claude Code prunes the transcript."""
+    from tokenjam.core.method_capture import load_session_method
+
+    _make_session_file(
+        tmp_path, session_id="sess-snap", cwd="/Users/me/proj",
+        records=[
+            {"type": "user", "message": {"role": "user", "content": "Do the thing."}},
+            _assistant_record(
+                "m-snap", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-snap", "/Users/me/proj",
+                tool_uses=[("tu-snap", "Read")],
+            ),
+        ],
+    )
+    db = InMemoryBackend()
+    try:
+        r = ingest_claude_code(db, root=tmp_path)
+        assert "sess-snap" in r.new_session_ids
+
+        # A snapshot row exists and is tagged as a backfill capture.
+        row = db.conn.execute(
+            "SELECT source FROM session_story WHERE session_id = $1", ["sess-snap"],
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "backfill"
+
+        # And load_session_method returns the reconstructed Story.
+        snapshot = load_session_method(db, "sess-snap")
+        assert snapshot is not None
+        assert snapshot["story"] is not None
+        assert snapshot["story"]["task"] == "Do the thing."
+    finally:
+        db.close()
+
+
+def test_backfill_capture_is_noop_without_transcript_text(tmp_path):
+    """A session whose transcript yields no reconstructable Story (SDK-style /
+    no on-disk content for the parser) leaves no session_story row and does not
+    raise — capture stays best-effort on the backfill path."""
+    from tokenjam.core.method_capture import load_session_method
+
+    # Ingest a normal session, then point capture at a DIFFERENT empty root so
+    # the per-session re-read finds no transcript: no row, no raise.
+    _make_session_file(
+        tmp_path, session_id="sess-ghost", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "m-ghost", "claude-haiku-4-5", 100, 50,
+            "2026-04-01T10:00:00.000Z", "sess-ghost", "/Users/me/proj",
+        )],
+    )
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+
+    db = InMemoryBackend()
+    try:
+        # Parse from the real root, but the second arg here is what capture re-reads.
+        # Simulate the no-transcript case by ingesting then capturing a session id
+        # that has no file under the capture root.
+        r = ingest_claude_code(db, root=tmp_path)
+        assert "sess-ghost" in r.new_session_ids
+
+        # The ingested session got a snapshot (transcript present)...
+        assert load_session_method(db, "sess-ghost") is not None
+
+        # ...but a session with no transcript under the root yields nothing and
+        # never raises when capture re-reads it.
+        from tokenjam.core.method_capture import capture_session_method
+
+        assert capture_session_method(
+            db, "no-such-session", projects_dir=empty_root, source="backfill"
+        ) is False
+        assert load_session_method(db, "no-such-session") is None
     finally:
         db.close()

@@ -1000,6 +1000,68 @@ def _render_reuse(finding, *, pricing_mode: str = "api") -> None:
         )
 
 
+def _render_subagent(finding, *, pricing_mode: str = "api") -> None:
+    """
+    Render the subagent right-sizing finding — how much of the window's cost ran
+    inside subagents, plus the structurally-flagged candidates (over-powered
+    model / over-provisioned context).
+    """
+    console.print("  [bold]Subagent right-sizing:[/bold]")
+    if not finding.total_subagents:
+        console.print(
+            "     [dim]No subagent (Task-tool) activity in this window.[/dim]"
+        )
+        return
+
+    pct = finding.percent_of_cost * 100
+    # Dollars only for api-billed users; subscription / local / unknown plans
+    # see token-share instead (matches the report-wide suppression convention).
+    if pricing_mode == "api":
+        share = format_cost(finding.subagent_cost_usd)
+    else:
+        share = f"{format_tokens(finding.subagent_tokens)} tokens"
+    console.print(
+        f"     • [bold]{finding.total_subagents}[/bold] subagent"
+        f"{'s' if finding.total_subagents != 1 else ''} across "
+        f"[bold]{finding.sessions_with_subagents}[/bold] session"
+        f"{'s' if finding.sessions_with_subagents != 1 else ''} — "
+        f"[bold]{pct:.0f}%[/bold] of window cost ({share})"
+    )
+
+    flagged = list(finding.flagged) if finding.flagged else []
+    if not flagged:
+        console.print(
+            "     [dim]No right-sizing candidates above thresholds.[/dim]"
+        )
+    else:
+        suffix = (
+            f" ([bold]{format_cost(finding.flagged_cost_usd)}[/bold] of spend)"
+            if pricing_mode == "api"
+            else ""
+        )
+        console.print(
+            f"     • [yellow]{len(flagged)}[/yellow] right-sizing candidate"
+            f"{'s' if len(flagged) != 1 else ''}{suffix}:"
+        )
+        for r in flagged[:10]:
+            cost_str = (
+                f"  {format_cost(r.cost_usd)}"
+                if pricing_mode == "api"
+                else ""
+            )
+            console.print(
+                f"       [dim]{r.session_id[:8]}…/{r.sub_agent_id[:10]}[/dim]  "
+                f"[bold]{r.model}[/bold]  "
+                f"[dim]in[/dim] {format_tokens(r.input_tokens)} "
+                f"[dim]cache[/dim] {format_tokens(r.cache_tokens)} "
+                f"[dim]out[/dim] {format_tokens(r.output_tokens)} "
+                f"[dim]· {r.tool_calls} tools[/dim]{cost_str}"
+            )
+            console.print(f"           [yellow]→[/yellow] {', '.join(r.flags)}")
+
+    console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
@@ -1007,4 +1069,5 @@ _FINDING_RENDERERS = {
     "script": _render_workflow_restructure,
     "reuse":        _render_reuse,
     "trim":         _render_prompt_bloat,
+    "subagent":     _render_subagent,
 }

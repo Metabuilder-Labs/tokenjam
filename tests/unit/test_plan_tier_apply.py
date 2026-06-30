@@ -176,6 +176,7 @@ def test_session_record_from_parsed_accepts_plan_tier():
         total_input_tokens=0,
         total_output_tokens=0,
         total_cache_tokens=0,
+        total_cache_write_tokens=0,
         total_cost_usd=0.0,
         tool_call_count=0,
     )

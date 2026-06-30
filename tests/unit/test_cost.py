@@ -9,28 +9,28 @@ from tokenjam.core.pricing import load_pricing_table, get_rates
 
 
 def test_calculate_cost_known_model():
-    # anthropic/claude-haiku-4-5: input=0.80, output=4.00 per MTok
+    # anthropic/claude-haiku-4-5: input=1.00, output=5.00 per MTok
     # 1000 input, 200 output
-    # Expected: (1000/1M * 0.80) + (200/1M * 4.00) = 0.0008 + 0.0008 = 0.0016
+    # Expected: (1000/1M * 1.00) + (200/1M * 5.00) = 0.001 + 0.001 = 0.002
     cost = calculate_cost("anthropic", "claude-haiku-4-5", 1000, 200)
-    assert cost == 0.0016
+    assert cost == 0.002
 
 
 def test_calculate_cost_with_cache_tokens():
-    # claude-haiku-4-5: cache_read=0.08 per MTok
+    # claude-haiku-4-5: cache_read=0.10 per MTok
     cost = calculate_cost(
         "anthropic", "claude-haiku-4-5",
         input_tokens=1000,
         output_tokens=200,
         cache_read_tokens=5000,
     )
-    # (1000/1M * 0.80) + (200/1M * 4.00) + (5000/1M * 0.08)
-    # = 0.0008 + 0.0008 + 0.0004 = 0.0020
-    assert cost == 0.002
+    # (1000/1M * 1.00) + (200/1M * 5.00) + (5000/1M * 0.10)
+    # = 0.001 + 0.001 + 0.0005 = 0.0025
+    assert cost == 0.0025
 
 
 def test_calculate_cost_with_cache_write_tokens():
-    # claude-haiku-4-5: cache_write=1.00 per MTok
+    # claude-haiku-4-5: cache_write=1.25 per MTok
     cost = calculate_cost(
         "anthropic", "claude-haiku-4-5",
         input_tokens=0,
@@ -40,12 +40,12 @@ def test_calculate_cost_with_cache_write_tokens():
     )
     # Zero input/output but cache_write tokens present — the early return only
     # fires when ALL token counts are zero, so cache_write cost is still charged.
-    # (1_000_000/1M * 1.00) = 1.00
-    assert cost == 1.0
+    # (1_000_000/1M * 1.25) = 1.25
+    assert cost == 1.25
 
 
 def test_calculate_cost_cache_read_only():
-    # claude-haiku-4-5: cache_read=0.08 per MTok. A pure cache hit (no new
+    # claude-haiku-4-5: cache_read=0.10 per MTok. A pure cache hit (no new
     # input/output) still costs the cache-read rate and must not be dropped.
     cost = calculate_cost(
         "anthropic", "claude-haiku-4-5",
@@ -53,8 +53,8 @@ def test_calculate_cost_cache_read_only():
         output_tokens=0,
         cache_read_tokens=1_000_000,
     )
-    # (1_000_000/1M * 0.08) = 0.08
-    assert cost == 0.08
+    # (1_000_000/1M * 0.10) = 0.10
+    assert cost == 0.10
 
 
 def test_calculate_cost_unknown_model_uses_default(caplog):
@@ -124,8 +124,8 @@ def test_calculate_cost_zero_tokens_returns_zero_no_warning(caplog):
 def test_calculate_cost_rounds_to_8_decimal_places():
     # Use values that would produce more than 8 decimal places
     cost = calculate_cost("anthropic", "claude-haiku-4-5", 1, 1)
-    # (1/1M * 0.80) + (1/1M * 4.00) = 0.0000008 + 0.000004 = 0.0000048
-    assert cost == 0.0000048
+    # (1/1M * 1.00) + (1/1M * 5.00) = 0.000001 + 0.000005 = 0.000006
+    assert cost == 0.000006
     assert len(str(cost).split(".")[-1]) <= 8
 
 
@@ -150,10 +150,10 @@ def test_get_rates_returns_none_for_unknown():
 def test_get_rates_returns_model_rates_for_known():
     rates = get_rates("anthropic", "claude-haiku-4-5")
     assert rates is not None
-    assert rates.input_per_mtok == 0.80
-    assert rates.output_per_mtok == 4.00
-    assert rates.cache_read_per_mtok == 0.08
-    assert rates.cache_write_per_mtok == 1.00
+    assert rates.input_per_mtok == 1.00
+    assert rates.output_per_mtok == 5.00
+    assert rates.cache_read_per_mtok == 0.10
+    assert rates.cache_write_per_mtok == 1.25
 
 
 def test_calculate_cost_opus_model():

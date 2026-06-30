@@ -15,16 +15,43 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 [![OTel](https://img.shields.io/badge/OTel-GenAI%20SemConv-3d8eff?labelColor=0d1117)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ```
-pipx install tokenjam
+npx tj
 ```
 
-<sub>Don't have pipx? `brew install pipx` on macOS, `apt install pipx` on Debian/Ubuntu, or see [docs/installation.md](docs/installation.md). `pip install tokenjam` also works in a clean venv.</sub>
+<sub>Zero install, zero config. Reads the same <code>~/.claude/projects/*.jsonl</code> files <a href="https://github.com/ryoppippi/ccusage">ccusage</a> does and shows you <b>where your Claude Code quota actually goes</b> — no pip env, no daemon, no onboarding. Prefer Python? <code>uvx --from tokenjam tj</code> does the same. Ready to go deeper (live capture + dashboard + MCP)? <code>pipx install tokenjam &amp;&amp; tj onboard</code>.</sub>
 
 **No cloud · No signup · No vendor lock-in**
 
 <sub>⭐ If TokenJam saves you tokens, **star it** · 👁 **Watch for releases** — we ship often</sub>
 
 </div>
+
+---
+
+## 15-second start (no install)
+
+```bash
+npx tj                      # or:  uvx --from tokenjam tj
+```
+
+One command, no setup. TokenJam ingests your existing Claude Code sessions from
+`~/.claude/projects/*.jsonl` (the same files [ccusage](https://github.com/ryoppippi/ccusage)
+reads) into a throwaway in-memory database and prints:
+
+- **Quota composition** — what share of your tokens went to *re-reading context*
+  (history, CLAUDE.md, accumulated tool output) versus *net-new work*.
+- **A session timeline** — your most recent sessions, token spend, and re-read share.
+
+Nothing is written to disk, no daemon runs, no config is created. When you want
+live capture, the local dashboard, and the MCP server for Claude Code, install
+the full CLI and onboard:
+
+```bash
+pipx install tokenjam        # or `pip install tokenjam` in a clean venv
+tj onboard
+```
+
+<sub>`npx tj` and `uvx --from tokenjam tj` launch the Python CLI via `uvx`/`pipx` — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
 ---
 
@@ -234,6 +261,7 @@ tj serve               # start Lens + REST API
 | 🔁 Reuse analyzer deep-dive | [docs/optimize/reuse.md](docs/optimize/reuse.md) |
 | 🧪 Prove a downsize candidate holds (TokenJam Bench) | [tokenjam-bench](https://github.com/Metabuilder-Labs/tokenjam-bench) |
 | Claude Code & Codex integration | [docs/claude-code-integration.md](docs/claude-code-integration.md) |
+| Harness run grouping (governors / fan-out launchers) | [docs/harness-integration.md](docs/harness-integration.md) |
 | Python SDK reference | [docs/python-sdk.md](docs/python-sdk.md) |
 | TypeScript SDK reference | [docs/typescript-sdk.md](docs/typescript-sdk.md) |
 | Framework support (LangChain / CrewAI / etc.) | [docs/framework-support.md](docs/framework-support.md) |
