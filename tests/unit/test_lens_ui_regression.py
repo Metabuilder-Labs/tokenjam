@@ -1350,14 +1350,52 @@ def test_map_board_section_present_and_wired(html):
 
 
 def test_map_board_has_four_synchronized_lanes(html):
-    # Four lanes share one x-axis, each with a left gutter label.
-    for lane in ("phase", "tools", "context", "cost"):
+    # Four lanes share one x-axis, each with a left gutter label. phase/tools use a
+    # plain name gutter; context/cost use a y-axis gutter (name in the .mb-yname).
+    for lane in ("phase", "tools"):
         assert f'<div class="mb-gutter">{lane}</div>' in html, f"missing {lane} lane gutter"
+    for lane in ("context", "cost"):
+        assert f'<span class="mb-yname">{lane}</span>' in html, f"missing {lane} y-axis gutter"
     # Context is an inline SVG area chart, cost is inline SVG bars — NOT uPlot —
     # so the lanes stay pixel-aligned (the mock's approach).
     assert 'viewBox="0 0 100 30" preserveAspectRatio="none"' in html
     # A shared crosshair binds the lanes.
     assert 'class="mb-cross"' in html
+
+
+def test_map_board_context_and_cost_lanes_are_readable_as_data(html):
+    # CONTEXT and COST lanes must expose a y-axis (max value at top, 0 at the
+    # baseline) read off the already-returned series arrays, plus a peak
+    # annotation — so the magnitude is legible, not just an unscaled shape.
+    assert ".mb-gutter.axis {" in html          # column max/name/0 gutter exists
+    assert '<span class="mb-yv">${fmtTokens(maxCtx)}</span>' in html   # context max (top)
+    assert '<span class="mb-yv">${fmtCost(maxCost)}</span>' in html    # cost max (top)
+    assert '<span class="mb-yv mb-y0">0</span>' in html                # context baseline
+    assert '<span class="mb-yv mb-y0">$0</span>' in html               # cost baseline
+    # Peak value labelled on each lane via the existing formatters.
+    assert 'class="mb-peak">peak ${fmtTokens(maxCtx)} tok' in html
+    assert 'class="mb-peak">peak ${fmtCost(maxCost)}/bucket' in html
+    # Max read off the series arrays already sent (UI reads, doesn't aggregate).
+    assert "const maxCtx = Math.max(1, ...ctxSeries.map" in html
+    assert "const maxCost = Math.max(0.0001, ...costSeries.map" in html
+
+
+def test_map_board_xaxis_row_not_clipped(html):
+    # The x-axis row must stretch to fill its height so the tick labels don't spill
+    # past the board's overflow:hidden bottom (a zero-height centered ticks box
+    # clipped the last tick). Pin the non-clipping rule.
+    assert ".mb-xaxis { display: flex; align-items: stretch; height: 26px; }" in html
+
+
+def test_map_board_subagent_label_is_single_ellipsized_run(html):
+    # Sub-agent bars render "name · tokens · $cost" as ONE ellipsized run (no
+    # separate cost span that truncated to a cryptic "1…" stub); null metrics are
+    # omitted so a transcript-only subagent shows just its name.
+    assert "const subParts = [sa.name];" in html
+    assert "if (sa.tokens != null) subParts.push(fmtTokens(sa.tokens));" in html
+    assert "if (sa.cost_usd != null) subParts.push(fmtCost(sa.cost_usd));" in html
+    assert 'class="mb-sublab"' in html
+    assert 'class="mb-subcost"' not in html  # the old two-span split is gone
 
 
 def test_map_board_has_time_step_toggle(html):

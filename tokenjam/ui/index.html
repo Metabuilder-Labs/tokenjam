@@ -1071,7 +1071,17 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .mb-lane { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); }
 .mb-lane:last-child { border-bottom: none; }
 .mb-gutter { width: 78px; flex: 0 0 78px; display: flex; align-items: center; padding: 0 10px; font-size: 10.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; border-right: 1px solid var(--border); background: var(--surface); }
+/* y-axis gutter for the CONTEXT / COST lanes: max value at the top, lane name in
+   the middle, 0 at the baseline — so the magnitude is readable, not just a shape. */
+.mb-gutter.axis { flex-direction: column; align-items: flex-start; justify-content: space-between; padding: 6px 8px; }
+.mb-gutter.axis .mb-yv { font-family: 'Geist Mono', monospace; font-size: 9.5px; font-weight: 600; color: var(--text); text-transform: none; letter-spacing: 0; }
+.mb-gutter.axis .mb-yv.mb-y0 { color: var(--text-faint); font-weight: 400; }
+.mb-gutter.axis .mb-yname { color: var(--text-dim); }
 .mb-plot { position: relative; flex: 1 1 auto; }
+/* faint horizontal gridlines + peak annotation overlaid on the ctx/cost plots. */
+.mb-grid { position: absolute; left: 0; right: 0; height: 0; border-top: 1px dashed var(--border); opacity: 0.6; pointer-events: none; }
+.mb-grid.mid { top: 50%; }
+.mb-peak { position: absolute; top: 3px; left: 7px; font-size: 9px; font-family: 'Geist Mono', monospace; color: var(--text-dim); background: color-mix(in srgb, var(--surface2) 78%, transparent); padding: 0 4px; border-radius: 3px; pointer-events: none; z-index: 2; }
 .mb-lane.phase { height: 30px; }
 .mb-seg { position: absolute; top: 0; bottom: 0; display: flex; align-items: center; justify-content: flex-start; font-size: 10.5px; color: var(--text); border-right: 1px solid var(--border); overflow: hidden; white-space: nowrap; }
 .mb-seg-lab { padding: 0 7px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1082,19 +1092,23 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 /* sub-agents lane (mock .lane.sub / .subbar): each in-session subagent as a
    horizontal bar positioned by its time window; color mapped to --chart-5. */
 .mb-lane.sub { height: 40px; }
-.mb-subbar { position: absolute; height: 13px; border-radius: 3px; display: flex; align-items: center; justify-content: space-between; padding: 0 6px; gap: 5px; font-size: 9px; font-family: 'Geist Mono', monospace; color: var(--text); white-space: nowrap; overflow: hidden; box-sizing: border-box; }
-.mb-subbar .mb-subnm { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mb-subbar .mb-subcost { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-faint); }
+.mb-subbar { position: absolute; height: 13px; border-radius: 3px; display: flex; align-items: center; padding: 0 6px; font-size: 9px; font-family: 'Geist Mono', monospace; color: var(--text); white-space: nowrap; overflow: hidden; box-sizing: border-box; }
+/* one ellipsized run ("name · tokens · $cost") so a narrow bar shows the name
+   and as much of the metric as fits — never a cryptic truncated "1…" stub. */
+.mb-subbar .mb-sublab { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mb-lane.ctx { height: 120px; }
 .mb-lane.cost { height: 78px; }
 .mb-board svg { display: block; width: 100%; height: 100%; }
-.mb-xaxis { display: flex; align-items: center; height: 22px; }
+/* align-items: stretch (not center) so .mb-ticks fills the row height — a
+   zero-height centered ticks box let the tick text spill past the board's
+   overflow:hidden bottom and clipped the last tick row. height 26px leaves room. */
+.mb-xaxis { display: flex; align-items: stretch; height: 26px; }
 .mb-ticks { position: relative; flex: 1; }
-.mb-tick { position: absolute; font-size: 9.5px; color: var(--text-faint); transform: translateX(-50%); top: 5px; font-family: 'Geist Mono', monospace; }
-.mb-cross { position: absolute; top: 0; bottom: 22px; width: 1px; background: var(--text-faint); pointer-events: none; z-index: 5; display: none; }
+.mb-tick { position: absolute; font-size: 9.5px; line-height: 1; color: var(--text-faint); transform: translateX(-50%); top: 6px; font-family: 'Geist Mono', monospace; }
+.mb-cross { position: absolute; top: 0; bottom: 26px; width: 1px; background: var(--text-faint); pointer-events: none; z-index: 5; display: none; }
 /* idle-gap break markers (time mode): a faint dashed rule where wall-clock idle
    time was collapsed off the active-time axis, labelled "⋯ idle Nh/Nm". */
-.mb-break { position: absolute; top: 0; bottom: 22px; width: 0; border-left: 1px dashed var(--text-faint); opacity: 0.55; pointer-events: none; z-index: 4; }
+.mb-break { position: absolute; top: 0; bottom: 26px; width: 0; border-left: 1px dashed var(--text-faint); opacity: 0.55; pointer-events: none; z-index: 4; }
 .mb-break-lab { position: absolute; top: 1px; max-width: 68px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 8.5px; color: var(--text-faint); font-family: 'Geist Mono', monospace; background: var(--surface2); padding: 0 3px; border-radius: 3px; pointer-events: none; z-index: 4; }
 .mb-crosslabel { position: absolute; bottom: 2px; transform: translateX(-50%); background: var(--surface3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: 9.5px; color: var(--text); font-family: 'Geist Mono', monospace; white-space: nowrap; }
 .mb-tip { position: absolute; background: var(--surface3); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font-size: 11px; z-index: 6; width: 190px; box-shadow: 0 6px 22px rgba(0,0,0,0.55); pointer-events: none; display: none; top: 60px; }
@@ -3459,17 +3473,23 @@ function MapBoardSection({ sessionId }) {
         ${subLayout.items.map(({ sa, left, right, row }) => {
           const w = Math.min(100, Math.max(MB_SUBBAR_MIN, right - left));
           const l = Math.max(0, Math.min(left, 100 - w)); // keep the bar inside the plot
-          const costTxt = fmtTokens(sa.tokens) + '·' + fmtCost(sa.cost_usd);
-          return html`<div class="mb-subbar" title=${sa.name + '  ' + costTxt}
+          // One ellipsized run: "name · tokens · $cost". Omit null metrics entirely
+          // (transcript-only subagents show just the name — no dangling "1…"/"—").
+          const subParts = [sa.name];
+          if (sa.tokens != null) subParts.push(fmtTokens(sa.tokens));
+          if (sa.cost_usd != null) subParts.push(fmtCost(sa.cost_usd));
+          const subLabel = subParts.join(' · ');
+          return html`<div class="mb-subbar" title=${subLabel}
             style=${'left:' + l + '%;width:' + w + '%;top:' + (5 + row * MB_SUB_ROW_H) + 'px;'
               + 'background:' + mbTint('--chart-5', 16) + ';border:1px solid ' + mbTint('--chart-5', 50)}>
-            <span class="mb-subnm">${sa.name}</span><span class="mb-subcost">${costTxt}</span>
+            <span class="mb-sublab">${subLabel}</span>
           </div>`;
         })}
       </div></div>
       ` : null}
 
-      <div class="mb-lane ctx"><div class="mb-gutter">context</div><div class="mb-plot">
+      <div class="mb-lane ctx"><div class="mb-gutter axis"><span class="mb-yv">${fmtTokens(maxCtx)}</span><span class="mb-yname">context</span><span class="mb-yv mb-y0">0</span></div><div class="mb-plot">
+        <div class="mb-grid mid"></div>
         <svg viewBox="0 0 100 30" preserveAspectRatio="none">
           <defs><linearGradient id="mbCtxGrad" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0" stop-color="var(--brand)" stop-opacity="0.35"/>
@@ -3478,9 +3498,11 @@ function MapBoardSection({ sessionId }) {
           ${ctxArea ? html`<path d=${ctxArea} fill="url(#mbCtxGrad)"/>` : null}
           ${ctxLine ? html`<path d=${ctxLine} fill="none" stroke="var(--brand)" stroke-width="0.7"/>` : null}
         </svg>
+        <span class="mb-peak">peak ${fmtTokens(maxCtx)} tok</span>
       </div></div>
 
-      <div class="mb-lane cost"><div class="mb-gutter">cost</div><div class="mb-plot">
+      <div class="mb-lane cost"><div class="mb-gutter axis"><span class="mb-yv">${fmtCost(maxCost)}</span><span class="mb-yname">cost</span><span class="mb-yv mb-y0">$0</span></div><div class="mb-plot">
+        <div class="mb-grid mid"></div>
         <svg viewBox="0 0 100 30" preserveAspectRatio="none">
           ${costSeries.map((p) => {
             const x = seriesFrac(p) * 100;
@@ -3488,6 +3510,7 @@ function MapBoardSection({ sessionId }) {
             return html`<rect x=${(x - 1).toFixed(2)} width="2" y=${(30 - h).toFixed(2)} height=${h.toFixed(2)} fill="var(--chart-3)"/>`;
           })}
         </svg>
+        <span class="mb-peak">peak ${fmtCost(maxCost)}/bucket</span>
       </div></div>
 
       <div class="mb-xaxis"><div class="mb-gutter mono">${mode === 'time' ? '0s' : 'step 1'}</div><div class="mb-ticks">
