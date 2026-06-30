@@ -1410,6 +1410,23 @@ def test_map_board_has_time_step_toggle(html):
     assert 'class="mb-toggle"' in html
 
 
+def test_map_board_has_subagents_lane(html):
+    # The sub-agents lane sits between tools and context, fed by data.subagents,
+    # positioned by the shared axis (mbLayoutSubagents) and themed to --chart-5.
+    assert "function mbLayoutSubagents" in html
+    assert '<div class="mb-lane sub"' in html
+    assert '<div class="mb-gutter">sub-<br/>agents</div>' in html
+    assert 'class="mb-subbar"' in html
+    assert "(data.subagents || []).length ? html`" in html
+    # The lane is between the tools lane and the context lane.
+    tools_i = html.index('<div class="mb-lane tools">')
+    sub_i = html.index('<div class="mb-lane sub"')
+    ctx_i = html.index('<div class="mb-lane ctx">')
+    assert tools_i < sub_i < ctx_i, "sub-agents lane must sit between tools and context"
+    # Bars are themed (no hardcoded mock hex) — Rule 18.
+    assert "mbTint('--chart-5', 16)" in html
+
+
 def test_map_board_renders_territory_treemap(html):
     # The ③ codebase-territory treemap aggregates read/edit events into per-file
     # touch counts, grouped by directory, with order badges + an edited marker.

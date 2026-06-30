@@ -1147,6 +1147,159 @@ def _session_map_series(
     return context_series, cost_series, meta
 
 
+def _subagent_name_index(asks_payload: dict[str, Any] | None) -> dict[str, str]:
+    """Map ``sub_agent_id`` -> human name from the story's nested subagent nodes.
+
+    Walks every ask's steps recursively, collecting the ``name`` each subagent
+    node carries (keyed by its ``agent_id``). The first name seen for an id
+    wins. Empty when there's no story (the caller then falls back to a synthetic
+    ``agent-<id[:8]>`` label).
+    """
+    names: dict[str, str] = {}
+    if not asks_payload:
+        return names
+
+    def walk(steps: Any) -> None:
+        for step in steps or []:
+            if not isinstance(step, dict) or "omitted" in step:
+                continue
+            subs: list[dict[str, Any]] = []
+            if isinstance(step.get("subagent"), dict):
+                subs.append(step["subagent"])
+            for sub in step.get("subagents") or []:
+                if isinstance(sub, dict):
+                    subs.append(sub)
+            for sub in subs:
+                aid = str(sub.get("agent_id") or "")
+                nm = sub.get("name")
+                if aid and nm and aid not in names:
+                    names[aid] = nm
+                walk(sub.get("steps") or [])
+
+    for ask in asks_payload.get("asks") or []:
+        if isinstance(ask, dict):
+            walk(ask.get("steps") or [])
+    return names
+
+
+def _session_map_subagent_windows(
+    db: Any, session_id: str
+) -> dict[str, dict[str, Any]]:
+    """Per-subagent time window — ``min(start_time)`` / ``max(end_time)`` grouped
+    by ``sub_agent_id`` over the session's spans.
+
+    The window spans the subagent's whole footprint regardless of span kind (LLM
+    calls + tool events both carry ``sub_agent_id``). ``end_time`` is nullable on
+    older rows, so it coalesces to ``start_time``. Empty for sessions with no
+    subagent spans.
+    """
+    if not hasattr(db, "conn"):
+        return {}
+    rows = db.conn.execute(
+        "SELECT sub_agent_id, MIN(start_time) AS start_ts, "
+        "MAX(COALESCE(end_time, start_time)) AS end_ts "
+        "FROM spans WHERE session_id = $1 AND sub_agent_id IS NOT NULL "
+        "GROUP BY sub_agent_id",
+        [session_id],
+    ).fetchall()
+    return {
+        str(r[0]): {"start_ts": r[1], "end_ts": r[2]}
+        for r in rows
+        if r[0] and r[1] is not None
+    }
+
+
+def _map_window_to_ordinals(
+    events: list[dict[str, Any]],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> tuple[int | None, int | None]:
+    """Map a subagent's [start_dt, end_dt] window onto main-thread event ordinals.
+
+    When the window overlaps main events, returns the inner edges: the first
+    event at/after ``start_dt`` and the last event at/before ``end_dt``. A
+    subagent often runs in a *gap* where the main thread emitted no events (it
+    was waiting on the subagent), so that inner mapping inverts; in that case it
+    *brackets* the gap instead — the event just before the window to the event
+    just after — clamping to the first/last ordinal at the session edges. Returns
+    ``(None, None)`` only when there are no time-anchored events at all (the UI
+    then falls back to ts-only positioning in time mode).
+    """
+    parsed: list[tuple[datetime, int]] = []
+    for event in events:
+        dt = _parse_iso(event.get("ts"))
+        if dt is not None:
+            parsed.append((dt, int(event["ordinal"])))
+    if not parsed:
+        return None, None
+    try:
+        inner_start = next((o for dt, o in parsed if dt >= start_dt), None)
+        inner_end: int | None = None
+        for dt, o in parsed:
+            if dt <= end_dt:
+                inner_end = o
+        # Clean overlap: the window contains at least one main event in order.
+        if (
+            inner_start is not None and inner_end is not None
+            and inner_start <= inner_end
+        ):
+            return inner_start, inner_end
+        # Gap / edge: bracket with the surrounding events, clamped to the axis.
+        before = [o for dt, o in parsed if dt <= start_dt]
+        after = [o for dt, o in parsed if dt >= end_dt]
+        s = before[-1] if before else parsed[0][1]
+        e = after[0] if after else parsed[-1][1]
+    except TypeError:
+        # tz-aware vs naive mismatch — give up on ordinals, keep ts positioning.
+        return None, None
+    return (s, e) if s <= e else (e, s)
+
+
+def _session_map_subagents(
+    db: Any,
+    session_id: str,
+    events: list[dict[str, Any]],
+    asks_payload: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """In-session subagents as positioned time windows for the Map's sub lane.
+
+    One entry per ``sub_agent_id`` with a usable span window: its name (from the
+    story, else ``agent-<id[:8]>``), absolute ts range, the window mapped onto
+    main-thread event ordinals (``None`` when it can't map cleanly), and its
+    summed tokens/cost (reusing ``_session_subagents``). Sorted by start ts.
+    Empty when the session spawned no subagents.
+    """
+    windows = _session_map_subagent_windows(db, session_id)
+    if not windows:
+        return []
+    by_id = {r["sub_agent_id"]: r for r in _session_subagents(db, session_id)["rows"]}
+    names = _subagent_name_index(asks_payload)
+
+    out: list[dict[str, Any]] = []
+    for aid, win in windows.items():
+        start_dt = win["start_ts"]
+        end_dt = win["end_ts"] or start_dt
+        row = by_id.get(aid)
+        tokens = (
+            row["input_tokens"] + row["output_tokens"]
+            + row["cache_tokens"] + row["cache_write_tokens"]
+        ) if row else 0
+        cost = float(row["cost_usd"]) if row else 0.0
+        start_ord, end_ord = _map_window_to_ordinals(events, start_dt, end_dt)
+        out.append({
+            "name": names.get(aid) or f"agent-{aid[:8]}",
+            "agent_id": aid,
+            "start_ts": start_dt.isoformat() if start_dt else None,
+            "end_ts": end_dt.isoformat() if end_dt else None,
+            "start_ordinal": start_ord,
+            "end_ordinal": end_ord,
+            "tokens": tokens,
+            "cost_usd": cost,
+        })
+    out.sort(key=lambda s: s["start_ts"] or "")
+    return out
+
+
 @router.get(
     "/sessions/{session_id}/sessionmap",
     response_model=None,
@@ -1162,10 +1315,13 @@ async def get_session_map(request: Request, session_id: str):
     same persisted-snapshot read-through as ``/workmap`` (marked
     ``from_snapshot``); the series come from ``db.conn``.
 
-    Returns ``{"available": true, "events", "phases", "context_series",
-    "cost_series", "meta", "from_snapshot"}``. When the session has neither a
-    Story nor any spans -> ``{"available": false, "reason": ...}`` with HTTP 200
-    (the same contract as ``/story`` and ``/workmap``).
+    Returns ``{"available": true, "events", "phases", "subagents",
+    "context_series", "cost_series", "meta", "from_snapshot"}``. ``subagents`` is
+    one entry per in-session subagent with a usable span window (name, ts range,
+    the window mapped onto event ordinals, summed tokens/cost); ``[]`` when none.
+    When the session has neither a Story nor any spans ->
+    ``{"available": false, "reason": ...}`` with HTTP 200 (the same contract as
+    ``/story`` and ``/workmap``).
     """
     override = getattr(request.app.state, "claude_projects_root", None)
     projects_root = resolve_projects_root(override)
@@ -1206,11 +1362,13 @@ async def get_session_map(request: Request, session_id: str):
         t0 = None
 
     context_series, cost_series, meta = _session_map_series(spans, t0, session)
+    subagents = _session_map_subagents(db, session_id, events, asks_payload)
 
     return {
         "available": True,
         "events": events,
         "phases": phases,
+        "subagents": subagents,
         "context_series": context_series,
         "cost_series": cost_series,
         "meta": meta,
