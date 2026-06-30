@@ -2484,6 +2484,94 @@ async def test_sessionmap_unified_axis_skew(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sessionmap_collapses_idle_gaps(tmp_path):
+    """A long session whose wall-clock is mostly idle collapses the idle gap on
+    the active-time axis: meta.gaps reports the collapsed stretch, and every
+    span's active_s skips the idle minutes while duration_s (wall) is unchanged.
+
+    Spans sit at t0, +10s, then a ~2h jump to +7200s, +7210s — one idle gap of
+    7190s (> the 300s threshold). Active axis: 10s active + 30s collapsed gap +
+    10s active = 50s; the wall duration stays ~7210s.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-idle"
+        _write_story_transcript(tmp_path, sid)
+        # Align the first span with the transcript's first event so t0 coincides.
+        started = datetime(2026, 6, 15, 9, 11, 36, 133000, tzinfo=timezone.utc)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        for off, cost in [(0, 0.01), (10, 0.02), (7200, 0.03), (7210, 0.04)]:
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-opus-4-8",
+                input_tokens=100, output_tokens=10, cost_usd=cost,
+                start_time=started + timedelta(seconds=off)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        meta = body["meta"]
+        # Wall-clock duration is untouched; the active span is the collapsed total.
+        assert meta["duration_s"] == pytest.approx(7210.0, abs=1.0)
+        assert meta["active_duration_s"] == pytest.approx(50.0, abs=0.5)
+        # Exactly one idle gap collapsed, carrying its real duration + axis frac.
+        gaps = meta["gaps"]
+        assert len(gaps) == 1
+        assert gaps[0]["duration_s"] == pytest.approx(7190.0, abs=1.0)
+        assert 0.0 <= gaps[0]["at_active_frac"] <= 1.0
+        assert gaps[0]["at_active_frac"] == pytest.approx(0.5, abs=0.1)
+        # Each series point carries the active-axis position; the idle minutes are
+        # skipped (the +7200s span lands at ~40s active, not 7200s).
+        ctx = body["context_series"]
+        assert [p["t_s"] for p in ctx] == [0.0, 10.0, 7200.0, 7210.0]
+        assert [round(p["active_s"]) for p in ctx] == [0, 10, 40, 50]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_sessionmap_gapless_active_axis_equals_wallclock(tmp_path):
+    """A normal short session (no idle gap > threshold) is unchanged: no gaps are
+    reported and the active axis equals the wall-clock axis (active_s == t_s,
+    active_duration_s == duration_s)."""
+    from datetime import datetime, timedelta, timezone
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-gapless"
+        _write_story_transcript(tmp_path, sid)
+        started = datetime(2026, 6, 15, 9, 11, 36, 133000, tzinfo=timezone.utc)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        for i in range(4):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-opus-4-8",
+                input_tokens=100, output_tokens=10, cost_usd=0.01,
+                start_time=started + timedelta(seconds=i * 30)))  # all < 300s apart
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        body = resp.json()
+        meta = body["meta"]
+        assert meta["gaps"] == []
+        assert meta["active_duration_s"] == pytest.approx(meta["duration_s"])
+        # active_s tracks t_s 1:1 when nothing collapses.
+        for p in body["context_series"]:
+            assert p["active_s"] == pytest.approx(p["t_s"])
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_sessionmap_spans_only_available(tmp_path):
     """A session with spans but no transcript is still available: events empty,
     series populated."""

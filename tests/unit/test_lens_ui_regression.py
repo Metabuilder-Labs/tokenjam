@@ -1447,6 +1447,24 @@ def test_map_board_has_time_step_toggle(html):
     assert 'class="mb-toggle"' in html
 
 
+def test_map_board_time_axis_collapses_idle_gaps(html):
+    # Time mode plots on the idle-collapsed ACTIVE-time axis the backend builds
+    # (meta.active_duration_s + per-point/-event active_s), not raw wall-clock, so
+    # the real work spreads out instead of being crammed against huge idle gaps.
+    assert "meta.active_duration_s" in html
+    assert "e.active_s != null" in html          # events position by active_s
+    assert "p.active_s != null" in html          # series points position by active_s
+    assert "sa.start_active_s != null" in html   # subagent bars position by active_s
+    # Each collapsed gap renders as a faint dashed break marker labelled "⋯ idle N".
+    assert "const gaps = meta.gaps || []" in html
+    assert "g.at_active_frac" in html
+    assert "'idle ' + mbFmtGap(g.duration_s)" in html
+    assert "function mbFmtGap" in html
+    assert 'class="mb-break"' in html
+    assert 'class="mb-break-lab"' in html
+    assert ".mb-break {" in html  # themed CSS exists (offline-safe — no external)
+
+
 def test_map_board_has_subagents_lane(html):
     # The sub-agents lane sits between tools and context, fed by data.subagents,
     # positioned by the shared axis (mbLayoutSubagents) and themed to --chart-5.

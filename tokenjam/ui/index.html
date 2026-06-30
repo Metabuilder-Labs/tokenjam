@@ -1351,6 +1351,10 @@ a.health-tile.attn { border-color: var(--warn); }
 .mb-ticks { position: relative; flex: 1; }
 .mb-tick { position: absolute; font-size: 9.5px; color: var(--text-faint); transform: translateX(-50%); top: 5px; font-family: 'Geist Mono', monospace; }
 .mb-cross { position: absolute; top: 0; bottom: 22px; width: 1px; background: var(--text-faint); pointer-events: none; z-index: 5; display: none; }
+/* idle-gap break markers (time mode): a faint dashed rule where wall-clock idle
+   time was collapsed off the active-time axis, labelled "⋯ idle Nh/Nm". */
+.mb-break { position: absolute; top: 0; bottom: 22px; width: 0; border-left: 1px dashed var(--text-faint); opacity: 0.55; pointer-events: none; z-index: 4; }
+.mb-break-lab { position: absolute; top: 1px; max-width: 68px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 8.5px; color: var(--text-faint); font-family: 'Geist Mono', monospace; background: var(--surface2); padding: 0 3px; border-radius: 3px; pointer-events: none; z-index: 4; }
 .mb-crosslabel { position: absolute; bottom: 2px; transform: translateX(-50%); background: var(--surface3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: 9.5px; color: var(--text); font-family: 'Geist Mono', monospace; white-space: nowrap; }
 .mb-tip { position: absolute; background: var(--surface3); border: 1px solid var(--border); border-radius: 7px; padding: 8px 10px; font-size: 11px; z-index: 6; width: 190px; box-shadow: 0 6px 22px rgba(0,0,0,0.55); pointer-events: none; display: none; top: 60px; }
 .mb-tip .mb-tip-hd { color: var(--text); font-weight: 600; margin-bottom: 5px; font-size: 11.5px; }
@@ -3284,6 +3288,8 @@ const MB_SUBBAR_MIN = 7;       // % — minimum subagent-bar width so its label 
 const MB_SUBBAR_GAP = 1.5;     // % — gap required before two bars share a row (else they stack).
 const MB_SUB_MAX_ROWS = 3;     // max stacked rows in the sub-agents lane (overflow reuses the earliest-ending row).
 const MB_SUB_ROW_H = 16;       // px — vertical pitch per stacked subagent row.
+const MB_BREAK_LAB_W = 74;     // px — break-label box width, used to clamp it inside the board.
+const MB_BREAK_LAB_GAP = 52;   // px — min spacing between printed idle-gap labels (rules still draw for all).
 
 const mbColor = (cat) => 'var(' + (MB_CAT_COLOR[cat] || '--text-dim') + ')';
 // A theme color at a given alpha, via color-mix (no rgba(hex) — keeps theming live).
@@ -3295,6 +3301,16 @@ function mbFmtTime(sec) {
   const m = Math.floor(sec / 60);
   const s = Math.round(sec % 60);
   return s ? (m + 'm ' + s + 's') : (m + 'm');
+}
+// Compact duration for an idle-gap break label: seconds → minutes → hours, one
+// unit only (e.g. "45s", "12m", "1.5h", "30h") so the marker stays terse.
+function mbFmtGap(sec) {
+  if (sec == null || isNaN(sec)) return '0s';
+  if (sec < 90) return Math.round(sec) + 's';
+  const m = sec / 60;
+  if (m < 90) return Math.round(m) + 'm';
+  const h = m / 60;
+  return (h < 10 ? h.toFixed(1) : Math.round(h)) + 'h';
 }
 
 // Aggregate the event stream into a codebase-territory treemap: read/edit events
@@ -3365,8 +3381,12 @@ function mbLayoutSubagents(subs, mode, started, duration, n) {
   (subs || []).forEach((sa) => {
     let l, r;
     if (mode === 'time') {
-      const so = (sa.start_ts && !isNaN(started)) ? (Date.parse(sa.start_ts) - started) / 1000 : null;
-      const eo = (sa.end_ts && !isNaN(started)) ? (Date.parse(sa.end_ts) - started) / 1000 : null;
+      // Active-time axis first (idle gaps collapsed); fall back to raw wall-clock
+      // offset for payloads without active_s (older backend / no gaps).
+      const so = (sa.start_active_s != null) ? sa.start_active_s
+        : ((sa.start_ts && !isNaN(started)) ? (Date.parse(sa.start_ts) - started) / 1000 : null);
+      const eo = (sa.end_active_s != null) ? sa.end_active_s
+        : ((sa.end_ts && !isNaN(started)) ? (Date.parse(sa.end_ts) - started) / 1000 : null);
       if (so == null || duration <= 0) return; // no usable time position
       l = clamp01(so / duration);
       r = clamp01((eo != null ? eo : so) / duration);
@@ -3445,13 +3465,20 @@ function MapBoardSection({ sessionId }) {
   const duration = (meta.duration_s && meta.duration_s > 0)
     ? meta.duration_s
     : Math.max(1, ...ctxSeries.map((p) => p.t_s || 0), ...costSeries.map((p) => p.t_s || 0), 1);
+  // Time mode plots on the idle-collapsed ACTIVE-time axis (meta.active_duration_s
+  // + per-point active_s), so the real work spreads out instead of being crammed
+  // against huge idle gaps. meta.gaps are the collapsed stretches → break markers.
+  // No gaps → active_duration_s == duration_s and every active_s == its wall-clock
+  // offset, so time mode is byte-identical to the old wall-clock behavior.
+  const activeDur = (meta.active_duration_s && meta.active_duration_s > 0) ? meta.active_duration_s : duration;
+  const gaps = meta.gaps || [];
 
   const clamp01 = (f) => Math.max(0, Math.min(1, f));
   const evOffset = (e) => (e.ts && !isNaN(started)) ? (Date.parse(e.ts) - started) / 1000 : null;
   const evStepFrac = (e, i) => (n > 1 ? i / (n - 1) : 0);
   const evTimeFrac = (e, i) => {
-    const off = evOffset(e);
-    return (off == null || duration <= 0) ? evStepFrac(e, i) : clamp01(off / duration);
+    const a = (e.active_s != null) ? e.active_s : evOffset(e);
+    return (a == null || activeDur <= 0) ? evStepFrac(e, i) : clamp01(a / activeDur);
   };
   // x% of an event in the current mode: by wall-clock offset (time) or evenly by
   // ordinal position (step). The toggle re-spaces every lane because every lane's
@@ -3475,9 +3502,13 @@ function MapBoardSection({ sessionId }) {
     }
     return 1;
   };
-  const seriesFrac = (ts) => (mode === 'time'
-    ? (duration > 0 ? clamp01((ts || 0) / duration) : 0)
-    : stepFracForTs(ts || 0));
+  // Series points carry both t_s (wall-clock) and active_s (idle-collapsed). Time
+  // mode fracs by active_s/activeDur (fall back to t_s); step mode interpolates the
+  // raw wall-clock ts onto the event step-grid (unchanged).
+  const seriesActive = (p) => (p && p.active_s != null) ? p.active_s : ((p && p.t_s) || 0);
+  const seriesFrac = (p) => (mode === 'time'
+    ? (activeDur > 0 ? clamp01(seriesActive(p) / activeDur) : 0)
+    : stepFracForTs((p && p.t_s) || 0));
 
   // Phase band edges anchor to the nearest event by ordinal, so bands line up with
   // the tool ticks; bands are made contiguous (each runs to the next phase's start).
@@ -3519,7 +3550,7 @@ function MapBoardSection({ sessionId }) {
   // Context area+line (cumulative tokens) and cost bars (per-span burn) as inline
   // SVG on a shared 0..100 x — NOT uPlot — so the lanes stay pixel-aligned.
   const maxCtx = Math.max(1, ...ctxSeries.map((p) => p.tokens || 0));
-  const ctxPts = ctxSeries.map((p) => [seriesFrac(p.t_s) * 100, 30 - ((p.tokens || 0) / maxCtx) * 26]);
+  const ctxPts = ctxSeries.map((p) => [seriesFrac(p) * 100, 30 - ((p.tokens || 0) / maxCtx) * 26]);
   const ctxLine = ctxPts.map((pt, i) => (i ? 'L' : 'M') + pt[0].toFixed(2) + ',' + pt[1].toFixed(2)).join(' ');
   const ctxArea = ctxPts.length ? ctxLine + ' L100,30 L0,30 Z' : '';
   const maxCost = Math.max(0.0001, ...costSeries.map((p) => p.usd || 0));
@@ -3527,7 +3558,7 @@ function MapBoardSection({ sessionId }) {
   // x-axis ticks (4 evenly across) + origin label in the gutter.
   const ticks = [0.25, 0.5, 0.75, 1].map((fr) => ({
     x: fr * 100,
-    label: mode === 'time' ? mbFmtTime(duration * fr) : ('step ' + Math.max(1, Math.round(fr * n))),
+    label: mode === 'time' ? mbFmtTime(activeDur * fr) : ('step ' + Math.max(1, Math.round(fr * n))),
   }));
 
   // Shared crosshair + exemplar tooltip: snap to the nearest event, drive the line
@@ -3544,14 +3575,16 @@ function MapBoardSection({ sessionId }) {
     const e = events[best];
     const frac = mode === 'time' ? evTimeFrac(e, best) : evStepFrac(e, best);
     const off = evOffset(e);
-    const labelTxt = mode === 'time' ? mbFmtTime(off != null ? off : frac * duration) : ('step ' + (best + 1));
+    const labelTxt = mode === 'time'
+      ? mbFmtTime(e.active_s != null ? e.active_s : (off != null ? off : frac * activeDur))
+      : ('step ' + (best + 1));
     if (cross) { cross.style.display = 'block'; cross.style.left = x + 'px'; }
     if (lab) lab.textContent = labelTxt;
     // nearest context + cumulative cost at this point (exemplar fields)
     let ctxTok = null, cb = Infinity;
-    ctxSeries.forEach((p) => { const d = Math.abs(seriesFrac(p.t_s) - frac); if (d < cb) { cb = d; ctxTok = p.tokens; } });
+    ctxSeries.forEach((p) => { const d = Math.abs(seriesFrac(p) - frac); if (d < cb) { cb = d; ctxTok = p.tokens; } });
     let spent = 0;
-    costSeries.forEach((p) => { if (seriesFrac(p.t_s) <= frac + 1e-9) spent += (p.usd || 0); });
+    costSeries.forEach((p) => { if (seriesFrac(p) <= frac + 1e-9) spent += (p.usd || 0); });
     if (tip) {
       tip.style.display = 'block';
       tip.style.left = Math.min(r.width - 200, x + 10) + 'px';
@@ -3573,8 +3606,25 @@ function MapBoardSection({ sessionId }) {
 
   // Sub-agents lane: positioned bars on the shared axis (re-spaced by the
   // time⇄step toggle). Rendered only when the session spawned subagents.
-  const subLayout = mbLayoutSubagents(data.subagents || [], mode, started, duration, n);
+  const subLayout = mbLayoutSubagents(data.subagents || [], mode, started, activeDur, n);
   const subLaneH = 10 + subLayout.rows * MB_SUB_ROW_H;
+
+  // Idle-gap break markers: a faint dashed rule at each collapsed gap's active-axis
+  // position (drawn for every gap), with a thinned "⋯ idle Nh/Nm" label (printed
+  // only when ≥ MB_BREAK_LAB_GAP px past the last, clamped inside the board so it
+  // never overflows). Time mode only — step mode has no wall-clock. gaps arrive in
+  // ascending at_active_frac, so left→right thinning is monotonic.
+  const breaks = [];
+  if (mode === 'time' && plotW > 0) {
+    let lastLabPx = -Infinity;
+    gaps.forEach((g) => {
+      const px = MB_GUTTER + clamp01(g.at_active_frac) * plotW;
+      const showLab = px - lastLabPx >= MB_BREAK_LAB_GAP;
+      if (showLab) lastLabPx = px;
+      const labLeft = Math.max(MB_GUTTER + 1, Math.min(px + 3, MB_GUTTER + plotW - MB_BREAK_LAB_W));
+      breaks.push({ px, labLeft, showLab, label: 'idle ' + mbFmtGap(g.duration_s) });
+    });
+  }
 
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
@@ -3642,7 +3692,7 @@ function MapBoardSection({ sessionId }) {
       <div class="mb-lane cost"><div class="mb-gutter">cost</div><div class="mb-plot">
         <svg viewBox="0 0 100 30" preserveAspectRatio="none">
           ${costSeries.map((p) => {
-            const x = seriesFrac(p.t_s) * 100;
+            const x = seriesFrac(p) * 100;
             const h = ((p.usd || 0) / maxCost) * 26;
             return html`<rect x=${(x - 1).toFixed(2)} width="2" y=${(30 - h).toFixed(2)} height=${h.toFixed(2)} fill="var(--chart-3)"/>`;
           })}
@@ -3657,6 +3707,9 @@ function MapBoardSection({ sessionId }) {
           return html`<div class="mb-tick" style=${pos}>${t.label}</div>`;
         })}
       </div></div>
+
+      ${breaks.map((b) => html`<div class="mb-break" style=${'left:' + b.px.toFixed(1) + 'px'}></div>`)}
+      ${breaks.map((b) => b.showLab ? html`<div class="mb-break-lab" title=${b.label} style=${'left:' + b.labLeft.toFixed(1) + 'px'}>⋯ ${b.label}</div>` : null)}
 
       <div class="mb-cross" ref=${crossRef}><div class="mb-crosslabel" ref=${crossLabelRef}></div></div>
       <div class="mb-tip" ref=${tipRef}></div>
