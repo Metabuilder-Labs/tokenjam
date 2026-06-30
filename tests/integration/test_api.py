@@ -2303,16 +2303,21 @@ async def test_workmap_no_launched_run_when_solo(tmp_path):
 @pytest.mark.asyncio
 async def test_get_session_sessionmap(tmp_path):
     """/sessionmap returns transcript-derived events + span-derived series for a
-    seeded session: cumulative context tokens grow, cost is per-span."""
-    from datetime import timedelta
-    from tokenjam.utils.time_parse import utcnow
+    seeded session: cumulative context tokens grow, cost is per-span.
+
+    Spans are anchored to the transcript's first event ts (a *normal* session
+    where transcript ≈ span time), so the unified axis t0 (min over events +
+    spans) coincides with the span start and the series t_s stay [0, 5, ...].
+    """
+    from datetime import datetime, timedelta, timezone
 
     db, app = _lifecycle_app(tmp_path)
     app.state.claude_projects_root = tmp_path
     try:
         sid = "smap-sess"
         _write_story_transcript(tmp_path, sid)
-        started = utcnow()
+        # Align spans with the transcript's first event (2026-06-15T09:11:36.133Z).
+        started = datetime(2026, 6, 15, 9, 11, 36, 133000, tzinfo=timezone.utc)
         db.upsert_session(make_session(
             agent_id="cc", session_id=sid, status="active", started_at=started))
         for i, (inp, cost) in enumerate([(100, 0.01), (500, 0.02), (300, 0.03)]):
@@ -2342,9 +2347,8 @@ async def test_get_session_sessionmap(tmp_path):
 
         # subagents: one window per sub_agent_id, with summed tokens/cost and a
         # ts range. (No story delegation matches "sub-A", so the name falls back
-        # to agent-<id[:8]>.) The subagent window is "now" while the only event is
-        # the 2026-06-15 transcript Read, so the window sits after every event and
-        # the ordinal bracket clamps to the lone ordinal 0.
+        # to agent-<id[:8]>.) The subagent window (started+5s..+11s) sits after
+        # the lone Read event, so the ordinal bracket clamps to ordinal 0.
         subs = body["subagents"]
         assert len(subs) == 1
         sub = subs[0]
@@ -2370,7 +2374,61 @@ async def test_get_session_sessionmap(tmp_path):
         meta = body["meta"]
         assert meta["model"] == "claude-opus-4-8"
         assert meta["total_cost_usd"] == pytest.approx(0.14)
-        assert meta["started_at"] is not None
+        # Unified axis: t0 == the shared event/span start; duration spans to the
+        # last span at +20s.
+        assert meta["started_at"].startswith("2026-06-15T09:11:36")
+        assert meta["duration_s"] == pytest.approx(20.0)
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_sessionmap_unified_axis_skew(tmp_path):
+    """A backfilled/resumed session whose spans postdate the transcript shares
+    ONE clock: the board's t0 is the earliest EVENT ts (not the span start), so
+    the tool events don't collapse to x=0 while the series spread out.
+
+    The transcript's lone Read event is at 2026-06-15T09:11:36.133Z; the spans
+    start a full day later (2026-06-16). Pre-fix, t0 was the span start, driving
+    the event's offset negative (clamped to 0) — collapse. Post-fix t0 is the
+    event ts, so meta.started_at == the event ts and the first span lands ~1 day
+    (86399.867s) out on the axis, proving both lanes share the unified basis.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-skew"
+        _write_story_transcript(tmp_path, sid)
+        # Spans start a day AFTER the transcript's first event (the skew).
+        started = datetime(2026, 6, 16, 9, 11, 36, 133000, tzinfo=timezone.utc)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        for i, (inp, cost) in enumerate([(100, 0.01), (500, 0.02), (300, 0.03)]):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-opus-4-8",
+                input_tokens=inp, output_tokens=10, cost_usd=cost,
+                start_time=started + timedelta(seconds=i * 10)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        # One time-anchored event (the Read at 2026-06-15T09:11:36.133Z).
+        assert [e["category"] for e in body["events"]] == ["read"]
+
+        meta = body["meta"]
+        # t0 is the EARLIEST event ts — the transcript day, not the span day.
+        assert meta["started_at"].startswith("2026-06-15T09:11:36")
+        # The first span is a full day past t0 (no longer at 0); series spread.
+        ctx = body["context_series"]
+        assert ctx[0]["t_s"] == pytest.approx(86399.867, abs=1.0)
+        # duration spans from the event ts to the last span (+20s) -> ~1 day.
+        assert meta["duration_s"] == pytest.approx(86400.0 - 0.133 + 20.0, abs=1.0)
     finally:
         db.close()
 
