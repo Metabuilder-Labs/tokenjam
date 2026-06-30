@@ -19,7 +19,7 @@ GET /api/v1/sessions/{session_id} — per-session detail rollup for the dashboar
 from __future__ import annotations
 
 import bisect
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -1143,13 +1143,16 @@ def _session_map_series(
     spans: list[dict[str, Any]],
     t0: datetime | None,
     session: SessionRecord | None,
+    axis: _ActiveAxis | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Build the context-growth + cost-burn series and the meta block.
 
     ``context_series`` carries the *running* context size (cumulative
     input+cache+cache_write tokens); ``cost_series`` carries each span's own
-    ``cost_usd`` (per-span burn, not cumulative). ``t_s`` is seconds from ``t0``
-    (the session start). Spans with no start_time are skipped.
+    ``cost_usd`` (per-span burn, not cumulative). ``t_s`` is raw wall-clock
+    seconds from ``t0`` (the session start); ``active_s`` is the same point on
+    the idle-collapsed active-time axis (== ``t_s`` when nothing collapses, or
+    when no ``axis`` is supplied). Spans with no start_time are skipped.
     """
     context_series: list[dict[str, Any]] = []
     cost_series: list[dict[str, Any]] = []
@@ -1163,12 +1166,17 @@ def _session_map_series(
         if start is None:
             continue
         t_s = (start - t0).total_seconds() if t0 is not None else 0.0
+        active_s = axis.to_active(start) if axis is not None else None
+        if active_s is None:
+            active_s = t_s
         context_tokens = (
             span["input_tokens"] + span["cache_tokens"] + span["cache_write_tokens"]
         )
         cumulative_tokens += context_tokens
-        context_series.append({"t_s": t_s, "tokens": cumulative_tokens})
-        cost_series.append({"t_s": t_s, "usd": span["cost_usd"]})
+        context_series.append(
+            {"t_s": t_s, "active_s": active_s, "tokens": cumulative_tokens}
+        )
+        cost_series.append({"t_s": t_s, "active_s": active_s, "usd": span["cost_usd"]})
 
         total_tokens += context_tokens + span["output_tokens"]
         total_cost += span["cost_usd"]
@@ -1237,6 +1245,123 @@ def _session_map_axis(
     t0 = min(times)
     duration = (max(times) - t0).total_seconds()
     return t0, duration if duration > 0 else 1.0
+
+
+# --- Idle-gap collapse: the Map's "active-time" axis -------------------------
+# A long or resumed session's wall-clock is usually dominated by idle gaps
+# between turns (the user away for minutes-to-hours). Plotting raw wall-clock
+# crams the actual work into thin clusters while those idle gaps eat the axis,
+# making time mode near-useless. We build a piecewise-linear map from real time
+# to an "active-time" axis that passes active periods through 1:1 but COLLAPSES
+# every gap in activity longer than IDLE_GAP_THRESHOLD_S down to a small fixed
+# COLLAPSED_GAP_S, so active work gets proportional space; the UI draws a faint
+# break marker at each collapsed gap. With NO idle gaps (a normal short
+# session) the active axis equals the wall-clock axis — no behavior change.
+IDLE_GAP_THRESHOLD_S = 300.0  # a gap in activity longer than 5 min is "idle"
+COLLAPSED_GAP_S = 30.0        # each collapsed idle gap is this many active-seconds
+
+
+class _ActiveAxis:
+    """Piecewise-linear real-time → active-time map that collapses idle gaps.
+
+    Built over the sorted union of event + span offsets (seconds from ``t0``).
+    Active stretches map 1:1; any inter-sample gap longer than
+    ``IDLE_GAP_THRESHOLD_S`` collapses to ``COLLAPSED_GAP_S`` active-seconds.
+    ``active_duration`` is the total active span after collapse; ``gaps`` lists
+    each collapsed gap (absolute ts range + real ``duration_s`` + its fractional
+    position ``at_active_frac`` on the active axis) so the UI can draw a break
+    marker. When nothing collapses, ``active_duration == duration_s`` and
+    ``gaps == []`` and ``to_active`` is the identity offset (no behavior change).
+    """
+
+    def __init__(
+        self, t0: datetime | None, duration_s: float, offsets: list[float]
+    ) -> None:
+        self._t0 = t0
+        self._real: list[float] = []   # cumulative real-second breakpoints
+        self._active: list[float] = []  # cumulative active-second breakpoints
+        self.active_duration: float = duration_s if duration_s > 0 else 1.0
+        self.gaps: list[dict[str, Any]] = []
+        if t0 is None:
+            return
+        reals = sorted({o for o in offsets if o >= 0.0})
+        if len(reals) < 2:
+            # ≤1 anchor: nothing to collapse; axis passes offsets through 1:1.
+            return
+        self._real = [reals[0]]
+        self._active = [0.0]
+        active = 0.0
+        marks: list[tuple[float, float, float]] = []  # (active_mid, r0, r1)
+        for i in range(1, len(reals)):
+            seg = reals[i] - reals[i - 1]
+            if seg > IDLE_GAP_THRESHOLD_S:
+                a_start = active
+                active += COLLAPSED_GAP_S
+                marks.append(
+                    (a_start + COLLAPSED_GAP_S / 2.0, reals[i - 1], reals[i])
+                )
+            else:
+                active += seg
+            self._real.append(reals[i])
+            self._active.append(active)
+        self.active_duration = active if active > 0 else 1.0
+        for amid, r0, r1 in marks:
+            self.gaps.append({
+                "start_ts": (t0 + timedelta(seconds=r0)).isoformat(),
+                "end_ts": (t0 + timedelta(seconds=r1)).isoformat(),
+                "duration_s": r1 - r0,
+                "at_active_frac": min(1.0, max(0.0, amid / self.active_duration)),
+            })
+
+    def to_active(self, dt: datetime | None) -> float | None:
+        """Active-axis seconds for a datetime, or ``None`` when unmappable.
+
+        Interpolates within the breakpoint segment ``dt`` falls in: active
+        segments 1:1, collapsed gaps proportionally into ``COLLAPSED_GAP_S``.
+        """
+        coerced = _coerce_utc(dt)
+        if coerced is None or self._t0 is None:
+            return None
+        off = (coerced - self._t0).total_seconds()
+        if not self._real:
+            return max(0.0, off)  # degenerate axis: identity offset
+        if off <= self._real[0]:
+            return 0.0
+        if off >= self._real[-1]:
+            return self._active[-1]
+        j = bisect.bisect_right(self._real, off) - 1
+        r0, r1 = self._real[j], self._real[j + 1]
+        a0, a1 = self._active[j], self._active[j + 1]
+        if r1 <= r0:
+            return a0
+        return a0 + (off - r0) / (r1 - r0) * (a1 - a0)
+
+
+def _build_active_axis(
+    t0: datetime | None,
+    duration_s: float,
+    events: list[dict[str, Any]],
+    spans: list[dict[str, Any]],
+) -> _ActiveAxis:
+    """Assemble the active-time axis over the UNION of event + span timestamps.
+
+    The same union ``_session_map_axis`` anchors on, so the collapsed gaps are
+    the true idle stretches where neither the transcript nor any span (main or
+    subagent LLM call) recorded activity.
+    """
+    offsets: list[float] = []
+    if t0 is not None:
+        offsets.append(0.0)
+        offsets.append(duration_s)
+        for event in events:
+            dt = _parse_iso(event.get("ts"))
+            if dt is not None:
+                offsets.append((dt - t0).total_seconds())
+        for span in spans:
+            dt = _coerce_utc(span.get("start_time"))
+            if dt is not None:
+                offsets.append((dt - t0).total_seconds())
+    return _ActiveAxis(t0, duration_s, offsets)
 
 
 def _subagent_name_index(asks_payload: dict[str, Any] | None) -> dict[str, str]:
@@ -1444,6 +1569,7 @@ def _session_map_subagents(
     session_id: str,
     events: list[dict[str, Any]],
     asks_payload: dict[str, Any] | None,
+    axis: _ActiveAxis | None = None,
 ) -> list[dict[str, Any]]:
     """In-session subagents as positioned time windows for the Map's sub lane.
 
@@ -1488,6 +1614,8 @@ def _session_map_subagents(
             start_ord, end_ord = _map_window_to_ordinals(events, start_dt, end_dt)
         else:
             start_ord, end_ord = None, None
+        start_active = axis.to_active(start_dt) if axis is not None else None
+        end_active = axis.to_active(end_dt) if axis is not None else None
         out.append({
             "name": (
                 names.get(aid)
@@ -1499,6 +1627,8 @@ def _session_map_subagents(
             "end_ts": end_dt.isoformat() if end_dt else None,
             "start_ordinal": start_ord,
             "end_ordinal": end_ord,
+            "start_active_s": start_active,
+            "end_active_s": end_active,
             "tokens": tokens,
             "cost_usd": cost,
         })
@@ -1567,9 +1697,24 @@ async def get_session_map(request: Request, session_id: str):
     # whose spans postdate the transcript (see _session_map_axis).
     t0, duration_s = _session_map_axis(events, spans, session)
 
-    context_series, cost_series, meta = _session_map_series(spans, t0, session)
+    # Collapse idle gaps into an active-time axis (see _ActiveAxis): on a long /
+    # resumed session whose wall-clock is mostly idle between turns, this spreads
+    # the actual work out instead of cramming it into thin clusters. Each event,
+    # series point and subagent window gets its position on this axis; the gaps
+    # array carries the collapsed stretches so the UI draws break markers.
+    axis = _build_active_axis(t0, duration_s, events, spans)
+    for event in events:
+        event["active_s"] = axis.to_active(_parse_iso(event.get("ts")))
+
+    context_series, cost_series, meta = _session_map_series(
+        spans, t0, session, axis
+    )
     meta["duration_s"] = duration_s
-    subagents = _session_map_subagents(db, session_id, events, asks_payload)
+    meta["active_duration_s"] = axis.active_duration
+    meta["gaps"] = axis.gaps
+    subagents = _session_map_subagents(
+        db, session_id, events, asks_payload, axis
+    )
 
     return {
         "available": True,
