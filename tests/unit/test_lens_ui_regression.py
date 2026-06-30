@@ -1081,6 +1081,22 @@ def test_work_map_files_shortened_for_readability(html):
     assert "shortPath(f)" in html
 
 
+def test_map_tool_lane_labels_shortened_and_collision_proof(html):
+    # The Map TOOLS lane prints arg labels under sampled ticks. They must be a
+    # short basename/first-token (not a long path-ish string) and spaced so two
+    # kept, center-anchored labels can never overlap — the min center-to-center
+    # gap must exceed the capped label box width.
+    assert "function evLabelShort" in html             # dedicated basename/tail shortener
+    assert "evLabelShort(events[i].label)" in html      # used for the printed tick label
+    assert "shortPath(events[i].label)" not in html     # no longer the long two-segment path
+    # collision-proof: MB_EVLAB_GAP (center spacing) must exceed MB_EVLAB_MAX (box width).
+    import re
+
+    gap = int(re.search(r"const MB_EVLAB_GAP\s*=\s*(\d+)", html).group(1))
+    box = int(re.search(r"const MB_EVLAB_MAX\s*=\s*(\d+)", html).group(1))
+    assert gap > box, f"MB_EVLAB_GAP ({gap}) must exceed MB_EVLAB_MAX ({box})"
+
+
 def test_work_map_is_ask_segmented(html):
     # A session is a sequence of asks (exchanges): the Map renders map.asks via a
     # per-ask component, read as a story ("ask by ask").

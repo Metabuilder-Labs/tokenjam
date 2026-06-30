@@ -1337,7 +1337,7 @@ a.health-tile.attn { border-color: var(--warn); }
 .mb-lane.tools { height: 52px; }
 .mb-ev { position: absolute; bottom: 16px; width: 3px; border-radius: 1px; transform: translateX(-50%); }
 .mb-ev.retry { outline: 1px dashed var(--error); outline-offset: 1px; }
-.mb-evlab { position: absolute; bottom: 2px; font-size: 8.5px; color: var(--text-faint); transform: translateX(-50%); white-space: nowrap; font-family: 'Geist Mono', monospace; max-width: 90px; overflow: hidden; text-overflow: ellipsis; }
+.mb-evlab { position: absolute; bottom: 2px; font-size: 8.5px; color: var(--text-faint); transform: translateX(-50%); white-space: nowrap; font-family: 'Geist Mono', monospace; max-width: 72px; overflow: hidden; text-overflow: ellipsis; text-align: center; }
 /* sub-agents lane (mock .lane.sub / .subbar): each in-session subagent as a
    horizontal bar positioned by its time window; color mapped to --chart-5. */
 .mb-lane.sub { height: 40px; }
@@ -1474,6 +1474,27 @@ function shortPath(s) {
   if (typeof s !== 'string' || s.indexOf('/') < 0 || s.indexOf('://') >= 0) return s;
   const parts = s.split('/').filter(Boolean);
   return parts.length > 2 ? '…/' + parts.slice(-2).join('/') : s;
+}
+// Tool-lane tick label: a tiny, glanceable tail of the tool's arg — the basename
+// (last /-segment) for a path, or the first token for a command — hard-capped at
+// MB_EVLAB_CHARS so adjacent printed labels stay narrow and never collide. The full
+// value rides along in the tick's title= for hover.
+const MB_EVLAB_CHARS = 12;
+function evLabelShort(s) {
+  if (typeof s !== 'string') return '';
+  let t = s.trim();
+  if (!t) return '';
+  // Whitespace ⇒ it's a command (a Bash line / a prompt), not a bare path —
+  // keep the leading verb/word. A path is a single token with a '/' (and not a
+  // URL): keep its basename (last segment). Anything else passes through whole.
+  if (/\s/.test(t)) {
+    t = t.split(/\s+/)[0];                          // command/prompt → first token
+  } else if (t.indexOf('/') >= 0 && t.indexOf('://') < 0) {
+    const parts = t.split('/').filter(Boolean);     // path → basename
+    if (parts.length) t = parts[parts.length - 1];
+  }
+  if (t.length > MB_EVLAB_CHARS) t = t.slice(0, MB_EVLAB_CHARS - 1) + '…';
+  return t;
 }
 // Reduce a multi-sentence, markdown-flecked outcome to one glanceable headline:
 // strip leading bullet/heading/quote markers and the inline marker characters of
@@ -3282,8 +3303,8 @@ const MB_CAT_COLOR = {
 const MB_PHASE_TINTS = ['--chart-1', '--chart-4', '--chart-2', '--chart-3', '--chart-6', '--chart-5'];
 const MB_GUTTER = 78; // px — keep in sync with .mb-gutter width so the crosshair lands in the plot.
 const MB_PHASE_LABEL_MIN = 60; // px — only print a phase-band label when the band is at least this wide.
-const MB_EVLAB_MAX = 90;       // px — keep in sync with .mb-evlab max-width (used to clamp labels inside the lane).
-const MB_EVLAB_GAP = 70;       // px — minimum spacing between two printed tool labels (skip ones that would collide).
+const MB_EVLAB_MAX = 72;       // px — keep in sync with .mb-evlab max-width (caps a label's box; used to clamp inside the lane).
+const MB_EVLAB_GAP = 80;       // px — min center-to-center spacing between two printed tool labels; must exceed MB_EVLAB_MAX so two kept (center-anchored) labels can never touch.
 const MB_SUBBAR_MIN = 7;       // % — minimum subagent-bar width so its label stays legible at any zoom.
 const MB_SUBBAR_GAP = 1.5;     // % — gap required before two bars share a row (else they stack).
 const MB_SUB_MAX_ROWS = 3;     // max stacked rows in the sub-agents lane (overflow reuses the earliest-ending row).
@@ -3529,9 +3550,13 @@ function MapBoardSection({ sessionId }) {
   }));
 
   // Which tool ticks get a printed label: walk the labelable events left→right and
-  // keep one only when it sits at least MB_EVLAB_GAP px past the last kept label, so
-  // the printed subset is sparse and never overlaps (dense regions lean on hover).
-  // Each kept label's x is clamped so the (max-width) box stays inside the lane.
+  // keep one only when its RENDERED center sits at least MB_EVLAB_GAP px past the
+  // last kept label, so the printed subset is sparse and never overlaps (dense
+  // regions lean on hover). The gap is enforced on the *clamped* x (each label's
+  // box is clamped so its max-width stays inside the lane), not the raw x — at the
+  // edges the clamp shifts a label inward, so comparing raw x would let an
+  // edge-clamped label collide with its neighbor (MB_EVLAB_GAP > MB_EVLAB_MAX, so
+  // two kept rendered centers that far apart can never touch).
   const labelPx = (i) => (evX(events[i], i) / 100) * plotW;
   const half = MB_EVLAB_MAX / 2;
   const shownLabels = [];
@@ -3539,10 +3564,9 @@ function MapBoardSection({ sessionId }) {
     let lastPx = -Infinity;
     events.forEach((e, i) => {
       if (!e.label) return;
-      const px = labelPx(i);
-      if (px - lastPx < MB_EVLAB_GAP) return;
-      lastPx = px;
-      const clampedPx = Math.max(half, Math.min(plotW - half, px));
+      const clampedPx = Math.max(half, Math.min(plotW - half, labelPx(i)));
+      if (clampedPx - lastPx < MB_EVLAB_GAP) return;
+      lastPx = clampedPx;
       shownLabels.push({ i, leftPct: (clampedPx / plotW) * 100 });
     });
   }
@@ -3660,7 +3684,7 @@ function MapBoardSection({ sessionId }) {
           const h = e.category === 'error' ? 13 : e.category === 'task' ? 12 : 10;
           return html`<div class="mb-ev ${e.is_retry ? 'retry' : ''}" style=${'left:' + x + '%;background:' + col + ';height:' + h + 'px;' + (e.category === 'task' ? 'width:5px;' : '')}></div>`;
         })}
-        ${shownLabels.map(({ i, leftPct }) => html`<div class="mb-evlab" title=${events[i].label} style=${'left:' + leftPct + '%'}>${shortPath(events[i].label)}</div>`)}
+        ${shownLabels.map(({ i, leftPct }) => html`<div class="mb-evlab" title=${events[i].label} style=${'left:' + leftPct + '%'}>${evLabelShort(events[i].label)}</div>`)}
       </div></div>
 
       ${(data.subagents || []).length ? html`
