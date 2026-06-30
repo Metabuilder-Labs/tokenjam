@@ -28,6 +28,7 @@ from typing import Iterator
 
 from tokenjam.core.cost import calculate_cost
 from tokenjam.core.config import CaptureConfig
+from tokenjam.core.method_capture import capture_session_method
 from tokenjam.core.models import (
     NormalizedSpan,
     SessionRecord,
@@ -584,6 +585,18 @@ def ingest_claude_code(
                 progress(parsed, result)
             except Exception:
                 pass
+
+    # Snapshot each newly-ingested session's reconstructed method into
+    # `session_story` so it survives Claude Code pruning the transcript later
+    # (the whole point of the persistence path — historical sessions are the
+    # ones most likely to lose their on-disk file). We capture ONLY the sessions
+    # that gained new spans this run (`new_session_ids`); an idempotent re-run
+    # re-captures nothing. Cost: one extra Story build per ingested session,
+    # re-reading the transcript backfill just parsed off `root`. Best-effort —
+    # capture_session_method swallows its own errors and never raises, so it
+    # cannot change backfill's result or break the ingest.
+    for sid in sorted(result.new_session_ids):
+        capture_session_method(db, sid, projects_dir=root, source="backfill")
 
     result.project_count = len(projects_seen)
     return result

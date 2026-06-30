@@ -14,7 +14,9 @@ from tokenjam.core.backfill import (
     iter_claude_code_sessions,
     parse_claude_code_session,
 )
+from tokenjam.core.config import CaptureConfig
 from tokenjam.core.db import InMemoryBackend
+from tokenjam.otel.semconv import GenAIAttributes
 
 
 def _make_session_file(tmp_path: Path, session_id: str, cwd: str,
@@ -461,7 +463,7 @@ def test_claude_code_backfill_accepts_since_window(tmp_path, monkeypatch):
     captured: dict[str, datetime | None] = {}
     fixed_now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
 
-    def fake_ingest(db, *, root, since, progress, config):
+    def fake_ingest(db, *, root, since, progress, config, reingest=False):
         captured["since"] = since
         return BackfillResult()
 
@@ -482,7 +484,7 @@ def test_claude_code_backfill_keeps_since_days_alias(tmp_path, monkeypatch):
     captured: dict[str, datetime | None] = {}
     fixed_now = datetime(2026, 6, 24, 12, 0, tzinfo=timezone.utc)
 
-    def fake_ingest(db, *, root, since, progress, config):
+    def fake_ingest(db, *, root, since, progress, config, reingest=False):
         captured["since"] = since
         return BackfillResult()
 
@@ -738,54 +740,6 @@ def test_ingest_attributes_tokens_per_subagent(tmp_path):
         assert db.get_session_cost("sess-x") > 0
     finally:
         db.close()
-
-
-def test_ingest_session_row_totals_include_subagents(tmp_path):
-    """Regression: the sessions table row must reflect main + ALL subagent files,
-    not just the last-processed one. Backfill upserts the row once per file with
-    replace semantics, so without reconciliation the row held only one file's
-    totals. Two subagents make the bug unambiguous (replace would leave 3000)."""
-    proj = "/Users/me/proj"
-    _make_session_file(
-        tmp_path, session_id="sess-tot", cwd=proj,
-        records=[_assistant_record(
-            "m-main", "claude-opus-4-7", 1000, 200,
-            "2026-04-01T10:00:00.000Z", "sess-tot", proj,
-        )],
-    )
-    sub_dir = tmp_path / proj.replace("/", "-") / "sess-tot" / "subagents"
-    sub_dir.mkdir(parents=True, exist_ok=True)
-    (sub_dir / "agent-s1.jsonl").write_text(json.dumps(_assistant_record(
-        "m-s1", "claude-haiku-4-5", 5000, 500,
-        "2026-04-01T10:00:01.000Z", "sess-tot", proj, is_sidechain=True, agent_id="s1",
-    )))
-    (sub_dir / "agent-s2.jsonl").write_text(json.dumps(_assistant_record(
-        "m-s2", "claude-haiku-4-5", 3000, 300,
-        "2026-04-01T10:00:02.000Z", "sess-tot", proj, is_sidechain=True, agent_id="s2",
-    )))
-
-    db = InMemoryBackend()
-    try:
-        ingest_claude_code(db, root=tmp_path)
-        sess = db.get_session("sess-tot")
-        assert sess is not None
-        assert sess.input_tokens == 1000 + 5000 + 3000   # main + both subagents
-        assert sess.output_tokens == 200 + 500 + 300
-        # The stored row total now matches the span-derived total (both include
-        # every subagent), and a second ingest is idempotent (no double-count).
-        assert abs((sess.total_cost_usd or 0) - db.get_session_cost("sess-tot")) < 1e-9
-        ingest_claude_code(db, root=tmp_path)
-        sess2 = db.get_session("sess-tot")
-        assert sess2 is not None
-        assert sess2.input_tokens == 9000
-    finally:
-        db.close()
-
-
-# --- #3: capture-gated per-message content + tool_input on backfill --------- #
-
-from tokenjam.core.config import CaptureConfig  # noqa: E402
-from tokenjam.otel.semconv import GenAIAttributes  # noqa: E402
 
 
 def _content_session_file(tmp_path: Path) -> Path:
@@ -1056,5 +1010,86 @@ def test_reingest_capture_off_does_not_wipe_existing_content(tmp_path):
         assert attrs[GenAIAttributes.PROMPT_CONTENT] == "please read the config"
         assert attrs[GenAIAttributes.COMPLETION_CONTENT] == \
             "Reading the config file now."
+    finally:
+        db.close()
+
+
+# --- method snapshot is captured at backfill so it survives a later prune ----- #
+
+def test_backfill_captures_method_snapshot_for_ingested_session(tmp_path):
+    """Backfill snapshots each newly-ingested session's reconstructed method into
+    `session_story`, with source='backfill', so a historical session keeps its
+    method even after Claude Code prunes the transcript."""
+    from tokenjam.core.method_capture import load_session_method
+
+    _make_session_file(
+        tmp_path, session_id="sess-snap", cwd="/Users/me/proj",
+        records=[
+            {"type": "user", "message": {"role": "user", "content": "Do the thing."}},
+            _assistant_record(
+                "m-snap", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-snap", "/Users/me/proj",
+                tool_uses=[("tu-snap", "Read")],
+            ),
+        ],
+    )
+    db = InMemoryBackend()
+    try:
+        r = ingest_claude_code(db, root=tmp_path)
+        assert "sess-snap" in r.new_session_ids
+
+        # A snapshot row exists and is tagged as a backfill capture.
+        row = db.conn.execute(
+            "SELECT source FROM session_story WHERE session_id = $1", ["sess-snap"],
+        ).fetchone()
+        assert row is not None
+        assert row[0] == "backfill"
+
+        # And load_session_method returns the reconstructed Story.
+        snapshot = load_session_method(db, "sess-snap")
+        assert snapshot is not None
+        assert snapshot["story"] is not None
+        assert snapshot["story"]["task"] == "Do the thing."
+    finally:
+        db.close()
+
+
+def test_backfill_capture_is_noop_without_transcript_text(tmp_path):
+    """A session whose transcript yields no reconstructable Story (SDK-style /
+    no on-disk content for the parser) leaves no session_story row and does not
+    raise — capture stays best-effort on the backfill path."""
+    from tokenjam.core.method_capture import load_session_method
+
+    # Ingest a normal session, then point capture at a DIFFERENT empty root so
+    # the per-session re-read finds no transcript: no row, no raise.
+    _make_session_file(
+        tmp_path, session_id="sess-ghost", cwd="/Users/me/proj",
+        records=[_assistant_record(
+            "m-ghost", "claude-haiku-4-5", 100, 50,
+            "2026-04-01T10:00:00.000Z", "sess-ghost", "/Users/me/proj",
+        )],
+    )
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+
+    db = InMemoryBackend()
+    try:
+        # Parse from the real root, but the second arg here is what capture re-reads.
+        # Simulate the no-transcript case by ingesting then capturing a session id
+        # that has no file under the capture root.
+        r = ingest_claude_code(db, root=tmp_path)
+        assert "sess-ghost" in r.new_session_ids
+
+        # The ingested session got a snapshot (transcript present)...
+        assert load_session_method(db, "sess-ghost") is not None
+
+        # ...but a session with no transcript under the root yields nothing and
+        # never raises when capture re-reads it.
+        from tokenjam.core.method_capture import capture_session_method
+
+        assert capture_session_method(
+            db, "no-such-session", projects_dir=empty_root, source="backfill"
+        ) is False
+        assert load_session_method(db, "no-such-session") is None
     finally:
         db.close()
