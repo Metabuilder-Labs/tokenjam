@@ -2,46 +2,8 @@ import json
 
 import click
 
-from tokenjam.core.pricing import (
-    PRICING_FILE,
-    _override_raw_sources,
-    _split_pricing_raw,
-    load_pricing_table,
-)
+from tokenjam.core.pricing import load_pricing_sources, load_pricing_table
 from tokenjam.utils.formatting import console, make_table
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # Python < 3.11
-    import tomli as tomllib  # type: ignore[no-redef]
-
-
-def _source_map() -> dict[tuple[str, str], str]:
-    """Map each (provider, model) to where its rate resolved from.
-
-    Mirrors the precedence in pricing._build_pricing(): override layers win
-    over the packaged models.toml, which wins over the built-in default. A
-    model present in an override layer is labelled "override"; one present
-    only in the packaged table is "packaged"; anything else falls through to
-    "default" (handled by the caller for models not seen in either layer).
-    """
-    sources: dict[tuple[str, str], str] = {}
-
-    # Packaged table (the base layer) -> "packaged".
-    with open(PRICING_FILE, "rb") as fh:
-        packaged_providers, _ = _split_pricing_raw(tomllib.load(fh))
-    for provider, models in packaged_providers.items():
-        for model_name in models:
-            sources[(provider, model_name)] = "packaged"
-
-    # Override layers win over the packaged table -> "override".
-    for raw in _override_raw_sources():
-        override_providers, _ = _split_pricing_raw(raw)
-        for provider, models in override_providers.items():
-            for model_name in models:
-                sources[(provider, model_name)] = "override"
-
-    return sources
 
 
 @click.group("pricing", invoke_without_command=False)
@@ -62,10 +24,13 @@ def cmd_pricing_list(ctx: click.Context, model: str | None,
     output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
 
     table = load_pricing_table()  # {provider: {model: ModelRates}}
-    source_map = _source_map()
+    sources = load_pricing_sources()  # {(provider, model): "override"|"packaged"}
 
     # Flatten the nested table into one row per (provider, model), optionally
-    # filtered by a case-insensitive substring match on the model name.
+    # filtered by a case-insensitive substring match on the model name. Every
+    # listed model is in the resolved table, so its source is "packaged" or
+    # "override" (the built-in default only applies to models absent from the
+    # table, which never appear here); "packaged" is a defensive fallback.
     rows = []
     for provider in sorted(table):
         for model_name in sorted(table[provider]):
@@ -79,7 +44,7 @@ def cmd_pricing_list(ctx: click.Context, model: str | None,
                 "output_per_mtok": rates.output_per_mtok,
                 "cache_read_per_mtok": rates.cache_read_per_mtok,
                 "cache_write_per_mtok": rates.cache_write_per_mtok,
-                "source": source_map.get((provider, model_name), "default"),
+                "source": sources.get((provider, model_name), "packaged"),
             })
 
     if output_json:

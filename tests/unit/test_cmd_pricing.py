@@ -52,12 +52,19 @@ _FAKE_TABLE = {
     },
 }
 
+# claude-sonnet-4 comes from an override layer; gpt-4o from the packaged table.
+_FAKE_SOURCES = {
+    ("anthropic", "claude-sonnet-4"): "override",
+    ("openai", "gpt-4o"): "packaged",
+}
+
 
 def test_pricing_list_json_outputs_resolved_rates(runner):
     """--json emits one object per model with the resolved rate fields."""
     with patch("tokenjam.cli.cmd_pricing.load_pricing_table",
                return_value=_FAKE_TABLE), \
-         patch("tokenjam.cli.cmd_pricing._source_map", return_value={}):
+         patch("tokenjam.cli.cmd_pricing.load_pricing_sources",
+               return_value=_FAKE_SOURCES):
         result = _invoke(runner, ["pricing", "list", "--json"])
 
     assert result.exit_code == 0
@@ -72,15 +79,14 @@ def test_pricing_list_json_outputs_resolved_rates(runner):
     assert sonnet["output_per_mtok"] == 15.0
     assert sonnet["cache_read_per_mtok"] == 0.3
     assert sonnet["cache_write_per_mtok"] == 3.75
-    # Not present in the (empty) source map -> falls through to "default".
-    assert sonnet["source"] == "default"
 
 
 def test_pricing_list_model_filter_is_case_insensitive_substring(runner):
     """--model narrows rows to a case-insensitive substring match on model."""
     with patch("tokenjam.cli.cmd_pricing.load_pricing_table",
                return_value=_FAKE_TABLE), \
-         patch("tokenjam.cli.cmd_pricing._source_map", return_value={}):
+         patch("tokenjam.cli.cmd_pricing.load_pricing_sources",
+               return_value=_FAKE_SOURCES):
         result = _invoke(runner, ["pricing", "list", "--model", "CLAUDE", "--json"])
 
     assert result.exit_code == 0
@@ -88,17 +94,16 @@ def test_pricing_list_model_filter_is_case_insensitive_substring(runner):
     assert [row["model"] for row in data] == ["claude-sonnet-4"]
 
 
-def test_pricing_list_source_reflects_override_layer(runner):
-    """A model present in the source map is labelled with that source."""
-    fake_sources = {("anthropic", "claude-sonnet-4"): "override"}
+def test_pricing_list_source_reflects_packaged_and_override(runner):
+    """Each row's source reflects the layer it resolved from."""
     with patch("tokenjam.cli.cmd_pricing.load_pricing_table",
                return_value=_FAKE_TABLE), \
-         patch("tokenjam.cli.cmd_pricing._source_map", return_value=fake_sources):
+         patch("tokenjam.cli.cmd_pricing.load_pricing_sources",
+               return_value=_FAKE_SOURCES):
         result = _invoke(runner, ["pricing", "list", "--json"])
 
     assert result.exit_code == 0
     data = json.loads(result.output)
     by_model = {row["model"]: row for row in data}
     assert by_model["claude-sonnet-4"]["source"] == "override"
-    # gpt-4o isn't in the source map -> "default".
-    assert by_model["gpt-4o"]["source"] == "default"
+    assert by_model["gpt-4o"]["source"] == "packaged"
