@@ -187,6 +187,37 @@ def _build_pricing() -> tuple[dict[str, dict[str, ModelRates]], dict[str, ModelR
     return provider_table, model_keyed
 
 
+def load_pricing_sources() -> dict[tuple[str, str], str]:
+    """Map each (provider, model) in the resolved table to its source layer.
+
+    Returns {(provider, model): "override" | "packaged"}, mirroring the
+    precedence in _build_pricing(): the packaged models.toml is the base
+    ("packaged"), and any provider/model present in an override source
+    (see _override_raw_sources) is promoted to "override". This is the
+    single source of truth for *where* a listed rate resolved from; callers
+    (e.g. `tj pricing list`) read it instead of re-deriving precedence.
+
+    Note: the built-in default flat rate is intentionally not represented
+    here -- it applies in get_rates() to models absent from the table, which
+    never appear as listed rows.
+    """
+    sources: dict[tuple[str, str], str] = {}
+
+    with open(PRICING_FILE, "rb") as f:
+        packaged_providers, _ = _split_pricing_raw(tomllib.load(f))
+    for provider, models in packaged_providers.items():
+        for model_name in models:
+            sources[(provider, model_name)] = "packaged"
+
+    for raw in _override_raw_sources():
+        override_providers, _ = _split_pricing_raw(raw)
+        for provider, models in override_providers.items():
+            for model_name in models:
+                sources[(provider, model_name)] = "override"
+
+    return sources
+
+
 @lru_cache(maxsize=1)
 def load_pricing_table() -> dict[str, dict[str, ModelRates]]:
     """
