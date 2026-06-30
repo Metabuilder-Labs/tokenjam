@@ -972,6 +972,46 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .wm-detail div { margin: 1px 0; }
 .wm-detail .k { color: var(--brand); margin-right: 6px; }
 
+/* Approach tab: the METHOD spine — how the agent attempted the work, with
+   recursive delegation expansion (ported from the approved mock; the mock's
+   hardcoded hexes are mapped onto the theme vars: brand→--brand, success→
+   --success, error→--error, task-pink→--chart-5, warn→--warn). */
+.ap-panel { border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); padding: 16px 18px; }
+.ap-head { border-bottom: 1px solid var(--border); padding-bottom: 13px; margin-bottom: 4px; }
+.ap-who { font-size: 14px; font-weight: 600; font-family: 'Geist Mono', monospace; }
+.ap-mandate { font-size: 12px; color: var(--text-dim); margin-top: 5px; }
+.ap-mandate b { color: var(--text); }
+.ap-outcome { font-size: 11.5px; color: var(--success); margin-top: 6px; }
+/* The spine: a continuous vertical line with each move's icon sitting on it. */
+.ap-spine { position: relative; margin: 8px 0 2px; padding-left: 26px; }
+.ap-spine::before { content: ''; position: absolute; left: 9px; top: 6px; bottom: 10px; width: 2px; background: var(--border); }
+.ap-move { position: relative; padding: 8px 0; }
+.ap-ic { position: absolute; left: -26px; top: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--surface3); border: 1px solid var(--border); display: flex; align-items: center; justify-content: center; font-size: 10px; }
+/* Per-kind icon accents (direct child only, so nested moves keep their own). */
+.ap-move.ap-delegate > .ap-ic { border-color: var(--chart-5); color: var(--chart-5); }
+.ap-move.ap-verify > .ap-ic { border-color: var(--success); color: var(--success); }
+.ap-move.dead > .ap-ic { border-color: var(--error); color: var(--error); }
+.ap-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ap-kind { font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint); font-family: 'Geist Mono', monospace; }
+.ap-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.ap-move.dead .ap-label, .ap-move.retry .ap-label { text-decoration: line-through; color: var(--text-dim); }
+.ap-revert { font-size: 9px; color: var(--error); border: 1px solid var(--error); border-radius: 9px; padding: 1px 6px; font-family: 'Geist Mono', monospace; }
+/* Source tag chip: agent's words (brand) vs structural (warn). No "distilled". */
+.ap-src { font-size: 9px; padding: 1px 6px; border-radius: 9px; font-family: 'Geist Mono', monospace; border: 1px solid var(--border); color: var(--text-dim); }
+.ap-src.words { color: var(--brand); border-color: var(--brand); }
+.ap-src.struct { color: var(--warn); border-color: var(--warn); }
+.ap-quote { font-size: 11.5px; color: var(--text-dim); font-style: italic; margin: 4px 0 0; border-left: 2px solid var(--border); padding-left: 9px; }
+.ap-ev { font-size: 10.5px; color: var(--text-faint); margin-top: 5px; font-family: 'Geist Mono', monospace; }
+.ap-ev-st.err { color: var(--error); }
+/* Delegation toggle — clickable, collapsed by default, recurses on open. */
+.ap-deleg { margin-top: 7px; border: 1px solid var(--chart-5); border-radius: 8px; background: var(--surface3); padding: 8px 10px; display: flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+.ap-caret { color: var(--chart-5); font-size: 10px; width: 12px; transition: transform .15s; display: inline-block; }
+.ap-deleg.open .ap-caret { transform: rotate(90deg); }
+.ap-deleg-label { font-size: 11.5px; font-weight: 600; font-family: 'Geist Mono', monospace; color: var(--text); }
+/* Nested child method (recursion): indent + a left depth rail. */
+.ap-nested { margin: 2px 0 4px 6px; padding: 10px 0 2px 14px; border-left: 2px solid var(--chart-5); }
+.ap-capped { font-size: 10.5px; color: var(--text-dim); font-style: italic; margin-top: 7px; padding: 6px 10px; border: 1px dashed var(--border); border-radius: 8px; }
+
 /* Charts (uPlot, issue #112). The vendored uplot.css styles the canvas/cursor;
    these style the container card and re-theme uPlot via CSS variables. */
 .chart-card {
@@ -2684,6 +2724,91 @@ function WorkMapSection({ sessionId }) {
   `;
 }
 
+// Small text/emoji marker per move kind (offline — no icon font).
+const APPROACH_ICONS = { delegate: '⑂', dead_end: '✗', verify: '✅', act: '•' };
+
+// One move on the Approach spine. RECURSIVE: a `delegate` move with children
+// renders a collapsed-by-default nested block (a caret toggles it) whose child
+// moves are rendered by THIS SAME component — so the child's own method spine
+// nests under the parent, with a left depth rail. A `capped` delegate shows a
+// "not expanded" note instead of children. Source is reported honestly as the
+// agent's own words or a structural inference — never an invented "distilled".
+function ApproachMove({ move }) {
+  const [open, setOpen] = useState(false);
+  const kind = move.kind || 'act';
+  const isDead = kind === 'dead_end' || move.failed;
+  const isRetry = !!move.is_retry;
+  const icon = APPROACH_ICONS[kind] || '•';
+  const srcWords = move.source === 'agent_words';
+  const ev = move.evidence || [];
+  const children = move.children || [];
+  const hasChildren = kind === 'delegate' && children.length > 0;
+  return html`
+    <div class="ap-move ap-${kind} ${isDead ? 'dead' : ''} ${isRetry ? 'retry' : ''}">
+      <div class="ap-ic">${icon}</div>
+      <div class="ap-top">
+        <span class="ap-kind">${kind.replace('_', ' ')}</span>
+        <span class="ap-label">${move.label}</span>
+        ${(isDead || isRetry) ? html`<span class="ap-revert">${kind === 'dead_end' ? 'reverted · dead-end' : 'retry'}</span>` : null}
+        <span class="ap-src ${srcWords ? 'words' : 'struct'}">${srcWords ? "agent's words" : 'structural'}</span>
+      </div>
+      ${move.quote ? html`<div class="ap-quote">${move.quote}</div>` : null}
+      ${ev.length ? html`<div class="ap-ev">▸ ${ev.map((e, i) => html`<span class="ap-ev-item">${i > 0 ? ' · ' : ''}${e.name} ${e.label}${e.status === 'error' ? html` <span class="ap-ev-st err">✗</span>` : null}</span>`)}</div>` : null}
+      ${hasChildren ? html`
+        <div class="ap-deleg ${open ? 'open' : ''}" onClick=${() => setOpen(o => !o)}>
+          <span class="ap-caret">▶</span>
+          <span class="ap-deleg-label">↳ ${open ? 'hide' : 'expand'} child method · ${children.length} move${children.length === 1 ? '' : 's'}</span>
+        </div>
+        ${open ? html`<div class="ap-nested">${children.map(c => html`<${ApproachMove} move=${c} />`)}</div>` : null}
+      ` : null}
+      ${move.capped ? html`<div class="ap-capped">not expanded — ${move.capped}</div>` : null}
+    </div>
+  `;
+}
+
+// The Approach tab: HOW the agent attempted the work. Mirrors WorkMapSection's
+// fetch idiom (poll the dedicated endpoint; keep the last good payload on a
+// transient failure). Renders the mandate header + the method spine, recursing
+// into each delegation's own method via ApproachMove.
+function ApproachSection({ sessionId }) {
+  const [data, setData] = useState(null);
+
+  const load = useCallback(() => {
+    api('/sessions/' + sessionId + '/approach')
+      .then(d => setData(d))
+      .catch(() => setData(prev => prev || { available: false }));
+  }, [sessionId]);
+
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+
+  if (!data) return null;
+
+  if (!data.available) {
+    return html`
+      <div class="page-title" style="font-size:14px;margin-top:24px">Approach</div>
+      <div class="story-unavailable">${data.reason || 'No transcript or snapshot for this session — Approach is available for Claude Code sessions.'}</div>
+    `;
+  }
+
+  const spine = data.spine || [];
+  return html`
+    <div class="page-title" style="font-size:14px;margin-top:24px">Approach</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How the agent attempted it — the method spine, kept after each dead-end; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
+    <div class="ap-panel">
+      ${(data.name || data.task || data.outcome) ? html`
+        <div class="ap-head">
+          ${data.name ? html`<div class="ap-who">${data.name}</div>` : null}
+          ${data.task ? html`<div class="ap-mandate">mandate: <b>${data.task}</b></div>` : null}
+          ${data.outcome ? html`<div class="ap-outcome">${data.outcome}</div>` : null}
+        </div>
+      ` : null}
+      ${spine.length === 0
+        ? html`<div class="story-unavailable">Transcript found but no moves reconstructed.</div>`
+        : html`<div class="ap-spine">${spine.map(m => html`<${ApproachMove} move=${m} />`)}</div>`}
+    </div>
+  `;
+}
+
 function SessionDetailView({ sessionId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -2764,6 +2889,7 @@ function SessionDetailView({ sessionId }) {
 
     <div class="tab-bar" role="tablist">
       <button class="tab ${tab === 'map' ? 'active' : ''}" role="tab" aria-selected=${tab === 'map'} onClick=${() => setTab('map')}>Map</button>
+      <button class="tab ${tab === 'approach' ? 'active' : ''}" role="tab" aria-selected=${tab === 'approach'} onClick=${() => setTab('approach')}>Approach</button>
       <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Timeline</button>
       <button class="tab ${tab === 'models' ? 'active' : ''}" role="tab" aria-selected=${tab === 'models'} onClick=${() => setTab('models')}>Models & context</button>
       ${subagents.total > 0 ? html`<button class="tab ${tab === 'subagents' ? 'active' : ''}" role="tab" aria-selected=${tab === 'subagents'} onClick=${() => setTab('subagents')}>Subagents${subagents.flagged ? ' (' + subagents.flagged + ')' : ''}</button>` : null}
@@ -2772,6 +2898,8 @@ function SessionDetailView({ sessionId }) {
     </div>
 
     ${tab === 'map' ? html`<${WorkMapSection} sessionId=${sessionId} />` : null}
+
+    ${tab === 'approach' ? html`<${ApproachSection} sessionId=${sessionId} />` : null}
 
     ${tab === 'story' ? html`<${StorySection} sessionId=${sessionId} />` : null}
 

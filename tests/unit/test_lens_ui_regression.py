@@ -1200,3 +1200,44 @@ def test_analytics_tool_dim_no_cost_metric_empty_state(html):
     # one-click recovery actions
     assert "onClick=${() => setFilter('metric', 'events')}>Switch to Events" in html
     assert "setFilter('group_by', 'model')" in html
+
+
+# --- Approach tab: recursive method spine (GET /sessions/{id}/approach) ------ #
+def test_approach_section_present_and_tab_wired(html):
+    # The Approach tab renders the method spine from the dedicated endpoint,
+    # mirroring WorkMapSection's fetch idiom.
+    assert "function ApproachSection" in html
+    assert "/sessions/' + sessionId + '/approach'" in html
+    # Tab button wired into SessionDetailView, placed AFTER Map and BEFORE Timeline.
+    assert "setTab('approach')" in html
+    map_btn = html.index("setTab('map')")
+    approach_btn = html.index("setTab('approach')")
+    story_btn = html.index("setTab('story')")
+    assert map_btn < approach_btn < story_btn, "Approach tab sits between Map and Timeline"
+    # The render block dispatches the 'approach' tab to the section.
+    assert "tab === 'approach' ? html`<${ApproachSection} sessionId=${sessionId} />`" in html
+
+
+def test_approach_source_tags_present(html):
+    # The two honest source tags ride each move; "distilled" is never invented
+    # on the approach spine (only agent's words vs structural inference).
+    assert "agent's words" in html
+    assert "'structural'" in html
+    assert 'class="ap-src ${srcWords' in html
+
+
+def test_approach_renders_recursively(html):
+    # A delegate move with children renders the SAME move renderer (recursion),
+    # behind a collapsed-by-default caret toggle; a capped delegate shows a note.
+    assert "function ApproachMove" in html
+    assert "children.map(c => html`<${ApproachMove} move=${c} />`)" in html
+    assert "kind === 'delegate' && children.length > 0" in html
+    assert "move.capped" in html
+    assert "not expanded — ${move.capped}" in html
+
+
+def test_approach_handles_unavailable(html):
+    # available:false surfaces the server-provided reason (e.g. no transcript or
+    # snapshot for this session).
+    assert "data.reason" in html
+    assert "No transcript or snapshot for this session" in html
