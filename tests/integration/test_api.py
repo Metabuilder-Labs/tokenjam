@@ -2587,12 +2587,37 @@ async def test_get_session_approach_returns_spine(config, db, tmp_path):
     assert body["available"] is True
     assert "from_snapshot" not in body
     spine = body["spine"]
-    # The orchestrator's Task step is a delegate move carrying the child's spine.
+    # The orchestrator's Task step is a delegate move carrying one delegation,
+    # whose nested spine is the child's own method.
     delegate = next(m for m in spine if m["kind"] == "delegate")
     assert delegate["source"] == "agent_words"
     assert delegate["label"] == "Spawning a worker."
-    assert len(delegate["children"]) == 1
-    assert delegate["children"][0]["kind"] == "act"
+    assert len(delegate["delegations"]) == 1
+    deleg = delegate["delegations"][0]
+    assert deleg["name"] == "build-it"
+    assert deleg["depth"] == 1
+    assert deleg["status"] == "ended"
+    assert len(deleg["spine"]) == 1
+    assert deleg["spine"][0]["kind"] == "act"
+
+    # The delegation-tree rail: the main agent (depth 0) then each subagent.
+    agents = body["agents"]
+    assert agents[0]["depth"] == 0
+    assert agents[0]["provenance"] == "main_session"
+    assert any(
+        a["name"] == "build-it" and a["depth"] == 1
+        and a["provenance"] == "in_session_subagent"
+        for a in agents
+    )
+
+    # Header counts roll up the whole (nested) spine.
+    counts = body["counts"]
+    assert counts["delegations"] == 1
+    assert counts["moves"] >= 2
+    assert set(counts) == {"moves", "delegations", "dead_ends", "verifies"}
+
+    # Session-level meta block is present (cost/tokens; null when no session row).
+    assert set(body["meta"]) == {"cost_usd", "tokens"}
 
 
 @pytest.mark.asyncio

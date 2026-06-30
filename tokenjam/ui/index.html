@@ -1270,6 +1270,43 @@ a.health-tile.attn { border-color: var(--warn); }
 /* Nested child method (recursion): indent + a left depth rail. */
 .ap-nested { margin: 2px 0 4px 6px; padding: 10px 0 2px 14px; border-left: 2px solid var(--chart-5); }
 .ap-capped { font-size: 10.5px; color: var(--text-dim); font-style: italic; margin-top: 7px; padding: 6px 10px; border: 1px dashed var(--border); border-radius: 8px; }
+/* Two-column layout: the delegation-tree rail (left) + the focused method (right). */
+.ap-grid { display: grid; grid-template-columns: 268px 1fr; gap: 16px; }
+@media (max-width: 760px) { .ap-grid { grid-template-columns: 1fr; } }
+/* Left rail: every agent in the spawn tree, indented by depth. */
+.ap-rail { border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); padding: 12px; height: fit-content; }
+.ap-rail-h { margin: 0 0 3px; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+.ap-rail-sub { font-size: 10.5px; color: var(--text-faint); margin-bottom: 11px; }
+.ap-node { display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border-radius: 7px; }
+.ap-node + .ap-node { margin-top: 2px; }
+.ap-node.d1 { margin-left: 14px; } .ap-node.d2 { margin-left: 28px; } .ap-node.d3 { margin-left: 42px; }
+.ap-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; margin-top: 4px; }
+.ap-dot.main { background: var(--brand); } .ap-dot.sub { background: var(--chart-5); } .ap-dot.term { background: var(--warn); }
+.ap-nname { font-size: 11.5px; font-weight: 600; font-family: 'Geist Mono', monospace; }
+.ap-nmeta { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+.ap-badge { display: inline-block; font-size: 9px; padding: 1px 6px; border-radius: 10px; margin-top: 4px; font-family: 'Geist Mono', monospace; border: 1px solid var(--border); color: var(--text-dim); }
+.ap-badge.live { color: var(--success); border-color: var(--success); }
+.ap-badge.partial { color: var(--warn); border-color: var(--warn); }
+.ap-prov { font-size: 8.5px; color: var(--text-faint); font-family: 'Geist Mono', monospace; margin-top: 3px; }
+.ap-railcap { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--text-dim); line-height: 1.5; }
+.ap-railcap b { color: var(--text); }
+/* Header card: mandate (left) + a right-aligned stats column. */
+.ap-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.ap-rt { text-align: right; font-size: 10.5px; color: var(--text-dim); white-space: nowrap; font-family: 'Geist Mono', monospace; line-height: 1.7; }
+.ap-rt b { color: var(--text); }
+/* Rich delegation card: identity + depth + cost/status chips. */
+.ap-deleg-main { display: flex; flex-direction: column; }
+.ap-deleg-name { font-size: 11.5px; font-weight: 600; font-family: 'Geist Mono', monospace; color: var(--text); }
+.ap-deleg-stats { margin-left: auto; font-size: 10px; color: var(--text-dim); font-family: 'Geist Mono', monospace; white-space: nowrap; }
+.ap-deleg-note { font-size: 10px; color: var(--text-dim); font-style: italic; margin-top: 2px; }
+.ap-depthtag { font-size: 8.5px; color: var(--chart-5); border: 1px solid var(--chart-5); border-radius: 8px; padding: 0 5px; margin-left: 6px; font-family: 'Geist Mono', monospace; }
+.ap-chead { font-size: 11px; color: var(--text-dim); margin-bottom: 2px; }
+.ap-chead b { color: var(--text); font-family: 'Geist Mono', monospace; }
+.ap-cmandate { font-size: 11px; color: var(--text-faint); margin-bottom: 4px; }
+.ap-cmandate i { color: var(--text-dim); }
+/* Source-of-each-line legend at the foot of the panel. */
+.ap-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--text-dim); align-items: center; }
+.ap-src.distill { color: var(--chart-6); border-color: var(--chart-6); }
 
 /* Map board (GET /sessions/{id}/sessionmap): synchronized swimlanes (① phase /
    tools / context / cost over one time-or-step axis) + a codebase-territory
@@ -3017,22 +3054,19 @@ function WorkMapSection({ sessionId }) {
 // Small text/emoji marker per move kind (offline — no icon font).
 const APPROACH_ICONS = { delegate: '⑂', dead_end: '✗', verify: '✅', act: '•' };
 
-// One move on the Approach spine. RECURSIVE: a `delegate` move with children
-// renders a collapsed-by-default nested block (a caret toggles it) whose child
-// moves are rendered by THIS SAME component — so the child's own method spine
-// nests under the parent, with a left depth rail. A `capped` delegate shows a
-// "not expanded" note instead of children. Source is reported honestly as the
-// agent's own words or a structural inference — never an invented "distilled".
+// One move on the Approach spine. A `delegate` move renders one rich card per
+// entry in `move.delegations` (ApproachDelegation), each expanding into the
+// child's own method spine — so the recursion runs through the delegation, not
+// a flat children list. Source is reported honestly as the agent's own words or
+// a structural inference — never an invented "distilled".
 function ApproachMove({ move }) {
-  const [open, setOpen] = useState(false);
   const kind = move.kind || 'act';
   const isDead = kind === 'dead_end' || move.failed;
   const isRetry = !!move.is_retry;
   const icon = APPROACH_ICONS[kind] || '•';
   const srcWords = move.source === 'agent_words';
   const ev = move.evidence || [];
-  const children = move.children || [];
-  const hasChildren = kind === 'delegate' && children.length > 0;
+  const delegations = move.delegations || [];
   return html`
     <div class="ap-move ap-${kind} ${isDead ? 'dead' : ''} ${isRetry ? 'retry' : ''}">
       <div class="ap-ic">${icon}</div>
@@ -3044,22 +3078,92 @@ function ApproachMove({ move }) {
       </div>
       ${move.quote ? html`<div class="ap-quote">${move.quote}</div>` : null}
       ${ev.length ? html`<div class="ap-ev">▸ ${ev.map((e, i) => html`<span class="ap-ev-item">${i > 0 ? ' · ' : ''}${e.name} ${e.label}${e.status === 'error' ? html` <span class="ap-ev-st err">✗</span>` : null}</span>`)}</div>` : null}
-      ${hasChildren ? html`
-        <div class="ap-deleg ${open ? 'open' : ''}" onClick=${() => setOpen(o => !o)}>
-          <span class="ap-caret">▶</span>
-          <span class="ap-deleg-label">↳ ${open ? 'hide' : 'expand'} child method · ${children.length} move${children.length === 1 ? '' : 's'}</span>
+      ${delegations.map(d => html`<${ApproachDelegation} deleg=${d} />`)}
+    </div>
+  `;
+}
+
+// A single delegation card: `↳ name · depth N · tokens · $cost · status`. Click
+// to expand a nested block — the child's "how it solved its piece" sub-header,
+// its mandate, and its own method spine (rendered by ApproachMove, recursively).
+// A `capped` delegation shows a "not expanded — reason" note and never expands.
+function ApproachDelegation({ deleg }) {
+  const [open, setOpen] = useState(false);
+  const capped = deleg.capped;
+  const spine = deleg.spine || [];
+  const stats = [
+    deleg.tokens != null ? fmtTokens(deleg.tokens) : null,
+    deleg.cost_usd != null ? fmtCost(deleg.cost_usd) : null,
+    deleg.status || (capped ? 'capped' : 'ended'),
+  ].filter(Boolean).join(' · ');
+  if (capped) {
+    return html`
+      <div class="ap-deleg capped">
+        <span class="ap-caret">▶</span>
+        <div class="ap-deleg-main">
+          <div class="ap-deleg-name">↳ ${deleg.name} <span class="ap-depthtag">depth ${deleg.depth}</span></div>
+          <div class="ap-deleg-note">not expanded — ${capped}</div>
         </div>
-        ${open ? html`<div class="ap-nested">${children.map(c => html`<${ApproachMove} move=${c} />`)}</div>` : null}
-      ` : null}
-      ${move.capped ? html`<div class="ap-capped">not expanded — ${move.capped}</div>` : null}
+      </div>`;
+  }
+  return html`
+    <div class="ap-deleg ${open ? 'open' : ''}" onClick=${() => setOpen(o => !o)}>
+      <span class="ap-caret">▶</span>
+      <div class="ap-deleg-main">
+        <div class="ap-deleg-name">↳ ${deleg.name} <span class="ap-depthtag">depth ${deleg.depth}</span></div>
+      </div>
+      <span class="ap-deleg-stats">${stats}</span>
+    </div>
+    ${open ? html`
+      <div class="ap-nested">
+        <div class="ap-chead">↳ <b>${deleg.name}</b> · how the subagent solved its piece</div>
+        ${deleg.task ? html`<div class="ap-cmandate">mandate: <i>${deleg.task}</i></div>` : null}
+        ${spine.length
+          ? html`<div class="ap-spine">${spine.map(m => html`<${ApproachMove} move=${m} />`)}</div>`
+          : html`<div class="ap-cmandate"><i>no moves reconstructed for this subagent</i></div>`}
+      </div>` : null}
+  `;
+}
+
+// The left delegation-tree rail: every agent in the spawn tree (data.agents),
+// indented by depth, with a status dot, a meta line, a status badge, and a
+// provenance sub-line for in-session subagents.
+function ApproachRail({ agents }) {
+  return html`
+    <div class="ap-rail">
+      <h4 class="ap-rail-h">Delegation tree</h4>
+      <div class="ap-rail-sub">indent = spawn depth · each agent's method is rebuilt below</div>
+      ${agents.map(a => {
+        const isMain = a.depth === 0;
+        const isCapped = a.capture_completeness !== 'full';
+        const dotClass = isMain ? 'main' : (isCapped ? 'term' : 'sub');
+        const dCls = a.depth ? ('d' + Math.min(a.depth, 3)) : '';
+        const meta = (a.tokens != null ? fmtTokens(a.tokens) + ' tok' : ('depth ' + (a.depth || 0)))
+          + (a.cost_usd != null ? ' · ' + fmtCost(a.cost_usd) : '');
+        let badgeCls = '', badgeTxt;
+        if (isMain) { badgeCls = a.status === 'active' ? 'live' : ''; badgeTxt = a.status === 'active' ? '● live' : (a.status || 'completed'); }
+        else if (isCapped) { badgeCls = 'partial'; badgeTxt = '⏏ ' + (a.status || 'capped'); }
+        else { badgeTxt = '⏏ ended · method kept'; }
+        return html`
+          <div class="ap-node ${dCls}">
+            <div class="ap-dot ${dotClass}"></div>
+            <div>
+              <div class="ap-nname">${a.name || '(unnamed)'}</div>
+              <div class="ap-nmeta">${meta}</div>
+              <span class="ap-badge ${badgeCls}">${badgeTxt}</span>
+              ${isMain ? null : html`<div class="ap-prov">in-session subagent · from transcript</div>`}
+            </div>
+          </div>`;
+      })}
+      <div class="ap-railcap">Nodes below main were <b>killed</b> when done — their context is gone, so tokenjam rebuilds <b>how each one solved its piece</b> from the captured transcript. The badge never claims more than tokenjam actually has.</div>
     </div>
   `;
 }
 
 // The Approach tab: HOW the agent attempted the work. Mirrors WorkMapSection's
 // fetch idiom (poll the dedicated endpoint; keep the last good payload on a
-// transient failure). Renders the mandate header + the method spine, recursing
-// into each delegation's own method via ApproachMove.
+// transient failure). Two columns: the delegation-tree rail + the focused method
+// panel (a bordered header card with mandate/outcome/stats, the spine, a legend).
 function ApproachSection({ sessionId }) {
   const [data, setData] = useState(null);
 
@@ -3081,20 +3185,35 @@ function ApproachSection({ sessionId }) {
   }
 
   const spine = data.spine || [];
+  const agents = data.agents || [];
+  const counts = data.counts || { moves: 0, delegations: 0, dead_ends: 0, verifies: 0 };
+  const meta = data.meta || {};
+  const statLine = (meta.cost_usd != null ? fmtCost(meta.cost_usd) : '$0.0000')
+    + ' · ' + (meta.tokens != null ? fmtTokens(meta.tokens) : '-') + ' tok';
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Approach</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How the agent attempted it — the method spine, kept after each dead-end; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
-    <div class="ap-panel">
-      ${(data.name || data.task || data.outcome) ? html`
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How the agent attempted it — the method spine, rebuilt for every agent and kept after each is killed; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
+    <div class="ap-grid">
+      <${ApproachRail} agents=${agents} />
+      <div class="ap-panel">
         <div class="ap-head">
-          ${data.name ? html`<div class="ap-who">${data.name}</div>` : null}
-          ${data.task ? html`<div class="ap-mandate">mandate: <b>${data.task}</b></div>` : null}
-          ${data.outcome ? html`<div class="ap-outcome">${data.outcome}</div>` : null}
+          <div>
+            ${data.name ? html`<div class="ap-who">${data.name}</div>` : null}
+            ${data.task ? html`<div class="ap-mandate">mandate: <b>${data.task}</b></div>` : null}
+            ${data.outcome ? html`<div class="ap-outcome">✓ ${data.outcome}</div>` : null}
+          </div>
+          <div class="ap-rt"><b>${counts.moves}</b> moves<br/><b>${counts.delegations}</b> delegations<br/><b>${counts.dead_ends}</b> dead-ends<br/>${statLine}</div>
         </div>
-      ` : null}
-      ${spine.length === 0
-        ? html`<div class="story-unavailable">Transcript found but no moves reconstructed.</div>`
-        : html`<div class="ap-spine">${spine.map(m => html`<${ApproachMove} move=${m} />`)}</div>`}
+        ${spine.length === 0
+          ? html`<div class="story-unavailable">Transcript found but no moves reconstructed.</div>`
+          : html`<div class="ap-spine">${spine.map(m => html`<${ApproachMove} move=${m} />`)}</div>`}
+        <div class="ap-legend">
+          <span><b>source of each line:</b></span>
+          <span><span class="ap-src words">agent's words</span> narration / TodoWrite</span>
+          <span><span class="ap-src struct">structural</span> revert / retry / spawn</span>
+          <span><span class="ap-src distill">distilled</span> LLM, opt-in</span>
+        </div>
+      </div>
     </div>
   `;
 }

@@ -215,31 +215,58 @@ def test_recursion_into_nested_subagent():
     ]))
     move = spine[0]
     assert move["kind"] == "delegate"
-    assert len(move["children"]) == 2
-    assert move["children"][0]["kind"] == "act"
-    assert move["children"][1]["kind"] == "verify"
-    assert "capped" not in move
+    # One delegation entry per subagent child, carrying the child's own spine.
+    assert len(move["delegations"]) == 1
+    deleg = move["delegations"][0]
+    assert deleg["name"] == "worker"
+    assert deleg["agent_id"] == "A"
+    assert deleg["depth"] == 1          # parent depth (0) + 1
+    assert deleg["task"] == "build"     # the child's mandate
+    assert deleg["capped"] is None
+    assert len(deleg["spine"]) == 2
+    assert deleg["spine"][0]["kind"] == "act"
+    assert deleg["spine"][1]["kind"] == "verify"
 
 
-def test_multiple_parallel_subagents_concatenate_children():
+def test_delegation_depth_increments_with_nesting():
+    grandchild = {"agent_id": "G", "name": "g",
+                  "steps": [_step([_tool("Read", "g")])]}
+    child = {
+        "agent_id": "A", "name": "a",
+        "steps": [_step([_tool("Task", "g")], text="Spawn grandchild.",
+                        subagent=grandchild)],
+    }
+    spine = build_method_spine(_story([
+        _step([_tool("Task", "a")], text="Spawn child.", subagent=child),
+    ]))
+    child_deleg = spine[0]["delegations"][0]
+    assert child_deleg["depth"] == 1
+    grand_deleg = child_deleg["spine"][0]["delegations"][0]
+    assert grand_deleg["depth"] == 2
+
+
+def test_multiple_parallel_subagents_each_get_a_delegation():
     sub_a = {"agent_id": "A", "name": "a", "steps": [_step([_tool("Read", "a")])]}
     sub_b = {"agent_id": "B", "name": "b", "steps": [_step([_tool("Edit", "b")])]}
     spine = build_method_spine(_story([
         _step([_tool("Task", "a"), _tool("Task", "b")], text="Fan out.",
               subagents=[sub_a, sub_b]),
     ]))
-    assert len(spine[0]["children"]) == 2
+    delegs = spine[0]["delegations"]
+    assert len(delegs) == 2
+    assert [d["agent_id"] for d in delegs] == ["A", "B"]
 
 
-def test_capped_child_emits_empty_children_and_marker():
+def test_capped_child_emits_empty_spine_and_marker():
     spine = build_method_spine(_story([
         _step([_tool("Task", "deep")], text="Go deeper.",
               subagent={"agent_id": "D", "name": "deep", "depth_capped": True}),
     ]))
     move = spine[0]
     assert move["kind"] == "delegate"
-    assert move["children"] == []
-    assert move["capped"] == "depth"
+    deleg = move["delegations"][0]
+    assert deleg["spine"] == []
+    assert deleg["capped"] == "depth"
 
 
 def test_cycle_child_marked_capped():
@@ -247,7 +274,7 @@ def test_cycle_child_marked_capped():
         _step([_tool("Task", "loop")], text="Loop.",
               subagent={"agent_id": "L", "name": "loop", "cycle": True}),
     ]))
-    assert spine[0]["capped"] == "cycle"
+    assert spine[0]["delegations"][0]["capped"] == "cycle"
 
 
 # --- structure ---------------------------------------------------------------

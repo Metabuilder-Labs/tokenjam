@@ -650,15 +650,166 @@ async def get_session_story(
     return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
 
 
-def _approach_payload(story: dict[str, Any]) -> dict[str, Any]:
-    """Render-ready Approach body from a Story dict (the method spine + mandate)."""
+def _join_delegation_costs(
+    spine: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]
+) -> None:
+    """Join span-derived cost/tokens/flags/status onto each delegation in-place.
+
+    Walks the spine recursively; for every delegation, matches its ``agent_id``
+    against the per-subagent rollup (keyed by ``sub_agent_id``) and writes
+    ``cost_usd`` / ``tokens`` / ``flags``, plus a ``status`` of ``"capped"`` (a
+    recursion guard tripped) or ``"ended"``. Leaves the cost fields ``None`` when
+    no matching span row exists (live/SDK sessions carry no subagent identity).
+    """
+    for move in spine:
+        for deleg in move.get("delegations") or []:
+            row = by_id.get(deleg.get("agent_id") or "")
+            if row is not None:
+                deleg["cost_usd"] = row["cost_usd"]
+                deleg["tokens"] = (
+                    row["input_tokens"] + row["output_tokens"]
+                    + row["cache_tokens"] + row["cache_write_tokens"]
+                )
+                deleg["flags"] = row["flags"]
+            else:
+                deleg["cost_usd"] = None
+                deleg["tokens"] = None
+                deleg["flags"] = []
+            deleg["status"] = "capped" if deleg.get("capped") else "ended"
+            _join_delegation_costs(deleg.get("spine") or [], by_id)
+
+
+def _flatten_delegation_agents(
+    spine: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Preorder-flatten every delegation in the spine into rail-agent summaries.
+
+    Each delegation (after ``_join_delegation_costs``) becomes one entry; deeper
+    delegations follow their parent (depth-first) so the rail reads top-down as
+    the tree was spawned.
+    """
+    agents: list[dict[str, Any]] = []
+    for move in spine:
+        for deleg in move.get("delegations") or []:
+            agents.append({
+                "name": deleg.get("name"),
+                "agent_id": deleg.get("agent_id"),
+                "depth": deleg.get("depth"),
+                "provenance": "in_session_subagent",
+                "status": deleg.get("status"),
+                "cost_usd": deleg.get("cost_usd"),
+                "tokens": deleg.get("tokens"),
+                "capture_completeness": (
+                    "session-level" if deleg.get("capped") else "full"
+                ),
+            })
+            agents.extend(_flatten_delegation_agents(deleg.get("spine") or []))
+    return agents
+
+
+def _spine_counts(spine: list[dict[str, Any]]) -> dict[str, int]:
+    """Totals over the whole (nested) spine: moves / delegations / dead-ends /
+    verifies — the header stats the Approach card surfaces."""
+    counts = {"moves": 0, "delegations": 0, "dead_ends": 0, "verifies": 0}
+
+    def walk(moves: list[dict[str, Any]]) -> None:
+        for move in moves:
+            counts["moves"] += 1
+            kind = move.get("kind")
+            if kind == "dead_end":
+                counts["dead_ends"] += 1
+            elif kind == "verify":
+                counts["verifies"] += 1
+            for deleg in move.get("delegations") or []:
+                counts["delegations"] += 1
+                walk(deleg.get("spine") or [])
+
+    walk(spine)
+    return counts
+
+
+def _main_agent_summary(
+    story: dict[str, Any], session: SessionRecord | None
+) -> dict[str, Any]:
+    """The depth-0 rail entry for the main agent (the session itself)."""
+    if session is not None:
+        status = "active" if session.effective_status == "active" else "completed"
+        tokens: int | None = (
+            session.input_tokens + session.output_tokens
+            + session.cache_tokens + session.cache_write_tokens
+        )
+        cost: float | None = (
+            float(session.total_cost_usd)
+            if session.total_cost_usd is not None else None
+        )
+        name = story.get("name") or session.agent_id
+        agent_id = session.agent_id
+    else:
+        status, tokens, cost = None, None, None
+        name = story.get("name")
+        agent_id = story.get("agent_id")
     return {
+        "name": name,
+        "agent_id": agent_id,
+        "depth": 0,
+        "provenance": "main_session",
+        "status": status,
+        "cost_usd": cost,
+        "tokens": tokens,
+        "capture_completeness": "full",
+    }
+
+
+def _session_meta(session: SessionRecord | None) -> dict[str, Any]:
+    """Session-level ``{cost_usd, tokens}`` for the Approach header stats."""
+    if session is None:
+        return {"cost_usd": None, "tokens": None}
+    return {
+        "cost_usd": (
+            float(session.total_cost_usd)
+            if session.total_cost_usd is not None else None
+        ),
+        "tokens": (
+            session.input_tokens + session.output_tokens
+            + session.cache_tokens + session.cache_write_tokens
+        ),
+    }
+
+
+def _approach_payload(
+    story: dict[str, Any], db: Any, session_id: str, *, from_snapshot: bool = False
+) -> dict[str, Any]:
+    """Render-ready Approach body: the recursive method spine joined to the
+    span-derived per-subagent cost/status, plus the delegation-tree rail summary
+    (``agents``), the header ``counts``, and session ``meta``.
+
+    The UI reads everything it draws straight from this payload (repo rule: the
+    UI never aggregates) — the rail, the header stats, and the per-delegation
+    cost chips are all assembled here, not in the browser.
+    """
+    spine = build_method_spine(story)
+
+    subs = _session_subagents(db, session_id)
+    by_id = {r["sub_agent_id"]: r for r in subs.get("rows", [])}
+    _join_delegation_costs(spine, by_id)
+
+    session = db.get_session(session_id)
+    main = _main_agent_summary(story, session)
+    agents = [main, *_flatten_delegation_agents(spine)]
+
+    payload: dict[str, Any] = {
         "available": True,
-        "spine": build_method_spine(story),
+        "name": main["name"],
         "task": story.get("task") or "",
         "outcome": story.get("outcome") or "",
-        "name": story.get("name"),
+        "spine": spine,
+        "agents": agents,
+        "counts": _spine_counts(spine),
+        "meta": _session_meta(session),
     }
+    if from_snapshot:
+        payload["from_snapshot"] = True
+    return payload
 
 
 @router.get(
@@ -675,7 +826,12 @@ async def get_session_approach(request: Request, session_id: str):
     (Critical Rule 14): only structurally-determinable intent is emitted — richer
     labels are the opt-in distill layer, not this route.
 
-    Found -> ``{"available": true, "spine": [...], "task": ..., ...}``. When the
+    Found -> ``{"available": true, "name", "task", "outcome", "spine",
+    "agents", "counts", "meta"}``. ``spine`` carries the recursive moves (each
+    ``delegate`` move's ``delegations`` joined to the span-derived
+    cost/tokens/flags/status); ``agents`` is the preorder delegation-tree rail
+    (main agent first); ``counts`` rolls up moves/delegations/dead-ends/verifies
+    over the whole tree; ``meta`` is the session ``{cost_usd, tokens}``. When the
     live transcript is gone, falls back to the method snapshot persisted at
     session close (M1), marked ``"from_snapshot": true``. Neither ->
     ``{"available": false, "reason": ...}`` with HTTP 200 (same contract as
@@ -683,17 +839,20 @@ async def get_session_approach(request: Request, session_id: str):
     """
     override = getattr(request.app.state, "claude_projects_root", None)
     projects_root = resolve_projects_root(override)
+    db = request.app.state.db
 
     story = build_session_story(
         session_id, projects_root=projects_root, include_subagents=True
     )
     if story is not None:
-        return _approach_payload(story)
+        return _approach_payload(story, db, session_id)
 
     # Transcript pruned -> read-through the persisted snapshot's story slice (M1).
-    snapshot = load_session_method(request.app.state.db, session_id)
+    snapshot = load_session_method(db, session_id)
     if snapshot and snapshot.get("story"):
-        return {"from_snapshot": True, **_approach_payload(snapshot["story"])}
+        return _approach_payload(
+            snapshot["story"], db, session_id, from_snapshot=True
+        )
 
     return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
 
