@@ -2295,6 +2295,109 @@ async def test_workmap_no_launched_run_when_solo(tmp_path):
         db.close()
 
 
+# --- Session Map (board data) endpoint ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_session_sessionmap(tmp_path):
+    """/sessionmap returns transcript-derived events + span-derived series for a
+    seeded session: cumulative context tokens grow, cost is per-span."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-sess"
+        _write_story_transcript(tmp_path, sid)
+        started = utcnow()
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        for i, (inp, cost) in enumerate([(100, 0.01), (500, 0.02), (300, 0.03)]):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-opus-4-8",
+                input_tokens=inp, output_tokens=10, cost_usd=cost,
+                start_time=started + timedelta(seconds=i * 10)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        assert body["from_snapshot"] is False
+
+        # Events: the transcript's single Read tool call.
+        assert [e["category"] for e in body["events"]] == ["read"]
+        assert body["events"][0]["ordinal"] == 0
+
+        # context_series: running (cumulative) context size on a 10s-spaced axis.
+        ctx = body["context_series"]
+        assert [p["tokens"] for p in ctx] == [100, 600, 900]
+        assert [p["t_s"] for p in ctx] == [0.0, 10.0, 20.0]
+
+        # cost_series: per-span burn (NOT cumulative).
+        assert [round(p["usd"], 2) for p in body["cost_series"]] == [0.01, 0.02, 0.03]
+
+        meta = body["meta"]
+        assert meta["model"] == "claude-opus-4-8"
+        assert meta["total_cost_usd"] == pytest.approx(0.06)
+        assert meta["started_at"] is not None
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_sessionmap_spans_only_available(tmp_path):
+    """A session with spans but no transcript is still available: events empty,
+    series populated."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-spans-only"
+        started = utcnow()
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        db.insert_span(make_llm_span(
+            agent_id="cc", session_id=sid, model="claude-haiku-4-5",
+            input_tokens=42, output_tokens=5, cost_usd=0.005,
+            start_time=started))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        assert body["events"] == []
+        assert body["phases"] == []
+        assert len(body["context_series"]) == 1
+        assert body["context_series"][0]["tokens"] == 42
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_get_session_sessionmap_unavailable(tmp_path):
+    """No transcript and no spans -> available:false with HTTP 200."""
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/nada-sess/sessionmap")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is False
+        assert "reason" in body
+    finally:
+        db.close()
+
+
 # --- Session Distill endpoint ------------------------------------------------
 
 @pytest.mark.asyncio

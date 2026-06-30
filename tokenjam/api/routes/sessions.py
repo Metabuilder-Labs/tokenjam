@@ -38,6 +38,7 @@ from tokenjam.core.framing import (
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.models import AlertFilters, SessionRecord
 from tokenjam.core.runlink import scan_transcript_run_ids
+from tokenjam.core.sessionmap import build_session_map
 from tokenjam.core.transcript import (
     build_session_asks,
     build_session_story,
@@ -810,6 +811,168 @@ async def get_session_workmap(request: Request, session_id: str):
         if launched is not None:
             result["launched_run"] = launched
     return result
+
+
+def _session_map_spans(db: Any, session_id: str) -> list[dict[str, Any]]:
+    """The session's LLM-call spans, time-ordered, with the columns the Map's
+    context/cost time-series need.
+
+    Mirrors ``_session_context_series`` / ``_bucket_tokens_by_ask``: the context
+    and cost curves live on ``gen_ai.llm.call`` spans (tool/event spans carry no
+    tokens or cost), so the series is built from those, ordered by start_time.
+    """
+    if not hasattr(db, "conn"):
+        return []
+    rows = db.conn.execute(
+        "SELECT start_time, "
+        "COALESCE(input_tokens, 0), COALESCE(cache_tokens, 0), "
+        "COALESCE(cache_write_tokens, 0), COALESCE(output_tokens, 0), "
+        "COALESCE(cost_usd, 0.0), model "
+        "FROM spans WHERE session_id = $1 AND name = $2 "
+        "ORDER BY start_time ASC",
+        [session_id, GenAIAttributes.SPAN_LLM_CALL],
+    ).fetchall()
+    return [
+        {
+            "start_time": r[0],
+            "input_tokens": int(r[1] or 0),
+            "cache_tokens": int(r[2] or 0),
+            "cache_write_tokens": int(r[3] or 0),
+            "output_tokens": int(r[4] or 0),
+            "cost_usd": float(r[5] or 0.0),
+            "model": r[6] if isinstance(r[6], str) else None,
+        }
+        for r in rows
+    ]
+
+
+def _session_map_series(
+    spans: list[dict[str, Any]],
+    t0: datetime | None,
+    session: SessionRecord | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    """Build the context-growth + cost-burn series and the meta block.
+
+    ``context_series`` carries the *running* context size (cumulative
+    input+cache+cache_write tokens); ``cost_series`` carries each span's own
+    ``cost_usd`` (per-span burn, not cumulative). ``t_s`` is seconds from ``t0``
+    (the session start). Spans with no start_time are skipped.
+    """
+    context_series: list[dict[str, Any]] = []
+    cost_series: list[dict[str, Any]] = []
+    cumulative_tokens = 0
+    total_tokens = 0
+    total_cost = 0.0
+    model_freq: dict[str, int] = {}
+
+    for span in spans:
+        start = span["start_time"]
+        if start is None:
+            continue
+        t_s = (start - t0).total_seconds() if t0 is not None else 0.0
+        context_tokens = (
+            span["input_tokens"] + span["cache_tokens"] + span["cache_write_tokens"]
+        )
+        cumulative_tokens += context_tokens
+        context_series.append({"t_s": t_s, "tokens": cumulative_tokens})
+        cost_series.append({"t_s": t_s, "usd": span["cost_usd"]})
+
+        total_tokens += context_tokens + span["output_tokens"]
+        total_cost += span["cost_usd"]
+        model = span["model"]
+        if model:
+            model_freq[model] = model_freq.get(model, 0) + 1
+
+    dominant_model = (
+        max(model_freq, key=lambda m: model_freq[m]) if model_freq else None
+    )
+    if context_series:
+        duration_s: float | None = context_series[-1]["t_s"]
+    elif session is not None:
+        duration_s = session.duration_seconds
+    else:
+        duration_s = None
+
+    started_at = t0.isoformat() if t0 is not None else None
+    meta = {
+        "started_at": started_at,
+        "duration_s": duration_s,
+        "total_tokens": total_tokens,
+        "total_cost_usd": total_cost,
+        "model": dominant_model,
+    }
+    return context_series, cost_series, meta
+
+
+@router.get(
+    "/sessions/{session_id}/sessionmap",
+    response_model=None,
+    dependencies=[Depends(require_api_key)],
+)
+async def get_session_map(request: Request, session_id: str):
+    """Board data for the Map's synchronized swimlanes (lens ①).
+
+    Folds the session's reconstructed Story into a flat tool-event list +
+    contiguous phase spans (``core.sessionmap.build_session_map``) and pairs them
+    with span-derived context-growth and cost-burn series over a shared
+    seconds-from-start axis. The Story comes from ``build_session_asks`` with the
+    same persisted-snapshot read-through as ``/workmap`` (marked
+    ``from_snapshot``); the series come from ``db.conn``.
+
+    Returns ``{"available": true, "events", "phases", "context_series",
+    "cost_series", "meta", "from_snapshot"}``. When the session has neither a
+    Story nor any spans -> ``{"available": false, "reason": ...}`` with HTTP 200
+    (the same contract as ``/story`` and ``/workmap``).
+    """
+    override = getattr(request.app.state, "claude_projects_root", None)
+    projects_root = resolve_projects_root(override)
+
+    db = request.app.state.db
+
+    asks_payload = build_session_asks(
+        session_id, projects_root=projects_root, include_subagents=True
+    )
+    from_snapshot = False
+    if asks_payload is None:
+        # Transcript gone (pruned). Fall back to the method snapshot persisted at
+        # session close (M1); the span-derived series below still come from the DB.
+        snapshot = load_session_method(db, session_id)
+        if snapshot and snapshot.get("asks"):
+            asks_payload = snapshot["asks"]
+            from_snapshot = True
+
+    if asks_payload is not None:
+        session_map = build_session_map(asks_payload)
+        events = session_map["events"]
+        phases = session_map["phases"]
+    else:
+        events, phases = [], []
+
+    session = db.get_session(session_id)
+    spans = _session_map_spans(db, session_id)
+
+    # Neither a story nor any spans -> nothing to draw.
+    if asks_payload is None and not spans:
+        return {"available": False, "reason": _NO_TRANSCRIPT_REASON}
+
+    if session is not None and session.started_at is not None:
+        t0: datetime | None = session.started_at
+    elif spans:
+        t0 = spans[0]["start_time"]
+    else:
+        t0 = None
+
+    context_series, cost_series, meta = _session_map_series(spans, t0, session)
+
+    return {
+        "available": True,
+        "events": events,
+        "phases": phases,
+        "context_series": context_series,
+        "cost_series": cost_series,
+        "meta": meta,
+        "from_snapshot": from_snapshot,
+    }
 
 
 # Min outcome length (chars) before an ask is worth distilling a title for. Short
