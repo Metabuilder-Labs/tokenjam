@@ -565,6 +565,87 @@ def session_token_cost_rollup(conn, session_id: str) -> dict | None:
     }
 
 
+def sdk_service_series(
+    conn, agent_ids: list[str], window_start, now, *, slots: int = 24
+) -> dict[str, dict]:
+    """Per-minute cost / calls / error% series + last_seen for the given agents.
+
+    Buckets `spans` by minute over the last `slots` minutes ending at `now`,
+    zero-filled to a fixed-length grid so every agent yields exactly `slots`
+    points (a flatline for services that emitted nothing recently). Also returns
+    window totals (for req/min + err-rate) and `last_seen` across ALL history —
+    a long-dormant service last emitted days ago, outside the sparkline window.
+
+    Powers the /status SDK-services zone (Prometheus-style sparklines). Returns
+    {} when `conn` is None or no agents are given. Each agent maps to:
+        {cost_per_min, calls_per_min, err_pct_per_min: [slots],
+         window_cost, window_calls, window_errors, last_seen}
+    """
+    if conn is None or not agent_ids:
+        return {}
+
+    # Fixed minute grid: slot i covers [grid[i], grid[i] + 60s); grid[-1] is the
+    # minute containing `now`. Epoch-second keys match the SQL bucket below.
+    base = int(now.timestamp() // 60) * 60
+    grid = [base - (slots - 1 - i) * 60 for i in range(slots)]
+    index = {ts: i for i, ts in enumerate(grid)}
+
+    result: dict[str, dict] = {
+        aid: {
+            "cost_per_min": [0.0] * slots,
+            "calls_per_min": [0] * slots,
+            "err_pct_per_min": [0.0] * slots,
+            "window_cost": 0.0,
+            "window_calls": 0,
+            "window_errors": 0,
+            "last_seen": None,
+        }
+        for aid in agent_ids
+    }
+
+    # IN (…) with per-id placeholders — a controlled small list; all values bound
+    # (never interpolated), matching the codebase's dynamic-placeholder style.
+    ph = ", ".join(f"${i + 2}" for i in range(len(agent_ids)))
+    rows = conn.execute(
+        f"""
+        SELECT agent_id,
+               CAST(epoch(date_trunc('minute', start_time AT TIME ZONE 'UTC')) AS BIGINT) AS b,
+               COALESCE(SUM(cost_usd), 0.0)                  AS cost,
+               COUNT(*) FILTER (WHERE status_code = 'error') AS errors,
+               COUNT(*)                                      AS calls
+        FROM spans
+        WHERE start_time >= $1 AND agent_id IN ({ph})
+        GROUP BY agent_id, b
+        """,
+        [window_start, *agent_ids],
+    ).fetchall()
+    for aid, b, cost, errors, calls in rows:
+        r = result[aid]
+        r["window_cost"] += float(cost or 0.0)
+        r["window_calls"] += int(calls or 0)
+        r["window_errors"] += int(errors or 0)
+        slot = index.get(int(b))
+        if slot is None:
+            continue
+        r["cost_per_min"][slot] = float(cost or 0.0)
+        r["calls_per_min"][slot] = int(calls or 0)
+        r["err_pct_per_min"][slot] = (
+            float(errors) / calls * 100.0 if calls else 0.0
+        )
+
+    ph1 = ", ".join(f"${i + 1}" for i in range(len(agent_ids)))
+    seen_rows = conn.execute(
+        f"SELECT agent_id, MAX(COALESCE(end_time, start_time)) "
+        f"FROM spans WHERE agent_id IN ({ph1}) GROUP BY agent_id",
+        [*agent_ids],
+    ).fetchall()
+    for aid, last_seen in seen_rows:
+        if aid in result:
+            result[aid]["last_seen"] = last_seen
+
+    return result
+
+
 def _int_or_none(val: object) -> int | None:
     if val is None:
         return None

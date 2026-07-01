@@ -1,13 +1,15 @@
 """GET /api/v1/status — agent status overview + session archive."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.alerts import is_interactive_coding_agent
 from tokenjam.core.db import (
     _row_to_session,
+    sdk_service_series,
     session_active_seconds,
     session_token_cost_rollup,
 )
@@ -18,6 +20,7 @@ from tokenjam.core.framing import (
 )
 from tokenjam.core.models import (
     SESSION_IDLE_THRESHOLD,
+    SESSION_STALE_THRESHOLD,
     AlertFilters,
     SessionRecord,
 )
@@ -32,6 +35,25 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 MAX_SESSION_TILES = 6
 # How many archived (closed/stale) sessions to return, most-recent first.
 ARCHIVE_LIMIT = 50
+
+# --- SDK-services zone (non-interactive agents) -----------------------------
+# An SDK service never "closes" — it just stops emitting telemetry. So its
+# lifecycle is keyed on last-seen, not an explicit end:
+#   live         : seen within LIVE_WINDOW           -> Prometheus panel
+#   went_quiet   : silent for LIVE..QUIET_WINDOW     -> inactive list, amber
+#                  (was steady, just stopped — possible outage)
+#   long_dormant : silent beyond QUIET_WINDOW        -> inactive list, muted
+# A silent service is ambiguous (decommissioned / idle / crashed), so the UI
+# surfaces last-seen and flags the recently-quiet case for a human to check.
+SDK_LIVE_WINDOW = SESSION_STALE_THRESHOLD          # 5 min
+SDK_QUIET_WINDOW = timedelta(minutes=30)
+# Only surface SDK services seen within this window at all (keeps the inactive
+# list bounded; older services age out entirely).
+SDK_DISCOVERY_WINDOW = timedelta(days=7)
+SDK_SERVICES_LIMIT = 50
+# Per-minute sparkline resolution for the live services panel.
+SDK_SPARKLINE_SLOTS = 24
+_SDK_STATE_RANK = {"live": 0, "went_quiet": 1, "long_dormant": 2}
 
 
 def _session_label(
@@ -136,6 +158,7 @@ def _build_archive(
         )
         archived.append({
             "agent_id": s.agent_id,
+            "kind": "coding" if is_interactive_coding_agent(s.agent_id) else "sdk",
             "namespace": namespace,
             "session_id": s.session_id,
             "label": _session_label(
@@ -150,6 +173,75 @@ def _build_archive(
             "last_span_time": s.ended_at.isoformat() if s.ended_at else None,
         })
     return archived
+
+
+def _build_sdk_services(db, config, agent_ids: list[str], now) -> list[dict]:
+    """SDK (non-interactive) agents seen recently, each with per-minute cost /
+    error sparkline series + a live/went_quiet/long_dormant lifecycle keyed on
+    last-seen. Best-effort: any failure degrades to [] rather than 500-ing the
+    whole /status route.
+    """
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return []
+    try:
+        sdk_ids = [a for a in agent_ids if not is_interactive_coding_agent(a)]
+        if not sdk_ids:
+            return []
+        window_start = now - timedelta(minutes=SDK_SPARKLINE_SLOTS)
+        series = sdk_service_series(
+            conn, sdk_ids, window_start, now, slots=SDK_SPARKLINE_SLOTS
+        )
+        discovery_cutoff = now - SDK_DISCOVERY_WINDOW
+
+        services: list[dict] = []
+        for aid in sdk_ids:
+            s = series.get(aid) or {}
+            last_seen = s.get("last_seen")
+            if last_seen is None:
+                continue
+            if last_seen.tzinfo is None:
+                last_seen = last_seen.replace(tzinfo=timezone.utc)
+            if last_seen < discovery_cutoff:
+                continue
+
+            gap = now - last_seen
+            if gap <= SDK_LIVE_WINDOW:
+                state = "live"
+            elif gap <= SDK_QUIET_WINDOW:
+                state = "went_quiet"
+            else:
+                state = "long_dormant"
+
+            window_calls = s.get("window_calls", 0)
+            window_errors = s.get("window_errors", 0)
+            err_rate = (window_errors / window_calls * 100.0) if window_calls else 0.0
+            # Average request rate over the sparkline window (req/min).
+            req_per_min = window_calls / SDK_SPARKLINE_SLOTS
+
+            services.append({
+                "agent_id": aid,
+                "kind": "sdk",
+                "namespace": _project_for(config, aid),
+                "state": state,
+                "last_seen": last_seen.isoformat(),
+                "today_cost": db.get_daily_cost(aid, now.date()),
+                "cost_per_min": s.get("cost_per_min", []),
+                "calls_per_min": s.get("calls_per_min", []),
+                "err_pct_per_min": s.get("err_pct_per_min", []),
+                "req_per_min": req_per_min,
+                "err_rate": err_rate,
+                "window_cost": s.get("window_cost", 0.0),
+            })
+
+        # Live first, then went_quiet, then long_dormant; each newest-seen first.
+        # Stable sort: order by last_seen desc, then by state rank (ISO strings
+        # sort chronologically, so reverse=True gives newest-first).
+        services.sort(key=lambda x: x["last_seen"], reverse=True)
+        services.sort(key=lambda x: _SDK_STATE_RANK[x["state"]])
+        return services[:SDK_SERVICES_LIMIT]
+    except Exception:
+        return []
 
 
 @router.get("/status")
@@ -238,6 +330,7 @@ async def get_status(
             )
             agents_data.append({
                 "agent_id": aid,
+                "kind": "coding" if is_interactive_coding_agent(aid) else "sdk",
                 "namespace": namespace,
                 "status": _live_status(session, idle_threshold, projects_root),
                 "session_id": session.session_id,
@@ -270,6 +363,11 @@ async def get_status(
         db, config, session_labels, idle_threshold, current_cutoff, agent_id
     )
 
+    # SDK-services zone: non-interactive agents with per-minute sparkline series
+    # + a last-seen-keyed lifecycle. Separate from the coding tiles above, which
+    # are session-backed interactive terminals.
+    sdk_services = _build_sdk_services(db, config, agent_ids, now)
+
     # Plan-tier framing block so the agent cards' "Cost today" figure suppresses
     # / reframes raw dollars for subscription / local users (#191) — the web UI
     # consumes this rather than re-deriving the rules in JS (single compute
@@ -285,6 +383,7 @@ async def get_status(
     return {
         "agents": agents_data,
         "archived": archived,
+        "sdk_services": sdk_services,
         "has_active_alerts": has_active_alerts,
         "framing": framing.to_dict(),
     }
