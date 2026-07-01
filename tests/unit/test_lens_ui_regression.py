@@ -1062,47 +1062,56 @@ def test_dashboard_triage_drills_in_place(html):
     # state (not a jump to standalone #/analytics).
     assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
     assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
-# --- #241: Status screen Cards | List view toggle -------------------------- #
-def test_status_view_toggle_exists(html):
-    # A segmented Cards | List control on the Status screen, driven by the URL
-    # view param. List is the default (#263), omitted from the URL via navigate
-    # defaults; Cards carries ?view=cards.
-    assert ".view-toggle" in html  # segmented-control CSS
-    assert "const DEFAULTS = { view: 'list', agent_id: '' };" in html
-    assert "readParam(params, 'view', DEFAULTS.view, v => ['cards', 'list'].includes(v))" in html
-    assert "const setView = (v) => navigate('status', { agent_id: agentId, view: v }, DEFAULTS);" in html
-    # both toggle buttons present
-    assert "onClick=${() => setView('cards')}>Cards</button>" in html
-    assert "onClick=${() => setView('list')}>List</button>" in html
+# --- #306: Status screen is two content-defined zones (no view toggle) ------ #
+def test_status_screen_has_split_zones(html):
+    # The #241/#263 Cards|List view toggle is retired: the Status screen now
+    # renders two content-defined zones — coding sessions (cards + archive) and
+    # SDK services — rather than a user-selected view of one agent list.
+    start = html.index("function StatusView")
+    end = html.index("function SubagentBlock", start)
+    view = html[start:end]
+    assert 'class="zone-title">Coding sessions' in view
+    assert "SDK agents / services" in html
+    # the toggle wiring is gone
+    assert "const setView =" not in html
+    assert "onClick=${() => setView('cards')}" not in html
+    assert "function StatusListTable" not in html
 
 
-def test_status_list_is_default_view(html):
-    # #263: List is the default scan view (not Cards).
-    assert "const DEFAULTS = { view: 'list', agent_id: '' };" in html
-    assert "const DEFAULTS = { view: 'cards', agent_id: '' };" not in html
+def test_status_sdk_services_panel_exists(html):
+    # The SDK zone is its own component fed by data.sdk_services.
+    assert "function SdkServicesPanel({ services, framing })" in html
+    assert "<${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />" in html
 
 
-def test_status_list_table_renderer_exists(html):
-    # The List view is a dedicated columned-table renderer, gated behind the
-    # view mode (now the default render path).
-    assert "function StatusListTable({ agents, framing })" in html
-    assert "? StatusListTable({ agents, framing: data.framing })" in html
+def test_sdk_panel_reuses_sparkline_and_splits_by_state(html):
+    # cost/min + err% sparklines come from the per-minute series; services are
+    # partitioned live vs went_quiet/long_dormant.
+    assert "values=${s.cost_per_min}" in html
+    assert "values=${s.err_pct_per_min}" in html
+    assert "s.state === 'live'" in html
+    assert "s.state === 'went_quiet'" in html
 
 
-def test_status_list_table_horizontally_scrolls(html):
-    # #263: the list table sits in the scrolling .table-wrap AND carries a
-    # min-width so it overflows (and scrolls) on narrow viewports instead of
-    # compressing columns and clipping the actions cell.
-    assert "<div class=\"table-wrap\"><table class=\"status-list\">" in html
+def test_coding_zone_partitions_agents_and_archive_by_kind(html):
+    # Cards are the coding agents; the collapsible archive is the coding archive.
+    assert "const codingAgents = agents.filter(a => a.kind === 'coding');" in html
+    assert "(data.archived || []).filter(s => s.kind === 'coding'" in html
+
+
+def test_coding_archive_is_collapsible_and_scrolls(html):
+    # The archive is a collapsible <details> holding the archive-list table,
+    # which sits in the scrolling .table-wrap AND carries a min-width so it
+    # overflows (and scrolls) instead of clipping the actions cell.
+    assert "<div class=\"table-wrap\"><table class=\"archive-list\">" in html
     assert ".table-wrap { overflow-x: auto; }" in html
-    assert ".table-wrap table.status-list { min-width: 760px; }" in html
+    assert "table.archive-list {" in html and "min-width: 820px;" in html
 
 
-def test_status_list_cost_column_respects_framing(html):
-    # The List view's Cost cell goes through fmtPerItemCost exactly like the
-    # cards — per-item cost renders as tokens for subscription/local (#249),
-    # plan-tier framing is never re-derived in JS (#110/#241).
-    assert "<td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>" in html
+def test_status_archive_cost_column_respects_framing(html):
+    # The archive Cost cell routes through the /status framing block (#17/#249),
+    # never a raw dollar.
+    assert "<td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>" in html
 
 
 # --- #249: "% of cycle" is window-level; per-item cost must render as tokens -- #
@@ -1119,13 +1128,12 @@ def test_per_item_cost_helper_renders_tokens_for_subscription_local(html):
 
 
 def test_per_item_cost_surfaces_use_the_helper_not_framed_dollar(html):
-    # Every per-item dollar cell — Traces list, Status cards, StatusListTable,
-    # span-detail, and the per-trace total — uses fmtPerItemCost, not the
-    # window-aggregate fmtFramedDollar. Guards against a regression reintroducing
-    # "% of cycle" at per-row granularity (the #249 bug: "466.7% of cycle").
+    # Every per-item dollar cell — Traces list, Status cards, span-detail, and
+    # the per-trace total — uses fmtPerItemCost, not the window-aggregate
+    # fmtFramedDollar. Guards against a regression reintroducing "% of cycle" at
+    # per-row granularity (the #249 bug: "466.7% of cycle").
     assert "${fmtPerItemCost(t.cost_usd, _costVal(t, true), framing)}" in html        # traces list
     assert "${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}" in html  # status card
-    assert "<td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>" in html  # status list
     assert "${fmtPerItemCost(sel.cost_usd, _costVal(sel, true), framing)}" in html     # span detail
     assert "fmtPerItemCost(wfTotalCost, wfTotalInOut, framing)" in html                # trace total
     # these per-item surfaces must NOT call fmtFramedDollar on the row value
@@ -1551,30 +1559,22 @@ def test_approach_splices_cross_terminal_spine(html):
     assert ".ap-deleg.ap-xterm { border-color: var(--warn); }" in html
 
 
-# --- StatusView: archived sessions render in List view too ----------------- #
-def test_status_archived_renders_regardless_of_view_mode(html):
-    # The archived-sessions table was nested INSIDE the Cards-mode branch of the
-    # `${viewMode === 'list' ? StatusListTable(...) : html`...`}` ternary, so in
-    # List view it was never rendered. With 0 active sessions in List view the
-    # whole Status page went blank. The archived block must live at the SAME
-    # level as the ternary (after it closes), not gated on cards mode.
+# --- #306: StatusView coding archive lives in the coding zone --------------- #
+def test_status_coding_archive_renders_in_coding_zone(html):
+    # The coding archive is a collapsible <details> inside the coding zone,
+    # gated only on there being coding archive rows — not on any view mode. The
+    # empty-active case still shows the archive (and a "No active coding
+    # sessions" note) rather than blanking the page.
     start = html.index("function StatusView")
-    end = html.index("function ", start + 1)
+    end = html.index("function SubagentBlock", start)
     view = html[start:end]
 
-    assert "Archived sessions" in view
-    # The cards-only branch terminates with this token (groupKeys map close +
-    # html`` close + ternary close). The archived block must come AFTER it.
-    cards_branch_close = view.index("`)}`}")
-    archived_block = view.index("${archived.length > 0 ? html`")
-    assert archived_block > cards_branch_close, (
-        "archived block must render after the cards-only branch closes, "
-        "not be nested inside it"
-    )
-    # Belt-and-suspenders: the StatusListTable (List) branch must not itself
-    # contain the archived table — it renders only the active rows.
-    list_branch = view[view.index("viewMode === 'list'"):cards_branch_close]
-    assert "Archived sessions" not in list_branch
-    # Empty-active note shown when List view has no active sessions.
-    assert "viewMode === 'list' && agents.length === 0" in view
-    assert "No active sessions" in view
+    # The coding zone renders whenever there are coding agents OR coding archive.
+    assert "${(codingAgents.length || codingArchived.length) ? html`" in view
+    # The archive is its own collapsible block keyed on ended-at.
+    assert "${codingArchived.length > 0 ? html`" in view
+    assert "keyed on ended-at · method still openable" in view
+    # Empty-active note shown when there are no active coding sessions.
+    assert "No active coding sessions" in view
+    # No leftover view-toggle machinery.
+    assert "viewMode" not in view
