@@ -233,9 +233,11 @@ code, .mono {
   font-size: 11px;
   color: var(--text-dim);
   opacity: 0;
-  transition: opacity 0.12s ease;
+  cursor: pointer;
+  transition: opacity 0.12s ease, color 0.12s ease;
 }
-.card:hover .rename-pencil { opacity: 0.55; }
+.card:hover .rename-pencil { opacity: 0.6; }
+.rename-pencil:hover { opacity: 1; color: var(--brand); }
 .rename-input {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -2436,7 +2438,7 @@ function StatusView({ params }) {
       ? (e) => { e.preventDefault(); e.stopPropagation(); setEditValue(displayName); setEditingId(a.session_id); }
       : null;
     return html`
-        <div class="card clickable" onClick=${() => { if (isEditing) return; location.hash = a.session_id ? '#/sessions/' + a.session_id : '#/traces'; }}>
+        <div class="card clickable" onContextMenu=${startEdit} onClick=${() => { if (isEditing) return; location.hash = a.session_id ? '#/sessions/' + a.session_id : '#/traces'; }}>
           <div class="card-header">
             <span class="status-dot ${a.status}"></span>
             ${isEditing
@@ -2449,7 +2451,7 @@ function StatusView({ params }) {
                     if (e.key === 'Enter') { e.preventDefault(); submitRename(a); }
                     else if (e.key === 'Escape') { e.preventDefault(); setEditingId(null); }
                   }} />`
-              : html`<span class="rename-title" title=${a.session_id ? 'Right-click to rename' : null} onContextMenu=${startEdit}>${displayName}${a.session_id ? html`<span class="rename-pencil">✎</span>` : null}</span>`}
+              : html`<span class="rename-title" title=${a.session_id ? 'Click ✎ or right-click to rename' : null} onContextMenu=${startEdit}>${displayName}${a.session_id ? html`<span class="rename-pencil" onClick=${startEdit} title="Rename">✎</span>` : null}</span>`}
             <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
           </div>
           ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
