@@ -1,0 +1,43 @@
+name: Build and publish Docker image
+
+on:
+  workflow_dispatch:
+  # Run only after the CI workflow finishes, so a commit that breaks
+  # tests/lint never produces a published image. This replaces a direct
+  # `push` trigger — CI fires on push, and this runs only once it passes.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Skip unless triggered manually or by a *successful* CI run.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # For workflow_run events, build the exact commit that passed CI.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Build and push tokenjam image
+        uses: ./.github/actions/docker-publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          image: ghcr.io/${{ github.repository }}
+          context: .
+          dockerfile: Dockerfile
