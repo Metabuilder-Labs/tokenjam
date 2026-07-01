@@ -58,9 +58,12 @@ class TjSpanExporter(SpanExporter):
         return SpanExportResult.FAILURE if failures > 0 else SpanExportResult.SUCCESS
 
     def shutdown(self) -> None:
-        pass
+        if hasattr(self.pipeline, "close"):
+            self.pipeline.close()
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
+        if hasattr(self.pipeline, "flush"):
+            self.pipeline.flush()
         return True
 
 
