@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 from typing import TYPE_CHECKING, Any
 
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
@@ -166,6 +168,12 @@ class IngestPipeline:
         self.schema_validator = schema_validator
         self.drift_detector = drift_detector
 
+        # Background worker thread & queue for async hooks
+        self._hook_queue = None
+        self._hook_thread = None
+        self._hook_lock = threading.Lock()
+        self._shutdown_event = threading.Event()
+
     def process(self, span: NormalizedSpan) -> None:
         """
         Full ingest pipeline for one span:
@@ -317,6 +325,17 @@ class IngestPipeline:
             except Exception as exc:
                 logger.warning("CostEngine hook failed: %s", exc)
 
+        async_hooks = False
+        if hasattr(self.config, "alerts") and hasattr(self.config.alerts, "async_hooks"):
+            async_hooks = self.config.alerts.async_hooks
+
+        if async_hooks:
+            self._enqueue_hook(span)
+        else:
+            self._run_deferred_hooks(span)
+
+    def _run_deferred_hooks(self, span: NormalizedSpan) -> None:
+        """Run AlertEngine and SchemaValidator hooks."""
         if self.alert_engine is not None:
             try:
                 self.alert_engine.evaluate(span)
@@ -328,6 +347,53 @@ class IngestPipeline:
                 self.schema_validator.validate(span)
             except Exception as exc:
                 logger.warning("SchemaValidator hook failed: %s", exc)
+
+    def _enqueue_hook(self, span: NormalizedSpan) -> None:
+        if self._hook_queue is None:
+            self._start_background_worker()
+        self._hook_queue.put(span)
+
+    def _start_background_worker(self) -> None:
+        with self._hook_lock:
+            if self._hook_queue is None:
+                self._hook_queue = queue.Queue()
+                self._shutdown_event.clear()
+                self._hook_thread = threading.Thread(
+                    target=self._worker_loop,
+                    name="TjHookWorker",
+                    daemon=True,
+                )
+                self._hook_thread.start()
+
+    def _worker_loop(self) -> None:
+        while not self._shutdown_event.is_set():
+            try:
+                span = self._hook_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if span is None:  # Shutdown sentinel
+                self._hook_queue.task_done()
+                break
+
+            try:
+                self._run_deferred_hooks(span)
+            finally:
+                self._hook_queue.task_done()
+
+    def flush(self) -> None:
+        """Wait for all currently queued hooks to complete."""
+        if self._hook_queue is not None:
+            self._hook_queue.join()
+
+    def close(self) -> None:
+        """Shutdown the background worker thread."""
+        if self._hook_thread is not None:
+            self._shutdown_event.set()
+            self._hook_queue.put(None)  # Sentinel
+            self._hook_thread.join()
+            self._hook_queue = None
+            self._hook_thread = None
 
 
 def build_default_pipeline(db: "StorageBackend", config: TjConfig) -> "IngestPipeline":

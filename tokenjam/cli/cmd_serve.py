@@ -102,6 +102,8 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
             if proxy_runner is not None:
                 await proxy_runner.stop()
             scheduler.shutdown(wait=False)
+            if hasattr(pipeline, "close"):
+                pipeline.close()
 
     app = create_app(config, db, pipeline, lifespan=_lifespan)
 
