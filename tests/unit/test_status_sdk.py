@@ -193,6 +193,7 @@ async def test_status_route_tags_coding_kind_on_archive(_db, _client):
     now = utcnow()
     _db.upsert_session(make_session(
         agent_id="claude-code-tokenjam", session_id="sess-1", status="closed",
+        input_tokens=1000, output_tokens=200, tool_call_count=5,
         started_at=now - timedelta(hours=1), ended_at=now - timedelta(minutes=30),
     ))
     resp = await _client.get("/api/v1/status")
@@ -200,3 +201,24 @@ async def test_status_route_tags_coding_kind_on_archive(_db, _client):
     arch = [a for a in data["archived"] if a["agent_id"] == "claude-code-tokenjam"]
     assert arch, data["archived"]
     assert arch[0]["kind"] == "coding"
+
+
+async def test_status_archive_filters_zero_signal_zombies(_db, _client):
+    # A terminal that opened and did nothing (0 tokens, 0 tool calls) carries no
+    # method/cost, so it must not clutter the archive. A session with any signal
+    # is kept.
+    now = utcnow()
+    _db.upsert_session(make_session(
+        agent_id="claude-code-zombie", session_id="z-1", status="closed",
+        input_tokens=0, output_tokens=0, tool_call_count=0,
+        started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1),
+    ))
+    _db.upsert_session(make_session(
+        agent_id="claude-code-real", session_id="r-1", status="closed",
+        input_tokens=500, output_tokens=100, tool_call_count=3,
+        started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1),
+    ))
+    resp = await _client.get("/api/v1/status")
+    archived_ids = {a["agent_id"] for a in resp.json()["archived"]}
+    assert "claude-code-real" in archived_ids
+    assert "claude-code-zombie" not in archived_ids

@@ -35,6 +35,9 @@ router = APIRouter(dependencies=[Depends(require_api_key)])
 MAX_SESSION_TILES = 6
 # How many archived (closed/stale) sessions to return, most-recent first.
 ARCHIVE_LIMIT = 50
+# Scan this many times ARCHIVE_LIMIT candidates so the post-rollup zombie filter
+# can still surface up to ARCHIVE_LIMIT sessions that did real work.
+ARCHIVE_CANDIDATE_FACTOR = 6
 
 # --- SDK-services zone (non-interactive agents) -----------------------------
 # An SDK service never "closes" — it just stops emitting telemetry. So its
@@ -134,7 +137,11 @@ def _build_archive(
     if agent_id:
         params.append(agent_id)
         sql += f" AND agent_id = ${len(params)}"
-    params.append(ARCHIVE_LIMIT)
+    # Fetch more candidates than we return: 0-signal zombie terminals are
+    # dropped below (post-rollup, so a fan-out session's trace-keyed cost isn't
+    # mistaken for "empty" — see session_token_cost_rollup #18), so scan a wider
+    # window to still surface up to ARCHIVE_LIMIT sessions that did real work.
+    params.append(ARCHIVE_LIMIT * ARCHIVE_CANDIDATE_FACTOR)
     sql += f" ORDER BY COALESCE(ended_at, started_at) DESC LIMIT ${len(params)}"
 
     rows = db.conn.execute(sql, params).fetchall()
@@ -156,6 +163,13 @@ def _build_archive(
             roll["total_cost_usd"] if roll
             else (float(s.total_cost_usd) if s.total_cost_usd is not None else 0.0)
         )
+        # Drop 0-signal zombies: a terminal that opened and did nothing (no
+        # tokens, no tool calls, no cost) carries no method worth reviewing.
+        # Checked post-rollup so a fan-out session's trace-keyed spend counts as
+        # signal even when its stored aggregate reads 0 (#18).
+        if (input_tokens == 0 and output_tokens == 0
+                and tool_call_count == 0 and total_cost_usd == 0):
+            continue
         archived.append({
             "agent_id": s.agent_id,
             "kind": "coding" if is_interactive_coding_agent(s.agent_id) else "sdk",
@@ -172,6 +186,8 @@ def _build_archive(
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "last_span_time": s.ended_at.isoformat() if s.ended_at else None,
         })
+        if len(archived) >= ARCHIVE_LIMIT:
+            break
     return archived
 
 

@@ -1077,8 +1077,10 @@ async def test_status_namespace_falls_back_to_configured_project(tmp_path):
         now = utcnow()
         db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
         # Pre-existing session with NO namespace (collected before the mapping).
+        # tool_call_count=1 so it clears the archive's 0-signal zombie filter.
         db.upsert_session(make_session(
-            agent_id="claude-code-harness", session_id="s1", status="closed"))
+            agent_id="claude-code-harness", session_id="s1", status="closed",
+            tool_call_count=1))
 
         app = create_app(config=config, db=db, ingest_pipeline=pipeline)
         transport = httpx.ASGITransport(app=app)
@@ -1226,7 +1228,7 @@ async def test_status_active_and_idle_become_tiles_stale_archived(tmp_path):
             agent_id="cc", session_id="idl", status="active",
             started_at=now - timedelta(minutes=40), ended_at=now - timedelta(minutes=30)))
         db.upsert_session(make_session(
-            agent_id="cc", session_id="stl", status="active",
+            agent_id="cc", session_id="stl", status="active", tool_call_count=1,
             started_at=now - timedelta(hours=6), ended_at=now - timedelta(hours=5)))
 
         transport = httpx.ASGITransport(app=app)
@@ -1252,8 +1254,9 @@ async def test_status_no_fallback_tile_for_completed_or_closed(tmp_path):
     try:
         db.upsert_session(make_session(
             agent_id="cc", session_id="done", status="completed"))
+        # tool_call_count=1 so "shut" clears the archive's 0-signal zombie filter.
         db.upsert_session(make_session(
-            agent_id="cc", session_id="shut", status="closed"))
+            agent_id="cc", session_id="shut", status="closed", tool_call_count=1))
 
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
