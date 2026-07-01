@@ -9,6 +9,7 @@ from tokenjam.api.deps import require_api_key
 from tokenjam.core.alerts import is_interactive_coding_agent
 from tokenjam.core.db import (
     _row_to_session,
+    get_session_labels,
     sdk_service_series,
     session_active_seconds,
     session_token_cost_rollup,
@@ -63,12 +64,15 @@ def _session_label(
     session_id: str | None,
     instance_id: str | None,
     session_labels: dict[str, str],
+    db_labels: dict[str, str] | None = None,
 ) -> str | None:
     """Human display name for a session's terminal.
 
-    Priority: manual [session_labels] override (full id or prefix match, for
-    naming already-running terminals) -> OTel service.instance.id (durable,
-    set at launch) -> None (UI falls back to the short session id).
+    Priority: config [session_labels] exact match -> config prefix match ->
+    DB rename (dashboard right-click -> POST /sessions/{id}/label) -> OTel
+    service.instance.id (durable, set at launch) -> None (UI falls back to the
+    short session id). The dashboard rename beats the ttys… instance id, but a
+    config [session_labels] entry still wins over a rename.
     """
     if session_id and session_labels:
         if session_id in session_labels:
@@ -76,6 +80,8 @@ def _session_label(
         for key, label in session_labels.items():
             if session_id.startswith(key):
                 return label
+    if db_labels and session_id and session_id in db_labels:
+        return db_labels[session_id]
     return instance_id
 
 
@@ -118,6 +124,7 @@ def _build_archive(
     idle_threshold: timedelta,
     cutoff,
     agent_id: str | None,
+    db_labels: dict[str, str] | None = None,
 ) -> list[dict]:
     """Closed + stale sessions, most-recent first, capped at ARCHIVE_LIMIT.
 
@@ -176,7 +183,7 @@ def _build_archive(
             "namespace": namespace,
             "session_id": s.session_id,
             "label": _session_label(
-                s.session_id, s.service_instance_id, session_labels
+                s.session_id, s.service_instance_id, session_labels, db_labels
             ),
             "status": s.status_at(idle_threshold),
             "input_tokens": input_tokens,
@@ -268,6 +275,10 @@ async def get_status(
     db = request.app.state.db
     config = getattr(request.app.state, "config", None)
     session_labels = dict(config.session_labels) if config else {}
+    # Dashboard renames (POST /sessions/{id}/label), fetched once and overlaid on
+    # every tile/archive label below (config entries still win, see
+    # _session_label). Single query for all overrides.
+    db_labels = get_session_labels(getattr(db, "conn", None))
     idle_threshold = _idle_threshold(config)
     projects_root = resolve_projects_root(
         getattr(request.app.state, "claude_projects_root", None)
@@ -351,7 +362,8 @@ async def get_status(
                 "status": _live_status(session, idle_threshold, projects_root),
                 "session_id": session.session_id,
                 "label": _session_label(
-                    session.session_id, session.service_instance_id, session_labels
+                    session.session_id, session.service_instance_id,
+                    session_labels, db_labels,
                 ),
                 "cost_today": today_cost,
                 "total_cost_usd": (
@@ -376,7 +388,8 @@ async def get_status(
             })
 
     archived = _build_archive(
-        db, config, session_labels, idle_threshold, current_cutoff, agent_id
+        db, config, session_labels, idle_threshold, current_cutoff, agent_id,
+        db_labels,
     )
 
     # SDK-services zone: non-interactive agents with per-minute sparkline series

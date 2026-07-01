@@ -226,6 +226,30 @@ code, .mono {
   font-weight: 600;
   font-size: 14px;
 }
+/* Right-click-to-rename affordance on a session card title (#306). */
+.rename-title { cursor: context-menu; }
+.rename-pencil {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.card:hover .rename-pencil { opacity: 0.55; }
+.rename-input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-family: 'Geist Mono', monospace;
+  font-weight: 600;
+  font-size: 14px;
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 220px;
+}
+.rename-input:focus { outline: none; border-color: var(--brand); }
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
   display: inline-block;
@@ -2329,6 +2353,17 @@ function StatusView({ params }) {
   const agentId = readParam(params, 'agent_id', '');
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
+  // Inline session-card rename (#306): which session's title is being edited,
+  // its working value, and a ref so the input autofocuses + selects on open.
+  const [editingId, setEditingId] = useState(null);
+  const [editValue, setEditValue] = useState('');
+  const renameRef = useRef(null);
+  useLayoutEffect(() => {
+    if (editingId && renameRef.current) {
+      renameRef.current.focus();
+      renameRef.current.select();
+    }
+  }, [editingId]);
 
   const load = useCallback(async () => {
     const [s, a] = await Promise.all([
@@ -2383,11 +2418,38 @@ function StatusView({ params }) {
   // detail (or traces when there's no session_id yet). Cost goes through the
   // shared fmtPerItemCost(framing) path (#249). A footer echoes the openable
   // method surfaces (Map / Approach / Timeline live as tabs on the detail page).
-  const agentCard = (a) => html`
-        <div class="card clickable" onClick=${() => { location.hash = a.session_id ? '#/sessions/' + a.session_id : '#/traces'; }}>
+  // Persist a right-click rename, then refresh immediately (don't wait for the
+  // 5s poll). An empty value clears the rename (backend reverts to the default).
+  const submitRename = async (a) => {
+    const value = editValue.trim();
+    setEditingId(null);
+    try {
+      await apiPost('/sessions/' + encodeURIComponent(a.session_id) + '/label', { label: value });
+      await load();
+    } catch (e) { /* leave the existing name; a transient failure isn't fatal */ }
+  };
+
+  const agentCard = (a) => {
+    const displayName = a.label || a.agent_id;
+    const isEditing = a.session_id && editingId === a.session_id;
+    const startEdit = a.session_id
+      ? (e) => { e.preventDefault(); e.stopPropagation(); setEditValue(displayName); setEditingId(a.session_id); }
+      : null;
+    return html`
+        <div class="card clickable" onClick=${() => { if (isEditing) return; location.hash = a.session_id ? '#/sessions/' + a.session_id : '#/traces'; }}>
           <div class="card-header">
             <span class="status-dot ${a.status}"></span>
-            ${a.label || a.agent_id}
+            ${isEditing
+              ? html`<input ref=${renameRef} class="rename-input" value=${editValue}
+                  onClick=${e => e.stopPropagation()}
+                  onInput=${e => setEditValue(e.target.value)}
+                  onBlur=${() => submitRename(a)}
+                  onKeyDown=${e => {
+                    e.stopPropagation();
+                    if (e.key === 'Enter') { e.preventDefault(); submitRename(a); }
+                    else if (e.key === 'Escape') { e.preventDefault(); setEditingId(null); }
+                  }} />`
+              : html`<span class="rename-title" title=${a.session_id ? 'Right-click to rename' : null} onContextMenu=${startEdit}>${displayName}${a.session_id ? html`<span class="rename-pencil">✎</span>` : null}</span>`}
             <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
           </div>
           ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
@@ -2401,6 +2463,7 @@ function StatusView({ params }) {
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
           <div class="card-foot">→ Map / Approach / Timeline</div>
         </div>`;
+  };
 
   // Archived coding-session row (mock parity): dot · session+badge · cost ·
   // tokens · duration (derived from started_at→last_span_time) · tool calls ·

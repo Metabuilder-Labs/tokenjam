@@ -376,6 +376,21 @@ MIGRATIONS: list[tuple[int, str]] = [
         "    schema_version INTEGER NOT NULL DEFAULT 1\n"
         ")"
     )),
+    # Migration 15: session_labels — a user-supplied display name for a session,
+    # set from the dashboard by right-clicking a session card (POST
+    # /api/v1/sessions/{id}/label). One row per session (session_id PRIMARY KEY);
+    # the /status route overlays these onto the tile/archive label, taking
+    # precedence over the OTel service.instance.id but NOT over a config
+    # [session_labels] entry (see status._session_label). Persisting to the DB
+    # (rather than editing the config TOML) keeps renames a runtime dashboard
+    # action that survives restarts without a config write.
+    (15, (
+        "CREATE TABLE IF NOT EXISTS session_labels (\n"
+        "    session_id  TEXT PRIMARY KEY,\n"
+        "    label       TEXT NOT NULL,\n"
+        "    updated_at  TIMESTAMPTZ NOT NULL\n"
+        ")"
+    )),
 ]
 
 
@@ -493,6 +508,52 @@ def session_active_seconds(conn, session_id: str) -> float | None:
     if not row or row[0] is None:
         return None
     return float(row[0]) / 1000.0
+
+
+def _resolve_conn(db_or_conn):
+    """Return the underlying cursor for a backend, or the conn passed as-is.
+
+    ``set_session_label`` / ``delete_session_label`` accept either a backend
+    (whose per-thread ``.conn`` cursor is used) or a raw DuckDB connection (which
+    has no ``.conn`` attr, so it passes through unchanged).
+    """
+    return getattr(db_or_conn, "conn", db_or_conn)
+
+
+def set_session_label(db_or_conn, session_id: str, label: str) -> None:
+    """Upsert a user-supplied display name for a session (migration 15).
+
+    DuckDB has no portable UPSERT here, so this DELETEs any prior row then
+    INSERTs the fresh one — idempotent (a re-label overwrites). ``updated_at`` is
+    stamped via ``utcnow()`` (Critical Rule 9). Parameterised SQL only (Critical
+    Rule 7: no f-string SQL), mirroring ``method_capture``'s DELETE+INSERT style.
+    """
+    conn = _resolve_conn(db_or_conn)
+    now = utcnow()
+    conn.execute("DELETE FROM session_labels WHERE session_id = $1", [session_id])
+    conn.execute(
+        "INSERT INTO session_labels (session_id, label, updated_at) "
+        "VALUES ($1, $2, $3)",
+        [session_id, label, now],
+    )
+
+
+def delete_session_label(db_or_conn, session_id: str) -> None:
+    """Remove a session's user-supplied display name (migration 15). Idempotent."""
+    conn = _resolve_conn(db_or_conn)
+    conn.execute("DELETE FROM session_labels WHERE session_id = $1", [session_id])
+
+
+def get_session_labels(conn) -> dict[str, str]:
+    """All session -> user label overlays as a dict (migration 15).
+
+    One SELECT so the /status route fetches every override in a single query.
+    Guards a ``None`` conn (a non-DB backend) -> ``{}``.
+    """
+    if conn is None:
+        return {}
+    rows = conn.execute("SELECT session_id, label FROM session_labels").fetchall()
+    return {r[0]: r[1] for r in rows if r[0] is not None and r[1] is not None}
 
 
 # Token/cost rollup for a single session, joining cost spans onto the session via

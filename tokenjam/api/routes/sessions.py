@@ -27,7 +27,11 @@ from fastapi.responses import JSONResponse
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.api.routes.runs import _child_sessions, _run_sessions
-from tokenjam.core.db import session_token_cost_rollup
+from tokenjam.core.db import (
+    delete_session_label,
+    session_token_cost_rollup,
+    set_session_label,
+)
 from tokenjam.core.distill import distill_titles_cached, peek_cached_titles
 from tokenjam.core.method_capture import capture_session_method, load_session_method
 from tokenjam.core.framing import (
@@ -123,6 +127,53 @@ async def close_sessions(request: Request) -> JSONResponse:
             )
 
     return JSONResponse(status_code=200, content={"closed": closed})
+
+
+# Max length of a user-supplied session label; longer input is truncated.
+MAX_SESSION_LABEL_LEN = 120
+
+
+@router.post(
+    "/sessions/{session_id}/label",
+    dependencies=[Depends(require_api_key)],
+)
+async def set_session_label_endpoint(
+    request: Request, session_id: str
+) -> JSONResponse:
+    """Set (or clear) a user-supplied display name for a session.
+
+    Body: ``{"label": "<str>"}``. The label is stripped and truncated to
+    ``MAX_SESSION_LABEL_LEN``; an empty (or whitespace-only) label CLEARS any
+    existing rename, reverting the card to its default (service.instance.id ->
+    short session id). The /status route overlays this onto the tile/archive
+    label, taking precedence over the OTel instance id but NOT over a config
+    ``[session_labels]`` entry (see ``status._session_label``).
+
+    Dashboard action gated by ``require_api_key`` (the UI's ``apiPost`` sends the
+    Bearer api key) — deliberately NOT added to the ingest-secret PROTECTED_PATHS.
+    Returns ``{"session_id": ..., "label": <str|None>}`` (None when cleared).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400, content={"error": "Expected a JSON object"}
+        )
+
+    label = (body.get("label") or "").strip()[:MAX_SESSION_LABEL_LEN]
+    db = request.app.state.db
+    if not label:
+        delete_session_label(db, session_id)
+        return JSONResponse(
+            status_code=200, content={"session_id": session_id, "label": None}
+        )
+    set_session_label(db, session_id, label)
+    return JSONResponse(
+        status_code=200, content={"session_id": session_id, "label": label}
+    )
 
 
 def _session_tools(db: Any, session_id: str) -> list[dict]:

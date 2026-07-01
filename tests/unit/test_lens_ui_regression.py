@@ -1578,3 +1578,23 @@ def test_status_coding_archive_renders_in_coding_zone(html):
     assert "No active coding sessions" in view
     # No leftover view-toggle machinery.
     assert "viewMode" not in view
+
+
+# --- #306: right-click to rename a session card ----------------------------- #
+def test_status_card_right_click_rename_wiring(html):
+    # The coding-session card title is right-click-renamable: an onContextMenu
+    # handler enters an inline edit state, and submitting POSTs to the label
+    # endpoint via the authed apiPost helper (not window.prompt).
+    start = html.index("function StatusView")
+    end = html.index("function SubagentBlock", start)
+    view = html[start:end]
+
+    # Inline edit state + autofocus ref (no window.prompt).
+    assert "const [editingId, setEditingId] = useState(null)" in view
+    assert "window.prompt" not in view
+    # Right-click enters edit mode on the card title.
+    assert "onContextMenu=${startEdit}" in view
+    # Submit persists via the authed POST helper to the /label endpoint.
+    assert "apiPost('/sessions/' + encodeURIComponent(a.session_id) + '/label'" in view
+    # Discoverability affordance on the title.
+    assert "Right-click to rename" in view
