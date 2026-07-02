@@ -239,6 +239,12 @@ For `GET /api/v1/drift`, if `agent_id` is missing, return `JSONResponse(status_c
 
 Integration tests use `httpx.AsyncClient` with `httpx.ASGITransport(app=app)` against `InMemoryBackend`. Synthetic alert tests use `unittest.mock.MagicMock` for the DB — you must explicitly set up `db.get_recent_spans.return_value` before calling `engine.evaluate()`, and silence channels with `engine.dispatcher.channels = []`.
 
+### StorageBackend parity (serve shim vs DB)
+
+`tj` ships three `StorageBackend` implementations: `DuckDBBackend`, `InMemoryBackend` (tests), and `ApiBackend` — the read-only HTTP shim the CLI uses when `tj serve` holds the DB write-lock. The shim reconstructs objects from JSON, so it repeatedly diverged from the DB backend *silently* (e.g. dropped `cache_write_tokens` on daemon-fetched spans, cache columns zeroed, `get_daily_cost` returning a cumulative total). That whole class of bug (#51) is now guarded by `tests/integration/test_storage_backend_parity.py`, which runs each faithfully-mirrored read method against both the DuckDB backend and the `ApiBackend` shim (over a **real in-process uvicorn server**, not the ASGI shortcut a sync `ApiBackend` can't use) and fails on any divergence.
+
+**Rule: every `StorageBackend` protocol method must be classified in that file** — as parity-covered (`SHIM_PARITY_METHODS` + a spec in `_parity_specs`), a documented `SHIM_KNOWN_GAPS`, deliberately unimplemented (`SHIM_NOT_IMPLEMENTED`), or lifecycle. Adding a protocol method, or teaching the shim a new method, fails CI (`test_every_protocol_method_is_classified` / `test_unimplemented_methods_have_no_silent_shim`) until you classify it — which for a new read method means adding a parity assertion. Don't skip the classification to make CI green; that reopens the exact hole this file closes.
+
 ### Web UI ("TokenJam Lens")
 
 `tokenjam/ui/index.html` is the served dashboard — a **single-file Preact + htm SPA** (no build step, no TypeScript, no client-side router). "TokenJam Lens" is the **brand only**: it appears in `<title>`, the sidebar wordmark, and the OpenAPI title, but never in module names, route paths, or config keys. Screens: **Overview** (the default landing route — a triage front door), Status, Traces, Cost, Alerts, Drift, Optimize, Budget.
