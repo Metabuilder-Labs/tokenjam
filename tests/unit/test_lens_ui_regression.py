@@ -1589,6 +1589,61 @@ def test_map_board_category_colors_use_theme_vars(html):
     assert "error: '--error'" in html
 
 
+def test_map_board_context_lane_plots_per_call_occupancy(html):
+    # #56: the CONTEXT lane plots each call's OWN context occupancy (per-call
+    # input+cache from the backend series), NOT a cumulative sum — a monotone
+    # climb duplicated the header's total-token chip and carried no information.
+    assert "each call's OWN context occupancy" in html
+    assert "per-call context size" in html  # the subtitle says what the lane is
+
+
+def test_map_board_subagent_labels_never_collide(html):
+    # #56: a subagent label prints only on a wide-enough (px-gated),
+    # non-overlapped bar; past-cap bars are flagged `.overlapped` so their labels
+    # are suppressed. Bars may overlap under extreme density — text never does.
+    # Every bar keeps the full label as its hover title.
+    assert "const MB_SUBLAB_MIN_PX" in html
+    assert "it.overlapped = true;" in html
+    assert 'showSubLab ? html`<span class="mb-sublab">' in html
+    assert "MB_SUBLAB_MIN_PX;" in html
+
+
+def test_map_board_legend_covers_every_encoding(html):
+    # #56: every on-board encoding is decodable from the legend — Other events,
+    # solid-red error, the dashed-red retry outline, and the phase-band tinting
+    # each get a legend entry (no more unexplained marks).
+    assert ">Other</span>" in html
+    assert ">retry</span>" in html
+    assert ">phase band</span>" in html
+    assert "marks a retried step" in html
+    assert "hover a band for its title" in html
+
+
+def test_map_board_surfaces_insights_strip(html):
+    # #56: the board ANSWERS "where did the time and money go" by default via a
+    # deterministic callouts strip (costliest stretch, friction, top delegation,
+    # idle share, edit footprint) — insight is never hover-gated.
+    assert 'class="mb-insights"' in html
+    assert "const insights = [];" in html
+    assert "'costliest ' + mbFmtBin(insW)" in html
+    assert "k: 'friction'" in html
+    assert "k: 'top sub-agent'" in html
+    assert "k: 'idle'" in html
+    assert ".mb-insights {" in html  # themed CSS exists (offline-safe)
+
+
+def test_map_board_territory_demotes_scratch_and_weights_edits(html):
+    # #56: temp/scratch reads collapse into ONE muted card and are excluded from
+    # the common-prefix root (so workspace dir labels stay relative + readable);
+    # cards and file rows are weighted by edits over reads; the file NAME keeps a
+    # readable floor instead of losing the flex fight to its meta text.
+    assert "const mbIsScratchPath" in html
+    assert "TemporaryItems" in html
+    assert 'class="mb-dir mb-scratch"' in html
+    assert "f.edits * 3 + f.reads" in html
+    assert "min-width: 9ch" in html
+
+
 def test_approach_rail_marks_cross_terminal_children(html):
     # M2b: a cross-terminal child (a separate run-linked session) renders amber
     # (is-term) with a run-linked provenance sub-line, distinct from the pink

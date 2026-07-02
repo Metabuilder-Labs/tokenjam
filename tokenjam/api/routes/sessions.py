@@ -1196,18 +1196,21 @@ def _session_map_series(
     session: SessionRecord | None,
     axis: _ActiveAxis | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    """Build the context-growth + cost-burn series and the meta block.
+    """Build the context-occupancy + cost-burn series and the meta block.
 
-    ``context_series`` carries the *running* context size (cumulative
-    input+cache+cache_write tokens); ``cost_series`` carries each span's own
-    ``cost_usd`` (per-span burn, not cumulative). ``t_s`` is raw wall-clock
-    seconds from ``t0`` (the session start); ``active_s`` is the same point on
-    the idle-collapsed active-time axis (== ``t_s`` when nothing collapses, or
-    when no ``axis`` is supplied). Spans with no start_time are skipped.
+    ``context_series`` carries each call's *own* context occupancy
+    (input+cache+cache_write tokens — what the model actually saw on that
+    call), NOT a cumulative sum: a running total is monotone by construction
+    and tells the reader nothing the header's total-token chip doesn't, while
+    per-call occupancy shows real growth, compaction drops and resets.
+    ``cost_series`` carries each span's own ``cost_usd`` (per-span burn, not
+    cumulative). ``t_s`` is raw wall-clock seconds from ``t0`` (the session
+    start); ``active_s`` is the same point on the idle-collapsed active-time
+    axis (== ``t_s`` when nothing collapses, or when no ``axis`` is supplied).
+    Spans with no start_time are skipped.
     """
     context_series: list[dict[str, Any]] = []
     cost_series: list[dict[str, Any]] = []
-    cumulative_tokens = 0
     total_tokens = 0
     total_cost = 0.0
     model_freq: dict[str, int] = {}
@@ -1223,9 +1226,8 @@ def _session_map_series(
         context_tokens = (
             span["input_tokens"] + span["cache_tokens"] + span["cache_write_tokens"]
         )
-        cumulative_tokens += context_tokens
         context_series.append(
-            {"t_s": t_s, "active_s": active_s, "tokens": cumulative_tokens}
+            {"t_s": t_s, "active_s": active_s, "tokens": context_tokens}
         )
         cost_series.append({"t_s": t_s, "active_s": active_s, "usd": span["cost_usd"]})
 
