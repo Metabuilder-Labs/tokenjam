@@ -46,21 +46,25 @@ _FAILURE_RATE_THRESHOLD = 0.20
 _FAILURE_RATE_CHECK_INTERVAL = 5
 _SESSION_DURATION_DEFAULT = 3600  # seconds
 
-# Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex).
-# Their sessions have no stable, repeatable workload and their OTLP carries no
-# tool arguments — so drift (assumes a stable baseline) and the default
-# session-duration ceiling (assumes short sessions) produce noise, not signal.
-# These checks are gated off for such agents and stay fully active for SDK /
-# production agents. retry_loop self-gates on the presence of an argument
-# signature, so it needs no prefix gate.
+# Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex): a
+# heterogeneous, arg-less, human-driven workload with no stable, repeatable
+# baseline. Two uses: (1) the alert engine + drift detector gate off checks that
+# assume a stable baseline — drift and the default session-duration ceiling
+# produce noise, not signal — while staying fully active for SDK / production
+# agents (retry_loop self-gates on an argument signature, so it needs no prefix
+# gate); and (2) the /status dashboard splits coding sessions from long-lived
+# SDK services.
 _INTERACTIVE_AGENT_PREFIXES = ("claude-code", "codex")
 
 
 def is_interactive_coding_agent(agent_id: str | None) -> bool:
     """True for Claude Code / Codex agents (interactive, heterogeneous, no args).
 
-    Shared by the alert engine and the drift detector to skip checks that assume
-    a stable, instrumented, repeatable workload.
+    Two callers: the alert engine + drift detector skip checks that assume a
+    stable, instrumented, repeatable workload; and the /status route classifies
+    an agent as a coding session vs an SDK service, keyed on the agent id rather
+    than session-id presence (unreliable — ingest mints session_ids for SDK
+    spans too).
     """
     if not agent_id:
         return False

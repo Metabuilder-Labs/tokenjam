@@ -56,6 +56,8 @@ class StorageBackend(Protocol):
     def upsert_baseline(self, baseline: DriftBaseline) -> None: ...
     def get_session(self, session_id: str) -> SessionRecord | None: ...
     def get_session_by_conversation(self, conversation_id: str) -> SessionRecord | None: ...
+    def close_sessions_by_instance(self, instance_id: str) -> int: ...
+    def close_session_by_id(self, session_id: str) -> int: ...
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]: ...
     def count_traces(self, filters: TraceFilters) -> int: ...
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]: ...
@@ -308,6 +310,45 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans ADD COLUMN IF NOT EXISTS request_params JSON;\n"
         "ALTER TABLE spans ADD COLUMN IF NOT EXISTS request_tools  JSON"
     )),
+    # Migration 8: service_namespace on sessions — the OTel service.namespace
+    # the session's service rolls up under (the dashboard's "project" grouping
+    # key). Nullable; sessions whose telemetry carried no namespace stay NULL.
+    (8, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_namespace TEXT"),
+    # Migration 9: service_instance_id on sessions — the per-terminal label
+    # (OTel service.instance.id) used as the session's display name.
+    (9, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS service_instance_id TEXT"),
+    # Migration 10: repair ended_at on already-closed sessions. A prior bug in
+    # close_session(s) advanced ended_at to the close time, so a session closed
+    # days after its last span showed a "Last seen" of the close moment instead
+    # of its real last activity. Recompute ended_at from the session's actual
+    # spans (max of end_time / start_time), but only LOWER it — never touch
+    # sessions whose ended_at already matches or precedes their last span.
+    # Idempotent: re-running finds nothing left to correct.
+    (10, (
+        "UPDATE sessions AS s "
+        "SET ended_at = sub.max_ts "
+        "FROM (SELECT session_id, MAX(COALESCE(end_time, start_time)) AS max_ts "
+        "      FROM spans GROUP BY session_id) AS sub "
+        "WHERE s.session_id = sub.session_id "
+        "  AND s.status = 'closed' "
+        "  AND sub.max_ts IS NOT NULL "
+        "  AND (s.ended_at IS NULL OR s.ended_at > sub.max_ts)"
+    )),
+    # Migration 11: session_labels — a user-supplied display name for a session,
+    # set from the dashboard by right-clicking a session card (POST
+    # /api/v1/sessions/{id}/label). One row per session (session_id PRIMARY KEY);
+    # the /status route overlays these onto the tile/archive label, taking
+    # precedence over the OTel service.instance.id but NOT over a config
+    # [session_labels] entry (see status._session_label). Persisting to the DB
+    # (rather than editing the config TOML) keeps renames a runtime dashboard
+    # action that survives restarts without a config write.
+    (11, (
+        "CREATE TABLE IF NOT EXISTS session_labels (\n"
+        "    session_id  TEXT PRIMARY KEY,\n"
+        "    label       TEXT NOT NULL,\n"
+        "    updated_at  TIMESTAMPTZ NOT NULL\n"
+        ")"
+    )),
     # Migration 12: cache_write_tokens on sessions. spans.cache_write_tokens
     # already exists (migration 5); the per-session aggregate column was still
     # missing, so cache-*write*/creation tokens never rolled up to the session
@@ -410,6 +451,8 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         tool_call_count=d.get("tool_call_count") or 0,
         error_count=d.get("error_count") or 0,
         plan_tier=d.get("plan_tier") or "unknown",
+        service_namespace=d.get("service_namespace"),
+        service_instance_id=d.get("service_instance_id"),
     )
 
 
@@ -501,6 +544,133 @@ def session_token_cost_rollup(conn, session_id: str) -> dict | None:
         "total_cost_usd": float(row[4] or 0.0),
         "tool_call_count": int(row[5] or 0),
     }
+
+
+def _resolve_conn(db_or_conn):
+    """Return the underlying cursor for a backend, or the conn passed as-is.
+
+    ``set_session_label`` / ``delete_session_label`` accept either a backend
+    (whose per-thread ``.conn`` cursor is used) or a raw DuckDB connection (which
+    has no ``.conn`` attr, so it passes through unchanged).
+    """
+    return getattr(db_or_conn, "conn", db_or_conn)
+
+
+def set_session_label(db_or_conn, session_id: str, label: str) -> None:
+    """Upsert a user-supplied display name for a session (migration 11).
+
+    DuckDB has no portable UPSERT here, so this DELETEs any prior row then
+    INSERTs the fresh one — idempotent (a re-label overwrites). ``updated_at`` is
+    stamped via ``utcnow()`` (Critical Rule 9). Parameterised SQL only (Critical
+    Rule 7: no f-string SQL).
+    """
+    conn = _resolve_conn(db_or_conn)
+    now = utcnow()
+    conn.execute("DELETE FROM session_labels WHERE session_id = $1", [session_id])
+    conn.execute(
+        "INSERT INTO session_labels (session_id, label, updated_at) "
+        "VALUES ($1, $2, $3)",
+        [session_id, label, now],
+    )
+
+
+def delete_session_label(db_or_conn, session_id: str) -> None:
+    """Remove a session's user-supplied display name (migration 11). Idempotent."""
+    conn = _resolve_conn(db_or_conn)
+    conn.execute("DELETE FROM session_labels WHERE session_id = $1", [session_id])
+
+
+def get_session_labels(conn) -> dict[str, str]:
+    """All session -> user label overlays as a dict (migration 11).
+
+    One SELECT so the /status route fetches every override in a single query.
+    Guards a ``None`` conn (a non-DB backend) -> ``{}``.
+    """
+    if conn is None:
+        return {}
+    rows = conn.execute("SELECT session_id, label FROM session_labels").fetchall()
+    return {r[0]: r[1] for r in rows if r[0] is not None and r[1] is not None}
+
+
+def sdk_service_series(
+    conn, agent_ids: list[str], window_start, now, *, slots: int = 24
+) -> dict[str, dict]:
+    """Per-minute cost / calls / error% series + last_seen for the given agents.
+
+    Buckets `spans` by minute over the last `slots` minutes ending at `now`,
+    zero-filled to a fixed-length grid so every agent yields exactly `slots`
+    points (a flatline for services that emitted nothing recently). Also returns
+    window totals (for req/min + err-rate) and `last_seen` across ALL history —
+    a long-dormant service last emitted days ago, outside the sparkline window.
+
+    Powers the /status SDK-services zone (Prometheus-style sparklines). Returns
+    {} when `conn` is None or no agents are given. Each agent maps to:
+        {cost_per_min, calls_per_min, err_pct_per_min: [slots],
+         window_cost, window_calls, window_errors, last_seen}
+    """
+    if conn is None or not agent_ids:
+        return {}
+
+    # Fixed minute grid: slot i covers [grid[i], grid[i] + 60s); grid[-1] is the
+    # minute containing `now`. Epoch-second keys match the SQL bucket below.
+    base = int(now.timestamp() // 60) * 60
+    grid = [base - (slots - 1 - i) * 60 for i in range(slots)]
+    index = {ts: i for i, ts in enumerate(grid)}
+
+    result: dict[str, dict] = {
+        aid: {
+            "cost_per_min": [0.0] * slots,
+            "calls_per_min": [0] * slots,
+            "err_pct_per_min": [0.0] * slots,
+            "window_cost": 0.0,
+            "window_calls": 0,
+            "window_errors": 0,
+            "last_seen": None,
+        }
+        for aid in agent_ids
+    }
+
+    # IN (…) with per-id placeholders — a controlled small list; all values bound
+    # (never interpolated), matching the codebase's dynamic-placeholder style.
+    ph = ", ".join(f"${i + 2}" for i in range(len(agent_ids)))
+    rows = conn.execute(
+        f"""
+        SELECT agent_id,
+               CAST(epoch(date_trunc('minute', start_time AT TIME ZONE 'UTC')) AS BIGINT) AS b,
+               COALESCE(SUM(cost_usd), 0.0)                  AS cost,
+               COUNT(*) FILTER (WHERE status_code = 'error') AS errors,
+               COUNT(*)                                      AS calls
+        FROM spans
+        WHERE start_time >= $1 AND agent_id IN ({ph})
+        GROUP BY agent_id, b
+        """,
+        [window_start, *agent_ids],
+    ).fetchall()
+    for aid, b, cost, errors, calls in rows:
+        r = result[aid]
+        r["window_cost"] += float(cost or 0.0)
+        r["window_calls"] += int(calls or 0)
+        r["window_errors"] += int(errors or 0)
+        slot = index.get(int(b))
+        if slot is None:
+            continue
+        r["cost_per_min"][slot] = float(cost or 0.0)
+        r["calls_per_min"][slot] = int(calls or 0)
+        r["err_pct_per_min"][slot] = (
+            float(errors) / calls * 100.0 if calls else 0.0
+        )
+
+    ph1 = ", ".join(f"${i + 1}" for i in range(len(agent_ids)))
+    seen_rows = conn.execute(
+        f"SELECT agent_id, MAX(COALESCE(end_time, start_time)) "
+        f"FROM spans WHERE agent_id IN ({ph1}) GROUP BY agent_id",
+        [*agent_ids],
+    ).fetchall()
+    for aid, last_seen in seen_rows:
+        if aid in result:
+            result[aid]["last_seen"] = last_seen
+
+    return result
 
 
 def _int_or_none(val: object) -> int | None:
@@ -802,8 +972,9 @@ class DuckDBBackend:
             INSERT INTO sessions (
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
-                tool_call_count, error_count, plan_tier, cache_write_tokens
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                tool_call_count, error_count, plan_tier, service_namespace,
+                service_instance_id, cache_write_tokens
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -818,14 +989,17 @@ class DuckDBBackend:
                     WHEN COALESCE(sessions.plan_tier, 'unknown') != 'unknown'
                     THEN sessions.plan_tier
                     ELSE EXCLUDED.plan_tier
-                END
+                END,
+                service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
+                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id)
             """,
             [
                 session.session_id, session.agent_id, session.conversation_id,
                 session.started_at, session.ended_at, session.status,
                 session.total_cost_usd, session.input_tokens, session.output_tokens,
                 session.cache_tokens, session.tool_call_count, session.error_count,
-                session.plan_tier, session.cache_write_tokens,
+                session.plan_tier, session.service_namespace,
+                session.service_instance_id, session.cache_write_tokens,
             ],
         )
 
@@ -936,6 +1110,54 @@ class DuckDBBackend:
             return None
         cols = [d[0] for d in cur.description]
         return _row_to_session(rows[0], cols)
+
+    def close_sessions_by_instance(self, instance_id: str) -> int:
+        """Mark all currently-active sessions for a terminal as 'closed'.
+
+        Returns the number closed. Idempotent: already-closed/completed rows are
+        not matched (status='active' filter), so re-closing is a no-op (0).
+        ended_at is the session's last-activity time ("Last seen" in the UI), so
+        closing must NOT advance it — a session closed long after its last span
+        still last had telemetry at that span. Only stamp ended_at when it's
+        NULL (a session that never recorded an end gets the close time).
+        """
+        now = utcnow()
+        count_row = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE service_instance_id = $1 AND status = 'active'",
+            [instance_id],
+        ).fetchone()
+        count = count_row[0] if count_row else 0
+        if count:
+            self.conn.execute(
+                "UPDATE sessions SET status = 'closed', "
+                "ended_at = COALESCE(ended_at, $2) "
+                "WHERE service_instance_id = $1 AND status = 'active'",
+                [instance_id, now],
+            )
+        return count
+
+    def close_session_by_id(self, session_id: str) -> int:
+        """Mark a single active session as 'closed'. Idempotent (see above).
+
+        Preserves ended_at (last-activity / "Last seen"); only stamps it when
+        NULL. Closing is not telemetry, so it must not advance last-seen.
+        """
+        now = utcnow()
+        count_row = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions "
+            "WHERE session_id = $1 AND status = 'active'",
+            [session_id],
+        ).fetchone()
+        count = count_row[0] if count_row else 0
+        if count:
+            self.conn.execute(
+                "UPDATE sessions SET status = 'closed', "
+                "ended_at = COALESCE(ended_at, $2) "
+                "WHERE session_id = $1 AND status = 'active'",
+                [session_id, now],
+            )
+        return count
 
     def _trace_filter_where(self, filters: TraceFilters) -> tuple[str, list[object], int]:
         clauses: list[str] = []
@@ -1159,9 +1381,14 @@ class DuckDBBackend:
         )
 
     def get_completed_sessions(self, agent_id: str, limit: int) -> list[SessionRecord]:
+        # Order by last activity (ended_at), not start time. A short fragment
+        # that *started* later must not hide a long-running session that was
+        # still active afterwards — otherwise the status tile shows a 40s blip
+        # instead of the real multi-hour session. Falls back to started_at when
+        # ended_at is NULL.
         cur = self.conn.execute(
             "SELECT * FROM sessions WHERE agent_id = $1 AND status = 'completed' "
-            "ORDER BY started_at DESC LIMIT $2",
+            "ORDER BY COALESCE(ended_at, started_at) DESC LIMIT $2",
             [agent_id, limit],
         )
         rows = cur.fetchall()
