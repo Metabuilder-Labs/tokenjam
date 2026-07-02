@@ -143,7 +143,7 @@ class TestParse:
         cap = config.hooks.output_cap
         assert cap.enabled is True
         assert cap.killswitch is False
-        assert cap.budget_tokens == 8000
+        assert cap.budget_tokens == 4000  # below CC's ~30KB Bash-output cap
         assert cap.tools == ["Bash", "Grep", "Glob", "WebFetch"]
 
     def test_hooks_output_cap_overrides_parsed(self):

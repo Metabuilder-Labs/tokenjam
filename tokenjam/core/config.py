@@ -233,7 +233,12 @@ class CapOutputConfig:
 
     Fields:
       - ``budget_tokens``  — outputs estimated under this (char/4) pass through
-        untouched. Conservative default ~8k tok (≈ 25 KB).
+        untouched. Default 4k tok (≈ 16 KB), chosen to sit BELOW Claude Code's
+        own ~30 KB Bash-tool-output cap (measured empirically, CC 2.1.198): a
+        budget above that cap would never fire, since CC head/tail-truncates
+        Bash output before the PostToolUse hook ever sees it. This budget trims
+        CC's already-capped outputs further so the saving compounds across the
+        turns that re-read them as cache.
       - ``head_lines`` / ``tail_lines`` — lines kept from each end of an
         over-budget output, with a middle marker between them.
       - ``smart_errors`` — for test/build commands, prefer keeping error/fail
@@ -243,7 +248,7 @@ class CapOutputConfig:
       - ``killswitch`` — pass everything through, hook stays installed.
     """
     enabled:           bool      = True
-    budget_tokens:     int       = 8000
+    budget_tokens:     int       = 4000   # below CC's ~30 KB Bash-output cap
     head_lines:        int       = 80
     tail_lines:        int       = 80
     smart_errors:      bool      = True
