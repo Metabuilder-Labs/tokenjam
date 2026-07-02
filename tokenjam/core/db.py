@@ -5,6 +5,7 @@ and migration runner. DuckDB only — never import sqlite3.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from datetime import date, datetime
 from pathlib import Path
@@ -32,6 +33,8 @@ from tokenjam.core.models import (
     TraceRecord,
 )
 from tokenjam.utils.time_parse import utcnow
+
+logger = logging.getLogger("tokenjam.db")
 
 
 # ---------------------------------------------------------------------------
@@ -448,8 +451,94 @@ MIGRATIONS: list[tuple[int, str]] = [
 ]
 
 
+# Additive columns that later migrations append to the base tables via
+# `ALTER TABLE ... ADD COLUMN`. Single-sourced here as the schema the *code*
+# depends on, so `ensure_expected_columns` can reconcile a live DB to it
+# regardless of what `schema_migrations` claims is applied (#55). Each entry is
+# (table, column, column_def) where column_def is the SQL that follows the
+# column name — it MUST be additive/backward-compatible (nullable or DEFAULTed)
+# so re-applying it is always a safe no-op. Keep in sync with the ADD COLUMN
+# statements in MIGRATIONS above; a column that a migration adds and the code
+# reads/writes belongs here.
+EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
+    ("spans",    "billing_account",    "TEXT"),                    # migration 4
+    ("spans",    "cache_write_tokens", "BIGINT"),                  # migration 5
+    ("spans",    "request_params",     "JSON"),                    # migration 7
+    ("spans",    "request_tools",      "JSON"),                    # migration 7
+    ("spans",    "sub_agent_id",       "TEXT"),                    # migration 14
+    ("sessions", "plan_tier",          "TEXT DEFAULT 'unknown'"),  # migration 4
+    ("sessions", "service_namespace",  "TEXT"),                    # migration 8
+    ("sessions", "service_instance_id", "TEXT"),                   # migration 9
+    ("sessions", "cache_write_tokens", "BIGINT DEFAULT 0"),        # migration 12
+    ("sessions", "run_id",             "TEXT"),                    # migration 13
+    ("sessions", "parent_session_id",  "TEXT"),                    # migration 13
+]
+
+
+def missing_expected_columns(conn: duckdb.DuckDBPyConnection) -> list[str]:
+    """Return the ``EXPECTED_ADDITIVE_COLUMNS`` absent from the live schema (#55).
+
+    Read-only counterpart to :func:`ensure_expected_columns`; powers the
+    ``tj doctor`` schema-integrity check without mutating the DB. Each entry is
+    formatted ``table.column``. Tables that don't exist yet are skipped (their
+    columns simply read as absent from ``information_schema``); a pre-migration
+    empty DB therefore reports nothing rather than the whole list.
+    """
+    by_table: dict[str, list[str]] = {}
+    for table, column, _ in EXPECTED_ADDITIVE_COLUMNS:
+        by_table.setdefault(table, []).append(column)
+    missing: list[str] = []
+    for table, columns in by_table.items():
+        existing = {
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = $1",
+                [table],
+            ).fetchall()
+        }
+        if not existing:
+            # Table absent entirely — a fresh/pre-migration DB. run_migrations
+            # creates it; nothing to reconcile here.
+            continue
+        missing.extend(f"{table}.{column}" for column in columns if column not in existing)
+    return missing
+
+
+def ensure_expected_columns(conn: duckdb.DuckDBPyConnection) -> list[str]:
+    """Idempotently reconcile the live schema to ``EXPECTED_ADDITIVE_COLUMNS`` (#55).
+
+    ``run_migrations`` keys purely on the version INTEGER, so if a version was
+    recorded-applied under an older or renumbered definition (this repo
+    renumbered migrations during a merge — see PR #306), the *current* SQL for
+    that version never runs and its ``ADD COLUMN`` silently never lands. Every
+    ingest that writes the missing column then hits a DuckDB Binder Error and is
+    dropped, surfacing to the user as a blank/stale Status page.
+
+    This closes that gap by re-issuing ``ADD COLUMN IF NOT EXISTS`` for the full
+    set of additive columns the code depends on, independent of the recorded
+    version set — so a DB with a recorded-but-unlanded migration self-heals on
+    next open. Idempotent: a no-op on an already-correct DB (every add is guarded
+    by ``IF NOT EXISTS`` *and* a pre-check). Returns the ``table.column`` list it
+    had to add (empty when healthy) so callers can log/report the repair.
+
+    Identifiers come from the hardcoded ``EXPECTED_ADDITIVE_COLUMNS`` constant,
+    never user input, so the f-string DDL carries no injection surface (same
+    pattern as ``repair_spans_stats``; Critical Rule 7 targets user-derived SQL).
+    """
+    defs = {(table, column): column_def for table, column, column_def in EXPECTED_ADDITIVE_COLUMNS}
+    added: list[str] = []
+    for key in missing_expected_columns(conn):
+        table, column = key.split(".", 1)
+        conn.execute(
+            f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "{column}" {defs[(table, column)]}'
+        )
+        added.append(key)
+    return added
+
+
 def run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
-    """Apply unapplied migrations. Idempotent."""
+    """Apply unapplied migrations, then reconcile the schema. Idempotent."""
     conn.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations "
         "(version INTEGER PRIMARY KEY, applied_at TIMESTAMPTZ)"
@@ -468,6 +557,20 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
                 "INSERT INTO schema_migrations VALUES ($1, $2)",
                 [version, utcnow()],
             )
+
+    # Self-heal (#55): the version-keyed loop above trusts schema_migrations, so
+    # a version recorded-applied under an older/renumbered definition leaves its
+    # ADD COLUMN unlanded. Reconcile the additive columns the code depends on
+    # regardless of recorded versions, so a mismatched DB is repaired on open
+    # instead of silently dropping ingest on a Binder Error.
+    healed = ensure_expected_columns(conn)
+    if healed:
+        logger.warning(
+            "Schema self-heal: added missing column(s) %s recorded as migrated "
+            "but never landed (#55). Ingest of affected rows would otherwise fail "
+            "with a DuckDB Binder Error and be silently dropped.",
+            ", ".join(healed),
+        )
 
 
 # ---------------------------------------------------------------------------
