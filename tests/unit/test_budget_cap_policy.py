@@ -11,7 +11,7 @@ traffic; and the envelope carries the unvalidated label + a would-do action
 """
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -40,7 +40,7 @@ def _cfg(*, ceilings: dict[str, float | None], policy_params: dict | None = None
     )
 
 
-def _engine(cfg: TjConfig, *, spend, db=None) -> PolicyEngine:
+def _engine(cfg: TjConfig, *, spend, db=None, now_fn=None) -> PolicyEngine:
     # `spend` is a {provider: usd} map (or a single float) injected as the
     # cycle-spend source so the evaluator is testable without a DB.
     if callable(spend):
@@ -49,8 +49,14 @@ def _engine(cfg: TjConfig, *, spend, db=None) -> PolicyEngine:
         spend_fn = lambda p: spend.get(p)  # noqa: E731
     else:
         spend_fn = lambda p: spend  # noqa: E731
-    ctx = PolicyContext(config=cfg, db=db, spend_fn=(None if db is not None else spend_fn))
+    ctx = PolicyContext(
+        config=cfg,
+        db=db,
+        spend_fn=(None if db is not None else spend_fn),
+        now_fn=now_fn,
+    )
     return PolicyEngine(list(cfg.policies), context=ctx)
+
 
 
 def _api_gate(cfg: TjConfig, provider="openai") -> GateDecision:
@@ -129,7 +135,7 @@ def test_cycle_spend_read_from_duckdb():
     # The real path: cycle spend summed from the telemetry DB, scoped to the
     # provider + the current billing cycle. Seed current-cycle spans via factory.
     db = InMemoryBackend()
-    now = utcnow()
+    now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
     db.upsert_session(make_session(session_id="s1", plan_tier="api", agent_id="cc"))
     # $7 of anthropic spend this cycle; an openai span must NOT count toward it.
     for i in range(7):
@@ -140,13 +146,13 @@ def test_cycle_spend_read_from_duckdb():
                                  model="gpt-4o", cost_usd=100.0, start_time=now - timedelta(hours=1)))
 
     over = _cfg(ceilings={"anthropic": 5.0})   # $7 spend > $5 ceiling
-    env = _engine(over, spend=None, db=db).evaluate(_api_gate(over, "anthropic"), _req("anthropic"))
+    env = _engine(over, spend=None, db=db, now_fn=lambda: now).evaluate(_api_gate(over, "anthropic"), _req("anthropic"))
     ev = env.evaluations[0]
     assert ev.would_action == ACTION_WOULD_BLOCK
     assert ev.details["cycle_spend_usd"] == pytest.approx(7.0)  # openai's $100 excluded
 
     under = _cfg(ceilings={"anthropic": 20.0})  # $7 spend < $20 ceiling
-    env2 = _engine(under, spend=None, db=db).evaluate(_api_gate(under, "anthropic"), _req("anthropic"))
+    env2 = _engine(under, spend=None, db=db, now_fn=lambda: now).evaluate(_api_gate(under, "anthropic"), _req("anthropic"))
     assert env2.evaluations[0].would_action == ACTION_NOOP
     db.close()
 
@@ -154,16 +160,17 @@ def test_cycle_spend_read_from_duckdb():
 def test_old_spend_outside_cycle_is_excluded():
     # Spend from before the current cycle must not count (deterministic ceiling).
     db = InMemoryBackend()
-    now = utcnow()
+    now = datetime(2026, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
     db.upsert_session(make_session(session_id="s1", plan_tier="api", agent_id="cc"))
     db.insert_span(make_llm_span(session_id="s1", agent_id="cc", provider="anthropic",
                                  model="claude-opus-4-7", cost_usd=500.0,
                                  start_time=now - timedelta(days=45)))  # last cycle
     cfg = _cfg(ceilings={"anthropic": 5.0})
-    env = _engine(cfg, spend=None, db=db).evaluate(_api_gate(cfg, "anthropic"), _req("anthropic"))
+    env = _engine(cfg, spend=None, db=db, now_fn=lambda: now).evaluate(_api_gate(cfg, "anthropic"), _req("anthropic"))
     assert env.evaluations[0].would_action == ACTION_NOOP  # 0 this cycle, under $5
     assert env.evaluations[0].details["cycle_spend_usd"] == pytest.approx(0.0)
     db.close()
+
 
 
 def test_noop_when_spend_unavailable():
