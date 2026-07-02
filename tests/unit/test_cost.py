@@ -199,6 +199,68 @@ def test_calculate_cost_openai_model():
     assert cost == 2.25
 
 
+def test_get_rates_bedrock_raw_span_provider_and_model():
+    """#373: a live Bedrock span carries provider="aws.bedrock" and the raw
+    boto3 modelId (dots + trailing ":0"); the lookup must normalize both
+    onto the [aws.us-amazon-nova-micro-v1] table key."""
+    rates = get_rates("aws.bedrock", "us.amazon.nova-micro-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.035
+    assert rates.output_per_mtok == 0.14
+
+
+def test_get_rates_bedrock_litellm_provider_form():
+    """#373: LiteLLM-routed Bedrock reports provider "bedrock" and may keep
+    the "bedrock/" prefix on the model id."""
+    rates = get_rates("bedrock", "us.amazon.nova-micro-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.035
+
+    rates = get_rates("bedrock", "bedrock/us.amazon.nova-micro-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.035
+
+
+def test_get_rates_bedrock_nova_pro():
+    rates = get_rates("aws.bedrock", "us.amazon.nova-pro-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.80
+    assert rates.output_per_mtok == 3.20
+
+
+def test_get_rates_bedrock_anthropic_on_bedrock():
+    """The mid-string date in Anthropic-on-Bedrock ids must survive
+    normalization (only the trailing ":N" is stripped)."""
+    rates = get_rates("aws.bedrock", "us.anthropic.claude-opus-4-1-20250805-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 15.00
+    assert rates.cache_write_per_mtok == 18.75
+
+
+def test_get_rates_bedrock_version_strip_only_trailing_digits():
+    """#373: the ":N" strip applies only to a trailing ":<digits>" —
+    arbitrary colons must not make an unrelated id match."""
+    from tokenjam.core.pricing import _normalize_bedrock_model
+
+    assert _normalize_bedrock_model("us.amazon.nova-micro-v1:0") == "us-amazon-nova-micro-v1"
+    # Non-numeric / non-trailing colon segments are preserved.
+    assert _normalize_bedrock_model("us.amazon.nova-micro-v1:latest") == (
+        "us-amazon-nova-micro-v1:latest"
+    )
+    assert _normalize_bedrock_model("us.amazon.nova:0:micro") == "us-amazon-nova:0:micro"
+    # No-op normalization returns None so callers skip the second lookup.
+    assert _normalize_bedrock_model("plain-model") is None
+
+
+def test_get_rates_non_bedrock_provider_unaffected():
+    """Regression guard: non-Bedrock providers get no alias or model
+    normalization — a dotted OpenAI-ish name still misses as before."""
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    assert rates is not None
+    assert get_rates("openai", "us.amazon.nova-micro-v1:0") is None
+    assert get_rates("nonexistent", "model") is None
+
+
 def test_pricing_file_exists_at_expected_path():
     """Regression: PRICING_FILE must resolve to tokenjam/pricing/models.toml,
     not a path outside the package. A broken path causes $0.00 costs
