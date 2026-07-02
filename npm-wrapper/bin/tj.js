@@ -41,7 +41,13 @@ function runners() {
 }
 
 function main() {
-  const passthrough = process.argv.slice(2);
+  // Bare `npx tokenjam` IS the zero-install first run — route it to
+  // `tj quickstart` (the quota report the docs promise). The branded home
+  // screen that bare LOCAL `tj` prints assumes an installed CLI and would
+  // dead-end an npx user ("You're set up", suggesting commands they don't
+  // have). Any explicit args pass through untouched.
+  const argv = process.argv.slice(2);
+  const passthrough = argv.length ? argv : ["quickstart"];
 
   for (const { bin, prefix } of runners()) {
     if (!has(bin)) continue;
