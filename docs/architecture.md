@@ -352,7 +352,7 @@ The `--claude-code` flag configures the full telemetry pipeline in one command:
 3. **Updates global Claude settings** (`~/.claude/settings.json`) with OTLP exporter env vars: `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, endpoint, protocol. On re-runs, always resyncs the `OTEL_EXPORTER_OTLP_HEADERS` auth header to fix 401s without manual setup.
 4. **Writes project settings** (`./.claude/settings.json`) with `OTEL_RESOURCE_ATTRIBUTES=service.name={agent_id}` so spans are tagged to the right agent
 5. **Updates shell env** (`~/.zshrc`) with Docker-compatible endpoint (`host.docker.internal:{port}`) for harness sessions that can't reach `127.0.0.1`
-6. **Registers MCP server** globally via `claude mcp add --scope user tj -- tj mcp`
+6. **Wires the zero-token statusline** into `~/.claude/settings.json` (`"statusLine": {"type": "command", "command": "tj statusline"}`), non-destructively (an existing statusLine is left intact). It does **not** register the MCP server — that's an SDK / API surface, and an in-loop MCP is a per-turn quota burden on subscription users (#59)
 7. **Installs daemon** by default (launchd on macOS, systemd on Linux) with `--config` baked into the unit file; skip with `--no-daemon`
 
 ### Log-to-span conversion
