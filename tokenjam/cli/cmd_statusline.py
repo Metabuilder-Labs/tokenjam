@@ -26,6 +26,8 @@ import os
 
 import click
 
+from tokenjam.core.usage import session_usage
+
 # Re-read share (cache-read ÷ total tokens over the session) thresholds. Past
 # WARN the context is mostly re-reading itself; past CRIT it is almost entirely
 # re-read and a /compact reclaims real quota. Tunable in one place.
@@ -58,36 +60,15 @@ def find_transcript(data: dict) -> str | None:
 def session_shares(path: str) -> tuple[int, float]:
     """Return ``(total_tokens, reread_pct)`` over a session's assistant turns.
 
-    Sums the usage of every ``assistant`` message, deduped by message id (Claude
-    Code writes multiple transcript lines per message during streaming, all
-    carrying the same cumulative usage — counting them all inflates every
-    number). ``reread_pct`` is cache-read tokens as a percent of the total.
+    Delegates the four-bucket parse + last-wins message-id dedup to
+    ``core.usage`` — the single source of truth shared with the backfill ingest
+    path, so the statusline's re-read % can't drift from the Cost tab for the
+    same session. ``reread_pct`` is cache-read tokens as a percent of the total.
     """
-    inp = out = cache_read = cache_write = 0
-    seen: set[str] = set()
     with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            if d.get("type") != "assistant":
-                continue
-            msg = d.get("message") or {}
-            usage = msg.get("usage") or {}
-            if not usage:
-                continue
-            mid = msg.get("id")
-            if mid:
-                if mid in seen:
-                    continue
-                seen.add(mid)
-            inp += int(usage.get("input_tokens", 0) or 0)
-            out += int(usage.get("output_tokens", 0) or 0)
-            cache_read += int(usage.get("cache_read_input_tokens", 0) or 0)
-            cache_write += int(usage.get("cache_creation_input_tokens", 0) or 0)
-    total = inp + out + cache_read + cache_write
-    reread_pct = (100.0 * cache_read / total) if total else 0.0
+        usage = session_usage(fh)
+    total = usage.total
+    reread_pct = (100.0 * usage.cache_read_tokens / total) if total else 0.0
     return total, reread_pct
 
 

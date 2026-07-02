@@ -60,6 +60,23 @@ def test_session_shares_dedupes_by_message_id(tmp_path):
     assert total == 1000  # counted once, not 3000
 
 
+def test_session_shares_dedupes_last_wins(tmp_path):
+    # Mid-stream snapshots of one message carry PARTIAL, growing usage under the
+    # same message id; the final record is authoritative. Last-wins keeps that
+    # finalized total (matching core/backfill) — first-wins would undercount.
+    early = make_claude_transcript_assistant_line(
+        message_id="m1", input_tokens=100, output_tokens=10,
+        cache_read_input_tokens=0, cache_creation_input_tokens=0,
+    )
+    final = make_claude_transcript_assistant_line(
+        message_id="m1", input_tokens=100, output_tokens=400,
+        cache_read_input_tokens=0, cache_creation_input_tokens=0,
+    )
+    path = write_claude_transcript(tmp_path / "s.jsonl", [early, final])
+    total, _ = session_shares(path)
+    assert total == 500  # 100 + 400 (final), not 110 (first)
+
+
 def test_session_shares_ignores_non_assistant_and_bad_lines(tmp_path):
     path = tmp_path / "s.jsonl"
     good = make_claude_transcript_assistant_line(
