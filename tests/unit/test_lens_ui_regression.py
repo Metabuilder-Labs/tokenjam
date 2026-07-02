@@ -71,7 +71,6 @@ def test_chart_has_hover_tooltip(html):
     assert "plugins: [chartTooltipPlugin(" in html
 
 
-
 def test_axis_time_ticks_timezone_split(html):
     # #178: HOURLY ticks localize — they format the UTC epoch-second buckets in
     # the viewer's local zone (a US-Pacific user sees their noon, not UTC's 7pm).
@@ -448,7 +447,6 @@ def test_analytics_presets_and_csv_export(html):
     assert "tokenjam-analytics_${startStr}_${endStr}.csv" in html
 
 
-
 def test_analytics_url_is_source_of_truth(html):
     # state read from URL params with validators, written back via navigate().
     # navigate() targets `route` (default 'analytics' preserves the standalone
@@ -671,13 +669,11 @@ def test_overview_recoverable_tiles_deeplink_into_analytics(html):
     assert "'#/optimize?finding=' + t.name" not in html
 
 
-
 def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
     # The deep-link helper builds #/analytics?... URLs (offline hash links, no
     # fetch) from a query object, dropping empty values.
     assert "function analyticsHref(q, route = 'analytics')" in html
     assert "return '#/' + route + (s ? '?' + s : '');" in html
-
 
 
 def test_dashboard_is_default_landing(html):
@@ -1468,9 +1464,10 @@ def test_map_board_context_and_cost_lanes_are_readable_as_data(html):
     assert '<span class="mb-yv">${fmtCost(costMax)}</span>' in html    # cost max (top)
     assert '<span class="mb-yv mb-y0">0</span>' in html                # context baseline
     assert '<span class="mb-yv mb-y0">$0</span>' in html               # cost baseline
-    # Peak value labelled on each lane via the existing formatters.
+    # Peak value labelled on each lane via the existing formatters. The cost peak
+    # self-describes its unit: the auto bin width in time mode, /call in step.
     assert 'class="mb-peak">peak ${fmtTokens(maxCtx)} tok' in html
-    assert 'class="mb-peak">peak ${fmtCost(costMax)}/bucket' in html
+    assert "class=\"mb-peak\">peak ${fmtCost(costMax)}${mode === 'time' ? ' per ' + mbFmtBin(binWidth) : '/call'}" in html
     # Max read off the series arrays already sent (UI reads, doesn't aggregate).
     assert "const maxCtx = Math.max(1, ...ctxSeries.map" in html
     assert "const maxCost = Math.max(0.0001, ...costSeries.map" in html
@@ -1495,8 +1492,8 @@ def test_map_board_subagent_label_is_single_ellipsized_run(html):
 
 
 def test_map_board_has_time_step_toggle(html):
-    # The time⇄step toggle re-spaces every lane (useState-driven).
-    assert "const [mode, setMode] = useState('time')" in html
+    # The step⇄time toggle re-spaces every lane (useState-driven; step default — #58).
+    assert "const [mode, setMode] = useState('step')" in html
     assert "setMode('time')" in html
     assert "setMode('step')" in html
     assert 'class="mb-toggle"' in html
@@ -1636,23 +1633,6 @@ def test_approach_splices_cross_terminal_spine(html):
     assert ".ap-deleg.ap-xterm { border-color: var(--warn); }" in html
 
 
-# --- Map TOOLS lane: binned density histogram + interval selector --------- #
-def test_map_tools_lane_has_interval_selector(html):
-    # The Map board carries a trading-chart-style interval selector that sets the
-    # tools-histogram bin width in active time. It has an Auto default plus the
-    # 1m/5m/15m/1h ladder, is persisted in component state, and Auto shows the
-    # resolved width (e.g. "Auto · 5m").
-    assert "const [binSel, setBinSel] = useState('auto')" in html
-    assert "function mbAutoBinWidth" in html
-    assert "const MB_BIN_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600 }" in html
-    assert "'Auto · ' + mbFmtBin(autoBinW)" in html
-    # the ladder options are wired to setBinSel
-    for opt in ("'1m'", "'5m'", "'15m'", "'1h'"):
-        assert "setBinSel(" + opt + ")" in html
-    # it's a time-mode control (hidden/disabled in step mode)
-    assert "class=\"mb-toggle mb-ivl\"" in html
-
-
 def test_map_tools_lane_is_stacked_density_histogram_in_time_mode(html):
     # In time mode the tools lane is a stacked-by-category density histogram — one
     # bar per active-time bucket, height ∝ count, segments colored by category with
@@ -1741,3 +1721,29 @@ def test_user_prompts_visually_marked_on_both_views(html):
     assert "step.ask" in html
     assert ".story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand)" in html
     assert ".wm-dot-spine.work { color: var(--brand)" in html
+
+
+def test_map_tools_lane_bin_width_is_auto_only(html):
+    # #58: the manual interval ladder (Auto/1m/5m/15m/1h) is PURGED. Bin widths
+    # carry no domain meaning for an agent run (users can't relate 5m→15m to any
+    # question), and a manual 1h on a ~40m session collapsed the whole board into
+    # one full-width slab. The width is always auto-resolved for the span and
+    # surfaced in the cost lane's peak label instead of a control.
+    assert "const binWidth = mbAutoBinWidth(activeDur)" in html
+    assert "binSel" not in html            # the state is gone
+    assert "mb-ivl" not in html            # the control + its CSS are gone
+    assert "MB_BIN_SECONDS" not in html    # the manual ladder map is gone
+    # the resolved width self-describes in the cost peak label (time mode)
+    assert "' per ' + mbFmtBin(binWidth)" in html
+
+
+def test_map_board_defaults_to_step_mode(html):
+    # #58: step is the default read — evenly spaced by tool-call order it shows
+    # the work sequence without burst/idle distortion (the user consistently read
+    # it as less noisy). Time mode stays one click away for cost localization.
+    assert "const [mode, setMode] = useState('step')" in html
+    # Peak value labelled on each lane via the existing formatters. The cost peak
+    # self-describes its unit: the auto bin width in time mode, /call in step.
+    assert "class=\"mb-peak\">peak ${fmtCost(costMax)}${mode === 'time' ? ' per ' + mbFmtBin(binWidth) : '/call'}" in html
+    # The step⇄time toggle re-spaces every lane (useState-driven; step default — #58).
+    assert "const [mode, setMode] = useState('step')" in html

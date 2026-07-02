@@ -183,6 +183,33 @@ def test_retry_step_flagged(tmp_path):
     assert story["steps"][1]["is_retry"] is False
 
 
+def test_repeat_after_success_is_not_a_retry(tmp_path):
+    """A retry means RE-ATTEMPT AFTER FAILURE. Two consecutive SUCCESSFUL steps
+    with the same tool signature (e.g. editing the same file twice in a row —
+    the most normal agent behavior there is) must NOT be flagged: the old
+    signature-repeat-only rule painted half a real session's Map with retry
+    marks (#58)."""
+    records = [
+        _user_prompt("Refactor the config module."),
+        _assistant(
+            "Editing the config.",
+            tools=[{"id": "t1", "name": "Edit", "input": {"file_path": "src/config.py"}}],
+        ),
+        _tool_result("t1", is_error=False),
+        # same signature, but the previous step SUCCEEDED -> not a retry
+        _assistant(
+            "One more tweak to the same file.",
+            tools=[{"id": "t2", "name": "Edit", "input": {"file_path": "src/config.py"}}],
+        ),
+        _tool_result("t2", is_error=False),
+    ]
+    _write_transcript(tmp_path, "sess-rep", records)
+    story = build_session_story("sess-rep", projects_root=tmp_path)
+    assert story is not None
+    assert story["steps"][0]["is_retry"] is False
+    assert story["steps"][1]["is_retry"] is False
+
+
 def test_outcome_is_last_narration(tmp_path):
     _make_fixture(tmp_path)
     story = build_session_story("sess-1", projects_root=tmp_path)

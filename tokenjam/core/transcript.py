@@ -453,6 +453,7 @@ def _build_steps(
     """
     steps: list[dict[str, Any]] = []
     prev_signature: tuple[tuple[str, str], ...] | None = None
+    prev_step_errored = False
     n = 0
     pending_ask: str | None = None
 
@@ -510,9 +511,16 @@ def _build_steps(
         text, text_truncated = _trim(text_raw, MAX_STEP_TEXT_CHARS)
         step_is_error = any(t["status"] == "error" for t in tools)
 
+        # A retry is a RE-ATTEMPT AFTER FAILURE: same tool signature as the
+        # previous tool-bearing step AND that step errored. Signature-repeat
+        # alone over-fires badly — consecutive successful Edits/Reads of the
+        # same file are the most normal agent behavior there is, and flagging
+        # them painted half the Map's tool buckets with retry marks (#58).
         signature = tuple((t["name"], t["label"]) for t in tools)
-        is_retry = bool(signature) and signature == prev_signature
-        prev_signature = signature if signature else prev_signature
+        is_retry = bool(signature) and signature == prev_signature and prev_step_errored
+        if signature:
+            prev_signature = signature
+            prev_step_errored = step_is_error
 
         model = message.get("model")
         step: dict[str, Any] = {

@@ -1355,9 +1355,6 @@ a.health-tile.attn { border-color: var(--warn); }
 .mb-hbar { position: absolute; bottom: 0; display: flex; flex-direction: column-reverse; box-sizing: border-box; border-radius: 1px 1px 0 0; overflow: hidden; cursor: default; }
 .mb-hbar.retry { outline: 1px dashed var(--error); outline-offset: -1px; border-radius: 0; }
 .mb-hseg { width: 100%; flex: 0 0 auto; }
-/* interval (bin-width) selector — a trading-chart-style segmented control that
-   sets the histogram bin width in active time; reuses .mb-toggle look. */
-.mb-toggle.mb-ivl span { padding: 5px 9px; }
 /* sub-agents lane (mock .lane.sub / .subbar): each in-session subagent as a
    horizontal bar positioned by its time window; color mapped to --chart-5. */
 .mb-lane.sub { height: 40px; }
@@ -3379,8 +3376,7 @@ const MB_CAT_LABEL = {
 };
 // Stack order, bottom → top; error last so failures sit on top of each bar.
 const MB_STACK_ORDER = ['read', 'search', 'edit', 'bash', 'task', 'web', 'other', 'error'];
-// The trading-chart-style interval ladder → bin width in ACTIVE seconds.
-const MB_BIN_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600 };
+// Preferred bin widths (ACTIVE seconds) the auto-resolver tries first.
 const MB_BIN_LADDER = [60, 300, 900, 3600];
 const MB_HIST_MAX_PX = 44;     // px — tallest histogram bar (tools lane is 52px; leaves headroom).
 const MB_HIST_TARGET = 80;     // Auto aims for ~this many bars across the active span.
@@ -3547,8 +3543,10 @@ function mbLayoutSubagents(subs, mode, started, duration, n) {
 // (between tools and context) renders only when the session spawned subagents.
 function MapBoardSection({ sessionId }) {
   const [data, setData] = useState(null);
-  const [mode, setMode] = useState('time'); // 'time' | 'step'
-  const [binSel, setBinSel] = useState('auto'); // 'auto' | '1m' | '5m' | '15m' | '1h' — histogram bin width (time mode)
+  // Step is the DEFAULT read: evenly spaced by tool-call order, it shows the
+  // work sequence without burst/idle distortion. Time mode (one click away)
+  // answers "when did money burn"; the insights strip answers it in text too.
+  const [mode, setMode] = useState('step'); // 'step' | 'time'
   const boardRef = useRef(null);
   const crossRef = useRef(null);
   const crossLabelRef = useRef(null);
@@ -3691,12 +3689,13 @@ function MapBoardSection({ sessionId }) {
 
   // Tools-lane density histogram (TIME MODE ONLY): bin every event into fixed
   // active-time buckets (idle-collapsed, same axis the lanes use), stacked by
-  // category. The interval selector sets the bin width; Auto resolves to a nice
-  // width for this span. Events with no ts fall back to their ordinal position
-  // (evTimeFrac already does this). Step mode keeps the per-event ticks below.
-  const autoBinW = mbAutoBinWidth(activeDur);
-  const binWidth = binSel === 'auto' ? autoBinW : (MB_BIN_SECONDS[binSel] || autoBinW);
-  const autoBinLabel = 'Auto · ' + mbFmtBin(autoBinW);
+  // category. Bin width is ALWAYS auto-resolved for this span — the manual
+  // interval ladder was purged (#58): bin widths carry no domain meaning for an
+  // agent run, and a manual 1h on a 40m session collapsed the board into one
+  // full-width slab. The width is surfaced in the cost lane's peak label.
+  // Events with no ts fall back to their ordinal position (evTimeFrac already
+  // does this). Step mode keeps the per-event ticks below.
+  const binWidth = mbAutoBinWidth(activeDur);
   const histBins = [];
   const costBins = [];
   if (mode === 'time') {
@@ -3877,17 +3876,9 @@ function MapBoardSection({ sessionId }) {
         ${data.from_snapshot ? html`<span class="mb-chip">from snapshot</span>` : null}
       </div>
       <div class="mb-head" style="margin:0;gap:8px">
-        ${mode === 'time' ? html`
-        <div class="mb-toggle mb-ivl" title="histogram bin width (active time)">
-          <span class=${binSel === 'auto' ? 'on' : ''} onClick=${() => setBinSel('auto')}>${autoBinLabel}</span>
-          <span class=${binSel === '1m' ? 'on' : ''} onClick=${() => setBinSel('1m')}>1m</span>
-          <span class=${binSel === '5m' ? 'on' : ''} onClick=${() => setBinSel('5m')}>5m</span>
-          <span class=${binSel === '15m' ? 'on' : ''} onClick=${() => setBinSel('15m')}>15m</span>
-          <span class=${binSel === '1h' ? 'on' : ''} onClick=${() => setBinSel('1h')}>1h</span>
-        </div>` : null}
-        <div class="mb-toggle">
-          <span class=${mode === 'time' ? 'on' : ''} onClick=${() => setMode('time')}>time</span>
+        <div class="mb-toggle" title="step: evenly by tool-call order (the sequence) · time: by active time (when money burned)">
           <span class=${mode === 'step' ? 'on' : ''} onClick=${() => setMode('step')}>step</span>
+          <span class=${mode === 'time' ? 'on' : ''} onClick=${() => setMode('time')}>time</span>
         </div>
       </div>
     </div>
@@ -3988,7 +3979,7 @@ function MapBoardSection({ sessionId }) {
               return html`<rect x=${(x - 1).toFixed(2)} width="2" y=${(30 - h).toFixed(2)} height=${h.toFixed(2)} fill="var(--chart-3)"/>`;
             })}
         </svg>
-        <span class="mb-peak">peak ${fmtCost(costMax)}/bucket</span>
+        <span class="mb-peak">peak ${fmtCost(costMax)}${mode === 'time' ? ' per ' + mbFmtBin(binWidth) : '/call'}</span>
       </div></div>
 
       <div class="mb-xaxis"><div class="mb-gutter mono">${mode === 'time' ? '0s' : 'step 1'}</div><div class="mb-ticks">
