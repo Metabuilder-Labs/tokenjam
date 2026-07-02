@@ -42,8 +42,8 @@ def _insert_agent(db, agent_id="test-agent"):
 def test_migrations_run_on_empty_db():
     backend = InMemoryBackend()
     rows = backend.conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert len(rows) == 7
-    assert {r[0] for r in rows} == {1, 2, 3, 4, 5, 6, 7}
+    assert len(rows) == 11
+    assert {r[0] for r in rows} == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
     backend.close()
 
 
@@ -52,7 +52,7 @@ def test_migrations_are_idempotent():
     # Running migrations again should not raise
     run_migrations(backend.conn)
     rows = backend.conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert len(rows) == 7
+    assert len(rows) == 11
     backend.close()
 
 
@@ -344,6 +344,34 @@ def test_get_completed_sessions(db):
     assert len(completed) == 3
     for s in completed:
         assert s.status == "completed"
+
+
+def test_get_completed_sessions_orders_by_last_activity(db):
+    """A long session must rank ahead of a short fragment that started later.
+
+    Regression: the status tile showed a 40s fragment instead of the real
+    multi-hour session because ordering was by started_at, not last activity.
+    """
+    _insert_agent(db)
+    base = utcnow()
+    # Long session: started first, stayed active for ~4.5h.
+    long_session = make_session(
+        status="completed",
+        started_at=base - timedelta(hours=4, minutes=27),
+        ended_at=base,
+    )
+    # Short fragment: started 3 min AFTER the long one, ended 40s later.
+    short_fragment = make_session(
+        status="completed",
+        started_at=base - timedelta(hours=4, minutes=24),
+        ended_at=base - timedelta(hours=4, minutes=23, seconds=20),
+    )
+    db.upsert_session(long_session)
+    db.upsert_session(short_fragment)
+
+    latest = db.get_completed_sessions("test-agent", limit=1)
+    assert latest[0].session_id == long_session.session_id
+    assert latest[0].duration_seconds > 3600  # the multi-hour one, not the 40s blip
 
 
 def test_get_completed_session_count(db):

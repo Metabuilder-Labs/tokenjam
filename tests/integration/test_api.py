@@ -19,7 +19,12 @@ from tokenjam.core.config import (
 )
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
-from tests.factories import make_llm_span, make_session, make_tool_span
+from tests.factories import (
+    make_invoke_agent_span,
+    make_llm_span,
+    make_session,
+    make_tool_span,
+)
 
 
 INGEST_SECRET = "test-secret-token"
@@ -652,9 +657,14 @@ async def test_span_without_agent_id_normalizes_to_unknown(client):
     trace_agents = [t["agent_id"] for t in traces.json()["traces"]]
     assert "unknown" in trace_agents
 
-    # Verify sessions table agrees
+    # Verify sessions table agrees. The OTLP span carries an old timestamp, so
+    # the session is stale and surfaces in the archive (not a live tile).
     status = await client.get("/api/v1/status")
-    status_agents = [a["agent_id"] for a in status.json()["agents"]]
+    body_json = status.json()
+    status_agents = (
+        {a["agent_id"] for a in body_json["agents"]}
+        | {s["agent_id"] for s in body_json["archived"]}
+    )
     assert "unknown" in status_agents
 
 
@@ -675,16 +685,32 @@ async def test_status_and_traces_agree_on_agent_ids(client):
     status = await client.get("/api/v1/status")
     traces = await client.get("/api/v1/traces")
 
-    status_agents = {a["agent_id"] for a in status.json()["agents"]}
+    sj = status.json()
+    # An agent's sessions can be live (agents) or archived (closed/stale); the
+    # full set of known agent ids is the union of both.
+    status_agents = (
+        {a["agent_id"] for a in sj["agents"]}
+        | {s["agent_id"] for s in sj["archived"]}
+    )
     trace_agents = {t["agent_id"] for t in traces.json()["traces"]}
     assert trace_agents == status_agents
 
 
 async def test_status_exposes_active_seconds(client, db):
-    """Status payload carries active (compute) time alongside wall-clock (#147)."""
-    from tests.factories import make_llm_span, make_session
+    """Status payload carries active (compute) time alongside wall-clock (#147).
 
-    db.upsert_session(make_session(agent_id="a1", session_id="s1", status="completed"))
+    The status payload surfaces current (active/idle) sessions as tiles, so the
+    session must be active with recent activity to carry active_seconds.
+    """
+    from datetime import timedelta
+
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+    db.upsert_session(make_session(
+        agent_id="a1", session_id="s1", status="active",
+        started_at=now - timedelta(minutes=2), ended_at=now - timedelta(minutes=1)))
     for ms in (1000.0, 2000.0, 3000.0):
         sp = make_llm_span(agent_id="a1", duration_ms=ms)
         sp.session_id = "s1"
@@ -751,3 +777,465 @@ async def test_post_budget_zero_clears_limit(db):
     assert resp.status_code == 200
     agent = resp.json()["agents"]["my-agent"]
     assert agent["configured"]["daily_usd"] is None  # limit was cleared
+
+
+# ===========================================================================
+# Status route: concurrent live sessions each get a tile, read as active
+#
+# Claude Code's logs path emits a zero-duration invoke_agent marker per user
+# prompt and never an explicit end. Each live terminal is its own session;
+# the status route surfaces one tile per recently-active session (not a single
+# collapsed/"completed" tile). Uses DuckDBBackend because /status reads via
+# db.conn.
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_status_shows_live_session_over_empty_marker(tmp_path):
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code", first_seen=now, last_seen=now))
+
+        # Live session: turn-start marker + real LLM activity.
+        pipeline.process(make_invoke_agent_span(
+            agent_id="claude-code", session_id="live", conversation_id="c1", duration_ms=0.0))
+        pipeline.process(make_llm_span(
+            agent_id="claude-code", session_id="live", conversation_id="c1",
+            input_tokens=19562, output_tokens=1321, cost_usd=0.17))
+        # A newer but EMPTY marker session (used to win the tile and show 0/0).
+        pipeline.process(make_invoke_agent_span(
+            agent_id="claude-code", session_id="empty", conversation_id="c2", duration_ms=0.0))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        # Concurrent active sessions each get their own tile (one per terminal).
+        cc_tiles = [a for a in resp.json()["agents"] if a["agent_id"] == "claude-code"]
+        by_session = {a["session_id"]: a for a in cc_tiles}
+        assert "live" in by_session and "empty" in by_session
+        live = by_session["live"]
+        assert live["status"] == "active"
+        assert live["input_tokens"] == 19562
+        assert live["output_tokens"] == 1321
+        # The just-started marker session is its own tile with no work yet.
+        assert by_session["empty"]["input_tokens"] == 0
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_returns_service_namespace(tmp_path):
+    """The status tile carries service.namespace so the dashboard groups by project."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="s1",
+            service_namespace="aquanode"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        agents = {a["agent_id"]: a for a in resp.json()["agents"]}
+        assert agents["claude-code-harness"]["namespace"] == "aquanode"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_namespace_falls_back_to_configured_project(tmp_path):
+    """Archived sessions with no per-session namespace still group via
+    [agents.<id>].project.
+
+    Covers the already-running session case: no service.namespace ever arrived
+    on the wire, but the server-side project mapping groups it anyway. A closed
+    session is no longer a live tile, so the fallback must apply to the archive.
+    """
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig, AgentConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
+        # Pre-existing session with NO namespace (collected before the mapping).
+        # tool_call_count=1 so it clears the archive's 0-signal zombie filter.
+        db.upsert_session(make_session(
+            agent_id="claude-code-harness", session_id="s1", status="closed",
+            tool_call_count=1))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        # Closed session -> archive, not a live tile.
+        assert resp.json()["agents"] == []
+        archived = {s["session_id"]: s for s in resp.json()["archived"]}
+        assert archived["s1"]["namespace"] == "aquanode"
+        assert archived["s1"]["status"] == "closed"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_one_tile_per_concurrent_session(tmp_path):
+    """Three concurrent terminals under one agent each get a tile, grouped by project."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig, AgentConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
+        # Three live terminals = three session ids under one agent.
+        for sid, intok in [("term-a", 100), ("term-b", 200), ("term-c", 300)]:
+            pipeline.process(make_llm_span(
+                agent_id="claude-code-harness", session_id=sid, conversation_id=sid,
+                input_tokens=intok, output_tokens=10))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        tiles = [a for a in resp.json()["agents"] if a["agent_id"] == "claude-code-harness"]
+        assert len(tiles) == 3
+        assert {t["session_id"] for t in tiles} == {"term-a", "term-b", "term-c"}
+        assert all(t["namespace"] == "aquanode" for t in tiles)
+        assert all(t["status"] == "active" for t in tiles)
+        assert {t["session_id"]: t["input_tokens"] for t in tiles} == {
+            "term-a": 100, "term-b": 200, "term-c": 300,
+        }
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_session_labels(tmp_path):
+    """Session label resolves: manual override > service.instance.id > short id."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig, AgentConfig
+    from tokenjam.core.models import AgentRecord
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+            agents={"claude-code-harness": AgentConfig(project="aquanode")},
+            # prefix override for a current terminal; "ovr" overrides instance.id
+            session_labels={"manual": "harness", "ovr": "config-wins"},
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        now = utcnow()
+        db.upsert_agent(AgentRecord(agent_id="claude-code-harness", first_seen=now, last_seen=now))
+        # instance.id on the wire -> durable label
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="wired", conversation_id="w",
+            service_instance_id="founder-os"))
+        # manual config prefix label only
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="manual-123", conversation_id="m"))
+        # both present -> manual override wins
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="ovr-9", conversation_id="o",
+            service_instance_id="wire-name"))
+        # neither -> label is None (UI falls back to short id)
+        pipeline.process(make_llm_span(
+            agent_id="claude-code-harness", session_id="plain", conversation_id="p"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        by = {a["session_id"]: a for a in resp.json()["agents"]
+              if a["agent_id"] == "claude-code-harness"}
+        assert by["wired"]["label"] == "founder-os"      # from instance.id
+        assert by["manual-123"]["label"] == "harness"    # from config prefix
+        assert by["ovr-9"]["label"] == "config-wins"     # config beats instance.id
+        assert by["plain"]["label"] is None              # no label
+    finally:
+        db.close()
+
+
+# ===========================================================================
+# Session lifecycle: active/idle tiers as tiles, closed/stale archived, cap.
+# ===========================================================================
+
+def _lifecycle_app(tmp_path, agents=None):
+    """A DuckDB-backed app for session-lifecycle tests (status reads db.conn)."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    config = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        agents=agents or {},
+    )
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    return db, app
+
+
+@pytest.mark.asyncio
+async def test_status_active_and_idle_become_tiles_stale_archived(tmp_path):
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        now = utcnow()
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="act", status="active",
+            started_at=now - timedelta(minutes=2), ended_at=now - timedelta(minutes=1)))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="idl", status="active",
+            started_at=now - timedelta(minutes=40), ended_at=now - timedelta(minutes=30)))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="stl", status="active", tool_call_count=1,
+            started_at=now - timedelta(hours=6), ended_at=now - timedelta(hours=5)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        assert resp.status_code == 200
+        sj = resp.json()
+        tiles = {a["session_id"]: a for a in sj["agents"]}
+        assert set(tiles) == {"act", "idl"}            # only active + idle
+        assert tiles["act"]["status"] == "active"
+        assert tiles["idl"]["status"] == "idle"
+        archived = {s["session_id"]: s for s in sj["archived"]}
+        assert "stl" in archived and archived["stl"]["status"] == "stale"
+        assert "act" not in archived and "idl" not in archived
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_no_fallback_tile_for_completed_or_closed(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="done", status="completed"))
+        # tool_call_count=1 so "shut" clears the archive's 0-signal zombie filter.
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="shut", status="closed", tool_call_count=1))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        sj = resp.json()
+        # No active/idle session for this agent -> no current tile at all.
+        assert sj["agents"] == []
+        archived = {s["session_id"]: s["status"] for s in sj["archived"]}
+        # Closed lands in the archive; completed is neither current nor archived.
+        assert archived.get("shut") == "closed"
+        assert "done" not in archived
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_status_caps_tiles_per_agent_and_reports_overflow(tmp_path):
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        now = utcnow()
+        for i in range(9):
+            db.upsert_session(make_session(
+                agent_id="cc", session_id=f"s{i}", status="active",
+                started_at=now - timedelta(seconds=30 + i),
+                ended_at=now - timedelta(seconds=i)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/status")
+
+        tiles = [a for a in resp.json()["agents"] if a["agent_id"] == "cc"]
+        assert len(tiles) == 6                 # MAX_SESSION_TILES
+        assert all(t["overflow"] == 3 for t in tiles)  # 9 - 6 surfaced, not dropped
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_sessions_by_instance_marks_closed_idempotent(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        from tokenjam.utils.time_parse import utcnow
+        now = utcnow()
+        for sid in ("s1", "s2"):
+            db.upsert_session(make_session(
+                agent_id="cc", session_id=sid, status="active",
+                service_instance_id="term-x", ended_at=now))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="s3", status="active",
+            service_instance_id="other", ended_at=now))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"instance_id": "term-x"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            assert resp.status_code == 200
+            assert resp.json()["closed"] == 2
+            # Re-closing is a no-op (idempotent).
+            resp2 = await c.post(
+                "/api/v1/sessions/close", json={"instance_id": "term-x"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            assert resp2.json()["closed"] == 0
+
+        assert db.get_session("s1").status == "closed"
+        assert db.get_session("s2").status == "closed"
+        assert db.get_session("s3").status == "active"   # different instance
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_preserves_last_activity_ended_at(tmp_path):
+    # ended_at is the session's last-activity ("Last seen") time. Closing a
+    # session long after its last span must NOT advance ended_at to the close
+    # moment — regression for the close-bumps-last-seen bug.
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        from datetime import timedelta
+        from tokenjam.utils.time_parse import utcnow
+        last_active = utcnow() - timedelta(days=2)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="old", status="active",
+            ended_at=last_active))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"session_id": "old"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            assert resp.json()["closed"] == 1
+        s = db.get_session("old")
+        assert s.status == "closed"
+        assert s.ended_at == last_active   # unchanged, not bumped to "now"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_stamps_ended_at_when_null(tmp_path):
+    # A session that never recorded an end time gets the close time stamped.
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="noend", status="active", ended_at=None))
+        assert db.get_session("noend").ended_at is None
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"session_id": "noend"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+            assert resp.json()["closed"] == 1
+        assert db.get_session("noend").ended_at is not None
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_session_by_id(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="s1", status="active"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"session_id": "s1"},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+        assert resp.json()["closed"] == 1
+        assert db.get_session("s1").status == "closed"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_sessions_requires_ingest_secret(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={"instance_id": "term-x"})
+        assert resp.status_code == 401
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_close_sessions_requires_an_id(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/sessions/close", json={},
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+        assert resp.status_code == 400
+    finally:
+        db.close()
