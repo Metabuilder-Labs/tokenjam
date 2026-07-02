@@ -308,20 +308,22 @@ Reinstall behavior: `--claude-code` and `--codex` onboard check `_daemon_already
 
 ## MCP Server
 
-`tj mcp` starts a FastMCP stdio server for Claude Code integration. The connection mode is chosen at startup by `cmd_mcp.py`:
+**The MCP is an SDK / API surface, not a Claude Code / Codex one (#59).** It puts tj *in the request path* — the right place for SDK / API integrations doing real-time enforcement/policy/budgets. It is deliberately **not** wired for Claude Code / Codex subscription users: an in-loop MCP is a per-turn quota burden on them (a measured A/B showed **+36%** model-weighted quota vs a no-tj control). Those users get tj **out-of-band**: the zero-token statusline (`tj statusline`, wired by `tj onboard --claude-code`) plus OTel telemetry ingest. `tj mcp` still works for anyone who invokes it; onboarding just no longer defaults CC/Codex users into it.
+
+`tj mcp` starts a FastMCP stdio server. The connection mode is chosen at startup by `cmd_mcp.py`:
 1. If `tj serve` is reachable on `config.api.{host,port}`, MCP proxies to it via HTTP (live ingest visible).
 2. Otherwise it tries to spawn `tj serve` in the background and waits up to 10s for the port.
 3. If neither works, it falls back to a **read-only DuckDB connection** — read tools still work, but newly ingested spans won't appear until restart.
 4. If no config file is found, `init()` is skipped and tools return a no-config sentinel.
 
-To wire into Claude Code locally: `claude mcp add tj --scope user -- tj mcp` (the `--claude-code` and `--codex` onboard flows do this automatically when the `claude` CLI is on PATH; `--codex` also writes `[mcp_servers.tj]` to `~/.codex/config.toml`).
+SDK / API users who want the in-loop tools can wire it manually: `claude mcp add tj --scope user -- tj mcp`. The `--claude-code` and `--codex` onboard flows **no longer** register the MCP (they wire the out-of-band statusline / OTel instead), and a re-onboard retires any tj-managed `[mcp_servers.tj]` block a previous version wrote to `~/.codex/config.toml`.
 
 ## Codex CLI Integration
 
-`tj onboard --codex` writes `[otel]` and `[mcp_servers.tj]` blocks to `~/.codex/config.toml`. Notes:
+`tj onboard --codex` writes an `[otel]` block to `~/.codex/config.toml` (out-of-band telemetry only). It does **not** register the tj MCP for Codex (#59) — Codex has no statusline surface, so tj stays fully out-of-band via OTel + the `tj` CLI; a re-onboard retires any `[mcp_servers.tj]` block a previous version wrote. Notes:
 - Codex hardcodes `service.name=codex_exec` in its binary and silently ignores `[otel.resource]`, so onboarding does **not** write that block — all Codex traces land under the `codex_exec` agent ID regardless of project. Onboarding is one-time global, not per-project.
 - Codex emits OTLP **logs** (not spans) to `/v1/logs`. `tokenjam/api/routes/logs.py` converts Codex events (`sse_event`, `user_prompt`, `tool_decision`, `tool_result`, `api_request`) into normalized spans for cost/drift/alerting. Event name is read from `attrs["event.name"]` when the OTLP body is empty (Codex schema quirk); epoch `timeUnixNano=0` falls back to `attrs["event.timestamp"]` ISO-8601. The `/v1/logs` endpoint also silently accepts `resourceSpans`/`resourceMetrics` because Codex's exporter reuses one endpoint for all signal types.
-- Re-running `tj onboard --codex` is a no-op only when both `[otel]` and `[mcp_servers.tj]` are present in `~/.codex/config.toml`. Re-onboarding either Codex or Claude Code cross-syncs the ingest secret into the other's config if it's already configured.
+- Re-running `tj onboard --codex` is a no-op only when `[otel]` is already present in `~/.codex/config.toml` (the check is `[otel]`-only now); a re-onboard also strips any legacy `[mcp_servers.tj]` block, since tj is out-of-band for Codex. Re-onboarding either Codex or Claude Code cross-syncs the ingest secret into the other's config if it's already configured.
 
 ## Examples Convention
 

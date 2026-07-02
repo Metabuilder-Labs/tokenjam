@@ -149,6 +149,8 @@ tj optimize          # cost-saving candidates from your actual usage
 tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
+Onboarding also wires a **zero-token statusline** into Claude Code — `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface — an MCP would tax every turn).
+
 That's it. Run `tj` any time and it points you to the next best action:
 
 ```text
@@ -217,7 +219,8 @@ TokenJam is also a full observability stack. The five analyzers and Lens ride on
 - **Behavioral drift detection** — Z-score baselines, no LLM required
 - **Schema validation** — declare or infer JSON Schema for tool outputs
 - **OTel-native** — point any OTLP exporter at `tj serve` and you're done
-- **MCP server** — lets Claude Code query its own telemetry mid-session
+- **Statusline** — a zero-token Claude Code status line (`tj statusline`, wired by `tj onboard --claude-code`) showing this session's re-read share + a `/compact` nudge
+- **MCP server** — in-request-path tools for **SDK / API** users (not Claude Code / Codex subscription users — an in-loop MCP is a per-turn quota burden there; they get the out-of-band statusline instead)
 
 ---
 
