@@ -1,4 +1,14 @@
-"""TokenJam MCP server — exposes observability data to Claude Code via stdio."""
+"""TokenJam MCP server — in-request-path observability tools for SDK / API users.
+
+This is the one tj surface that sits *in the loop*: it exposes observability
+data over stdio and is meant for SDK / API integrations where tj is already in
+the request path (real-time enforcement, policy, budgets). It is NOT the
+recommended surface for Claude Code / Codex subscription users — an in-loop MCP
+is a per-turn quota burden on them (a measured A/B showed +36% model-weighted
+quota vs a no-tj control; ticket #59). Those users get tj out-of-band instead:
+the zero-token statusline (`tj statusline`) plus OTel telemetry ingest wired by
+`tj onboard --claude-code`. `tj mcp` still works for anyone who wants it.
+"""
 from __future__ import annotations
 
 try:
@@ -783,11 +793,11 @@ def _tool_setup_project(
         try:
             gs = json.loads(global_settings.read_text())
             if "OTEL_EXPORTER_OTLP_ENDPOINT" not in gs.get("env", {}):
-                warning = "Global OTLP endpoint not configured. Run 'tj onboard --claude-code' to finish setup, then run 'claude mcp add tj --scope user -- tj mcp' to register the MCP server."
+                warning = "Global OTLP endpoint not configured. Run 'tj onboard --claude-code' to finish setup (it wires the zero-token statusline and OTel telemetry; the tj MCP is reserved for SDK/API users, not Claude Code)."
         except Exception:
             warning = "Could not read ~/.claude/settings.json."
     else:
-        warning = "~/.claude/settings.json not found. Run 'tj onboard --claude-code' to configure the global OTLP endpoint and register the MCP server."
+        warning = "~/.claude/settings.json not found. Run 'tj onboard --claude-code' to configure the OTel endpoint and the zero-token statusline (the tj MCP is for SDK/API users, not Claude Code)."
 
     result = {
         "agent_id": agent_id,

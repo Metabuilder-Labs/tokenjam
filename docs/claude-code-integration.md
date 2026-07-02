@@ -13,7 +13,7 @@ tj status --agent claude-code-<project>
 - Creates a shared config at `~/.config/tj/config.toml` (one config for all your projects)
 - Writes OTLP exporter vars to `~/.claude/settings.json` so Claude Code sends telemetry automatically
 - Tags this project's sessions by writing `OTEL_RESOURCE_ATTRIBUTES=service.name=claude-code-<project>` to `.claude/settings.json`
-- Registers the MCP server globally (`claude mcp add --scope user tj -- tj mcp`)
+- Wires the **zero-token statusline** into `~/.claude/settings.json` (`"statusLine": {"type": "command", "command": "tj statusline"}`) — non-destructively; an existing statusLine you (or another tool) authored is left untouched
 - Installs a background daemon (launchd on macOS, systemd on Linux) to keep `tj serve` alive across restarts
 - Adds Docker harness-compatible OTLP env vars to `~/.zshrc`
 
@@ -33,9 +33,25 @@ Each project gets its own agent ID (`claude-code-<repo-name>`), all sharing one 
 
 Claude Code emits OTLP log events which `tj serve` converts into spans — every API request, tool result, tool decision, and error becomes a first-class span with cost tracking, alert evaluation, and drift detection. Works in both interactive and autonomous (headless) mode.
 
-## MCP server
+## Statusline (zero token cost)
 
-The MCP server ships in the base install (`pipx install tokenjam` — no extra needed) and is registered automatically by `tj onboard --claude-code`. It gives Claude Code direct access to your observability data inside the session itself. After restarting Claude Code you have 13 tools available in every session:
+`tj onboard --claude-code` wires a **statusline** into `~/.claude/settings.json`:
+
+```json
+"statusLine": {"type": "command", "command": "tj statusline"}
+```
+
+Claude Code runs `tj statusline` out-of-band after each turn (it never enters the model's context, so it costs **zero quota**) and prints one line — your model, this session's total tokens, and its **re-read share** (cache-read tokens ÷ total), with an actionable `/compact` nudge once re-reading starts eating your budget:
+
+```text
+◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota
+```
+
+The wiring is non-destructive: if you already have a `statusLine` (hand-authored, or from a tool like ccstatusline), tj leaves it untouched and tells you to set it to `tj statusline` yourself. For the deep dive, run `tj tokenmaxx` / `tj optimize`.
+
+## MCP server — for SDK / API users, not Claude Code
+
+The MCP is tj's **in-request-path** surface, meant for **SDK / API** integrations where tj already sits in the loop (real-time enforcement, policy, budgets). It is **not** wired for Claude Code by `tj onboard --claude-code`, and you shouldn't add it as a Claude Code subscription user: an in-loop MCP is a **per-turn quota burden** (a measured A/B showed **+36%** model-weighted quota vs a no-tj control) — the exact tax the out-of-band statusline above avoids. SDK / API users who want the in-loop tools can wire it manually with `claude mcp add tj --scope user -- tj mcp`. After doing so you have 13 tools available in every session:
 
 | Tool | What it does |
 |---|---|

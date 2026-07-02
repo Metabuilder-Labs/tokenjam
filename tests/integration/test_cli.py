@@ -406,17 +406,23 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
         assert mcp_checks and mcp_checks[0]["level"] == "info"
 
-    # Case 2: Claude Code CLI is on PATH (shutil.which returns True), but no registration -> should be level: "warning"
+    # Case 2: Claude Code CLI is on PATH but the MCP is NOT registered. Post-#59
+    # the MCP is an SDK-only surface, so its absence for a coding agent is the
+    # correct state and must NOT warn (it's "info"). Instead the STATUSLINE check
+    # warns, because the zero-token statusline isn't wired yet.
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", side_effect=lambda cmd: "/bin/claude" if cmd == "claude" else None), \
          patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
-        assert result.exit_code == 1
         checks = json.loads(result.output)
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
-        assert mcp_checks and mcp_checks[0]["level"] == "warning"
-        assert "Claude Code" in mcp_checks[0]["message"]
+        assert mcp_checks and mcp_checks[0]["level"] == "info"
+        # The MCP must never steer a Claude Code user to register it.
+        assert "SDK" in mcp_checks[0]["message"]
+        statusline_checks = [c for c in checks if c["name"] == "Statusline wiring"]
+        assert statusline_checks and statusline_checks[0]["level"] == "warning"
+        assert "tj onboard --claude-code" in statusline_checks[0]["message"]
 
     # Case 3: MCP registered globally in Codex (~/.codex/config.toml) -> should be level: "ok"
     codex_dir = fake_home / ".codex"
