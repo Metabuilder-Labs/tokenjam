@@ -108,6 +108,8 @@ from tokenjam.cli.cmd_report import cmd_report  # noqa: E402
 from tokenjam.cli.cmd_policy import cmd_policy  # noqa: E402
 from tokenjam.cli.cmd_pricing import cmd_pricing  # noqa: E402
 from tokenjam.cli.cmd_proxy import cmd_proxy  # noqa: E402
+from tokenjam.cli.cmd_context import cmd_context  # noqa: E402
+from tokenjam.cli.cmd_quota_audit import cmd_quota_audit  # noqa: E402
 from tokenjam.cli.cmd_otel import cmd_otel_resource_attrs  # noqa: E402
 from tokenjam.cli.cmd_session_end import cmd_session_end  # noqa: E402
 
@@ -132,6 +134,8 @@ cli.add_command(cmd_report, name="report")
 cli.add_command(cmd_policy, name="policy")
 cli.add_command(cmd_pricing, name="pricing")
 cli.add_command(cmd_proxy, name="proxy")
+cli.add_command(cmd_context, name="context")
+cli.add_command(cmd_quota_audit, name="quota-audit")
 cli.add_command(cmd_otel_resource_attrs, name="otel-resource-attrs")
 cli.add_command(cmd_session_end, name="session-end")
 
