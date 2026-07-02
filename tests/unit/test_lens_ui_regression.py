@@ -208,6 +208,55 @@ def test_map_tool_lane_labels_shortened_and_collision_proof(html):
     assert gap > box, f"MB_EVLAB_GAP ({gap}) must exceed MB_EVLAB_MAX ({box})"
 
 
+def test_map_tools_lane_has_interval_selector(html):
+    # The Map board carries a trading-chart-style interval selector that sets the
+    # tools-histogram bin width in active time. It has an Auto default plus the
+    # 1m/5m/15m/1h ladder, is persisted in component state, and Auto shows the
+    # resolved width (e.g. "Auto · 5m").
+    assert "const [binSel, setBinSel] = useState('auto')" in html
+    assert "function mbAutoBinWidth" in html
+    assert "const MB_BIN_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600 }" in html
+    assert "'Auto · ' + mbFmtBin(autoBinW)" in html
+    # the ladder options are wired to setBinSel
+    for opt in ("'1m'", "'5m'", "'15m'", "'1h'"):
+        assert "setBinSel(" + opt + ")" in html
+    # it's a time-mode control (hidden/disabled in step mode)
+    assert "class=\"mb-toggle mb-ivl\"" in html
+
+
+def test_map_tools_lane_is_stacked_density_histogram_in_time_mode(html):
+    # In time mode the tools lane is a stacked-by-category density histogram — one
+    # bar per active-time bucket, height ∝ count, segments colored by category with
+    # error stacked on top — NOT the per-event 3px ticks (which smeared over ~100s
+    # of events). Buckets with 0 events render nothing (honest quiet signal).
+    assert "const MB_STACK_ORDER = ['read', 'search', 'edit', 'bash', 'task', 'web', 'other', 'error']" in html
+    assert "const histBins = []" in html
+    assert 'class="mb-hbar' in html          # the stacked bucket bar
+    assert 'class="mb-hseg"' in html         # a per-category stacked segment
+    assert "if (b.total <= 0) return null" in html  # empty bucket → gap
+    # error is the last (top) entry of the stack order so failures pop
+    import re
+
+    assert re.search(r"MB_STACK_ORDER\s*=\s*\[[^\]]*'error'\]", html) is not None
+
+
+def test_map_tools_lane_keeps_per_event_ticks_in_step_mode(html):
+    # Step mode is unchanged: individual per-event ticks (.mb-ev) + sampled labels.
+    assert 'class="mb-ev ' in html
+    assert "evLabelShort(events[i].label)" in html
+    # the histogram branch is gated to time mode (step falls through to ticks)
+    assert "${mode === 'time'\n          ? histBins.map" in html
+
+
+def test_map_cost_lane_shares_histogram_bucket_edges_in_time_mode(html):
+    # The COST lane is re-binned into the SAME bucket edges as the tools histogram
+    # (usd summed per bucket) so cost bars line up vertically under tool bursts.
+    assert "histBins[bi].usd += (p.usd || 0)" in html
+    assert "const costMax = mode === 'time'" in html
+    # cost bars in time mode are drawn from the shared histBins, not raw cost_series
+    assert "Same bucket edges as the tools histogram" in html
+
+
 def test_work_map_is_ask_segmented(html):
     # A session is a sequence of asks (exchanges): the Map renders map.asks via a
     # per-ask component, read as a story ("ask by ask").
@@ -1443,12 +1492,13 @@ def test_map_board_context_and_cost_lanes_are_readable_as_data(html):
     # annotation — so the magnitude is legible, not just an unscaled shape.
     assert ".mb-gutter.axis {" in html          # column max/name/0 gutter exists
     assert '<span class="mb-yv">${fmtTokens(maxCtx)}</span>' in html   # context max (top)
-    assert '<span class="mb-yv">${fmtCost(maxCost)}</span>' in html    # cost max (top)
+    # Cost max/peak use costMax (binned peak in time mode, per-point peak in step).
+    assert '<span class="mb-yv">${fmtCost(costMax)}</span>' in html    # cost max (top)
     assert '<span class="mb-yv mb-y0">0</span>' in html                # context baseline
     assert '<span class="mb-yv mb-y0">$0</span>' in html               # cost baseline
     # Peak value labelled on each lane via the existing formatters.
     assert 'class="mb-peak">peak ${fmtTokens(maxCtx)} tok' in html
-    assert 'class="mb-peak">peak ${fmtCost(maxCost)}/bucket' in html
+    assert 'class="mb-peak">peak ${fmtCost(costMax)}/bucket' in html
     # Max read off the series arrays already sent (UI reads, doesn't aggregate).
     assert "const maxCtx = Math.max(1, ...ctxSeries.map" in html
     assert "const maxCost = Math.max(0.0001, ...costSeries.map" in html
