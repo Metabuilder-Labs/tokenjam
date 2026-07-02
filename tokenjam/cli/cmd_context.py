@@ -99,13 +99,20 @@ def cmd_context(ctx: click.Context, agent: str | None, since: str,
 
     framing = _framing_for(conn, config, diag, agent)
 
+    # The ACTION half of the measure→act→prove loop: what the `tj hook
+    # cap-output` PostToolUse hook reclaimed (read from the append-only sink,
+    # never the DB). Estimated (char/4).
+    from tokenjam.core.savings_log import read_savings, summarize_savings
+    reclaimed = summarize_savings(read_savings(config))
+
     if output_json:
         payload = diagnostic_to_dict(diag)
         payload["framing"] = framing.to_dict()
+        payload["reclaimed"] = reclaimed
         click.echo(json.dumps(payload, default=str))
         return
 
-    _render(diag, framing, since=since)
+    _render(diag, framing, since=since, reclaimed=reclaimed)
 
 
 def _framing_for(
@@ -146,7 +153,8 @@ def _quota_share(tokens: int, framing: Framing) -> str:
     return f"{format_tokens(tokens)} tokens"
 
 
-def _render(diag: ContextDiagnostic, framing: Framing, *, since: str) -> None:
+def _render(diag: ContextDiagnostic, framing: Framing, *, since: str,
+            reclaimed: dict | None = None) -> None:
     from rich.align import Align
     from rich.console import Group
     from rich.panel import Panel
@@ -205,6 +213,16 @@ def _render(diag: ContextDiagnostic, framing: Framing, *, since: str) -> None:
         breakdown.append("\nImplied $: ", style="dim")
         breakdown.append(f"${diag.total_cost_usd:,.2f}", style="bold")
         breakdown.append(" over the window", style="dim")
+
+    # The action-proof line: tokens the output-trim hook clawed back (estimated).
+    if reclaimed and reclaimed.get("trims", 0) > 0:
+        breakdown.append("\nReclaimed:  ", style="dim")
+        breakdown.append(
+            f"~{format_tokens(reclaimed['saved_tok_est'])} est.", style="bold green")
+        breakdown.append(
+            f"  (tj cap-output trimmed {reclaimed['trims']} outputs"
+            f"; ~{format_tokens(reclaimed.get('saved_today_tok_est', 0))} today)",
+            style="dim")
 
     sections: list[Any] = [headline, Text(""), reread, work, breakdown]
 

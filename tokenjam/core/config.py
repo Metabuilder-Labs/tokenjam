@@ -216,6 +216,51 @@ class ProviderBudget:
 
 
 @dataclass
+class CapOutputConfig:
+    """`[hooks.output_cap]` — the PostToolUse output-trim hook (`tj hook cap-output`).
+
+    A PostToolUse hook that shrinks bloated tool outputs *before they enter the
+    model's context*, so a 12k-token test log is not re-read as cache on every
+    subsequent turn (the compounding mechanism behind the measured re-read tax).
+    The tool itself runs unchanged — only the *presentation* the model sees is
+    trimmed, and every trim carries a visible marker (nothing silent).
+
+    DELIBERATELY DEFAULT-ON (unlike the default-off `ProxyConfig`): the value
+    only lands if the hook actually fires, the mechanism is fail-open + fully
+    transparent, and the budget is conservative. Disable in one line
+    (`enabled = false`) or flip `killswitch = true` to pass everything through
+    while leaving the hook installed.
+
+    Fields:
+      - ``budget_tokens``  — outputs estimated under this (char/4) pass through
+        untouched. Conservative default ~8k tok (≈ 25 KB).
+      - ``head_lines`` / ``tail_lines`` — lines kept from each end of an
+        over-budget output, with a middle marker between them.
+      - ``smart_errors`` — for test/build commands, prefer keeping error/fail
+        lines so the *signal* survives, not the noise.
+      - ``min_saving_tokens`` — never trim unless it saves at least this much.
+      - ``tools`` — the tool names eligible for trimming (opt a tool in/out).
+      - ``killswitch`` — pass everything through, hook stays installed.
+    """
+    enabled:           bool      = True
+    budget_tokens:     int       = 8000
+    head_lines:        int       = 80
+    tail_lines:        int       = 80
+    smart_errors:      bool      = True
+    min_saving_tokens: int       = 500
+    tools:             list[str] = field(
+        default_factory=lambda: ["Bash", "Grep", "Glob", "WebFetch"]
+    )
+    killswitch:        bool      = False
+
+
+@dataclass
+class HooksConfig:
+    """`[hooks.*]` — Claude Code hook integrations tj installs out-of-band."""
+    output_cap: CapOutputConfig = field(default_factory=CapOutputConfig)
+
+
+@dataclass
 class SummarizeConfig:
     """`[summarize]` — config for structure-aware prompt summarization.
 
@@ -239,6 +284,7 @@ class TjConfig:
     api:      ApiConfig               = field(default_factory=ApiConfig)
     proxy:    ProxyConfig             = field(default_factory=ProxyConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
+    hooks:    HooksConfig             = field(default_factory=HooksConfig)
     summarize: SummarizeConfig        = field(default_factory=SummarizeConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     policies: list[PolicyConfig]      = field(default_factory=list)
@@ -474,6 +520,24 @@ def _parse(raw: dict) -> TjConfig:
         tool_outputs=capture_raw.get("tool_outputs", False),
     )
 
+    # [hooks.output_cap] — the PostToolUse output-trim hook. DEFAULT-ON (see
+    # CapOutputConfig): a missing section yields an enabled, conservative cap.
+    hooks_raw = raw.get("hooks", {})
+    cap_raw = hooks_raw.get("output_cap", {})
+    cap_output = CapOutputConfig(
+        enabled=cap_raw.get("enabled", CapOutputConfig.enabled),
+        budget_tokens=int(cap_raw.get("budget_tokens", CapOutputConfig.budget_tokens)),
+        head_lines=int(cap_raw.get("head_lines", CapOutputConfig.head_lines)),
+        tail_lines=int(cap_raw.get("tail_lines", CapOutputConfig.tail_lines)),
+        smart_errors=bool(cap_raw.get("smart_errors", CapOutputConfig.smart_errors)),
+        min_saving_tokens=int(
+            cap_raw.get("min_saving_tokens", CapOutputConfig.min_saving_tokens)
+        ),
+        tools=list(cap_raw.get("tools", ["Bash", "Grep", "Glob", "WebFetch"])),
+        killswitch=bool(cap_raw.get("killswitch", CapOutputConfig.killswitch)),
+    )
+    hooks = HooksConfig(output_cap=cap_output)
+
     summarize = SummarizeConfig(api_model=raw.get("summarize", {}).get("api_model"))
 
     defaults_raw = raw.get("defaults", {})
@@ -522,6 +586,7 @@ def _parse(raw: dict) -> TjConfig:
         api=api,
         proxy=proxy,
         capture=capture,
+        hooks=hooks,
         summarize=summarize,
         budgets=budgets,
         policies=policies,
