@@ -1348,6 +1348,16 @@ a.health-tile.attn { border-color: var(--warn); }
 .mb-ev { position: absolute; bottom: 16px; width: 3px; border-radius: 1px; transform: translateX(-50%); }
 .mb-ev.retry { outline: 1px dashed var(--error); outline-offset: 1px; }
 .mb-evlab { position: absolute; bottom: 2px; font-size: 8.5px; color: var(--text-faint); transform: translateX(-50%); white-space: nowrap; font-family: 'Geist Mono', monospace; max-width: 72px; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+/* time-mode tools lane: a stacked-by-category density histogram (option 1) — one
+   bar per time bucket, height ∝ event count, segments colored by category with
+   error on top so failures pop. Replaces the 3px per-event ticks (which smeared
+   into an unreadable smudge over ~hundreds of events). Step mode keeps the ticks. */
+.mb-hbar { position: absolute; bottom: 0; display: flex; flex-direction: column-reverse; box-sizing: border-box; border-radius: 1px 1px 0 0; overflow: hidden; cursor: default; }
+.mb-hbar.retry { outline: 1px dashed var(--error); outline-offset: -1px; border-radius: 0; }
+.mb-hseg { width: 100%; flex: 0 0 auto; }
+/* interval (bin-width) selector — a trading-chart-style segmented control that
+   sets the histogram bin width in active time; reuses .mb-toggle look. */
+.mb-toggle.mb-ivl span { padding: 5px 9px; }
 /* sub-agents lane (mock .lane.sub / .subbar): each in-session subagent as a
    horizontal bar positioned by its time window; color mapped to --chart-5. */
 .mb-lane.sub { height: 40px; }
@@ -3348,6 +3358,41 @@ function mbFmtGap(sec) {
   return (h < 10 ? h.toFixed(1) : Math.round(h)) + 'h';
 }
 
+// --- Tools-lane density histogram (time mode) ------------------------------- //
+// Human display name per category (for bucket tooltips + the legend echo).
+const MB_CAT_LABEL = {
+  read: 'Read', search: 'Grep/Glob', edit: 'Edit/Write', bash: 'Bash',
+  task: 'Task', web: 'WebFetch', other: 'Other', error: 'error',
+};
+// Stack order, bottom → top; error last so failures sit on top of each bar.
+const MB_STACK_ORDER = ['read', 'search', 'edit', 'bash', 'task', 'web', 'other', 'error'];
+// The trading-chart-style interval ladder → bin width in ACTIVE seconds.
+const MB_BIN_SECONDS = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600 };
+const MB_BIN_LADDER = [60, 300, 900, 3600];
+const MB_HIST_MAX_PX = 44;     // px — tallest histogram bar (tools lane is 52px; leaves headroom).
+const MB_HIST_TARGET = 80;     // Auto aims for ~this many bars across the active span.
+// Nice bin widths (seconds) Auto falls back to when no ladder step lands in-range.
+const MB_NICE_SECONDS = [1, 2, 5, 10, 15, 20, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400];
+// Auto bin width: prefer the smallest ladder step that yields ~60–100 bars for
+// this active span; else the smallest nice width targeting ~80 bars.
+function mbAutoBinWidth(activeDur) {
+  if (!(activeDur > 0)) return 60;
+  for (const w of MB_BIN_LADDER) {
+    const bars = activeDur / w;
+    if (bars >= 60 && bars <= 100) return w;
+  }
+  const ideal = activeDur / MB_HIST_TARGET;
+  for (const w of MB_NICE_SECONDS) if (w >= ideal) return w;
+  return MB_NICE_SECONDS[MB_NICE_SECONDS.length - 1];
+}
+// Terse label for a bin width in seconds: 3600→"1h", 300→"5m", 30→"30s".
+function mbFmtBin(w) {
+  if (w == null) return '';
+  if (w % 3600 === 0) return (w / 3600) + 'h';
+  if (w % 60 === 0) return (w / 60) + 'm';
+  return w + 's';
+}
+
 // Aggregate the event stream into a codebase-territory treemap: read/edit events
 // carry a file-path `label`; count touches per file, track first-touch order (min
 // ordinal) and whether the file was ever edited, then group files by directory.
@@ -3455,6 +3500,7 @@ function mbLayoutSubagents(subs, mode, started, duration, n) {
 function MapBoardSection({ sessionId }) {
   const [data, setData] = useState(null);
   const [mode, setMode] = useState('time'); // 'time' | 'step'
+  const [binSel, setBinSel] = useState('auto'); // 'auto' | '1m' | '5m' | '15m' | '1h' — histogram bin width (time mode)
   const boardRef = useRef(null);
   const crossRef = useRef(null);
   const crossLabelRef = useRef(null);
@@ -3593,6 +3639,46 @@ function MapBoardSection({ sessionId }) {
   const ctxArea = ctxPts.length ? ctxLine + ' L100,30 L0,30 Z' : '';
   const maxCost = Math.max(0.0001, ...costSeries.map((p) => p.usd || 0));
 
+  // Tools-lane density histogram (TIME MODE ONLY): bin every event into fixed
+  // active-time buckets (idle-collapsed, same axis the lanes use), stacked by
+  // category. The interval selector sets the bin width; Auto resolves to a nice
+  // width for this span. Events with no ts fall back to their ordinal position
+  // (evTimeFrac already does this). Step mode keeps the per-event ticks below.
+  const autoBinW = mbAutoBinWidth(activeDur);
+  const binWidth = binSel === 'auto' ? autoBinW : (MB_BIN_SECONDS[binSel] || autoBinW);
+  const autoBinLabel = 'Auto · ' + mbFmtBin(autoBinW);
+  const histBins = [];
+  const costBins = [];
+  if (mode === 'time') {
+    const nb = Math.max(1, Math.ceil(activeDur / binWidth));
+    for (let j = 0; j < nb; j++) {
+      histBins.push({ i: j, start: j * binWidth, end: Math.min(activeDur, (j + 1) * binWidth), cats: {}, total: 0, retries: 0, usd: 0 });
+    }
+    events.forEach((e, i) => {
+      const pos = evTimeFrac(e, i) * activeDur;   // active-seconds position (idle-collapsed)
+      let bi = Math.floor(pos / binWidth);
+      if (bi < 0) bi = 0; if (bi >= nb) bi = nb - 1;
+      const b = histBins[bi];
+      const cat = MB_CAT_COLOR[e.category] ? e.category : 'other';
+      b.cats[cat] = (b.cats[cat] || 0) + 1;
+      b.total += 1;
+      if (e.is_retry) b.retries += 1;
+    });
+    // Cost re-binned into the SAME bucket edges so the cost bars line up
+    // vertically under the tool bursts ("this spike came from these tools").
+    costSeries.forEach((p) => {
+      const a = seriesActive(p);
+      let bi = Math.floor(a / binWidth);
+      if (bi < 0) bi = 0; if (bi >= nb) bi = nb - 1;
+      histBins[bi].usd += (p.usd || 0);
+    });
+  }
+  const histMax = histBins.reduce((m, b) => Math.max(m, b.total), 1);
+  // Cost lane vertical scale: binned peak in time mode, per-point peak in step mode.
+  const costMax = mode === 'time'
+    ? Math.max(0.0001, ...histBins.map((b) => b.usd))
+    : maxCost;
+
   // x-axis ticks (4 evenly across) + origin label in the gutter.
   const ticks = [0.25, 0.5, 0.75, 1].map((fr) => ({
     x: fr * 100,
@@ -3640,6 +3726,32 @@ function MapBoardSection({ sessionId }) {
     if (tipRef.current) tipRef.current.style.display = 'none';
   };
 
+  // Histogram-bucket hover: show the bucket's time range + per-category counts in
+  // the shared mb-tip (reusing the tooltip pattern). stopPropagation so the board's
+  // onMove exemplar handler doesn't overwrite it while we're over a bucket.
+  const onBucketMove = (ev, b) => {
+    ev.stopPropagation();
+    const board = boardRef.current; if (!board) return;
+    const r = board.getBoundingClientRect();
+    const x = ev.clientX - r.left;
+    const cross = crossRef.current, lab = crossLabelRef.current, tip = tipRef.current;
+    const range = mbFmtTime(b.start) + '–' + mbFmtTime(b.end);
+    if (cross) { cross.style.display = 'block'; cross.style.left = x + 'px'; }
+    if (lab) lab.textContent = range;
+    if (tip) {
+      tip.style.display = 'block';
+      tip.style.left = Math.min(r.width - 200, x + 10) + 'px';
+      const catRows = Object.keys(b.cats).sort((a, c) => b.cats[c] - b.cats[a])
+        .map((c) => '<div class="mb-tip-r"><span>' + mbEsc(MB_CAT_LABEL[c] || c) + '</span><b>' + b.cats[c] + '</b></div>').join('');
+      tip.innerHTML =
+        '<div class="mb-tip-hd">' + mbEsc(range) + '</div>' +
+        catRows +
+        (b.retries ? '<div class="mb-tip-r"><span>retries</span><b>' + b.retries + '</b></div>' : '') +
+        '<div class="mb-tip-r"><span>total</span><b>' + b.total + ' tool' + (b.total === 1 ? '' : 's') + '</b></div>' +
+        (b.usd > 0 ? '<div class="mb-tip-r"><span>cost</span><b>' + mbEsc(fmtCost(b.usd)) + '</b></div>' : '');
+    }
+  };
+
   const territory = mbBuildTerritory(events);
 
   // Sub-agents lane: positioned bars on the shared axis (re-spaced by the
@@ -3676,9 +3788,19 @@ function MapBoardSection({ sessionId }) {
         <span class="mb-chip">${n} tool${n === 1 ? '' : 's'}</span>
         ${data.from_snapshot ? html`<span class="mb-chip">from snapshot</span>` : null}
       </div>
-      <div class="mb-toggle">
-        <span class=${mode === 'time' ? 'on' : ''} onClick=${() => setMode('time')}>time</span>
-        <span class=${mode === 'step' ? 'on' : ''} onClick=${() => setMode('step')}>step</span>
+      <div class="mb-head" style="margin:0;gap:8px">
+        ${mode === 'time' ? html`
+        <div class="mb-toggle mb-ivl" title="histogram bin width (active time)">
+          <span class=${binSel === 'auto' ? 'on' : ''} onClick=${() => setBinSel('auto')}>${autoBinLabel}</span>
+          <span class=${binSel === '1m' ? 'on' : ''} onClick=${() => setBinSel('1m')}>1m</span>
+          <span class=${binSel === '5m' ? 'on' : ''} onClick=${() => setBinSel('5m')}>5m</span>
+          <span class=${binSel === '15m' ? 'on' : ''} onClick=${() => setBinSel('15m')}>15m</span>
+          <span class=${binSel === '1h' ? 'on' : ''} onClick=${() => setBinSel('1h')}>1h</span>
+        </div>` : null}
+        <div class="mb-toggle">
+          <span class=${mode === 'time' ? 'on' : ''} onClick=${() => setMode('time')}>time</span>
+          <span class=${mode === 'step' ? 'on' : ''} onClick=${() => setMode('step')}>step</span>
+        </div>
       </div>
     </div>
 
@@ -3692,13 +3814,32 @@ function MapBoardSection({ sessionId }) {
       </div></div>
 
       <div class="mb-lane tools"><div class="mb-gutter">tools</div><div class="mb-plot">
-        ${events.map((e, i) => {
-          const x = evX(e, i);
-          const col = e.category === 'error' ? 'var(--error)' : mbColor(e.category);
-          const h = e.category === 'error' ? 13 : e.category === 'task' ? 12 : 10;
-          return html`<div class="mb-ev ${e.is_retry ? 'retry' : ''}" style=${'left:' + x + '%;background:' + col + ';height:' + h + 'px;' + (e.category === 'task' ? 'width:5px;' : '')}></div>`;
-        })}
-        ${shownLabels.map(({ i, leftPct }) => html`<div class="mb-evlab" title=${events[i].label} style=${'left:' + leftPct + '%'}>${evLabelShort(events[i].label)}</div>`)}
+        ${mode === 'time'
+          ? histBins.map((b) => {
+            if (b.total <= 0) return null; // 0 events → empty gap (honest "quiet" signal)
+            const leftPct = (b.start / activeDur) * 100;
+            const wPct = ((b.end - b.start) / activeDur) * 100;
+            const barH = (b.total / histMax) * MB_HIST_MAX_PX;
+            const segs = MB_STACK_ORDER.filter((c) => b.cats[c]).map((c) => {
+              const segH = (b.cats[c] / histMax) * MB_HIST_MAX_PX;
+              const col = c === 'error' ? 'var(--error)' : mbColor(c);
+              return html`<div class="mb-hseg" style=${'height:' + segH.toFixed(2) + 'px;background:' + col}></div>`;
+            });
+            return html`<div class="mb-hbar ${b.retries ? 'retry' : ''}"
+              onMouseMove=${(ev) => onBucketMove(ev, b)}
+              style=${'left:' + leftPct.toFixed(3) + '%;width:calc(' + wPct.toFixed(3) + '% - 1px);height:' + barH.toFixed(2) + 'px'}>
+              ${segs}
+            </div>`;
+          })
+          : html`
+            ${events.map((e, i) => {
+              const x = evX(e, i);
+              const col = e.category === 'error' ? 'var(--error)' : mbColor(e.category);
+              const h = e.category === 'error' ? 13 : e.category === 'task' ? 12 : 10;
+              return html`<div class="mb-ev ${e.is_retry ? 'retry' : ''}" style=${'left:' + x + '%;background:' + col + ';height:' + h + 'px;' + (e.category === 'task' ? 'width:5px;' : '')}></div>`;
+            })}
+            ${shownLabels.map(({ i, leftPct }) => html`<div class="mb-evlab" title=${events[i].label} style=${'left:' + leftPct + '%'}>${evLabelShort(events[i].label)}</div>`)}
+          `}
       </div></div>
 
       ${(data.subagents || []).length ? html`
@@ -3734,16 +3875,25 @@ function MapBoardSection({ sessionId }) {
         <span class="mb-peak">peak ${fmtTokens(maxCtx)} tok</span>
       </div></div>
 
-      <div class="mb-lane cost"><div class="mb-gutter axis"><span class="mb-yv">${fmtCost(maxCost)}</span><span class="mb-yname">cost</span><span class="mb-yv mb-y0">$0</span></div><div class="mb-plot">
+      <div class="mb-lane cost"><div class="mb-gutter axis"><span class="mb-yv">${fmtCost(costMax)}</span><span class="mb-yname">cost</span><span class="mb-yv mb-y0">$0</span></div><div class="mb-plot">
         <div class="mb-grid mid"></div>
         <svg viewBox="0 0 100 30" preserveAspectRatio="none">
-          ${costSeries.map((p) => {
-            const x = seriesFrac(p) * 100;
-            const h = ((p.usd || 0) / maxCost) * 26;
-            return html`<rect x=${(x - 1).toFixed(2)} width="2" y=${(30 - h).toFixed(2)} height=${h.toFixed(2)} fill="var(--chart-3)"/>`;
-          })}
+          ${mode === 'time'
+            ? histBins.map((b) => {
+              if (!(b.usd > 0)) return null;
+              const left = (b.start / activeDur) * 100;
+              const w = ((b.end - b.start) / activeDur) * 100;
+              const h = (b.usd / costMax) * 26;
+              // Same bucket edges as the tools histogram → the bars line up vertically.
+              return html`<rect x=${(left + 0.05).toFixed(2)} width=${Math.max(0.3, w - 0.1).toFixed(2)} y=${(30 - h).toFixed(2)} height=${h.toFixed(2)} fill="var(--chart-3)"/>`;
+            })
+            : costSeries.map((p) => {
+              const x = seriesFrac(p) * 100;
+              const h = ((p.usd || 0) / costMax) * 26;
+              return html`<rect x=${(x - 1).toFixed(2)} width="2" y=${(30 - h).toFixed(2)} height=${h.toFixed(2)} fill="var(--chart-3)"/>`;
+            })}
         </svg>
-        <span class="mb-peak">peak ${fmtCost(maxCost)}/bucket</span>
+        <span class="mb-peak">peak ${fmtCost(costMax)}/bucket</span>
       </div></div>
 
       <div class="mb-xaxis"><div class="mb-gutter mono">${mode === 'time' ? '0s' : 'step 1'}</div><div class="mb-ticks">
