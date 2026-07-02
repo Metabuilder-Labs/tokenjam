@@ -360,6 +360,42 @@ MIGRATIONS: list[tuple[int, str]] = [
         "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0;\n"
         "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0"
     )),
+    # Migration 13: run_id + parent_session_id on sessions — cross-session run
+    # grouping declared by a fan-out harness (tokenjam.run_id /
+    # tokenjam.parent_session_id resource attributes). Both nullable; existing
+    # sessions stay NULL on upgrade.
+    (13, (
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_id            TEXT;\n"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_session_id TEXT"
+    )),
+    # Migration 14: sub_agent_id on spans — the Claude Code subagent (Task-tool
+    # / sidechain) that issued the span. NULL for main-thread spans and all
+    # non-Claude-Code telemetry. A single research session can spawn 12-20
+    # subagents whose spans all fold under the parent session_id; this column
+    # keeps them attributable per subagent. Populated by the backfill parser
+    # from each record's top-level agentId when isSidechain is true.
+    (14, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_id TEXT"),
+    # Migration 15: session_story — a persisted snapshot of a session's
+    # reconstructed Story (the recursive method/narration + subagent subtree,
+    # core/transcript.py). /story and /workmap recompute that Story from the
+    # on-disk Claude Code JSONL transcript on every request and never store it;
+    # Claude Code PRUNES those transcripts, so a killed ephemeral agent's method
+    # dies with the file. This table captures it at session close (M1,
+    # core/method_capture.py) so it outlives the prune and can serve as a
+    # read-through fallback. One row per session (session_id PRIMARY KEY);
+    # `source` records provenance ('live-transcript' | 'backfill') and
+    # `schema_version` the snapshot payload shape. story_json is the full
+    # snapshot ({"story": ..., "asks": ...}); the depth_capped/budget_capped/
+    # cycle markers ride through it unchanged.
+    (15, (
+        "CREATE TABLE IF NOT EXISTS session_story (\n"
+        "    session_id     TEXT PRIMARY KEY,\n"
+        "    story_json     JSON NOT NULL,\n"
+        "    captured_at    TIMESTAMPTZ NOT NULL,\n"
+        "    source         TEXT NOT NULL,\n"
+        "    schema_version INTEGER NOT NULL DEFAULT 1\n"
+        ")"
+    )),
 ]
 
 
@@ -413,6 +449,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         parent_span_id=d.get("parent_span_id"),
         session_id=d.get("session_id"),
         agent_id=d.get("agent_id"),
+        sub_agent_id=d.get("sub_agent_id"),
         end_time=d.get("end_time"),
         duration_ms=d.get("duration_ms"),
         status_message=d.get("status_message"),
@@ -453,6 +490,8 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         plan_tier=d.get("plan_tier") or "unknown",
         service_namespace=d.get("service_namespace"),
         service_instance_id=d.get("service_instance_id"),
+        run_id=d.get("run_id"),
+        parent_session_id=d.get("parent_session_id"),
     )
 
 
@@ -830,9 +869,9 @@ class DuckDBBackend:
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
             "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens, request_params, request_tools"
+            "cache_write_tokens, request_params, request_tools, sub_agent_id"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -843,6 +882,7 @@ class DuckDBBackend:
                 span.billing_account, span.cache_write_tokens,
                 json.dumps(span.request_params) if span.request_params is not None else None,
                 json.dumps(span.request_tools) if span.request_tools is not None else None,
+                span.sub_agent_id,
             ],
         )
 
@@ -973,8 +1013,8 @@ class DuckDBBackend:
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                 tool_call_count, error_count, plan_tier, service_namespace,
-                service_instance_id, cache_write_tokens
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                service_instance_id, cache_write_tokens, run_id, parent_session_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -991,7 +1031,9 @@ class DuckDBBackend:
                     ELSE EXCLUDED.plan_tier
                 END,
                 service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
-                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id)
+                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
+                run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
+                parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id)
             """,
             [
                 session.session_id, session.agent_id, session.conversation_id,
@@ -1000,6 +1042,7 @@ class DuckDBBackend:
                 session.cache_tokens, session.tool_call_count, session.error_count,
                 session.plan_tier, session.service_namespace,
                 session.service_instance_id, session.cache_write_tokens,
+                session.run_id, session.parent_session_id,
             ],
         )
 

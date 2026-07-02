@@ -327,6 +327,14 @@ class IngestPipeline:
             # Late-resolve the per-terminal instance id (display label).
             if existing.service_instance_id is None and span.service_instance_id:
                 existing.service_instance_id = span.service_instance_id
+            # Self-heal cross-session run grouping: a session created before its
+            # telemetry carried the run markers (e.g. an early tool span) gets
+            # them backfilled when a later span declares them. Never overwrite a
+            # value already on the session.
+            if existing.run_id is None and span.run_id:
+                existing.run_id = span.run_id
+            if existing.parent_session_id is None and span.parent_session_id:
+                existing.parent_session_id = span.parent_session_id
             return existing
 
         # New session
@@ -348,6 +356,8 @@ class IngestPipeline:
             plan_tier=plan_tier,
             service_namespace=span.service_namespace or self._resolve_project(span.agent_id),
             service_instance_id=span.service_instance_id,
+            run_id=span.run_id,
+            parent_session_id=span.parent_session_id,
         )
 
     def _resolve_project(self, agent_id: str | None) -> str | None:

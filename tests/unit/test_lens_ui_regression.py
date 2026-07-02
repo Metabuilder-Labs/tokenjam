@@ -71,7 +71,6 @@ def test_chart_has_hover_tooltip(html):
     assert "plugins: [chartTooltipPlugin(" in html
 
 
-
 def test_axis_time_ticks_timezone_split(html):
     # #178: HOURLY ticks localize — they format the UTC epoch-second buckets in
     # the viewer's local zone (a US-Pacific user sees their noon, not UTC's 7pm).
@@ -448,7 +447,6 @@ def test_analytics_presets_and_csv_export(html):
     assert "tokenjam-analytics_${startStr}_${endStr}.csv" in html
 
 
-
 def test_analytics_url_is_source_of_truth(html):
     # state read from URL params with validators, written back via navigate().
     # navigate() targets `route` (default 'analytics' preserves the standalone
@@ -671,13 +669,11 @@ def test_overview_recoverable_tiles_deeplink_into_analytics(html):
     assert "'#/optimize?finding=' + t.name" not in html
 
 
-
 def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
     # The deep-link helper builds #/analytics?... URLs (offline hash links, no
     # fetch) from a query object, dropping empty values.
     assert "function analyticsHref(q, route = 'analytics')" in html
     assert "return '#/' + route + (s ? '?' + s : '');" in html
-
 
 
 def test_dashboard_is_default_landing(html):
@@ -1046,3 +1042,766 @@ def test_status_card_right_click_rename_wiring(html):
     assert "apiPost('/sessions/' + encodeURIComponent(a.session_id) + '/label'" in view
     # Discoverability affordance on the title.
     assert "or right-click to rename" in view
+
+
+# --- Work map: graphical "what did my agent do" tab ------------------------ #
+def test_work_map_tab_present_and_default(html):
+    # Map is the default session tab and renders before Timeline.
+    assert "function WorkMapSection" in html
+    assert "function WorkMapNode" in html
+    assert "useState('map')" in html
+    assert "/sessions/' + sessionId + '/workmap'" in html
+    # Tab order: the Map button must appear before the Timeline button.
+    map_btn = html.index("setTab('map')")
+    story_btn = html.index("setTab('story')")
+    assert map_btn < story_btn, "Map tab must render before Timeline"
+
+
+def test_work_map_is_descriptive_not_evaluative(html):
+    # Honesty discipline: the map reports, it does not judge the approach.
+    assert "you judge the approach" in html
+
+
+def test_work_map_node_metric_is_tokens_not_dollars(html):
+    # User preference: the visible per-node metric is tokens; the dollar figure
+    # moved to a hover title only.
+    assert "fmtTokens(node.tokens)" in html
+    assert 'class="wm-tokens"' in html
+    assert ">${fmtCost(node.cost_usd)}</span>" not in html  # no bare $ in the row
+
+
+def test_work_map_files_shortened_for_readability(html):
+    # Long absolute file paths are shortened to "…/dir/file" with the full path
+    # on hover, so the files list is readable.
+    assert "function shortPath" in html
+    assert "shortPath(f)" in html
+
+
+def test_map_tool_lane_labels_shortened_and_collision_proof(html):
+    # The Map TOOLS lane prints arg labels under sampled ticks. They must be a
+    # short basename/first-token (not a long path-ish string) and spaced so two
+    # kept, center-anchored labels can never overlap — the min center-to-center
+    # gap must exceed the capped label box width.
+    assert "function evLabelShort" in html             # dedicated basename/tail shortener
+    assert "evLabelShort(e.label)" in html              # used for the printed tick label
+    assert "shortPath(events[i].label)" not in html     # no longer the long two-segment path
+    # over-long names keep their distinctive TAIL ("…izer-design.md"), not the
+    # head — date-prefixed filenames all share the head, so a head-keep printed
+    # the same date fragment for every tick.
+    assert "t = '…' + t.slice(-(MB_EVLAB_CHARS - 1));" in html
+    # consecutive ticks on the same file print ONE label, not a repeated run.
+    assert "if (txt === lastTxt) return;" in html
+    # collision-proof: MB_EVLAB_GAP (center spacing) must exceed MB_EVLAB_MAX (box width).
+    import re
+
+    gap = int(re.search(r"const MB_EVLAB_GAP\s*=\s*(\d+)", html).group(1))
+    box = int(re.search(r"const MB_EVLAB_MAX\s*=\s*(\d+)", html).group(1))
+    assert gap > box, f"MB_EVLAB_GAP ({gap}) must exceed MB_EVLAB_MAX ({box})"
+
+
+def test_work_map_is_ask_segmented(html):
+    # A session is a sequence of asks (exchanges): the Map renders map.asks via a
+    # per-ask component, read as a story ("ask by ask").
+    assert "function WorkMapAsk" in html
+    assert "map.asks" in html
+    assert "ask by ask" in html
+
+
+def test_work_map_is_a_storyline(html):
+    # The Map headlines each ask by WHAT THE AGENT DID (its outcome) with a
+    # deterministic status icon, and reads chronologically (oldest first) so it
+    # tells the session's story rather than a reverse-time log.
+    assert "function askStatus" in html
+    assert "wm-ask-did" in html                       # bold "what it did" headline
+    assert "wm-ask-ctx" in html                       # dim prompt-as-context line
+    assert "(map.asks || []).slice().reverse()" in html  # chronological order
+
+
+def test_work_map_renders_spine_with_milestone_dots(html):
+    # Map v2 layout (approved Option-A mock): the asks render on a continuous
+    # vertical spine — a left-border line — with each ask a milestone carrying a
+    # status dot positioned ON the spine, not as a bordered card.
+    assert ".wm-spine {" in html
+    assert "border-left: 2px solid var(--border)" in html  # the spine line
+    assert ".wm-milestone {" in html
+    assert "position: relative" in html
+    assert 'class="wm-spine' in html
+    # The dot sits on the spine (negative offset lands it over the border line).
+    assert ".wm-dot-spine {" in html
+    assert "left: -30px" in html
+    # The old bordered-card framing is gone.
+    assert ".wm-ask {" not in html
+    assert 'class="wm-asks"' not in html
+
+
+def test_work_map_has_inline_branch_block(html):
+    # Fan-out asks list their top subagents inline in an indented branch block
+    # (dashed left border, like the mock) — visible without a click; only the
+    # deeper subtree stays expandable.
+    assert ".wm-branch {" in html
+    assert "border-left: 2px dashed var(--border)" in html
+    assert 'class="wm-branch"' in html
+    # Top 5 subagents shown inline, with a "+N more" overflow line.
+    assert "subs.slice(0, 5)" in html
+    assert "+${branchMore} more" in html
+
+
+def test_user_prompts_visually_marked_on_both_views(html):
+    # Timeline marks user prompts (grouped by ask) in a distinct brand color —
+    # no box/label; the Map's work milestones carry a brand status dot on the
+    # spine (other statuses recolor it: amber flagged, red error, dim chat).
+    assert "function StoryAsk" in html
+    assert "step.ask" in html
+    assert ".story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand)" in html
+    assert ".wm-dot-spine.work { color: var(--brand)" in html
+
+
+# --- Map v1.1: glanceable storyline (first-sentence, chat collapse, summary) - #
+def test_work_map_headlines_use_first_sentence(html):
+    # Verbose run-on outcomes are reduced to one clean sentence for the headline;
+    # the old raw 160-char truncation of the outcome is gone.
+    assert "function firstSentence" in html
+    assert "firstSentence(ask.outcome || ask.summary || '')" in html
+    assert "outcome.slice(0, 160)" not in html  # the old raw truncation is gone
+
+
+def test_work_map_collapses_chat_runs(html):
+    # Runs of 2+ consecutive no-work chat asks collapse into one clickable
+    # divider that expands into the individual rows.
+    assert "function WorkMapChatRun" in html
+    assert "function groupAsks" in html
+    assert 'class="wm-chat-divider"' in html
+    assert "quick exchanges" in html
+    # The collapse decision keys off askStatus(...).hasWork being false.
+    assert "askStatus(ask).hasWork" in html
+
+
+def test_work_map_has_summary_band(html):
+    # A 5-second-read summary band sits above the asks list: totals + the top
+    # fan-outs (biggest subagent counts).
+    assert 'class="wm-summary-band"' in html
+    assert ".wm-summary-band {" in html
+    assert ".wm-chat-divider {" in html
+
+
+def test_first_sentence_strips_single_and_double_emphasis(html):
+    # firstSentence must strip single AND double * / _ plus backticks anywhere,
+    # so no stray emphasis markers leak into a headline (e.g. "*cheaper*"). The
+    # old strip that only removed the paired forms (\*\*|__) is gone.
+    assert r".replace(/[*_`]+/g, '')" in html
+    assert r".replace(/\*\*|__|`|##+|---+/g, '')" not in html
+
+
+def test_work_map_subagent_count_clamped_to_session_total(html):
+    # A per-ask fan-out can never exceed the session total; both the ask row and
+    # the summary fan-out clamp the displayed number with Math.min(..., session).
+    # The ask row threads the session total down as the sessionSubs prop.
+    assert "sessionSubs" in html
+    assert "Math.min(subCount, sessionSubs)" in html
+    assert "Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)" in html
+    # The row's displayed count uses the clamped value, not the raw subCount.
+    assert "${subShown} sub${subShown === 1 ? '' : 's'}" in html
+
+
+# --- Map: on-demand LLM-distilled titles ----------------------------------- #
+def test_work_map_has_distill_control(html):
+    # The Map carries a "Distill titles" button that calls /distill and threads
+    # the result into the ask headlines (prefer distilled[n] over firstSentence).
+    assert "Distill titles" in html
+    assert "setDistilled" in html
+    assert "/distill" in html
+    # The distilled title is preferred over the deterministic first sentence.
+    assert "distilled[String(ask.n)]" in html
+
+
+# --- Map: launcher -> run linkage card (Task A) ---------------------------- #
+def test_work_map_has_run_card(html):
+    # The Map renders a run card from the workmap's `launched_run` block with a
+    # working "View run" link into #/runs/<id> and clickable worker chips.
+    assert "function WorkMapRunCard" in html
+    assert "map.launched_run" in html
+    assert "Launched run" in html
+    assert "#/runs/' + run.run_id" in html
+    assert "#/sessions/' + s.session_id" in html
+    # Inferred (transcript-scraped) runs are visibly marked as a best-effort guess.
+    assert "run.source === 'inferred'" in html
+
+
+# --- Map: per-ask phase breakdown (Task E) --------------------------------- #
+def test_work_map_renders_phases(html):
+    # A long ask's journey renders as the agent's narrated phases under the
+    # milestone, with a tool tally and a show-all toggle past the preview.
+    assert "function phaseTools" in html
+    assert "ask.phases || []" in html
+    assert 'class="wm-phases"' in html
+    assert "PHASE_PREVIEW" in html
+    # The honest omitted marker (no silent drop) is rendered.
+    assert "more phase" in html
+
+
+# --- Timeline: tool-only steps show the command inline ---------------------- #
+def test_timeline_tool_step_shows_command_inline(html):
+    # A step with no narration but a tool call surfaces the tool's label/command
+    # inline instead of a bare "(no narration)".
+    assert "const toolLine = !preview && tools.length" in html
+    assert "preview || toolLine || '(no narration)'" in html
+    assert ".story-line.tool" in html
+
+
+# --- Timeline: failed steps show the error, not a red box ------------------- #
+def test_timeline_error_step_shows_message_not_red_box(html):
+    # The red border around an errored step is gone; the expanded body surfaces
+    # the transcript error message instead.
+    assert ".story-step.error { border-color: var(--error)" not in html
+    assert "tools.filter(t => t.error)" in html
+    assert "story-error" in html
+
+
+# --- Timeline: subagents nest + expand recursively (like Approach/Map) ------- #
+def test_timeline_renders_subagents_recursively(html):
+    # Requirement: EVERY delegation in the Timeline is expandable to recurse into
+    # the child's own work. The recursion is a closed cycle of three pieces:
+    #   1. a StoryStep renders a SubagentBlock for each subagent it spawned,
+    #   2. a SubagentBlock renders the child's steps via renderTimelineSteps,
+    #   3. renderTimelineSteps renders a StoryStep per step — back to (1).
+    # So a subagent's steps that spawned their OWN subagents nest arbitrarily
+    # deep, each level independently expandable. Assert the whole cycle is wired.
+    assert "function SubagentBlock(" in html
+    assert "function StoryStep(" in html
+    assert "function renderTimelineSteps(" in html
+    # (1) StoryStep reads the step's subagents and renders a SubagentBlock each.
+    assert "const subagents = step.subagents || (step.subagent ? [step.subagent] : []);" in html
+    assert "subagents.map((sa, i) => html`<${SubagentBlock} subagent=${sa}" in html
+    # (2) SubagentBlock recurses into the child's steps with the SAME renderer.
+    assert '<div class="story-steps">${renderTimelineSteps(steps)}</div>' in html
+    # (3) renderTimelineSteps renders a StoryStep per step (closes the cycle).
+    assert "html`<${StoryStep} step=${step}" in html
+
+
+def test_timeline_subagent_is_expandable_with_honest_caps(html):
+    # Each subagent block has a clickable head with a caret affordance (collapsed
+    # ▸ / open ▾), consistent with the Approach/Map nodes — NOT a flat dump.
+    assert "const [open, setOpen] = useState(false);" in html
+    assert "onClick=${() => !capped && setOpen(o => !o)}" in html
+    assert "${capped ? '·' : (open ? '▾' : '▸')}" in html
+    # Caps are surfaced as honest notes, never silent drops: depth / size / cycle
+    # each map to an explicit "… omitted …" / "… already shown …" marker, and a
+    # capped ref is non-expandable (shows the note in place of the subtree).
+    assert "const capped = subagent.depth_capped || subagent.budget_capped || subagent.cycle;" in html
+    assert "deeper subagents omitted (depth cap)" in html
+    assert "deeper subagents omitted (size cap)" in html
+    assert "already shown above (cycle)" in html
+    assert "${cappedNote ? html`<div class=\"story-omitted\">${cappedNote}</div>` : null}" in html
+
+
+# --- Map: distill UX (auto-apply cached, honest note, feedback) ------------- #
+def test_distill_auto_applies_cached_and_has_honest_states(html):
+    # Cache-only auto-apply on load (press once, sticks; zero cost).
+    assert "cached_only: 1" in html
+    # The note distinguishes failure from "nothing to distill" (no longer lies).
+    assert "nothing to distill" in html
+    assert "candidate_count === 0" in html
+    # A visible post-distill flash so a successful run is obvious.
+    assert "wm-flash" in html
+    assert "@keyframes wmDistillFlash" in html
+
+
+def test_index_html_has_no_nul_bytes():
+    # Guards the NUL-byte corruption fixed alongside the work map (it broke
+    # `node --check` and made `file` mis-detect the SPA as binary).
+    assert b"\x00" not in _UI.read_bytes()
+
+
+# --- #17: #2 shipped incomplete — SessionDetailView + Status cost cells ----- #
+# Route the two dollar-bearing cells left on bare fmtCost through
+# fmtFramedDollar(value, framing) so subscription users see "% of cycle" and
+# only api-plan users see raw $ — matching Traces/Cost/Optimize.
+def test_session_detail_cost_cell_routes_through_framing(html):
+    # The "Cost & Tokens" / "Implied API value" panel must consume the
+    # /sessions/{id} framing block, not render raw fmtCost(s.total_cost_usd).
+    assert "<span class=\"value\">${fmtCost(s.total_cost_usd)}</span>" not in html
+    assert "<span class=\"value\">${fmtFramedDollar(s.total_cost_usd, framing)}</span>" in html
+    # The view actually pulls the framing block off the /sessions/{id} response.
+    assert "const framing = data.framing || null;" in html
+
+
+def test_status_archived_table_cost_routes_through_framing(html):
+    # The Status "Archived sessions" table cost column must consume the /status
+    # framing block (data.framing), not render raw fmtCost(s.total_cost_usd).
+    assert "<td>${fmtCost(s.total_cost_usd)}</td>" not in html
+    assert "<td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>" in html
+
+
+# --- #20: Traces empty-state must not flash before the first fetch -------- #
+def test_traces_distinguishes_loading_from_loaded_empty(html):
+    # The Traces view tracks a `loaded` flag that flips true only once the first
+    # /traces fetch resolves; until then it renders a loading shimmer. The
+    # "No traces yet" empty-state is gated on `loaded` so it can only appear
+    # after a fetch genuinely returned zero rows — never on initial paint.
+    assert "const [loaded, setLoaded] = useState(false);" in html
+    assert "setLoaded(true);" in html
+    # Empty-state is now downstream of the `!loaded` shimmer branch, so the
+    # bare "traces.length === 0 ? <empty>" first-branch pattern must be gone.
+    assert (
+        "${traces.length === 0 ? html`<div class=\"empty\">No traces yet."
+        not in html
+    )
+    assert (
+        "${!loaded ? html`<div class=\"shimmer\" style=\"height:200px\"></div>`"
+        in html
+    )
+
+
+# --- Approach tab: recursive method spine (GET /sessions/{id}/approach) ------ #
+def test_approach_section_present_and_tab_wired(html):
+    # The Approach tab renders the method spine from the dedicated endpoint,
+    # mirroring WorkMapSection's fetch idiom.
+    assert "function ApproachSection" in html
+    assert "/sessions/' + sessionId + '/approach'" in html
+    # Tab button wired into SessionDetailView, placed AFTER Map and BEFORE Timeline.
+    assert "setTab('approach')" in html
+    map_btn = html.index("setTab('map')")
+    approach_btn = html.index("setTab('approach')")
+    story_btn = html.index("setTab('story')")
+    assert map_btn < approach_btn < story_btn, "Approach tab sits between Map and Timeline"
+    # The render block dispatches the 'approach' tab to the section.
+    assert "tab === 'approach' ? html`<${ApproachSection} sessionId=${sessionId} />`" in html
+
+
+def test_approach_source_tags_present(html):
+    # The two honest source tags ride each move; "distilled" is never invented
+    # on the approach spine (only agent's words vs structural inference).
+    assert "agent's words" in html
+    assert "'structural'" in html
+    assert 'class="ap-src ${srcWords' in html
+
+
+def test_approach_renders_recursively(html):
+    # A delegate move renders one rich card per `delegations` entry; expanding a
+    # card recurses into the child's own spine via the SAME move renderer. A
+    # capped delegation shows a "not expanded" note instead of expanding.
+    assert "function ApproachMove" in html
+    assert "function ApproachDelegation" in html
+    assert "delegations.map(d => html`<${ApproachDelegation} deleg=${d} />`)" in html
+    # spines render through ApproachSpine (which also folds conversational runs).
+    assert "<${ApproachSpine} moves=${spine} />" in html
+    assert "not expanded — ${capped}" in html
+
+
+def test_approach_delegation_cards_show_cost_and_depth(html):
+    # Each delegation card carries the child's identity, spawn depth, and the
+    # span-joined token/cost/status chips (read straight off the payload).
+    assert "function ApproachDelegation" in html
+    assert "↳ ${deleg.name}" in html
+    assert "depth ${deleg.depth}" in html
+    assert "deleg.tokens != null ? fmtTokens(deleg.tokens)" in html
+    assert "deleg.cost_usd != null ? fmtCost(deleg.cost_usd)" in html
+    # The expanded block carries the child's "how it solved its piece" header.
+    assert "how the subagent solved its piece" in html
+
+
+def test_approach_delegation_tree_rail_present(html):
+    # The left rail renders data.agents — a status dot + name + meta + badge +
+    # provenance line per agent, indented by spawn depth, with the ephemeral
+    # capture caption at the foot.
+    assert "function ApproachRail" in html
+    assert "<${ApproachRail} agents=${agents} />" in html
+    assert "Delegation tree" in html
+    assert 'class="ap-dot ${dotClass}"' in html
+    assert "in-session subagent · from transcript" in html
+    assert "ended · method kept" in html
+    assert "rebuilds" in html  # the ephemeral-capture caption
+
+
+def test_approach_header_stats_and_layout(html):
+    # Two-column grid (rail + panel) and a right-aligned header stats block from
+    # counts + meta.
+    assert 'class="ap-grid"' in html
+    assert "data.counts" in html
+    assert "data.meta" in html
+    assert "moves<br/><b>${counts.delegations}</b> delegations" in html
+
+
+def test_approach_legend_present(html):
+    # The bottom "source of each line" legend names all three sources.
+    assert 'class="ap-legend"' in html
+    assert "source of each line:" in html
+    assert "narration / TodoWrite" in html
+    assert "revert / retry / spawn" in html
+    assert "LLM, opt-in" in html
+
+
+def test_approach_handles_unavailable(html):
+    # available:false surfaces the server-provided reason (e.g. no transcript or
+    # snapshot for this session).
+    assert "data.reason" in html
+    assert "No transcript or snapshot for this session" in html
+
+
+# --- Map board: ①+③ swimlanes + territory (GET /sessions/{id}/sessionmap) ---- #
+def test_map_board_section_present_and_wired(html):
+    # The Map tab renders the ①+③ board from the dedicated /sessionmap endpoint.
+    assert "function MapBoardSection" in html
+    assert "/sessions/' + sessionId + '/sessionmap'" in html
+    # The Map tab dispatches to the board (no longer straight to WorkMapSection).
+    assert "tab === 'map' ? html`<${MapBoardSection} sessionId=${sessionId} />`" in html
+
+
+def test_map_board_has_four_synchronized_lanes(html):
+    # Four lanes share one x-axis, each with a left gutter label. phase/tools use a
+    # plain name gutter; context/cost use a y-axis gutter (name in the .mb-yname).
+    for lane in ("phase", "tools"):
+        assert f'<div class="mb-gutter">{lane}</div>' in html, f"missing {lane} lane gutter"
+    for lane in ("context", "cost"):
+        assert f'<span class="mb-yname">{lane}</span>' in html, f"missing {lane} y-axis gutter"
+    # Context is an inline SVG area chart, cost is inline SVG bars — NOT uPlot —
+    # so the lanes stay pixel-aligned (the mock's approach).
+    assert 'viewBox="0 0 100 30" preserveAspectRatio="none"' in html
+    # A shared crosshair binds the lanes.
+    assert 'class="mb-cross"' in html
+
+
+def test_map_board_context_and_cost_lanes_are_readable_as_data(html):
+    # CONTEXT and COST lanes must expose a y-axis (max value at top, 0 at the
+    # baseline) read off the already-returned series arrays, plus a peak
+    # annotation — so the magnitude is legible, not just an unscaled shape.
+    assert ".mb-gutter.axis {" in html          # column max/name/0 gutter exists
+    assert '<span class="mb-yv">${fmtTokens(maxCtx)}</span>' in html   # context max (top)
+    # Cost max/peak use costMax (binned peak in time mode, per-point peak in step).
+    assert '<span class="mb-yv">${fmtCost(costMax)}</span>' in html    # cost max (top)
+    assert '<span class="mb-yv mb-y0">0</span>' in html                # context baseline
+    assert '<span class="mb-yv mb-y0">$0</span>' in html               # cost baseline
+    # Peak value labelled on each lane via the existing formatters. The cost peak
+    # self-describes its unit: the auto bin width in time mode, /call in step.
+    assert 'class="mb-peak">peak ${fmtTokens(maxCtx)} tok' in html
+    assert "class=\"mb-peak\">peak ${fmtCost(costMax)}${mode === 'time' ? ' per ' + mbFmtBin(binWidth) : '/call'}" in html
+    # Max read off the series arrays already sent (UI reads, doesn't aggregate).
+    assert "const maxCtx = Math.max(1, ...ctxSeries.map" in html
+    assert "const maxCost = Math.max(0.0001, ...costSeries.map" in html
+
+
+def test_map_board_xaxis_row_not_clipped(html):
+    # The x-axis row must stretch to fill its height so the tick labels don't spill
+    # past the board's overflow:hidden bottom (a zero-height centered ticks box
+    # clipped the last tick). Pin the non-clipping rule.
+    assert ".mb-xaxis { display: flex; align-items: stretch; height: 26px; }" in html
+
+
+def test_map_board_subagent_label_is_single_ellipsized_run(html):
+    # Sub-agent bars render "name · tokens · $cost" as ONE ellipsized run (no
+    # separate cost span that truncated to a cryptic "1…" stub); null metrics are
+    # omitted so a transcript-only subagent shows just its name.
+    assert "if (sa.tokens != null) metrics.push(fmtTokens(sa.tokens));" in html
+    assert "if (sa.cost_usd != null) metrics.push(fmtCost(sa.cost_usd));" in html
+    # the printed name is middle-truncated ("first8…last6") so both ends stay
+    # legible; the full label rides in the bar's hover title.
+    assert "const subLabel = [mbMidTrunc(sa.name), ...metrics].join(' · ');" in html
+    assert "const fullLabel = [sa.name, ...metrics].join(' · ');" in html
+    assert 'class="mb-sublab"' in html
+    assert 'class="mb-subcost"' not in html  # the old two-span split is gone
+
+
+def test_map_board_has_time_step_toggle(html):
+    # The step⇄time toggle re-spaces every lane (useState-driven; step default — #58).
+    assert "const [mode, setMode] = useState('step')" in html
+    assert "setMode('time')" in html
+    assert "setMode('step')" in html
+    assert 'class="mb-toggle"' in html
+
+
+def test_map_board_time_axis_collapses_idle_gaps(html):
+    # Time mode plots on the idle-collapsed ACTIVE-time axis the backend builds
+    # (meta.active_duration_s + per-point/-event active_s), not raw wall-clock, so
+    # the real work spreads out instead of being crammed against huge idle gaps.
+    assert "meta.active_duration_s" in html
+    assert "e.active_s != null" in html          # events position by active_s
+    assert "p.active_s != null" in html          # series points position by active_s
+    assert "sa.start_active_s != null" in html   # subagent bars position by active_s
+    # Each collapsed gap renders as a faint dashed break marker labelled "⋯ idle N".
+    assert "const gaps = meta.gaps || []" in html
+    assert "g.at_active_frac" in html
+    assert "'idle ' + mbFmtGap(g.duration_s)" in html
+    assert "function mbFmtGap" in html
+    assert 'class="mb-break"' in html
+    assert 'class="mb-break-lab"' in html
+    assert ".mb-break {" in html  # themed CSS exists (offline-safe — no external)
+
+
+def test_map_board_has_subagents_lane(html):
+    # The sub-agents lane sits between tools and context, fed by data.subagents,
+    # positioned by the shared axis (mbLayoutSubagents) and themed to --chart-5.
+    assert "function mbLayoutSubagents" in html
+    assert '<div class="mb-lane sub"' in html
+    assert '<div class="mb-gutter">sub-<br/>agents</div>' in html
+    assert 'class="mb-subbar"' in html
+    assert "(data.subagents || []).length ? html`" in html
+    # The lane is between the tools lane and the context lane.
+    tools_i = html.index('<div class="mb-lane tools">')
+    sub_i = html.index('<div class="mb-lane sub"')
+    ctx_i = html.index('<div class="mb-lane ctx">')
+    assert tools_i < sub_i < ctx_i, "sub-agents lane must sit between tools and context"
+    # Bars are themed (no hardcoded mock hex) — Rule 18.
+    assert "mbTint('--chart-5', 16)" in html
+
+
+def test_map_board_renders_territory_treemap(html):
+    # The ③ codebase-territory treemap aggregates read/edit events into per-file
+    # touch counts, grouped by directory, with order badges + an edited marker.
+    assert "function mbBuildTerritory" in html
+    assert 'class="mb-tree"' in html
+    assert 'class="mb-file"' in html
+    assert 'class="mb-ord"' in html  # first-touch order badge
+
+
+def test_map_board_falls_back_to_work_map_when_unavailable(html):
+    # When /sessionmap has no board data, the board falls back to the existing
+    # WorkMapSection so nothing is lost — and WorkMapSection stays defined.
+    assert "function WorkMapSection" in html
+    assert "return html`<${WorkMapSection} sessionId=${sessionId} />`" in html
+
+
+def test_map_board_category_colors_use_theme_vars(html):
+    # Category → theme chart var map (offline; no hardcoded hexes — Rule 18).
+    assert "const MB_CAT_COLOR = {" in html
+    assert "read: '--chart-1'" in html
+    assert "edit: '--chart-2'" in html
+    assert "error: '--error'" in html
+
+
+def test_map_board_context_lane_plots_per_call_occupancy(html):
+    # #56: the CONTEXT lane plots each call's OWN context occupancy (per-call
+    # input+cache from the backend series), NOT a cumulative sum — a monotone
+    # climb duplicated the header's total-token chip and carried no information.
+    assert "each call's OWN context occupancy" in html
+    assert "per-call context size" in html  # the subtitle says what the lane is
+
+
+def test_map_board_subagent_labels_never_collide(html):
+    # #56: a subagent label prints only on a wide-enough (px-gated),
+    # non-overlapped bar; past-cap bars are flagged `.overlapped` so their labels
+    # are suppressed. Bars may overlap under extreme density — text never does.
+    # Every bar keeps the full label as its hover title.
+    assert "const MB_SUBLAB_MIN_PX" in html
+    assert "it.overlapped = true;" in html
+    assert 'showSubLab ? html`<span class="mb-sublab">' in html
+    assert "MB_SUBLAB_MIN_PX;" in html
+
+
+def test_map_board_legend_covers_every_encoding(html):
+    # #56: every on-board encoding is decodable from the legend — Other events,
+    # solid-red error, the dashed-red retry outline, and the phase-band tinting
+    # each get a legend entry (no more unexplained marks).
+    assert ">Other</span>" in html
+    assert ">retry</span>" in html
+    assert ">phase band</span>" in html
+    assert "marks a retried step" in html
+    assert "hover a band for its title" in html
+
+
+def test_map_board_surfaces_insights_strip(html):
+    # #56: the board ANSWERS "where did the time and money go" by default via a
+    # deterministic callouts strip (costliest stretch, friction, top delegation,
+    # idle share, edit footprint) — insight is never hover-gated.
+    assert 'class="mb-insights"' in html
+    assert "const insights = [];" in html
+    assert "'costliest ' + mbFmtBin(insW)" in html
+    assert "k: 'friction'" in html
+    assert "k: 'top sub-agent'" in html
+    assert "k: 'idle'" in html
+    assert ".mb-insights {" in html  # themed CSS exists (offline-safe)
+
+
+def test_map_board_territory_demotes_scratch_and_weights_edits(html):
+    # #56: temp/scratch reads collapse into ONE muted card and are excluded from
+    # the common-prefix root (so workspace dir labels stay relative + readable);
+    # cards and file rows are weighted by edits over reads; the file NAME keeps a
+    # readable floor instead of losing the flex fight to its meta text.
+    assert "const mbIsScratchPath" in html
+    assert "TemporaryItems" in html
+    assert 'class="mb-dir mb-scratch"' in html
+    assert "f.edits * 3 + f.reads" in html
+    assert "min-width: 9ch" in html
+
+
+def test_approach_rail_marks_cross_terminal_children(html):
+    # M2b: a cross-terminal child (a separate run-linked session) renders amber
+    # (is-term) with a run-linked provenance sub-line, distinct from the pink
+    # in-session subagent nodes — never claiming more than capture_completeness.
+    assert "a.provenance === 'cross_terminal_child'" in html
+    assert "cross-terminal child · run-linked" in html
+    # Honest completeness: session-level node vs method-kept when the child's own
+    # method was recoverable.
+    assert "a.capture_completeness === 'full' ? '⏏ ended · method kept' : 'session-level'" in html
+
+
+def test_approach_splices_cross_terminal_spine(html):
+    # When a child's own method is available the backend ships a `cross_terminal`
+    # spine list; the UI renders each under a divider with recursive ApproachMove.
+    assert "function ApproachCrossTerminal" in html
+    assert "const crossTerminal = data.cross_terminal || [];" in html
+    assert "cross-terminal children" in html  # the divider label
+    assert ".ap-deleg.ap-xterm { border-color: var(--warn); }" in html
+
+
+def test_map_tools_lane_is_stacked_density_histogram_in_time_mode(html):
+    # In time mode the tools lane is a stacked-by-category density histogram — one
+    # bar per active-time bucket, height ∝ count, segments colored by category with
+    # error stacked on top — NOT the per-event 3px ticks (which smeared over ~100s
+    # of events). Buckets with 0 events render nothing (honest quiet signal).
+    assert "const MB_STACK_ORDER = ['read', 'search', 'edit', 'bash', 'task', 'web', 'other', 'error']" in html
+    assert "const histBins = []" in html
+    assert 'class="mb-hbar' in html          # the stacked bucket bar
+    assert 'class="mb-hseg"' in html         # a per-category stacked segment
+    assert "if (b.total <= 0) return null" in html  # empty bucket → gap
+    # error is the last (top) entry of the stack order so failures pop
+    import re
+
+    assert re.search(r"MB_STACK_ORDER\s*=\s*\[[^\]]*'error'\]", html) is not None
+
+
+def test_map_tools_lane_keeps_per_event_ticks_in_step_mode(html):
+    # Step mode is unchanged: individual per-event ticks (.mb-ev) + sampled labels.
+    assert 'class="mb-ev ' in html
+    assert "evLabelShort(e.label)" in html
+    # the histogram branch is gated to time mode (step falls through to ticks)
+    assert "${mode === 'time'\n          ? histBins.map" in html
+
+
+def test_map_cost_lane_shares_histogram_bucket_edges_in_time_mode(html):
+    # The COST lane is re-binned into the SAME bucket edges as the tools histogram
+    # (usd summed per bucket) so cost bars line up vertically under tool bursts.
+    assert "histBins[bi].usd += (p.usd || 0)" in html
+    assert "const costMax = mode === 'time'" in html
+    # cost bars in time mode are drawn from the shared histBins, not raw cost_series
+    assert "Same bucket edges as the tools histogram" in html
+def test_map_tools_lane_bin_width_is_auto_only(html):
+    # #58: the manual interval ladder (Auto/1m/5m/15m/1h) is PURGED. Bin widths
+    # carry no domain meaning for an agent run (users can't relate 5m→15m to any
+    # question), and a manual 1h on a ~40m session collapsed the whole board into
+    # one full-width slab. The width is always auto-resolved for the span and
+    # surfaced in the cost lane's peak label instead of a control.
+    assert "const binWidth = mbAutoBinWidth(activeDur)" in html
+    assert "binSel" not in html            # the state is gone
+    assert "mb-ivl" not in html            # the control + its CSS are gone
+    assert "MB_BIN_SECONDS" not in html    # the manual ladder map is gone
+    # the resolved width self-describes in the cost peak label (time mode)
+    assert "' per ' + mbFmtBin(binWidth)" in html
+
+
+def test_map_board_defaults_to_step_mode(html):
+    # #58: step is the default read — evenly spaced by tool-call order it shows
+    # the work sequence without burst/idle distortion (the user consistently read
+    # it as less noisy). Time mode stays one click away for cost localization.
+    assert "const [mode, setMode] = useState('step')" in html
+    # Peak value labelled on each lane via the existing formatters. The cost peak
+    # self-describes its unit: the auto bin width in time mode, /call in step.
+    assert "class=\"mb-peak\">peak ${fmtCost(costMax)}${mode === 'time' ? ' per ' + mbFmtBin(binWidth) : '/call'}" in html
+    # The step⇄time toggle re-spaces every lane (useState-driven; step default — #58).
+    assert "const [mode, setMode] = useState('step')" in html
+
+
+# ---- Approach/Map presentation polish (dogfooding round on a real 22.7M-tok
+# ---- session: PR #306 follow-ups applied to the #371 carve).
+
+
+def test_approach_scrubs_mojibake_at_load(html):
+    # Transcript text can arrive UTF-8-decoded-as-Latin-1 ("Â\xa0" where an NBSP
+    # was meant); the approach payload is scrubbed ONCE at data-load so mandate,
+    # outcome, labels and quotes all render clean without per-render cost.
+    assert "function stripMojibake" in html
+    assert "function sanitizeApproachPayload" in html
+    assert "setData(sanitizeApproachPayload(d))" in html
+    # the Timeline's /story payload gets the same scrub (asks + step narration).
+    assert "function sanitizeStoryPayload" in html
+    assert "setStory(sanitizeStoryPayload(d))" in html
+
+
+def test_approach_renders_inline_markdown_not_asterisks(html):
+    # Narration carries **bold** / *italic* / `code`; the spine renders them as
+    # vnodes (h('b'…)/h('i'…)/h('code'…)) instead of printing literal asterisks.
+    assert "function mdInline" in html
+    assert "md-code" in html
+
+
+def test_approach_move_untruncates_headline_instead_of_duplicating_quote(html):
+    # When a move's quote merely re-states its (80-char-truncated) label, the
+    # row un-truncates the headline from the quote's lead sentence and renders
+    # only the remainder as the italic quote — never the same sentence twice.
+    assert "function splitLeadSentence" in html
+    assert "labelCore(" in html
+
+
+def test_approach_spine_folds_conversational_runs(html):
+    # A run of >4 consecutive chat-only moves (agent narration, no tools, no
+    # delegations) folds to first + "· N conversational steps" + last, click to
+    # expand — the method must not drown in Q&A narration.
+    assert "function ApproachSpine" in html
+    assert "const isChatMove" in html
+    assert "conversational steps" in html
+    assert 'class="ap-collapse"' in html
+
+
+def test_approach_verify_flavored_delegations_counted_and_chipped(html):
+    # A delegation whose name/task reads as review/verify/audit gets a ✅ accent
+    # + 'verify' chip, and the header's verifies stat is recomputed client-side
+    # (the structural backend classifies them as plain delegates → verifies:0).
+    assert "VERIFY_NAME_RE" in html
+    assert "const isVerifyDeleg" in html
+    assert "ap-verify-chip" in html
+    assert "ap-verify-deleg" in html
+    assert "verifies" in html
+
+
+def test_approach_delegate_move_renders_card_only(html):
+    # A delegate move with delegation cards suppresses its own label line and
+    # "Agent <name>" evidence row — the card already carries the name; the old
+    # form printed the same subagent name three times per delegation.
+    assert "const isDelegateCard = kind === 'delegate' && delegations.length > 0;" in html
+
+
+def test_approach_outcome_clamps_with_toggle(html):
+    # The ✓ outcome block clamps to 3 lines with a click-to-toggle "show all"
+    # (outcomes arrive truncated mid-word server-side; full text one click away).
+    assert "ap-outcome-body" in html
+    assert "ap-outcome-more" in html
+
+
+def test_approach_rail_hides_default_badges(html):
+    # Rail nodes only badge the EXCEPTIONS (capped/killed/cross-terminal/running);
+    # the default "ended · method kept · in-session subagent · from transcript"
+    # pair repeated on every node was pure noise — it moves to the node's title=.
+    assert "const isPlainSub = !isMain && !isCross && !isCapped;" in html
+    assert "const showBadge = !isPlainSub;" in html
+    assert "nodeTitle" in html
+
+
+def test_timeline_ask_carries_user_prefix(html):
+    # Each ask in the Timeline is prefixed with a grey mono "user: " marker so
+    # asks carry a speaker label just like steps carry #n + time.
+    assert 'class="story-ask-who"' in html
+    assert 'story-ask-who">user: <' in html
+
+
+def test_map_context_area_stops_at_last_sample(html):
+    # The context lane's area fill closes straight down at the LAST sample's x —
+    # it must not fade to the right edge as a decaying wedge that reads as data.
+    assert "const ctxLastX" in html
+    assert "L' + ctxLastX.toFixed(2) + ',30 L' + ctxFirstX.toFixed(2) + ',30 Z'" in html
+
+
+def test_map_phase_titles_cleaned_and_merged(html):
+    # Phase titles strip leading conversational pleasantries ("Got it — my
+    # mistake." → "My mistake.") and adjacent phases with the same normalized
+    # title merge into one band (#57's confetti came from same-title splits).
+    assert "MB_PLEASANTRY_RE" in html
+    assert "function mbCleanPhase" in html
+    assert "mbNormTitle(prev.name) === mbNormTitle(name)" in html
+
+
+def test_map_phase_bands_split_at_idle_breaks(html):
+    # In time mode a phase band that spans an idle break splits into segments
+    # with a visible gap at the break — one band must not bridge an 18h idle
+    # gulf as if it were continuous work. Only the widest segment is labelled.
+    assert "const phaseSegs = []" in html
+    assert "labelSeg: si === widest" in html
+    assert "usePhaseSegs ? phaseSegs : phaseBands" in html

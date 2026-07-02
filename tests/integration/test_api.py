@@ -393,6 +393,32 @@ async def test_status_framing_reflects_plan_tier(
     assert framing["pricing_mode"] == expected_mode
 
 
+# --- #2: /sessions/{id} carries a framing block so SessionDetailView's ------- #
+# --- Overview / subagents / traces cost cells reframe subscription/local. ----- #
+async def test_session_detail_includes_framing_block(db, client):
+    db.upsert_session(make_session(session_id="sess-2", plan_tier="api"))
+    db.insert_span(make_llm_span(
+        session_id="sess-2", trace_id="ff" * 16, cost_usd=1.23,
+        billing_account="anthropic",
+    ))
+    body = (await client.get("/api/v1/sessions/sess-2")).json()
+    assert _FRAMING_KEYS <= set(body["framing"])
+
+
+async def test_session_detail_framing_reframes_subscription(db, client, monkeypatch, tmp_path):
+    """A subscription-plan session's detail framing suppresses raw dollars
+    (display_rule != show_dollars) so the UI's fmtFramedDollar reframes the
+    Overview / subagents / traces cost cells (#2). HOME isolated so the config
+    fallback can't pull this machine's global plan."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    db.upsert_session(make_session(session_id="sess-2-sub", plan_tier="max_5x"))
+    db.insert_span(make_llm_span(
+        session_id="sess-2-sub", trace_id="ab" * 16, cost_usd=4.56,
+        billing_account="anthropic",
+    ))
+    framing = (await client.get("/api/v1/sessions/sess-2-sub")).json()["framing"]
+    assert framing["pricing_mode"] == "subscription"
+    assert framing["display_rule"] != "show_dollars"
 async def test_cost_cycle_block_defaults_to_calendar_month(client):
     """With no [budget.<provider>] cycle configured, the run-rate cycle falls
     back to the calendar month (start_day=1) (#138)."""
@@ -838,6 +864,43 @@ async def test_status_shows_live_session_over_empty_marker(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_status_live_transcript_rescues_stale_cc_session(tmp_path):
+    """A Claude Code session whose backfilled spans went stale but whose
+    transcript is still being written shows 'active', not 'idle' — while a
+    look-alike session with no transcript stays 'idle' (Task D)."""
+    from tokenjam.utils.time_parse import utcnow
+    from datetime import timedelta
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        now = utcnow()
+        # Both look identical to the span signal: active, last span 10 min ago
+        # (past the 5-min stale window, well within the 4h idle window -> idle).
+        for sid in ("cc-live", "cc-dead"):
+            db.upsert_session(make_session(
+                agent_id="cc", session_id=sid, status="active",
+                started_at=now - timedelta(hours=1),
+                ended_at=now - timedelta(minutes=10)))
+        # Only cc-live has a (freshly written) transcript on disk.
+        _write_story_transcript(tmp_path, "cc-live")
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            status = await c.get("/api/v1/status")
+            live_detail = await c.get("/api/v1/sessions/cc-live")
+            dead_detail = await c.get("/api/v1/sessions/cc-dead")
+
+        tiles = {a["session_id"]: a for a in status.json()["agents"]}
+        assert tiles["cc-live"]["status"] == "active"   # rescued by transcript
+        assert tiles["cc-dead"]["status"] == "idle"     # no transcript -> unchanged
+        assert live_detail.json()["session"]["status"] == "active"
+        assert dead_detail.json()["session"]["status"] == "idle"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
 async def test_status_returns_service_namespace(tmp_path):
     """The status tile carries service.namespace so the dashboard groups by project."""
     from tokenjam.core.db import DuckDBBackend
@@ -1239,3 +1302,1613 @@ async def test_close_sessions_requires_an_id(tmp_path):
         assert resp.status_code == 400
     finally:
         db.close()
+
+
+# ===========================================================================
+# GET /api/v1/sessions/{session_id} — Session Detail view (Layer 1).
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_session_detail_returns_rollup_tools_and_traces(tmp_path):
+    """A known session returns its rollup + per-tool breakdown + its traces."""
+    from tokenjam.core.models import Alert, AlertType, Severity
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "sess-1"
+        trace_a = "trace-a"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, conversation_id="conv-1",
+            input_tokens=5000, output_tokens=800, tool_call_count=3,
+            error_count=1, total_cost_usd=0.42, status="active",
+            plan_tier="api"))
+        # Two LLM spans (one with a tool_name, one a failing tool) on one trace.
+        db.insert_span(make_llm_span(
+            agent_id="cc", session_id=sid, conversation_id="conv-1",
+            trace_id=trace_a, input_tokens=2500, output_tokens=400,
+            cost_usd=0.21))
+        db.insert_span(make_llm_span(
+            agent_id="cc", session_id=sid, conversation_id="conv-1",
+            trace_id=trace_a, tool_name="Read", input_tokens=0,
+            output_tokens=0, cost_usd=0.0))
+        db.insert_span(make_llm_span(
+            agent_id="cc", session_id=sid, conversation_id="conv-2",
+            trace_id="trace-b", tool_name="Bash", status="error",
+            input_tokens=2500, output_tokens=400, cost_usd=0.21))
+        # An active alert attributed to this session, plus one to another.
+        now = utcnow()
+        db.insert_alert(Alert(
+            alert_id="al-1", fired_at=now, type=AlertType.RETRY_LOOP,
+            severity=Severity.WARNING, title="Retry loop detected",
+            detail={}, agent_id="cc", session_id=sid))
+        db.insert_alert(Alert(
+            alert_id="al-2", fired_at=now, type=AlertType.FAILURE_RATE,
+            severity=Severity.INFO, title="Other session", detail={},
+            agent_id="cc", session_id="someone-else"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        sess = body["session"]
+        assert sess["session_id"] == sid
+        assert sess["agent_id"] == "cc"
+        assert sess["plan_tier"] == "api"
+        assert sess["pricing_mode"] == "api"
+        assert sess["input_tokens"] == 5000
+        assert sess["output_tokens"] == 800
+        assert sess["total_cost_usd"] == 0.42
+        # Two distinct conversation_ids across the session's spans.
+        assert sess["conversation_count"] == 2
+        assert sess["active_alerts"] == 1
+
+        # Tool breakdown: Read (ok) + Bash (1 failure).
+        tools = {t["tool_name"]: t for t in body["tools"]}
+        assert tools["Read"]["count"] == 1 and tools["Read"]["error_count"] == 0
+        assert tools["Bash"]["count"] == 1 and tools["Bash"]["error_count"] == 1
+
+        # Only this session's alert appears.
+        assert [a["title"] for a in body["alerts"]] == ["Retry loop detected"]
+
+        # Traces: both the session's traces, newest first; status rolls up.
+        trace_ids = {t["trace_id"] for t in body["traces"]}
+        assert trace_ids == {"trace-a", "trace-b"}
+        by_trace = {t["trace_id"]: t for t in body["traces"]}
+        assert by_trace["trace-a"]["status_code"] == "ok"
+        assert by_trace["trace-b"]["status_code"] == "error"
+        assert by_trace["trace-a"]["span_count"] == 2
+
+        # No drift baseline recorded for this agent.
+        assert body["drift"] is None
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_unknown_returns_404(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/does-not-exist")
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["error"]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_subscription_plan_tier(tmp_path):
+    """A subscription session reports pricing_mode='subscription' so the UI
+    renders the implied-API-value framing (not a dollar 'spend' claim)."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "sub-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, plan_tier="max_20x",
+            input_tokens=1000, output_tokens=200, total_cost_usd=1.50,
+            status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        sess = resp.json()["session"]
+        assert sess["plan_tier"] == "max_20x"
+        assert sess["pricing_mode"] == "subscription"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_includes_drift_baseline(tmp_path):
+    """When the agent has a drift baseline, the detail view surfaces its
+    summary; otherwise it is null."""
+    from tokenjam.core.models import DriftBaseline
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "drift-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active"))
+        db.upsert_baseline(DriftBaseline(
+            agent_id="cc", sessions_sampled=12, computed_at=utcnow(),
+            avg_input_tokens=4200.0, avg_output_tokens=600.0,
+            avg_tool_call_count=3.5, avg_session_duration_s=120.0))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        drift = resp.json()["drift"]
+        assert drift is not None
+        assert drift["sessions_sampled"] == 12
+        assert drift["avg_input_tokens"] == 4200.0
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_requires_api_key_when_enabled(tmp_path):
+    """The GET is guarded by require_api_key like other GET endpoints."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "auth.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=True, api_key="my-api-key")),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="s1", status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            unauth = await c.get("/api/v1/sessions/s1")
+            assert unauth.status_code == 401
+            ok = await c.get(
+                "/api/v1/sessions/s1",
+                headers={"Authorization": "Bearer my-api-key"})
+            assert ok.status_code == 200
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_model_mix_and_turn_count(tmp_path):
+    """Multi-model session: model_mix aggregates per model (calls + summed
+    tokens + cost), ordered by calls desc; turn_count == llm.call span count."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "mm-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", plan_tier="api"))
+        base = utcnow()
+        # opus x3, sonnet x2, haiku x1 -> ordered opus, sonnet, haiku.
+        specs = (
+            [("claude-opus-4-8", 1000, 100, 50, 0.30)] * 3
+            + [("claude-sonnet-4-6", 500, 80, 10, 0.05)] * 2
+            + [("claude-haiku-4-5", 200, 40, 0, 0.01)] * 1
+        )
+        for i, (model, inp, out, cache, cost) in enumerate(specs):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model=model,
+                input_tokens=inp, output_tokens=out, cache_tokens=cache,
+                cost_usd=cost, start_time=base + timedelta(seconds=i)))
+        # A tool span must not be counted as a turn or appear in model_mix.
+        db.insert_span(make_tool_span(agent_id="cc", tool_name="Read"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["turn_count"] == 6  # llm.call spans only
+
+        mix = body["model_mix"]
+        assert [m["model"] for m in mix] == [
+            "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5",
+        ]
+        by_model = {m["model"]: m for m in mix}
+        assert by_model["claude-opus-4-8"]["calls"] == 3
+        assert by_model["claude-opus-4-8"]["input_tokens"] == 3000
+        assert by_model["claude-opus-4-8"]["output_tokens"] == 300
+        assert by_model["claude-opus-4-8"]["cache_tokens"] == 150
+        assert by_model["claude-opus-4-8"]["cost_usd"] == pytest.approx(0.90)
+        assert by_model["claude-sonnet-4-6"]["calls"] == 2
+        assert by_model["claude-sonnet-4-6"]["input_tokens"] == 1000
+        assert by_model["claude-haiku-4-5"]["calls"] == 1
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_context_series_ordered_and_complete(tmp_path):
+    """A small session emits one context point per llm.call, time-ordered,
+    each carrying that turn's real input_tokens."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "ctx-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active"))
+        base = utcnow()
+        inputs = [100, 500, 1200, 800, 300]
+        # Insert out of chronological order to prove SQL ORDER BY start_time.
+        for i in [2, 0, 4, 1, 3]:
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-haiku-4-5",
+                input_tokens=inputs[i], output_tokens=10,
+                start_time=base + timedelta(seconds=i)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        series = resp.json()["context_series"]
+        assert len(series) == 5
+        # Time-ordered ascending.
+        ts = [p["t"] for p in series]
+        assert ts == sorted(ts)
+        # Each point keeps its turn's real input_tokens, in chronological order.
+        assert [p["input_tokens"] for p in series] == inputs
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_context_series_downsampled_preserves_first_last(tmp_path):
+    """A session with > MAX_CONTEXT_POINTS llm.calls is downsampled to <= 120
+    points, keeping the first and last turns."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+    from tokenjam.api.routes.sessions import MAX_CONTEXT_POINTS
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        sid = "big-sess"
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active"))
+        base = utcnow()
+        n = 300
+        first_input = 11
+        last_input = 9999
+        for i in range(n):
+            if i == 0:
+                inp = first_input
+            elif i == n - 1:
+                inp = last_input
+            else:
+                inp = 100 + i
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-haiku-4-5",
+                input_tokens=inp, output_tokens=10,
+                start_time=base + timedelta(seconds=i)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["turn_count"] == n  # turn_count is the true count, undownsampled
+        series = body["context_series"]
+        assert 0 < len(series) <= MAX_CONTEXT_POINTS
+        # First and last turns are preserved.
+        assert series[0]["input_tokens"] == first_input
+        assert series[-1]["input_tokens"] == last_input
+        # Still time-ordered.
+        ts = [p["t"] for p in series]
+        assert ts == sorted(ts)
+    finally:
+        db.close()
+
+
+# ===========================================================================
+# Cross-session run grouping (Layer 3): tokenjam.run_id resource attribute,
+# GET /api/v1/sessions/{id} exposing the fields, and GET /api/v1/runs/{run_id}.
+# ===========================================================================
+
+@pytest.mark.asyncio
+async def test_ingest_logs_captures_run_id_from_resource_attrs(tmp_path):
+    """A Claude Code OTLP-logs batch with tokenjam.run_id in the resource attrs
+    produces a session carrying that run_id (and parent_session_id)."""
+    from tests.factories import (
+        make_claude_code_api_request_log,
+        make_otlp_logs_body,
+    )
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        body = make_otlp_logs_body(
+            [make_claude_code_api_request_log(session_id="cc-run-sess")],
+            resource_attributes={
+                "tokenjam.run_id": "run-42",
+                "tokenjam.parent_session_id": "parent-sess",
+            },
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/v1/logs", json=body,
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+        assert resp.status_code == 200
+
+        sess = db.get_session("cc-run-sess")
+        assert sess is not None
+        assert sess.run_id == "run-42"
+        assert sess.parent_session_id == "parent-sess"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_ingest_spans_captures_run_id_from_resource_attrs(tmp_path):
+    """The live spans path extracts tokenjam.run_id from resource attrs too
+    (shared otlp_parsing.py path)."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        body = {
+            "resourceSpans": [{
+                "resource": {"attributes": [
+                    {"key": "service.name", "value": {"stringValue": "worker-a"}},
+                    {"key": "session.id", "value": {"stringValue": "span-run-sess"}},
+                    {"key": "tokenjam.run_id", "value": {"stringValue": "run-7"}},
+                ]},
+                "scopeSpans": [{"spans": [_make_otlp_span()]}],
+            }]
+        }
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/spans", json=body,
+                headers={"Authorization": f"Bearer {INGEST_SECRET}"})
+        assert resp.status_code == 200
+
+        sess = db.get_session("span-run-sess")
+        assert sess is not None and sess.run_id == "run-7"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_session_detail_exposes_run_fields(tmp_path):
+    """GET /api/v1/sessions/{id} surfaces run_id + parent_session_id."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="s-run", status="active",
+            run_id="run-9", parent_session_id="root-sess"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/s-run")
+        assert resp.status_code == 200
+        sess = resp.json()["session"]
+        assert sess["run_id"] == "run-9"
+        assert sess["parent_session_id"] == "root-sess"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_detail_groups_sessions_aggregates_and_tree(tmp_path):
+    """Three sessions sharing a run_id (one a child of another) group into one
+    run with aggregated totals and a parent-edge tree."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        # Root + one child + one leaf, all in run-100.
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="root", run_id="run-100",
+            input_tokens=1000, output_tokens=200, total_cost_usd=0.10,
+            tool_call_count=2, status="active", plan_tier="api"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="child", run_id="run-100",
+            parent_session_id="root", input_tokens=500, output_tokens=100,
+            total_cost_usd=0.05, tool_call_count=1, status="active",
+            plan_tier="api"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="leaf", run_id="run-100",
+            input_tokens=300, output_tokens=50, total_cost_usd=0.02,
+            status="active", plan_tier="api"))
+        # A session in a different run must NOT leak in.
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="other", run_id="run-999",
+            total_cost_usd=9.0, status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/runs/run-100")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        run = body["run"]
+        assert run["run_id"] == "run-100"
+        assert run["session_count"] == 3
+        # Totals aggregate over the 3 members only (not the other run).
+        assert round(run["total_cost_usd"], 2) == 0.17
+        assert run["input_tokens"] == 1800
+        assert run["output_tokens"] == 350
+        assert run["tool_call_count"] == 3
+        assert run["pricing_mode"] == "api"
+
+        member_ids = {s["session_id"] for s in body["sessions"]}
+        assert member_ids == {"root", "child", "leaf"}
+
+        # Tree: root and leaf are roots; child nests under root.
+        tree = body["tree"]
+        root_ids = {n["session_id"] for n in tree}
+        assert root_ids == {"root", "leaf"}
+        root_node = next(n for n in tree if n["session_id"] == "root")
+        assert [c["session_id"] for c in root_node["children"]] == ["child"]
+        leaf_node = next(n for n in tree if n["session_id"] == "leaf")
+        assert leaf_node["children"] == []
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_detail_unknown_returns_404(tmp_path):
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/runs/nope")
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["error"]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_detail_mixed_pricing_mode(tmp_path):
+    """A run whose members span api + subscription reports pricing_mode='mixed'
+    so the dashboard avoids a single dollar 'spend' claim."""
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="api-s", run_id="run-mix",
+            plan_tier="api", status="active"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="sub-s", run_id="run-mix",
+            plan_tier="max_20x", status="active"))
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/runs/run-mix")
+        assert resp.status_code == 200
+        assert resp.json()["run"]["pricing_mode"] == "mixed"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_runs_index_lists_runs_newest_first(tmp_path):
+    """GET /api/v1/runs lists each run once with totals; sessions with no
+    run_id are excluded."""
+    from datetime import timedelta
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    try:
+        now = utcnow()
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="old", run_id="run-old",
+            status="active", ended_at=now - timedelta(hours=2)))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="new", run_id="run-new",
+            status="active", ended_at=now))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="norun", status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/runs")
+        assert resp.status_code == 200
+        runs = resp.json()["runs"]
+        run_ids = [r["run_id"] for r in runs]
+        # Only runs with a run_id; newest activity first.
+        assert run_ids == ["run-new", "run-old"]
+        assert all(r["session_count"] == 1 for r in runs)
+    finally:
+        db.close()
+
+
+# --- Session Story endpoint --------------------------------------------------
+
+def _write_story_transcript(projects_root, session_id: str) -> None:
+    """Write a minimal Claude Code JSONL transcript for the Story endpoint."""
+    import json as _json
+
+    project_dir = projects_root / "-Users-test-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "Build the thing."}},
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-15T09:11:36.133Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [
+                    {"type": "text", "text": "Reading the file."},
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "Read",
+                        "input": {"file_path": "src/app.py"},
+                    },
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "..."}
+                ],
+            },
+        },
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-15T09:12:00.000Z",
+            "message": {
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": "Done — it works."}],
+            },
+        },
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in records), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_session_story_available(config, db, tmp_path):
+    _write_story_transcript(tmp_path, "story-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/story-sess/story")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["task"] == "Build the thing."
+    assert body["outcome"] == "Done — it works."
+    assert body["step_count"] == 2
+    assert body["steps"][0]["tools"][0]["name"] == "Read"
+    assert body["steps"][0]["tools"][0]["label"] == "src/app.py"
+    assert body["steps"][0]["tools"][0]["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_get_session_story_unavailable(config, db, tmp_path):
+    # No transcript written -> available:false with HTTP 200.
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/unknown-sess/story")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "reason" in body
+
+
+def _write_story_with_subagent(projects_root, session_id: str) -> None:
+    """Parent transcript that spawns a subagent via a Task tool.
+
+    The child agentId lives in the Task tool_result; the child transcript lives
+    flat under ``<session_id>/subagents/agent-<id>.jsonl``.
+    """
+    import json as _json
+
+    child_id = "abcabcabcabcabc12"
+    project_dir = projects_root / "-Users-test-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    parent = [
+        {"type": "user", "message": {"role": "user", "content": "Orchestrate."}},
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-15T09:11:36.133Z",
+            "message": {"role": "assistant", "model": "claude-opus-4-8", "content": [
+                {"type": "text", "text": "Spawning a worker."},
+                {"type": "tool_use", "id": "tt1", "name": "Task",
+                 "input": {"description": "build-it",
+                           "subagent_type": "general-purpose"}},
+            ]},
+        },
+        {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tt1",
+             "content": f"Agent (agentId: {child_id}) finished."}]}},
+        {"type": "assistant", "timestamp": "2026-06-15T09:12:00.000Z",
+         "message": {"role": "assistant", "model": "claude-opus-4-8",
+                     "content": [{"type": "text", "text": "All done."}]}},
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in parent), encoding="utf-8"
+    )
+    subdir = project_dir / session_id / "subagents"
+    subdir.mkdir(parents=True, exist_ok=True)
+    child = [
+        {"type": "user", "message": {"role": "user", "content": "Build it."}},
+        {"type": "assistant", "timestamp": "2026-06-15T09:11:40.000Z",
+         "message": {"role": "assistant", "model": "claude-opus-4-8",
+                     "content": [{"type": "text", "text": "Worker done."}]}},
+    ]
+    (subdir / f"agent-{child_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in child), encoding="utf-8"
+    )
+    (subdir / f"agent-{child_id}.meta.json").write_text(
+        _json.dumps({"agentType": "general-purpose", "name": "build-it",
+                     "toolUseId": "tt1"}), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_session_story_nested_subagent(config, db, tmp_path):
+    _write_story_with_subagent(tmp_path, "story-parent")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/story-parent/story")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    task_step = body["steps"][0]
+    assert task_step["tools"][0]["name"] == "Task"
+    sub = task_step["subagent"]
+    assert sub["name"] == "build-it"
+    assert sub["task"] == "Build it."
+    assert sub["outcome"] == "Worker done."
+    assert len(sub["steps"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_session_story_subagents_false_is_flat(config, db, tmp_path):
+    _write_story_with_subagent(tmp_path, "story-flat")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/story-flat/story?subagents=false")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert "subagent" not in body["steps"][0]
+
+
+@pytest.mark.asyncio
+async def test_get_session_workmap_asks(config, db, tmp_path):
+    _write_story_with_subagent(tmp_path, "wm-parent")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/wm-parent/workmap")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["ask_count"] == 1
+    ask = body["asks"][0]
+    assert ask["prompt"] == "Orchestrate."        # the one human ask
+    assert ask["subagent_count"] == 1
+    assert body["subagent_count"] == 1
+    child = ask["subagents"][0]
+    assert child["name"] == "build-it"
+    assert child["activity"]["steps"] == 1        # the worker's one narrated turn
+
+
+@pytest.mark.asyncio
+async def test_get_session_workmap_unavailable(config, db, tmp_path):
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/nope-sess/workmap")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "reason" in body
+
+
+def _write_long_ask_transcript(projects_root, session_id: str) -> None:
+    """One human ask followed by a long narrated work sequence (for phases)."""
+    import json as _json
+
+    project_dir = projects_root / "-Users-test-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    records = [{"type": "user", "message": {"role": "user", "content": "Fix and validate it."}}]
+    narrations = [
+        ("Explored the adapter.", "Bash"),
+        ("Read the SSH client.", "Read"),
+        ("Researched the auth model.", "Read"),
+        ("Wrote the fix.", "Edit"),
+        ("Ran end-to-end validation.", "Bash"),
+        ("Cleaned up and verified.", "Bash"),
+    ]
+    for text, tool in narrations:
+        records.append({
+            "type": "assistant", "timestamp": "2026-06-23T09:00:00.000Z",
+            "message": {"role": "assistant", "model": "claude-opus-4-8", "content": [
+                {"type": "text", "text": text},
+                {"type": "tool_use", "id": "x" + tool + text[:3], "name": tool, "input": {}},
+            ]},
+        })
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in records), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workmap_long_ask_has_phases(config, db, tmp_path):
+    """A long single ask is segmented into descriptive phases (Task E)."""
+    _write_long_ask_transcript(tmp_path, "long-ask")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/long-ask/workmap")
+
+    assert resp.status_code == 200
+    ask = resp.json()["asks"][0]
+    assert ask["step_count"] == 6
+    titles = [p["title"] for p in ask["phases"]]
+    assert titles[0] == "Explored the adapter."
+    assert "Cleaned up and verified." in titles
+    assert ask["phases"][0]["tools"] == [{"name": "Bash", "count": 1}]
+
+
+# --- Launcher -> Run linkage on the workmap (Task A) -------------------------
+
+def _write_launcher_transcript(projects_root, session_id: str, announce: str) -> None:
+    """A launcher transcript whose narration announces a run id string."""
+    import json as _json
+
+    project_dir = projects_root / "-Users-test-project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "Drive the backlog."}},
+        {
+            "type": "assistant",
+            "timestamp": "2026-06-23T09:34:00.000Z",
+            "message": {"role": "assistant", "model": "claude-opus-4-8", "content": [
+                {"type": "text", "text": f"TokenJam run id: `{announce}` — monitoring."},
+            ]},
+        },
+    ]
+    (project_dir / f"{session_id}.jsonl").write_text(
+        "\n".join(_json.dumps(r) for r in records), encoding="utf-8"
+    )
+
+
+@pytest.mark.asyncio
+async def test_workmap_launched_run_inferred(tmp_path):
+    """A launcher that only ANNOUNCES a run id (not tagged with it) gets a run
+    card on its Map, inferred from the transcript + confirmed against real run
+    data. Mirrors the governor session 155755fa."""
+    run_id = "gov-20260623T093359Z-11694"
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        # The launcher session: exists in the DB but carries NO run_id of its own.
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="gov-sess", status="active", plan_tier="api"))
+        _write_launcher_transcript(tmp_path, "gov-sess", run_id)
+        # Three worker sessions tagged with the announced run id.
+        for sid, cost, tools in (("ticket-137", 5.0, 100),
+                                 ("ticket-138", 6.0, 120),
+                                 ("ticket-144", 5.86, 142)):
+            db.upsert_session(make_session(
+                agent_id="cc", session_id=sid, run_id=run_id,
+                total_cost_usd=cost, tool_call_count=tools,
+                status="active", plan_tier="api"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/gov-sess/workmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        run = body["launched_run"]
+        assert run["run_id"] == run_id
+        assert run["source"] == "inferred"
+        assert run["session_count"] == 3
+        assert round(run["total_cost_usd"], 2) == 16.86
+        assert run["tool_call_count"] == 362
+        member_ids = {s["session_id"] for s in run["sessions"]}
+        assert member_ids == {"ticket-137", "ticket-138", "ticket-144"}
+        # The launcher is not itself a member of the run roster.
+        assert all(s["is_self"] is False for s in run["sessions"])
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_workmap_launched_run_tagged(tmp_path):
+    """A worker session that carries tokenjam.run_id sees its siblings as a run
+    card (source 'tagged'), with itself flagged is_self."""
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="w1", run_id="run-x",
+            status="active", plan_tier="api"))
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="w2", run_id="run-x",
+            status="active", plan_tier="api"))
+        # w1 needs a transcript so /workmap is available; no announcement in it.
+        _write_story_transcript(tmp_path, "w1")
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/w1/workmap")
+
+        assert resp.status_code == 200
+        run = resp.json()["launched_run"]
+        assert run["source"] == "tagged"
+        assert run["run_id"] == "run-x"
+        assert run["session_count"] == 2
+        self_entry = next(s for s in run["sessions"] if s["session_id"] == "w1")
+        assert self_entry["is_self"] is True
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_workmap_no_launched_run_when_solo(tmp_path):
+    """A run with no OTHER member sessions is not surfaced as a card."""
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        db.upsert_session(make_session(
+            agent_id="cc", session_id="solo", run_id="run-solo",
+            status="active", plan_tier="api"))
+        _write_story_transcript(tmp_path, "solo")
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/solo/workmap")
+
+        assert resp.status_code == 200
+        assert "launched_run" not in resp.json()
+    finally:
+        db.close()
+
+
+# --- Session Map (board data) endpoint ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_session_sessionmap(tmp_path):
+    """/sessionmap returns transcript-derived events + span-derived series for a
+    seeded session: context is each call's own occupancy, cost is per-span.
+
+    Spans are anchored to the transcript's first event ts (a *normal* session
+    where transcript ≈ span time), so the unified axis t0 (min over events +
+    spans) coincides with the span start and the series t_s stay [0, 5, ...].
+    """
+    from datetime import datetime, timedelta, timezone
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-sess"
+        _write_story_transcript(tmp_path, sid)
+        # Align spans with the transcript's first event (2026-06-15T09:11:36.133Z).
+        started = datetime(2026, 6, 15, 9, 11, 36, 133000, tzinfo=timezone.utc)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        for i, (inp, cost) in enumerate([(100, 0.01), (500, 0.02), (300, 0.03)]):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-opus-4-8",
+                input_tokens=inp, output_tokens=10, cost_usd=cost,
+                start_time=started + timedelta(seconds=i * 10)))
+        # Two subagent spans (same sub_agent_id) -> one window in the sub lane.
+        for i in range(2):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-haiku-4-5",
+                sub_agent_id="sub-A", input_tokens=200, output_tokens=20,
+                cost_usd=0.04, start_time=started + timedelta(seconds=5 + i * 6)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        assert body["from_snapshot"] is False
+
+        # Events: the transcript's single Read tool call.
+        assert [e["category"] for e in body["events"]] == ["read"]
+        assert body["events"][0]["ordinal"] == 0
+
+        # subagents: one window per sub_agent_id, with summed tokens/cost and a
+        # ts range. (No story delegation matches "sub-A", so the name falls back
+        # to agent-<id[:8]>.) The subagent window (started+5s..+11s) sits after
+        # the lone Read event, so the ordinal bracket clamps to ordinal 0.
+        subs = body["subagents"]
+        assert len(subs) == 1
+        sub = subs[0]
+        assert sub["agent_id"] == "sub-A"
+        assert sub["name"] == "agent-sub-A"
+        assert sub["tokens"] == 2 * (200 + 20)
+        assert sub["cost_usd"] == pytest.approx(0.08)
+        assert sub["start_ts"] is not None and sub["end_ts"] is not None
+        assert sub["start_ordinal"] == 0 and sub["end_ordinal"] == 0
+
+        # context_series: each LLM call's OWN context occupancy (input+cache+
+        # cache_write on that call — NOT a cumulative sum) over ALL the session's
+        # LLM-call spans (main + subagent), ordered by start_time. The subagent
+        # spans at t=5s/11s interleave with the main spans at t=0/10/20s.
+        ctx = body["context_series"]
+        assert [p["tokens"] for p in ctx] == [100, 200, 500, 200, 300]
+        assert [p["t_s"] for p in ctx] == [0.0, 5.0, 10.0, 11.0, 20.0]
+
+        # cost_series: per-span burn (NOT cumulative).
+        assert [round(p["usd"], 2) for p in body["cost_series"]] == [
+            0.01, 0.04, 0.02, 0.04, 0.03,
+        ]
+
+        meta = body["meta"]
+        assert meta["model"] == "claude-opus-4-8"
+        assert meta["total_cost_usd"] == pytest.approx(0.14)
+        # Unified axis: t0 == the shared event/span start; duration spans to the
+        # last span at +20s.
+        assert meta["started_at"].startswith("2026-06-15T09:11:36")
+        assert meta["duration_s"] == pytest.approx(20.0)
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_sessionmap_subagents_from_transcript_without_spans(tmp_path):
+    """The sub-agents lane lists every transcript subagent — even one with no
+    ``sub_agent_id``-tagged spans — so it matches the Approach rail instead of
+    under-counting delegation.
+
+    The parent transcript spawns one subagent (``build-it``) via a Task tool; no
+    span carries ``sub_agent_id``. Pre-fix the lane (span-grouped) was empty;
+    post-fix the subagent appears, sourced from the transcript subtree, with a
+    transcript-derived window and ``null`` tokens/cost (no spans to sum).
+    """
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-tx-sub"
+        _write_story_with_subagent(tmp_path, sid)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active"))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            map_resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+            ap_resp = await c.get(f"/api/v1/sessions/{sid}/approach")
+
+        assert map_resp.status_code == 200
+        body = map_resp.json()
+        assert body["available"] is True
+
+        subs = body["subagents"]
+        assert len(subs) == 1
+        sub = subs[0]
+        assert sub["name"] == "build-it"
+        assert sub["agent_id"] == "abcabcabcabcabc12"
+        # No sub_agent_id spans -> tokens/cost unknown (null), not a phantom 0.
+        assert sub["tokens"] is None
+        assert sub["cost_usd"] is None
+        # Window falls back to the subagent's own transcript step ts.
+        assert sub["start_ts"] is not None and sub["end_ts"] is not None
+
+        # Parity: the lane lists the same in-session subagent the rail does.
+        ap = ap_resp.json()
+        rail_subs = [
+            a for a in ap["agents"]
+            if a["provenance"] == "in_session_subagent"
+        ]
+        assert {s["agent_id"] for s in subs} == {a["agent_id"] for a in rail_subs}
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_sessionmap_unified_axis_skew(tmp_path):
+    """A backfilled/resumed session whose spans postdate the transcript shares
+    ONE clock: the board's t0 is the earliest EVENT ts (not the span start), so
+    the tool events don't collapse to x=0 while the series spread out.
+
+    The transcript's lone Read event is at 2026-06-15T09:11:36.133Z; the spans
+    start a full day later (2026-06-16). Pre-fix, t0 was the span start, driving
+    the event's offset negative (clamped to 0) — collapse. Post-fix t0 is the
+    event ts, so meta.started_at == the event ts and the first span lands ~1 day
+    (86399.867s) out on the axis, proving both lanes share the unified basis.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-skew"
+        _write_story_transcript(tmp_path, sid)
+        # Spans start a day AFTER the transcript's first event (the skew).
+        started = datetime(2026, 6, 16, 9, 11, 36, 133000, tzinfo=timezone.utc)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        for i, (inp, cost) in enumerate([(100, 0.01), (500, 0.02), (300, 0.03)]):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-opus-4-8",
+                input_tokens=inp, output_tokens=10, cost_usd=cost,
+                start_time=started + timedelta(seconds=i * 10)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        # One time-anchored event (the Read at 2026-06-15T09:11:36.133Z).
+        assert [e["category"] for e in body["events"]] == ["read"]
+
+        meta = body["meta"]
+        # t0 is the EARLIEST event ts — the transcript day, not the span day.
+        assert meta["started_at"].startswith("2026-06-15T09:11:36")
+        # The first span is a full day past t0 (no longer at 0); series spread.
+        ctx = body["context_series"]
+        assert ctx[0]["t_s"] == pytest.approx(86399.867, abs=1.0)
+        # duration spans from the event ts to the last span (+20s) -> ~1 day.
+        assert meta["duration_s"] == pytest.approx(86400.0 - 0.133 + 20.0, abs=1.0)
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_sessionmap_collapses_idle_gaps(tmp_path):
+    """A long session whose wall-clock is mostly idle collapses the idle gap on
+    the active-time axis: meta.gaps reports the collapsed stretch, and every
+    span's active_s skips the idle minutes while duration_s (wall) is unchanged.
+
+    Spans sit at t0, +10s, then a ~2h jump to +7200s, +7210s — one idle gap of
+    7190s (> the 300s threshold). Active axis: 10s active + 30s collapsed gap +
+    10s active = 50s; the wall duration stays ~7210s.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-idle"
+        _write_story_transcript(tmp_path, sid)
+        # Align the first span with the transcript's first event so t0 coincides.
+        started = datetime(2026, 6, 15, 9, 11, 36, 133000, tzinfo=timezone.utc)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        for off, cost in [(0, 0.01), (10, 0.02), (7200, 0.03), (7210, 0.04)]:
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-opus-4-8",
+                input_tokens=100, output_tokens=10, cost_usd=cost,
+                start_time=started + timedelta(seconds=off)))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        meta = body["meta"]
+        # Wall-clock duration is untouched; the active span is the collapsed total.
+        assert meta["duration_s"] == pytest.approx(7210.0, abs=1.0)
+        assert meta["active_duration_s"] == pytest.approx(50.0, abs=0.5)
+        # Exactly one idle gap collapsed, carrying its real duration + axis frac.
+        gaps = meta["gaps"]
+        assert len(gaps) == 1
+        assert gaps[0]["duration_s"] == pytest.approx(7190.0, abs=1.0)
+        assert 0.0 <= gaps[0]["at_active_frac"] <= 1.0
+        assert gaps[0]["at_active_frac"] == pytest.approx(0.5, abs=0.1)
+        # Each series point carries the active-axis position; the idle minutes are
+        # skipped (the +7200s span lands at ~40s active, not 7200s).
+        ctx = body["context_series"]
+        assert [p["t_s"] for p in ctx] == [0.0, 10.0, 7200.0, 7210.0]
+        assert [round(p["active_s"]) for p in ctx] == [0, 10, 40, 50]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_sessionmap_gapless_active_axis_equals_wallclock(tmp_path):
+    """A normal short session (no idle gap > threshold) is unchanged: no gaps are
+    reported and the active axis equals the wall-clock axis (active_s == t_s,
+    active_duration_s == duration_s)."""
+    from datetime import datetime, timedelta, timezone
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-gapless"
+        _write_story_transcript(tmp_path, sid)
+        started = datetime(2026, 6, 15, 9, 11, 36, 133000, tzinfo=timezone.utc)
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        for i in range(4):
+            db.insert_span(make_llm_span(
+                agent_id="cc", session_id=sid, model="claude-opus-4-8",
+                input_tokens=100, output_tokens=10, cost_usd=0.01,
+                start_time=started + timedelta(seconds=i * 30)))  # all < 300s apart
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        body = resp.json()
+        meta = body["meta"]
+        assert meta["gaps"] == []
+        assert meta["active_duration_s"] == pytest.approx(meta["duration_s"])
+        # active_s tracks t_s 1:1 when nothing collapses.
+        for p in body["context_series"]:
+            assert p["active_s"] == pytest.approx(p["t_s"])
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_sessionmap_spans_only_available(tmp_path):
+    """A session with spans but no transcript is still available: events empty,
+    series populated."""
+    from tokenjam.utils.time_parse import utcnow
+
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        sid = "smap-spans-only"
+        started = utcnow()
+        db.upsert_session(make_session(
+            agent_id="cc", session_id=sid, status="active", started_at=started))
+        db.insert_span(make_llm_span(
+            agent_id="cc", session_id=sid, model="claude-haiku-4-5",
+            input_tokens=42, output_tokens=5, cost_usd=0.005,
+            start_time=started))
+
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get(f"/api/v1/sessions/{sid}/sessionmap")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is True
+        assert body["events"] == []
+        assert body["phases"] == []
+        assert body["subagents"] == []
+        assert len(body["context_series"]) == 1
+        assert body["context_series"][0]["tokens"] == 42
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_get_session_sessionmap_unavailable(tmp_path):
+    """No transcript and no spans -> available:false with HTTP 200."""
+    db, app = _lifecycle_app(tmp_path)
+    app.state.claude_projects_root = tmp_path
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/sessions/nada-sess/sessionmap")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["available"] is False
+        assert "reason" in body
+    finally:
+        db.close()
+
+
+# --- Session Distill endpoint ------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_session_distill(config, db, tmp_path, monkeypatch):
+    """/distill returns LLM-distilled titles keyed by ask number.
+
+    The distiller is monkeypatched so no real ``claude`` runs — the route maps
+    its ``{int: title}`` result to ``{str: title}`` under a stable envelope.
+    """
+    # Patch the name as imported into the route module (it calls the bare name).
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.distill_titles_cached",
+        lambda *a, **k: {3: "did a thing"},
+    )
+    _write_story_transcript(tmp_path, "distill-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/distill-sess/distill")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert body["model"] == "haiku"
+    assert body["titles"] == {"3": "did a thing"}
+
+
+@pytest.mark.asyncio
+async def test_get_session_distill_cached_only_never_calls_claude(
+    config, db, tmp_path, monkeypatch
+):
+    """cached_only=true serves from the cache-peek and never shells to claude."""
+    calls = {"distill": 0}
+
+    def _count(*a, **k):
+        calls["distill"] += 1
+        return {9: "x"}
+
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.distill_titles_cached", _count)
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.peek_cached_titles",
+        lambda *a, **k: {2: "cached title"})
+    _write_story_transcript(tmp_path, "peek-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/peek-sess/distill?cached_only=true")
+    body = resp.json()
+    assert body["cached"] is True
+    assert body["titles"] == {"2": "cached title"}
+    assert calls["distill"] == 0  # the CLI path was never taken
+
+
+@pytest.mark.asyncio
+async def test_get_session_distill_reports_candidate_count(
+    config, db, tmp_path, monkeypatch
+):
+    """candidate_count lets the UI tell a real failure from 'nothing to distill'.
+
+    The short story transcript's only outcome is under the distill length gate,
+    so candidate_count is 0 even though claude (mocked here) returned nothing.
+    """
+    monkeypatch.setattr(
+        "tokenjam.api.routes.sessions.distill_titles_cached", lambda *a, **k: {})
+    _write_story_transcript(tmp_path, "cc-sess")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/cc-sess/distill")
+    body = resp.json()
+    assert body["titles"] == {}
+    assert body["candidate_count"] == 0  # short outcome -> nothing eligible
+    assert body["cached"] is False
+
+
+@pytest.mark.asyncio
+async def test_get_session_distill_unavailable(config, db, tmp_path):
+    # No transcript on disk -> available:false with HTTP 200 (no CLI call).
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/unknown-sess/distill")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "reason" in body
+
+
+@pytest.mark.asyncio
+async def test_close_captures_method_and_story_falls_back_after_prune(
+    config, db, tmp_path
+):
+    """End-to-end M1: closing a session snapshots its method; after the transcript
+    is pruned, /story serves the snapshot (from_snapshot) instead of 404-ing."""
+    from tokenjam.utils.time_parse import utcnow
+
+    _write_story_transcript(tmp_path, "ephemeral")
+    transcript = tmp_path / "-Users-test-project" / "ephemeral.jsonl"
+    db.upsert_session(make_session(
+        agent_id="claude-code", session_id="ephemeral", status="active",
+        service_instance_id="term-1", started_at=utcnow(), ended_at=utcnow()))
+
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        # Live transcript present -> behavior is unchanged (no snapshot marker).
+        live = await c.get("/api/v1/sessions/ephemeral/story")
+        assert live.status_code == 200
+        assert live.json()["available"] is True
+        assert "from_snapshot" not in live.json()
+
+        # The `claude` wrapper reports the terminal closed (by instance_id).
+        closed = await c.post(
+            "/api/v1/sessions/close",
+            json={"instance_id": "term-1"},
+            headers={"Authorization": f"Bearer {INGEST_SECRET}"},
+        )
+        assert closed.status_code == 200
+        assert closed.json()["closed"] == 1
+
+        # Claude Code prunes the on-disk transcript.
+        transcript.unlink()
+
+        # /story now serves the persisted snapshot.
+        story = await c.get("/api/v1/sessions/ephemeral/story")
+        assert story.status_code == 200
+        body = story.json()
+        assert body["available"] is True
+        assert body["from_snapshot"] is True
+        assert body["outcome"] == "Done — it works."
+
+        # /workmap likewise falls back to the snapshot's ask-segmented story.
+        workmap = await c.get("/api/v1/sessions/ephemeral/workmap")
+        assert workmap.status_code == 200
+        wm = workmap.json()
+        assert wm["available"] is True
+        assert wm["from_snapshot"] is True
+        assert wm["ask_count"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_story_still_404s_when_no_transcript_and_no_snapshot(config, db, tmp_path):
+    """Read-through fallback doesn't paper over genuinely-absent sessions."""
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/nonexistent/story")
+    assert resp.status_code == 200
+    assert resp.json()["available"] is False
+
+
+# --- Approach (method spine) endpoint ----------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_session_approach_returns_spine(config, db, tmp_path):
+    """A session with a transcript yields a deterministic method spine; the Task
+    step reads as a ``delegate`` move recursing into its subagent's spine."""
+    _write_story_with_subagent(tmp_path, "approach-parent")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/approach-parent/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is True
+    assert "from_snapshot" not in body
+    spine = body["spine"]
+    # The orchestrator's Task step is a delegate move carrying one delegation,
+    # whose nested spine is the child's own method.
+    delegate = next(m for m in spine if m["kind"] == "delegate")
+    assert delegate["source"] == "agent_words"
+    assert delegate["label"] == "Spawning a worker."
+    assert len(delegate["delegations"]) == 1
+    deleg = delegate["delegations"][0]
+    assert deleg["name"] == "build-it"
+    assert deleg["depth"] == 1
+    assert deleg["status"] == "ended"
+    assert len(deleg["spine"]) == 1
+    assert deleg["spine"][0]["kind"] == "act"
+
+    # The delegation-tree rail: the main agent (depth 0) then each subagent.
+    agents = body["agents"]
+    assert agents[0]["depth"] == 0
+    assert agents[0]["provenance"] == "main_session"
+    assert any(
+        a["name"] == "build-it" and a["depth"] == 1
+        and a["provenance"] == "in_session_subagent"
+        for a in agents
+    )
+
+    # Header counts roll up the whole (nested) spine.
+    counts = body["counts"]
+    assert counts["delegations"] == 1
+    assert counts["moves"] >= 2
+    assert set(counts) == {"moves", "delegations", "dead_ends", "verifies"}
+
+    # Session-level meta block is present (cost/tokens; null when no session row).
+    assert set(body["meta"]) == {"cost_usd", "tokens"}
+
+
+@pytest.mark.asyncio
+async def test_get_session_approach_unavailable(config, db, tmp_path):
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/no-such/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "reason" in body
+
+
+@pytest.mark.asyncio
+async def test_approach_falls_back_to_snapshot_after_prune(config, db, tmp_path):
+    """End-to-end: closing a session snapshots its method; after the transcript
+    is pruned, /approach serves the spine from the snapshot (from_snapshot)."""
+    from tokenjam.utils.time_parse import utcnow
+
+    _write_story_transcript(tmp_path, "approach-eph")
+    transcript = tmp_path / "-Users-test-project" / "approach-eph.jsonl"
+    db.upsert_session(make_session(
+        agent_id="claude-code", session_id="approach-eph", status="active",
+        service_instance_id="term-ap", started_at=utcnow(), ended_at=utcnow()))
+
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        # Live transcript present -> spine, no snapshot marker.
+        live = await c.get("/api/v1/sessions/approach-eph/approach")
+        assert live.status_code == 200
+        assert live.json()["available"] is True
+        assert "from_snapshot" not in live.json()
+        assert len(live.json()["spine"]) >= 1
+
+        # The `claude` wrapper reports the terminal closed -> method snapshotted.
+        closed = await c.post(
+            "/api/v1/sessions/close",
+            json={"instance_id": "term-ap"},
+            headers={"Authorization": f"Bearer {INGEST_SECRET}"},
+        )
+        assert closed.status_code == 200
+        assert closed.json()["closed"] == 1
+
+        # Claude Code prunes the on-disk transcript.
+        transcript.unlink()
+
+        # /approach now serves the persisted snapshot's spine.
+        approach = await c.get("/api/v1/sessions/approach-eph/approach")
+        assert approach.status_code == 200
+        body = approach.json()
+        assert body["available"] is True
+        assert body["from_snapshot"] is True
+        assert len(body["spine"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_approach_no_cross_terminal_children_is_empty(config, db, tmp_path):
+    """The common case: a session that launched no cross-terminal children ships
+    an empty ``cross_terminal`` and adds no cross-terminal rail agents."""
+    _write_story_with_subagent(tmp_path, "xt-solo")
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/xt-solo/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["cross_terminal"] == []
+    assert not any(
+        a["provenance"] == "cross_terminal_child" for a in body["agents"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_approach_splices_cross_terminal_child_with_method(
+    config, db, tmp_path
+):
+    """A run-linked child session whose OWN method is recoverable surfaces as a
+    ``cross_terminal_child`` rail node (capture_completeness ``full``) AND has its
+    own spine spliced into ``cross_terminal``."""
+    _write_story_transcript(tmp_path, "xt-parent")
+    _write_story_transcript(tmp_path, "xt-child")  # the child's own method
+    db.upsert_session(make_session(
+        agent_id="cc", session_id="xt-child", run_id="run-xt",
+        parent_session_id="xt-parent", service_instance_id="child-term",
+        input_tokens=400, output_tokens=80, total_cost_usd=0.21,
+        status="completed"))
+
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/xt-parent/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    # Rail: the cross-terminal child node, honestly full (method recovered).
+    child_agents = [
+        a for a in body["agents"]
+        if a["provenance"] == "cross_terminal_child"
+    ]
+    assert len(child_agents) == 1
+    child = child_agents[0]
+    assert child["agent_id"] == "xt-child"
+    assert child["name"] == "child-term"
+    assert child["depth"] == 1
+    assert child["capture_completeness"] == "full"
+    assert child["cost_usd"] == 0.21
+    assert child["tokens"] == 480
+
+    # Spine: the child's own method is spliced under cross_terminal.
+    assert len(body["cross_terminal"]) == 1
+    ct = body["cross_terminal"][0]
+    assert ct["agent_id"] == "xt-child"
+    assert ct["provenance"] == "cross_terminal_child"
+    assert len(ct["spine"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_approach_cross_terminal_child_session_level_only(
+    config, db, tmp_path
+):
+    """A run-linked child with NO recoverable method (no transcript, no snapshot)
+    surfaces as a session-level rail node and is NOT spliced into the spine."""
+    _write_story_transcript(tmp_path, "xt2-parent")
+    db.upsert_session(make_session(
+        agent_id="cc", session_id="xt2-child", run_id="run-xt2",
+        parent_session_id="xt2-parent", service_instance_id="child2-term",
+        input_tokens=100, output_tokens=20, status="completed"))
+
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+    app.state.claude_projects_root = tmp_path
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        resp = await c.get("/api/v1/sessions/xt2-parent/approach")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    child_agents = [
+        a for a in body["agents"]
+        if a["provenance"] == "cross_terminal_child"
+    ]
+    assert len(child_agents) == 1
+    assert child_agents[0]["agent_id"] == "xt2-child"
+    assert child_agents[0]["capture_completeness"] == "session_level"
+    # No method -> nothing spliced into the spine list.
+    assert body["cross_terminal"] == []
