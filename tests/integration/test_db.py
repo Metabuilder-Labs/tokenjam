@@ -1,7 +1,7 @@
 """Integration tests for the database layer."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pytest
 
@@ -17,7 +17,7 @@ from tokenjam.core.models import (
     Severity,
     TraceFilters,
 )
-from tokenjam.utils.ids import new_uuid, new_span_id, new_trace_id
+from tokenjam.utils.ids import new_uuid
 from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session, make_tool_span
 
@@ -42,8 +42,8 @@ def _insert_agent(db, agent_id="test-agent"):
 def test_migrations_run_on_empty_db():
     backend = InMemoryBackend()
     rows = backend.conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert len(rows) == 11
-    assert {r[0] for r in rows} == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
+    assert len(rows) == 12
+    assert {r[0] for r in rows} == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
     backend.close()
 
 
@@ -52,7 +52,7 @@ def test_migrations_are_idempotent():
     # Running migrations again should not raise
     run_migrations(backend.conn)
     rows = backend.conn.execute("SELECT version FROM schema_migrations").fetchall()
-    assert len(rows) == 11
+    assert len(rows) == 12
     backend.close()
 
 
