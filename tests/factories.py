@@ -8,8 +8,47 @@ from tokenjam.core.models import (
     NormalizedSpan, SessionRecord,
     SpanStatus, SpanKind,
 )
+from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.utils.ids import new_uuid, new_trace_id, new_span_id
 from tokenjam.utils.time_parse import utcnow
+
+
+def make_invoke_agent_span(
+    agent_id: str = "test-agent",
+    session_id: str | None = None,
+    conversation_id: str | None = None,
+    duration_ms: float = 0.0,
+    start_time=None,
+    trace_id: str | None = None,
+    service_namespace: str | None = None,
+) -> NormalizedSpan:
+    """Create an ``invoke_agent`` span.
+
+    ``duration_ms == 0`` -> a zero-duration turn-start marker, exactly what the
+    Claude Code / Codex logs path emits for every ``user_prompt`` event
+    (``end_time == start_time``). These mark the *start* of a turn and must NOT
+    complete the session.
+
+    ``duration_ms > 0`` -> a real session-wrapping span, what the SDK
+    ``@watch()`` path emits to bracket a whole agent run. This DOES complete the
+    session.
+    """
+    now = start_time or utcnow()
+    end = now + timedelta(milliseconds=duration_ms)
+    return NormalizedSpan(
+        span_id=new_span_id(),
+        trace_id=trace_id or new_trace_id(),
+        name=GenAIAttributes.SPAN_INVOKE_AGENT,
+        kind=SpanKind.SERVER,
+        status_code=SpanStatus.OK,
+        start_time=now,
+        end_time=end,
+        duration_ms=duration_ms if duration_ms else None,
+        agent_id=agent_id,
+        session_id=session_id,
+        conversation_id=conversation_id,
+        service_namespace=service_namespace,
+    )
 
 
 def make_llm_span(
@@ -33,6 +72,8 @@ def make_llm_span(
     billing_account: str | None = "anthropic",
     request_params: dict | None = None,
     request_tools: dict | None = None,
+    service_namespace: str | None = None,
+    service_instance_id: str | None = None,
 ) -> NormalizedSpan:
     """
     Create a NormalizedSpan representing a single LLM call.
@@ -73,6 +114,8 @@ def make_llm_span(
         billing_account=billing_account,
         request_params=request_params,
         request_tools=request_tools,
+        service_namespace=service_namespace,
+        service_instance_id=service_instance_id,
     )
 
 
@@ -119,6 +162,10 @@ def make_session(
     status: str = "completed",
     duration_seconds: float = 60.0,
     plan_tier: str = "api",
+    started_at=None,
+    ended_at=None,
+    service_namespace: str | None = None,
+    service_instance_id: str | None = None,
 ) -> SessionRecord:
     """
     Create a SessionRecord with sensible defaults.
@@ -126,15 +173,26 @@ def make_session(
     `plan_tier` defaults to "api" so existing tests see dollar figures
     rendered normally (least-disruption). Tests for subscription / local /
     unknown rendering paths should pass it explicitly.
+
+    Pass `started_at` / `ended_at` to control the timeline explicitly (e.g.
+    to test ordering by last activity, or the idle/stale lifecycle tiers);
+    otherwise they derive from `duration_seconds` ending at "now".
+
+    `service_instance_id` sets the per-terminal label (used by close-by-instance
+    and session-lifecycle tests); `service_namespace` sets the project grouping.
     """
     now = utcnow()
-    started = now - timedelta(seconds=duration_seconds)
+    started = started_at or (now - timedelta(seconds=duration_seconds))
+    if ended_at is not None:
+        ended = ended_at
+    else:
+        ended = now if status == "completed" else None
 
     return SessionRecord(
         session_id=session_id or new_uuid(),
         agent_id=agent_id,
         started_at=started,
-        ended_at=now if status == "completed" else None,
+        ended_at=ended,
         conversation_id=conversation_id or new_uuid(),
         status=status,
         total_cost_usd=total_cost_usd,
@@ -143,6 +201,8 @@ def make_session(
         tool_call_count=tool_call_count,
         error_count=error_count,
         plan_tier=plan_tier,
+        service_namespace=service_namespace,
+        service_instance_id=service_instance_id,
     )
 
 

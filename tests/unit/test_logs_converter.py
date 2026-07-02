@@ -517,3 +517,24 @@ def test_parse_log_records_unknown_event_skipped():
     assert ingested == 0
     assert rejections == []
     pipeline.process.assert_not_called()
+
+
+def test_parse_log_records_extracts_service_namespace():
+    """service.namespace on the resource is stamped onto every synthesized span."""
+    record = make_claude_code_api_request_log(session_id="s-ns")
+    body = {
+        "resourceLogs": [{
+            "resource": {"attributes": [
+                {"key": "service.name", "value": {"stringValue": "claude-code-harness"}},
+                {"key": "service.namespace", "value": {"stringValue": "aquanode"}},
+            ]},
+            "scopeLogs": [{"logRecords": [record]}],
+        }],
+    }
+    pipeline = MagicMock()
+    parse_log_records(body, pipeline)
+
+    pipeline.process.assert_called_once()
+    span = pipeline.process.call_args[0][0]
+    assert span.service_namespace == "aquanode"
+    assert span.agent_id == "claude-code-harness"

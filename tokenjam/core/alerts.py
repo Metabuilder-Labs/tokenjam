@@ -45,6 +45,23 @@ _FAILURE_RATE_THRESHOLD = 0.20
 _FAILURE_RATE_CHECK_INTERVAL = 5
 _SESSION_DURATION_DEFAULT = 3600  # seconds
 
+# Agent-id prefixes for interactive coding agents (Claude Code / Codex): a
+# heterogeneous, arg-less, human-driven workload. Distinguished from SDK
+# services so the dashboard can split coding sessions from long-lived services.
+_INTERACTIVE_AGENT_PREFIXES = ("claude-code", "codex")
+
+
+def is_interactive_coding_agent(agent_id: str | None) -> bool:
+    """True for Claude Code / Codex agents (interactive, heterogeneous, no args).
+
+    Used to classify a /status agent as a coding session vs an SDK service,
+    keyed on the agent id rather than session-id presence (which is unreliable —
+    ingest mints session_ids for SDK spans too).
+    """
+    if not agent_id:
+        return False
+    return any(agent_id.startswith(p) for p in _INTERACTIVE_AGENT_PREFIXES)
+
 
 # ── Cooldown tracker ───────────────────────────────────────────────────────
 

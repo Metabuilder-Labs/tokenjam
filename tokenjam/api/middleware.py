@@ -13,7 +13,9 @@ class IngestAuthMiddleware(BaseHTTPMiddleware):
     Returns 401 with JSON error if secret is wrong or missing.
     """
 
-    PROTECTED_PATHS = {"/api/v1/spans", "/v1/logs", "/v1/traces"}
+    PROTECTED_PATHS = {
+        "/api/v1/spans", "/api/v1/sessions/close", "/v1/logs", "/v1/traces",
+    }
 
     async def dispatch(self, request: Request, call_next):  # type: ignore[override]
         if request.method == "POST" and request.url.path in self.PROTECTED_PATHS:
