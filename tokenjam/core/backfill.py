@@ -111,6 +111,11 @@ class BackfillResult:
         """Distinct sessions already fully present before this run."""
         return self.sessions_total - self.sessions_new
 
+    # True when a `max_sessions` cap was hit, so callers know more sessions exist
+    # on disk than were ingested (the #13 quickstart first-run cap). The full
+    # `tj backfill claude-code` path passes no cap, so this stays False there.
+    limit_reached: bool = False
+
 
 @dataclass
 class ParsedSession:
@@ -469,6 +474,7 @@ def iter_claude_code_sessions(
     root: Path | None = None,
     since: datetime | None = None,
     capture: CaptureConfig | None = None,
+    max_sessions: int | None = None,
 ) -> Iterator[ParsedSession]:
     """
     Walk a Claude Code projects directory and yield ParsedSession objects.
@@ -478,11 +484,40 @@ def iter_claude_code_sessions(
 
     `capture` is forwarded to `parse_claude_code_session` to gate per-message
     content extraction (#3); None/all-False means no content is extracted.
+
+    `max_sessions` caps how many sessions are parsed+yielded. When set, files are
+    walked **most-recent first** (by mtime) and parsing stops once `max_sessions`
+    sessions have been yielded — so the work this generator does (and the inserts
+    its caller performs) is bounded regardless of how large `~/.claude` is. This
+    powers the `tj quickstart` first-run cap (#13): a brand-new user with
+    thousands of sessions sees the headline over their most-recent N sessions in
+    bounded time, with the full picture available on demand. `None` (the default)
+    keeps the original deterministic path-sorted, unbounded walk so the full
+    `tj backfill claude-code` ingest is byte-for-byte unchanged.
     """
     base = root or CLAUDE_CODE_PROJECTS_ROOT
     if not base.exists() or not base.is_dir():
         return
-    for jsonl_path in sorted(base.rglob("*.jsonl")):
+
+    paths = list(base.rglob("*.jsonl"))
+    if max_sessions is not None:
+        # Most-recent first so the cap keeps the freshest sessions. We sort by
+        # mtime (cheap, no parse) and read the stat once, reusing it for the
+        # `since` pre-filter below.
+        def _mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        paths = sorted(paths, key=_mtime, reverse=True)
+    else:
+        paths = sorted(paths)
+
+    yielded = 0
+    for jsonl_path in paths:
+        if max_sessions is not None and yielded >= max_sessions:
+            return
         try:
             if since is not None:
                 mtime = datetime.fromtimestamp(jsonl_path.stat().st_mtime, tz=timezone.utc)
@@ -496,6 +531,7 @@ def iter_claude_code_sessions(
         if since is not None and parsed.ended_at < since:
             continue
         yield parsed
+        yielded += 1
 
 
 def session_record_from_parsed(
@@ -527,6 +563,7 @@ def ingest_claude_code(
     progress=None,
     config=None,
     reingest: bool = False,
+    max_sessions: int | None = None,
 ) -> BackfillResult:
     """
     Ingest Claude Code sessions into the storage backend.
@@ -543,13 +580,21 @@ def ingest_claude_code(
     config default, and when `config` is None) extracts no content, so a
     default backfill is byte-for-byte unchanged.
 
+    `max_sessions` caps the number of (most-recent) sessions ingested so the
+    work is bounded on a large `~/.claude` history — the #13 quickstart first-run
+    cap. When the cap is hit, `result.limit_reached` is set True. `None` (the
+    default, used by the full `tj backfill claude-code` path) ingests everything
+    in window, unchanged.
+
     `progress(parsed_session, result)` is called once per session if provided.
     """
     result = BackfillResult()
     projects_seen: set[str] = set()
     plan_tier = _plan_tier_for_provider(config, _CLAUDE_CODE_PROVIDER)
     capture = getattr(config, "capture", None) if config is not None else None
-    for parsed in iter_claude_code_sessions(root=root, since=since, capture=capture):
+    for parsed in iter_claude_code_sessions(
+        root=root, since=since, capture=capture, max_sessions=max_sessions,
+    ):
         result.sessions_seen += 1
         result.seen_session_ids.add(parsed.session_id)
         if parsed.cwd:
@@ -586,6 +631,15 @@ def ingest_claude_code(
             except Exception:
                 pass
 
+    # A Claude Code session is split across files that share one session_id
+    # (main thread + subagents/agent-*.jsonl). The per-file upsert above uses
+    # replace semantics, so each touched session row must be reconciled to the
+    # SUM of its spans -- otherwise it holds only the last file's totals.
+    # Idempotent: a re-run also repairs rows written by an earlier backfill.
+    recompute = getattr(db, "recompute_session_totals_from_spans", None)
+    if recompute is not None and result.seen_session_ids:
+        recompute(sorted(result.seen_session_ids))
+
     # Snapshot each newly-ingested session's reconstructed method into
     # `session_story` so it survives Claude Code pruning the transcript later
     # (the whole point of the persistence path — historical sessions are the
@@ -599,6 +653,10 @@ def ingest_claude_code(
         capture_session_method(db, sid, projects_dir=root, source="backfill")
 
     result.project_count = len(projects_seen)
+    # The iterator stops yielding once the cap is reached, so seeing exactly
+    # `max_sessions` means there may be older sessions on disk we skipped.
+    if max_sessions is not None and result.sessions_seen >= max_sessions:
+        result.limit_reached = True
     return result
 
 
@@ -636,12 +694,68 @@ def _merge_attributes(exists_attributes: dict, parsed_attributes: dict) -> dict:
     return {**exists_attributes, **parsed_attributes}
 
 
+# Column order for the bulk span INSERT — kept in lock-step with the named-column
+# INSERT in `DuckDBBackend.insert_span`. A named-column list (not positional) so a
+# future migration adding a column at the end doesn't silently shift binding order.
+_SPAN_INSERT_SQL = (
+    "INSERT INTO spans ("
+    "span_id, trace_id, parent_span_id, session_id, agent_id, "
+    "name, kind, status_code, status_message, start_time, end_time, "
+    "duration_ms, attributes, provider, model, tool_name, "
+    "input_tokens, output_tokens, cache_tokens, cost_usd, "
+    "request_type, conversation_id, events, billing_account, "
+    "cache_write_tokens, sub_agent_id"
+    ") VALUES "
+    "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)"
+)
+
+
+def _span_insert_params(span: NormalizedSpan) -> list:
+    """Positional bind params for `_SPAN_INSERT_SQL`, in column order."""
+    return [
+        span.span_id, span.trace_id, span.parent_span_id, span.session_id,
+        span.agent_id, span.name, span.kind.value, span.status_code.value,
+        span.status_message, span.start_time, span.end_time, span.duration_ms,
+        json.dumps(span.attributes), span.provider, span.model, span.tool_name,
+        span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
+        span.request_type, span.conversation_id, json.dumps(span.events),
+        span.billing_account, span.cache_write_tokens, span.sub_agent_id,
+    ]
+
+
+def _existing_span_ids(conn, span_ids: list[str]) -> set[str]:
+    """Return the subset of `span_ids` that already exist in `spans`, in ONE
+    query (replacing the per-span existence SELECT). Chunked so an enormous
+    session can't blow past DuckDB's bind-parameter ceiling.
+    """
+    found: set[str] = set()
+    if not span_ids:
+        return found
+    chunk = 5000
+    for start in range(0, len(span_ids), chunk):
+        batch = span_ids[start:start + chunk]
+        placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
+        rows = conn.execute(
+            f"SELECT span_id FROM spans WHERE span_id IN ({placeholders})", batch
+        ).fetchall()
+        found.update(r[0] for r in rows)
+    return found
+
+
 def _insert_session_idempotent(
     db, parsed: ParsedSession, plan_tier: str = "unknown", reingest: bool = False
 ) -> tuple[int, int]:
     """
     Insert spans + session record; skip spans already present.
     Returns (newly_inserted, retagged).
+
+    Bulk path (#15): instead of one SELECT + one INSERT per span (~2 round-trips
+    × N spans → ~100s over a large history), the whole session is processed in a
+    bounded number of statements regardless of span count — ONE (chunked)
+    `WHERE span_id IN (...)` partitions spans into new-vs-existing, then the new
+    spans are inserted in a single `executemany`. PRIMARY KEY conflicts on
+    (span_id) mean a previous backfill (or live ingest) already covered the span,
+    so it is skipped.
 
     When `reingest` is True, spans that already exist are UPDATEd instead of
     being skipped — this backfills two things onto rows an older/leaner backfill
@@ -676,50 +790,33 @@ def _insert_session_idempotent(
         db.upsert_session(session_record_from_parsed(parsed, plan_tier))
         return inserted, retagged
 
-    for span in parsed.spans:
-        # PRIMARY KEY conflicts on (span_id) mean a previous backfill (or live ingest)
-        # has already covered this span. Skip silently — the row count returned by
-        # DuckDB's execute() isn't reliable for ON CONFLICT, so we pre-check.
-        exists = conn.execute(
-            "SELECT 1 FROM spans WHERE span_id = $1", [span.span_id]
-        ).fetchone()
-        if exists:
-            if reingest:
-                # Re-tag history from before the sub_agent_id column existed AND
-                # overlay any freshly-parsed captured content (#10) so enabling
-                # [capture] later backfills onto already-ingested spans.
-                merged_attrs = _merge_attributes(
-                    exists_attributes=_load_attrs(conn, span.span_id),
-                    parsed_attributes=span.attributes,
-                )
-                conn.execute(
-                    "UPDATE spans SET sub_agent_id = $1, attributes = $2 "
-                    "WHERE span_id = $3",
-                    [span.sub_agent_id, json.dumps(merged_attrs), span.span_id],
-                )
-                retagged += 1
-            continue
-        conn.execute(
-            "INSERT INTO spans ("
-            "span_id, trace_id, parent_span_id, session_id, agent_id, "
-            "name, kind, status_code, status_message, start_time, end_time, "
-            "duration_ms, attributes, provider, model, tool_name, "
-            "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens, sub_agent_id"
-            ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)",
-            [
-                span.span_id, span.trace_id, span.parent_span_id, span.session_id,
-                span.agent_id, span.name, span.kind.value, span.status_code.value,
-                span.status_message, span.start_time, span.end_time, span.duration_ms,
-                json.dumps(span.attributes), span.provider, span.model, span.tool_name,
-                span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
-                span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account, span.cache_write_tokens, span.sub_agent_id,
-            ],
+    span_ids = [s.span_id for s in parsed.spans]
+    existing = _existing_span_ids(conn, span_ids)
+    new_spans = [s for s in parsed.spans if s.span_id not in existing]
+    if new_spans:
+        conn.executemany(
+            _SPAN_INSERT_SQL, [_span_insert_params(s) for s in new_spans]
         )
-        inserted += 1
+        inserted = len(new_spans)
+
+    if reingest and existing:
+        # Re-tag rows an older/leaner backfill wrote: overlay sub_agent_id (for
+        # history ingested before that column existed) and any freshly-parsed
+        # captured content (#10) so enabling [capture] later backfills onto
+        # already-ingested spans. Per-span UPDATE, bounded by the existing set.
+        for span in parsed.spans:
+            if span.span_id not in existing:
+                continue
+            merged_attrs = _merge_attributes(
+                exists_attributes=_load_attrs(conn, span.span_id),
+                parsed_attributes=span.attributes,
+            )
+            conn.execute(
+                "UPDATE spans SET sub_agent_id = $1, attributes = $2 "
+                "WHERE span_id = $3",
+                [span.sub_agent_id, json.dumps(merged_attrs), span.span_id],
+            )
+            retagged += 1
 
     db.upsert_session(session_record_from_parsed(parsed, plan_tier))
     return inserted, retagged

@@ -53,8 +53,8 @@ def test_cost_engine_updates_span_cost_in_db(db: InMemoryBackend, engine: CostEn
 
     db_cost = _span_cost(db, span)
     assert db_cost is not None
-    assert db_cost == pytest.approx(0.0016)
-    assert span.cost_usd == pytest.approx(0.0016)
+    assert db_cost == pytest.approx(0.002)
+    assert span.cost_usd == pytest.approx(0.002)
 
 
 def test_cost_engine_updates_session_total_cost(db: InMemoryBackend, engine: CostEngine) -> None:
@@ -72,7 +72,7 @@ def test_cost_engine_updates_session_total_cost(db: InMemoryBackend, engine: Cos
 
     session_cost = _session_total(db, session.session_id)
     assert session_cost is not None
-    assert session_cost == pytest.approx(0.0016)
+    assert session_cost == pytest.approx(0.002)
 
 
 def test_cost_engine_accumulates_across_multiple_spans(
@@ -92,8 +92,8 @@ def test_cost_engine_accumulates_across_multiple_spans(
 
     session_cost = _session_total(db, session.session_id)
     assert session_cost is not None
-    # 3 * 0.0016 = 0.0048
-    assert session_cost == pytest.approx(0.0048)
+    # 3 * 0.002 = 0.006
+    assert session_cost == pytest.approx(0.006)
 
 
 def test_cost_engine_no_op_when_tokens_missing(db: InMemoryBackend, engine: CostEngine) -> None:
@@ -112,7 +112,7 @@ def test_cost_engine_no_op_when_tokens_missing(db: InMemoryBackend, engine: Cost
 def test_cost_engine_costs_cache_only_span(db: InMemoryBackend, engine: CostEngine) -> None:
     # A span with no new input/output but cache-read tokens (a cache hit) still
     # costs the cache-read rate and must be recorded, not dropped as a no-op.
-    # claude-haiku-4-5: cache_read=0.08 per MTok.
+    # claude-haiku-4-5: cache_read=0.10 per MTok.
     span = make_llm_span(
         provider="anthropic", model="claude-haiku-4-5",
         input_tokens=0, output_tokens=0, cache_tokens=1_000_000,
@@ -121,8 +121,8 @@ def test_cost_engine_costs_cache_only_span(db: InMemoryBackend, engine: CostEngi
 
     engine.process_span(span)
 
-    assert _span_cost(db, span) == pytest.approx(0.08)
-    assert span.cost_usd == pytest.approx(0.08)
+    assert _span_cost(db, span) == pytest.approx(0.10)
+    assert span.cost_usd == pytest.approx(0.10)
 
 
 def test_cost_engine_cache_only_span_updates_session_total(
@@ -142,13 +142,13 @@ def test_cost_engine_cache_only_span_updates_session_total(
 
     engine.process_span(span)
 
-    assert _session_total(db, session.session_id) == pytest.approx(0.08)
+    assert _session_total(db, session.session_id) == pytest.approx(0.10)
 
 
 def test_cost_engine_costs_cache_write_span(db: InMemoryBackend, engine: CostEngine) -> None:
     # A span whose only tokens are cache-CREATION (cache write) must be costed at
     # the cache-write rate, not dropped as a no-op and not charged the read rate.
-    # claude-haiku-4-5: cache_write=1.00 per MTok.
+    # claude-haiku-4-5: cache_write=1.25 per MTok.
     span = make_llm_span(
         provider="anthropic", model="claude-haiku-4-5",
         input_tokens=0, output_tokens=0, cache_write_tokens=1_000_000,
@@ -157,15 +157,15 @@ def test_cost_engine_costs_cache_write_span(db: InMemoryBackend, engine: CostEng
 
     engine.process_span(span)
 
-    assert _span_cost(db, span) == pytest.approx(1.00)
-    assert span.cost_usd == pytest.approx(1.00)
+    assert _span_cost(db, span) == pytest.approx(1.25)
+    assert span.cost_usd == pytest.approx(1.25)
 
 
 def test_cost_engine_costs_cache_read_and_write_together(
     db: InMemoryBackend, engine: CostEngine,
 ) -> None:
     # Read and write cache tokens are priced at different rates and must both be
-    # charged. claude-haiku-4-5: cache_read=0.08, cache_write=1.00 per MTok.
+    # charged. claude-haiku-4-5: cache_read=0.10, cache_write=1.25 per MTok.
     span = make_llm_span(
         provider="anthropic", model="claude-haiku-4-5",
         input_tokens=0, output_tokens=0,
@@ -175,8 +175,8 @@ def test_cost_engine_costs_cache_read_and_write_together(
 
     engine.process_span(span)
 
-    assert _span_cost(db, span) == pytest.approx(1.08)
-    assert span.cost_usd == pytest.approx(1.08)
+    assert _span_cost(db, span) == pytest.approx(1.35)
+    assert span.cost_usd == pytest.approx(1.35)
 
 
 def test_cost_engine_cache_write_span_updates_session_total(
@@ -195,7 +195,7 @@ def test_cost_engine_cache_write_span_updates_session_total(
 
     engine.process_span(span)
 
-    assert _session_total(db, session.session_id) == pytest.approx(1.00)
+    assert _session_total(db, session.session_id) == pytest.approx(1.25)
 
 
 def test_cost_engine_cache_write_pre_priced_does_not_double_count_session(
@@ -218,7 +218,7 @@ def test_cost_engine_cache_write_pre_priced_does_not_double_count_session(
     engine.process_span(span)
 
     # Span cost recomputed, session total left untouched (no double-count).
-    assert _span_cost(db, span) == pytest.approx(1.00)
+    assert _span_cost(db, span) == pytest.approx(1.25)
     assert _session_total(db, session.session_id) == pytest.approx(5.0)
 
 

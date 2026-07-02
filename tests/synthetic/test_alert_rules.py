@@ -107,31 +107,83 @@ def test_sensitive_action_uses_configured_severity():
 # ── Retry loop ─────────────────────────────────────────────────────────────
 
 def test_retry_loop_fires_at_4_calls_not_3():
+    # A genuine loop = the SAME tool with IDENTICAL arguments repeated.
     config = _make_config()
     engine, db = _make_engine(config)
     session_id = new_uuid()
     trace_id = "a" * 32
+    same = {"url": "http://x"}
 
-    # 3 calls — no alert
+    # 3 identical calls — no alert
     three_spans = [
-        make_tool_span(tool_name="fetch_url", trace_id=trace_id)
+        make_tool_span(tool_name="fetch_url", trace_id=trace_id, tool_input=same)
         for _ in range(3)
     ]
     db.get_recent_spans.return_value = three_spans
-    span3 = make_tool_span(tool_name="fetch_url", trace_id=trace_id)
+    span3 = make_tool_span(tool_name="fetch_url", trace_id=trace_id, tool_input=same)
     span3.session_id = session_id
     engine.evaluate(span3)
     db.insert_alert.assert_not_called()
 
-    # 4th call — should fire
-    four_spans = three_spans + [make_tool_span(tool_name="fetch_url", trace_id=trace_id)]
+    # 4th identical call — should fire
+    four_spans = three_spans + [
+        make_tool_span(tool_name="fetch_url", trace_id=trace_id, tool_input=same)]
     db.get_recent_spans.return_value = four_spans
-    span4 = make_tool_span(tool_name="fetch_url", trace_id=trace_id)
+    span4 = make_tool_span(tool_name="fetch_url", trace_id=trace_id, tool_input=same)
     span4.session_id = session_id
     engine.evaluate(span4)
     db.insert_alert.assert_called_once()
     alert: Alert = db.insert_alert.call_args[0][0]
     assert alert.type == AlertType.RETRY_LOOP
+
+
+def test_retry_loop_ignores_different_arguments():
+    # 4 calls to the SAME tool with DIFFERENT args is normal work, not a loop.
+    config = _make_config()
+    engine, db = _make_engine(config)
+    session_id = new_uuid()
+    spans = [
+        make_tool_span(tool_name="Bash", tool_input={"cmd": f"echo {i}"})
+        for i in range(4)
+    ]
+    db.get_recent_spans.return_value = spans
+    span = make_tool_span(tool_name="Bash", tool_input={"cmd": "echo 5"})
+    span.session_id = session_id
+    engine.evaluate(span)
+    db.insert_alert.assert_not_called()
+
+
+def test_retry_loop_skipped_without_tool_arguments():
+    # Telemetry with no tool args (Claude Code over OTLP) can't prove a repeat.
+    config = _make_config()
+    engine, db = _make_engine(config)
+    session_id = new_uuid()
+    spans = [make_tool_span(tool_name="Read") for _ in range(5)]  # no tool_input
+    db.get_recent_spans.return_value = spans
+    span = make_tool_span(tool_name="Read")
+    span.session_id = session_id
+    engine.evaluate(span)
+    db.insert_alert.assert_not_called()
+
+
+def test_retry_loop_ignores_decision_event_spans():
+    # Non-execution spans (claude_code.tool_decision) must not count, even with
+    # identical args — only real gen_ai.tool.call executions do.
+    config = _make_config()
+    engine, db = _make_engine(config)
+    session_id = new_uuid()
+    same = {"cmd": "ls"}
+    spans = [
+        make_tool_span(tool_name="Bash", tool_input=same,
+                       name="claude_code.tool_decision")
+        for _ in range(5)
+    ]
+    db.get_recent_spans.return_value = spans
+    span = make_tool_span(tool_name="Bash", tool_input=same,
+                          name="claude_code.tool_decision")
+    span.session_id = session_id
+    engine.evaluate(span)
+    db.insert_alert.assert_not_called()
 
 
 def test_retry_loop_ignores_spans_without_session():
@@ -395,6 +447,36 @@ def test_failure_rate_fires_when_threshold_exceeded():
     db.insert_alert.assert_called()
     alert: Alert = db.insert_alert.call_args[0][0]
     assert alert.type == AlertType.FAILURE_RATE
+
+
+def test_failure_rate_fires_once_per_session():
+    # A struggling session is one incident — further errors must not re-fire.
+    engine, db = _make_engine()
+    session_id = new_uuid()
+
+    def errored_window(n_errors):
+        spans = []
+        for i in range(20):
+            status = "error" if i < n_errors else "ok"
+            spans.append(make_tool_span(agent_id="test-agent",
+                                        tool_name=f"t{i}", status=status))
+        return spans
+
+    def fire(n_errors):
+        db.get_recent_spans.return_value = errored_window(n_errors)
+        s = make_tool_span(agent_id="test-agent", tool_name="boom", status="error")
+        s.session_id = session_id
+        s.status_code = SpanStatus.ERROR
+        engine.evaluate(s)
+
+    fire(5)   # crosses 20% -> one alert
+    fire(8)   # worse, same session -> must NOT re-fire
+    fire(12)  # worse still -> must NOT re-fire
+    failure_alerts = [
+        c.args[0] for c in db.insert_alert.call_args_list
+        if c.args[0].type == AlertType.FAILURE_RATE
+    ]
+    assert len(failure_alerts) == 1
 
 
 # ── External fire() entry point ───────────���────────────────────────────────

@@ -203,6 +203,11 @@ class TjAttributes:
     # the dashboard can group a run's member sessions and render a parent tree.
     RUN_ID            = "tokenjam.run_id"
     PARENT_SESSION_ID = "tokenjam.parent_session_id"
+    # Privacy-safe hash of a tool call's arguments, computed at ingest BEFORE the
+    # raw `gen_ai.tool.input` is stripped per capture config. Lets retry-loop
+    # detection tell an identical repeated call from normal repeated tool use
+    # without retaining the (potentially sensitive) raw input.
+    TOOL_ARG_SIG      = "tokenjam.tool_arg_sig"
 
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"

@@ -5,7 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.db import InMemoryBackend, session_active_seconds
+from tokenjam.core.db import (
+    InMemoryBackend,
+    session_active_seconds,
+    session_token_cost_rollup,
+)
 from tests.factories import make_llm_span, make_session
 
 
@@ -145,3 +149,53 @@ def test_get_cost_delta_by_group_rejects_unknown_column(db):
             "drop_table", datetime.now(timezone.utc), datetime.now(timezone.utc),
             datetime.now(timezone.utc), datetime.now(timezone.utc), top_n=5,
         )
+
+
+# ---------------------------------------------------------------------------
+# session_token_cost_rollup (#18): join trace-keyed cost spans onto the session
+# ---------------------------------------------------------------------------
+
+def test_session_token_cost_rollup_joins_trace_keyed_cost(db):
+    # #18 fan-out shape: the session's zero-cost marker span carries the
+    # session_id + a shared trace_id; the real cost-bearing spans carry only that
+    # trace_id (session_id=None), so the denormalized session aggregate reads 0.
+    # The rollup must recover the real spend via the shared trace.
+    db.upsert_session(make_session(agent_id="a1", session_id="s1", status="completed"))
+    # Zero-cost marker carrying session_id + trace.
+    db.insert_span(make_llm_span(
+        agent_id="a1", session_id="s1", trace_id="18" * 16,
+        input_tokens=0, output_tokens=0, cost_usd=0.0,
+    ))
+    # Two cost spans keyed only by the shared trace (session_id=None).
+    for _ in range(2):
+        db.insert_span(make_llm_span(
+            agent_id="a1", session_id=None, trace_id="18" * 16,
+            input_tokens=150, output_tokens=60, cost_usd=1.20,
+        ))
+
+    roll = session_token_cost_rollup(db.conn, "s1")
+    assert roll is not None
+    assert roll["input_tokens"] == 300
+    assert roll["output_tokens"] == 120
+    assert roll["total_cost_usd"] == pytest.approx(2.40)
+
+
+def test_session_token_cost_rollup_none_when_no_spans(db):
+    db.upsert_session(make_session(agent_id="a1", session_id="s-empty", status="completed"))
+    assert session_token_cost_rollup(db.conn, "s-empty") is None
+
+
+def test_session_token_cost_rollup_equals_plain_sum_when_cost_carries_session_id(db):
+    # When the cost spans DO carry the session_id (the common case), the trace
+    # clause is redundant and the rollup equals the plain session_id sum.
+    db.upsert_session(make_session(agent_id="a1", session_id="s2", status="completed"))
+    for _ in range(3):
+        db.insert_span(make_llm_span(
+            agent_id="a1", session_id="s2", trace_id="2a" * 16,
+            input_tokens=100, output_tokens=40, cost_usd=0.50,
+        ))
+    roll = session_token_cost_rollup(db.conn, "s2")
+    assert roll is not None
+    assert roll["input_tokens"] == 300
+    assert roll["output_tokens"] == 120
+    assert roll["total_cost_usd"] == pytest.approx(1.50)

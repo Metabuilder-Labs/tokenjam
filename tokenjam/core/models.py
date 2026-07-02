@@ -123,11 +123,9 @@ class SessionRecord:
     total_cost_usd:  float | None = None
     input_tokens:    int          = 0
     output_tokens:   int          = 0
+    # cache_tokens = cache reads (reused); cache_write_tokens = cache writes/
+    # creation. Kept separate; the dashboard's "Cache tokens" shows their sum.
     cache_tokens:    int          = 0
-    # cache-CREATE (write) tokens rolled up onto the session. The dedicated
-    # sessions column is a sibling-branch migration; until it lands this stays a
-    # model-level default (0) so the dashboard's per-session detail can total
-    # cache activity without depending on that column.
     cache_write_tokens: int       = 0
     tool_call_count: int          = 0
     error_count:     int          = 0

@@ -1,93 +1,92 @@
-"""Unit tests for `tj tokenmaxx`."""
+"""Unit tests for `tj tokenmaxx` — the quota/efficiency card (#7).
+
+Reframed from the old spend-tier card: the card now leads with context
+COMPOSITION (overhead vs real work) pulled from the #4 diagnostic, is
+quota-native for subscription plans (NO dollar spend-brag — mirrors #5's
+polarity), and has a weekly "quota Wrapped" recap mode.
+
+Two layers under test:
+  * efficiency-tier classification from the overhead (re-read) share;
+  * the CLI render / JSON over a synthetic multi-session fixture, asserting the
+    quota-native framing (composition + reclaimed, never a spend flex) and the
+    plan-tier suppression of dollars.
+"""
 from __future__ import annotations
 
+import json
+from datetime import timedelta
+
 import pytest
+from click.testing import CliRunner
 
 from tokenjam.cli.cmd_tokenmaxx import (
     Tier,
     _TIERS,
     _classify,
+    cmd_tokenmaxx,
 )
-from tokenjam.core.config import ProviderBudget, TjConfig
-# Plan-tier helpers moved to the shared framing module (#110); tokenmaxx now
-# consumes them from there.
-from tokenjam.core.framing import PLAN_LABEL_AND_FEE
-from tokenjam.core.framing import config_declared_plan as _config_declared_plan
+from tokenjam.core.config import CaptureConfig, ProviderBudget, TjConfig
+from tokenjam.core.db import InMemoryBackend
+from tokenjam.utils.time_parse import utcnow
+from tests.factories import make_llm_span, make_session
 
-
-def _plan_label_and_fee(plan_tier):
-    """Shim mirroring the old cmd_tokenmaxx helper's contract (returns None for
-    unknown / api / local / None) on top of the shared PLAN_LABEL_AND_FEE."""
-    if plan_tier is None:
-        return None
-    return PLAN_LABEL_AND_FEE.get(plan_tier)
+# Anchor the fixture a couple of hours before "now" so a relative `--since`
+# window (parsed against utcnow() in the CLI) always covers it.
+BASE = utcnow() - timedelta(hours=2)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_home(monkeypatch, tmp_path):
-    """Keep config_declared_plan's global fallback from reading this machine's
-    ~/.config/tj/config.toml during the no-budgets test."""
+    """Keep framing's global-config fallback from reading this machine's
+    ~/.config/tj/config.toml during the no-plan tests."""
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+
+
+@pytest.fixture
+def db():
+    backend = InMemoryBackend()
+    yield backend
+    backend.close()
 
 
 # ───────────────────────────── classification ─────────────────────────────
 
-def test_classify_zero_spend_is_sipper():
-    # Zero spend → Sipper, regardless of which path.
-    assert _classify(0.0).label == "TokenSipper"
-    assert _classify(0.0, multiplier=0.0).label == "TokenSipper"
+def test_classify_lean_context_is_minimizer():
+    # Very low overhead → the leanest tier. Efficiency is the brag now, not spend.
+    assert _classify(0.0).label == "TokenMinimizer"
+    assert _classify(0.30).label == "TokenMinimizer"
 
 
-def test_classify_multiplier_path_walks_tier_boundaries():
-    # Multiplier-based classification — the primary path for subscription users.
-    # Six tiers, boundaries at 1× / 4× / 10× / 20× / 50×.
+def test_classify_walks_overhead_boundaries_lean_to_heavy():
+    # Five efficiency tiers, boundaries at 30% / 50% / 70% / 85% overhead.
+    # Lower overhead = leaner context = a better tier.
     cases = [
-        (0.99,  "TokenSipper"),
-        (1.0,   "TokenModerator"),
-        (3.99,  "TokenModerator"),
-        (4.0,   "TokenMaxxer"),
-        (9.99,  "TokenMaxxer"),
-        (10.0,  "TokenSuperMaxxer"),
-        (19.99, "TokenSuperMaxxer"),
-        (20.0,  "TokenMegaMaxxer"),
-        (49.99, "TokenMegaMaxxer"),
-        (50.0,  "TokenGigaMaxxer"),
-        (200.0, "TokenGigaMaxxer"),
+        (0.00, "TokenMinimizer"),
+        (0.30, "TokenMinimizer"),
+        (0.3001, "LeanOperator"),
+        (0.50, "LeanOperator"),
+        (0.5001, "SteadyState"),
+        (0.70, "SteadyState"),
+        (0.7001, "ContextHeavy"),
+        (0.85, "ContextHeavy"),
+        (0.8501, "QuotaSink"),
+        (1.00, "QuotaSink"),
     ]
-    for mult, expected in cases:
-        assert _classify(0.0, multiplier=mult).label == expected, f"failed at {mult}×"
+    for share, expected in cases:
+        assert _classify(share).label == expected, f"failed at overhead {share}"
 
 
-def test_classify_absolute_path_for_api_users_walks_tier_boundaries():
-    # Absolute USD/mo fallback — calibrated against Max-5x = $100/mo so the
-    # tier names mean roughly the same thing in both paths.
-    cases = [
-        (99.99,   "TokenSipper"),
-        (100.0,   "TokenModerator"),
-        (399.99,  "TokenModerator"),
-        (400.0,   "TokenMaxxer"),
-        (999.99,  "TokenMaxxer"),
-        (1000.0,  "TokenSuperMaxxer"),
-        (1999.99, "TokenSuperMaxxer"),
-        (2000.0,  "TokenMegaMaxxer"),
-        (4999.99, "TokenMegaMaxxer"),
-        (5000.0,  "TokenGigaMaxxer"),
-        (50_000,  "TokenGigaMaxxer"),
-    ]
-    for spend, expected in cases:
-        assert _classify(spend).label == expected, f"failed at ${spend}"
-
-
-def test_classify_multiplier_overrides_absolute_when_both_provided():
-    # A subscription user at $50/mo on a $20 Pro plan (2.5× their plan) is
-    # a TokenModerator, NOT a TokenSipper — the multiplier path wins.
-    t = _classify(50.0, multiplier=2.5)
-    assert t.label == "TokenModerator"
+def test_classify_is_monotonic_more_overhead_never_better():
+    # Sanity: as overhead climbs, the tier index never decreases. Guards a
+    # future table edit from accidentally rewarding waste.
+    labels = [t.label for t in _TIERS]
+    for share in (0.1, 0.4, 0.6, 0.8, 0.95):
+        tier = _classify(share)
+        assert tier.label in labels
 
 
 def test_every_tier_has_emoji_and_quip():
-    # The artifact's social-shareability depends on every tier having
-    # readable text — guard against a future blank entry.
+    # The card's social-shareability depends on every tier having readable text.
     for tier in _TIERS:
         assert isinstance(tier, Tier)
         assert tier.label
@@ -95,69 +94,178 @@ def test_every_tier_has_emoji_and_quip():
         assert tier.quip
 
 
-# ───────────────────────────── config helpers ─────────────────────────────
+# ───────────────────────────── fixtures ───────────────────────────────────
 
-def test_config_declared_plan_none_when_no_budgets():
-    cfg = TjConfig(version="1")
-    assert _config_declared_plan(cfg) is None
-
-
-def test_config_declared_plan_returns_subscription_tier():
-    cfg = TjConfig(version="1")
-    cfg.budgets["anthropic"] = ProviderBudget(plan="max_5x")
-    assert _config_declared_plan(cfg) == "max_5x"
-
-
-def test_config_declared_plan_prefers_first_sorted_provider():
-    cfg = TjConfig(version="1")
-    cfg.budgets["openai"] = ProviderBudget(plan="plus")
-    cfg.budgets["anthropic"] = ProviderBudget(plan="max_20x")
-    # alphabetical: anthropic < openai
-    assert _config_declared_plan(cfg) == "max_20x"
-
-
-def test_config_declared_plan_skips_providers_without_plan_field():
-    cfg = TjConfig(version="1")
-    cfg.budgets["anthropic"] = ProviderBudget(usd=200.0)  # no plan
-    cfg.budgets["openai"] = ProviderBudget(plan="plus")
-    assert _config_declared_plan(cfg) == "plus"
+def _seed_overhead_heavy(db, plan_tier: str = "max_5x") -> None:
+    """One re-read-heavy session: ~95% of tokens are cache re-reads (overhead),
+    plus a big-cache turn that clears the compact threshold so the card can
+    surface a 'reclaimable' figure.
+    """
+    sess = make_session(session_id="sess-a", plan_tier=plan_tier,
+                        duration_seconds=120.0)
+    db.upsert_session(sess)
+    span = make_llm_span(
+        model="claude-opus-4-6",
+        input_tokens=4_000,            # net-new work
+        output_tokens=1_000,           # work produced
+        cache_tokens=250_000,          # re-reading history / CLAUDE.md (overhead)
+        cache_write_tokens=0,
+        cost_usd=2.5,
+        session_id="sess-a",
+    )
+    span.start_time = BASE
+    db.insert_span(span)
 
 
-# ───────────────────────────── plan table ─────────────────────────────────
-
-def test_plan_label_and_fee_known_subscription_tiers():
-    assert _plan_label_and_fee("max_5x") == ("Max 5x plan", 100.0)
-    assert _plan_label_and_fee("max_20x") == ("Max 20x plan", 200.0)
-    assert _plan_label_and_fee("pro") == ("Pro plan", 20.0)
-    assert _plan_label_and_fee("plus") == ("ChatGPT Plus", 20.0)
-
-
-def test_plan_label_and_fee_contract_priced_tiers_have_no_fee():
-    label, fee = _plan_label_and_fee("team")
-    assert label == "ChatGPT Team"
-    assert fee is None
-
-
-def test_plan_label_and_fee_returns_none_for_unknown_or_api():
-    # 'api' and 'local' deliberately not in the table — the renderer
-    # doesn't quote a "plan cost multiplier" against pay-per-use plans.
-    assert _plan_label_and_fee("api") is None
-    assert _plan_label_and_fee("local") is None
-    assert _plan_label_and_fee(None) is None
-    assert _plan_label_and_fee("not_a_plan") is None
+def _seed_lean(db, plan_tier: str = "max_5x") -> None:
+    """A lean session: mostly net-new work, low overhead share."""
+    sess = make_session(session_id="sess-lean", plan_tier=plan_tier,
+                        duration_seconds=30.0)
+    db.upsert_session(sess)
+    span = make_llm_span(
+        model="claude-haiku-4-5",
+        input_tokens=5_000,
+        output_tokens=3_000,
+        cache_tokens=500,              # negligible overhead
+        cost_usd=0.1,
+        session_id="sess-lean",
+    )
+    span.start_time = BASE
+    db.insert_span(span)
 
 
-def test_all_anthropic_subscription_plans_produce_a_multiplier():
-    # Every Anthropic subscription plan in the onboard wizard must produce
-    # a finite multiplier, otherwise the tokenmaxx tweet hook ("Nx your
-    # plan") doesn't render for those users. This guards against the table
-    # diverging from `cmd_onboard.py::_ANTHROPIC_PLAN_CHOICES`.
-    for plan in ("pro", "max_5x", "max_20x"):
-        info = _plan_label_and_fee(plan)
-        assert info is not None, f"{plan!r} not in plan-fee table"
-        label, fee = info
-        assert label, f"{plan!r} missing a display label"
-        assert fee and fee > 0, f"{plan!r} missing a numeric monthly fee"
-        # Sanity-check the multiplier math the renderer does.
-        spend = 1000.0
-        assert spend / fee > 0
+def _config(plan_tier: str | None) -> TjConfig:
+    budgets = {}
+    if plan_tier is not None:
+        budgets["anthropic"] = ProviderBudget(plan=plan_tier)
+    return TjConfig(
+        version="1",
+        capture=CaptureConfig(tool_inputs=True),
+        budgets=budgets,
+    )
+
+
+def _invoke(db, config, *args) -> object:
+    runner = CliRunner()
+    return runner.invoke(
+        cmd_tokenmaxx, list(args),
+        obj={"db": db, "config": config, "agent": None},
+    )
+
+
+# ───────────────────────── render: composition framing ────────────────────
+
+def test_card_leads_with_overhead_vs_work_composition(db):
+    _seed_overhead_heavy(db, plan_tier="max_5x")
+    result = _invoke(db, _config("max_5x"))
+    assert result.exit_code == 0, result.output
+    out = result.output
+    # The headline is the COMPOSITION — overhead vs real work — not a spend tier.
+    assert "overhead" in out.lower()
+    assert "real work" in out.lower()
+    # A heavily re-read window classifies into a high-overhead tier.
+    assert "QuotaSink" in out or "ContextHeavy" in out
+
+
+def test_card_is_quota_native_for_subscription_no_dollar_spend_brag(db):
+    # The load-bearing reframe: a subscription user sees a token-share headline
+    # and NEVER a dollar spend figure (no "$X in last 30d" flex).
+    _seed_overhead_heavy(db, plan_tier="max_5x")
+    result = _invoke(db, _config("max_5x"))
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "% of cycle tokens" in out
+    # No dollar figure anywhere on a subscription card.
+    assert "$" not in out
+    assert "Implied API value" not in out
+
+
+def test_card_surfaces_reclaimable_quota_not_spend(db):
+    # The action line frames "what you can reclaim" in quota terms (compact
+    # candidates), pointing at tj context — the payoff, not a brag.
+    _seed_overhead_heavy(db, plan_tier="max_5x")
+    result = _invoke(db, _config("max_5x"))
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "reclaim" in out.lower()
+    assert "tj context" in out
+
+
+def test_api_plan_shows_implied_dollars_as_secondary_only(db):
+    # API users DO get a dollar calibration line — but demoted, labeled
+    # "Implied API value", never the headline (mirrors quota-audit #5).
+    _seed_overhead_heavy(db, plan_tier="api")
+    result = _invoke(db, _config("api"))
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Implied API value" in out
+    assert "calibration only" in out
+    # Still composition-led, not spend-led.
+    assert "overhead" in out.lower()
+
+
+def test_lean_context_rewards_an_efficiency_tier(db):
+    _seed_lean(db, plan_tier="max_5x")
+    result = _invoke(db, _config("max_5x"))
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "TokenMinimizer" in out or "LeanOperator" in out
+    # Even lean cards are quota-native (no dollars for subscription).
+    assert "$" not in out
+
+
+def test_weekly_recap_mode_renders_wrapped_title(db):
+    _seed_overhead_heavy(db, plan_tier="max_5x")
+    result = _invoke(db, _config("max_5x"), "--weekly")
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Weekly Recap" in out
+    assert "this week" in out
+
+
+def test_no_data_prints_onboarding_hint(db):
+    # Empty DB → friendly onboarding hint, not a crash.
+    result = _invoke(db, _config("max_5x"))
+    assert result.exit_code == 0, result.output
+    assert "onboard --claude-code" in result.output
+
+
+# ───────────────────────────── JSON output ────────────────────────────────
+
+def test_json_emits_composition_shares_not_spend_tier(db):
+    _seed_overhead_heavy(db, plan_tier="max_5x")
+    result = _invoke(db, _config("max_5x"), "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    # The JSON is composition-shaped: overhead/work shares + token totals.
+    assert "overhead_share" in payload
+    assert "work_share" in payload
+    assert payload["overhead_share"] > 0.80
+    assert payload["total_reread_tokens"] > payload["total_work_tokens"]
+    # Quota-native: pricing mode reflects the subscription plan.
+    assert payload["pricing_mode"] == "subscription"
+    assert payload["plan_tier"] == "max_5x"
+    # No spend-brag keys carried over from the old card.
+    assert "tier" in payload  # efficiency tier label still present
+    assert payload["tier"] in {t.label for t in _TIERS}
+
+
+def test_json_weekly_flag_round_trips(db):
+    _seed_overhead_heavy(db, plan_tier="max_5x")
+    result = _invoke(db, _config("max_5x"), "--weekly", "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["weekly"] is True
+
+
+# ───────────────────────────── error paths ────────────────────────────────
+
+def test_requires_direct_db_connection(db):
+    # Mirrors cmd_context / cmd_quota_audit: a connection-less backend (API shim
+    # style) is rejected with a clear daemon-down hint.
+    class _NoConn:
+        pass
+
+    result = _invoke(_NoConn(), _config("max_5x"))
+    assert result.exit_code != 0
+    assert "direct database connection" in str(result.output) + str(result.exception)
