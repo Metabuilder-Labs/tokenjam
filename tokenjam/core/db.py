@@ -396,6 +396,55 @@ MIGRATIONS: list[tuple[int, str]] = [
         "    schema_version INTEGER NOT NULL DEFAULT 1\n"
         ")"
     )),
+    # Migration 16: close-the-loop tables (#53) — local-first annotations,
+    # expectations, and a fix-history ledger. This is the capture half's missing
+    # other half: going from "something weird happened" to "this is now a
+    # repeatable check", entirely offline (no eval-platform / cloud dependency).
+    # See core/loop.py + docs/internal/close-the-loop.md for the product bet.
+    #
+    #  * `run_annotations` — human note + verdict AFTER the fact on a run
+    #    (session). MANY rows per session (an append-only log, not an upsert like
+    #    `session_labels` which is a single display-name rename); `annotation_id`
+    #    PK. `verdict` is one of good/bad/mixed/unknown (nullable = note only).
+    #  * `expectations` — a labeled run promoted into a stored expectation/case.
+    #    `origin_session_id` is the run it was promoted FROM (nullable — an
+    #    expectation can be authored free-standing); `agent_id` scopes it.
+    #  * `expectation_runs` — the fix-history ledger keyed to an expectation: one
+    #    row per rerun recorded against it, `outcome` in pass/regress/unknown, so
+    #    a user sees whether a change fixed or regressed the case over time.
+    #
+    # All additive (backward-compatible): old code ignores the new tables.
+    (16, (
+        "CREATE TABLE IF NOT EXISTS run_annotations (\n"
+        "    annotation_id TEXT PRIMARY KEY,\n"
+        "    session_id    TEXT NOT NULL,\n"
+        "    verdict       TEXT,\n"
+        "    note          TEXT,\n"
+        "    created_at    TIMESTAMPTZ NOT NULL\n"
+        ");\n"
+        "CREATE INDEX IF NOT EXISTS idx_run_annotations_session "
+        "ON run_annotations(session_id);\n"
+        "CREATE TABLE IF NOT EXISTS expectations (\n"
+        "    expectation_id    TEXT PRIMARY KEY,\n"
+        "    origin_session_id TEXT,\n"
+        "    agent_id          TEXT,\n"
+        "    name              TEXT NOT NULL,\n"
+        "    description       TEXT,\n"
+        "    created_at        TIMESTAMPTZ NOT NULL\n"
+        ");\n"
+        "CREATE INDEX IF NOT EXISTS idx_expectations_origin "
+        "ON expectations(origin_session_id);\n"
+        "CREATE TABLE IF NOT EXISTS expectation_runs (\n"
+        "    run_ledger_id  TEXT PRIMARY KEY,\n"
+        "    expectation_id TEXT NOT NULL,\n"
+        "    session_id     TEXT,\n"
+        "    outcome        TEXT NOT NULL,\n"
+        "    note           TEXT,\n"
+        "    created_at     TIMESTAMPTZ NOT NULL\n"
+        ");\n"
+        "CREATE INDEX IF NOT EXISTS idx_expectation_runs_exp "
+        "ON expectation_runs(expectation_id)"
+    )),
 ]
 
 

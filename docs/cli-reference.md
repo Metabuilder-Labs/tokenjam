@@ -102,6 +102,25 @@ tj drift --agent my-agent
 
 Exit code 1 if any agent has drifted (useful for CI gating).
 
+### `tj loop`
+
+Close the loop on a run: annotate it, promote it into an expectation, and track
+whether later runs pass or regress. Local-first — pass/regress is your recorded
+verdict, not an automated score. Also available as the Lens "Loop" tab on a
+session's detail page.
+
+```bash
+# Annotate a run with a human note + optional verdict (good/bad/mixed/unknown)
+tj loop annotate <session_id> --verdict bad --note "retried the same tool 5x"
+tj loop annotations <session_id>
+
+# Promote a run into a stored expectation, then record reruns against it
+tj loop expect <session_id> --name "no retry loop" --desc "must not retry >3x"
+tj loop expectations
+tj loop record <expectation_id> <session_id> --outcome pass --note "fixed it"
+tj loop history <expectation_id>
+```
+
 ### `tj tools`
 
 Tool call summary: call counts, average duration, error rates.
