@@ -36,6 +36,7 @@ from tokenjam.core.models import (
     SpanStatus,
 )
 from tokenjam.core.transcript import _block_text
+from tokenjam.core.usage import assistant_message_key, parse_usage
 from tokenjam.otel.semconv import GenAIAttributes
 
 logger = logging.getLogger(__name__)
@@ -299,27 +300,25 @@ def parse_claude_code_session(
             continue
 
         model = msg.get("model")
-        usage = msg.get("usage") or {}
-        if not isinstance(usage, dict):
-            usage = {}
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        cache_read = int(usage.get("cache_read_input_tokens") or 0)
-        cache_creation = int(usage.get("cache_creation_input_tokens") or 0)
+        # Four-bucket parse via the shared source of truth (core.usage), so the
+        # statusline's re-read % and the Cost tab agree on the same session.
+        usage = parse_usage(msg.get("usage"))
+        input_tokens = usage.input_tokens
+        output_tokens = usage.output_tokens
+        cache_read = usage.cache_read_tokens
+        cache_creation = usage.cache_write_tokens
 
         # Some records have no model (e.g. early init); skip
         if not model:
             continue
         # Skip empty-usage records entirely (no cost contribution)
-        if input_tokens == 0 and output_tokens == 0 and cache_read == 0 and cache_creation == 0:
+        if usage.total == 0:
             continue
 
-        # Prefer the Anthropic API response id (`message.id`, msg_…) — it is
-        # STABLE per real call and survives resume/branch re-ingest, where the
-        # record `uuid` is regenerated (#294). Fall back to the record uuid only
-        # when message.id is absent. NEVER key on the token-usage signature:
-        # distinct real calls can share identical token counts.
-        message_key = msg.get("id") or record.get("uuid") or f"{line_no}"
+        # Stable per-call dedup key (message.id, falling back to uuid/line_no);
+        # keying span_id on it collapses resume/branch replays (#294). See
+        # core.usage.assistant_message_key for the precedence + rationale.
+        message_key = assistant_message_key(record, msg, line_no)
         sid_str = session_id or path.stem
         # One trace per session (#243): all assistant turns + their tool calls
         # in this conversation share a trace_id. span_id is keyed on the stable

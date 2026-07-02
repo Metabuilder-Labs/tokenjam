@@ -46,6 +46,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     no_db_commands = {
         "stop", "uninstall", "onboard", "mcp", "demo", "policy",
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
+        "statusline",
         "quickstart",
     }
     invoked = ctx.invoked_subcommand
@@ -118,6 +119,7 @@ from tokenjam.cli.cmd_quota_audit import cmd_quota_audit  # noqa: E402
 from tokenjam.cli.cmd_quickstart import cmd_quickstart  # noqa: E402
 from tokenjam.cli.cmd_otel import cmd_otel_resource_attrs  # noqa: E402
 from tokenjam.cli.cmd_session_end import cmd_session_end  # noqa: E402
+from tokenjam.cli.cmd_statusline import cmd_statusline  # noqa: E402
 from tokenjam.cli.cmd_loop import cmd_loop  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
@@ -146,6 +148,7 @@ cli.add_command(cmd_quota_audit, name="quota-audit")
 cli.add_command(cmd_quickstart, name="quickstart")
 cli.add_command(cmd_otel_resource_attrs, name="otel-resource-attrs")
 cli.add_command(cmd_session_end, name="session-end")
+cli.add_command(cmd_statusline, name="statusline")
 cli.add_command(cmd_loop, name="loop")
 
 # cmd_drift is provided by task 05 — register if available
