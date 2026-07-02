@@ -1434,8 +1434,22 @@ def _install_daemon(config_path: str) -> str | None:
         return None
 
 
+def _resolve_tj_binary() -> str:
+    """Resolve the absolute path to the ``tj`` executable for daemon units.
+
+    Prefer the copy on PATH. When ``tj`` isn't on PATH (e.g. a venv whose bin
+    dir isn't exported), fall back to the sibling ``tj`` next to the running
+    interpreter — derived by path, not string substitution. The old
+    ``sys.executable.replace("/python", "/tj")`` rewrote a ``python3``-named
+    interpreter to a nonexistent ``tj3`` (``/python`` matches inside
+    ``/python3``), so launchd/systemd pointed at a binary that doesn't exist
+    while ``launchctl load`` still returned 0 (#340).
+    """
+    return shutil.which("tj") or str(Path(sys.executable).with_name("tj"))
+
+
 def _install_launchd(config_path: str) -> str | None:
-    tj_path = shutil.which("tj") or sys.executable.replace("/python", "/tj").replace("/python3", "/tj")
+    tj_path = _resolve_tj_binary()
     plist_path = Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_content = f"""\
@@ -1493,7 +1507,7 @@ def _install_launchd(config_path: str) -> str | None:
 
 
 def _install_systemd(config_path: str) -> str | None:
-    tj_path = shutil.which("tj") or sys.executable.replace("/python", "/tj").replace("/python3", "/tj")
+    tj_path = _resolve_tj_binary()
     service_path = Path.home() / ".config/systemd/user/tokenjam.service"
     service_path.parent.mkdir(parents=True, exist_ok=True)
     service_content = f"""\
