@@ -978,6 +978,8 @@ a.health-tile.attn { border-color: var(--warn); }
    stand out from the agent's steps. No box, no label. */
 .story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand); white-space: pre-wrap; }
 .story-ask.clickable { cursor: pointer; }
+/* grey speaker marker on asks, visually paired with the #n/time meta on steps */
+.story-ask-who { color: var(--text-dim); font-weight: 400; font-family: 'Geist Mono', monospace; font-size: 11px; }
 /* Compact single-line row (356 steps must stay scannable, not a wall of cards) */
 .story-step {
   border: 1px solid transparent;
@@ -1313,6 +1315,40 @@ a.health-tile.attn { border-color: var(--warn); }
 /* Source-of-each-line legend at the foot of the panel. */
 .ap-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); font-size: 10.5px; color: var(--text-dim); align-items: center; }
 .ap-src.distill { color: var(--chart-6); border-color: var(--chart-6); }
+/* Collapsed conversational run — a fold marker for >4 consecutive chat-only
+   moves, so the method doesn't drown in Q&A narration. */
+.ap-collapse {
+  position: relative; margin: 2px 0 2px; padding: 5px 0 5px 2px; cursor: pointer;
+  font-size: 11px; color: var(--text-faint); font-family: 'Geist Mono', monospace;
+  font-style: italic; user-select: none; border-left: 2px dashed var(--border);
+  padding-left: 10px; margin-left: -1px;
+}
+.ap-collapse:hover { color: var(--text-dim); }
+/* Verify-flavored delegation (review/audit mandates) — green accent + chip. */
+.ap-deleg.ap-verify-deleg { border-color: var(--success); }
+.ap-deleg.ap-verify-deleg .ap-caret { color: var(--success); }
+.ap-verify-chip {
+  display: inline-block; margin-left: 6px; font-size: 8.5px; color: var(--success);
+  border: 1px solid var(--success); border-radius: 8px; padding: 0 5px;
+  font-family: 'Geist Mono', monospace; vertical-align: 1px;
+}
+/* Outcome block: 3-line clamp with a click-to-toggle "show all" (outcomes are
+   truncated server-side mid-word; the toggle keeps the header compact). */
+.ap-outcome .ap-outcome-body.clamp {
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ap-outcome .ap-outcome-more {
+  display: inline-block; margin-top: 3px; cursor: pointer; font-size: 10.5px;
+  color: var(--text-faint); font-family: 'Geist Mono', monospace; user-select: none;
+}
+.ap-outcome .ap-outcome-more:hover { color: var(--success); }
+/* Inline `code` in approach labels/quotes/outcome (rendered by mdInline). */
+code.md-code {
+  font-family: 'Geist Mono', monospace; font-size: 0.92em;
+  background: var(--surface3); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0 4px;
+}
 
 /* Map board (GET /sessions/{id}/sessionmap): synchronized swimlanes (① phase /
    tools / context / cost over one time-or-step axis) + a codebase-territory
@@ -1526,7 +1562,10 @@ function evLabelShort(s) {
     const parts = t.split('/').filter(Boolean);     // path → basename
     if (parts.length) t = parts[parts.length - 1];
   }
-  if (t.length > MB_EVLAB_CHARS) t = t.slice(0, MB_EVLAB_CHARS - 1) + '…';
+  // Over-long names keep their TAIL, not their head: date-prefixed filenames
+  // ("2026-07-02-…") all share the head, so a head-keep printed the same
+  // meaningless date fragment for every tick.
+  if (t.length > MB_EVLAB_CHARS) t = '…' + t.slice(-(MB_EVLAB_CHARS - 1));
   return t;
 }
 // Reduce a multi-sentence, markdown-flecked outcome to one glanceable headline:
@@ -2670,7 +2709,8 @@ function StoryAsk({ prompt }) {
   const [expanded, setExpanded] = useState(false);
   const long = prompt.length > 200;
   const short = long ? prompt.slice(0, 200) + '…' : prompt;
-  return html`<div class=${'story-ask' + (long ? ' clickable' : '')} onClick=${long ? (() => setExpanded(e => !e)) : null}>${expanded ? prompt : short}</div>`;
+  /* grey "user: " prefix so asks carry a speaker marker like steps carry #n + time */
+  return html`<div class=${'story-ask' + (long ? ' clickable' : '')} onClick=${long ? (() => setExpanded(e => !e)) : null}><span class="story-ask-who">user: </span>${expanded ? prompt : short}</div>`;
 }
 
 function StoryStep({ step, prevModel }) {
@@ -2739,7 +2779,7 @@ function StorySection({ sessionId }) {
   // good Timeline — only fall back to the unavailable state on the first load.
   const load = useCallback(() => {
     api('/sessions/' + sessionId + '/story')
-      .then(d => setStory(d))
+      .then(d => setStory(sanitizeStoryPayload(d)))   // de-mojibake at load
       .catch(() => setStory(prev => prev || { available: false }));
   }, [sessionId]);
 
@@ -3123,6 +3163,171 @@ function WorkMapSection({ sessionId }) {
   `;
 }
 
+/* ==================== Approach/Map presentation helpers ====================
+   Text-hygiene + layout helpers shared by the Approach spine and Map board:
+   mojibake scrub, inline markdown, label truncation, chat-run detection,
+   verify-flavored delegation detection, phase-title cleanup. */
+
+// strip UTF-8-as-Latin-1 mojibake ("Â " / "Â " artifacts), collapse
+// doubled spaces, trim. Applied to task/outcome/labels/quotes at data-load time.
+function stripMojibake(s) {
+  if (typeof s !== 'string') return s;
+  return s
+    .replace(/Â /g, ' ')
+    .replace(/Â /g, ' ')
+    .replace(/ /g, ' ')
+    .replace(/  +/g, ' ')
+    .trim();
+}
+// Deep-sanitize an approach payload in place-of a copy (immutable): task, outcome,
+// every move label/quote, delegation task, nested spines, agent names.
+// Same scrub for the Timeline's /story payload — asks and step narration come
+// off the same mis-decoded transcript text as the approach spine.
+function sanitizeStoryPayload(d) {
+  if (!d || typeof d !== 'object') return d;
+  return {
+    ...d,
+    task: stripMojibake(d.task),
+    outcome: stripMojibake(d.outcome),
+    steps: (d.steps || []).map((s) => ({
+      ...s,
+      text: stripMojibake(s.text),
+      ask: s.ask != null ? stripMojibake(s.ask) : s.ask,
+    })),
+  };
+}
+
+function sanitizeApproachPayload(d) {
+  if (!d || typeof d !== 'object') return d;
+  const move = (m) => ({
+    ...m,
+    label: stripMojibake(m.label),
+    quote: stripMojibake(m.quote),
+    evidence: (m.evidence || []).map((e) => ({ ...e, label: stripMojibake(e.label), name: stripMojibake(e.name) })),
+    delegations: (m.delegations || []).map(deleg),
+  });
+  function deleg(x) {
+    return { ...x, name: stripMojibake(x.name), task: stripMojibake(x.task), spine: (x.spine || []).map(move) };
+  }
+  return {
+    ...d,
+    task: stripMojibake(d.task),
+    outcome: stripMojibake(d.outcome),
+    name: stripMojibake(d.name),
+    spine: (d.spine || []).map(move),
+    cross_terminal: (d.cross_terminal || []).map((c) => ({ ...c, name: stripMojibake(c.name), spine: (c.spine || []).map(move) })),
+    agents: (d.agents || []).map((a) => ({ ...a, name: stripMojibake(a.name) })),
+  };
+}
+
+// tiny inline-markdown → vnode renderer for **bold**, *italic*, `code`. No
+// HTML injection risk: text runs become preact text nodes (auto-escaped), markers
+// become <strong>/<em>/<code> vnodes. No links, no headings.
+function mdInline(text) {
+  if (typeof text !== 'string') return text;
+  const re = /(\*\*([^*]+?)\*\*|\*([^*\s][^*]*?)\*|`([^`]+?)`)/g;
+  const out = [];
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    if (m[2] != null) out.push(h('strong', null, m[2]));
+    else if (m[3] != null) out.push(h('em', null, m[3]));
+    else if (m[4] != null) out.push(h('code', { class: 'md-code' }, m[4]));
+    last = re.lastIndex;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return out;
+}
+
+// split a quote into a headline sentence (up to first '. '/'! '/'? ' or 160
+// chars, word-boundary) + the remaining text.
+function splitLeadSentence(q) {
+  const s = (q || '').trim();
+  const m = s.match(/^.*?[.!?](?=\s)/);
+  if (m && m[0].length <= 160) {
+    return { head: m[0].trim(), rest: s.slice(m[0].length).trim() };
+  }
+  if (s.length <= 160) return { head: s, rest: '' };
+  const slice = s.slice(0, 160);
+  const sp = slice.lastIndexOf(' ');
+  const cut = sp > 0 ? sp : 160;
+  return { head: slice.slice(0, cut).replace(/[.!?,;:]+$/, '') + '…', rest: s.slice(cut).trim() };
+}
+// Strip a label's trailing truncation marker so it can be prefix-matched against
+// the full quote.
+const labelCore = (label) => (label || '').replace(/\s*(…|\.\.\.)\s*$/, '').trim();
+
+// a delegation is "verify-flavored" when its name or task reads as a
+// review/verification/audit step.
+const VERIFY_NAME_RE = /\b(review|verif\w*|audit|validate|check)\b/i;
+const isVerifyDeleg = (d) => !!d && (VERIFY_NAME_RE.test(d.name || '') || VERIFY_NAME_RE.test(d.task || ''));
+
+// is this move part of a plain conversational run (agent narration, no tool
+// evidence, no delegation, not a failure/retry)?
+const isChatMove = (m) =>
+  (m.kind || 'act') === 'act' && m.source === 'agent_words'
+  && !(m.evidence && m.evidence.length) && !(m.delegations && m.delegations.length)
+  && !m.failed && !m.is_retry;
+
+// middle-truncate a label ("first8…last6") so both ends stay legible.
+function mbMidTrunc(s, head = 8, tail = 6) {
+  if (typeof s !== 'string' || s.length <= head + tail + 1) return s;
+  return s.slice(0, head) + '…' + s.slice(-tail);
+}
+// strip leading conversational pleasantries from a phase title, uppercase the
+// first surviving letter; fall back to the original if stripping empties it.
+// The (?![A-Za-z]) guard stops a pleasantry from matching a longer word it
+// prefixes (e.g. "Love the moment" must not chop "Love the momentum" → "um").
+const MB_PLEASANTRY_RE = /^\s*(Good question|Great question|Totally fair|Fair question|Happy to|Got it|Yes[!,—]|You're right|Love the moment|My apologies|OK[,—]|Okay[,—])(?![A-Za-z])[\s,!.—–-]*/i;
+function mbCleanPhase(name) {
+  if (typeof name !== 'string') return name;
+  let s = name.replace(MB_PLEASANTRY_RE, '').trim();
+  if (!s) return name;
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+const mbNormTitle = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// the ✓ outcome block — 3-line clamp with a click-to-toggle "show all".
+function ApproachOutcome({ text }) {
+  const [open, setOpen] = useState(false);
+  return html`
+    <div class="ap-outcome">
+      <div class="ap-outcome-body ${open ? '' : 'clamp'}">✓ ${mdInline(text)}</div>
+      <span class="ap-outcome-more" onClick=${() => setOpen((o) => !o)}>${open ? '⌃ collapse' : '⌄ more'}</span>
+    </div>`;
+}
+
+// render a method spine, collapsing any run of >4 consecutive conversational
+// moves into first + a click-to-expand "· N conversational steps" row + last.
+function ApproachSpine({ moves }) {
+  const [open, setOpen] = useState({});
+  const rows = [];
+  let i = 0, runId = 0;
+  while (i < moves.length) {
+    let j = i;
+    while (j < moves.length && isChatMove(moves[j])) j++;
+    const runLen = j - i;
+    if (runLen > 4) {
+      const id = 'run' + (runId++);
+      const mid = runLen - 2;
+      rows.push(html`<${ApproachMove} move=${moves[i]} key=${'a' + i} />`);
+      if (open[id]) {
+        for (let k = i + 1; k < j - 1; k++) rows.push(html`<${ApproachMove} move=${moves[k]} key=${'m' + k} />`);
+        rows.push(html`<div class="ap-collapse" key=${id} onClick=${() => setOpen((o) => ({ ...o, [id]: false }))}>· collapse ${mid} conversational steps ⌃</div>`);
+      } else {
+        rows.push(html`<div class="ap-collapse" key=${id} onClick=${() => setOpen((o) => ({ ...o, [id]: true }))}>· ${mid} conversational steps ⌄</div>`);
+      }
+      rows.push(html`<${ApproachMove} move=${moves[j - 1]} key=${'z' + (j - 1)} />`);
+      i = j;
+    } else {
+      rows.push(html`<${ApproachMove} move=${moves[i]} key=${'s' + i} />`);
+      i++;
+    }
+  }
+  return html`<div class="ap-spine">${rows}</div>`;
+}
+/* ================== end Approach/Map presentation helpers ================= */
+
 // Small text/emoji marker per move kind (offline — no icon font).
 const APPROACH_ICONS = { delegate: '⑂', dead_end: '✗', verify: '✅', act: '•' };
 
@@ -3139,17 +3344,30 @@ function ApproachMove({ move }) {
   const srcWords = move.source === 'agent_words';
   const ev = move.evidence || [];
   const delegations = move.delegations || [];
+  // a delegate move that carries its own delegation card(s) — suppress the
+  // redundant label + "Agent <name>" evidence line, keep the ⑂ marker + cards.
+  const isDelegateCard = kind === 'delegate' && delegations.length > 0;
+  // when the quote just re-states the truncated label, drop the separate
+  // italic line and un-truncate the headline to the quote's first sentence;
+  // spill the remainder into the italic line.
+  const rawLabel = move.label || '';
+  const quote = move.quote || '';
+  const core = labelCore(rawLabel);
+  const isDupe = quote && core && core.length > 8 && quote.startsWith(core);
+  const split = isDupe ? splitLeadSentence(quote) : null;
+  const headline = isDupe ? split.head : rawLabel;
+  const italic = isDupe ? split.rest : quote;
   return html`
     <div class="ap-move ap-${kind} ${isDead ? 'dead' : ''} ${isRetry ? 'retry' : ''}">
       <div class="ap-ic">${icon}</div>
       <div class="ap-top">
         <span class="ap-kind">${kind.replace('_', ' ')}</span>
-        <span class="ap-label">${move.label}</span>
+        ${isDelegateCard ? null : html`<span class="ap-label">${mdInline(headline)}</span>`}
         ${(isDead || isRetry) ? html`<span class="ap-revert">${kind === 'dead_end' ? 'reverted · dead-end' : 'retry'}</span>` : null}
-        <span class="ap-src ${srcWords ? 'words' : 'struct'}">${srcWords ? "agent's words" : 'structural'}</span>
+        ${isDelegateCard ? null : html`<span class="ap-src ${srcWords ? 'words' : 'struct'}">${srcWords ? "agent's words" : 'structural'}</span>`}
       </div>
-      ${move.quote ? html`<div class="ap-quote">${move.quote}</div>` : null}
-      ${ev.length ? html`<div class="ap-ev">▸ ${ev.map((e, i) => html`<span class="ap-ev-item">${i > 0 ? ' · ' : ''}${e.name} ${e.label}${e.status === 'error' ? html` <span class="ap-ev-st err">✗</span>` : null}</span>`)}</div>` : null}
+      ${!isDelegateCard && italic ? html`<div class="ap-quote">${mdInline(italic)}</div>` : null}
+      ${!isDelegateCard && ev.length ? html`<div class="ap-ev">▸ ${ev.map((e, i) => html`<span class="ap-ev-item">${i > 0 ? ' · ' : ''}${e.name} ${e.label}${e.status === 'error' ? html` <span class="ap-ev-st err">✗</span>` : null}</span>`)}</div>` : null}
       ${delegations.map(d => html`<${ApproachDelegation} deleg=${d} />`)}
     </div>
   `;
@@ -3163,6 +3381,9 @@ function ApproachDelegation({ deleg }) {
   const [open, setOpen] = useState(false);
   const capped = deleg.capped;
   const spine = deleg.spine || [];
+  // verify-flavored delegation → ✅ accent + a 'verify' chip.
+  const isVerify = isVerifyDeleg(deleg);
+  const verifyChip = isVerify ? html`<span class="ap-verify-chip">✅ verify</span>` : null;
   const stats = [
     deleg.tokens != null ? fmtTokens(deleg.tokens) : null,
     deleg.cost_usd != null ? fmtCost(deleg.cost_usd) : null,
@@ -3170,28 +3391,28 @@ function ApproachDelegation({ deleg }) {
   ].filter(Boolean).join(' · ');
   if (capped) {
     return html`
-      <div class="ap-deleg capped">
+      <div class="ap-deleg capped ${isVerify ? 'ap-verify-deleg' : ''}">
         <span class="ap-caret">▶</span>
         <div class="ap-deleg-main">
-          <div class="ap-deleg-name">↳ ${deleg.name} <span class="ap-depthtag">depth ${deleg.depth}</span></div>
+          <div class="ap-deleg-name">↳ ${deleg.name} <span class="ap-depthtag">depth ${deleg.depth}</span>${verifyChip}</div>
           <div class="ap-deleg-note">not expanded — ${capped}</div>
         </div>
       </div>`;
   }
   return html`
-    <div class="ap-deleg ${open ? 'open' : ''}" onClick=${() => setOpen(o => !o)}>
+    <div class="ap-deleg ${open ? 'open' : ''} ${isVerify ? 'ap-verify-deleg' : ''}" onClick=${() => setOpen(o => !o)}>
       <span class="ap-caret">▶</span>
       <div class="ap-deleg-main">
-        <div class="ap-deleg-name">↳ ${deleg.name} <span class="ap-depthtag">depth ${deleg.depth}</span></div>
+        <div class="ap-deleg-name">↳ ${deleg.name} <span class="ap-depthtag">depth ${deleg.depth}</span>${verifyChip}</div>
       </div>
       <span class="ap-deleg-stats">${stats}</span>
     </div>
     ${open ? html`
       <div class="ap-nested">
         <div class="ap-chead">↳ <b>${deleg.name}</b> · how the subagent solved its piece</div>
-        ${deleg.task ? html`<div class="ap-cmandate">mandate: <i>${deleg.task}</i></div>` : null}
+        ${deleg.task ? html`<div class="ap-cmandate">mandate: <i>${mdInline(deleg.task)}</i></div>` : null}
         ${spine.length
-          ? html`<div class="ap-spine">${spine.map(m => html`<${ApproachMove} move=${m} />`)}</div>`
+          ? html`<${ApproachSpine} moves=${spine} />`
           : html`<div class="ap-cmandate"><i>no moves reconstructed for this subagent</i></div>`}
       </div>` : null}
   `;
@@ -3216,7 +3437,7 @@ function ApproachCrossTerminal({ child }) {
       <div class="ap-nested ap-xterm-nested">
         <div class="ap-chead">↗ <b>${child.name}</b> · how the child session solved its piece</div>
         ${spine.length
-          ? html`<div class="ap-spine">${spine.map(m => html`<${ApproachMove} move=${m} />`)}</div>`
+          ? html`<${ApproachSpine} moves=${spine} />`
           : html`<div class="ap-cmandate"><i>no moves reconstructed for this child</i></div>`}
       </div>` : null}
   `;
@@ -3247,14 +3468,23 @@ function ApproachRail({ agents }) {
         else { badgeTxt = '⏏ ended · method kept'; }
         const provLine = isMain ? null
           : (isCross ? 'cross-terminal child · run-linked' : 'in-session subagent · from transcript');
+        // a plain in-session subagent's badge ("⏏ ended · method kept") and
+        // provenance ("in-session subagent · from transcript") are the defaults for
+        // every killed sidechain — pure noise repeated down the rail. Hide both and
+        // fold them into the node's title=; keep badges only for the exceptions
+        // (main/live, cross-terminal, capped/killed).
+        const isPlainSub = !isMain && !isCross && !isCapped;
+        const showBadge = !isPlainSub;
+        const showProv = provLine && !isPlainSub;
+        const nodeTitle = isPlainSub ? (badgeTxt + ' · ' + provLine) : '';
         return html`
-          <div class="ap-node ${dCls}">
+          <div class="ap-node ${dCls}" title=${nodeTitle}>
             <div class="ap-dot ${dotClass}"></div>
             <div>
               <div class="ap-nname">${a.name || '(unnamed)'}</div>
               <div class="ap-nmeta">${meta}</div>
-              <span class="ap-badge ${badgeCls}">${badgeTxt}</span>
-              ${provLine ? html`<div class="ap-prov">${provLine}</div>` : null}
+              ${showBadge ? html`<span class="ap-badge ${badgeCls}">${badgeTxt}</span>` : null}
+              ${showProv ? html`<div class="ap-prov">${provLine}</div>` : null}
             </div>
           </div>`;
       })}
@@ -3272,7 +3502,7 @@ function ApproachSection({ sessionId }) {
 
   const load = useCallback(() => {
     api('/sessions/' + sessionId + '/approach')
-      .then(d => setData(d))
+      .then(d => setData(sanitizeApproachPayload(d)))   // de-mojibake at load
       .catch(() => setData(prev => prev || { available: false }));
   }, [sessionId]);
 
@@ -3291,6 +3521,14 @@ function ApproachSection({ sessionId }) {
   const agents = data.agents || [];
   const crossTerminal = data.cross_terminal || [];
   const counts = data.counts || { moves: 0, delegations: 0, dead_ends: 0, verifies: 0 };
+  // the backend reports verifies:0 — recompute client-side by counting
+  // verify-flavored delegations across the spine (and cross-terminal children).
+  let verifyCount = 0;
+  const countVerify = (moves) => (moves || []).forEach((m) => {
+    (m.delegations || []).forEach((d) => { if (isVerifyDeleg(d)) verifyCount++; });
+  });
+  countVerify(spine);
+  crossTerminal.forEach((c) => countVerify(c.spine));
   const meta = data.meta || {};
   const statLine = (meta.cost_usd != null ? fmtCost(meta.cost_usd) : '$0.0000')
     + ' · ' + (meta.tokens != null ? fmtTokens(meta.tokens) : '-') + ' tok';
@@ -3303,14 +3541,14 @@ function ApproachSection({ sessionId }) {
         <div class="ap-head">
           <div>
             ${data.name ? html`<div class="ap-who">${data.name}</div>` : null}
-            ${data.task ? html`<div class="ap-mandate">mandate: <b>${data.task}</b></div>` : null}
-            ${data.outcome ? html`<div class="ap-outcome">✓ ${data.outcome}</div>` : null}
+            ${data.task ? html`<div class="ap-mandate">mandate: <b>${mdInline(data.task)}</b></div>` : null}
+            ${data.outcome ? html`<${ApproachOutcome} text=${data.outcome} />` : null}
           </div>
-          <div class="ap-rt"><b>${counts.moves}</b> moves<br/><b>${counts.delegations}</b> delegations<br/><b>${counts.dead_ends}</b> dead-ends<br/>${statLine}</div>
+          <div class="ap-rt"><b>${counts.moves}</b> moves<br/><b>${counts.delegations}</b> delegations<br/><b>${counts.dead_ends}</b> dead-ends<br/><b>${verifyCount}</b> verifies<br/>${statLine}</div>
         </div>
         ${spine.length === 0
           ? html`<div class="story-unavailable">Transcript found but no moves reconstructed.</div>`
-          : html`<div class="ap-spine">${spine.map(m => html`<${ApproachMove} move=${m} />`)}</div>`}
+          : html`<${ApproachSpine} moves=${spine} />`}
         ${crossTerminal.length ? html`
           <div class="ap-xterm-divider">cross-terminal children</div>
           ${crossTerminal.map(c => html`<${ApproachCrossTerminal} child=${c} />`)}
@@ -3342,7 +3580,7 @@ const MB_SUBBAR_MIN = 1.2;     // % — minimum subagent-bar width so a short wi
 const MB_SUBBAR_GAP = 0.6;     // % — gap required before two bars share a row (else they stack).
 const MB_SUB_MAX_ROWS = 8;     // max stacked rows in the sub-agents lane (overflow falls onto the least-loaded row, label-less).
 const MB_SUB_ROW_H = 16;       // px — vertical pitch per stacked subagent row.
-const MB_SUBLAB_MIN_PX = 56;   // px — print a subagent bar's label only when the bar is at least this wide (narrower bars keep the hover title, so text never collides).
+const MB_SUBLAB_MIN_PX = 40;   // px — print a subagent bar's label only when the bar is at least this wide (narrower bars keep the hover title, so text never collides; labels are middle-truncated so this can sit low).
 const MB_BREAK_LAB_W = 74;     // px — break-label box width, used to clamp it inside the board.
 const MB_BREAK_LAB_GAP = 52;   // px — min spacing between printed idle-gap labels (rules still draw for all).
 
@@ -3646,14 +3884,46 @@ function MapBoardSection({ sessionId }) {
     return evX(events[bi], bi);
   };
   const sortedPhases = phases.slice().sort((a, b) => (a.start_ordinal || 0) - (b.start_ordinal || 0));
-  const starts = sortedPhases.map((p) => phaseEdgeX(p.start_ordinal));
-  const phaseBands = sortedPhases.map((p, i) => ({
+  // strip leading pleasantries from phase titles, then merge adjacent phases
+  // whose cleaned titles are identical (case/punct-insensitive). Dropping the later
+  // duplicate is enough to merge — bands run to the next distinct phase's start.
+  const cleanedPhases = [];
+  sortedPhases.forEach((p) => {
+    const name = mbCleanPhase(p.name);
+    const prev = cleanedPhases[cleanedPhases.length - 1];
+    if (prev && mbNormTitle(prev.name) === mbNormTitle(name)) return;
+    cleanedPhases.push({ ...p, name });
+  });
+  const starts = cleanedPhases.map((p) => phaseEdgeX(p.start_ordinal));
+  const phaseBands = cleanedPhases.map((p, i) => ({
     name: p.name,
     left: i === 0 ? 0 : starts[i],
-    right: i === sortedPhases.length - 1 ? 100 : starts[i + 1],
+    right: i === cleanedPhases.length - 1 ? 100 : starts[i + 1],
     tint: mbTint(MB_PHASE_TINTS[i % MB_PHASE_TINTS.length], 14),
-    last: i === sortedPhases.length - 1,
+    last: i === cleanedPhases.length - 1,
   }));
+  // in time mode, split any phase band that spans an idle break into segments
+  // with a visible gap at the break; label only the widest segment of each phase.
+  const phaseSegs = [];
+  if (mode === 'time' && gaps.length) {
+    const gapPct = plotW > 0 ? Math.min(2, (5 / plotW) * 100) : 0.5;
+    const breakFracs = gaps.map((g) => clamp01(g.at_active_frac) * 100).sort((a, b) => a - b);
+    phaseBands.forEach((band) => {
+      const inside = breakFracs.filter((x) => x > band.left + 0.05 && x < band.right - 0.05);
+      const bounds = [band.left, ...inside, band.right];
+      const segs = [];
+      for (let k = 0; k < bounds.length - 1; k++) {
+        let l = bounds[k], r = bounds[k + 1];
+        if (k > 0) l += gapPct / 2;                    // gap after a break
+        if (k < bounds.length - 2) r -= gapPct / 2;    // gap before the next break
+        if (r > l) segs.push({ left: l, right: r, name: band.name, tint: band.tint, last: band.last && k === bounds.length - 2 });
+      }
+      let widest = 0, wmax = -1;
+      segs.forEach((s, si) => { const w = s.right - s.left; if (w > wmax) { wmax = w; widest = si; } });
+      segs.forEach((s, si) => phaseSegs.push({ ...s, labelSeg: si === widest }));
+    });
+  }
+  const usePhaseSegs = mode === 'time' && gaps.length > 0 && phaseSegs.length > 0;
 
   // Which tool ticks get a printed label: walk the labelable events left→right and
   // keep one only when its RENDERED center sits at least MB_EVLAB_GAP px past the
@@ -3667,13 +3937,17 @@ function MapBoardSection({ sessionId }) {
   const half = MB_EVLAB_MAX / 2;
   const shownLabels = [];
   if (plotW > 0) {
-    let lastPx = -Infinity;
+    let lastPx = -Infinity, lastTxt = null;
     events.forEach((e, i) => {
       if (!e.label) return;
       const clampedPx = Math.max(half, Math.min(plotW - half, labelPx(i)));
       if (clampedPx - lastPx < MB_EVLAB_GAP) return;
-      lastPx = clampedPx;
-      shownLabels.push({ i, leftPct: (clampedPx / plotW) * 100 });
+      // head-truncate long filenames (keep the distinctive tail) and suppress a
+      // label that repeats the most recently SHOWN one (consecutive same-file ticks).
+      const txt = evLabelShort(e.label);
+      if (txt === lastTxt) return;
+      lastPx = clampedPx; lastTxt = txt;
+      shownLabels.push({ i, leftPct: (clampedPx / plotW) * 100, txt });
     });
   }
 
@@ -3684,7 +3958,12 @@ function MapBoardSection({ sessionId }) {
   const maxCtx = Math.max(1, ...ctxSeries.map((p) => p.tokens || 0));
   const ctxPts = ctxSeries.map((p) => [seriesFrac(p) * 100, 30 - ((p.tokens || 0) / maxCtx) * 26]);
   const ctxLine = ctxPts.map((pt, i) => (i ? 'L' : 'M') + pt[0].toFixed(2) + ',' + pt[1].toFixed(2)).join(' ');
-  const ctxArea = ctxPts.length ? ctxLine + ' L100,30 L0,30 Z' : '';
+  // close the area straight down at the LAST sample's x (and up at the first),
+  // so the fill stops where the data stops instead of fading to the right edge as a
+  // decaying wedge. The stroke (ctxLine) already ends at the last sample.
+  const ctxFirstX = ctxPts.length ? ctxPts[0][0] : 0;
+  const ctxLastX = ctxPts.length ? ctxPts[ctxPts.length - 1][0] : 100;
+  const ctxArea = ctxPts.length ? ctxLine + ' L' + ctxLastX.toFixed(2) + ',30 L' + ctxFirstX.toFixed(2) + ',30 Z' : '';
   const maxCost = Math.max(0.0001, ...costSeries.map((p) => p.usd || 0));
 
   // Tools-lane density histogram (TIME MODE ONLY): bin every event into fixed
@@ -3889,9 +4168,11 @@ function MapBoardSection({ sessionId }) {
 
     <div class="mb-board" ref=${boardRef} onMouseMove=${onMove} onMouseLeave=${onLeave}>
       <div class="mb-lane phase"><div class="mb-gutter">phase</div><div class="mb-plot">
-        ${phaseBands.map((b) => {
+        ${(usePhaseSegs ? phaseSegs : phaseBands).map((b) => {
           const wpct = Math.max(0, b.right - b.left);
-          const showLabel = (wpct / 100) * plotW >= MB_PHASE_LABEL_MIN;
+          // in split mode only the widest segment of each phase is labelable.
+          const canLabel = usePhaseSegs ? b.labelSeg : true;
+          const showLabel = canLabel && (wpct / 100) * plotW >= MB_PHASE_LABEL_MIN;
           return html`<div class="mb-seg" title=${b.name} style=${'left:' + b.left + '%;width:' + wpct + '%;background:' + b.tint + (b.last ? ';border-right:none' : '')}>${showLabel ? html`<span class="mb-seg-lab">${b.name}</span>` : null}</div>`;
         })}
       </div></div>
@@ -3921,7 +4202,7 @@ function MapBoardSection({ sessionId }) {
               const h = e.category === 'error' ? 13 : e.category === 'task' ? 12 : 10;
               return html`<div class="mb-ev ${e.is_retry ? 'retry' : ''}" style=${'left:' + x + '%;background:' + col + ';height:' + h + 'px;' + (e.category === 'task' ? 'width:5px;' : '')}></div>`;
             })}
-            ${shownLabels.map(({ i, leftPct }) => html`<div class="mb-evlab" title=${events[i].label} style=${'left:' + leftPct + '%'}>${evLabelShort(events[i].label)}</div>`)}
+            ${shownLabels.map(({ i, leftPct, txt }) => html`<div class="mb-evlab" title=${events[i].label} style=${'left:' + leftPct + '%'}>${txt}</div>`)}
           `}
       </div></div>
 
@@ -3932,14 +4213,17 @@ function MapBoardSection({ sessionId }) {
           const l = Math.max(0, Math.min(left, 100 - w)); // keep the bar inside the plot
           // One ellipsized run: "name · tokens · $cost". Omit null metrics entirely
           // (transcript-only subagents show just the name — no dangling "1…"/"—").
-          const subParts = [sa.name];
-          if (sa.tokens != null) subParts.push(fmtTokens(sa.tokens));
-          if (sa.cost_usd != null) subParts.push(fmtCost(sa.cost_usd));
-          const subLabel = subParts.join(' · ');
+          // middle-truncate the name ("first8…last6") so both ends stay legible
+          // instead of a tail-ellipsized "Gather tokenj…" stub; full name in hover.
+          const metrics = [];
+          if (sa.tokens != null) metrics.push(fmtTokens(sa.tokens));
+          if (sa.cost_usd != null) metrics.push(fmtCost(sa.cost_usd));
+          const fullLabel = [sa.name, ...metrics].join(' · ');
+          const subLabel = [mbMidTrunc(sa.name), ...metrics].join(' · ');
           // Text never collides: a label prints only on a wide-enough,
           // non-overlapped bar; every bar keeps the full label as hover title.
           const showSubLab = !overlapped && plotW > 0 && (w / 100) * plotW >= MB_SUBLAB_MIN_PX;
-          return html`<div class="mb-subbar" title=${subLabel}
+          return html`<div class="mb-subbar" title=${fullLabel}
             style=${'left:' + l + '%;width:' + w + '%;top:' + (5 + row * MB_SUB_ROW_H) + 'px;'
               + 'background:' + mbTint('--chart-5', 16) + ';border:1px solid ' + mbTint('--chart-5', 50)}>
             ${showSubLab ? html`<span class="mb-sublab">${subLabel}</span>` : null}

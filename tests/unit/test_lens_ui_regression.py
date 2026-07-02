@@ -1083,8 +1083,14 @@ def test_map_tool_lane_labels_shortened_and_collision_proof(html):
     # kept, center-anchored labels can never overlap — the min center-to-center
     # gap must exceed the capped label box width.
     assert "function evLabelShort" in html             # dedicated basename/tail shortener
-    assert "evLabelShort(events[i].label)" in html      # used for the printed tick label
+    assert "evLabelShort(e.label)" in html              # used for the printed tick label
     assert "shortPath(events[i].label)" not in html     # no longer the long two-segment path
+    # over-long names keep their distinctive TAIL ("…izer-design.md"), not the
+    # head — date-prefixed filenames all share the head, so a head-keep printed
+    # the same date fragment for every tick.
+    assert "t = '…' + t.slice(-(MB_EVLAB_CHARS - 1));" in html
+    # consecutive ticks on the same file print ONE label, not a repeated run.
+    assert "if (txt === lastTxt) return;" in html
     # collision-proof: MB_EVLAB_GAP (center spacing) must exceed MB_EVLAB_MAX (box width).
     import re
 
@@ -1377,7 +1383,8 @@ def test_approach_renders_recursively(html):
     assert "function ApproachMove" in html
     assert "function ApproachDelegation" in html
     assert "delegations.map(d => html`<${ApproachDelegation} deleg=${d} />`)" in html
-    assert "spine.map(m => html`<${ApproachMove} move=${m} />`)" in html
+    # spines render through ApproachSpine (which also folds conversational runs).
+    assert "<${ApproachSpine} moves=${spine} />" in html
     assert "not expanded — ${capped}" in html
 
 
@@ -1484,9 +1491,12 @@ def test_map_board_subagent_label_is_single_ellipsized_run(html):
     # Sub-agent bars render "name · tokens · $cost" as ONE ellipsized run (no
     # separate cost span that truncated to a cryptic "1…" stub); null metrics are
     # omitted so a transcript-only subagent shows just its name.
-    assert "const subParts = [sa.name];" in html
-    assert "if (sa.tokens != null) subParts.push(fmtTokens(sa.tokens));" in html
-    assert "if (sa.cost_usd != null) subParts.push(fmtCost(sa.cost_usd));" in html
+    assert "if (sa.tokens != null) metrics.push(fmtTokens(sa.tokens));" in html
+    assert "if (sa.cost_usd != null) metrics.push(fmtCost(sa.cost_usd));" in html
+    # the printed name is middle-truncated ("first8…last6") so both ends stay
+    # legible; the full label rides in the bar's hover title.
+    assert "const subLabel = [mbMidTrunc(sa.name), ...metrics].join(' · ');" in html
+    assert "const fullLabel = [sa.name, ...metrics].join(' · ');" in html
     assert 'class="mb-sublab"' in html
     assert 'class="mb-subcost"' not in html  # the old two-span split is gone
 
@@ -1652,7 +1662,7 @@ def test_map_tools_lane_is_stacked_density_histogram_in_time_mode(html):
 def test_map_tools_lane_keeps_per_event_ticks_in_step_mode(html):
     # Step mode is unchanged: individual per-event ticks (.mb-ev) + sampled labels.
     assert 'class="mb-ev ' in html
-    assert "evLabelShort(events[i].label)" in html
+    assert "evLabelShort(e.label)" in html
     # the histogram branch is gated to time mode (step falls through to ticks)
     assert "${mode === 'time'\n          ? histBins.map" in html
 
@@ -1688,3 +1698,110 @@ def test_map_board_defaults_to_step_mode(html):
     assert "class=\"mb-peak\">peak ${fmtCost(costMax)}${mode === 'time' ? ' per ' + mbFmtBin(binWidth) : '/call'}" in html
     # The step⇄time toggle re-spaces every lane (useState-driven; step default — #58).
     assert "const [mode, setMode] = useState('step')" in html
+
+
+# ---- Approach/Map presentation polish (dogfooding round on a real 22.7M-tok
+# ---- session: PR #306 follow-ups applied to the #371 carve).
+
+
+def test_approach_scrubs_mojibake_at_load(html):
+    # Transcript text can arrive UTF-8-decoded-as-Latin-1 ("Â\xa0" where an NBSP
+    # was meant); the approach payload is scrubbed ONCE at data-load so mandate,
+    # outcome, labels and quotes all render clean without per-render cost.
+    assert "function stripMojibake" in html
+    assert "function sanitizeApproachPayload" in html
+    assert "setData(sanitizeApproachPayload(d))" in html
+    # the Timeline's /story payload gets the same scrub (asks + step narration).
+    assert "function sanitizeStoryPayload" in html
+    assert "setStory(sanitizeStoryPayload(d))" in html
+
+
+def test_approach_renders_inline_markdown_not_asterisks(html):
+    # Narration carries **bold** / *italic* / `code`; the spine renders them as
+    # vnodes (h('b'…)/h('i'…)/h('code'…)) instead of printing literal asterisks.
+    assert "function mdInline" in html
+    assert "md-code" in html
+
+
+def test_approach_move_untruncates_headline_instead_of_duplicating_quote(html):
+    # When a move's quote merely re-states its (80-char-truncated) label, the
+    # row un-truncates the headline from the quote's lead sentence and renders
+    # only the remainder as the italic quote — never the same sentence twice.
+    assert "function splitLeadSentence" in html
+    assert "labelCore(" in html
+
+
+def test_approach_spine_folds_conversational_runs(html):
+    # A run of >4 consecutive chat-only moves (agent narration, no tools, no
+    # delegations) folds to first + "· N conversational steps" + last, click to
+    # expand — the method must not drown in Q&A narration.
+    assert "function ApproachSpine" in html
+    assert "const isChatMove" in html
+    assert "conversational steps" in html
+    assert 'class="ap-collapse"' in html
+
+
+def test_approach_verify_flavored_delegations_counted_and_chipped(html):
+    # A delegation whose name/task reads as review/verify/audit gets a ✅ accent
+    # + 'verify' chip, and the header's verifies stat is recomputed client-side
+    # (the structural backend classifies them as plain delegates → verifies:0).
+    assert "VERIFY_NAME_RE" in html
+    assert "const isVerifyDeleg" in html
+    assert "ap-verify-chip" in html
+    assert "ap-verify-deleg" in html
+    assert "verifies" in html
+
+
+def test_approach_delegate_move_renders_card_only(html):
+    # A delegate move with delegation cards suppresses its own label line and
+    # "Agent <name>" evidence row — the card already carries the name; the old
+    # form printed the same subagent name three times per delegation.
+    assert "const isDelegateCard = kind === 'delegate' && delegations.length > 0;" in html
+
+
+def test_approach_outcome_clamps_with_toggle(html):
+    # The ✓ outcome block clamps to 3 lines with a click-to-toggle "show all"
+    # (outcomes arrive truncated mid-word server-side; full text one click away).
+    assert "ap-outcome-body" in html
+    assert "ap-outcome-more" in html
+
+
+def test_approach_rail_hides_default_badges(html):
+    # Rail nodes only badge the EXCEPTIONS (capped/killed/cross-terminal/running);
+    # the default "ended · method kept · in-session subagent · from transcript"
+    # pair repeated on every node was pure noise — it moves to the node's title=.
+    assert "const isPlainSub = !isMain && !isCross && !isCapped;" in html
+    assert "const showBadge = !isPlainSub;" in html
+    assert "nodeTitle" in html
+
+
+def test_timeline_ask_carries_user_prefix(html):
+    # Each ask in the Timeline is prefixed with a grey mono "user: " marker so
+    # asks carry a speaker label just like steps carry #n + time.
+    assert 'class="story-ask-who"' in html
+    assert 'story-ask-who">user: <' in html
+
+
+def test_map_context_area_stops_at_last_sample(html):
+    # The context lane's area fill closes straight down at the LAST sample's x —
+    # it must not fade to the right edge as a decaying wedge that reads as data.
+    assert "const ctxLastX" in html
+    assert "L' + ctxLastX.toFixed(2) + ',30 L' + ctxFirstX.toFixed(2) + ',30 Z'" in html
+
+
+def test_map_phase_titles_cleaned_and_merged(html):
+    # Phase titles strip leading conversational pleasantries ("Got it — my
+    # mistake." → "My mistake.") and adjacent phases with the same normalized
+    # title merge into one band (#57's confetti came from same-title splits).
+    assert "MB_PLEASANTRY_RE" in html
+    assert "function mbCleanPhase" in html
+    assert "mbNormTitle(prev.name) === mbNormTitle(name)" in html
+
+
+def test_map_phase_bands_split_at_idle_breaks(html):
+    # In time mode a phase band that spans an idle break splits into segments
+    # with a visible gap at the break — one band must not bridge an 18h idle
+    # gulf as if it were continuous work. Only the widest segment is labelled.
+    assert "const phaseSegs = []" in html
+    assert "labelSeg: si === widest" in html
+    assert "usePhaseSegs ? phaseSegs : phaseBands" in html
