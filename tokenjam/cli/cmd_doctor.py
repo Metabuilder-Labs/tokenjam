@@ -60,7 +60,10 @@ def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
     # 12. MCP server wiring (issue #285)
     checks.append(_check_mcp_wiring(config))
 
-    # 13. Claude Code statusline wiring (issue #59) — the zero-token surface
+    # 13. Schema integrity — recorded-but-unlanded migration (issue #55)
+    checks.append(_check_schema_integrity(ctx.obj["db"]))
+
+    # 14. Claude Code statusline wiring (issue #59) — the zero-token surface
     checks.append(_check_statusline_wiring(config))
 
     if output_json:
@@ -283,6 +286,51 @@ def _check_spans_stats(db: object) -> dict:
             "message": "Column statistics are consistent."}
 
 
+def _check_schema_integrity(db: object) -> dict:
+    """Detect a recorded-but-unlanded migration (missing expected columns, #55).
+
+    `run_migrations` keys on the version integer alone, so a version renumbered
+    or recorded under an older definition can be marked applied while its
+    `ADD COLUMN` never ran — leaving `spans`/`sessions` missing a column the code
+    writes on every ingest, which then fails with a DuckDB Binder Error and is
+    silently dropped (blank Status page). `DuckDBBackend` now self-heals these on
+    open (`ensure_expected_columns`), so this normally reports OK; a WARN means
+    the live DB was opened without that path (or self-heal failed) and needs
+    `tj doctor --repair`.
+
+    Uses the already-open connection on `db` (same pattern as the spans-stats
+    canary) — DuckDB rejects a second read-write connection to the same file.
+    """
+    from tokenjam.core.db import missing_expected_columns
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Schema integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        missing = missing_expected_columns(conn)
+    except duckdb.Error as e:
+        return {"name": "Schema integrity", "level": "info",
+                "message": f"Skipped — could not inspect schema: {e}"}
+    if missing:
+        return {
+            "name": "Schema integrity",
+            "level": "warning",
+            "message": (
+                "Live schema is missing column(s) the code writes on ingest: "
+                f"{', '.join(missing)}. These were recorded as migrated but never "
+                "landed (see #55); ingest of affected rows fails with a DuckDB "
+                "Binder Error and is silently dropped, surfacing as a blank/stale "
+                "Status page. Run `tj doctor --repair` to add them (idempotent, "
+                "data preserved)."
+            ),
+            "repair_action": "heal_schema",
+        }
+    return {"name": "Schema integrity", "level": "ok",
+            "message": "All expected columns present."}
+
+
 # Spans older than this are treated as a stalled connection. Claude Code /
 # Codex flush their OTLP exporter on a short interval while running, so during
 # any active session the newest span is minutes old at most. A 6h gap means
@@ -352,12 +400,36 @@ def _check_span_staleness(db: object) -> dict:
 
 def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
     """Run repair actions for any check that flagged one."""
-    from tokenjam.core.db import repair_spans_stats
+    from tokenjam.core.db import ensure_expected_columns, repair_spans_stats
 
     conn = getattr(db, "conn", None)
     for c in checks:
         action = c.get("repair_action")
         if not action:
+            continue
+        if action == "heal_schema":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                added = ensure_expected_columns(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Schema repair failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                summary = ", ".join(added) if added else "nothing (already healthy)"
+                console.print(
+                    f"  [green]Schema reconciled — added {summary}.[/green]"
+                )
             continue
         if action == "rebuild_spans":
             if conn is None:

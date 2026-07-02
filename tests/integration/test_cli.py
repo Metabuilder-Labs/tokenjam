@@ -319,6 +319,70 @@ def test_doctor_warns_on_schema_without_capture(runner, db, config, tmp_path):
     assert any(c["level"] == "warning" for c in schema_checks)
 
 
+def _duckdb_with_dropped_migration_7(tmp_path):
+    """A real DuckDBBackend reproduced in the #55 state: migration 7 recorded
+    applied, but its request_params/request_tools columns dropped after open
+    (DuckDBBackend self-heals on open, so we corrupt the live conn afterward)."""
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.db import DuckDBBackend
+
+    backend = DuckDBBackend(StorageConfig(path=str(tmp_path / "telemetry.duckdb")))
+    for idx in (
+        "idx_spans_trace_id", "idx_spans_agent_id", "idx_spans_start_time",
+        "idx_spans_tool_name", "idx_spans_conv_id",
+    ):
+        backend.conn.execute(f"DROP INDEX IF EXISTS {idx}")
+    backend.conn.execute("ALTER TABLE spans DROP COLUMN request_params")
+    backend.conn.execute("ALTER TABLE spans DROP COLUMN request_tools")
+    return backend
+
+
+def test_doctor_warns_on_missing_schema_column(runner, config, tmp_path):
+    """`tj doctor` flags a recorded-but-unlanded migration (missing column, #55)."""
+    _clean_doctor_config(config, tmp_path)
+    backend = _duckdb_with_dropped_migration_7(tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    try:
+        with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+            result = _invoke(runner, backend, config, ["doctor", "--json"])
+        assert result.exit_code == 1
+        checks = json.loads(result.output)
+        integrity = [c for c in checks if c["name"] == "Schema integrity"]
+        assert integrity and integrity[0]["level"] == "warning"
+        assert "request_params" in integrity[0]["message"]
+    finally:
+        backend.close()
+
+
+def test_doctor_repair_heals_missing_schema_column(runner, config, tmp_path):
+    """`tj doctor --repair` reconciles the missing columns; a re-run is clean (#55)."""
+    _clean_doctor_config(config, tmp_path)
+    backend = _duckdb_with_dropped_migration_7(tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    try:
+        with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+            repair = _invoke(runner, backend, config, ["doctor", "--repair"])
+        assert "Schema reconciled" in repair.output
+        cols = {
+            r[0]
+            for r in backend.conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'spans'"
+            ).fetchall()
+        }
+        assert {"request_params", "request_tools"} <= cols
+        # A follow-up doctor run now reports the schema as healthy.
+        with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+            again = _invoke(runner, backend, config, ["doctor", "--json"])
+        checks = json.loads(again.output)
+        integrity = [c for c in checks if c["name"] == "Schema integrity"]
+        assert integrity and integrity[0]["level"] == "ok"
+    finally:
+        backend.close()
+
+
 def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
     # Set up a fake home directory and fake cwd
     fake_home = tmp_path / "fake_home"
