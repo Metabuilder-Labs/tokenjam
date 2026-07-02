@@ -472,6 +472,7 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         input_tokens=d.get("input_tokens") or 0,
         output_tokens=d.get("output_tokens") or 0,
         cache_tokens=d.get("cache_tokens") or 0,
+        cache_write_tokens=d.get("cache_write_tokens") or 0,
         tool_call_count=d.get("tool_call_count") or 0,
         error_count=d.get("error_count") or 0,
         plan_tier=d.get("plan_tier") or "unknown",

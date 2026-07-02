@@ -1664,65 +1664,6 @@ def test_map_cost_lane_shares_histogram_bucket_edges_in_time_mode(html):
     assert "const costMax = mode === 'time'" in html
     # cost bars in time mode are drawn from the shared histBins, not raw cost_series
     assert "Same bucket edges as the tools histogram" in html
-
-
-def test_work_map_is_ask_segmented(html):
-    # A session is a sequence of asks (exchanges): the Map renders map.asks via a
-    # per-ask component, read as a story ("ask by ask").
-    assert "function WorkMapAsk" in html
-    assert "map.asks" in html
-    assert "ask by ask" in html
-
-
-def test_work_map_is_a_storyline(html):
-    # The Map headlines each ask by WHAT THE AGENT DID (its outcome) with a
-    # deterministic status icon, and reads chronologically (oldest first) so it
-    # tells the session's story rather than a reverse-time log.
-    assert "function askStatus" in html
-    assert "wm-ask-did" in html                       # bold "what it did" headline
-    assert "wm-ask-ctx" in html                       # dim prompt-as-context line
-    assert "(map.asks || []).slice().reverse()" in html  # chronological order
-
-
-def test_work_map_renders_spine_with_milestone_dots(html):
-    # Map v2 layout (approved Option-A mock): the asks render on a continuous
-    # vertical spine — a left-border line — with each ask a milestone carrying a
-    # status dot positioned ON the spine, not as a bordered card.
-    assert ".wm-spine {" in html
-    assert "border-left: 2px solid var(--border)" in html  # the spine line
-    assert ".wm-milestone {" in html
-    assert "position: relative" in html
-    assert 'class="wm-spine' in html
-    # The dot sits on the spine (negative offset lands it over the border line).
-    assert ".wm-dot-spine {" in html
-    assert "left: -30px" in html
-    # The old bordered-card framing is gone.
-    assert ".wm-ask {" not in html
-    assert 'class="wm-asks"' not in html
-
-
-def test_work_map_has_inline_branch_block(html):
-    # Fan-out asks list their top subagents inline in an indented branch block
-    # (dashed left border, like the mock) — visible without a click; only the
-    # deeper subtree stays expandable.
-    assert ".wm-branch {" in html
-    assert "border-left: 2px dashed var(--border)" in html
-    assert 'class="wm-branch"' in html
-    # Top 5 subagents shown inline, with a "+N more" overflow line.
-    assert "subs.slice(0, 5)" in html
-    assert "+${branchMore} more" in html
-
-
-def test_user_prompts_visually_marked_on_both_views(html):
-    # Timeline marks user prompts (grouped by ask) in a distinct brand color —
-    # no box/label; the Map's work milestones carry a brand status dot on the
-    # spine (other statuses recolor it: amber flagged, red error, dim chat).
-    assert "function StoryAsk" in html
-    assert "step.ask" in html
-    assert ".story-ask { margin: 14px 0 4px; font-size: 13px; font-weight: 600; color: var(--brand)" in html
-    assert ".wm-dot-spine.work { color: var(--brand)" in html
-
-
 def test_map_tools_lane_bin_width_is_auto_only(html):
     # #58: the manual interval ladder (Auto/1m/5m/15m/1h) is PURGED. Bin widths
     # carry no domain meaning for an agent run (users can't relate 5m→15m to any

@@ -1,7 +1,7 @@
 """Integration tests for the database layer."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pytest
 
@@ -17,7 +17,7 @@ from tokenjam.core.models import (
     Severity,
     TraceFilters,
 )
-from tokenjam.utils.ids import new_uuid, new_span_id, new_trace_id
+from tokenjam.utils.ids import new_uuid
 from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span, make_session, make_tool_span
 

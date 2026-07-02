@@ -124,6 +124,11 @@ class SessionRecord:
     input_tokens:    int          = 0
     output_tokens:   int          = 0
     cache_tokens:    int          = 0
+    # cache-CREATE (write) tokens rolled up onto the session. The dedicated
+    # sessions column is a sibling-branch migration; until it lands this stays a
+    # model-level default (0) so the dashboard's per-session detail can total
+    # cache activity without depending on that column.
+    cache_write_tokens: int       = 0
     tool_call_count: int          = 0
     error_count:     int          = 0
     # Canonical plan-tier identifier for the user's billing relationship with
