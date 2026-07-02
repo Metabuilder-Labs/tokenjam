@@ -8,6 +8,7 @@ from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.ids import new_uuid
+from tokenjam.utils.signatures import tool_arg_signature
 
 if TYPE_CHECKING:
     from tokenjam.core.db import StorageBackend
@@ -94,8 +95,18 @@ def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
     capture rides through the same gate: sampling parameters are gated with the
     request `prompts` toggle, and the tools/tool_choice payload (tool-definition
     content) is gated with `tool_inputs`.
+
+    Before dropping the raw tool input, derive a privacy-safe argument signature
+    (``tokenjam.tool_arg_sig``) and keep it — this is what retry-loop detection
+    uses to tell an identical repeated call from normal repeated tool use, so the
+    raw (possibly sensitive) input never has to be retained.
     """
     stripped = dict(attributes)
+    # Compute the arg signature from whatever input is present, regardless of the
+    # capture toggle, and persist it (the hash is non-sensitive).
+    sig = tool_arg_signature(stripped.get(GenAIAttributes.TOOL_INPUT))
+    if sig is not None:
+        stripped[TjAttributes.TOOL_ARG_SIG] = sig
     if not capture.prompts:
         stripped.pop(GenAIAttributes.PROMPT_CONTENT, None)
         for key in _REQUEST_PARAM_ATTRS:
@@ -290,6 +301,7 @@ class IngestPipeline:
             existing.input_tokens += span.input_tokens or 0
             existing.output_tokens += span.output_tokens or 0
             existing.cache_tokens += span.cache_tokens or 0
+            existing.cache_write_tokens += span.cache_write_tokens or 0
             if span.cost_usd is not None:
                 existing.total_cost_usd = (existing.total_cost_usd or 0.0) + span.cost_usd
             if span.tool_name:
@@ -315,6 +327,14 @@ class IngestPipeline:
             # Late-resolve the per-terminal instance id (display label).
             if existing.service_instance_id is None and span.service_instance_id:
                 existing.service_instance_id = span.service_instance_id
+            # Self-heal cross-session run grouping: a session created before its
+            # telemetry carried the run markers (e.g. an early tool span) gets
+            # them backfilled when a later span declares them. Never overwrite a
+            # value already on the session.
+            if existing.run_id is None and span.run_id:
+                existing.run_id = span.run_id
+            if existing.parent_session_id is None and span.parent_session_id:
+                existing.parent_session_id = span.parent_session_id
             return existing
 
         # New session
@@ -330,11 +350,14 @@ class IngestPipeline:
             input_tokens=span.input_tokens or 0,
             output_tokens=span.output_tokens or 0,
             cache_tokens=span.cache_tokens or 0,
+            cache_write_tokens=span.cache_write_tokens or 0,
             tool_call_count=1 if span.tool_name else 0,
             error_count=1 if span.status_code == SpanStatus.ERROR else 0,
             plan_tier=plan_tier,
             service_namespace=span.service_namespace or self._resolve_project(span.agent_id),
             service_instance_id=span.service_instance_id,
+            run_id=span.run_id,
+            parent_session_id=span.parent_session_id,
         )
 
     def _resolve_project(self, agent_id: str | None) -> str | None:

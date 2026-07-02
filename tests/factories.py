@@ -68,6 +68,7 @@ def make_llm_span(
     trace_id: str | None = None,
     span_id: str | None = None,
     session_id: str | None = None,
+    sub_agent_id: str | None = None,
     extra_attributes: dict | None = None,
     billing_account: str | None = "anthropic",
     request_params: dict | None = None,
@@ -100,6 +101,7 @@ def make_llm_span(
         end_time=end,
         duration_ms=duration_ms,
         agent_id=agent_id,
+        sub_agent_id=sub_agent_id,
         session_id=session_id,
         provider=provider,
         model=model,
@@ -128,15 +130,30 @@ def make_tool_span(
     output_tokens: int = 0,
     conversation_id: str | None = None,
     trace_id: str | None = None,
+    tool_input: dict | str | None = None,
+    name: str = "gen_ai.tool.call",
 ) -> NormalizedSpan:
-    """Create a NormalizedSpan representing a single tool call."""
+    """Create a NormalizedSpan representing a single tool call.
+
+    Pass ``tool_input`` to set the ``gen_ai.tool.input`` attribute — retry-loop
+    detection needs an argument signature to tell a genuine repeat from normal
+    repeated tool use. ``name`` overrides the span name (e.g. to model a
+    non-execution ``claude_code.tool_decision`` event span).
+    """
+    import json as _json
+
     now = utcnow()
     end = now + timedelta(milliseconds=duration_ms)
+    attrs: dict = {}
+    if tool_input is not None:
+        attrs[GenAIAttributes.TOOL_INPUT] = (
+            tool_input if isinstance(tool_input, str) else _json.dumps(tool_input)
+        )
 
     return NormalizedSpan(
         span_id=new_span_id(),
         trace_id=trace_id or new_trace_id(),
-        name="gen_ai.tool.call",
+        name=name,
         kind=SpanKind.INTERNAL,
         status_code=SpanStatus(status),
         start_time=now,
@@ -147,6 +164,7 @@ def make_tool_span(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         conversation_id=conversation_id,
+        attributes=attrs,
     )
 
 
@@ -166,6 +184,8 @@ def make_session(
     ended_at=None,
     service_namespace: str | None = None,
     service_instance_id: str | None = None,
+    run_id: str | None = None,
+    parent_session_id: str | None = None,
 ) -> SessionRecord:
     """
     Create a SessionRecord with sensible defaults.
@@ -180,6 +200,10 @@ def make_session(
 
     `service_instance_id` sets the per-terminal label (used by close-by-instance
     and session-lifecycle tests); `service_namespace` sets the project grouping.
+
+    `run_id` ties this session to a fan-out harness run (cross-session run
+    grouping); `parent_session_id` is the optional spawning-session id for the
+    run tree.
     """
     now = utcnow()
     started = started_at or (now - timedelta(seconds=duration_seconds))
@@ -203,6 +227,8 @@ def make_session(
         plan_tier=plan_tier,
         service_namespace=service_namespace,
         service_instance_id=service_instance_id,
+        run_id=run_id,
+        parent_session_id=parent_session_id,
     )
 
 
@@ -399,15 +425,22 @@ def write_claude_transcript(path, records: list[dict]) -> str:
 def make_otlp_logs_body(
     log_records: list[dict],
     service_name: str = "claude-code",
+    resource_attributes: dict[str, str] | None = None,
 ) -> dict:
-    """Wrap log records in the full resourceLogs envelope."""
+    """Wrap log records in the full resourceLogs envelope.
+
+    `resource_attributes` adds extra string-valued resource attributes (e.g.
+    ``{"tokenjam.run_id": "run-1"}``) so tests can exercise resource-attr
+    capture (run grouping, service.namespace) on the logs path.
+    """
+    attributes = [
+        {"key": "service.name", "value": {"stringValue": service_name}},
+    ]
+    for key, value in (resource_attributes or {}).items():
+        attributes.append({"key": key, "value": {"stringValue": value}})
     return {
         "resourceLogs": [{
-            "resource": {
-                "attributes": [
-                    {"key": "service.name", "value": {"stringValue": service_name}},
-                ],
-            },
+            "resource": {"attributes": attributes},
             "scopeLogs": [{"logRecords": log_records}],
         }],
     }

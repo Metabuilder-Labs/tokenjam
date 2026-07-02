@@ -13,6 +13,7 @@ from tokenjam.otel.semconv import (
     CodexEvents,
     GenAIAttributes,
     ResourceAttributes,
+    TjAttributes,
 )
 from tokenjam.utils.ids import new_span_id
 from tokenjam.api.routes.spans import _otlp_value, _safe_int
@@ -525,6 +526,12 @@ def parse_log_records(
                     )
                     span.service_instance_id = resource_attrs.get(
                         ResourceAttributes.SERVICE_INSTANCE_ID
+                    )
+                    # Cross-session run grouping markers (declared by a fan-out
+                    # harness on each spawned worker; resource-level attrs).
+                    span.run_id = resource_attrs.get(TjAttributes.RUN_ID)
+                    span.parent_session_id = resource_attrs.get(
+                        TjAttributes.PARENT_SESSION_ID
                     )
                     pipeline.process(span)
                     ingested += 1

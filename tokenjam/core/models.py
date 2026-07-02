@@ -60,6 +60,11 @@ class NormalizedSpan:
     parent_span_id: str | None     = None
     session_id:     str | None     = None
     agent_id:       str | None     = None
+    # Claude Code subagent (Task-tool / sidechain) identity. Set during backfill
+    # from a record's top-level `agentId` when `isSidechain` is true; None for
+    # main-thread spans and non-Claude-Code telemetry. Lets a session's cost be
+    # broken down per subagent.
+    sub_agent_id:   str | None     = None
     end_time:       datetime | None = None
     duration_ms:    float | None   = None
     status_message: str | None     = None
@@ -98,6 +103,13 @@ class NormalizedSpan:
     # OTel service.instance.id — the per-terminal/process label (e.g.
     # "founder-os"). Persisted on the session for use as its display name.
     service_instance_id: str | None = None
+    # Cross-session run grouping (tokenjam.run_id resource attribute). One id
+    # per fan-out harness run, shared by all its workers. Transient on the
+    # span; persisted on the session it creates so the dashboard can group runs.
+    run_id:           str | None    = None
+    # Optional spawning-session id (tokenjam.parent_session_id) for nested
+    # spawns. Transient on the span; persisted on the session for the run tree.
+    parent_session_id: str | None   = None
 
 
 @dataclass
@@ -111,7 +123,10 @@ class SessionRecord:
     total_cost_usd:  float | None = None
     input_tokens:    int          = 0
     output_tokens:   int          = 0
+    # cache_tokens = cache reads (reused); cache_write_tokens = cache writes/
+    # creation. Kept separate; the dashboard's "Cache tokens" shows their sum.
     cache_tokens:    int          = 0
+    cache_write_tokens: int       = 0
     tool_call_count: int          = 0
     error_count:     int          = 0
     # Canonical plan-tier identifier for the user's billing relationship with
@@ -127,6 +142,13 @@ class SessionRecord:
     # OTel service.instance.id — the per-terminal label (e.g. "founder-os").
     # Used as the session's display name when set; None otherwise.
     service_instance_id: str | None = None
+    # Cross-session run grouping. `run_id` ties this session to all the other
+    # sessions a fan-out harness spawned in the same run (declared via the
+    # tokenjam.run_id resource attribute, not inferred). `parent_session_id`
+    # is the optional spawning-session id for nested spawns; the run view uses
+    # it to render a parent tree (flat list when no parent edges exist).
+    run_id:           str | None    = None
+    parent_session_id: str | None   = None
 
     @property
     def duration_seconds(self) -> float | None:

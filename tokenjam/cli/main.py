@@ -26,7 +26,10 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     ctx.ensure_object(dict)
 
     # Bare `tj` (no subcommand) → branded home screen (#240): banner +
-    # next-best-action. Reads only config presence, never opens the DB.
+    # next-best-action. Reads only config presence, never opens the DB. The
+    # zero-install first run (`tj quickstart`, #6) is what `npx tokenjam` routes
+    # to via the npm wrapper — bare local `tj` (an installed CLI) keeps the home
+    # screen.
     if ctx.invoked_subcommand is None:
         if no_color:
             from rich import reconfigure
@@ -44,8 +47,10 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         "stop", "uninstall", "onboard", "mcp", "demo", "policy",
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
         "statusline",
+        "quickstart",
     }
     invoked = ctx.invoked_subcommand
+
     if invoked in no_db_commands:
         ctx.obj["config"] = config
         ctx.obj["db"] = None
@@ -109,6 +114,9 @@ from tokenjam.cli.cmd_report import cmd_report  # noqa: E402
 from tokenjam.cli.cmd_policy import cmd_policy  # noqa: E402
 from tokenjam.cli.cmd_pricing import cmd_pricing  # noqa: E402
 from tokenjam.cli.cmd_proxy import cmd_proxy  # noqa: E402
+from tokenjam.cli.cmd_context import cmd_context  # noqa: E402
+from tokenjam.cli.cmd_quota_audit import cmd_quota_audit  # noqa: E402
+from tokenjam.cli.cmd_quickstart import cmd_quickstart  # noqa: E402
 from tokenjam.cli.cmd_otel import cmd_otel_resource_attrs  # noqa: E402
 from tokenjam.cli.cmd_session_end import cmd_session_end  # noqa: E402
 from tokenjam.cli.cmd_statusline import cmd_statusline  # noqa: E402
@@ -134,6 +142,9 @@ cli.add_command(cmd_report, name="report")
 cli.add_command(cmd_policy, name="policy")
 cli.add_command(cmd_pricing, name="pricing")
 cli.add_command(cmd_proxy, name="proxy")
+cli.add_command(cmd_context, name="context")
+cli.add_command(cmd_quota_audit, name="quota-audit")
+cli.add_command(cmd_quickstart, name="quickstart")
 cli.add_command(cmd_otel_resource_attrs, name="otel-resource-attrs")
 cli.add_command(cmd_session_end, name="session-end")
 cli.add_command(cmd_statusline, name="statusline")

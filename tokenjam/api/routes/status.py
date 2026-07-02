@@ -7,6 +7,10 @@ from fastapi import APIRouter, Depends, Request
 
 from tokenjam.api.deps import require_api_key
 from tokenjam.core.alerts import is_interactive_coding_agent
+from tokenjam.core.transcript import (
+    resolve_projects_root,
+    session_transcript_mtime,
+)
 from tokenjam.core.db import (
     _row_to_session,
     get_session_labels,
@@ -88,6 +92,19 @@ def _idle_threshold(config) -> timedelta:
     if config is not None:
         return timedelta(minutes=config.session_idle_minutes)
     return SESSION_IDLE_THRESHOLD
+
+
+def _live_status(session, idle_threshold, projects_root) -> str:
+    """`status_at`, rescued to 'active' when the session's Claude Code transcript
+    is still being written (a fresh mtime), even if its backfilled spans went
+    stale. Only sessions the span signal reads as idle/stale are checked, so the
+    transcript stat is skipped for everything else (SDK sessions, active tiles).
+    """
+    base = session.status_at(idle_threshold)
+    if base not in ("idle", "stale"):
+        return base
+    mtime = session_transcript_mtime(session.session_id, projects_root)
+    return session.status_with_transcript_mtime(mtime, idle_threshold)
 
 
 def _project_for(config, agent_id: str) -> str | None:
@@ -248,6 +265,9 @@ async def get_status(
     # _session_label). Single query for all overrides.
     db_labels = get_session_labels(getattr(db, "conn", None))
     idle_threshold = _idle_threshold(config)
+    projects_root = resolve_projects_root(
+        getattr(request.app.state, "claude_projects_root", None)
+    )
     now = utcnow()
     # Sessions whose last activity is newer than this are "current" (active or
     # idle) and get a tile; older active sessions are stale -> archive only.
@@ -323,7 +343,7 @@ async def get_status(
                 "agent_id": aid,
                 "kind": "coding" if is_interactive_coding_agent(aid) else "sdk",
                 "namespace": namespace,
-                "status": session.status_at(idle_threshold),
+                "status": _live_status(session, idle_threshold, projects_root),
                 "session_id": session.session_id,
                 "label": _session_label(
                     session.session_id, session.service_instance_id,

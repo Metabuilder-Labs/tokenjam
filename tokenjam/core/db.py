@@ -170,6 +170,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     input_tokens        BIGINT DEFAULT 0,
     output_tokens       BIGINT DEFAULT 0,
     cache_tokens        BIGINT DEFAULT 0,
+    -- cache_write_tokens (cache-CREATION tokens) added by migration 12. Kept
+    -- separate from cache_tokens (cache-read) because they bill at a higher rate.
+    cache_write_tokens  BIGINT DEFAULT 0,
     tool_call_count     INTEGER DEFAULT 0,
     error_count         INTEGER DEFAULT 0
 );
@@ -346,6 +349,53 @@ MIGRATIONS: list[tuple[int, str]] = [
         "    updated_at  TIMESTAMPTZ NOT NULL\n"
         ")"
     )),
+    # Migration 12: cache_write_tokens on sessions. spans.cache_write_tokens
+    # already exists (migration 5); the per-session aggregate column was still
+    # missing, so cache-*write*/creation tokens never rolled up to the session
+    # row. Now tracked so the dashboard can show total cache activity
+    # (reads + writes) per session and the cost engine can price writes at the
+    # higher cache-write rate. Nullable; existing rows default 0. The spans line
+    # is a defensive no-op (the column is already present from migration 5).
+    (12, (
+        "ALTER TABLE spans    ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0;\n"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cache_write_tokens BIGINT DEFAULT 0"
+    )),
+    # Migration 13: run_id + parent_session_id on sessions — cross-session run
+    # grouping declared by a fan-out harness (tokenjam.run_id /
+    # tokenjam.parent_session_id resource attributes). Both nullable; existing
+    # sessions stay NULL on upgrade.
+    (13, (
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS run_id            TEXT;\n"
+        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS parent_session_id TEXT"
+    )),
+    # Migration 14: sub_agent_id on spans — the Claude Code subagent (Task-tool
+    # / sidechain) that issued the span. NULL for main-thread spans and all
+    # non-Claude-Code telemetry. A single research session can spawn 12-20
+    # subagents whose spans all fold under the parent session_id; this column
+    # keeps them attributable per subagent. Populated by the backfill parser
+    # from each record's top-level agentId when isSidechain is true.
+    (14, "ALTER TABLE spans ADD COLUMN IF NOT EXISTS sub_agent_id TEXT"),
+    # Migration 15: session_story — a persisted snapshot of a session's
+    # reconstructed Story (the recursive method/narration + subagent subtree,
+    # core/transcript.py). /story and /workmap recompute that Story from the
+    # on-disk Claude Code JSONL transcript on every request and never store it;
+    # Claude Code PRUNES those transcripts, so a killed ephemeral agent's method
+    # dies with the file. This table captures it at session close (M1,
+    # core/method_capture.py) so it outlives the prune and can serve as a
+    # read-through fallback. One row per session (session_id PRIMARY KEY);
+    # `source` records provenance ('live-transcript' | 'backfill') and
+    # `schema_version` the snapshot payload shape. story_json is the full
+    # snapshot ({"story": ..., "asks": ...}); the depth_capped/budget_capped/
+    # cycle markers ride through it unchanged.
+    (15, (
+        "CREATE TABLE IF NOT EXISTS session_story (\n"
+        "    session_id     TEXT PRIMARY KEY,\n"
+        "    story_json     JSON NOT NULL,\n"
+        "    captured_at    TIMESTAMPTZ NOT NULL,\n"
+        "    source         TEXT NOT NULL,\n"
+        "    schema_version INTEGER NOT NULL DEFAULT 1\n"
+        ")"
+    )),
 ]
 
 
@@ -399,6 +449,7 @@ def _row_to_span(row: tuple, columns: list[str]) -> NormalizedSpan:
         parent_span_id=d.get("parent_span_id"),
         session_id=d.get("session_id"),
         agent_id=d.get("agent_id"),
+        sub_agent_id=d.get("sub_agent_id"),
         end_time=d.get("end_time"),
         duration_ms=d.get("duration_ms"),
         status_message=d.get("status_message"),
@@ -433,11 +484,14 @@ def _row_to_session(row: tuple, columns: list[str]) -> SessionRecord:
         input_tokens=d.get("input_tokens") or 0,
         output_tokens=d.get("output_tokens") or 0,
         cache_tokens=d.get("cache_tokens") or 0,
+        cache_write_tokens=d.get("cache_write_tokens") or 0,
         tool_call_count=d.get("tool_call_count") or 0,
         error_count=d.get("error_count") or 0,
         plan_tier=d.get("plan_tier") or "unknown",
         service_namespace=d.get("service_namespace"),
         service_instance_id=d.get("service_instance_id"),
+        run_id=d.get("run_id"),
+        parent_session_id=d.get("parent_session_id"),
     )
 
 
@@ -459,6 +513,76 @@ def session_active_seconds(conn, session_id: str) -> float | None:
     if not row or row[0] is None:
         return None
     return float(row[0]) / 1000.0
+
+
+# Token/cost rollup for a single session, joining cost spans onto the session via
+# the trace(s) the session's own spans carry. The keys mirror the denormalized
+# `sessions` aggregate columns so callers can splice the result straight in.
+_SESSION_ROLLUP_KEYS = (
+    "input_tokens", "output_tokens", "cache_tokens", "cache_write_tokens",
+    "total_cost_usd", "tool_call_count",
+)
+
+
+def session_token_cost_rollup(conn, session_id: str) -> dict | None:
+    """True per-session token/cost rollup, joining trace-keyed cost spans (#18).
+
+    The denormalized `sessions` aggregate columns are accumulated per span keyed
+    by `span.session_id` (see `IngestPipeline._build_or_update_session`). That is
+    correct for telemetry that stamps the session id on its cost spans (the
+    `/v1/logs` Claude Code/Codex path, and the on-disk backfill). But a fan-out
+    harness posting raw OTLP to `/api/v1/spans` can emit the zero-cost
+    `invoke_agent` marker span WITH `session.id` while its cost-bearing
+    `gen_ai.llm.call` spans carry only `agent_id` + `traceId` (no `session.id`).
+    Those cost spans never accumulate onto the marker's session row, so the
+    per-session rollup reads 0 even though the spend is real and surfaces fine on
+    Cost/Traces (which key by agent_id / trace, never session_id).
+
+    The defensible association is the **trace**: the marker span (which carries
+    the session_id) and the cost spans share a `trace_id`, exactly the join
+    `/traces` already uses to attribute the same spans. So this rolls up every
+    span whose `session_id` matches OR whose `trace_id` appears on a span that
+    carries this session_id. Each span is counted once (a span matching both
+    predicates isn't double-counted — the WHERE is a disjunction over distinct
+    rows, not a self-join). When the cost spans DO carry the session_id (the
+    common case), the trace clause is redundant and the result equals the plain
+    `session_id` sum, so this is a strict superset that never under- or
+    over-counts the already-correct paths.
+
+    Returns a dict keyed by `_SESSION_ROLLUP_KEYS`, or None when the session has
+    no spans at all (caller keeps the stored row's values).
+    """
+    if conn is None or session_id is None:
+        return None
+    row = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(input_tokens), 0),
+            COALESCE(SUM(output_tokens), 0),
+            COALESCE(SUM(cache_tokens), 0),
+            COALESCE(SUM(cache_write_tokens), 0),
+            COALESCE(SUM(cost_usd), 0.0),
+            COUNT(*) FILTER (WHERE tool_name IS NOT NULL),
+            COUNT(*)
+        FROM spans
+        WHERE session_id = $1
+           OR trace_id IN (
+                SELECT DISTINCT trace_id FROM spans
+                WHERE session_id = $1 AND trace_id IS NOT NULL
+           )
+        """,
+        [session_id],
+    ).fetchone()
+    if not row or row[6] == 0:
+        return None
+    return {
+        "input_tokens": int(row[0] or 0),
+        "output_tokens": int(row[1] or 0),
+        "cache_tokens": int(row[2] or 0),
+        "cache_write_tokens": int(row[3] or 0),
+        "total_cost_usd": float(row[4] or 0.0),
+        "tool_call_count": int(row[5] or 0),
+    }
 
 
 def _resolve_conn(db_or_conn):
@@ -745,9 +869,9 @@ class DuckDBBackend:
             "duration_ms, attributes, provider, model, tool_name, "
             "input_tokens, output_tokens, cache_tokens, cost_usd, "
             "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens, request_params, request_tools"
+            "cache_write_tokens, request_params, request_tools, sub_agent_id"
             ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)",
+            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)",
             [
                 span.span_id, span.trace_id, span.parent_span_id, span.session_id,
                 span.agent_id, span.name, span.kind.value, span.status_code.value,
@@ -758,6 +882,7 @@ class DuckDBBackend:
                 span.billing_account, span.cache_write_tokens,
                 json.dumps(span.request_params) if span.request_params is not None else None,
                 json.dumps(span.request_tools) if span.request_tools is not None else None,
+                span.sub_agent_id,
             ],
         )
 
@@ -888,8 +1013,8 @@ class DuckDBBackend:
                 session_id, agent_id, conversation_id, started_at, ended_at,
                 status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
                 tool_call_count, error_count, plan_tier, service_namespace,
-                service_instance_id
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                service_instance_id, cache_write_tokens, run_id, parent_session_id
+            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             ON CONFLICT (session_id) DO UPDATE SET
                 ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
                 status = EXCLUDED.status,
@@ -897,6 +1022,7 @@ class DuckDBBackend:
                 input_tokens = EXCLUDED.input_tokens,
                 output_tokens = EXCLUDED.output_tokens,
                 cache_tokens = EXCLUDED.cache_tokens,
+                cache_write_tokens = EXCLUDED.cache_write_tokens,
                 tool_call_count = EXCLUDED.tool_call_count,
                 error_count = EXCLUDED.error_count,
                 plan_tier = CASE
@@ -905,7 +1031,9 @@ class DuckDBBackend:
                     ELSE EXCLUDED.plan_tier
                 END,
                 service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
-                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id)
+                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
+                run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
+                parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id)
             """,
             [
                 session.session_id, session.agent_id, session.conversation_id,
@@ -913,8 +1041,48 @@ class DuckDBBackend:
                 session.total_cost_usd, session.input_tokens, session.output_tokens,
                 session.cache_tokens, session.tool_call_count, session.error_count,
                 session.plan_tier, session.service_namespace,
-                session.service_instance_id,
+                session.service_instance_id, session.cache_write_tokens,
+                session.run_id, session.parent_session_id,
             ],
+        )
+
+    def recompute_session_totals_from_spans(self, session_ids: list[str]) -> None:
+        """Reconcile the given session rows' token + cost aggregates to the SUM
+        of their spans (the source of truth).
+
+        Backfill upserts a session row once per on-disk file, but a Claude Code
+        session is split across files that share one session_id (the main-thread
+        transcript plus each subagents/agent-<id>.jsonl). Because upsert_session
+        uses replace semantics, the per-file upserts would otherwise leave the
+        row holding only the last-processed file's totals. Scoped to the given
+        ids so it never touches live-ingested sessions. Idempotent.
+        """
+        if not session_ids:
+            return
+        self.conn.execute(
+            """
+            UPDATE sessions AS s SET
+                input_tokens       = agg.input_tokens,
+                output_tokens      = agg.output_tokens,
+                cache_tokens       = agg.cache_tokens,
+                cache_write_tokens = agg.cache_write_tokens,
+                total_cost_usd     = agg.total_cost_usd,
+                tool_call_count    = agg.tool_call_count
+            FROM (
+                SELECT session_id,
+                       COALESCE(SUM(input_tokens), 0)       AS input_tokens,
+                       COALESCE(SUM(output_tokens), 0)      AS output_tokens,
+                       COALESCE(SUM(cache_tokens), 0)       AS cache_tokens,
+                       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                       COALESCE(SUM(cost_usd), 0.0)         AS total_cost_usd,
+                       COUNT(*) FILTER (WHERE tool_name IS NOT NULL) AS tool_call_count
+                FROM spans
+                WHERE session_id IN (SELECT unnest($1))
+                GROUP BY session_id
+            ) AS agg
+            WHERE s.session_id = agg.session_id
+            """,
+            [list(session_ids)],
         )
 
     def upsert_agent(self, agent: AgentRecord) -> None:
