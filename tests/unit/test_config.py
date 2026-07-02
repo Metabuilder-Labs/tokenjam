@@ -232,6 +232,19 @@ class TestSerialise:
         assert _parse({"version": "1"}).policies == []
         assert _parse({"version": "1", "policies": [{"name": "x"}]}).policies == []  # no kind
 
+    def test_session_idle_minutes_roundtrip(self):
+        config = TjConfig(version="1", session_idle_minutes=90)
+        serialised = _serialise(config)
+        # Maps to the [sessions] table, not a bare top-level scalar.
+        assert serialised["sessions"]["idle_minutes"] == 90
+        assert "session_idle_minutes" not in serialised
+        restored = _parse(serialised)
+        assert restored.session_idle_minutes == 90
+
+    def test_session_idle_minutes_defaults_when_absent(self):
+        restored = _parse({"version": "1"})
+        assert restored.session_idle_minutes == 240
+
     def test_serialise_excludes_config_path(self):
         """Regression: config_path is a Path object which is not TOML
         serializable. _serialise() must exclude it. See v0.1.7 fix."""
