@@ -1,7 +1,7 @@
 """``tj quickstart`` — the zero-install, zero-config first run (issue #6).
 
 The 15-second time-to-first-value path that lets a brand-new user — reached via
-``npx tj`` / ``uvx tj`` with **no** pip env, **no** daemon, **no** onboarding —
+``npx tokenjam`` / ``uvx tj`` with **no** pip env, **no** daemon, **no** onboarding —
 see where their Claude Code quota actually goes, straight from the JSONL files
 ccusage already reads (``~/.claude/projects/*.jsonl``).
 

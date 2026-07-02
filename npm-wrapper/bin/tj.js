@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /*
- * Zero-install launcher for TokenJam (`npx tj`), issue #6.
+ * Zero-install launcher for TokenJam (`npx tokenjam`), issue #6.
  *
  * TokenJam's CLI is a Python package (`tokenjam`, command `tj`). This thin npm
  * wrapper exists for one reason: the Claude Code / ccusage crowd reaches for
- * `npx <tool>` first. `npx tj` here resolves a Python launcher with NO pip env,
+ * `npx <tool>` first. `npx tokenjam` here resolves a Python launcher with NO pip env,
  * NO daemon, NO onboarding — it shells out to the Python CLI via the first
- * available runner and hands every argument straight through. Bare `npx tj`
+ * available runner and hands every argument straight through. Bare `npx tokenjam`
  * (no subcommand) routes to `tj quickstart`: where your Claude Code quota goes,
  * from the same ~/.claude/projects/*.jsonl files ccusage reads, in one command.
  *
@@ -55,7 +55,7 @@ function main() {
   process.stderr.write(
     "\n" +
       "tj (TokenJam) needs a Python runner to launch its CLI.\n" +
-      "Install one of these, then re-run `npx tj`:\n" +
+      "Install one of these, then re-run `npx tokenjam`:\n" +
       "  • uv     →  https://docs.astral.sh/uv/  (then `uvx --from tokenjam tj`)\n" +
       "  • pipx   →  `brew install pipx` / `apt install pipx`\n" +
       "Or install TokenJam directly:  pipx install tokenjam\n\n"

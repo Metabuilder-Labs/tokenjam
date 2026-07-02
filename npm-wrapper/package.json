@@ -1,7 +1,7 @@
 {
-  "name": "tj",
+  "name": "tokenjam",
   "version": "0.5.0",
-  "description": "Zero-install launcher for TokenJam (tj) — `npx tj` runs the Python CLI via uvx/pipx and prints where your Claude Code quota actually goes, no setup.",
+  "description": "Zero-install launcher for TokenJam (tj) — `npx tokenjam` runs the Python CLI via uvx/pipx and prints where your Claude Code quota actually goes, no setup.",
   "keywords": ["claude-code", "ccusage", "tokens", "cost", "llm", "agents", "observability", "tokenjam"],
   "homepage": "https://tokenjam.dev",
   "bugs": "https://github.com/Metabuilder-Labs/tokenjam/issues",

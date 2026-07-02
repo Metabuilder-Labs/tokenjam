@@ -15,7 +15,7 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 [![OTel](https://img.shields.io/badge/OTel-GenAI%20SemConv-3d8eff?labelColor=0d1117)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ```
-npx tj
+npx tokenjam
 ```
 
 <sub>Zero install, zero config. Reads the same <code>~/.claude/projects/*.jsonl</code> files <a href="https://github.com/ryoppippi/ccusage">ccusage</a> does and shows you <b>where your Claude Code quota actually goes</b> — no pip env, no daemon, no onboarding. Prefer Python? <code>uvx --from tokenjam tj</code> does the same. Ready to go deeper (live capture + dashboard + MCP)? <code>pipx install tokenjam &amp;&amp; tj onboard</code>.</sub>
@@ -31,7 +31,7 @@ npx tj
 ## 15-second start (no install)
 
 ```bash
-npx tj                      # or:  uvx --from tokenjam tj
+npx tokenjam                      # or:  uvx --from tokenjam tj
 ```
 
 One command, no setup. TokenJam ingests your existing Claude Code sessions from
@@ -51,7 +51,7 @@ pipx install tokenjam        # or `pip install tokenjam` in a clean venv
 tj onboard
 ```
 
-<sub>`npx tj` and `uvx --from tokenjam tj` launch the Python CLI via `uvx`/`pipx` — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
+<sub>`npx tokenjam` and `uvx --from tokenjam tj` launch the Python CLI via `uvx`/`pipx` — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
 ---
 
