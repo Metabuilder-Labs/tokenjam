@@ -1384,6 +1384,12 @@ a.health-tile.attn { border-color: var(--warn); }
 .mb-tip .mb-tip-hd { color: var(--text); font-weight: 600; margin-bottom: 5px; font-size: 11.5px; }
 .mb-tip .mb-tip-r { display: flex; justify-content: space-between; gap: 10px; color: var(--text-dim); margin: 1px 0; }
 .mb-tip .mb-tip-r b { color: var(--text); }
+/* Derived-callouts strip: the board's answers (costliest burst, friction, top
+   delegation, idle share, edit footprint) surfaced by DEFAULT — never hover-gated. */
+.mb-insights { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 10px; }
+.mb-ins { display: inline-flex; align-items: baseline; gap: 6px; border: 1px solid var(--border); background: var(--surface2); border-radius: 6px; padding: 4px 9px; font-size: 10.5px; font-family: 'Geist Mono', monospace; color: var(--text-dim); }
+.mb-ins b { color: var(--text); font-weight: 600; }
+.mb-ins.bad b { color: var(--error); }
 .mb-legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 10px 2px 2px; font-size: 10.5px; color: var(--text-dim); }
 .mb-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 .mb-hint { color: var(--text-faint); margin-left: auto; }
@@ -1396,13 +1402,19 @@ a.health-tile.attn { border-color: var(--warn); }
 .mb-tree { border: 1px solid var(--border); border-radius: 9px; background: var(--surface2); padding: 12px; }
 .mb-root { font-size: 10.5px; color: var(--text-dim); margin-bottom: 9px; font-family: 'Geist Mono', monospace; }
 .mb-dirs { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
-.mb-dir { border: 1px solid var(--border); border-radius: 8px; padding: 9px; background: var(--surface); display: flex; flex-direction: column; min-width: 150px; max-width: 340px; }
+.mb-dir { border: 1px solid var(--border); border-radius: 8px; padding: 9px; background: var(--surface); display: flex; flex-direction: column; min-width: 170px; max-width: 340px; }
+/* Demoted temp/scratch reads: one muted, fixed-size card at the end of the row. */
+.mb-dir.mb-scratch { flex: 0 0 auto; opacity: 0.62; border-style: dashed; }
 .mb-dh { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; font-family: 'Geist Mono', monospace; display: flex; align-items: baseline; gap: 6px; }
-.mb-dh .mb-dh-nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-dh .mb-dh-nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mb-dh .mb-meta { flex: 0 0 auto; }
 .mb-files { display: flex; flex-direction: column; gap: 6px; }
 .mb-file { position: relative; display: flex; align-items: center; gap: 7px; padding: 7px 9px; border-radius: 6px; font-size: 11.5px; font-family: 'Geist Mono', monospace; border: 1px solid var(--border); }
 .mb-ord { flex: 0 0 auto; width: 17px; height: 17px; border-radius: 50%; background: var(--surface3); color: var(--text-dim); font-size: 9px; display: flex; align-items: center; justify-content: center; }
-.mb-nm { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The file NAME is the card's payload — give it a readable floor and let the
+   touch-count meta ellipsize first (pre-fix the meta won and names shrank to one letter). */
+.mb-nm { flex: 1 1 auto; min-width: 9ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mb-file .mb-meta { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mb-edt { color: var(--success); font-size: 11px; }
 .mb-meta { font-size: 9px; color: var(--text-faint); }
 .mb-tcap { margin-top: 11px; font-size: 11.5px; color: var(--text-dim); }
@@ -3329,10 +3341,11 @@ const MB_GUTTER = 78; // px — keep in sync with .mb-gutter width so the crossh
 const MB_PHASE_LABEL_MIN = 60; // px — only print a phase-band label when the band is at least this wide.
 const MB_EVLAB_MAX = 72;       // px — keep in sync with .mb-evlab max-width (caps a label's box; used to clamp inside the lane).
 const MB_EVLAB_GAP = 80;       // px — min center-to-center spacing between two printed tool labels; must exceed MB_EVLAB_MAX so two kept (center-anchored) labels can never touch.
-const MB_SUBBAR_MIN = 7;       // % — minimum subagent-bar width so its label stays legible at any zoom.
-const MB_SUBBAR_GAP = 1.5;     // % — gap required before two bars share a row (else they stack).
-const MB_SUB_MAX_ROWS = 3;     // max stacked rows in the sub-agents lane (overflow reuses the earliest-ending row).
+const MB_SUBBAR_MIN = 1.2;     // % — minimum subagent-bar width so a short window stays visible (labels are px-gated separately).
+const MB_SUBBAR_GAP = 0.6;     // % — gap required before two bars share a row (else they stack).
+const MB_SUB_MAX_ROWS = 8;     // max stacked rows in the sub-agents lane (overflow falls onto the least-loaded row, label-less).
 const MB_SUB_ROW_H = 16;       // px — vertical pitch per stacked subagent row.
+const MB_SUBLAB_MIN_PX = 56;   // px — print a subagent bar's label only when the bar is at least this wide (narrower bars keep the hover title, so text never collides).
 const MB_BREAK_LAB_W = 74;     // px — break-label box width, used to clamp it inside the board.
 const MB_BREAK_LAB_GAP = 52;   // px — min spacing between printed idle-gap labels (rules still draw for all).
 
@@ -3393,10 +3406,20 @@ function mbFmtBin(w) {
   return w + 's';
 }
 
+// A path outside the workspace that agents use as scratch: OS temp dirs,
+// screenshot staging, trash. Reads there are process noise, not "where the work
+// landed" — the treemap demotes them into one collapsed card instead of letting
+// a dozen one-off screenshot reads swamp the real files.
+const MB_SCRATCH_RE = /(^\/(private\/)?(tmp|var\/folders)\/)|\/TemporaryItems\/|\/\.Trash\/|\/scratchpad\//;
+const mbIsScratchPath = (p) => MB_SCRATCH_RE.test(p);
+
 // Aggregate the event stream into a codebase-territory treemap: read/edit events
 // carry a file-path `label`; count touches per file, track first-touch order (min
 // ordinal) and whether the file was ever edited, then group files by directory.
-// Files with no usable path label are skipped. Returns null when nothing maps.
+// Files with no usable path label are skipped; scratch/temp paths are demoted to
+// one collapsed card (and excluded from the common-prefix root, so workspace dir
+// labels stay relative + readable). Cards and files are weighted by EDITS over
+// reads — edits are where the work landed. Returns null when nothing maps.
 function mbBuildTerritory(events) {
   const files = new Map();
   (events || []).forEach((e) => {
@@ -3411,10 +3434,16 @@ function mbBuildTerritory(events) {
     if (e.category === 'edit') { f.edits++; f.edited = true; } else { f.reads++; }
     if (ord < f.firstOrd) f.firstOrd = ord;
   });
-  const list = [...files.values()];
-  if (!list.length) return null;
-  // Global first-touch rank → the order badge on each file.
-  list.slice().sort((a, b) => a.firstOrd - b.firstOrd).forEach((f, i) => { f.rank = i + 1; });
+  const all = [...files.values()];
+  if (!all.length) return null;
+  // Global first-touch rank → the order badge on each file (scratch included,
+  // so ranks stay honest about what happened when).
+  all.slice().sort((a, b) => a.firstOrd - b.firstOrd).forEach((f, i) => { f.rank = i + 1; });
+  // Demote scratch/temp paths into one collapsed card; everything below builds
+  // from the workspace files only (prefix, grouping, intensity).
+  const scratchFiles = all.filter((f) => mbIsScratchPath(f.path));
+  let list = all.filter((f) => !mbIsScratchPath(f.path));
+  if (!list.length) { list = scratchFiles.splice(0); } // all-scratch session: show them normally
   const dirOf = (p) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i); };
   const baseOf = (p) => { const i = p.lastIndexOf('/'); return i < 0 ? p : p.slice(i + 1); };
   // Longest common path-segment prefix (shown as the tree root; stripped from dir labels).
@@ -3436,25 +3465,38 @@ function mbBuildTerritory(events) {
       const shortLabel = restSegs.length === 0
         ? '(root)'
         : (restSegs.length > 2 ? '…/' + restSegs.slice(-2).join('/') : rest);
-      g = { label: shortLabel + '/', full: (dir || '(root)'), totalTouches: 0, files: [] };
+      g = { label: shortLabel + '/', full: (dir || '(root)'), totalTouches: 0, weight: 0, files: [] };
       groups.set(key, g);
     }
     g.totalTouches += f.touches;
+    // Edits are where the work landed — weight them over reads so an edited file
+    // (and its directory) claims more space than a widely-read one.
+    g.weight += f.edits * 3 + f.reads;
     g.files.push({ ...f, base: baseOf(f.path) });
   });
   const dirs = [...groups.values()];
-  dirs.forEach((d) => d.files.sort((a, b) => b.touches - a.touches));
-  dirs.sort((a, b) => b.totalTouches - a.totalTouches);
+  dirs.forEach((d) => d.files.sort((a, b) => (b.edits * 3 + b.reads) - (a.edits * 3 + a.reads) || b.touches - a.touches));
+  dirs.sort((a, b) => b.weight - a.weight);
   const maxTouches = list.reduce((m, f) => Math.max(m, f.touches), 1);
-  return { root: (pref.join('/') || 'workspace') + '/', dirs, maxTouches };
+  // One collapsed card for the demoted scratch reads (rendered last, muted).
+  const scratch = scratchFiles.length ? {
+    count: scratchFiles.length,
+    reads: scratchFiles.reduce((s, f) => s + f.reads, 0),
+    edits: scratchFiles.reduce((s, f) => s + f.edits, 0),
+    title: scratchFiles.slice(0, 12).map((f) => f.path).join('\n')
+      + (scratchFiles.length > 12 ? '\n… +' + (scratchFiles.length - 12) + ' more' : ''),
+  } : null;
+  return { root: (pref.join('/') || 'workspace') + '/', dirs, maxTouches, scratch };
 }
 
 // Lay out the sub-agents lane: position each subagent as a [left,right]% bar on
 // the SAME axis the other lanes use (time → ts offset / duration; step →
-// start/end ordinal), then greedily pack non-overlapping bars onto one row and
-// stack the rest (capped at MB_SUB_MAX_ROWS). In step mode a subagent with no
-// mapped ordinals is hidden (it has no step-grid position). Returns the placed
-// items (with `.row`) and the row count for sizing the lane.
+// start/end ordinal), then greedily pack non-overlapping bars onto rows (the
+// lane grows up to MB_SUB_MAX_ROWS). Past the cap an item falls onto the
+// earliest-ending row and is marked `.overlapped` so the renderer suppresses
+// its label — bars may then overlap, text never does. In step mode a subagent
+// with no mapped ordinals is hidden (it has no step-grid position). Returns the
+// placed items (with `.row`) and the row count for sizing the lane.
 function mbLayoutSubagents(subs, mode, started, duration, n) {
   const clamp01 = (f) => Math.max(0, Math.min(1, f));
   const items = [];
@@ -3482,11 +3524,17 @@ function mbLayoutSubagents(subs, mode, started, duration, n) {
   const rowEnds = []; // right edge (%) of the last bar placed on each row
   items.forEach((it) => {
     let row = rowEnds.findIndex((end, idx) => idx < MB_SUB_MAX_ROWS && it.left >= end + MB_SUBBAR_GAP);
+    it.overlapped = false;
     if (row < 0) {
       if (rowEnds.length < MB_SUB_MAX_ROWS) { row = rowEnds.length; rowEnds.push(0); }
-      else { row = 0; for (let k = 1; k < rowEnds.length; k++) if (rowEnds[k] < rowEnds[row]) row = k; }
+      else {
+        // Every row is occupied here — this bar WILL overlap its row-mate, so
+        // flag it: the renderer keeps the bar (honest density) but not the label.
+        row = 0; for (let k = 1; k < rowEnds.length; k++) if (rowEnds[k] < rowEnds[row]) row = k;
+        it.overlapped = true;
+      }
     }
-    rowEnds[row] = it.right;
+    rowEnds[row] = Math.max(rowEnds[row], it.right);
     it.row = row;
   });
   return { items, rows: Math.max(1, rowEnds.length) };
@@ -3631,8 +3679,10 @@ function MapBoardSection({ sessionId }) {
     });
   }
 
-  // Context area+line (cumulative tokens) and cost bars (per-span burn) as inline
-  // SVG on a shared 0..100 x — NOT uPlot — so the lanes stay pixel-aligned.
+  // Context area+line (each call's OWN context occupancy — input+cache tokens on
+  // that call, so growth/compaction/resets are visible; NOT a cumulative sum) and
+  // cost bars (per-span burn) as inline SVG on a shared 0..100 x — NOT uPlot —
+  // so the lanes stay pixel-aligned.
   const maxCtx = Math.max(1, ...ctxSeries.map((p) => p.tokens || 0));
   const ctxPts = ctxSeries.map((p) => [seriesFrac(p) * 100, 30 - ((p.tokens || 0) / maxCtx) * 26]);
   const ctxLine = ctxPts.map((pt, i) => (i ? 'L' : 'M') + pt[0].toFixed(2) + ',' + pt[1].toFixed(2)).join(' ');
@@ -3754,6 +3804,44 @@ function MapBoardSection({ sessionId }) {
 
   const territory = mbBuildTerritory(events);
 
+  // Derived callouts — the board's job is to ANSWER "where did the time and
+  // money go", not just plot it. Deterministic, computed on fixed auto-width
+  // bins (independent of the UI bin selector) so the strip is stable across
+  // mode/interval toggles; each chip's title says how it was derived.
+  const insights = [];
+  {
+    const insW = mbAutoBinWidth(activeDur);
+    const insBins = new Map();
+    let totalUsd = 0;
+    costSeries.forEach((p) => {
+      const bi = Math.floor(seriesActive(p) / insW);
+      insBins.set(bi, (insBins.get(bi) || 0) + (p.usd || 0));
+      totalUsd += (p.usd || 0);
+    });
+    let topBin = null;
+    insBins.forEach((usd, bi) => { if (!topBin || usd > topBin.usd) topBin = { bi, usd }; });
+    if (topBin && totalUsd > 0 && topBin.usd > 0) {
+      const pct = Math.round((topBin.usd / totalUsd) * 100);
+      insights.push({ k: 'costliest ' + mbFmtBin(insW), v: fmtCost(topBin.usd) + ' (' + pct + '% of spend) @ ' + mbFmtTime(topBin.bi * insW), title: 'the single ' + mbFmtBin(insW) + ' stretch of active time that burned the most' });
+    }
+    const errCount = events.filter((e) => e.category === 'error').length;
+    const retryCount = events.filter((e) => e.is_retry).length;
+    if (errCount || retryCount) insights.push({ k: 'friction', v: errCount + ' error' + (errCount === 1 ? '' : 's') + ' · ' + retryCount + ' retr' + (retryCount === 1 ? 'y' : 'ies'), bad: errCount > 0, title: 'failed tool calls and retried steps across the run' });
+    const costedSubs = (data.subagents || []).filter((s) => s.cost_usd != null);
+    if (costedSubs.length) {
+      const topSub = costedSubs.reduce((m, s) => (s.cost_usd > m.cost_usd ? s : m));
+      insights.push({ k: 'top sub-agent', v: topSub.name + ' · ' + fmtCost(topSub.cost_usd), title: 'the delegation that cost the most (of ' + (data.subagents || []).length + ' sub-agents)' });
+    }
+    if (gaps.length && duration > activeDur) {
+      const idlePct = Math.round(((duration - activeDur) / duration) * 100);
+      insights.push({ k: 'idle', v: idlePct + '% of wall-clock', title: 'time collapsed off the axis as idle gaps (⋯ markers)' });
+    }
+    if (territory) {
+      const editedCount = territory.dirs.reduce((s, d) => s + d.files.filter((f) => f.edited).length, 0);
+      if (editedCount) insights.push({ k: 'edits landed in', v: editedCount + ' file' + (editedCount === 1 ? '' : 's'), title: 'distinct files edited — see "Where the work landed" below' });
+    }
+  }
+
   // Sub-agents lane: positioned bars on the shared axis (re-spaced by the
   // time⇄step toggle). Rendered only when the session spawned subagents.
   const subLayout = mbLayoutSubagents(data.subagents || [], mode, started, activeDur, n);
@@ -3778,7 +3866,7 @@ function MapBoardSection({ sessionId }) {
 
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 0;font-family:'Geist Mono',monospace">How this run worked — phase, tool-events, context growth and cost burn on one axis. Toggle time⇄step to re-space every lane; hover for the exemplar.</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 0;font-family:'Geist Mono',monospace">Where this run's time and money went — phases, tool activity, sub-agents, per-call context size and cost burn on one shared axis. Toggle time⇄step to re-space every lane; hover any point for details.</div>
     <div class="mb-head">
       <div class="mb-chips">
         <span class="mb-chip">${mbFmtTime(duration)}</span>
@@ -3803,6 +3891,10 @@ function MapBoardSection({ sessionId }) {
         </div>
       </div>
     </div>
+
+    ${insights.length ? html`<div class="mb-insights">
+      ${insights.map((it) => html`<span class="mb-ins${it.bad ? ' bad' : ''}" title=${it.title}><span class="mb-ins-k">${it.k}</span><b>${it.v}</b></span>`)}
+    </div>` : null}
 
     <div class="mb-board" ref=${boardRef} onMouseMove=${onMove} onMouseLeave=${onLeave}>
       <div class="mb-lane phase"><div class="mb-gutter">phase</div><div class="mb-plot">
@@ -3844,7 +3936,7 @@ function MapBoardSection({ sessionId }) {
 
       ${(data.subagents || []).length ? html`
       <div class="mb-lane sub" style=${'height:' + subLaneH + 'px'}><div class="mb-gutter">sub-<br/>agents</div><div class="mb-plot">
-        ${subLayout.items.map(({ sa, left, right, row }) => {
+        ${subLayout.items.map(({ sa, left, right, row, overlapped }) => {
           const w = Math.min(100, Math.max(MB_SUBBAR_MIN, right - left));
           const l = Math.max(0, Math.min(left, 100 - w)); // keep the bar inside the plot
           // One ellipsized run: "name · tokens · $cost". Omit null metrics entirely
@@ -3853,10 +3945,13 @@ function MapBoardSection({ sessionId }) {
           if (sa.tokens != null) subParts.push(fmtTokens(sa.tokens));
           if (sa.cost_usd != null) subParts.push(fmtCost(sa.cost_usd));
           const subLabel = subParts.join(' · ');
+          // Text never collides: a label prints only on a wide-enough,
+          // non-overlapped bar; every bar keeps the full label as hover title.
+          const showSubLab = !overlapped && plotW > 0 && (w / 100) * plotW >= MB_SUBLAB_MIN_PX;
           return html`<div class="mb-subbar" title=${subLabel}
             style=${'left:' + l + '%;width:' + w + '%;top:' + (5 + row * MB_SUB_ROW_H) + 'px;'
               + 'background:' + mbTint('--chart-5', 16) + ';border:1px solid ' + mbTint('--chart-5', 50)}>
-            <span class="mb-sublab">${subLabel}</span>
+            ${showSubLab ? html`<span class="mb-sublab">${subLabel}</span>` : null}
           </div>`;
         })}
       </div></div>
@@ -3919,8 +4014,11 @@ function MapBoardSection({ sessionId }) {
       <span><i style="background:var(--chart-3)"></i>Bash</span>
       <span><i style="background:var(--chart-5)"></i>Task</span>
       <span><i style="background:var(--chart-6)"></i>WebFetch</span>
+      <span><i style="background:var(--text-dim)"></i>Other</span>
       <span><i style="background:var(--error)"></i>error</span>
-      <span class="mb-hint">hover the board → exemplar · toggle re-spaces every lane</span>
+      <span title="a dashed red outline on a bar or tick marks a retried step"><i style="background:transparent;border:1px dashed var(--error);box-sizing:border-box"></i>retry</span>
+      <span title="phase-band tints alternate per phase to show boundaries; hover a band for its title"><i style=${'background:' + mbTint('--chart-1', 30)}></i>phase band</span>
+      <span class="mb-hint">hover any lane for details · toggle re-spaces every lane</span>
     </div>
 
     ${territory ? html`
@@ -3931,7 +4029,7 @@ function MapBoardSection({ sessionId }) {
           <div class="mb-root">${territory.root}</div>
           <div class="mb-dirs">
             ${territory.dirs.map((d) => html`
-              <div class="mb-dir" style=${'flex:' + Math.max(0.6, d.totalTouches)}>
+              <div class="mb-dir" style=${'flex:' + Math.max(0.6, d.weight)}>
                 <div class="mb-dh"><span class="mb-dh-nm" title=${d.full}>${d.label}</span> <span class="mb-meta">${d.totalTouches} touch${d.totalTouches === 1 ? '' : 'es'}</span></div>
                 <div class="mb-files">
                   ${d.files.map((f) => {
@@ -3950,8 +4048,13 @@ function MapBoardSection({ sessionId }) {
                   })}
                 </div>
               </div>`)}
+            ${territory.scratch ? html`
+              <div class="mb-dir mb-scratch" title=${territory.scratch.title}>
+                <div class="mb-dh"><span class="mb-dh-nm">temp / scratch</span> <span class="mb-meta">demoted</span></div>
+                <div class="mb-meta">${territory.scratch.count} file${territory.scratch.count === 1 ? '' : 's'} · ${territory.scratch.reads} read${territory.scratch.reads === 1 ? '' : 's'}${territory.scratch.edits ? ' · ' + territory.scratch.edits + ' edit' + (territory.scratch.edits === 1 ? '' : 's') : ''} — hover for paths</div>
+              </div>` : null}
           </div>
-          <div class="mb-tcap">Reads sweep wide; edits (green, ✎) converge on the files that changed. Order badges show first-touch sequence. Descriptive only — tj reports what happened, you judge the approach.</div>
+          <div class="mb-tcap">Cards are sized by edits over reads — edits (green, ✎) are where the work landed; reads sweep wide. Order badges show first-touch sequence; temp/scratch reads collapse into one muted card. Descriptive only — tj reports what happened, you judge the approach.</div>
         </div>
       </div>
     ` : null}

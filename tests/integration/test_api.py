@@ -2303,7 +2303,7 @@ async def test_workmap_no_launched_run_when_solo(tmp_path):
 @pytest.mark.asyncio
 async def test_get_session_sessionmap(tmp_path):
     """/sessionmap returns transcript-derived events + span-derived series for a
-    seeded session: cumulative context tokens grow, cost is per-span.
+    seeded session: context is each call's own occupancy, cost is per-span.
 
     Spans are anchored to the transcript's first event ts (a *normal* session
     where transcript ≈ span time), so the unified axis t0 (min over events +
@@ -2359,11 +2359,12 @@ async def test_get_session_sessionmap(tmp_path):
         assert sub["start_ts"] is not None and sub["end_ts"] is not None
         assert sub["start_ordinal"] == 0 and sub["end_ordinal"] == 0
 
-        # context_series: running (cumulative) context size over ALL the session's
+        # context_series: each LLM call's OWN context occupancy (input+cache+
+        # cache_write on that call — NOT a cumulative sum) over ALL the session's
         # LLM-call spans (main + subagent), ordered by start_time. The subagent
         # spans at t=5s/11s interleave with the main spans at t=0/10/20s.
         ctx = body["context_series"]
-        assert [p["tokens"] for p in ctx] == [100, 300, 800, 1000, 1300]
+        assert [p["tokens"] for p in ctx] == [100, 200, 500, 200, 300]
         assert [p["t_s"] for p in ctx] == [0.0, 5.0, 10.0, 11.0, 20.0]
 
         # cost_series: per-span burn (NOT cumulative).
