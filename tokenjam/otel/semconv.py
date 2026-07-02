@@ -143,6 +143,19 @@ class CodexEvents:
     OUTPUT    = "output"
 
 
+class ResourceAttributes:
+    """OTel standard resource attributes (set per process / service)."""
+    SERVICE_NAME      = "service.name"
+    # Logical grouping above service.name. tj uses it as the "project" a
+    # service belongs to, so the dashboard can roll up every repo under one
+    # project tile (e.g. all `Aquanodeio/*` repos -> namespace "aquanode").
+    SERVICE_NAMESPACE = "service.namespace"
+    # Per-instance identifier (one process / terminal). tj uses it as the
+    # human label for a session's terminal (e.g. "founder-os") when set at
+    # launch via OTEL_RESOURCE_ATTRIBUTES.
+    SERVICE_INSTANCE_ID = "service.instance.id"
+
+
 class TjAttributes:
     """tj-specific span attributes (non-standard extensions)."""
     COST_USD         = "tokenjam.cost_usd"

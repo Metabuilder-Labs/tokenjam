@@ -226,15 +226,45 @@ code, .mono {
   font-weight: 600;
   font-size: 14px;
 }
+/* Right-click-to-rename affordance on a session card title (#306). */
+.rename-title { cursor: context-menu; }
+.rename-pencil {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.12s ease, color 0.12s ease;
+}
+.card:hover .rename-pencil { opacity: 0.6; }
+.rename-pencil:hover { opacity: 1; color: var(--brand); }
+.rename-input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 2px 6px;
+  border-radius: 5px;
+  font-family: 'Geist Mono', monospace;
+  font-weight: 600;
+  font-size: 14px;
+  min-width: 0;
+  flex: 1 1 auto;
+  max-width: 220px;
+}
+.rename-input:focus { outline: none; border-color: var(--brand); }
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
   display: inline-block;
 }
 .status-dot.active { background: var(--success); }
 .status-dot.completed { background: var(--success); }
-.status-dot.idle { background: var(--text-dim); }
+.status-dot.idle { background: var(--warn); }
 .status-dot.error { background: var(--error); }
-.status-dot.stale { background: var(--warn); }
+.status-dot.stale { background: var(--warn); opacity: 0.6; }
+.status-dot.closed { background: var(--text-dim); }
+.status-dot.dormant { background: var(--text-faint); }
+.status-dot.quiet { background: var(--warn); box-shadow: 0 0 0 0 rgba(245,166,35,0.5); animation: pulse-amber 2.4s infinite; }
+@keyframes pulse-amber { 0% { box-shadow: 0 0 0 0 rgba(245,166,35,0.5); } 70% { box-shadow: 0 0 0 6px rgba(245,166,35,0); } 100% { box-shadow: 0 0 0 0 rgba(245,166,35,0); } }
 .card-row {
   display: flex;
   justify-content: space-between;
@@ -327,6 +357,12 @@ tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: rgba(var(--accent-rgb),0.06); }
 td.chevron { color: var(--text-dim); font-size: 14px; text-align: center; width: 24px; }
 tr.clickable:hover td.chevron { color: var(--accent); }
+/* Status-list row actions: unify the two secondary links (View cost / View
+   traces) into one inline group with consistent spacing, clearly subordinate
+   to the now-clickable row. Mirrors the .card-links link treatment. */
+.row-actions { display: inline-flex; gap: 14px; }
+.row-actions a { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; }
+.row-actions a:hover { text-decoration: underline; }
 
 /* Badges */
 .badge {
@@ -340,10 +376,81 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 .badge-ok, .badge-completed { background: rgba(12,228,144,0.15); color: var(--success); }
 .badge-error { background: rgba(238,0,0,0.15); color: var(--error); }
 .badge-active { background: rgba(12,228,144,0.15); color: var(--success); }
-.badge-stale { background: rgba(245,166,35,0.15); color: var(--warn); }
+.badge-idle { background: rgba(245,166,35,0.15); color: var(--warn); }
+.badge-stale { background: rgba(245,166,35,0.12); color: var(--warn); }
+.badge-closed { background: rgba(140,140,140,0.15); color: var(--text-dim); }
 .badge-critical { background: rgba(238,0,0,0.15); color: var(--error); }
 .badge-warning { background: rgba(245,166,35,0.15); color: var(--warn); }
 .badge-info { background: rgba(61,142,255,0.15); color: var(--info); }
+
+/* Split zones — Status screen (#306) */
+.zone-head { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 14px; }
+.zone-title { font-family: 'Geist', sans-serif; font-size: 16px; font-weight: 700; color: var(--text); }
+.zone-sub { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); }
+.zone-count { margin-left: auto; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-faint); }
+.section-gap { height: 28px; }
+.card-foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--brand); display: flex; align-items: center; gap: 6px; }
+.card.clickable:hover .card-foot { color: var(--accent); }
+
+/* Collapsible archive / inactive block */
+details.archive-block { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+details.archive-block > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+details.archive-block > summary::-webkit-details-marker { display: none; }
+details.archive-block > summary .tw { color: var(--text-faint); font-size: 9px; transition: transform 0.15s; display: inline-block; }
+details.archive-block[open] > summary .tw { transform: rotate(90deg); }
+details.archive-block > summary .a-count { color: var(--text-faint); }
+details.archive-block > summary .a-hint { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-faint); }
+details.archive-block .table-wrap { border-top: 1px solid var(--border); }
+table.archive-list { width: 100%; border-collapse: collapse; font-family: 'Geist Mono', monospace; font-size: 13px; min-width: 820px; }
+table.archive-list th { text-align: left; padding: 9px 14px; color: var(--text-faint); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table.archive-list td { padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; color: var(--text-dim); }
+table.archive-list tr:last-child td { border-bottom: none; }
+table.archive-list tr.clickable:hover td { background: rgba(var(--accent-rgb),0.04); }
+table.archive-list .a-id { color: var(--text); }
+
+/* SDK services panel (Prometheus-style rows) */
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.panel-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+.panel-head .grip { color: var(--text-faint); }
+.panel-head .range { margin-left: auto; text-transform: none; letter-spacing: 0; }
+.panel-head .range-tag { padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); }
+.svc-row { display: grid; grid-template-columns: 200px 82px 1fr 90px 120px; align-items: center; gap: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border); transition: background 0.12s; }
+.svc-row:last-child { border-bottom: none; }
+.svc-row.clickable { cursor: pointer; }
+.svc-row.clickable:hover { background: rgba(var(--accent-rgb),0.03); }
+.svc-name { font-family: 'Geist Mono', monospace; font-size: 13px; display: flex; align-items: center; gap: 8px; color: var(--text); }
+.svc-metric { font-family: 'Geist Mono', monospace; font-size: 13px; color: var(--text); }
+.svc-metric .unit { color: var(--text-dim); font-size: 10px; }
+.metric-label { font-family: 'Geist Mono', monospace; font-size: 9px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.4px; }
+.spark-wrap { display: flex; align-items: center; gap: 12px; }
+.spark-col { display: flex; flex-direction: column; gap: 2px; }
+.spark-lab { font-family: 'Geist Mono', monospace; font-size: 9px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.3px; }
+.err-good { color: var(--success); }
+.err-warn { color: var(--warn); }
+.err-bad { color: var(--error); }
+.svc-empty { padding: 16px 14px; font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); }
+
+/* Inactive services list */
+.inactive-list { border-top: 1px solid var(--border); }
+.inact-row { display: grid; grid-template-columns: 220px 150px 1fr 176px auto; align-items: center; gap: 16px; padding: 13px 14px; border-bottom: 1px solid var(--border); transition: background 0.12s; }
+.inact-row:last-child { border-bottom: none; }
+.inact-row.clickable { cursor: pointer; }
+.inact-row.clickable:hover { background: rgba(var(--accent-rgb),0.03); }
+.inact-name { font-family: 'Geist Mono', monospace; font-size: 13px; display: flex; align-items: center; gap: 8px; color: var(--text-dim); }
+.inact-row.quiet .inact-name { color: var(--text); }
+.inact-row.quiet { background: rgba(245,166,35,0.035); }
+.inact-seen { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-faint); }
+.inact-flat { display: flex; align-items: center; gap: 10px; }
+.inact-flat .svg-flat { flex-shrink: 0; }
+.inact-flatline { font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-faint); font-style: italic; }
+.inact-meta { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); text-align: right; white-space: nowrap; }
+.inact-meta .unit { color: var(--text-faint); font-size: 10px; }
+.inact-tag { font-family: 'Geist Mono', monospace; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; padding: 3px 9px; border-radius: 6px; white-space: nowrap; }
+.tag-dormant { background: rgba(237,237,237,0.06); color: var(--text-faint); border: 1px solid var(--border); }
+.tag-quiet { background: rgba(245,166,35,0.13); color: var(--warn); border: 1px solid rgba(245,166,35,0.35); }
+.inact-actions { display: inline-flex; gap: 12px; }
+.inact-actions a { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; cursor: pointer; }
+.inact-actions a:hover { text-decoration: underline; }
 
 /* Filters */
 .filters {
@@ -1527,61 +1634,121 @@ function dominantSplit(costSegs) {
 }
 
 // ============================
-// Status List Table (#241)
+// SDK Services zone (#306)
 // ============================
-// The List alternative to the Status cards: one row per agent in a columned
-// table — Agent · Status · Cost today · Tokens · Tool calls · Elapsed · Actions.
-// The Cost cell goes through fmtPerItemCost(framing) exactly like the cards do:
-// per-item cost is rendered as TOKENS for subscription/local users (not "% of
-// cycle", which is a window-level aggregate — #249) and as dollars for api. The
-// suppression decision is never re-derived here. Reuses the existing
-// .table-wrap/table CSS; no new lib.
-function StatusListTable({ agents, framing }) {
+// Non-interactive SDK agents render as Prometheus-style rows: name + status
+// dot, cost/day, a cost/min sparkline + a smaller err% sparkline, err-rate and
+// req/min. Services that stopped emitting telemetry drop into a collapsible
+// "Inactive" list keyed on last-seen — went_quiet (amber: recently silent →
+// possible outage) vs long_dormant (muted: silent for a while). Reuses the
+// shared Sparkline + fmtAgo + fmtFramedDollar; introduces no new palette.
+function _sdkErrClass(pct) {
+  return pct > 0.5 ? 'err-bad' : pct > 0 ? 'err-warn' : 'err-good';
+}
+function _sdkErrColor(pct) {
+  return pct > 0.5 ? 'var(--error)' : pct > 0 ? 'var(--warn)' : 'var(--success)';
+}
+function _flatlineSvg(color) {
+  return html`<svg class="svg-flat" width="120" height="24" viewBox="0 0 120 24" preserveAspectRatio="none">
+    <line x1="0" y1="12" x2="120" y2="12" stroke=${color} stroke-width="1.2" stroke-dasharray="3 3"></line>
+  </svg>`;
+}
+function SdkServicesPanel({ services, framing }) {
+  const live = services.filter(s => s.state === 'live');
+  const inactive = services.filter(s => s.state !== 'live');
+  const openTraces = (aid) => { location.hash = '#/traces?agent_id=' + encodeURIComponent(aid); };
+
+  const svcRow = (s) => {
+    const errPct = s.err_rate || 0;
+    return html`
+      <div class="svc-row clickable" title="Open service traces & cost"
+           onClick=${() => openTraces(s.agent_id)}>
+        <div class="svc-name"><span class="status-dot live"></span>${s.agent_id}</div>
+        <div class="svc-metric">$${(s.today_cost || 0).toFixed(2)}<span class="unit">/day</span></div>
+        <div class="spark-wrap">
+          <div class="spark-col" style="flex:1;min-width:1px">
+            <span class="spark-lab">cost / min</span>
+            <${Sparkline} values=${s.cost_per_min} color="var(--brand)" width=${220} height=${30} />
+          </div>
+          <div class="spark-col" style="width:110px">
+            <span class="spark-lab">error %</span>
+            <${Sparkline} values=${s.err_pct_per_min} color=${_sdkErrColor(errPct)} width=${110} height=${30} />
+          </div>
+        </div>
+        <div class="svc-metric ${_sdkErrClass(errPct)}">${errPct.toFixed(1)}%<div class="metric-label">err rate</div></div>
+        <div class="svc-metric" style="text-align:right">~${Math.round(s.req_per_min || 0)}<span class="unit"> req/min</span></div>
+      </div>`;
+  };
+
+  const inactRow = (s) => {
+    const quiet = s.state === 'went_quiet';
+    const dotCls = quiet ? 'quiet' : 'dormant';
+    const tagCls = quiet ? 'tag-quiet' : 'tag-dormant';
+    const tag = quiet ? 'went quiet' : 'long-dormant';
+    const flatColor = quiet ? 'var(--warn)' : 'var(--text-faint)';
+    const extra = quiet ? ('was ~' + Math.round(s.req_per_min || 0) + ' req/min') : 'no data in 24h';
+    const seen = (quiet ? 'went quiet ' : 'last seen ') + fmtAgo(s.last_seen);
+    return html`
+      <div class=${'inact-row clickable ' + (quiet ? 'quiet' : 'dormant')}
+           title=${quiet ? 'Was steady and just stopped — check for an incident' : 'Long silent — likely decommissioned'}
+           onClick=${() => openTraces(s.agent_id)}>
+        <div class="inact-name"><span class="status-dot ${dotCls}"></span>${s.agent_id}</div>
+        <div><span class=${'inact-tag ' + tagCls}>${tag}</span></div>
+        <div class="inact-flat">${_flatlineSvg(flatColor)}<span class="inact-flatline">${extra}</span></div>
+        <div class="inact-meta"><span class="inact-seen">${seen}</span><br/>$${(s.today_cost || 0).toFixed(2)}<span class="unit"> today</span></div>
+        <div class="inact-actions">
+          <a href=${'#/traces?agent_id=' + encodeURIComponent(s.agent_id)} onClick=${e => e.stopPropagation()}>Traces</a>
+          <a href=${'#/cost?agent_id=' + encodeURIComponent(s.agent_id)} onClick=${e => e.stopPropagation()}>Cost</a>
+        </div>
+      </div>`;
+  };
+
   return html`
-    <div class="table-wrap"><table class="status-list">
-      <thead><tr>
-        <th>Agent</th>
-        <th>Status</th>
-        <th>Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></th>
-        <th>Tokens (in / out)</th>
-        <th>Tool calls</th>
-        <th>Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days.</span></span></th>
-        <th></th>
-      </tr></thead>
-      <tbody>
-        ${agents.map(a => html`
-          <tr>
-            <td class="mono"><span class="status-dot ${a.status}" style="margin-right:7px"></span>${a.agent_id}</td>
-            <td><span class="badge badge-${a.status}">${a.status}</span></td>
-            <td>${fmtPerItemCost(a.cost_today, _costVal(a, true), framing)}</td>
-            <td>${fmtTokens(a.input_tokens)} / ${fmtTokens(a.output_tokens)}</td>
-            <td>${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</td>
-            <td>${a.duration_seconds != null ? fmtDurLong(a.duration_seconds * 1000) : '-'}</td>
-            <td style="white-space:nowrap">
-              <a href=${'#/cost?agent_id=' + encodeURIComponent(a.agent_id)}>View cost →</a>
-              <a href=${'#/traces?agent_id=' + encodeURIComponent(a.agent_id)} style="margin-left:10px">View traces →</a>
-            </td>
-          </tr>
-        `)}
-      </tbody>
-    </table></div>`;
+    <div class="panel">
+      <div class="panel-head">
+        <span class="grip">⣿</span>
+        <span>SDK agents / services · cost & error rate</span>
+        <span class="range"><span class="range-tag">last 24m · 1m step</span></span>
+      </div>
+      <div>
+        ${live.length ? live.map(svcRow) : html`<div class="svc-empty">No SDK services live right now</div>`}
+      </div>
+    </div>
+    ${inactive.length ? html`
+      <details class="archive-block" open>
+        <summary>
+          <span class="tw">▶</span>
+          <span>Inactive</span>
+          <span class="a-count">(no telemetry in 24h) · ${inactive.length}</span>
+          <span class="a-hint">keyed on last-seen · a silent service may be an outage</span>
+        </summary>
+        <div class="inactive-list">${inactive.map(inactRow)}</div>
+      </details>` : null}
+  `;
 }
 
 // ============================
 // Status View
 // ============================
 function StatusView({ params }) {
-  // Optional single-agent filter via URL (#112). Filtered client-side since
-  // /status returns every agent.
-  // View mode (Cards | List) also lives in the URL (#241): `#/status?view=cards`.
-  // List is the default (the more useful scan view, #263) and is omitted from
-  // the URL; choosing Cards carries `?view=cards`.
-  const DEFAULTS = { view: 'list', agent_id: '' };
-  const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
-  const viewMode = readParam(params, 'view', DEFAULTS.view, v => ['cards', 'list'].includes(v));
-  const setView = (v) => navigate('status', { agent_id: agentId, view: v }, DEFAULTS);
+  // Optional single-agent filter via URL (#112), filtered client-side.
+  // The Status screen is two content-defined zones (#306): coding sessions
+  // (bounded work → archived list) and SDK services (unbounded telemetry →
+  // inactive list). Content, not a user toggle, decides what renders.
+  const agentId = readParam(params, 'agent_id', '');
   const [data, setData] = useState(null);
   const [alerts, setAlerts] = useState([]);
+  // Inline session-card rename (#306): which session's title is being edited,
+  // its working value, and a ref so the input autofocuses + selects on open.
+  const [editingId, setEditingId] = useState(null);
+  const [editValue, setEditValue] = useState('');
+  const renameRef = useRef(null);
+  useLayoutEffect(() => {
+    if (editingId && renameRef.current) {
+      renameRef.current.focus();
+      renameRef.current.select();
+    }
+  }, [editingId]);
 
   const load = useCallback(async () => {
     const [s, a] = await Promise.all([
@@ -1595,33 +1762,80 @@ function StatusView({ params }) {
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
   if (!data) return html`<div class="empty">Loading...</div>`;
-  if (!data.agents.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
+  const sdkServices = data.sdk_services || [];
+  if (!data.agents.length && !(data.archived || []).length && !sdkServices.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
   const agents = agentId ? data.agents.filter(a => a.agent_id === agentId) : data.agents;
+  // Coding zone = interactive coding agents (cards) + coding archive.
+  // SDK zone = data.sdk_services, rendered by SdkServicesPanel. The two zones
+  // are content-defined, not a user-selected view (#306).
+  const codingAgents = agents.filter(a => a.kind === 'coding');
+  const codingArchived = (data.archived || []).filter(s => s.kind === 'coding' && (!agentId || s.agent_id === agentId));
 
-  return html`
-    <div class="page-title">Status</div>
-    <div style="display:flex;align-items:center;gap:12px;margin:-14px 0 16px">
-      <div style="font-size:12px;color:var(--text-dim);font-family:'Geist Mono',monospace">
-        ${agentId
-          ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/status" style="color:var(--brand)">show all</a>`
-          : (viewMode === 'list' ? 'Click on an agent row for details' : 'Click on an agent tile for details')}
-      </div>
-      <div class="view-toggle" style="margin-left:auto" role="tablist" aria-label="Status view mode">
-        <button class=${viewMode === 'cards' ? 'active' : ''} aria-pressed=${viewMode === 'cards'} onClick=${() => setView('cards')}>Cards</button>
-        <button class=${viewMode === 'list' ? 'active' : ''} aria-pressed=${viewMode === 'list'} onClick=${() => setView('list')}>List</button>
-      </div>
-    </div>
-    ${viewMode === 'list'
-      ? StatusListTable({ agents, framing: data.framing })
-      : html`<div class="cards">
-      ${agents.map(a => html`
-        <div class="card">
+  // Group coding tiles by project (service.namespace). Agents whose telemetry
+  // carried no namespace fall under "Ungrouped".
+  const UNGROUPED = ' ungrouped';
+  const groups = {};
+  for (const a of codingAgents) {
+    const key = a.namespace || UNGROUPED;
+    (groups[key] = groups[key] || []).push(a);
+  }
+  const groupKeys = Object.keys(groups).sort((x, y) =>
+    x === UNGROUPED ? 1 : y === UNGROUPED ? -1 : x.localeCompare(y));
+  // Only show project headers when at least one agent has a real namespace.
+  const showHeadings = groupKeys.some(k => k !== UNGROUPED);
+
+  // Per-group count of current sessions hidden by the per-agent tile cap.
+  // `overflow` is duplicated across an agent's tiles, so dedupe by agent_id.
+  const groupOverflow = (key) => {
+    const seen = {};
+    let total = 0;
+    for (const a of groups[key]) {
+      if (a.overflow && !seen[a.agent_id]) { seen[a.agent_id] = 1; total += a.overflow; }
+    }
+    return total;
+  };
+
+  // Coding-session tile. The whole card is clickable through to the session
+  // detail (or traces when there's no session_id yet). Cost goes through the
+  // shared fmtPerItemCost(framing) path (#249). A footer echoes the openable
+  // method surfaces (Map / Approach / Timeline live as tabs on the detail page).
+  // Persist a right-click rename, then refresh immediately (don't wait for the
+  // 5s poll). An empty value clears the rename (backend reverts to the default).
+  const submitRename = async (a) => {
+    const value = editValue.trim();
+    setEditingId(null);
+    try {
+      await apiPost('/sessions/' + encodeURIComponent(a.session_id) + '/label', { label: value });
+      await load();
+    } catch (e) { /* leave the existing name; a transient failure isn't fatal */ }
+  };
+
+  const agentCard = (a) => {
+    const displayName = a.label || a.agent_id;
+    const isEditing = a.session_id && editingId === a.session_id;
+    const startEdit = a.session_id
+      ? (e) => { e.preventDefault(); e.stopPropagation(); setEditValue(displayName); setEditingId(a.session_id); }
+      : null;
+    return html`
+        <div class="card clickable" onContextMenu=${startEdit} onClick=${() => { if (isEditing) return; location.hash = a.session_id ? '#/sessions/' + a.session_id : '#/traces'; }}>
           <div class="card-header">
             <span class="status-dot ${a.status}"></span>
-            ${a.agent_id}
+            ${isEditing
+              ? html`<input ref=${renameRef} class="rename-input" value=${editValue}
+                  onClick=${e => e.stopPropagation()}
+                  onInput=${e => setEditValue(e.target.value)}
+                  onBlur=${() => submitRename(a)}
+                  onKeyDown=${e => {
+                    e.stopPropagation();
+                    if (e.key === 'Enter') { e.preventDefault(); submitRename(a); }
+                    else if (e.key === 'Escape') { e.preventDefault(); setEditingId(null); }
+                  }} />`
+              : html`<span class="rename-title" title=${a.session_id ? 'Click ✎ or right-click to rename' : null} onContextMenu=${startEdit}>${displayName}${a.session_id ? html`<span class="rename-pencil" onClick=${startEdit} title="Rename">✎</span>` : null}</span>`}
             <span class="badge badge-${a.status}" style="margin-left:auto">${a.status}</span>
           </div>
+          ${a.label ? html`<div class="card-row"><span class="label">Agent</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.agent_id}</span></div>` : null}
+          ${a.session_id ? html`<div class="card-row"><span class="label">Session</span><span class="value" style="font-family:'Geist Mono',monospace;font-size:12px">${a.session_id.slice(0, 8)}</span></div>` : null}
           <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage. If you're on a subscription plan (e.g. Claude Max), your actual spend may differ.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
@@ -1629,14 +1843,86 @@ function StatusView({ params }) {
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
-          <div class="card-links">
-            <a href=${'#/cost?agent_id=' + encodeURIComponent(a.agent_id)}>View cost →</a>
-            <a href=${'#/traces?agent_id=' + encodeURIComponent(a.agent_id)}>View traces →</a>
-          </div>
+          <div class="card-foot">→ Map / Approach / Timeline</div>
+        </div>`;
+  };
+
+  // Archived coding-session row (mock parity): dot · session+badge · cost ·
+  // tokens · duration (derived from started_at→last_span_time) · tool calls ·
+  // ended-ago · Map/Approach/Timeline. The whole row opens the frozen session.
+  const archRow = (s) => {
+    const dur = (s.started_at && s.last_span_time)
+      ? fmtDurLong(new Date(s.last_span_time).getTime() - new Date(s.started_at).getTime())
+      : '-';
+    const endedLabel = (s.status === 'stale' ? 'last activity ' : 'ended ') + fmtAgo(s.last_span_time || s.started_at);
+    return html`
+      <tr class=${s.session_id ? 'clickable' : ''} onClick=${() => { if (s.session_id) location.hash = '#/sessions/' + s.session_id; }}>
+        <td><span class="status-dot ${s.status}"></span></td>
+        <td class="a-id">${s.label || (s.session_id ? s.session_id.slice(0, 8) : '-')} <span class="badge badge-${s.status}" style="margin-left:4px">${s.status}</span></td>
+        <td>${fmtFramedDollar(s.total_cost_usd, data.framing)}</td>
+        <td>${fmtTokens(s.input_tokens)} / ${fmtTokens(s.output_tokens)}</td>
+        <td>${dur}</td>
+        <td>${s.tool_call_count != null ? s.tool_call_count : '-'}</td>
+        <td>${endedLabel}</td>
+        <td class="row-actions">
+          ${s.session_id ? html`
+            <a href=${'#/sessions/' + s.session_id} onClick=${e => e.stopPropagation()}>Map</a>
+            <a href=${'#/sessions/' + s.session_id} onClick=${e => e.stopPropagation()}>Approach</a>
+            <a href=${'#/sessions/' + s.session_id} onClick=${e => e.stopPropagation()}>Timeline</a>` : null}
+        </td>
+      </tr>`;
+  };
+
+  return html`
+    <div class="page-title">Status</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 18px;font-family:'Geist Mono',monospace">
+      ${agentId
+        ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/status" style="color:var(--brand)">show all</a>`
+        : 'Two zones — coding sessions (bounded work) and SDK services (unbounded telemetry).'}
+    </div>
+
+    ${(codingAgents.length || codingArchived.length) ? html`
+      <div class="zone-head">
+        <span class="zone-title">Coding sessions</span>
+        <span class="zone-sub">bounded work · active → idle → stale → closed</span>
+        <span class="zone-count">${codingAgents.length} active · ${codingArchived.length} archived</span>
+      </div>
+      ${codingAgents.length ? groupKeys.map(key => html`
+        ${(showHeadings || groupOverflow(key) > 0) ? html`
+          <div style="display:flex;align-items:baseline;gap:10px;margin:18px 0 10px;font-family:'Geist Mono',monospace">
+            <span style="font-size:13px;font-weight:600;color:var(--text)">${key === UNGROUPED ? 'Ungrouped' : key}</span>
+            <span style="font-size:12px;color:var(--text-dim)">${groups[key].length} session${groups[key].length > 1 ? 's' : ''} · ${fmtCost(Object.values(groups[key].reduce((m, a) => (m[a.agent_id] = a.cost_today || 0, m), {})).reduce((s, c) => s + c, 0))} today${groupOverflow(key) > 0 ? ' · +' + groupOverflow(key) + ' more' : ''}</span>
+          </div>` : null}
+        <div class="cards">
+          ${groups[key].map(agentCard)}
         </div>
-      `)}
-    </div>`}
+      `) : html`
+        <div style="font-size:12px;color:var(--text-dim);margin:8px 0 4px;font-family:'Geist Mono',monospace">No active coding sessions</div>`}
+
+      ${codingArchived.length > 0 ? html`
+        <details class="archive-block">
+          <summary>
+            <span class="tw">▶</span>
+            <span>Archived</span>
+            <span class="a-count">(closed / stale) · ${codingArchived.length}</span>
+            <span class="a-hint">keyed on ended-at · method still openable</span>
+          </summary>
+          <div class="table-wrap"><table class="archive-list">
+            <thead><tr><th></th><th>Session</th><th>Cost</th><th>Tokens (in / out)</th><th>Duration</th><th>Tool calls</th><th>Ended</th><th></th></tr></thead>
+            <tbody>
+              ${codingArchived.map(archRow)}
+            </tbody>
+          </table></div>
+        </details>` : null}
+    ` : null}
+
+    ${sdkServices.length ? html`
+      <div class="section-gap"></div>
+      <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />
+    ` : null}
+
     ${alerts.length > 0 ? html`
+      <div class="section-gap"></div>
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>
         <thead><tr><th>Time</th><th>Severity</th><th>Type</th><th>Title</th><th>Agent</th></tr></thead>

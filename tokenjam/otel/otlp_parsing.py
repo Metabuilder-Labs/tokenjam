@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from tokenjam.core.models import NormalizedSpan, SpanKind, SpanStatus
-from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
+from tokenjam.otel.semconv import GenAIAttributes, ResourceAttributes, TjAttributes
 from tokenjam.utils.ids import new_span_id
 
 
@@ -183,6 +183,8 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
             attrs.get(TjAttributes.BILLING_ACCOUNT)
             or provider_to_billing_account(provider)
         ),
+        service_namespace=attrs.get(ResourceAttributes.SERVICE_NAMESPACE),
+        service_instance_id=attrs.get(ResourceAttributes.SERVICE_INSTANCE_ID),
     )
 
 
