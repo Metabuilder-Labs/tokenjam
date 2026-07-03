@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 from typing import TYPE_CHECKING, Any
 
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
@@ -18,6 +20,12 @@ if TYPE_CHECKING:
     from tokenjam.core.schema_validator import SchemaValidator
 
 logger = logging.getLogger("tokenjam.ingest")
+
+# Bound on the async-hooks background queue. Chosen to absorb bursty ingest
+# while a slow hook catches up, without letting memory grow unbounded. When the
+# queue is full, _enqueue_hook drops the OLDEST queued span (see its docstring)
+# and logs the drop — post-ingest hooks are advisory, so newest telemetry wins.
+HOOK_QUEUE_MAXSIZE = 10_000
 
 
 class SpanRejectedError(Exception):
@@ -176,6 +184,14 @@ class IngestPipeline:
         self.alert_engine = alert_engine
         self.schema_validator = schema_validator
         self.drift_detector = drift_detector
+
+        # Background worker thread & queue for async hooks (opt-in via
+        # [alerts] async_hooks = true; default OFF — see _run_hooks).
+        self._hook_queue: queue.Queue | None = None
+        self._hook_thread: threading.Thread | None = None
+        self._hook_lock = threading.Lock()
+        self._shutdown_event = threading.Event()
+        self._hook_dropped = 0  # count of spans dropped on queue overflow
 
     def process(self, span: NormalizedSpan) -> None:
         """
@@ -401,6 +417,15 @@ class IngestPipeline:
             except Exception as exc:
                 logger.warning("CostEngine hook failed: %s", exc)
 
+        # Default OFF: a config without async_hooks set runs hooks inline on the
+        # ingest thread, identical to the pre-async synchronous behavior.
+        if self.config.alerts.async_hooks:
+            self._enqueue_hook(span)
+        else:
+            self._run_deferred_hooks(span)
+
+    def _run_deferred_hooks(self, span: NormalizedSpan) -> None:
+        """Run AlertEngine and SchemaValidator hooks."""
         if self.alert_engine is not None:
             try:
                 self.alert_engine.evaluate(span)
@@ -412,6 +437,127 @@ class IngestPipeline:
                 self.schema_validator.validate(span)
             except Exception as exc:
                 logger.warning("SchemaValidator hook failed: %s", exc)
+
+    def _enqueue_hook(self, span: NormalizedSpan) -> None:
+        if self._hook_queue is None:
+            self._start_background_worker()
+        q = self._hook_queue
+        assert q is not None  # _start_background_worker guarantees this
+        # Bounded queue with a drop-oldest overflow policy: under a slow hook +
+        # high span volume, memory must not grow without bound. When the queue is
+        # full we evict the oldest queued span to make room for the newest, and
+        # log the drop (never silently) so operators can see hooks are shedding
+        # load. Post-ingest hooks are advisory (alerts / schema validation), so
+        # favoring the freshest telemetry is the right trade-off.
+        try:
+            q.put_nowait(span)
+        except queue.Full:
+            try:
+                dropped = q.get_nowait()
+                q.task_done()
+                self._hook_dropped += 1
+                logger.warning(
+                    "async hook queue full (maxsize=%d); dropped oldest queued "
+                    "span %s to enqueue newest (%d dropped total). Hooks are "
+                    "falling behind span ingest.",
+                    HOOK_QUEUE_MAXSIZE,
+                    getattr(dropped, "span_id", "<unknown>"),
+                    self._hook_dropped,
+                )
+            except queue.Empty:
+                pass
+            try:
+                q.put_nowait(span)
+            except queue.Full:
+                # Consumer refilled the queue between our get and put; drop the
+                # newest span rather than block the ingest path. Still logged.
+                self._hook_dropped += 1
+                logger.warning(
+                    "async hook queue still full; dropped newest span %s "
+                    "(%d dropped total).",
+                    getattr(span, "span_id", "<unknown>"),
+                    self._hook_dropped,
+                )
+
+    def _start_background_worker(self) -> None:
+        with self._hook_lock:
+            if self._hook_queue is None:
+                self._hook_queue = queue.Queue(maxsize=HOOK_QUEUE_MAXSIZE)
+                self._shutdown_event.clear()
+                self._hook_thread = threading.Thread(
+                    target=self._worker_loop,
+                    name="TjHookWorker",
+                    daemon=True,
+                )
+                self._hook_thread.start()
+
+    def _worker_loop(self) -> None:
+        # NOTE: the loop deliberately does NOT check _shutdown_event at the top of
+        # each iteration. On shutdown, close() sets the event AND enqueues a None
+        # sentinel; the worker keeps draining until it reaches the sentinel, so
+        # every span already queued gets its hooks run before the thread exits.
+        # This is what makes flush()+close() lossless (blocker: shutdown dropped
+        # queued alerts).
+        q = self._hook_queue
+        assert q is not None  # only started after the queue exists
+        while True:
+            try:
+                span = q.get(timeout=0.1)
+            except queue.Empty:
+                # No work pending. Only exit on the empty queue once shutdown was
+                # requested — otherwise keep waiting for new spans.
+                if self._shutdown_event.is_set():
+                    break
+                continue
+
+            if span is None:  # Shutdown sentinel — queue is drained, stop.
+                q.task_done()
+                break
+
+            try:
+                self._run_deferred_hooks(span)
+            finally:
+                q.task_done()
+
+    def flush(self) -> None:
+        """Block until all currently-queued hooks have been processed.
+
+        Guarded so it can never hang forever: if the worker thread has already
+        exited (e.g. close() ran first, or it was never started), there is no
+        live consumer to drain the queue, so joining would block indefinitely.
+        In that case we return immediately.
+        """
+        q = self._hook_queue
+        t = self._hook_thread
+        if q is None:
+            return
+        if t is None or not t.is_alive():
+            return
+        q.join()
+
+    def close(self) -> None:
+        """Flush queued hooks, then shut down the background worker thread.
+
+        Drains the queue before exiting (via the sentinel + non-top-of-loop
+        shutdown check in _worker_loop), so no queued alert is lost on exit.
+        Idempotent and safe to call when async hooks were never enabled.
+        """
+        thread = self._hook_thread
+        q = self._hook_queue
+        if thread is None or q is None:
+            return
+        # Drain everything already queued before signalling stop.
+        self.flush()
+        self._shutdown_event.set()
+        try:
+            q.put_nowait(None)  # Sentinel; queue has room after the flush.
+        except queue.Full:
+            # Extremely unlikely (queue was just drained), but never block: the
+            # top-of-empty shutdown check will still let the worker exit.
+            pass
+        thread.join(timeout=10.0)
+        self._hook_queue = None
+        self._hook_thread = None
 
 
 def build_default_pipeline(db: "StorageBackend", config: TjConfig) -> "IngestPipeline":

@@ -58,7 +58,6 @@ def _engine(cfg: TjConfig, *, spend, db=None, now_fn=None) -> PolicyEngine:
     return PolicyEngine(list(cfg.policies), context=ctx)
 
 
-
 def _api_gate(cfg: TjConfig, provider="openai") -> GateDecision:
     gd = classify(cfg, provider)
     assert gd.path == POLICY  # precondition: api/usage-billed
