@@ -44,6 +44,11 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_CODE_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 
+# The `attributes.source` tag every Claude Code backfill span carries (LLM +
+# tool). Used to scope the stale-scheme reconciliation DELETE so it only ever
+# touches backfill-sourced rows, never live-ingested spans.
+_CLAUDE_CODE_SOURCE = "backfill.claude_code"
+
 # Claude Code always bills Anthropic — its plan tier lives under
 # [budget.anthropic] in config.
 _CLAUDE_CODE_PROVIDER = "anthropic"
@@ -79,6 +84,10 @@ class BackfillResult:
     spans_ingested: int = 0
     spans_skipped_existing: int = 0
     spans_retagged: int = 0
+    # Stale-scheme backfill spans purged this run (the #294/#300 cross-version
+    # self-heal). 0 on a clean current-scheme DB; >0 the first time an affected
+    # user re-backfills a DB that still holds pre-v0.5.2 uuid-keyed rows.
+    spans_stale_purged: int = 0
     files_failed: int = 0
     earliest: datetime | None = None
     latest: datetime | None = None
@@ -355,7 +364,7 @@ def parse_claude_code_session(
         # llm_attrs == {"source": ...} so existing behavior is byte-for-byte
         # unchanged. Keys match GenAIAttributes so downstream consumers (and
         # alert content-stripping) treat backfilled content like live content.
-        llm_attrs: dict = {"source": "backfill.claude_code"}
+        llm_attrs: dict = {"source": _CLAUDE_CODE_SOURCE}
         if capture.prompts and pending_prompt.strip():
             llm_attrs[GenAIAttributes.PROMPT_CONTENT] = pending_prompt
         if capture.completions:
@@ -406,7 +415,7 @@ def parse_claude_code_session(
                 )
                 tool_span_id = _span_id_for_tool(sid_str, tool_use_id)
                 tool_name = item.get("name") or "unknown"
-                tool_attrs: dict = {"source": "backfill.claude_code"}
+                tool_attrs: dict = {"source": _CLAUDE_CODE_SOURCE}
                 if capture.tool_inputs:
                     tool_input = item.get("input")
                     # Persist whatever shape CC emitted (usually a dict);
@@ -591,11 +600,21 @@ def ingest_claude_code(
     projects_seen: set[str] = set()
     plan_tier = _plan_tier_for_provider(config, _CLAUDE_CODE_PROVIDER)
     capture = getattr(config, "capture", None) if config is not None else None
+    # Union of CURRENT-scheme (message.id-keyed) span_ids per session, aggregated
+    # across ALL of a session's on-disk files (main thread +
+    # subagents/agent-*.jsonl share one session_id). Used AFTER the loop for the
+    # stale-scheme reconciliation DELETE — building the union first is essential:
+    # a per-file DELETE scoped to session_id would wipe the sibling files' spans,
+    # since they carry the same session_id + source tag (#294/#300).
+    keep_by_session: dict[str, set[str]] = {}
     for parsed in iter_claude_code_sessions(
         root=root, since=since, capture=capture, max_sessions=max_sessions,
     ):
         result.sessions_seen += 1
         result.seen_session_ids.add(parsed.session_id)
+        keep_by_session.setdefault(parsed.session_id, set()).update(
+            s.span_id for s in parsed.spans
+        )
         if parsed.cwd:
             projects_seen.add(parsed.cwd)
         try:
@@ -629,6 +648,28 @@ def ingest_claude_code(
                 progress(parsed, result)
             except Exception:
                 pass
+
+    # Self-heal stale-scheme duplicates (#294/#300 cross-version). A DB written
+    # by <=v0.5.1 keyed backfill span_ids on the record `uuid`; current code keys
+    # on the stable `message.id`. The two schemes are DISJOINT, so re-backfilling
+    # an old DB ADDS a full duplicate set alongside the stale rows, inflating
+    # token/cost totals ~2.6x. `keep_by_session[sid]` is the COMPLETE
+    # current-scheme span_id set for the session (LLM + tool spans, unioned across
+    # all its files); any `backfill.claude_code`-tagged span for that session NOT
+    # in the set can only be a stale-scheme orphan, so drop it. Scoped to
+    # (session_id, source) -> never touches live-ingested spans or other sessions.
+    # Runs BEFORE recompute so the reconciled sums exclude the purged rows.
+    # Skipped under the `max_sessions` quickstart cap: that path stops mid-session
+    # (bounded preview), so its per-session keep-set may be incomplete and a
+    # DELETE could drop valid spans; the full `tj backfill claude-code` path
+    # (used by onboard) does the self-healing.
+    reconcile = getattr(db, "reconcile_backfill_spans", None)
+    if reconcile is not None and max_sessions is None and keep_by_session:
+        try:
+            purged = reconcile(keep_by_session, _CLAUDE_CODE_SOURCE)
+            result.spans_stale_purged = purged
+        except Exception as exc:  # never let reconciliation break the ingest
+            logger.warning("stale-span reconciliation skipped: %s", exc)
 
     # A Claude Code session is split across files that share one session_id
     # (main thread + subagents/agent-*.jsonl). The per-file upsert above uses
