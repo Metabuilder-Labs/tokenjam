@@ -854,3 +854,45 @@ def test_todowrite_malformed_payload_has_no_todos(tmp_path):
     tool = story["steps"][0]["tools"][0]
     assert tool["name"] == "TodoWrite"
     assert "todos" not in tool
+
+
+def test_todowrite_step_preserves_todos_list_and_statuses(tmp_path):
+    """Ticket #67: a TodoWrite step must carry its real ``todos`` payload
+    (``{"todos": [{content, status}]}``), not read a nonexistent one-line key.
+
+    This is the "where it left off / what's incomplete" signal the resume-brief
+    OPEN section consumes, so the pending/in_progress items must survive parsing.
+    """
+    records = [
+        _user_prompt("Ship the resume-brief feature."),
+        _assistant(
+            "Tracking the remaining work.",
+            tools=[{
+                "id": "td1",
+                "name": "TodoWrite",
+                "input": {"todos": [
+                    {"content": "read the codebase", "status": "completed"},
+                    {"content": "wire the SessionStart hook", "status": "in_progress"},
+                    {"content": "open the PR", "status": "pending"},
+                    # unknown status normalises to pending; activeForm fallback
+                    {"activeForm": "writing tests", "status": "weird"},
+                ]},
+            }],
+        ),
+        _tool_result("td1", is_error=False),
+        _assistant("Done for now."),
+    ]
+    _write_transcript(tmp_path, "sess-todo", records)
+    story = build_session_story("sess-todo", projects_root=tmp_path)
+    assert story is not None
+
+    todo_step = story["steps"][0]
+    tool = todo_step["tools"][0]
+    assert tool["name"] == "TodoWrite"
+    todos = tool["todos"]
+    assert {"content": "wire the SessionStart hook", "status": "in_progress"} in todos
+    assert {"content": "open the PR", "status": "pending"} in todos
+    # activeForm fallback with an unknown status -> pending
+    assert {"content": "writing tests", "status": "pending"} in todos
+    # the rollup label summarises, never the missing single-arg key
+    assert "in progress" in tool["label"] and "pending" in tool["label"]

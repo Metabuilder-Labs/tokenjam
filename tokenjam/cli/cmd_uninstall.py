@@ -124,8 +124,16 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
                 del env[k]
             if removed:
                 gs["env"] = env
+            # Remove the tj-managed SessionStart resume-brief hook (idempotent,
+            # non-destructive — foreign SessionStart hooks are preserved).
+            from tokenjam.cli.cmd_onboard import _unwire_claude_resume_brief_hook
+            hook_removed = _unwire_claude_resume_brief_hook(gs)
+            if removed or hook_removed:
                 global_settings_path.write_text(json.dumps(gs, indent=2) + "\n")
+            if removed:
                 console.print(f"  Cleaned {len(removed)} TokenJam env vars from {global_settings_path}")
+            if hook_removed:
+                console.print(f"  Removed tj resume-brief SessionStart hook from {global_settings_path}")
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {global_settings_path}: {exc}[/yellow]")
 
