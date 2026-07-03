@@ -753,6 +753,75 @@ def test_acknowledge_alert_read_only_fallback_returns_actionable_error(tmp_path)
         _srv._config = None
 
 
+# --- get_optimize_report under a running tj serve (#61) ---
+
+def test_get_optimize_report_serve_holds_lock_routes_over_http(tmp_path):
+    """When a tj serve holds the DuckDB write lock (_serve_url set, _ro_conn
+    None), get_optimize_report must route the optimize computation through the
+    serve HTTP API and NOT open its own connection to the locked file.
+
+    The old code called open_db() (read-write) in this state, so DuckDB threw
+    "Could not set lock on file" and the tool returned {"error": ...} on every
+    call while a serve was up (#61). Holding a real write lock here proves the
+    fix: if the buggy path still ran, open_db() would raise before we ever
+    reached the (mocked) HTTP fetch."""
+    from unittest.mock import patch
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.db import DuckDBBackend
+
+    db_file = tmp_path / "telemetry.duckdb"
+    # A live "tj serve" holds the exclusive write lock on the file.
+    serve_backend = DuckDBBackend(StorageConfig(path=str(db_file)))
+
+    fake_report = {
+        "window": {"total_cost_usd": 1.0, "total_tokens": 100, "sessions": 1},
+        "findings": {"downsize": {"candidates": []}},
+        "pricing_mode": "api",
+    }
+
+    config = _make_config("alpha")
+    config.storage = StorageConfig(path=str(db_file))
+    _srv._config = config
+    _srv._ro_conn = None
+    _set_serve_url("http://127.0.0.1:7391")
+    try:
+        with patch(
+            "tokenjam.core.api_backend.ApiBackend.fetch_optimize_report",
+            return_value=fake_report,
+        ) as mock_fetch:
+            result = _srv.get_optimize_report(since="7d", findings=["downsize"])
+
+        # Routed over HTTP and returned the serve-built report — no raw lock error.
+        assert result == fake_report
+        assert "could not set lock" not in str(result.get("error", "")).lower()
+        mock_fetch.assert_called_once()
+        _, kwargs = mock_fetch.call_args
+        assert kwargs["since"] == "7d"
+        assert kwargs["findings"] == ["downsize"]
+    finally:
+        serve_backend._conn.close()
+        _srv._config = None
+        _srv._ro_conn = None
+        _set_serve_url(None)
+
+
+def test_get_optimize_report_no_connection_returns_graceful_message():
+    """With neither a read-only connection nor a serve URL, get_optimize_report
+    must return the graceful "requires a direct database connection" guidance
+    rather than opening a competing read-write connection (#61)."""
+    config = _make_config("alpha")
+    _srv._config = config
+    _srv._ro_conn = None
+    _set_serve_url(None)
+    try:
+        result = _srv.get_optimize_report()
+        assert "error" in result
+        assert "direct database connection" in result["error"].lower()
+        assert "could not set lock" not in result["error"].lower()
+    finally:
+        _srv._config = None
+
+
 # --- test_get_budget_headroom_http_mode ---
 
 def test_get_budget_headroom_http_mode_reads_live_limits():
