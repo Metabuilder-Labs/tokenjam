@@ -107,6 +107,7 @@ class AlertChannelConfig:
 class AlertsConfig:
     cooldown_seconds:        int  = 60
     include_captured_content: bool = False
+    async_hooks:             bool = False
     channels: list[AlertChannelConfig] = field(default_factory=lambda: [
         AlertChannelConfig(type="stdout"),
     ])
@@ -489,6 +490,7 @@ def _parse(raw: dict) -> TjConfig:
     alerts = AlertsConfig(
         cooldown_seconds=alerts_raw.get("cooldown_seconds", AlertsConfig.cooldown_seconds),
         include_captured_content=alerts_raw.get("include_captured_content", False),
+        async_hooks=alerts_raw.get("async_hooks", False),
         channels=channels if channels else [AlertChannelConfig(type="stdout")],
     )
 

@@ -102,6 +102,14 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
             if proxy_runner is not None:
                 await proxy_runner.stop()
             scheduler.shutdown(wait=False)
+            # Drain any queued async hooks before tearing down the worker so no
+            # alert is lost on shutdown. close() also flushes internally, but we
+            # call flush() first to keep the "flush then close" contract explicit
+            # and to drain even if a future close() changes behavior.
+            if hasattr(pipeline, "flush"):
+                pipeline.flush()
+            if hasattr(pipeline, "close"):
+                pipeline.close()
 
     app = create_app(config, db, pipeline, lifespan=_lifespan)
 
