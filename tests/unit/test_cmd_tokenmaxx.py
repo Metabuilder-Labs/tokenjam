@@ -191,6 +191,20 @@ def test_card_surfaces_reclaimable_quota_not_spend(db):
     assert "tj context" in out
 
 
+def test_card_nudges_proving_savings_hold_with_bench(db):
+    # The panel footer nudges the user to *prove* the savings hold with
+    # tokenjam-bench — honest framing ("hold", never "guaranteed"/"certified").
+    _seed_overhead_heavy(db, plan_tier="max_5x")
+    result = _invoke(db, _config("max_5x"))
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert "Prove your savings hold" in out
+    assert "pip install tokenjam-bench" in out
+    # The bench CTA itself must not overclaim.
+    assert "certified" not in out.lower()
+    assert "guaranteed savings hold" not in out.lower()
+
+
 def test_api_plan_shows_implied_dollars_as_secondary_only(db):
     # API users DO get a dollar calibration line — but demoted, labeled
     # "Implied API value", never the headline (mirrors quota-audit #5).
