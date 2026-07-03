@@ -50,9 +50,13 @@ runs:
       uses: docker/metadata-action@v5
       with:
         images: ${{ inputs.image }}
+        # Release-driven tags: the semver of the published release plus `latest`.
+        # No per-commit short-SHA tag — the image only ships on a release, so its
+        # version maps 1:1 to the release tag (matching the PyPI/npm packages).
         tags: |
-          type=raw,value=latest,enable={{is_default_branch}}
-          type=sha,format=short
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=raw,value=latest
 
     - name: Build and push image
       id: build

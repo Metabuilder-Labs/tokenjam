@@ -2,13 +2,13 @@ name: Build and publish Docker image
 
 on:
   workflow_dispatch:
-  # Run only after the CI workflow finishes, so a commit that breaks
-  # tests/lint never produces a published image. This replaces a direct
-  # `push` trigger — CI fires on push, and this runs only once it passes.
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [main]
+  # Publish the container image only when a GitHub Release is published, so the
+  # image version lines up with the release-gated PyPI + npm packages (both fire
+  # on `release: [published]` — see publish-pypi.yml / publish-npm.yml). This
+  # replaces the previous per-commit / after-CI trigger, which shipped an image
+  # on every green main build.
+  release:
+    types: [published]
 
 permissions:
   contents: read
@@ -22,15 +22,8 @@ jobs:
   build-and-publish-image:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Skip unless triggered manually or by a *successful* CI run.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
     steps:
       - uses: actions/checkout@v4
-        with:
-          # For workflow_run events, build the exact commit that passed CI.
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Build and push tokenjam image
         uses: ./.github/actions/docker-publish
