@@ -15,16 +15,43 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 [![OTel](https://img.shields.io/badge/OTel-GenAI%20SemConv-3d8eff?labelColor=0d1117)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
 ```
-pipx install tokenjam
+npx tokenjam
 ```
 
-<sub>Don't have pipx? `brew install pipx` on macOS, `apt install pipx` on Debian/Ubuntu, or see [docs/installation.md](docs/installation.md). `pip install tokenjam` also works in a clean venv.</sub>
+<sub>Zero install, zero config. Reads the same <code>~/.claude/projects/*.jsonl</code> files <a href="https://github.com/ryoppippi/ccusage">ccusage</a> does and shows you <b>where your Claude Code quota actually goes</b> — no pip env, no daemon, no onboarding. Prefer Python? <code>uvx --from tokenjam tj</code> does the same. Ready to go deeper (live capture + dashboard + MCP)? <code>pipx install tokenjam &amp;&amp; tj onboard</code>.</sub>
 
 **No cloud · No signup · No vendor lock-in**
 
 <sub>⭐ If TokenJam saves you tokens, **star it** · 👁 **Watch for releases** — we ship often</sub>
 
 </div>
+
+---
+
+## 15-second start (no install)
+
+```bash
+npx tokenjam                      # or:  uvx --from tokenjam tj
+```
+
+One command, no setup. TokenJam ingests your existing Claude Code sessions from
+`~/.claude/projects/*.jsonl` (the same files [ccusage](https://github.com/ryoppippi/ccusage)
+reads) into a throwaway in-memory database and prints:
+
+- **Quota composition** — what share of your tokens went to *re-reading context*
+  (history, CLAUDE.md, accumulated tool output) versus *net-new work*.
+- **A session timeline** — your most recent sessions, token spend, and re-read share.
+
+Nothing is written to disk, no daemon runs, no config is created. When you want
+live capture, the local dashboard, and the MCP server for Claude Code, install
+the full CLI and onboard:
+
+```bash
+pipx install tokenjam        # or `pip install tokenjam` in a clean venv
+tj onboard
+```
+
+<sub>`npx tokenjam` and `uvx --from tokenjam tj` launch the Python CLI via `uvx`/`pipx` — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
 ---
 
@@ -122,6 +149,8 @@ tj optimize          # cost-saving candidates from your actual usage
 tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
+Onboarding also wires a **zero-token statusline** into Claude Code — `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface — an MCP would tax every turn).
+
 That's it. Run `tj` any time and it points you to the next best action:
 
 ```text
@@ -190,7 +219,8 @@ TokenJam is also a full observability stack. The five analyzers and Lens ride on
 - **Behavioral drift detection** — Z-score baselines, no LLM required
 - **Schema validation** — declare or infer JSON Schema for tool outputs
 - **OTel-native** — point any OTLP exporter at `tj serve` and you're done
-- **MCP server** — lets Claude Code query its own telemetry mid-session
+- **Statusline** — a zero-token Claude Code status line (`tj statusline`, wired by `tj onboard --claude-code`) showing this session's re-read share + a `/compact` nudge
+- **MCP server** — in-request-path tools for **SDK / API** users (not Claude Code / Codex subscription users — an in-loop MCP is a per-turn quota burden there; they get the out-of-band statusline instead)
 
 ---
 
@@ -234,6 +264,7 @@ tj serve               # start Lens + REST API
 | 🔁 Reuse analyzer deep-dive | [docs/optimize/reuse.md](docs/optimize/reuse.md) |
 | 🧪 Prove a downsize candidate holds (TokenJam Bench) | [tokenjam-bench](https://github.com/Metabuilder-Labs/tokenjam-bench) |
 | Claude Code & Codex integration | [docs/claude-code-integration.md](docs/claude-code-integration.md) |
+| Harness run grouping (governors / fan-out launchers) | [docs/harness-integration.md](docs/harness-integration.md) |
 | Python SDK reference | [docs/python-sdk.md](docs/python-sdk.md) |
 | TypeScript SDK reference | [docs/typescript-sdk.md](docs/typescript-sdk.md) |
 | Framework support (LangChain / CrewAI / etc.) | [docs/framework-support.md](docs/framework-support.md) |

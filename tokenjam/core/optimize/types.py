@@ -12,6 +12,18 @@ MODEL_DOWNGRADE_CAVEAT = (
     "Review the example sessions before changing models."
 )
 
+# Mandatory caveat string for the Opus quota audit (issue #5). Honesty
+# discipline (CLAUDE.md Rule 14): the audit flags Opus sessions whose STRUCTURE
+# matches Sonnet-shaped work — it is an accountability list to spot-check, never
+# a claim that the cheaper model would have produced the same answer. Surfaced
+# verbatim next to every "% of Opus quota reclaimable" headline.
+OPUS_QUOTA_AUDIT_CAVEAT = (
+    "Candidates to spot-check, not a verdict. Each flagged session merely has "
+    "the structural shape (small input/output, few tool calls) of work a "
+    "smaller model often handles — review the example sessions before changing "
+    "your routing. Never \"safe to downgrade.\""
+)
+
 # Mandatory caveat string for the Reuse analyzer. Honesty discipline
 # (CLAUDE.md Rule 14): structural detection only, never a claim of
 # interchangeability. Surfaced verbatim next to every recoverable figure.
@@ -90,6 +102,54 @@ class DowngradeFinding:
     n_sessions:                   int          = 0
     ci_low:                       float | None = None
     ci_high:                      float | None = None
+
+
+@dataclass
+class OpusAuditExample:
+    """One Opus session flagged as a Sonnet-shaped quota-reclaim candidate."""
+    trace_id:   str
+    session_id: str | None
+    model:      str
+    alt_model:  str
+    input_tokens:  int
+    output_tokens: int
+    cache_tokens:  int
+    tool_calls: int
+    duration_seconds: float | None
+    cost_usd:   float
+
+
+@dataclass
+class OpusQuotaAudit:
+    """Retroactive Opus quota audit (issue #5).
+
+    Reframes the structural downsize heuristic as an *accountability* audit
+    scoped to Opus sessions: how much of your Opus quota was spent on sessions
+    whose shape matches Sonnet-shaped work. The headline figure is
+    ``percent_quota_reclaimable`` (candidate Opus tokens / total Opus tokens) —
+    quota language, never a dollar "saving" (the subscription majority is on a
+    flat fee; dollar framing mis-targets them). Dollar fields are a best-effort
+    SECONDARY signal for API users only.
+    """
+    window_days: float = 0.0
+    opus_sessions: int = 0
+    opus_tokens: int = 0  # input + output + cache across all Opus sessions
+    candidate_sessions: int = 0
+    candidate_tokens: int = 0  # input + output + cache, candidates only
+    # The headline: % of Opus quota (tokens) held by Sonnet-shaped sessions.
+    percent_quota_reclaimable: float = 0.0
+    percent_sessions: float = 0.0
+    # model -> cheaper-alternative suggestions observed among the candidates.
+    suggestions: dict[str, str] = field(default_factory=dict)
+    examples: list[OpusAuditExample] = field(default_factory=list)
+    # Secondary, API-only calibration figures (never the headline).
+    actual_cost_usd: float = 0.0
+    alternative_cost_usd: float = 0.0
+    caveat: str = OPUS_QUOTA_AUDIT_CAVEAT
+
+    @property
+    def has_opus(self) -> bool:
+        return self.opus_sessions > 0
 
 
 @dataclass

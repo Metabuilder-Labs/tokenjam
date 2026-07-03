@@ -4,8 +4,13 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-# Sessions with no spans for this long are considered stale (zombie).
+# Sessions with no spans for this long are no longer "active" (live terminal).
 SESSION_STALE_THRESHOLD = timedelta(minutes=5)
+# Default idle window: active sessions quieter than the stale threshold but
+# within this window are "idle" (paused, likely to resume); beyond it they are
+# "stale" (zombie). Overridable per-install via [sessions] idle_minutes, applied
+# at the status route — effective_status itself stays config-free.
+SESSION_IDLE_THRESHOLD = timedelta(hours=4)
 
 
 class Severity(str, Enum):
@@ -55,6 +60,11 @@ class NormalizedSpan:
     parent_span_id: str | None     = None
     session_id:     str | None     = None
     agent_id:       str | None     = None
+    # Claude Code subagent (Task-tool / sidechain) identity. Set during backfill
+    # from a record's top-level `agentId` when `isSidechain` is true; None for
+    # main-thread spans and non-Claude-Code telemetry. Lets a session's cost be
+    # broken down per subagent.
+    sub_agent_id:   str | None     = None
     end_time:       datetime | None = None
     duration_ms:    float | None   = None
     status_message: str | None     = None
@@ -86,6 +96,20 @@ class NormalizedSpan:
     # strip_captured_content() in core/ingest.py. Round-trip via JSON columns.
     request_params: dict[str, Any] | None = None
     request_tools:  dict[str, Any] | None = None
+    # OTel service.namespace — the logical "project" this service rolls up
+    # under (e.g. all Aquanodeio/* repos -> "aquanode"). Transient on the span;
+    # persisted on the session it creates so the dashboard can group by it.
+    service_namespace: str | None  = None
+    # OTel service.instance.id — the per-terminal/process label (e.g.
+    # "founder-os"). Persisted on the session for use as its display name.
+    service_instance_id: str | None = None
+    # Cross-session run grouping (tokenjam.run_id resource attribute). One id
+    # per fan-out harness run, shared by all its workers. Transient on the
+    # span; persisted on the session it creates so the dashboard can group runs.
+    run_id:           str | None    = None
+    # Optional spawning-session id (tokenjam.parent_session_id) for nested
+    # spawns. Transient on the span; persisted on the session for the run tree.
+    parent_session_id: str | None   = None
 
 
 @dataclass
@@ -99,7 +123,10 @@ class SessionRecord:
     total_cost_usd:  float | None = None
     input_tokens:    int          = 0
     output_tokens:   int          = 0
+    # cache_tokens = cache reads (reused); cache_write_tokens = cache writes/
+    # creation. Kept separate; the dashboard's "Cache tokens" shows their sum.
     cache_tokens:    int          = 0
+    cache_write_tokens: int       = 0
     tool_call_count: int          = 0
     error_count:     int          = 0
     # Canonical plan-tier identifier for the user's billing relationship with
@@ -108,6 +135,20 @@ class SessionRecord:
     # default to "unknown" — `tj optimize` suppresses dollar figures for those.
     # Valid values: see VALID_PLAN_TIERS in tokenjam.otel.semconv.
     plan_tier:       str          = "unknown"
+    # OTel service.namespace — the logical "project" this session's service
+    # rolls up under (e.g. repo `Aquanodeio/harness` -> namespace "aquanode").
+    # Drives dashboard grouping. None when the telemetry carried no namespace.
+    service_namespace: str | None = None
+    # OTel service.instance.id — the per-terminal label (e.g. "founder-os").
+    # Used as the session's display name when set; None otherwise.
+    service_instance_id: str | None = None
+    # Cross-session run grouping. `run_id` ties this session to all the other
+    # sessions a fan-out harness spawned in the same run (declared via the
+    # tokenjam.run_id resource attribute, not inferred). `parent_session_id`
+    # is the optional spawning-session id for nested spawns; the run view uses
+    # it to render a parent tree (flat list when no parent edges exist).
+    run_id:           str | None    = None
+    parent_session_id: str | None   = None
 
     @property
     def duration_seconds(self) -> float | None:
@@ -117,14 +158,63 @@ class SessionRecord:
 
     @property
     def effective_status(self) -> str:
-        """Return 'stale' for zombie sessions whose process was killed."""
+        """Lifecycle tier for the dashboard (pure: uses module-default windows).
+
+        Tiers:
+          closed     -> explicitly ended (status='closed')
+          completed  -> wrapped by a real session span (status='completed')
+          active     -> last activity within SESSION_STALE_THRESHOLD (5 min)
+          idle       -> within SESSION_IDLE_THRESHOLD (default 4h)
+          stale      -> older than the idle window (zombie)
+
+        The status route honours the configurable [sessions] idle_minutes via
+        status_at(); this property stays config-free for use everywhere else.
+        """
+        return self.status_at(SESSION_IDLE_THRESHOLD)
+
+    def status_at(self, idle_threshold: timedelta = SESSION_IDLE_THRESHOLD) -> str:
+        """effective_status with a caller-supplied idle window.
+
+        Separate from the property so the status route can apply a config-driven
+        idle window while effective_status itself remains pure.
+        """
         if self.status != "active":
+            # closed / completed (or any other terminal state) pass through.
             return self.status
         from tokenjam.utils.time_parse import utcnow
         last_activity = self.ended_at or self.started_at
-        if last_activity and (utcnow() - last_activity) > SESSION_STALE_THRESHOLD:
-            return "stale"
-        return "active"
+        if not last_activity:
+            return "active"
+        gap = utcnow() - last_activity
+        if gap <= SESSION_STALE_THRESHOLD:
+            return "active"
+        if gap <= idle_threshold:
+            return "idle"
+        return "stale"
+
+    def status_with_transcript_mtime(
+        self,
+        transcript_mtime: datetime | None,
+        idle_threshold: timedelta = SESSION_IDLE_THRESHOLD,
+    ) -> str:
+        """status_at, but rescued to 'active' by a fresh transcript mtime.
+
+        Claude Code spans are backfilled periodically, so a *live* CC session
+        can drift to ``idle``/``stale`` once its last backfilled span ages past
+        the stale threshold — even though its on-disk transcript is still being
+        appended to. When the deterministic status is idle/stale and the
+        transcript was modified within ``SESSION_STALE_THRESHOLD``, report
+        ``active`` instead. Terminal states (closed/completed) and genuinely
+        active sessions pass through untouched, so non-CC sessions (which have
+        no transcript: ``transcript_mtime is None``) are unaffected.
+        """
+        base = self.status_at(idle_threshold)
+        if base not in ("idle", "stale") or transcript_mtime is None:
+            return base
+        from tokenjam.utils.time_parse import utcnow
+        if utcnow() - transcript_mtime <= SESSION_STALE_THRESHOLD:
+            return "active"
+        return base
 
     @property
     def pricing_mode(self) -> str:

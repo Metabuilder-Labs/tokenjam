@@ -14,9 +14,10 @@ import httpx
 
 from tokenjam.core.config import AlertChannelConfig, TjConfig, resolve_effective_budget
 from tokenjam.core.models import Alert, AlertType, Severity
-from tokenjam.otel.semconv import TjAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.formatting import console, severity_colour
 from tokenjam.utils.ids import new_uuid
+from tokenjam.utils.signatures import tool_arg_signature
 from tokenjam.utils.time_parse import utcnow
 
 if TYPE_CHECKING:
@@ -44,6 +45,56 @@ _FAILURE_RATE_WINDOW = 20
 _FAILURE_RATE_THRESHOLD = 0.20
 _FAILURE_RATE_CHECK_INTERVAL = 5
 _SESSION_DURATION_DEFAULT = 3600  # seconds
+
+# Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex): a
+# heterogeneous, arg-less, human-driven workload with no stable, repeatable
+# baseline. Two uses: (1) the alert engine + drift detector gate off checks that
+# assume a stable baseline — drift and the default session-duration ceiling
+# produce noise, not signal — while staying fully active for SDK / production
+# agents (retry_loop self-gates on an argument signature, so it needs no prefix
+# gate); and (2) the /status dashboard splits coding sessions from long-lived
+# SDK services.
+_INTERACTIVE_AGENT_PREFIXES = ("claude-code", "codex")
+
+
+def is_interactive_coding_agent(agent_id: str | None) -> bool:
+    """True for Claude Code / Codex agents (interactive, heterogeneous, no args).
+
+    Two callers: the alert engine + drift detector skip checks that assume a
+    stable, instrumented, repeatable workload; and the /status route classifies
+    an agent as a coding session vs an SDK service, keyed on the agent id rather
+    than session-id presence (unreliable — ingest mints session_ids for SDK
+    spans too).
+    """
+    if not agent_id:
+        return False
+    return any(agent_id.startswith(p) for p in _INTERACTIVE_AGENT_PREFIXES)
+
+
+def _is_tool_execution(span: NormalizedSpan) -> bool:
+    """True only for real tool-execution spans (``gen_ai.tool.call``).
+
+    Excludes permission/decision and result *event* spans (e.g.
+    ``claude_code.tool_decision``) that also carry ``tool_name`` and would
+    otherwise inflate the retry-loop window.
+    """
+    return span.name == GenAIAttributes.SPAN_TOOL_CALL
+
+
+def _tool_arg_signature(span: NormalizedSpan) -> str | None:
+    """A stable signature of a tool call's arguments, or None when unknown.
+
+    A genuine retry loop is the *same tool with the same arguments* fired over
+    and over. Prefer the ingest-computed ``tokenjam.tool_arg_sig`` (survives
+    content stripping); fall back to hashing the raw input when present. When
+    neither exists (e.g. Claude Code over OTLP carries no tool args) we return
+    None and the caller declines to fire — a real repeat can't be proven from a
+    tool name alone.
+    """
+    sig = span.attributes.get(TjAttributes.TOOL_ARG_SIG)
+    if isinstance(sig, str) and sig:
+        return sig
+    return tool_arg_signature(span.attributes.get(GenAIAttributes.TOOL_INPUT))
 
 
 # ── Cooldown tracker ───────────────────────────────────────────────────────
@@ -84,9 +135,11 @@ class AlertEngine:
         self.config = config
         self.cooldown = CooldownTracker(config.alerts.cooldown_seconds)
         self.dispatcher = AlertDispatcher(config)
-        # Tracks the error_count value at which the failure-rate check last fired per session.
-        # Prevents non-deterministic re-firing when the sliding-window count oscillates.
-        self._last_failure_rate_check: dict[str, int] = {}
+        # Sessions that have already fired a failure-rate alert. One struggling
+        # session = one alert: without this, every additional error past the
+        # threshold re-fired (5/20, 6/20, 7/20 …), turning a few incidents into a
+        # cascade of near-identical alerts. In-memory (resets per process).
+        self._failure_rate_fired: set[str] = set()
 
     def evaluate(self, span: NormalizedSpan) -> None:
         """Evaluate all per-span alert rules against this span."""
@@ -171,18 +224,32 @@ class AlertEngine:
                 return
 
     def _check_retry_loop(self, span: NormalizedSpan) -> None:
-        """
-        Fetch last 6 spans for this session. If same tool_name appears 4+ times,
-        fire RETRY_LOOP.
+        """Fire RETRY_LOOP only on a genuine stuck loop: the SAME tool with the
+        SAME arguments fired 4+ times in the last 6 tool-execution spans.
+
+        Keying on the tool *name* alone (the old behaviour) flagged normal work —
+        four different ``Bash`` commands or ``Read``s in a row — as a loop, which
+        flooded false positives (especially for Claude Code). We now (1) count
+        only real ``gen_ai.tool.call`` spans, never decision/event spans that
+        also carry a tool_name, and (2) require an argument signature so only an
+        *identical* call counts. Telemetry without tool arguments (Claude Code
+        over OTLP) yields no signature and never trips this — genuine repeats are
+        still visible in the Map/Timeline (transcript-derived ``is_retry``).
         """
         if not span.session_id or not span.tool_name:
             return
+        if not _is_tool_execution(span):
+            return
+        sig = _tool_arg_signature(span)
+        if sig is None:
+            return
         recent = self.db.get_recent_spans(span.session_id, _RETRY_LOOP_WINDOW)
-        tool_counts: dict[str, int] = {}
-        for s in recent:
-            if s.tool_name:
-                tool_counts[s.tool_name] = tool_counts.get(s.tool_name, 0) + 1
-        count = tool_counts.get(span.tool_name, 0)
+        count = sum(
+            1 for s in recent
+            if _is_tool_execution(s)
+            and s.tool_name == span.tool_name
+            and _tool_arg_signature(s) == sig
+        )
         if count >= _RETRY_LOOP_THRESHOLD:
             alert = Alert(
                 alert_id=new_uuid(),
@@ -194,7 +261,10 @@ class AlertEngine:
                     "tool_name": span.tool_name,
                     "count": count,
                     "window": _RETRY_LOOP_WINDOW,
-                    "message": f"{span.tool_name} called {count} times in last {_RETRY_LOOP_WINDOW} spans",
+                    "message": (
+                        f"{span.tool_name} called with identical arguments "
+                        f"{count} times in last {_RETRY_LOOP_WINDOW} tool calls"
+                    ),
                 },
                 agent_id=span.agent_id,
                 session_id=span.session_id,
@@ -205,24 +275,26 @@ class AlertEngine:
     def _check_failure_rate(self, span: NormalizedSpan) -> None:
         """
         In a rolling window of last 20 spans, fire FAILURE_RATE if error rate > 20%.
-        Only check when error_count reaches a new multiple of the check interval to
-        avoid firing on every single error and to avoid re-firing when the sliding
-        window count oscillates.
+
+        Fires at most ONCE per session: a session that crosses the threshold is a
+        single incident, so re-firing on every further error (5/20, 6/20, 7/20 …)
+        just floods near-identical alerts. The first crossing alerts; subsequent
+        errors in that session are ignored.
         """
         if not span.session_id or span.status_code.value != "error":
+            return
+        if span.session_id in self._failure_rate_fired:
             return
         recent = self.db.get_recent_spans(span.session_id, _FAILURE_RATE_WINDOW)
         total = len(recent)
         if total < _FAILURE_RATE_CHECK_INTERVAL:
             return
         error_count = sum(1 for s in recent if s.status_code.value == "error")
-        session_key = span.session_id
-        last_checked = self._last_failure_rate_check.get(session_key, 0)
-        if error_count < _FAILURE_RATE_CHECK_INTERVAL or error_count <= last_checked:
+        if error_count < _FAILURE_RATE_CHECK_INTERVAL:
             return
-        self._last_failure_rate_check[session_key] = error_count
         rate = error_count / total
         if rate > _FAILURE_RATE_THRESHOLD:
+            self._failure_rate_fired.add(span.session_id)
             alert = Alert(
                 alert_id=new_uuid(),
                 fired_at=utcnow(),
@@ -326,7 +398,14 @@ class AlertEngine:
                 self._fire(alert)
 
     def _check_session_duration(self, session: SessionRecord) -> None:
-        """Fire SESSION_DURATION if session wall time exceeds threshold."""
+        """Fire SESSION_DURATION if session wall time exceeds threshold.
+
+        Skipped for interactive coding agents (Claude Code / Codex): a governor
+        or long autonomous run legitimately lasts hours, so the SDK-era 3600s
+        default is a false alarm there. Stays active for SDK/production agents.
+        """
+        if is_interactive_coding_agent(session.agent_id):
+            return
         duration = session.duration_seconds
         if duration is None:
             return

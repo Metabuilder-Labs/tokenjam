@@ -71,8 +71,8 @@ async def test_cost_cache_endpoint_hitrate_and_captured():
     # hit-rate = cache_read / (cache_read + input) = 4000 / 14000
     assert abs(p["hit_rate"] - (4000 / 14000)) < 1e-3
     # captured = cache_read * (input_rate - cache_read_rate) / 1e6
-    #          = 4000 * (0.80 - 0.08) / 1e6 = 0.00288  (Haiku 4.5)
-    assert abs(p["captured_usd"] - 0.00288) < 1e-6
+    #          = 4000 * (1.00 - 0.10) / 1e6 = 0.0036  (Haiku 4.5)
+    assert abs(p["captured_usd"] - 0.0036) < 1e-6
     assert p["captured_tokens"] == 4000
     # window totals + estimated recoverable from the cache analyzer
     assert d["total_captured_tokens"] == 12_000

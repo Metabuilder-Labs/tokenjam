@@ -176,28 +176,29 @@ tj optimize --json | python3 -c \
   "import json,sys;r=json.load(sys.stdin);assert 'plan' in r and 'pricing_mode' in r;print('ok: plan-tier metadata present')"
 ```
 
-### 6f. TokenMaxx (v0.3.4 — six-tier ladder)
+### 6f. TokenMaxx (#7 — quota/efficiency card)
+
+The card is a quota/efficiency artifact, not a spend-tier flex: it leads with
+the overhead-vs-real-work composition and is quota-native for subscription plans.
 
 ```bash
 tj tokenmaxx
-# [ ] Bordered "TokenJam TokenMaxxing Report" panel renders
-# [ ] On api plan: shows absolute spend; no multiplier line
-# [ ] `tj optimize` reference in the action line renders in green bold
+# [ ] Bordered "TokenJam Quota / Efficiency Card" panel renders
+# [ ] Headline is the composition ("X% overhead" vs "Y% real work"), not spend
+# [ ] On a subscription plan: figures read as "% of cycle tokens", NO $ shown
+# [ ] `tj context` / `tj optimize` references in the action line render green bold
 # [ ] Share-line is teal, mentions @tokenjamdev (NOT #tokenmaxx)
 
-# Tier label must be one of the v0.3.4 six.
+# Tier label must be one of the five efficiency tiers.
 tj tokenmaxx --json | python3 -c \
-  "import json,sys;d=json.load(sys.stdin);ok={'TokenSipper','TokenModerator','TokenMaxxer','TokenSuperMaxxer','TokenMegaMaxxer','TokenGigaMaxxer'};assert d['tier'] in ok,d['tier'];print('ok:',d['tier'])"
+  "import json,sys;d=json.load(sys.stdin);ok={'TokenMinimizer','LeanOperator','SteadyState','ContextHeavy','QuotaSink'};assert d['tier'] in ok,d['tier'];assert 'overhead_share' in d;print('ok:',d['tier'],'overhead=%.2f'%d['overhead_share'])"
 
-# Force a different tier by exercising a subscription plan (use whatever
-# plan matches your test data — heavy usage on a Pro plan will land you
-# higher up the ladder than the same usage on a Max-20x plan).
-tj onboard --claude-code --reconfigure --plan max_5x
+# On the api plan the demoted dollar line appears; on subscription it must not.
+tj onboard --claude-code --reconfigure --plan api
 tj tokenmaxx
-# [ ] Output now shows "That's N× your Max 5x plan cost ($100/mo flat)."
-# [ ] Tier name follows the v0.3.4 ladder (Sipper / Moderator / Maxxer /
-#     SuperMaxxer / MegaMaxxer / GigaMaxxer)
-# [ ] At thresholds: 1× / 4× / 10× / 20× / 50× crosses tier boundaries
+# [ ] api plan: secondary "Implied API value: $… (calibration only)" line appears
+tj tokenmaxx --weekly
+# [ ] "Quota Wrapped — Weekly Recap" title + "this week" window
 
 # Reset to api before continuing
 tj onboard --claude-code --reconfigure --plan api

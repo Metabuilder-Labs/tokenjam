@@ -60,6 +60,12 @@ def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
     # 12. MCP server wiring (issue #285)
     checks.append(_check_mcp_wiring(config))
 
+    # 13. Schema integrity — recorded-but-unlanded migration (issue #55)
+    checks.append(_check_schema_integrity(ctx.obj["db"]))
+
+    # 14. Claude Code statusline wiring (issue #59) — the zero-token surface
+    checks.append(_check_statusline_wiring(config))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -280,6 +286,51 @@ def _check_spans_stats(db: object) -> dict:
             "message": "Column statistics are consistent."}
 
 
+def _check_schema_integrity(db: object) -> dict:
+    """Detect a recorded-but-unlanded migration (missing expected columns, #55).
+
+    `run_migrations` keys on the version integer alone, so a version renumbered
+    or recorded under an older definition can be marked applied while its
+    `ADD COLUMN` never ran — leaving `spans`/`sessions` missing a column the code
+    writes on every ingest, which then fails with a DuckDB Binder Error and is
+    silently dropped (blank Status page). `DuckDBBackend` now self-heals these on
+    open (`ensure_expected_columns`), so this normally reports OK; a WARN means
+    the live DB was opened without that path (or self-heal failed) and needs
+    `tj doctor --repair`.
+
+    Uses the already-open connection on `db` (same pattern as the spans-stats
+    canary) — DuckDB rejects a second read-write connection to the same file.
+    """
+    from tokenjam.core.db import missing_expected_columns
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Schema integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        missing = missing_expected_columns(conn)
+    except duckdb.Error as e:
+        return {"name": "Schema integrity", "level": "info",
+                "message": f"Skipped — could not inspect schema: {e}"}
+    if missing:
+        return {
+            "name": "Schema integrity",
+            "level": "warning",
+            "message": (
+                "Live schema is missing column(s) the code writes on ingest: "
+                f"{', '.join(missing)}. These were recorded as migrated but never "
+                "landed (see #55); ingest of affected rows fails with a DuckDB "
+                "Binder Error and is silently dropped, surfacing as a blank/stale "
+                "Status page. Run `tj doctor --repair` to add them (idempotent, "
+                "data preserved)."
+            ),
+            "repair_action": "heal_schema",
+        }
+    return {"name": "Schema integrity", "level": "ok",
+            "message": "All expected columns present."}
+
+
 # Spans older than this are treated as a stalled connection. Claude Code /
 # Codex flush their OTLP exporter on a short interval while running, so during
 # any active session the newest span is minutes old at most. A 6h gap means
@@ -349,12 +400,36 @@ def _check_span_staleness(db: object) -> dict:
 
 def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
     """Run repair actions for any check that flagged one."""
-    from tokenjam.core.db import repair_spans_stats
+    from tokenjam.core.db import ensure_expected_columns, repair_spans_stats
 
     conn = getattr(db, "conn", None)
     for c in checks:
         action = c.get("repair_action")
         if not action:
+            continue
+        if action == "heal_schema":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                added = ensure_expected_columns(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Schema repair failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                summary = ", ".join(added) if added else "nothing (already healthy)"
+                console.print(
+                    f"  [green]Schema reconciled — added {summary}.[/green]"
+                )
             continue
         if action == "rebuild_spans":
             if conn is None:
@@ -398,7 +473,6 @@ def _check_mcp_wiring(config: object) -> dict:
         import tomllib
     else:
         import tomli as tomllib  # type: ignore[no-redef]
-    import shutil
     from pathlib import Path
 
     codex_config_path = Path.home() / ".codex" / "config.toml"
@@ -439,6 +513,10 @@ def _check_mcp_wiring(config: object) -> dict:
             except Exception:
                 pass
 
+    # The MCP is an SDK / API surface, not a Claude Code / Codex one (#59): an
+    # in-loop MCP is a per-turn quota burden on subscription users, so its
+    # ABSENCE for a coding agent is the correct state, never a warning. If it is
+    # registered (an SDK user, or a legacy CC/Codex registration) just report it.
     if has_codex or has_claude or has_project:
         found_locations = []
         if has_codex:
@@ -450,26 +528,9 @@ def _check_mcp_wiring(config: object) -> dict:
         return {
             "name": "MCP wiring",
             "level": "ok",
-            "message": f"MCP server registered in {', '.join(found_locations)}.",
-        }
-
-    # If not registered anywhere, decide level based on agent presence
-    codex_present = bool(shutil.which("codex")) or (Path.home() / ".codex").exists()
-    claude_present = bool(shutil.which("claude")) or (Path.home() / ".claude").exists()
-
-    if codex_present or claude_present:
-        agents = []
-        if claude_present:
-            agents.append("Claude Code")
-        if codex_present:
-            agents.append("Codex")
-        return {
-            "name": "MCP wiring",
-            "level": "warning",
             "message": (
-                f"MCP server not registered in {', '.join(agents)}. Coding agents "
-                "won't be able to query TokenJam telemetry. Run `tj onboard --claude-code` "
-                "or `tj onboard --codex` to register it."
+                f"MCP server registered in {', '.join(found_locations)} "
+                "(the in-request-path surface for SDK / API use)."
             ),
         }
 
@@ -477,8 +538,70 @@ def _check_mcp_wiring(config: object) -> dict:
         "name": "MCP wiring",
         "level": "info",
         "message": (
-            "MCP server is not registered in Claude Code or Codex. Run `tj onboard "
-            "--claude-code` or `tj onboard --codex` if using a coding agent."
+            "MCP server not registered — expected for Claude Code / Codex, which "
+            "use tj out-of-band (statusline + OTel). The MCP is for SDK / API "
+            "users; wire it with `claude mcp add tj --scope user -- tj mcp` only "
+            "if you want the in-loop tools (it costs per-turn quota)."
+        ),
+    }
+
+
+def _check_statusline_wiring(config: object) -> dict:
+    """Check whether the zero-token tj statusline is wired into Claude Code (#59).
+
+    The statusline is tj's out-of-band Claude Code surface. If ``claude`` is
+    present but the statusLine isn't tj's, nudge the user to onboard; a foreign
+    statusLine is fine (we never clobber it) and reported as info.
+    """
+    import shutil
+    from pathlib import Path
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+    statusline: dict | None = None
+    if settings_path.exists():
+        try:
+            with open(settings_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            sl = data.get("statusLine")
+            if isinstance(sl, dict):
+                statusline = sl
+        except Exception:
+            pass
+
+    cmd = statusline.get("command", "") if statusline else ""
+    if isinstance(cmd, str) and "tj statusline" in cmd:
+        return {
+            "name": "Statusline wiring",
+            "level": "ok",
+            "message": "tj statusline wired into Claude Code (zero token cost).",
+        }
+
+    claude_present = bool(shutil.which("claude")) or (Path.home() / ".claude").exists()
+    if statusline is not None:
+        return {
+            "name": "Statusline wiring",
+            "level": "info",
+            "message": (
+                "A non-tj statusLine is set in ~/.claude/settings.json (left "
+                "untouched). Set its command to `tj statusline` to see tj's "
+                "re-read / quota line."
+            ),
+        }
+    if claude_present:
+        return {
+            "name": "Statusline wiring",
+            "level": "warning",
+            "message": (
+                "tj statusline not wired into Claude Code. Run `tj onboard "
+                "--claude-code` for the zero-token re-read / quota line."
+            ),
+        }
+    return {
+        "name": "Statusline wiring",
+        "level": "info",
+        "message": (
+            "Claude Code not detected. `tj onboard --claude-code` wires the "
+            "zero-token tj statusline when you use it."
         ),
     }
 

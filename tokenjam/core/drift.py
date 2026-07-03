@@ -220,6 +220,15 @@ class DriftDetector:
         Falls back to default AgentConfig (drift.enabled=True) when agent isn't explicitly
         configured, so drift detection works out of the box for any observed agent.
         """
+        # Drift assumes a stable, repeatable workload. Interactive coding agents
+        # (Claude Code / Codex) have wildly heterogeneous sessions under one
+        # agent id — a 40-token prompt, a 200-tool worker, an hours-long governor
+        # — so a single mean/stddev baseline is meaningless and every longer
+        # session "drifts". Skip them; keep drift fully active for SDK agents.
+        from tokenjam.core.alerts import is_interactive_coding_agent
+        if is_interactive_coding_agent(agent_id):
+            return
+
         agent_config = self.config.agents.get(agent_id) or AgentConfig()
         if not agent_config.drift.enabled:
             return

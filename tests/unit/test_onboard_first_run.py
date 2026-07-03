@@ -120,9 +120,10 @@ def _isolated_claude_code(monkeypatch, tmp_path):
 def _run_claude_code(tmp_path, plan_choice: str):
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        # plan_choice then daily budget "0".
+        # --project skips the interactive project-name prompt; then plan_choice
+        # then daily budget "0".
         return runner.invoke(
-            cmd_onboard, ["--claude-code", "--no-daemon"],
+            cmd_onboard, ["--claude-code", "--no-daemon", "--project", "testproj"],
             input=f"{plan_choice}\n0\n", obj={},
         )
 

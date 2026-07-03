@@ -9,28 +9,28 @@ from tokenjam.core.pricing import load_pricing_table, get_rates
 
 
 def test_calculate_cost_known_model():
-    # anthropic/claude-haiku-4-5: input=0.80, output=4.00 per MTok
+    # anthropic/claude-haiku-4-5: input=1.00, output=5.00 per MTok
     # 1000 input, 200 output
-    # Expected: (1000/1M * 0.80) + (200/1M * 4.00) = 0.0008 + 0.0008 = 0.0016
+    # Expected: (1000/1M * 1.00) + (200/1M * 5.00) = 0.001 + 0.001 = 0.002
     cost = calculate_cost("anthropic", "claude-haiku-4-5", 1000, 200)
-    assert cost == 0.0016
+    assert cost == 0.002
 
 
 def test_calculate_cost_with_cache_tokens():
-    # claude-haiku-4-5: cache_read=0.08 per MTok
+    # claude-haiku-4-5: cache_read=0.10 per MTok
     cost = calculate_cost(
         "anthropic", "claude-haiku-4-5",
         input_tokens=1000,
         output_tokens=200,
         cache_read_tokens=5000,
     )
-    # (1000/1M * 0.80) + (200/1M * 4.00) + (5000/1M * 0.08)
-    # = 0.0008 + 0.0008 + 0.0004 = 0.0020
-    assert cost == 0.002
+    # (1000/1M * 1.00) + (200/1M * 5.00) + (5000/1M * 0.10)
+    # = 0.001 + 0.001 + 0.0005 = 0.0025
+    assert cost == 0.0025
 
 
 def test_calculate_cost_with_cache_write_tokens():
-    # claude-haiku-4-5: cache_write=1.00 per MTok
+    # claude-haiku-4-5: cache_write=1.25 per MTok
     cost = calculate_cost(
         "anthropic", "claude-haiku-4-5",
         input_tokens=0,
@@ -40,12 +40,12 @@ def test_calculate_cost_with_cache_write_tokens():
     )
     # Zero input/output but cache_write tokens present — the early return only
     # fires when ALL token counts are zero, so cache_write cost is still charged.
-    # (1_000_000/1M * 1.00) = 1.00
-    assert cost == 1.0
+    # (1_000_000/1M * 1.25) = 1.25
+    assert cost == 1.25
 
 
 def test_calculate_cost_cache_read_only():
-    # claude-haiku-4-5: cache_read=0.08 per MTok. A pure cache hit (no new
+    # claude-haiku-4-5: cache_read=0.10 per MTok. A pure cache hit (no new
     # input/output) still costs the cache-read rate and must not be dropped.
     cost = calculate_cost(
         "anthropic", "claude-haiku-4-5",
@@ -53,8 +53,8 @@ def test_calculate_cost_cache_read_only():
         output_tokens=0,
         cache_read_tokens=1_000_000,
     )
-    # (1_000_000/1M * 0.08) = 0.08
-    assert cost == 0.08
+    # (1_000_000/1M * 0.10) = 0.10
+    assert cost == 0.10
 
 
 def test_calculate_cost_unknown_model_uses_default(caplog):
@@ -124,8 +124,8 @@ def test_calculate_cost_zero_tokens_returns_zero_no_warning(caplog):
 def test_calculate_cost_rounds_to_8_decimal_places():
     # Use values that would produce more than 8 decimal places
     cost = calculate_cost("anthropic", "claude-haiku-4-5", 1, 1)
-    # (1/1M * 0.80) + (1/1M * 4.00) = 0.0000008 + 0.000004 = 0.0000048
-    assert cost == 0.0000048
+    # (1/1M * 1.00) + (1/1M * 5.00) = 0.000001 + 0.000005 = 0.000006
+    assert cost == 0.000006
     assert len(str(cost).split(".")[-1]) <= 8
 
 
@@ -150,10 +150,10 @@ def test_get_rates_returns_none_for_unknown():
 def test_get_rates_returns_model_rates_for_known():
     rates = get_rates("anthropic", "claude-haiku-4-5")
     assert rates is not None
-    assert rates.input_per_mtok == 0.80
-    assert rates.output_per_mtok == 4.00
-    assert rates.cache_read_per_mtok == 0.08
-    assert rates.cache_write_per_mtok == 1.00
+    assert rates.input_per_mtok == 1.00
+    assert rates.output_per_mtok == 5.00
+    assert rates.cache_read_per_mtok == 0.10
+    assert rates.cache_write_per_mtok == 1.25
 
 
 def test_calculate_cost_opus_model():
@@ -197,6 +197,68 @@ def test_calculate_cost_openai_model():
     cost = calculate_cost("openai", "gpt-4o", 500_000, 100_000)
     # (500k/1M * 2.50) + (100k/1M * 10.00) = 1.25 + 1.00 = 2.25
     assert cost == 2.25
+
+
+def test_get_rates_bedrock_raw_span_provider_and_model():
+    """#373: a live Bedrock span carries provider="aws.bedrock" and the raw
+    boto3 modelId (dots + trailing ":0"); the lookup must normalize both
+    onto the [aws.us-amazon-nova-micro-v1] table key."""
+    rates = get_rates("aws.bedrock", "us.amazon.nova-micro-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.035
+    assert rates.output_per_mtok == 0.14
+
+
+def test_get_rates_bedrock_litellm_provider_form():
+    """#373: LiteLLM-routed Bedrock reports provider "bedrock" and may keep
+    the "bedrock/" prefix on the model id."""
+    rates = get_rates("bedrock", "us.amazon.nova-micro-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.035
+
+    rates = get_rates("bedrock", "bedrock/us.amazon.nova-micro-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.035
+
+
+def test_get_rates_bedrock_nova_pro():
+    rates = get_rates("aws.bedrock", "us.amazon.nova-pro-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.80
+    assert rates.output_per_mtok == 3.20
+
+
+def test_get_rates_bedrock_anthropic_on_bedrock():
+    """The mid-string date in Anthropic-on-Bedrock ids must survive
+    normalization (only the trailing ":N" is stripped)."""
+    rates = get_rates("aws.bedrock", "us.anthropic.claude-opus-4-1-20250805-v1:0")
+    assert rates is not None
+    assert rates.input_per_mtok == 15.00
+    assert rates.cache_write_per_mtok == 18.75
+
+
+def test_get_rates_bedrock_version_strip_only_trailing_digits():
+    """#373: the ":N" strip applies only to a trailing ":<digits>" —
+    arbitrary colons must not make an unrelated id match."""
+    from tokenjam.core.pricing import _normalize_bedrock_model
+
+    assert _normalize_bedrock_model("us.amazon.nova-micro-v1:0") == "us-amazon-nova-micro-v1"
+    # Non-numeric / non-trailing colon segments are preserved.
+    assert _normalize_bedrock_model("us.amazon.nova-micro-v1:latest") == (
+        "us-amazon-nova-micro-v1:latest"
+    )
+    assert _normalize_bedrock_model("us.amazon.nova:0:micro") == "us-amazon-nova:0:micro"
+    # No-op normalization returns None so callers skip the second lookup.
+    assert _normalize_bedrock_model("plain-model") is None
+
+
+def test_get_rates_non_bedrock_provider_unaffected():
+    """Regression guard: non-Bedrock providers get no alias or model
+    normalization — a dotted OpenAI-ish name still misses as before."""
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    assert rates is not None
+    assert get_rates("openai", "us.amazon.nova-micro-v1:0") is None
+    assert get_rates("nonexistent", "model") is None
 
 
 def test_pricing_file_exists_at_expected_path():
