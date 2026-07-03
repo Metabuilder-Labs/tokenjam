@@ -385,6 +385,52 @@ def make_claude_code_api_error_log(
     }
 
 
+def make_claude_transcript_assistant_line(
+    message_id: str | None = None,
+    input_tokens: int = 1000,
+    output_tokens: int = 200,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    model: str = "claude-opus-4-8",
+) -> dict:
+    """Build one ``assistant`` line of a Claude Code session transcript JSONL.
+
+    Mirrors the on-disk shape ``tj statusline`` reads from
+    ``~/.claude/projects/**/<session_id>.jsonl``: a top-level ``type=assistant``
+    record whose ``message`` carries an ``id`` and a ``usage`` block. Reuse the
+    same ``message_id`` across lines to exercise the streaming-dedup path (Claude
+    Code writes several transcript lines per message, all with cumulative usage).
+    """
+    return {
+        "type": "assistant",
+        "message": {
+            "id": message_id or f"msg_{new_uuid()}",
+            "model": model,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read_input_tokens,
+                "cache_creation_input_tokens": cache_creation_input_tokens,
+            },
+        },
+    }
+
+
+def write_claude_transcript(path, records: list[dict]) -> str:
+    """Write ``records`` as JSONL to *path* and return the path as a string.
+
+    Accepts any mix of records (assistant lines from
+    ``make_claude_transcript_assistant_line`` plus user/system lines) so tests
+    can assert the statusline ignores non-assistant rows.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    p = _Path(path)
+    p.write_text("\n".join(_json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return str(p)
+
+
 def make_otlp_logs_body(
     log_records: list[dict],
     service_name: str = "claude-code",

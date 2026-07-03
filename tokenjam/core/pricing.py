@@ -269,6 +269,78 @@ def _strip_date_suffix(model: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _strip_context_tag(model: str) -> str | None:
+    """Return `model` minus a trailing context-window tag like `[1m]`, or None.
+
+    Some runtimes stamp the requested context window onto the model name — e.g.
+    Claude's 1M-context variant surfaces as ``claude-opus-4-8[1m]``. As of
+    Anthropic's 2026-03-13 pricing change the 1M context window bills at
+    **standard** per-token rates: the old long-context premium (historically 2x
+    input / 1.5x output for requests over 200K tokens) was removed, so a 900K-token
+    request bills at the same per-token rate as a 9K-token one. See
+    https://platform.claude.com/docs/en/about-claude/pricing → "Long context
+    pricing". Stripping the ``[...]`` tag here resolves ``claude-opus-4-8[1m]`` to
+    the base ``claude-opus-4-8`` rates without duplicating rows in models.toml
+    (duplicate rows would silently drift). Also handles ``[1M]`` and any future
+    bracketed context tag. See PR #386.
+    """
+    import re as _re
+
+    m = _re.match(r"^(.*?)\[[^\]]*\]$", model)
+    return m.group(1) if (m and m.group(1)) else None
+
+
+def _lookup_candidates(model: str) -> list[str]:
+    """Ordered fallback names to try for `model` (most specific first).
+
+    Beyond the exact name we try, in order: the date-stripped name
+    (``-YYYYMMDD``), the context-tag-stripped name (``[1m]``), and the
+    context-tag-then-date-stripped name. The caller de-dups against the exact
+    name, so a plain model like ``claude-opus-4-8`` yields no extra work.
+    """
+    candidates: list[str] = []
+
+    def _add(name: str | None) -> None:
+        if name and name not in candidates and name != model:
+            candidates.append(name)
+
+    _add(_strip_date_suffix(model))
+    no_tag = _strip_context_tag(model)
+    _add(no_tag)
+    if no_tag is not None:
+        _add(_strip_date_suffix(no_tag))
+    return candidates
+
+
+# Live Bedrock spans carry the provider verbatim from their ingest path —
+# "aws.bedrock" (direct boto3 via BedrockIntegration), "bedrock" (LiteLLM's
+# `bedrock/...` routing), or "aws_bedrock" — but the packaged table keys
+# Bedrock rates under [aws.*]. Mapped here for the lookup only; the stored
+# span keeps its raw provider string (#373).
+_BEDROCK_PROVIDER_ALIASES = {
+    "aws.bedrock": "aws",
+    "aws_bedrock": "aws",
+    "bedrock": "aws",
+}
+
+
+def _normalize_bedrock_model(model: str) -> str | None:
+    """Return the [aws.*] table-key form of a raw Bedrock modelId, or None.
+
+    boto3 modelIds look like "us.amazon.nova-micro-v1:0" — dotted, with a
+    trailing ":N" version — and LiteLLM-routed ids may keep a "bedrock/"
+    prefix. The table keys are dot-flattened and unversioned
+    ("us-amazon-nova-micro-v1"). Only a trailing ":<digits>" is stripped;
+    other colons are left alone. Returns None when normalization is a no-op
+    so callers skip the redundant second lookup.
+    """
+    import re as _re
+
+    normalized = model.removeprefix("bedrock/")
+    normalized = _re.sub(r":\d+$", "", normalized).replace(".", "-")
+    return normalized if normalized != model else None
+
+
 def get_rates(provider: str, model: str) -> ModelRates | None:
     """
     Return ModelRates for the given provider/model, or None if not found.
@@ -280,32 +352,51 @@ def get_rates(provider: str, model: str) -> ModelRates | None:
       2. The provider-keyed table (user [provider.model] overrides merged
          over the packaged models.toml).
 
-    Each step tries an exact match first, then falls back to stripping a
-    trailing YYYYMMDD release-date suffix (Anthropic/OpenAI both ship dated
-    variants like `claude-haiku-4-5-20251001`). This keeps the tables short
-    while still pricing the dated names that flow through Claude Code logs.
+    Each step tries an exact match first, then falls back through
+    `_lookup_candidates`: the YYYYMMDD-date-stripped name (Anthropic/OpenAI both
+    ship dated variants like `claude-haiku-4-5-20251001`) and the context-tag-
+    stripped name (`claude-opus-4-8[1m]` → `claude-opus-4-8`; the 1M window bills
+    at standard rates, see `_strip_context_tag`). This keeps the tables short
+    while still pricing the dated / context-tagged names that flow through Lens.
+
+    Bedrock spans are normalized for the table lookup only (#373): the
+    provider aliases in _BEDROCK_PROVIDER_ALIASES map onto the table's
+    "aws" key, and the raw boto3 modelId is additionally tried in its
+    table-key form (see _normalize_bedrock_model).
     """
-    base = _strip_date_suffix(model)
+    candidates = _lookup_candidates(model)
 
     # 1. Model-keyed user override — wins regardless of inferred provider.
     model_keyed = load_model_pricing_overrides()
     rates = model_keyed.get(model)
     if rates is not None:
         return rates
-    if base is not None:
-        rates = model_keyed.get(base)
+    for name in candidates:
+        rates = model_keyed.get(name)
         if rates is not None:
             return rates
 
     # 2. Provider-keyed table (user [provider.model] over packaged).
     table = load_pricing_table()
-    rates = table.get(provider, {}).get(model)
+    lookup_provider = _BEDROCK_PROVIDER_ALIASES.get(provider, provider)
+    provider_models = table.get(lookup_provider, {})
+    rates = provider_models.get(model)
     if rates is not None:
         return rates
-    if base is not None:
-        rates = table.get(provider, {}).get(base)
+    for name in candidates:
+        rates = provider_models.get(name)
         if rates is not None:
             return rates
+
+    # Bedrock: the raw boto3 modelId ("us.amazon.nova-micro-v1:0") never
+    # matches the dot-flattened, unversioned [aws.*] keys — try the
+    # normalized table-key form (#373).
+    if lookup_provider == "aws":
+        normalized = _normalize_bedrock_model(model)
+        if normalized is not None:
+            rates = provider_models.get(normalized)
+            if rates is not None:
+                return rates
 
     return None
 

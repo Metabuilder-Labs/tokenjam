@@ -1,4 +1,14 @@
-"""TokenJam MCP server — exposes observability data to Claude Code via stdio."""
+"""TokenJam MCP server — in-request-path observability tools for SDK / API users.
+
+This is the one tj surface that sits *in the loop*: it exposes observability
+data over stdio and is meant for SDK / API integrations where tj is already in
+the request path (real-time enforcement, policy, budgets). It is NOT the
+recommended surface for Claude Code / Codex subscription users — an in-loop MCP
+is a per-turn quota burden on them (a measured A/B showed +36% model-weighted
+quota vs a no-tj control; ticket #59). Those users get tj out-of-band instead:
+the zero-token statusline (`tj statusline`) plus OTel telemetry ingest wired by
+`tj onboard --claude-code`. `tj mcp` still works for anyone who wants it.
+"""
 from __future__ import annotations
 
 try:
@@ -783,11 +793,11 @@ def _tool_setup_project(
         try:
             gs = json.loads(global_settings.read_text())
             if "OTEL_EXPORTER_OTLP_ENDPOINT" not in gs.get("env", {}):
-                warning = "Global OTLP endpoint not configured. Run 'tj onboard --claude-code' to finish setup, then run 'claude mcp add tj --scope user -- tj mcp' to register the MCP server."
+                warning = "Global OTLP endpoint not configured. Run 'tj onboard --claude-code' to finish setup (it wires the zero-token statusline and OTel telemetry; the tj MCP is reserved for SDK/API users, not Claude Code)."
         except Exception:
             warning = "Could not read ~/.claude/settings.json."
     else:
-        warning = "~/.claude/settings.json not found. Run 'tj onboard --claude-code' to configure the global OTLP endpoint and register the MCP server."
+        warning = "~/.claude/settings.json not found. Run 'tj onboard --claude-code' to configure the OTel endpoint and the zero-token statusline (the tj MCP is for SDK/API users, not Claude Code)."
 
     result = {
         "agent_id": agent_id,
@@ -1325,15 +1335,43 @@ def get_optimize_report(
     if _config is None:
         return _no_config()
     try:
-        # Pass the writable backend (not _ro_db) so the analyzers can read
-        # via the same DuckDB connection the CLI uses.
-        from tokenjam.core.db import open_db
+        # Serve mode: a tj serve holds the DuckDB write lock, so we CANNOT open
+        # our own connection to the file — DuckDB's file lock is exclusive, and
+        # even a read-only attach throws "Could not set lock on file" while the
+        # daemon is up (#61). Previously this path called open_db() (read-write),
+        # so every get_optimize_report call failed with a raw lock error whenever
+        # a serve was running. Route the optimize computation through the serve
+        # HTTP API instead, exactly as the CLI does under daemon mode (#68 §12).
+        if _ro_conn is None and _serve_url is not None:
+            from tokenjam.core.api_backend import ApiBackend
+            api_key = (
+                _config.api.auth.api_key
+                if _config.api.auth.enabled and _config.api.auth.api_key
+                else None
+            )
+            backend = ApiBackend(_serve_url, api_key)
+            try:
+                return backend.fetch_optimize_report(
+                    since=since or "30d",
+                    agent_id=agent_id,
+                    findings=findings,
+                    budget_provider=budget_provider,
+                    budget_usd=budget_usd,
+                )
+            finally:
+                backend.close()
+
+        # Direct-DB mode: reuse the single read-only connection when we have one
+        # (fallback path, serve unreachable). We never open a competing
+        # read-write connection here — _tool_get_optimize_report returns the
+        # graceful "Optimize requires a direct database connection" message when
+        # no usable connection is available.
         if _ro_conn is not None:
             class _Shim:
                 conn = _ro_conn
             db = _Shim()
         else:
-            db = open_db(_config.storage)
+            db = None
         return _tool_get_optimize_report(
             db, _config, agent_id, since, findings, budget_provider, budget_usd,
         )
