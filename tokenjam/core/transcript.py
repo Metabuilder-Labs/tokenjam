@@ -59,6 +59,16 @@ MAX_TOOL_LABEL_CHARS = 120
 #: Cap on a failed tool's surfaced error message (the why-it-failed text).
 MAX_ERROR_TEXT_CHARS = 600
 
+#: ``TodoWrite`` payload caps. Unlike every other tool (whose input is reduced to
+#: a single one-line ``label``), a TodoWrite call carries the session's STRUCTURED
+#: work-state — the single best "where it left off / what's incomplete" signal the
+#: transcript holds — so we preserve the whole list (content + status per item),
+#: bounded by these caps rather than discarded. See ``_extract_todos``.
+MAX_TODO_ITEMS = 100
+MAX_TODO_CONTENT_CHARS = 200
+#: Recognised TodoWrite item statuses; anything else is normalised to "pending".
+_TODO_STATUSES = ("pending", "in_progress", "completed")
+
 #: Subagent recursion guards (a 4h fan-out run can spawn a deep, wide tree).
 #: ``MAX_SUBAGENT_DEPTH`` caps how many levels of nesting we descend; beyond it
 #: an Agent/Task step carries ``subagent = {"depth_capped": True}``. A SHARED
@@ -118,7 +128,9 @@ _TOOL_LABEL_ARGS: dict[str, tuple[str, ...]] = {
     "WebFetch": ("url", "prompt"),
     "WebSearch": ("query",),
     "Skill": ("skill", "args"),
-    "TodoWrite": ("description",),
+    # TodoWrite's real input key is ``todos`` (a list), NOT a one-line string, so
+    # it has no generic label arg — its label + payload come from ``_extract_todos``
+    # / ``_todo_label`` in ``_build_steps``, not from this single-arg picker.
 }
 #: Generic fallback order (most-useful-first) for unknown tools.
 _GENERIC_LABEL_ARGS: tuple[str, ...] = (
@@ -217,6 +229,68 @@ def _tool_label(name: str, tool_input: Any) -> str:
             label, _ = _trim(value, MAX_TOOL_LABEL_CHARS)
             return label
     return ""
+
+
+def _extract_todos(tool_input: Any) -> list[dict[str, str]]:
+    """Preserve a ``TodoWrite`` call's ``todos`` list as ``[{content, status}]``.
+
+    The real tool_input shape is ``{"todos": [{"content", "status", "activeForm"?}]}``
+    with ``status`` in ``pending | in_progress | completed``. Each item's content
+    is whitespace-trimmed and length-capped; an unknown/missing status normalises
+    to ``pending``; the list is bounded to ``MAX_TODO_ITEMS`` (never a silent drop
+    beyond the cap — the count of what's kept is what the rollup reports). Returns
+    ``[]`` for a malformed/absent payload. NEVER returns arbitrary extra fields.
+    """
+    if not isinstance(tool_input, dict):
+        return []
+    raw = tool_input.get("todos")
+    if not isinstance(raw, list):
+        return []
+    todos: list[dict[str, str]] = []
+    for item in raw[:MAX_TODO_ITEMS]:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str) or not content.strip():
+            # CC carries the present-tense phrasing in ``activeForm``; use it as a
+            # fallback so an item is never dropped for lacking ``content``.
+            content = item.get("activeForm")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        status = item.get("status")
+        if status not in _TODO_STATUSES:
+            status = "pending"
+        text, _ = _trim(content, MAX_TODO_CONTENT_CHARS)
+        todos.append({"content": text, "status": status})
+    return todos
+
+
+def _todo_counts(todos: list[dict[str, str]]) -> dict[str, int]:
+    """Per-status counts over a todos list (all three keys always present)."""
+    counts = {status: 0 for status in _TODO_STATUSES}
+    for todo in todos:
+        counts[todo["status"]] = counts.get(todo["status"], 0) + 1
+    return counts
+
+
+def _todo_label(todos: list[dict[str, str]]) -> str:
+    """A one-line rollup label for a ``TodoWrite`` step (e.g.
+    ``5 todos: 2 done, 1 in progress, 2 pending``). Empty for an empty list."""
+    if not todos:
+        return ""
+    counts = _todo_counts(todos)
+    parts: list[str] = []
+    if counts["completed"]:
+        parts.append(f"{counts['completed']} done")
+    if counts["in_progress"]:
+        parts.append(f"{counts['in_progress']} in progress")
+    if counts["pending"]:
+        parts.append(f"{counts['pending']} pending")
+    n = len(todos)
+    head = f"{n} todo{'s' if n != 1 else ''}"
+    label = f"{head}: {', '.join(parts)}" if parts else head
+    label, _ = _trim(label, MAX_TOOL_LABEL_CHARS)
+    return label
 
 
 def _build_tool_status(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -500,6 +574,14 @@ def _build_steps(
                 }
                 if is_error and entry and entry.get("error_text"):
                     tool["error"] = entry["error_text"]
+                # TodoWrite carries the session's STRUCTURED work-state — preserve
+                # the whole list + per-item status (the best "where it left off"
+                # signal) instead of collapsing it to an empty one-line label.
+                if name == "TodoWrite":
+                    todos = _extract_todos(tool_input)
+                    if todos:
+                        tool["todos"] = todos
+                        tool["label"] = _todo_label(todos)
                 tools.append(tool)
                 if name in _SUBAGENT_TOOL_NAMES and isinstance(tool_use_id, str):
                     spawns.append((tool_use_id, _spawn_fallback_name(tool_input)))
@@ -621,7 +703,8 @@ def build_session_story(
           "step_count": int,      # number of real assistant turns
           "truncated": bool,      # True if steps were capped
           "steps": [ {n, ts, text, text_truncated,
-                      tools: [{name, label, status}],
+                      tools: [{name, label, status,
+                               todos?: [{content, status}]  # TodoWrite only}],
                       is_error, is_retry, model,
                       subagent?: {...}  # only on Task/Agent steps that spawned
                      }, ...,
@@ -995,4 +1078,6 @@ __all__ = [
     "MAX_TOOL_LABEL_CHARS",
     "MAX_SUBAGENT_DEPTH",
     "TOTAL_STEP_BUDGET",
+    "MAX_TODO_ITEMS",
+    "MAX_TODO_CONTENT_CHARS",
 ]

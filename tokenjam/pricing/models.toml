@@ -1,6 +1,18 @@
 # tokenjam/pricing/models.toml
 # Prices in USD per million tokens.
 # Submit a PR when provider prices change.
+#
+# ─── 1M-context / [1m] variants ────────────────────────────────────────────
+# Claude's 1M-context models surface in telemetry as `claude-opus-4-8[1m]`,
+# `claude-sonnet-4-6[1m]`, etc. There are intentionally NO separate `[1m]` rows
+# in this file: as of Anthropic's 2026-03-13 pricing change the 1M context window
+# bills at STANDARD per-token rates — the old long-context premium (historically
+# ~2x input / ~1.5x output for requests over 200K tokens) was removed, so a
+# 900K-token request bills at the same per-token rate as a 9K-token one.
+# `get_rates` strips the trailing `[...]` context tag (core/pricing.py
+# `_strip_context_tag`), so `claude-opus-4-8[1m]` resolves to the base
+# `claude-opus-4-8` rates. Source:
+# https://platform.claude.com/docs/en/about-claude/pricing → "Long context pricing".
 
 # Claude Fable 5 — Anthropic's most capable widely released model.
 # See https://platform.claude.com/docs/en/pricing (cache_write = 5-minute write).
@@ -92,6 +104,45 @@ output_per_mtok = 4.00
 cache_read_per_mtok = 0.08
 cache_write_per_mtok = 1.00
 
+# ─── OpenAI ────────────────────────────────────────────────────────────────
+# Current GPT-5 family (July 2026). Source: https://developers.openai.com/api/docs/pricing
+# Keys are the literal API model IDs (dotted, e.g. `gpt-5.5`) exactly as they
+# arrive in the `gen_ai.request.model` span attribute — TOML dotted names must
+# be quoted so the `.` isn't read as table nesting.
+# `cache_read_per_mtok` is OpenAI's "cached input" rate (~0.1x input). OpenAI
+# does not publish a separate cache-write rate for these, so cache_write is
+# left at its 0.0 default (billed as normal input by calculate_cost).
+[openai."gpt-5.5"]
+input_per_mtok = 5.00
+output_per_mtok = 30.00
+cache_read_per_mtok = 0.50
+
+[openai."gpt-5.5-pro"]
+input_per_mtok = 30.00
+output_per_mtok = 180.00
+
+[openai."gpt-5.4"]
+input_per_mtok = 2.50
+output_per_mtok = 15.00
+cache_read_per_mtok = 0.25
+
+[openai."gpt-5.4-mini"]
+input_per_mtok = 0.75
+output_per_mtok = 4.50
+cache_read_per_mtok = 0.075
+
+[openai."gpt-5.4-nano"]
+input_per_mtok = 0.20
+output_per_mtok = 1.25
+cache_read_per_mtok = 0.02
+
+[openai."gpt-5.4-pro"]
+input_per_mtok = 30.00
+output_per_mtok = 180.00
+
+# ─── OpenAI (superseded, kept for historical spans) ─────────────────────────
+# gpt-4o / gpt-4o-mini / o3 / o4-mini are no longer on OpenAI's current pricing
+# page but still appear in older telemetry; rates retained as last-published.
 [openai.gpt-4o]
 input_per_mtok = 2.50
 output_per_mtok = 10.00

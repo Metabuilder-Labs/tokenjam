@@ -15,8 +15,12 @@ token-share and "% of cycle" via :mod:`tokenjam.core.framing` (the single source
 of truth for plan-tier-aware rendering). Dollars are a secondary calibration
 signal for API users, never the headline.
 
-Needs a direct DuckDB connection: the diagnostic reads the raw ``attributes``
-column for recurring-inclusion detection, which the API shim does not expose.
+Needs the raw ``attributes`` column for recurring-inclusion detection, which
+the API shim does not expose row-by-row. When ``tj serve`` holds the DuckDB
+write lock, the diagnostic is instead computed **server-side** (the daemon owns
+the direct connection) and fetched over the ``/api/v1/context`` shim, so this
+launch-hero command renders with the daemon up rather than telling the user to
+stop it (#63).
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ from tokenjam.core.context_diagnostic import (
     INCLUSION_TOOL_OUTPUT,
     ContextDiagnostic,
     compute_context_diagnostic,
+    diagnostic_from_dict,
     diagnostic_to_dict,
 )
 from tokenjam.core.framing import (
@@ -68,19 +73,23 @@ def cmd_context(ctx: click.Context, agent: str | None, since: str,
     if db is None or config is None:
         raise click.ClickException("context requires a database connection.")
 
-    conn = getattr(db, "conn", None)
-    if conn is None:
-        raise click.ClickException(
-            "tj context needs a direct database connection (it reads captured "
-            "content). It can't run against a live `tj serve` — stop the daemon "
-            "(`tj stop`) and re-run, or run from a project without the daemon up."
-        )
-
+    # Validate the window up-front so both paths give the same error message.
     try:
         since_dt = parse_since(since)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
     until_dt = utcnow()
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        # API-shim path: `tj serve` holds the DuckDB write lock. The diagnostic
+        # reads the raw `attributes` column, which the shim can't expose
+        # row-by-row and DuckDB won't let us open read-only alongside the
+        # writer — so the daemon (which owns the connection) computes it and we
+        # render the returned payload, instead of refusing to run on the exact
+        # command the launch drives people to (#63).
+        _render_via_serve(db, since=since, agent=agent, output_json=output_json)
+        return
 
     capture = getattr(config, "capture", None)
     tool_inputs_captured = bool(getattr(capture, "tool_inputs", False))
@@ -113,6 +122,57 @@ def cmd_context(ctx: click.Context, agent: str | None, since: str,
         return
 
     _render(diag, framing, since=since, reclaimed=reclaimed)
+
+
+def _render_via_serve(
+    db, *, since: str, agent: str | None, output_json: bool,
+) -> None:
+    """Render the diagnostic fetched from a running ``tj serve`` (#63).
+
+    The daemon holds the DuckDB write lock, so the CLI can't read the raw
+    ``attributes`` column directly. It fetches the server-computed diagnostic
+    (``diagnostic_to_dict`` + the ``framing`` block) over ``/api/v1/context``,
+    reconstructs the dataclasses, and renders exactly as the direct path does.
+    """
+    from tokenjam.core.api_backend import ApiBackend
+
+    if not isinstance(db, ApiBackend):
+        raise click.ClickException(
+            "tj context needs either a direct DuckDB connection or a running "
+            "tj serve at the configured api.{host,port}."
+        )
+    try:
+        payload = db.fetch_context_diagnostic(since=since, agent_id=agent)
+    except Exception as exc:  # noqa: BLE001 — surface any HTTP/transport error
+        raise click.ClickException(
+            f"Failed to fetch the context diagnostic from tj serve: {exc}"
+        ) from exc
+
+    if output_json:
+        # The server already merged the `framing` block into the payload;
+        # emit it verbatim so `--json` is byte-identical across paths.
+        click.echo(json.dumps(payload, default=str))
+        return
+
+    diag = diagnostic_from_dict(payload)
+    framing = _framing_from_dict(payload.get("framing"))
+    _render(diag, framing, since=since)
+
+
+def _framing_from_dict(data: dict | None) -> Framing:
+    """Reconstruct a :class:`Framing` from a serialized ``framing`` block.
+
+    Mirrors the reconstruction in ``cmd_cost._cost_framing``: ``Framing`` is a
+    flat dataclass, so ``Framing(**data)`` round-trips ``to_dict()``. A missing
+    block or a server-side schema drift degrades to the neutral default (which
+    renders raw token counts) rather than raising.
+    """
+    if not data:
+        return Framing()
+    try:
+        return Framing(**data)
+    except TypeError:
+        return Framing()
 
 
 def _framing_for(
