@@ -824,6 +824,88 @@ def _llm_span_rows(conn, since, until, agent_id, _attr):
     )
 
 
+def diagnostic_from_dict(payload: dict[str, Any]) -> ContextDiagnostic:
+    """Reconstruct a :class:`ContextDiagnostic` from :func:`diagnostic_to_dict`.
+
+    The inverse of :func:`diagnostic_to_dict`, used by the API-shim path: when
+    ``tj serve`` holds the DuckDB write lock, ``tj context`` fetches the
+    server-computed diagnostic over HTTP (the daemon owns the direct connection
+    that can read the raw ``attributes`` column) and rebuilds the dataclass here
+    to render it exactly as the direct-connection path would (#63).
+
+    Only the fields the renderer reads are reconstructed with full fidelity;
+    ``heaviest_turns`` (carried for ``--json`` consumers, never rendered) is
+    rebuilt best-effort, with the fields the payload doesn't serialize
+    (``cost_usd``) defaulted. Missing keys fall back to the dataclass defaults so
+    a schema drift degrades gracefully rather than raising.
+    """
+    diag = ContextDiagnostic(
+        since=_parse_dt(payload.get("since")),
+        until=_parse_dt(payload.get("until")),
+        sessions=int(payload.get("sessions", 0) or 0),
+        turns=int(payload.get("turns", 0) or 0),
+        total_reread_tokens=int(payload.get("total_reread_tokens", 0) or 0),
+        total_new_input_tokens=int(payload.get("total_new_input_tokens", 0) or 0),
+        total_output_tokens=int(payload.get("total_output_tokens", 0) or 0),
+        total_cache_write_tokens=int(payload.get("total_cache_write_tokens", 0) or 0),
+        total_cost_usd=float(payload.get("total_cost_usd", 0.0) or 0.0),
+        tool_inputs_captured=bool(payload.get("tool_inputs_captured", False)),
+        prompts_captured=bool(payload.get("prompts_captured", False)),
+        tool_outputs_captured=bool(payload.get("tool_outputs_captured", False)),
+        notes=list(payload.get("notes", []) or []),
+        caveat=str(payload.get("caveat", CONTEXT_HONESTY_CAVEAT)),
+    )
+    diag.heaviest_turns = [
+        TurnComposition(
+            session_id=str(t.get("session_id", "unknown")),
+            sub_agent_id=t.get("sub_agent_id"),
+            model=str(t.get("model", "unknown")),
+            reread_tokens=int(t.get("reread_tokens", 0) or 0),
+            new_input_tokens=int(t.get("new_input_tokens", 0) or 0),
+            output_tokens=int(t.get("output_tokens", 0) or 0),
+            cache_write_tokens=int(t.get("cache_miss_tokens", 0) or 0),
+            cost_usd=0.0,
+        )
+        for t in payload.get("heaviest_turns", []) or []
+    ]
+    diag.recurring = [
+        RecurringInclusion(
+            label=str(r.get("label", "")),
+            tool_name=str(r.get("tool_name", "")),
+            target=str(r.get("target", "")),
+            sessions=int(r.get("sessions", 0) or 0),
+            occurrences=int(r.get("occurrences", 0) or 0),
+            fix=str(r.get("fix", "")),
+            inclusion_type=str(r.get("inclusion_type", INCLUSION_FILE_READ)),
+        )
+        for r in payload.get("recurring", []) or []
+    ]
+    diag.compact_candidates = [
+        CompactCandidate(
+            session_id=str(c.get("session_id", "unknown")),
+            reread_tokens=int(c.get("reread_tokens", 0) or 0),
+            total_tokens=int(c.get("total_tokens", 0) or 0),
+            reread_share=float(c.get("reread_share", 0.0) or 0.0),
+            turns=int(c.get("turns", 0) or 0),
+        )
+        for c in payload.get("compact_candidates", []) or []
+    ]
+    return diag
+
+
+def _parse_dt(raw: Any) -> datetime:
+    """Parse an ISO datetime string back to a ``datetime`` (defaults to now)."""
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            pass
+    from tokenjam.utils.time_parse import utcnow
+    return utcnow()
+
+
 def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
     """JSON-serialisable view of the diagnostic for ``--json`` output."""
     return {

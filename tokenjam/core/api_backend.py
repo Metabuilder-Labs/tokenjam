@@ -334,6 +334,27 @@ class ApiBackend:
             params["agent_id"] = agent_id
         return self._get("/api/v1/reuse/clusters", params)
 
+    def fetch_context_diagnostic(
+        self,
+        *,
+        since: str = "30d",
+        agent_id: str | None = None,
+    ) -> dict:
+        """
+        Fetch the server-computed context-cost diagnostic from `tj serve`.
+
+        Used by `tj context` when the local DuckDB connection is unavailable
+        (the daemon holds the write lock — the launch-hero availability gap,
+        #63). The diagnostic reads the raw `attributes` column, which the shim
+        can't expose, so the daemon (which owns the direct connection) computes
+        it and returns `diagnostic_to_dict(diag)` plus the `framing` block. The
+        CLI reconstructs via `diagnostic_from_dict` + `Framing(**framing)`.
+        """
+        params: dict[str, Any] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        return self._get("/api/v1/context", params)
+
     def close(self) -> None:
         self.client.close()
 
