@@ -39,6 +39,9 @@ _WEB_TOOLS = frozenset({"WebFetch", "WebSearch"})
 _SEARCH_TOOLS = frozenset({"Grep", "Glob"})
 _BASH_TOOLS = frozenset({"Bash"})
 _SPAWN_TOOLS = frozenset({"Task", "Agent"})
+#: TodoWrite carries the session's structured work-state — rolled up separately
+#: (open-todo counts + the current items) rather than lumped into ``other_count``.
+_TODO_TOOLS = frozenset({"TodoWrite"})
 
 #: Cap on the distinct file paths listed per node (the count stays exact).
 MAX_FILES_PER_NODE = 8
@@ -70,6 +73,8 @@ def _empty_activity() -> dict[str, Any]:
         "steps": 0, "tool_calls": 0, "files": [], "file_count": 0,
         "source_count": 0, "search_count": 0, "bash_count": 0,
         "spawn_count": 0, "other_count": 0, "error_count": 0, "retry_count": 0,
+        "todos": [], "open_todos": 0,
+        "todo_counts": {"pending": 0, "in_progress": 0, "completed": 0},
     }
 
 
@@ -86,6 +91,9 @@ def _rollup_steps(steps: list[dict[str, Any]]) -> tuple[dict[str, Any], str | No
     search = bash = spawn = other = 0
     tool_calls = error_calls = step_count = retry_count = 0
     model_freq: dict[str, int] = {}
+    # TodoWrite overwrites the whole list every call, so the node's CURRENT
+    # work-state is the LAST TodoWrite payload seen in record order.
+    latest_todos: list[dict[str, Any]] = []
 
     for step in steps:
         if "omitted" in step:
@@ -116,8 +124,19 @@ def _rollup_steps(steps: list[dict[str, Any]]) -> tuple[dict[str, Any], str | No
                 bash += 1
             elif name in _SPAWN_TOOLS:
                 spawn += 1
+            elif name in _TODO_TOOLS:
+                todos = tool.get("todos")
+                if isinstance(todos, list) and todos:
+                    latest_todos = todos
             else:
                 other += 1
+
+    todo_counts = {"pending": 0, "in_progress": 0, "completed": 0}
+    for todo in latest_todos:
+        status = todo.get("status")
+        if status in todo_counts:
+            todo_counts[status] += 1
+    open_todos = todo_counts["pending"] + todo_counts["in_progress"]
 
     dominant = max(model_freq, key=lambda m: model_freq[m]) if model_freq else None
     activity = {
@@ -132,6 +151,11 @@ def _rollup_steps(steps: list[dict[str, Any]]) -> tuple[dict[str, Any], str | No
         "other_count": other,
         "error_count": error_calls,
         "retry_count": retry_count,
+        # Structured work-state rollup: the current todo items + how many remain
+        # open (pending + in_progress) — the best "where it left off" signal.
+        "todos": latest_todos,
+        "open_todos": open_todos,
+        "todo_counts": todo_counts,
     }
     return activity, dominant
 
@@ -158,6 +182,9 @@ def _summary(activity: dict[str, Any]) -> str:
             parts.append(_plural(activity["tool_calls"], "tool call"))
         else:
             return "no tool activity"
+    if activity.get("open_todos"):
+        parts.append(f"{activity['open_todos']} open todo"
+                     + ("" if activity["open_todos"] == 1 else "s"))
     if activity["error_count"]:
         parts.append(_plural(activity["error_count"], "error"))
     return " · ".join(parts)

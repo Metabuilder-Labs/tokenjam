@@ -99,6 +99,32 @@ MCP_INJECTION_PARK_NOTE = (
     "per-request tool-schema token delta would let `tj context` attribute it."
 )
 
+# Subagent accounting (#60). A Claude Code session that delegates to a Task
+# subagent records the handoff as a `Task` tool call in the PARENT transcript;
+# each subagent's own LLM turns live in a separate `subagents/agent-*.jsonl`
+# file that backfill folds in under the same session with a `sub_agent_id`.
+# When that subagent transcript is present its turns are already in the weighted
+# quota below (this metric never filters `sub_agent_id`). But if the subagent
+# file is missing — pruned, or the delegation ran outside the on-disk transcript
+# — the parent shows the Task delegation with NO matching subagent turns, so the
+# weighted quota is silently LOW for that session (the original #60 A/B measured
+# ~half of Claude Code's subagent-inclusive total_cost_usd). Rather than report
+# a confidently-wrong total we FLAG those sessions as a lower bound (Rule 14):
+# the number is honest about what it can't see.
+SUBAGENT_UNACCOUNTED_NOTE = (
+    "{n} delegating session(s) recorded a Task subagent handoff whose subagent "
+    "turns aren't in the data — their weighted quota is a LOWER BOUND, not a "
+    "complete total. Re-run `tj backfill claude-code` while the subagent "
+    "transcripts still exist (~/.claude/projects/**/subagents/), or use the live "
+    "ingest path, to account for the delegated work."
+)
+
+# Tool name Claude Code stamps on the parent-transcript span that delegates to a
+# subagent. Backfill copies it verbatim from the tool_use block's `name`, so a
+# case-insensitive match is the delegation signal. Kept as a constant so the
+# detection query and any future renderer agree on it.
+DELEGATION_TOOL_NAME = "task"
+
 # A re-read share at or above this fraction is "context-heavy" and worth a
 # compact / restructure look. Calibrated against the community signal that
 # steady-state CC turns can run well above this once history + CLAUDE.md grow.
@@ -241,6 +267,15 @@ class ContextDiagnostic:
     tool_inputs_captured: bool = False
     prompts_captured: bool = False
     tool_outputs_captured: bool = False
+    # Subagent accounting (#60). `subagent_turns` counts LLM turns attributed to
+    # a Task subagent (`sub_agent_id` set) — already folded into the weighted
+    # quota above; surfaced for transparency. `delegating_sessions` is how many
+    # sessions recorded a Task delegation in the window.
+    # `unaccounted_subagent_sessions` are the delegating sessions whose subagent
+    # turns are MISSING from the data, so their weighted quota is a lower bound.
+    subagent_turns: int = 0
+    delegating_sessions: int = 0
+    unaccounted_subagent_sessions: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     caveat: str = CONTEXT_HONESTY_CAVEAT
 
@@ -276,6 +311,13 @@ class ContextDiagnostic:
     def cache_miss_share(self) -> float:
         total = self.total_tokens
         return (self.total_cache_miss_tokens / total) if total else 0.0
+
+    @property
+    def subagent_accounting_partial(self) -> bool:
+        """True when at least one delegating session's subagent turns are
+        missing, so the window's weighted quota under-counts delegated work and
+        is a lower bound rather than a complete total (#60)."""
+        return bool(self.unaccounted_subagent_sessions)
 
     @property
     def has_data(self) -> bool:
@@ -450,6 +492,8 @@ def compute_context_diagnostic(
         tool_outputs_captured=tool_outputs_captured,
     )
 
+    _apply_subagent_accounting(result, conn, since, until, agent_id, turns)
+
     if not (tool_inputs_captured or prompts_captured or tool_outputs_captured):
         result.notes.append(
             "Recurring-inclusion detection needs content capture: "
@@ -485,8 +529,13 @@ def _load_turns(
         clauses.append("agent_id = $" + str(len(params) + 1))
         params.append(agent_id)
     where = " AND ".join(clauses)
+    # Select the real `sub_agent_id` column — NOT `agent_id`. This row's
+    # `TurnComposition.sub_agent_id` is the Task-subagent attribution the #60
+    # accounting reads (and the `heaviest_turns[].sub_agent_id` JSON emits);
+    # before this fix the query selected `agent_id` and bound it to that field,
+    # so the metric never actually saw which turns were subagent turns.
     rows = conn.execute(
-        "SELECT session_id, agent_id, model, "
+        "SELECT session_id, sub_agent_id, model, "
         "COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), "
         "COALESCE(cache_tokens, 0), COALESCE(cache_write_tokens, 0), "
         "COALESCE(cost_usd, 0.0) "
@@ -509,6 +558,71 @@ def _load_turns(
             )
         )
     return turns
+
+
+def _delegating_session_ids(
+    conn: Any,
+    since: datetime,
+    until: datetime,
+    agent_id: str | None,
+) -> set[str]:
+    """Session ids that recorded a Task delegation (subagent handoff) in window.
+
+    Claude Code stamps ``tool_name = "Task"`` on the parent-transcript tool span
+    that spawns a subagent, so a distinct-session scan over those spans tells us
+    which sessions delegated — independent of whether the subagent's own
+    transcript was captured. Case-insensitive on the tool name (#60).
+    """
+    clauses = [
+        "name = $1",
+        "start_time >= $2",
+        "start_time < $3",
+        "LOWER(tool_name) = $4",
+    ]
+    params: list[Any] = [
+        GenAIAttributes.SPAN_TOOL_CALL, since, until, DELEGATION_TOOL_NAME,
+    ]
+    if agent_id:
+        clauses.append("agent_id = $" + str(len(params) + 1))
+        params.append(agent_id)
+    where = " AND ".join(clauses)
+    rows = conn.execute(
+        "SELECT DISTINCT session_id FROM spans WHERE " + where, params
+    ).fetchall()
+    return {str(r[0]) for r in rows if r[0] is not None}
+
+
+def _apply_subagent_accounting(
+    result: ContextDiagnostic,
+    conn: Any,
+    since: datetime,
+    until: datetime,
+    agent_id: str | None,
+    turns: list[TurnComposition],
+) -> None:
+    """Populate the subagent-accounting fields + partial-quota note (#60).
+
+    The weighted quota already includes captured subagent turns (``_load_turns``
+    never filters ``sub_agent_id``). This adds the honesty half the ticket asks
+    for: when a session *delegated* (a ``Task`` tool span in the parent) but no
+    subagent turns were captured for it, its weighted quota is a lower bound —
+    so we flag it instead of letting the number read as complete (Rule 14).
+    """
+    result.subagent_turns = sum(1 for t in turns if t.sub_agent_id)
+    sessions_with_subagent_turns = {
+        t.session_id for t in turns if t.sub_agent_id
+    }
+    delegating = _delegating_session_ids(conn, since, until, agent_id)
+    result.delegating_sessions = len(delegating)
+    result.unaccounted_subagent_sessions = sorted(
+        delegating - sessions_with_subagent_turns
+    )
+    if result.unaccounted_subagent_sessions:
+        result.notes.append(
+            SUBAGENT_UNACCOUNTED_NOTE.format(
+                n=len(result.unaccounted_subagent_sessions)
+            )
+        )
 
 
 def _compact_candidates(turns: list[TurnComposition]) -> list[CompactCandidate]:
@@ -849,6 +963,13 @@ def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
         "tool_inputs_captured": diag.tool_inputs_captured,
         "prompts_captured": diag.prompts_captured,
         "tool_outputs_captured": diag.tool_outputs_captured,
+        # Subagent accounting (#60). `subagent_turns` are already in the weighted
+        # quota; `subagent_accounting_partial` marks the total a LOWER BOUND when
+        # a delegating session's subagent turns are missing.
+        "subagent_turns": diag.subagent_turns,
+        "delegating_sessions": diag.delegating_sessions,
+        "unaccounted_subagent_sessions": diag.unaccounted_subagent_sessions,
+        "subagent_accounting_partial": diag.subagent_accounting_partial,
         # Parked #11 half — surfaced as an honest gap, not a fabricated number.
         "mcp_injection_parked": MCP_INJECTION_PARK_NOTE,
         "notes": diag.notes,

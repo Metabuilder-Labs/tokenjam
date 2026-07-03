@@ -33,3 +33,37 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # Publishes the zero-install `npx tokenjam` wrapper (npm-wrapper/, issue #6):
+  # the unscoped `tokenjam` package that shells out to the Python CLI. Separate
+  # job from the SDK publish above so a wrapper failure never blocks @tokenjam/sdk
+  # (and vice versa); both fire on the same `v*` release tag.
+  publish-npm-wrapper:
+    if: startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      # Cheap guard — the wrapper has no test suite (no Python in the JS lane),
+      # so a syntax error would otherwise only surface after publish.
+      - name: Syntax-check launcher
+        working-directory: npm-wrapper
+        run: node -c bin/tj.js
+
+      # Derive the published version from the release tag (v0.5.3 -> 0.5.3) so the
+      # wrapper can never drift from the release being cut — no manual bump needed.
+      # --allow-same-version tolerates package.json already matching the tag.
+      - name: Sync version to release tag
+        working-directory: npm-wrapper
+        run: npm version "${GITHUB_REF_NAME#v}" --no-git-tag-version --allow-same-version
+
+      - name: Publish
+        working-directory: npm-wrapper
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

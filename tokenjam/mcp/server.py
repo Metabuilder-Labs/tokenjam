@@ -1335,15 +1335,43 @@ def get_optimize_report(
     if _config is None:
         return _no_config()
     try:
-        # Pass the writable backend (not _ro_db) so the analyzers can read
-        # via the same DuckDB connection the CLI uses.
-        from tokenjam.core.db import open_db
+        # Serve mode: a tj serve holds the DuckDB write lock, so we CANNOT open
+        # our own connection to the file — DuckDB's file lock is exclusive, and
+        # even a read-only attach throws "Could not set lock on file" while the
+        # daemon is up (#61). Previously this path called open_db() (read-write),
+        # so every get_optimize_report call failed with a raw lock error whenever
+        # a serve was running. Route the optimize computation through the serve
+        # HTTP API instead, exactly as the CLI does under daemon mode (#68 §12).
+        if _ro_conn is None and _serve_url is not None:
+            from tokenjam.core.api_backend import ApiBackend
+            api_key = (
+                _config.api.auth.api_key
+                if _config.api.auth.enabled and _config.api.auth.api_key
+                else None
+            )
+            backend = ApiBackend(_serve_url, api_key)
+            try:
+                return backend.fetch_optimize_report(
+                    since=since or "30d",
+                    agent_id=agent_id,
+                    findings=findings,
+                    budget_provider=budget_provider,
+                    budget_usd=budget_usd,
+                )
+            finally:
+                backend.close()
+
+        # Direct-DB mode: reuse the single read-only connection when we have one
+        # (fallback path, serve unreachable). We never open a competing
+        # read-write connection here — _tool_get_optimize_report returns the
+        # graceful "Optimize requires a direct database connection" message when
+        # no usable connection is available.
         if _ro_conn is not None:
             class _Shim:
                 conn = _ro_conn
             db = _Shim()
         else:
-            db = open_db(_config.storage)
+            db = None
         return _tool_get_optimize_report(
             db, _config, agent_id, since, findings, budget_provider, budget_usd,
         )

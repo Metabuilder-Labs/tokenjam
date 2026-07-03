@@ -190,6 +190,31 @@ def test_overview_error_handling_is_asymmetric(html):
     assert "api('/drift').catch(() => ({ agents: [] }))" in html
 
 
+def test_overview_empty_gate_considers_historical_cost(html):
+    # Regression: the Overview front door showed "No data yet" whenever /status
+    # reported 0 active agents — and it returned BEFORE /cost was ever fetched.
+    # A DB whose sessions are all >24h old (e.g. a user upgrading to review past
+    # spend) has 0 active agents but a full cost history, so the default landing
+    # screen falsely read empty while Cost/Analytics/Optimize rendered fine.
+    ov_start = html.index("const setWin = v => navigate('dashboard'")
+    ov_end = html.index("const winPicker = html`", ov_start)
+    ov = html[ov_start:ov_end]
+
+    # Buggy pattern GONE: empty was gated purely on active-agent count with an
+    # early return before /cost was fetched.
+    assert "if (!status.agents || status.agents.length === 0) {" not in ov
+    assert "const status = await api('/status');" not in ov  # /status no longer fetched first + serially
+
+    # Fix pattern PRESENT: /cost is fetched in the parallel fan-out, and the
+    # empty gate considers historical cost/tokens (not just agents/traces).
+    assert "const hasCost = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;" in ov
+    assert "const empty = !hasCost && !hasAgents && !hasTraces;" in ov
+    # /cost stays load-bearing (no .catch) inside the fan-out.
+    assert "api('/cost', { since, group_by: 'day' })," in ov
+    # /status is now degradable (moved into the parallel fetch with a .catch).
+    assert "api('/status').catch(() => ({ agents: [] }))" in ov
+
+
 # --- #147: status tile shows Active (compute) time + relabeled Elapsed ----- #
 def test_status_tile_shows_active_and_elapsed(html):
     # A coarse formatter for multi-day wall-clock spans, so "3087m" reads "2d 3h".

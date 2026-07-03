@@ -450,3 +450,91 @@ def test_cli_json_output(db, monkeypatch):
     assert all("inclusion_type" in r for r in payload["recurring"])
     assert payload["compact_candidates"][0]["session_id"] == "sess-a"
     assert payload["framing"]["pricing_mode"] == "subscription"
+
+
+# --- Subagent accounting (#60) ----------------------------------------------
+#
+# A Claude Code session that delegates to Task subagents under-counts the
+# model-weighted quota when the subagent turns aren't in the data. These fixtures
+# model both halves of the ticket's "Done when": (a) captured subagent turns are
+# included in the weighted quota, and (b) a delegating session whose subagent
+# turns are MISSING is explicitly flagged partial (a lower bound), so the number
+# is never silently low.
+
+
+def _seed_delegating_session(db, sid: str, *, capture_subagents: bool) -> None:
+    """A session that delegates via a `Task` tool span in the parent.
+
+    Always records the parent's own LLM turn plus the `Task` delegation span.
+    When ``capture_subagents`` is True it also records the subagent's own LLM
+    turns (as backfill would, folded in under a `sub_agent_id`); when False the
+    subagent transcript is absent — the exact #60 A/B shape where tj saw the
+    parent turns but not the delegated work.
+    """
+    db.upsert_session(make_session(session_id=sid, plan_tier="max_5x"))
+    # Parent-thread LLM turn (main model, no sub_agent_id).
+    parent = make_llm_span(
+        model="claude-opus-4-6", input_tokens=2_000, output_tokens=400,
+        cost_usd=0.3, session_id=sid, sub_agent_id=None, start_time=BASE,
+    )
+    db.insert_span(parent)
+    # The delegation itself: a `Task` tool call recorded in the parent.
+    db.insert_span(make_tool_span(
+        tool_name="Task", session_id=sid, start_time=BASE + timedelta(seconds=1),
+    ))
+    if capture_subagents:
+        # Two subagent turns backfill folded in from subagents/agent-*.jsonl.
+        for i, said in enumerate(("sub-1", "sub-2")):
+            db.insert_span(make_llm_span(
+                model="claude-haiku-4-5", input_tokens=30_000, output_tokens=1_500,
+                cost_usd=0.25, session_id=sid, sub_agent_id=said,
+                start_time=BASE + timedelta(seconds=2 + i),
+            ))
+
+
+def test_captured_subagent_turns_are_in_weighted_quota_and_not_flagged(db):
+    """A delegating session whose subagent transcripts were captured: its
+    subagent turns are counted in the weighted quota and it is NOT flagged."""
+    _seed_delegating_session(db, "sess-deleg", capture_subagents=True)
+    diag = compute_context_diagnostic(db.conn, SINCE, UNTIL)
+
+    # Parent turn + two subagent turns all counted in the window.
+    assert diag.turns == 3
+    assert diag.subagent_turns == 2
+    # The subagent output tokens (2 x 1500) are in the weighted total — the
+    # under-count the ticket describes is gone when the data is present.
+    assert diag.total_output_tokens == 400 + 1_500 + 1_500
+    # Delegation was seen and fully accounted → no partial flag, no note.
+    assert diag.delegating_sessions == 1
+    assert diag.unaccounted_subagent_sessions == []
+    assert diag.subagent_accounting_partial is False
+    assert not any("LOWER BOUND" in n for n in diag.notes)
+
+
+def test_delegating_session_without_subagent_turns_is_flagged_partial(db):
+    """A delegating session whose subagent transcript is MISSING is flagged: the
+    weighted quota is a lower bound, surfaced instead of silently under-counted."""
+    _seed_delegating_session(db, "sess-blind", capture_subagents=False)
+    diag = compute_context_diagnostic(db.conn, SINCE, UNTIL)
+
+    # Only the parent turn is visible; no subagent turns were captured.
+    assert diag.turns == 1
+    assert diag.subagent_turns == 0
+    # The delegation is detected via the parent's Task span and flagged partial.
+    assert diag.delegating_sessions == 1
+    assert diag.unaccounted_subagent_sessions == ["sess-blind"]
+    assert diag.subagent_accounting_partial is True
+    assert any("LOWER BOUND" in n for n in diag.notes)
+
+
+def test_subagent_accounting_fields_in_json_payload(db):
+    """The subagent-accounting flag round-trips through diagnostic_to_dict."""
+    from tokenjam.core.context_diagnostic import diagnostic_to_dict
+
+    _seed_delegating_session(db, "sess-blind", capture_subagents=False)
+    payload = diagnostic_to_dict(compute_context_diagnostic(db.conn, SINCE, UNTIL))
+
+    assert payload["subagent_turns"] == 0
+    assert payload["delegating_sessions"] == 1
+    assert payload["unaccounted_subagent_sessions"] == ["sess-blind"]
+    assert payload["subagent_accounting_partial"] is True
