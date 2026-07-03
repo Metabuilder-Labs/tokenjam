@@ -1830,3 +1830,29 @@ def test_map_phase_bands_split_at_idle_breaks(html):
     assert "const phaseSegs = []" in html
     assert "labelSeg: si === widest" in html
     assert "usePhaseSegs ? phaseSegs : phaseBands" in html
+
+
+# --- #396: KPI "% vs prev" delta must not blow up on a near-empty prior ----- #
+def test_trend_chip_guards_zero_baseline_with_new(html):
+    # A fresh onboard + 30-day backfill compares the current window against the
+    # near-empty pre-backfill period, so cost_delta_pct explodes (e.g. ▲140980%).
+    # TrendChip must show "new" when the prior window is thin, not the figure.
+    assert "function TrendChip({ pct, prevThin })" in html
+    assert "prevThin && pct != null && pct > 0" in html
+    assert "▲ new" in html
+    # The Cost/Dashboard call site derives prevThin from the prior window's
+    # session count and passes it through.
+    assert "const trendPrevThin" in html
+    assert "compare.previous.sessions" in html
+    assert "prevThin=${trendPrevThin}" in html
+
+
+def test_delta_pct_capped_to_avoid_four_digit_percentages(html):
+    # Genuinely-large-but-finite deltas are capped at ">999%" so a tiny (nonzero)
+    # prior baseline can't render "140980.0%". Both KPI chips route through the
+    # shared formatter — neither re-implements the raw toFixed.
+    assert "function fmtDeltaPct(pct)" in html
+    assert "DELTA_PCT_CEILING" in html
+    assert "'>999%'" in html
+    # The old unguarded raw-percentage render is gone from both chips.
+    assert "${Math.abs(pct).toFixed(1)}% vs prev" not in html
