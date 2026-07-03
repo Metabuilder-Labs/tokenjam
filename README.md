@@ -322,4 +322,6 @@ MIT License · Built by [Metabuilder Labs](https://github.com/Metabuilder-Labs)
 
 TokenJam was created by [Anil Murty](https://github.com/anilmurty) — reach him at [anil@metabldr.com](mailto:anil@metabldr.com).
 
+<!-- greptile-integration-smoke-test: temporary, will be reverted -->
+
 </div>
