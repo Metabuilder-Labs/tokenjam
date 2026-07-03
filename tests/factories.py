@@ -132,17 +132,24 @@ def make_tool_span(
     trace_id: str | None = None,
     tool_input: dict | str | None = None,
     name: str = "gen_ai.tool.call",
+    session_id: str | None = None,
+    start_time=None,
+    sub_agent_id: str | None = None,
 ) -> NormalizedSpan:
     """Create a NormalizedSpan representing a single tool call.
 
     Pass ``tool_input`` to set the ``gen_ai.tool.input`` attribute — retry-loop
     detection needs an argument signature to tell a genuine repeat from normal
     repeated tool use. ``name`` overrides the span name (e.g. to model a
-    non-execution ``claude_code.tool_decision`` event span).
+    non-execution ``claude_code.tool_decision`` event span). ``session_id`` /
+    ``start_time`` / ``sub_agent_id`` default to the prior behavior (None / now /
+    None) so existing callers are unaffected; pass them to place a tool span in a
+    specific session/window or attribute it to a subagent (e.g. a ``Task``
+    delegation span for the #60 subagent-accounting path).
     """
     import json as _json
 
-    now = utcnow()
+    now = start_time or utcnow()
     end = now + timedelta(milliseconds=duration_ms)
     attrs: dict = {}
     if tool_input is not None:
@@ -160,6 +167,8 @@ def make_tool_span(
         end_time=end,
         duration_ms=duration_ms,
         agent_id=agent_id,
+        sub_agent_id=sub_agent_id,
+        session_id=session_id,
         tool_name=tool_name,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
