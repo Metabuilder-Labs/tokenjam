@@ -26,7 +26,7 @@ from tokenjam.core.ingest import HOOK_QUEUE_MAXSIZE, IngestPipeline
 from tokenjam.core.models import Alert, AlertType, Severity
 from tokenjam.utils.ids import new_uuid
 from tokenjam.utils.time_parse import utcnow
-from tests.factories import make_llm_span
+from tests.factories import make_llm_span, make_session
 
 
 def _duckdb(tmp_path) -> DuckDBBackend:
@@ -68,6 +68,11 @@ def test_async_hooks_concurrent_writes_no_lost_writes(tmp_path):
     and every span produces exactly one alert — no write-write conflict aborts a
     write, and none is silently swallowed by the hook error handler.
     """
+    # NOTE: this exercises concurrent writes to DISJOINT tables (main thread →
+    # spans, worker → alerts, each new span/session_id), which DuckDB never
+    # conflicts on. It proves the two threads coexist and no write is dropped,
+    # but is NOT a lock regression test — see
+    # test_async_hooks_same_row_update_contention for the same-row conflict guard.
     db = _duckdb(tmp_path)
     config = TjConfig(version="1")
     config.alerts.async_hooks = True
@@ -103,6 +108,9 @@ def test_async_hooks_concurrent_two_producers(tmp_path):
     concurrently (each writes spans on its own DuckDB cursor) while the worker
     writes alerts. Asserts the totals reconcile with no lost writes.
     """
+    # NOTE: like the test above, each producer inserts fresh spans/sessions —
+    # disjoint rows DuckDB never conflicts on. Not a lock regression test; the
+    # same-row conflict guard is test_async_hooks_same_row_update_contention.
     db = _duckdb(tmp_path)
     config = TjConfig(version="1")
     config.alerts.async_hooks = True
@@ -140,6 +148,81 @@ def test_async_hooks_concurrent_two_producers(tmp_path):
     alert_count = db.conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0]
     assert span_count == total
     assert alert_count == total
+
+
+def test_async_hooks_same_row_update_contention(tmp_path):
+    """Many threads increment the SAME session row concurrently — the write lock
+    is what keeps every increment (no lost update, no raised conflict).
+
+    This is the *load-bearing* concurrency guard. The disjoint-INSERT tests above
+    can't catch a lock regression: DuckDB's optimistic concurrency only conflicts
+    on **same-row UPDATE overlap** (`TransactionException: Conflict on update!`),
+    never on inserts of distinct rows. Here N threads each call
+    `increment_session_cost(session_id, ...)` on the SAME session_id in a tight
+    loop (a read-modify-write on one row) while the async hook worker also writes
+    alerts. Without `DuckDBBackend._write_lock` serializing writes, two threads
+    read the same total, both write back, and an increment is lost — or DuckDB
+    aborts one with a "Conflict on update!" that surfaces here.
+
+    Verified load-bearing: swapping `self._write_lock` for
+    `contextlib.nullcontext()` makes this test FAIL (lost increments / raised
+    conflict); restoring the RLock makes it PASS.
+    """
+    db = _duckdb(tmp_path)
+    config = TjConfig(version="1")
+    config.alerts.async_hooks = True
+
+    pipeline = IngestPipeline(
+        db=db,
+        config=config,
+        alert_engine=_AlertWritingEngine(db),
+    )
+
+    # One shared session row that every thread will contend on.
+    session = make_session(session_id=new_uuid(), total_cost_usd=0.0)
+    db.upsert_session(session)
+
+    n_threads = 8
+    increments_per_thread = 200
+    delta = 0.01
+    errors: list[BaseException] = []
+    start = threading.Barrier(n_threads + 1)
+
+    def bumper() -> None:
+        try:
+            start.wait(timeout=10.0)
+            for _ in range(increments_per_thread):
+                # Same-row read-modify-write — the exact overlap DuckDB conflicts
+                # on. Also drive the worker so alert writes race these updates.
+                db.increment_session_cost(session.session_id, delta)
+                pipeline.process(make_llm_span())
+        except BaseException as exc:  # pragma: no cover - failure path
+            errors.append(exc)
+
+    threads = [threading.Thread(target=bumper) for _ in range(n_threads)]
+    try:
+        for t in threads:
+            t.start()
+        # Release all threads at once to maximize same-row contention.
+        start.wait(timeout=10.0)
+        for t in threads:
+            t.join()
+        pipeline.flush()
+    finally:
+        pipeline.close()
+
+    assert not errors, f"a same-row UPDATE conflict was raised (lock regression?): {errors!r}"
+
+    total = db.conn.execute(
+        "SELECT total_cost_usd FROM sessions WHERE session_id = ?",
+        [session.session_id],
+    ).fetchone()[0]
+    expected = n_threads * increments_per_thread * delta
+    # Exact-to-the-penny: any lost increment would leave total < expected.
+    assert round(total, 2) == round(expected, 2), (
+        f"lost same-row increments: got {total}, expected {expected} "
+        "(write lock not serializing concurrent same-row UPDATEs?)"
+    )
 
 
 def test_close_drains_queued_hooks(tmp_path):

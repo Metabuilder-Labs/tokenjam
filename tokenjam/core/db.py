@@ -1179,43 +1179,43 @@ class DuckDBBackend:
         # clobber historical tiers when config plan changes).
         with self._write_lock:
             self.conn.execute(
-            """
-            INSERT INTO sessions (
-                session_id, agent_id, conversation_id, started_at, ended_at,
-                status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
-                tool_call_count, error_count, plan_tier, service_namespace,
-                service_instance_id, cache_write_tokens, run_id, parent_session_id
-            ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
-            ON CONFLICT (session_id) DO UPDATE SET
-                ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
-                status = EXCLUDED.status,
-                total_cost_usd = EXCLUDED.total_cost_usd,
-                input_tokens = EXCLUDED.input_tokens,
-                output_tokens = EXCLUDED.output_tokens,
-                cache_tokens = EXCLUDED.cache_tokens,
-                cache_write_tokens = EXCLUDED.cache_write_tokens,
-                tool_call_count = EXCLUDED.tool_call_count,
-                error_count = EXCLUDED.error_count,
-                plan_tier = CASE
-                    WHEN COALESCE(sessions.plan_tier, 'unknown') != 'unknown'
-                    THEN sessions.plan_tier
-                    ELSE EXCLUDED.plan_tier
-                END,
-                service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
-                service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
-                run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
-                parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id)
-            """,
-            [
-                session.session_id, session.agent_id, session.conversation_id,
-                session.started_at, session.ended_at, session.status,
-                session.total_cost_usd, session.input_tokens, session.output_tokens,
-                session.cache_tokens, session.tool_call_count, session.error_count,
-                session.plan_tier, session.service_namespace,
-                session.service_instance_id, session.cache_write_tokens,
-                session.run_id, session.parent_session_id,
-            ],
-        )
+                """
+                INSERT INTO sessions (
+                    session_id, agent_id, conversation_id, started_at, ended_at,
+                    status, total_cost_usd, input_tokens, output_tokens, cache_tokens,
+                    tool_call_count, error_count, plan_tier, service_namespace,
+                    service_instance_id, cache_write_tokens, run_id, parent_session_id
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                ON CONFLICT (session_id) DO UPDATE SET
+                    ended_at = COALESCE(EXCLUDED.ended_at, sessions.ended_at),
+                    status = EXCLUDED.status,
+                    total_cost_usd = EXCLUDED.total_cost_usd,
+                    input_tokens = EXCLUDED.input_tokens,
+                    output_tokens = EXCLUDED.output_tokens,
+                    cache_tokens = EXCLUDED.cache_tokens,
+                    cache_write_tokens = EXCLUDED.cache_write_tokens,
+                    tool_call_count = EXCLUDED.tool_call_count,
+                    error_count = EXCLUDED.error_count,
+                    plan_tier = CASE
+                        WHEN COALESCE(sessions.plan_tier, 'unknown') != 'unknown'
+                        THEN sessions.plan_tier
+                        ELSE EXCLUDED.plan_tier
+                    END,
+                    service_namespace = COALESCE(EXCLUDED.service_namespace, sessions.service_namespace),
+                    service_instance_id = COALESCE(EXCLUDED.service_instance_id, sessions.service_instance_id),
+                    run_id = COALESCE(EXCLUDED.run_id, sessions.run_id),
+                    parent_session_id = COALESCE(EXCLUDED.parent_session_id, sessions.parent_session_id)
+                """,
+                [
+                    session.session_id, session.agent_id, session.conversation_id,
+                    session.started_at, session.ended_at, session.status,
+                    session.total_cost_usd, session.input_tokens, session.output_tokens,
+                    session.cache_tokens, session.tool_call_count, session.error_count,
+                    session.plan_tier, session.service_namespace,
+                    session.service_instance_id, session.cache_write_tokens,
+                    session.run_id, session.parent_session_id,
+                ],
+            )
 
     def recompute_session_totals_from_spans(self, session_ids: list[str]) -> None:
         """Reconcile the given session rows' token + cost aggregates to the SUM
@@ -1232,77 +1232,77 @@ class DuckDBBackend:
             return
         with self._write_lock:
             self.conn.execute(
-            """
-            UPDATE sessions AS s SET
-                input_tokens       = agg.input_tokens,
-                output_tokens      = agg.output_tokens,
-                cache_tokens       = agg.cache_tokens,
-                cache_write_tokens = agg.cache_write_tokens,
-                total_cost_usd     = agg.total_cost_usd,
-                tool_call_count    = agg.tool_call_count
-            FROM (
-                SELECT session_id,
-                       COALESCE(SUM(input_tokens), 0)       AS input_tokens,
-                       COALESCE(SUM(output_tokens), 0)      AS output_tokens,
-                       COALESCE(SUM(cache_tokens), 0)       AS cache_tokens,
-                       COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
-                       COALESCE(SUM(cost_usd), 0.0)         AS total_cost_usd,
-                       COUNT(*) FILTER (WHERE tool_name IS NOT NULL) AS tool_call_count
-                FROM spans
-                WHERE session_id IN (SELECT unnest($1))
-                GROUP BY session_id
-            ) AS agg
-            WHERE s.session_id = agg.session_id
-            """,
-            [list(session_ids)],
-        )
+                """
+                UPDATE sessions AS s SET
+                    input_tokens       = agg.input_tokens,
+                    output_tokens      = agg.output_tokens,
+                    cache_tokens       = agg.cache_tokens,
+                    cache_write_tokens = agg.cache_write_tokens,
+                    total_cost_usd     = agg.total_cost_usd,
+                    tool_call_count    = agg.tool_call_count
+                FROM (
+                    SELECT session_id,
+                           COALESCE(SUM(input_tokens), 0)       AS input_tokens,
+                           COALESCE(SUM(output_tokens), 0)      AS output_tokens,
+                           COALESCE(SUM(cache_tokens), 0)       AS cache_tokens,
+                           COALESCE(SUM(cache_write_tokens), 0) AS cache_write_tokens,
+                           COALESCE(SUM(cost_usd), 0.0)         AS total_cost_usd,
+                           COUNT(*) FILTER (WHERE tool_name IS NOT NULL) AS tool_call_count
+                    FROM spans
+                    WHERE session_id IN (SELECT unnest($1))
+                    GROUP BY session_id
+                ) AS agg
+                WHERE s.session_id = agg.session_id
+                """,
+                [list(session_ids)],
+            )
 
     def upsert_agent(self, agent: AgentRecord) -> None:
         with self._write_lock:
             self.conn.execute(
-            """
-            INSERT INTO agents VALUES ($1,$2,$3,$4,$5,$6)
-            ON CONFLICT (agent_id) DO UPDATE SET
-                name = COALESCE(EXCLUDED.name, agents.name),
-                version = COALESCE(EXCLUDED.version, agents.version),
-                provider = COALESCE(EXCLUDED.provider, agents.provider),
-                last_seen = EXCLUDED.last_seen
-            """,
-            [
-                agent.agent_id, agent.name, agent.version, agent.provider,
-                agent.first_seen, agent.last_seen,
-            ],
-        )
+                """
+                INSERT INTO agents VALUES ($1,$2,$3,$4,$5,$6)
+                ON CONFLICT (agent_id) DO UPDATE SET
+                    name = COALESCE(EXCLUDED.name, agents.name),
+                    version = COALESCE(EXCLUDED.version, agents.version),
+                    provider = COALESCE(EXCLUDED.provider, agents.provider),
+                    last_seen = EXCLUDED.last_seen
+                """,
+                [
+                    agent.agent_id, agent.name, agent.version, agent.provider,
+                    agent.first_seen, agent.last_seen,
+                ],
+            )
 
     def upsert_baseline(self, baseline: DriftBaseline) -> None:
         with self._write_lock:
             self.conn.execute(
-            """
-            INSERT INTO drift_baselines VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-            ON CONFLICT (agent_id) DO UPDATE SET
-                sessions_sampled = EXCLUDED.sessions_sampled,
-                computed_at = EXCLUDED.computed_at,
-                avg_input_tokens = EXCLUDED.avg_input_tokens,
-                stddev_input_tokens = EXCLUDED.stddev_input_tokens,
-                avg_output_tokens = EXCLUDED.avg_output_tokens,
-                stddev_output_tokens = EXCLUDED.stddev_output_tokens,
-                avg_session_duration_s = EXCLUDED.avg_session_duration_s,
-                stddev_session_duration = EXCLUDED.stddev_session_duration,
-                avg_tool_call_count = EXCLUDED.avg_tool_call_count,
-                stddev_tool_call_count = EXCLUDED.stddev_tool_call_count,
-                common_tool_sequences = EXCLUDED.common_tool_sequences,
-                output_schema_inferred = EXCLUDED.output_schema_inferred
-            """,
-            [
-                baseline.agent_id, baseline.sessions_sampled, baseline.computed_at,
-                baseline.avg_input_tokens, baseline.stddev_input_tokens,
-                baseline.avg_output_tokens, baseline.stddev_output_tokens,
-                baseline.avg_session_duration_s, baseline.stddev_session_duration,
-                baseline.avg_tool_call_count, baseline.stddev_tool_call_count,
-                json.dumps(baseline.common_tool_sequences),
-                json.dumps(baseline.output_schema_inferred),
-            ],
-        )
+                """
+                INSERT INTO drift_baselines VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+                ON CONFLICT (agent_id) DO UPDATE SET
+                    sessions_sampled = EXCLUDED.sessions_sampled,
+                    computed_at = EXCLUDED.computed_at,
+                    avg_input_tokens = EXCLUDED.avg_input_tokens,
+                    stddev_input_tokens = EXCLUDED.stddev_input_tokens,
+                    avg_output_tokens = EXCLUDED.avg_output_tokens,
+                    stddev_output_tokens = EXCLUDED.stddev_output_tokens,
+                    avg_session_duration_s = EXCLUDED.avg_session_duration_s,
+                    stddev_session_duration = EXCLUDED.stddev_session_duration,
+                    avg_tool_call_count = EXCLUDED.avg_tool_call_count,
+                    stddev_tool_call_count = EXCLUDED.stddev_tool_call_count,
+                    common_tool_sequences = EXCLUDED.common_tool_sequences,
+                    output_schema_inferred = EXCLUDED.output_schema_inferred
+                """,
+                [
+                    baseline.agent_id, baseline.sessions_sampled, baseline.computed_at,
+                    baseline.avg_input_tokens, baseline.stddev_input_tokens,
+                    baseline.avg_output_tokens, baseline.stddev_output_tokens,
+                    baseline.avg_session_duration_s, baseline.stddev_session_duration,
+                    baseline.avg_tool_call_count, baseline.stddev_tool_call_count,
+                    json.dumps(baseline.common_tool_sequences),
+                    json.dumps(baseline.output_schema_inferred),
+                ],
+            )
 
     # -- reads --
 
