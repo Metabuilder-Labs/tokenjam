@@ -136,6 +136,44 @@ class TestParse:
         assert config.capture.completions is False
         assert config.capture.tool_outputs is True
 
+    def test_hooks_output_cap_default_off(self):
+        # DEFAULT-OFF opt-in (like proxy). The A/B gate failed — CC pre-truncates
+        # Bash output to ~30KB before the hook sees it — so a missing [hooks]
+        # section yields a DISABLED (but otherwise conservative) cap. Users opt in
+        # via `[hooks.output_cap].enabled = true`.
+        config = _parse({})
+        cap = config.hooks.output_cap
+        assert cap.enabled is False
+        assert cap.killswitch is False
+        assert cap.budget_tokens == 4000  # below CC's ~30KB Bash-output cap
+        assert cap.tools == ["Bash", "Grep", "Glob", "WebFetch"]
+
+    def test_hooks_output_cap_overrides_parsed(self):
+        raw = {"hooks": {"output_cap": {
+            "enabled": False, "budget_tokens": 2000, "head_lines": 10,
+            "tail_lines": 20, "smart_errors": False, "min_saving_tokens": 5,
+            "tools": ["Bash"], "killswitch": True,
+        }}}
+        cap = _parse(raw).hooks.output_cap
+        assert cap.enabled is False
+        assert cap.budget_tokens == 2000
+        assert cap.head_lines == 10
+        assert cap.tail_lines == 20
+        assert cap.smart_errors is False
+        assert cap.min_saving_tokens == 5
+        assert cap.tools == ["Bash"]
+        assert cap.killswitch is True
+
+    def test_hooks_output_cap_roundtrips_through_serialise(self):
+        raw = {"hooks": {"output_cap": {"budget_tokens": 3333, "tools": ["Bash", "Grep"]}}}
+        config = _parse(raw)
+        d = _serialise(config)
+        assert d["hooks"]["output_cap"]["budget_tokens"] == 3333
+        # re-parse the serialised form → same values survive a round trip
+        cap2 = _parse(d).hooks.output_cap
+        assert cap2.budget_tokens == 3333
+        assert cap2.tools == ["Bash", "Grep"]
+
     def test_alerts_channels_parsed(self):
         raw = {
             "alerts": {

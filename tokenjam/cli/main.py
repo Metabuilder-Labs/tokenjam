@@ -48,6 +48,9 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
         "statusline",
         "quickstart",
+        # `hook` fires on every tool call and must never take the DuckDB lock
+        # (#61); `savings` reads the append-only JSONL sink, not the DB.
+        "hook", "savings",
     }
     invoked = ctx.invoked_subcommand
 
@@ -166,3 +169,9 @@ cli.add_command(cmd_demo, name="demo")
 
 from tokenjam.cli.cmd_summarize import cmd_summarize  # noqa: E402
 cli.add_command(cmd_summarize, name="summarize")
+
+from tokenjam.cli.cmd_hook import cmd_hook  # noqa: E402
+cli.add_command(cmd_hook, name="hook")
+
+from tokenjam.cli.cmd_savings import cmd_savings  # noqa: E402
+cli.add_command(cmd_savings, name="savings")
