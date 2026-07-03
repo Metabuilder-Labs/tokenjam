@@ -304,6 +304,9 @@ retention_days = 90
     console.print("[dim]     tj traces          [/dim]# span history")
     console.print("[dim]     tj serve           [/dim]# web UI at http://127.0.0.1:7391/")
     console.print()
+    console.print("  4. Prove a cheaper model still holds:")
+    console.print("[dim]     pip install tokenjam-bench[/dim]  # then: tjb")
+    console.print()
 
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
@@ -392,6 +395,7 @@ def _print_next_steps_nudge(*, has_data: bool, days: int | None = None) -> None:
     console.print()
     console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable spend tier[/dim]")
     console.print("  [bold]tj optimize[/bold]    [dim]cost-saving candidates from your usage[/dim]")
+    console.print("  [bold]tjb[/bold]            [dim]prove a cheaper model still holds (pip install tokenjam-bench)[/dim]")
     console.print("  [bold]tj serve[/bold]       [dim]open Lens (web UI) at http://127.0.0.1:7391/[/dim]")
     console.print()
 

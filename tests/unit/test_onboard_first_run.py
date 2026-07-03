@@ -31,9 +31,12 @@ def test_welcome_banner_shows_brand_version_and_value_prop(capsys):
 def test_nudge_leads_with_no_restart_wins(capsys):
     _print_next_steps_nudge(has_data=True, days=30)
     out = capsys.readouterr().out
-    # The three high-wow, no-restart commands.
-    for cmd in ("tj tokenmaxx", "tj optimize", "tj serve"):
+    # The high-wow, no-restart commands + the bench "prove" nudge.
+    for cmd in ("tj tokenmaxx", "tj optimize", "tjb", "tj serve"):
         assert cmd in out, out
+    # Prove step: honest framing (holds, never "guaranteed") + install hint.
+    assert "prove a cheaper model still holds" in out
+    assert "pip install tokenjam-bench" in out
     assert "already loaded" in out
     assert "last 30 days" in out
 

@@ -287,6 +287,11 @@ def _render(
         action.append("tj optimize", style="bold green")
         action.append(" for the full savings report.")
 
+    # ── Prove line — nudge to verify the savings hold, never "guaranteed". ──
+    prove = Text("🔬 ")
+    prove.append("Prove your savings hold: ", style="dim")
+    prove.append("pip install tokenjam-bench", style="bold green")
+
     panel_body = Group(
         headline,
         Text(""),
@@ -295,6 +300,7 @@ def _render(
         body,
         Text(""),
         action,
+        prove,
     )
 
     title = ("[bold]TokenJam Quota Wrapped — Weekly Recap[/bold]" if weekly
