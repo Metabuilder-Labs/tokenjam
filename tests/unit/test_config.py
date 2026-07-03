@@ -136,12 +136,14 @@ class TestParse:
         assert config.capture.completions is False
         assert config.capture.tool_outputs is True
 
-    def test_hooks_output_cap_default_on(self):
-        # DEFAULT-ON, deliberately (unlike proxy). A missing [hooks] section
-        # yields an enabled, conservative cap.
+    def test_hooks_output_cap_default_off(self):
+        # DEFAULT-OFF opt-in (like proxy). The A/B gate failed — CC pre-truncates
+        # Bash output to ~30KB before the hook sees it — so a missing [hooks]
+        # section yields a DISABLED (but otherwise conservative) cap. Users opt in
+        # via `[hooks.output_cap].enabled = true`.
         config = _parse({})
         cap = config.hooks.output_cap
-        assert cap.enabled is True
+        assert cap.enabled is False
         assert cap.killswitch is False
         assert cap.budget_tokens == 4000  # below CC's ~30KB Bash-output cap
         assert cap.tools == ["Bash", "Grep", "Glob", "WebFetch"]

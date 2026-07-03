@@ -25,6 +25,11 @@ def runner():
 def _config(tmp_path) -> TjConfig:
     cfg = TjConfig(version="1")
     cfg.storage.path = str(tmp_path / "tj.duckdb")  # sink derives from this parent
+    # The hook is DEFAULT-OFF opt-in (A/B gate failed — see CapOutputConfig).
+    # These tests exercise the trim MECHANISM, so opt in explicitly; the
+    # default-off policy itself is covered by test_config.py and the
+    # disabled/passthrough tests below.
+    cfg.hooks.output_cap.enabled = True
     return cfg
 
 

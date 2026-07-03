@@ -225,11 +225,19 @@ class CapOutputConfig:
     The tool itself runs unchanged — only the *presentation* the model sees is
     trimmed, and every trim carries a visible marker (nothing silent).
 
-    DELIBERATELY DEFAULT-ON (unlike the default-off `ProxyConfig`): the value
-    only lands if the hook actually fires, the mechanism is fail-open + fully
-    transparent, and the budget is conservative. Disable in one line
-    (`enabled = false`) or flip `killswitch = true` to pass everything through
-    while leaving the hook installed.
+    DEFAULT-OFF opt-in (like `ProxyConfig`). The mechanism is safe (fail-open,
+    fully transparent, conservative budget, 58 tests) but the REQUIRED A/B gate
+    FAILED, so it does not ship as a default. Root finding: Claude Code already
+    truncates Bash tool output to ~30 KB *before* the PostToolUse hook ever sees
+    it, so the addressable bloat per call is tiny (~1,206 tok reclaimed ≈ 0.06%
+    of a ~2M-token cache-read footprint) and agents self-mitigate (`| tail`,
+    `grep`, `Read` — which the hook excludes). Across 5 trials/arm (sonnet)
+    treatment cost was +5.6% (median $0.833 vs $0.789) and cache-read +2.3% —
+    run-to-run noise, no quota win. See
+    `.specs/2026-07-02-tj-output-trim-hook-AB-result.md`. Users who still want
+    aggressive trimming opt in with one line (`enabled = true`), then re-run
+    `tj onboard` to install the hook; flip `killswitch = true` to pass
+    everything through while leaving an installed hook wired.
 
     Fields:
       - ``budget_tokens``  — outputs estimated under this (char/4) pass through
@@ -247,7 +255,7 @@ class CapOutputConfig:
       - ``tools`` — the tool names eligible for trimming (opt a tool in/out).
       - ``killswitch`` — pass everything through, hook stays installed.
     """
-    enabled:           bool      = True
+    enabled:           bool      = False  # opt-in: A/B gate failed (see docstring)
     budget_tokens:     int       = 4000   # below CC's ~30 KB Bash-output cap
     head_lines:        int       = 80
     tail_lines:        int       = 80
