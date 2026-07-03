@@ -77,6 +77,7 @@ def create_app(
     from tokenjam.api.routes.agents import router as agents_router
     from tokenjam.api.routes.optimize import router as optimize_router
     from tokenjam.api.routes.reuse import router as reuse_router
+    from tokenjam.api.routes.context import router as context_router
     from tokenjam.api.routes.cost_compare import router as cost_compare_router
     from tokenjam.api.routes.analytics import router as analytics_router
     from tokenjam.api.routes.version import router as version_router, health_router
@@ -96,6 +97,7 @@ def create_app(
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(optimize_router, prefix="/api/v1")
     app.include_router(reuse_router, prefix="/api/v1")
+    app.include_router(context_router, prefix="/api/v1")  # /context diagnostic (#63)
     app.include_router(cost_compare_router, prefix="/api/v1")
     app.include_router(analytics_router, prefix="/api/v1")
     app.include_router(version_router, prefix="/api/v1")
