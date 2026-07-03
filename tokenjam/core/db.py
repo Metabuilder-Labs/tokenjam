@@ -1257,6 +1257,85 @@ class DuckDBBackend:
                 [list(session_ids)],
             )
 
+    def reconcile_backfill_spans(
+        self, keep_by_session: dict[str, set[str]], source: str
+    ) -> int:
+        """Purge stale-scheme `source`-tagged spans across the given sessions.
+
+        Self-healing reconciliation for the stale-scheme duplicate bug (#294/#300
+        cross-version): a DB written by ≤v0.5.1 keyed backfill span_ids on the
+        record `uuid`; current code keys on the stable `message.id`. The two
+        schemes are DISJOINT, so a re-backfill of an old DB ADDS a full duplicate
+        set alongside the stale uuid-keyed rows, inflating token/cost totals ~2.6×.
+
+        `keep_by_session` maps each session_id to the COMPLETE current-scheme
+        span_id set for that session (LLM + tool spans, unioned across all of its
+        on-disk files). Any `source`-tagged span in one of those sessions whose
+        span_id is NOT in the session's keep set can only be a stale-scheme
+        orphan, so we delete it. Returns the number of rows deleted.
+
+        Scoped to (session_id, source): never touches live-ingested spans, spans
+        from other sources, or sessions not in `keep_by_session`. A session with
+        an empty keep set is skipped (defensive: never wipe a session on a parse
+        that produced no spans). Idempotent — on a clean current-scheme DB the
+        keep sets already cover every stored backfill span, so nothing matches.
+
+        ART-index workaround: DuckDB (through ≥1.5.2) raises a FATAL "Failed to
+        delete all rows from index" — invalidating the whole connection — when
+        deleting indexed span rows on some persisted DB states. We drop the five
+        secondary spans indexes, run the deletes, then recreate them (identical
+        DDL to migration 2/3). Drop+recreate is cheap (~20ms on 50k rows). All of
+        it runs under `write_lock`, so no concurrent cursor sees the table without
+        its indexes. The recreate is in a `finally` so a mid-delete error can't
+        leave the table permanently unindexed.
+        """
+        # Materialize the stale-span ids up front (a read) so the write section
+        # is a tight drop → delete → recreate with no interleaved reads.
+        to_delete: list[tuple[str, list[str]]] = []
+        for session_id, keep in keep_by_session.items():
+            if not keep:
+                continue
+            rows = self.conn.execute(
+                """
+                SELECT span_id FROM spans
+                WHERE session_id = $1
+                  AND json_extract_string(attributes, '$.source') = $2
+                """,
+                [session_id, source],
+            ).fetchall()
+            stale = [r[0] for r in rows if r[0] not in keep]
+            if stale:
+                to_delete.append((session_id, stale))
+        if not to_delete:
+            return 0
+
+        deleted = 0
+        with self._write_lock:
+            self.conn.execute(
+                "DROP INDEX IF EXISTS idx_spans_trace_id;\n"
+                "DROP INDEX IF EXISTS idx_spans_agent_id;\n"
+                "DROP INDEX IF EXISTS idx_spans_start_time;\n"
+                "DROP INDEX IF EXISTS idx_spans_tool_name;\n"
+                "DROP INDEX IF EXISTS idx_spans_conv_id"
+            )
+            try:
+                chunk = 5000
+                for session_id, stale in to_delete:
+                    for start in range(0, len(stale), chunk):
+                        batch = stale[start:start + chunk]
+                        placeholders = ",".join(
+                            f"${i + 2}" for i in range(len(batch))
+                        )
+                        self.conn.execute(
+                            f"DELETE FROM spans WHERE session_id = $1 "
+                            f"AND span_id IN ({placeholders})",
+                            [session_id, *batch],
+                        )
+                        deleted += len(batch)
+            finally:
+                self.conn.execute(SPANS_INDEX_SQL)
+        return deleted
+
     def upsert_agent(self, agent: AgentRecord) -> None:
         with self._write_lock:
             self.conn.execute(

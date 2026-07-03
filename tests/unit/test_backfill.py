@@ -18,6 +18,8 @@ from tokenjam.core.config import CaptureConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.otel.semconv import GenAIAttributes
 
+from tests.factories import make_llm_span, make_tool_span
+
 
 def _make_session_file(tmp_path: Path, session_id: str, cwd: str,
                         records: list[dict]) -> Path:
@@ -1133,5 +1135,177 @@ def test_ingest_session_row_totals_include_subagents(tmp_path):
         sess2 = db.get_session("sess-tot")
         assert sess2 is not None
         assert sess2.input_tokens == 9000
+    finally:
+        db.close()
+
+
+# --- stale-scheme duplicate reconciliation (#294/#300 cross-version) --------- #
+
+def _dup_session_records(session_id: str, cwd: str) -> list[dict]:
+    """A transcript with two assistant turns (one carrying a tool_use), each with
+    a stable Anthropic `message.id`. Current backfill keys span_ids on message.id;
+    a pre-v0.5.2 DB keyed them on the record `uuid` (disjoint scheme)."""
+    return [
+        _assistant_record(
+            "uuid-A", "claude-opus-4-7", 1000, 200,
+            "2026-04-01T10:00:00.000Z", session_id, cwd,
+            tool_uses=[("tu-A", "Read")],
+            message_id="msg_A",
+        ),
+        _assistant_record(
+            "uuid-B", "claude-opus-4-7", 500, 100,
+            "2026-04-01T10:00:05.000Z", session_id, cwd,
+            message_id="msg_B",
+        ),
+    ]
+
+
+def test_backfill_purges_stale_scheme_duplicate_spans(tmp_path):
+    """Simulate a pre-v0.5.2 DB (old uuid-keyed backfill spans) then re-backfill
+    with current (message.id-keyed) code. The stale spans must be purged so the
+    session totals equal a single clean run — not old+new inflated (#294/#300)."""
+    from tokenjam.core.backfill import (
+        _span_id_for_assistant,
+        _span_id_for_tool,
+    )
+
+    session_id, cwd = "sess-dup", "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id=session_id, cwd=cwd,
+        records=_dup_session_records(session_id, cwd),
+    )
+
+    # Baseline: a clean single run on a fresh DB gives the correct figures.
+    clean = InMemoryBackend()
+    try:
+        ingest_claude_code(clean, root=tmp_path)
+        clean_sess = clean.get_session(session_id)
+        assert clean_sess is not None
+        clean_span_count = clean.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE session_id = $1", [session_id]
+        ).fetchone()[0]
+        clean_input = clean_sess.input_tokens
+        clean_output = clean_sess.output_tokens
+        clean_cost = clean_sess.total_cost_usd
+    finally:
+        clean.close()
+    # 2 LLM + 1 tool = 3 current-scheme spans.
+    assert clean_span_count == 3
+    assert clean_input == 1500
+    assert clean_output == 300
+
+    # Now build a DB that already holds OLD-scheme (uuid-keyed) backfill spans
+    # for the same session — what a pre-v0.5.2 install left behind.
+    db = InMemoryBackend()
+    try:
+        for uuid, in_tok, out_tok in (("uuid-A", 1000, 200), ("uuid-B", 500, 100)):
+            stale_llm = make_llm_span(
+                agent_id="claude-code-proj",
+                model="claude-opus-4-7",
+                input_tokens=in_tok,
+                output_tokens=out_tok,
+                cost_usd=0.5,
+                session_id=session_id,
+                conversation_id=session_id,
+                span_id=_span_id_for_assistant(session_id, uuid),  # OLD scheme
+                extra_attributes={"source": "backfill.claude_code"},
+            )
+            db.insert_span(stale_llm)
+        stale_tool = make_tool_span(
+            agent_id="claude-code-proj",
+            tool_name="Read",
+            session_id=session_id,
+            conversation_id=session_id,
+        )
+        # Override with old-scheme tool span_id + backfill source tag.
+        import dataclasses
+        stale_tool = dataclasses.replace(
+            stale_tool,
+            span_id=_span_id_for_tool(session_id, "tu-A"),  # OLD scheme
+            attributes={"source": "backfill.claude_code"},
+        )
+        db.insert_span(stale_tool)
+
+        # A live-ingested span in the SAME session must NEVER be touched.
+        live_span = make_llm_span(
+            agent_id="claude-code-proj",
+            input_tokens=42,
+            output_tokens=7,
+            cost_usd=0.01,
+            session_id=session_id,
+            conversation_id=session_id,
+            span_id="live-span-keepme",
+            extra_attributes={"source": "live"},
+        )
+        db.insert_span(live_span)
+
+        stale_before = db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE session_id = $1 "
+            "AND json_extract_string(attributes, '$.source') = 'backfill.claude_code'",
+            [session_id],
+        ).fetchone()[0]
+        assert stale_before == 3  # 2 old LLM + 1 old tool
+
+        # Re-backfill with CURRENT code — should purge the 3 stale spans and
+        # insert the 3 current-scheme spans.
+        ingest_claude_code(db, root=tmp_path)
+
+        backfill_spans = db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE session_id = $1 "
+            "AND json_extract_string(attributes, '$.source') = 'backfill.claude_code'",
+            [session_id],
+        ).fetchone()[0]
+        assert backfill_spans == 3, "stale + new must NOT coexist (was inflating)"
+
+        # Live span survives.
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE span_id = 'live-span-keepme'"
+        ).fetchone()[0] == 1
+
+        # Session totals equal the clean single-run figures + the live span's
+        # contribution (recompute_session_totals sums ALL spans in the session).
+        sess = db.get_session(session_id)
+        assert sess is not None
+        assert sess.input_tokens == clean_input + 42
+        assert sess.output_tokens == clean_output + 7
+        assert abs(sess.total_cost_usd - (clean_cost + 0.01)) < 1e-6
+
+        # Second run is a no-op: no stale rows remain to delete, spans skipped.
+        r2 = ingest_claude_code(db, root=tmp_path)
+        assert r2.spans_ingested == 0
+        backfill_spans_2 = db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE session_id = $1 "
+            "AND json_extract_string(attributes, '$.source') = 'backfill.claude_code'",
+            [session_id],
+        ).fetchone()[0]
+        assert backfill_spans_2 == 3
+    finally:
+        db.close()
+
+
+def test_reconcile_never_touches_other_sessions_or_sources(tmp_path):
+    """reconcile_backfill_spans is scoped to (session_id, source): a backfill
+    span in a DIFFERENT session and a non-backfill span are both preserved."""
+    from tokenjam.core.backfill import _span_id_for_assistant
+
+    session_id, cwd = "sess-scoped", "/Users/me/proj"
+    _make_session_file(
+        tmp_path, session_id=session_id, cwd=cwd,
+        records=_dup_session_records(session_id, cwd),
+    )
+    db = InMemoryBackend()
+    try:
+        # Stale backfill span in ANOTHER session.
+        other = make_llm_span(
+            session_id="other-session",
+            span_id=_span_id_for_assistant("other-session", "uuid-X"),
+            extra_attributes={"source": "backfill.claude_code"},
+        )
+        db.insert_span(other)
+        ingest_claude_code(db, root=tmp_path)
+        # Other session's backfill span untouched.
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM spans WHERE session_id = 'other-session'"
+        ).fetchone()[0] == 1
     finally:
         db.close()
