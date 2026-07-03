@@ -4,8 +4,8 @@
 npx tokenjam
 ```
 
-That one command reads the same `~/.claude/projects/*.jsonl` files
-[ccusage](https://github.com/ryoppippi/ccusage) does and shows you **where your
+That one command reads your `~/.claude/projects/*.jsonl` session logs
+and shows you **where your
 Claude Code quota actually goes** — quota composition (re-reading context vs.
 net-new work) plus a session timeline. No pip env, no daemon, no onboarding.
 
