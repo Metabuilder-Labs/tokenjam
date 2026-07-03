@@ -777,3 +777,80 @@ def test_subagent_story_has_no_ask_markers(tmp_path):
     story = build_session_story(sid, projects_root=tmp_path)
     sub = story["steps"][0]["subagent"]
     assert all("ask" not in s for s in sub["steps"])
+
+
+# --- TodoWrite payload preservation (#67) -----------------------------------
+
+def _real_todos() -> list[dict]:
+    """A real-shaped Claude Code TodoWrite payload (content + status per item)."""
+    return [
+        {"content": "Read the auth module", "status": "completed",
+         "activeForm": "Reading the auth module"},
+        {"content": "Fix the failing test", "status": "in_progress",
+         "activeForm": "Fixing the failing test"},
+        {"content": "Run the full suite", "status": "pending",
+         "activeForm": "Running the full suite"},
+    ]
+
+
+def test_todowrite_payload_preserved_not_dropped(tmp_path):
+    records = [
+        _user_prompt("Fix the auth test."),
+        _assistant(
+            "Let me lay out the plan.",
+            tools=[{"id": "td1", "name": "TodoWrite",
+                    "input": {"todos": _real_todos()}}],
+        ),
+        _tool_result("td1"),
+        _assistant("Done."),
+    ]
+    _write_transcript(tmp_path, "todo-1", records)
+    story = build_session_story("todo-1", projects_root=tmp_path)
+    assert story is not None
+    tool = story["steps"][0]["tools"][0]
+    assert tool["name"] == "TodoWrite"
+    # The label is a non-empty rollup — NOT the empty string the old parser gave.
+    assert tool["label"] == "3 todos: 1 done, 1 in progress, 1 pending"
+    # The structured payload survives: content + per-item status.
+    assert tool["todos"] == [
+        {"content": "Read the auth module", "status": "completed"},
+        {"content": "Fix the failing test", "status": "in_progress"},
+        {"content": "Run the full suite", "status": "pending"},
+    ]
+
+
+def test_todowrite_activeform_fallback_and_unknown_status(tmp_path):
+    records = [
+        _user_prompt("Plan the work."),
+        _assistant(
+            "Planning.",
+            tools=[{"id": "td1", "name": "TodoWrite", "input": {"todos": [
+                {"activeForm": "Investigating the bug", "status": "in_progress"},
+                {"content": "Ship it", "status": "bogus-status"},
+            ]}}],
+        ),
+        _tool_result("td1"),
+    ]
+    _write_transcript(tmp_path, "todo-2", records)
+    story = build_session_story("todo-2", projects_root=tmp_path)
+    todos = story["steps"][0]["tools"][0]["todos"]
+    # activeForm fills in for a missing content; an unknown status -> "pending".
+    assert todos == [
+        {"content": "Investigating the bug", "status": "in_progress"},
+        {"content": "Ship it", "status": "pending"},
+    ]
+
+
+def test_todowrite_malformed_payload_has_no_todos(tmp_path):
+    records = [
+        _user_prompt("Go."),
+        _assistant("Working.", tools=[
+            {"id": "td1", "name": "TodoWrite", "input": {"todos": "not-a-list"}},
+        ]),
+        _tool_result("td1"),
+    ]
+    _write_transcript(tmp_path, "todo-3", records)
+    story = build_session_story("todo-3", projects_root=tmp_path)
+    tool = story["steps"][0]["tools"][0]
+    assert tool["name"] == "TodoWrite"
+    assert "todos" not in tool

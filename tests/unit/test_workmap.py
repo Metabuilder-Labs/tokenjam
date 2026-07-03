@@ -169,3 +169,42 @@ def test_session_totals_passed_through():
     m = build_work_map({"asks": []}, None, session_tokens=999, session_cost_usd=1.5)
     assert m["session_tokens"] == 999
     assert m["session_cost_usd"] == 1.5
+
+
+# --- TodoWrite work-state rollup (#67) --------------------------------------
+
+def _todo_tool(todos: list[dict]) -> dict:
+    return {"name": "TodoWrite", "label": "todos", "status": "ok", "todos": todos}
+
+
+def test_todowrite_surfaces_open_todo_rollup_not_other_count():
+    todos = [
+        {"content": "Read auth", "status": "completed"},
+        {"content": "Fix test", "status": "in_progress"},
+        {"content": "Run suite", "status": "pending"},
+    ]
+    asks = {"asks": [_ask(1, "fix it", [_step([_todo_tool(todos)])])]}
+    m = build_work_map(asks, None)
+    act = m["asks"][0]["activity"]
+    # NOT lumped into the anonymous other bucket.
+    assert act["other_count"] == 0
+    assert act["open_todos"] == 2  # 1 in_progress + 1 pending
+    assert act["todo_counts"] == {"pending": 1, "in_progress": 1, "completed": 1}
+    assert act["todos"] == todos
+    assert "2 open todos" in m["asks"][0]["summary"]
+
+
+def test_todowrite_latest_call_wins_for_current_state():
+    first = [{"content": "A", "status": "pending"},
+             {"content": "B", "status": "pending"}]
+    latest = [{"content": "A", "status": "completed"},
+              {"content": "B", "status": "in_progress"}]
+    asks = {"asks": [_ask(1, "work", [
+        _step([_todo_tool(first)]),
+        _step([_todo_tool(latest)]),
+    ])]}
+    m = build_work_map(asks, None)
+    act = m["asks"][0]["activity"]
+    # TodoWrite overwrites the whole list; the node reports the latest state.
+    assert act["todos"] == latest
+    assert act["open_todos"] == 1
