@@ -81,6 +81,7 @@ _TOOL_VERBS: dict[str, str] = {
     "WebSearch": "search",
     "Task": "delegate",
     "Agent": "delegate",
+    "TodoWrite": "plan",
 }
 
 
@@ -212,15 +213,24 @@ def _structural_label(tools: list[dict[str, Any]]) -> str:
 
 
 def _evidence(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Compact per-tool summary: ``{name, label, status}`` (no inputs/outputs)."""
-    return [
-        {
+    """Compact per-tool summary: ``{name, label, status}`` (no inputs/outputs).
+
+    A ``TodoWrite`` tool additionally carries its ``todos`` (``[{content, status}]``)
+    — the structured work-state the transcript preserved — so the Approach surface
+    can show what a step planned / what remained open, not just an empty label.
+    """
+    evidence: list[dict[str, Any]] = []
+    for t in tools:
+        entry: dict[str, Any] = {
             "name": t.get("name"),
             "label": t.get("label") or "",
             "status": t.get("status") or "ok",
         }
-        for t in tools
-    ]
+        todos = t.get("todos")
+        if isinstance(todos, list) and todos:
+            entry["todos"] = todos
+        evidence.append(entry)
+    return evidence
 
 
 def _subagent_dicts(step: dict[str, Any]) -> list[dict[str, Any]]:

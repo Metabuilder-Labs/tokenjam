@@ -292,3 +292,29 @@ def test_omitted_markers_skipped():
 def test_empty_story_yields_empty_spine():
     assert build_method_spine(_story([])) == []
     assert build_method_spine({}) == []
+
+
+# --- TodoWrite evidence carries structured todos (#67) -----------------------
+
+def test_todowrite_todos_carried_into_evidence():
+    todos = [
+        {"content": "Read auth", "status": "completed"},
+        {"content": "Fix test", "status": "in_progress"},
+    ]
+    spine = build_method_spine(_story([
+        _step([{"name": "TodoWrite", "label": "2 todos: 1 done, 1 in progress",
+                "status": "ok", "todos": todos}], text="Planning the work."),
+    ]))
+    move = spine[0]
+    assert move["kind"] == "act"
+    ev = move["evidence"][0]
+    assert ev["name"] == "TodoWrite"
+    assert ev["label"] == "2 todos: 1 done, 1 in progress"
+    assert ev["todos"] == todos
+
+
+def test_non_todo_evidence_has_no_todos_key():
+    spine = build_method_spine(_story([
+        _step([_tool("Read", "a.py")], text="Reading."),
+    ]))
+    assert "todos" not in spine[0]["evidence"][0]

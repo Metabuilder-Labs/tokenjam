@@ -1,0 +1,36 @@
+name: Build and publish Docker image
+
+on:
+  workflow_dispatch:
+  # Publish the container image only when a GitHub Release is published, so the
+  # image version lines up with the release-gated PyPI + npm packages (both fire
+  # on `release: [published]` — see publish-pypi.yml / publish-npm.yml). This
+  # replaces the previous per-commit / after-CI trigger, which shipped an image
+  # on every green main build.
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-publish-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and push tokenjam image
+        uses: ./.github/actions/docker-publish
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          image: ghcr.io/${{ github.repository }}
+          context: .
+          dockerfile: Dockerfile
