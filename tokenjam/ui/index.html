@@ -5216,13 +5216,28 @@ function PlanBadge({ framing }) {
   `)}`;
 }
 
-// Trend chip: ▲ (up, red) / ▼ (down, green) with a percentage.
-function TrendChip({ pct }) {
+// Cap absurd-but-finite deltas so a near-empty prior window can't render a
+// four-digit percentage (#262/#396). Above the ceiling we show ">999%" instead
+// of e.g. "140980.0%", which reads as a broken number on a cost tool.
+const DELTA_PCT_CEILING = 999;
+function fmtDeltaPct(pct) {
+  const mag = Math.abs(pct);
+  return mag > DELTA_PCT_CEILING ? '>999%' : mag.toFixed(1) + '%';
+}
+
+// Trend chip: ▲ (up, red) / ▼ (down, green) with a percentage. When the prior
+// window is empty/thin (`prevThin`, a fresh backfill's sliver period, #262) the
+// % is arithmetic noise — show "new" instead of a blown-up figure.
+function TrendChip({ pct, prevThin }) {
+  if (prevThin && pct != null && pct > 0) {
+    return html`<span class="trend-chip" style="color:var(--error)"
+      title="The prior window had little or no data, so a percentage change would be misleading.">▲ new</span>`;
+  }
   if (pct == null) return null;
   const up = pct > 0;
   const arrow = pct === 0 ? '·' : up ? '▲' : '▼';
   const color = pct === 0 ? 'var(--text-dim)' : up ? 'var(--error)' : 'var(--success)';
-  return html`<span class="trend-chip" style="color:${color}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev</span>`;
+  return html`<span class="trend-chip" style="color:${color}">${arrow} ${fmtDeltaPct(pct)} vs prev</span>`;
 }
 
 // Signed period-over-period delta chip for KPI tiles (#217). `cost`=true uses
@@ -5242,7 +5257,7 @@ function DeltaChip({ pct, cost, prevThin }) {
   const color = cost
     ? (pct === 0 ? 'var(--text-dim)' : up ? 'var(--error)' : 'var(--success)')
     : 'var(--text-dim)';
-  return html`<span class="delta-chip" style="color:${color}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev</span>`;
+  return html`<span class="delta-chip" style="color:${color}">${arrow} ${fmtDeltaPct(pct)} vs prev</span>`;
 }
 
 // Inline-SVG sparkline (#217) — lightweight + offline; avoids spinning up a
@@ -5490,6 +5505,10 @@ function CostView({ params }) {
   }
 
   const trendPct = compare ? (useTokens ? compare.tokens_delta_pct : compare.cost_delta_pct) : null;
+  // A near-empty prior window (a fresh backfill's sliver period, #262) makes the
+  // % arithmetic noise. Use its session count as the "did anything happen" proxy
+  // so TrendChip shows "new" instead of e.g. ▲140980% on a first-run compare.
+  const trendPrevThin = !!(compare && compare.previous) && (compare.previous.sessions || 0) < 2;
   const totalDisplay = useTokens ? (fmtTokens(totalTokens) + ' tokens') : fmtFramedDollar(total, framing);
   const tableMode = groupBy === 'total' ? 'day' : groupBy;
   const totalIn = rows.reduce((s, r) => s + (r.input_tokens || 0), 0);
@@ -5530,7 +5549,7 @@ function CostView({ params }) {
           <div class="chart-title">Spend over time ${groupBy === 'model' ? 'by model' : groupBy === 'agent' ? 'by agent' : ''} ${useTokens ? '(tokens)' : ''}</div>
           <div class="chart-meta">
             <span class="chart-total">${totalDisplay}</span>
-            <${TrendChip} pct=${trendPct} />
+            <${TrendChip} pct=${trendPct} prevThin=${trendPrevThin} />
           </div>
         </div>
         ${loading ? html`<div class="shimmer" style="height:160px"></div>`
