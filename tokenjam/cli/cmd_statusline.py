@@ -5,7 +5,7 @@ stdin (``{session_id, model, transcript_path, cwd, ...}``). It never enters the
 model's context window, so it costs ZERO quota — the deliberate opposite of the
 MCP surface, which sits in the request path and taxes every turn.
 
-The whole Claude-Code-usage ecosystem (ccusage, ccstatusline, sniffly, …) is
+The whole Claude-Code-usage tooling ecosystem is
 out-of-band for exactly this reason. tj's differentiator on that free surface is
 the "where did my quota go" decomposition: the **re-read share** of THIS session
 — cache-read tokens as a fraction of all tokens the session has spent — plus an

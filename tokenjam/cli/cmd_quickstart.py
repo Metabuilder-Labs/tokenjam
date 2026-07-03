@@ -16,9 +16,9 @@ Design (what makes it "zero-setup"):
       - quota composition (re-reading vs. net-new work) from
         :mod:`tokenjam.core.context_diagnostic` (issue #4's engine, reused);
       - a session timeline from :mod:`tokenjam.core.session_timeline`.
-  * The output **leads with ccusage-parity + added-value framing** — "reads the
-    same files ccusage does; here's where your quota actually goes" — then ends
-    on the opt-in "go deeper" pointer to ``tj onboard`` (daemon / MCP / live).
+  * The output **leads with reads-your-local-logs + added-value framing** —
+    "reads your ~/.claude session logs; here's where your quota actually goes" —
+    then ends on the opt-in "go deeper" pointer to ``tj onboard`` (daemon / MCP / live).
 
 Because it manages its own transient DB, ``quickstart`` is registered in
 ``no_db_commands`` so the CLI never opens the on-disk DB or trips the daemon's
@@ -134,8 +134,8 @@ def _render_no_logs(root, output_json: bool) -> None:
         return
     console.print(
         f"\n[yellow]No Claude Code logs found at {root}.[/yellow]\n"
-        "[dim]tj quickstart reads the same ~/.claude/projects/*.jsonl files "
-        "ccusage does. This is normal if Claude Code hasn't run on this machine "
+        "[dim]tj quickstart reads your ~/.claude/projects/*.jsonl session logs. "
+        "This is normal if Claude Code hasn't run on this machine "
         "yet — use it for a session, then re-run [bold]tj quickstart[/bold].[/dim]\n"
     )
 
@@ -158,12 +158,12 @@ def _render(diag, timeline, *, since: str,
     from rich import box
     from rich.text import Text
 
-    # ── Lead: ccusage-parity + added-value framing. ──
+    # ── Lead: reads-your-local-logs + added-value framing. ──
     console.print()
     lead = Text()
-    lead.append("TokenJam reads the same ", style="dim")
+    lead.append("TokenJam reads your ", style="dim")
     lead.append("~/.claude/projects/*.jsonl", style="bold")
-    lead.append(" files ccusage does — and shows you ", style="dim")
+    lead.append(" session logs — and shows you ", style="dim")
     lead.append("where your quota actually goes", style="bold")
     lead.append(".", style="dim")
     console.print(lead)
