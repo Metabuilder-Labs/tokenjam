@@ -3,8 +3,8 @@
 The validated Claude-Code wedge (issue #4). Claude Code's built-ins leave a real
 gap: ``/compact`` is reactive, lossy and single-session; ``/context`` shows
 current-session totals only. Neither attributes *what* is burning quota across
-sessions nor suggests a structural fix. A whole DIY ecosystem (ccusage,
-codeburn, context-analyzer, session-recall, ...) has sprung up to fill it — the
+sessions nor suggests a structural fix. A whole DIY ecosystem of quota-tracking
+tools has sprung up to fill it — the
 strongest possible revealed-demand signal. Proof point: anthropics/claude-code
 #24147, where a dev parsed 30 days of JSONL to find CLAUDE.md re-reads consumed
 99.93% of their quota.

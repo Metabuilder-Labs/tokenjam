@@ -144,8 +144,8 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
 
     assert result.exit_code == 0, result.output
-    # Leads with the ccusage-parity framing.
-    assert "ccusage" in result.output
+    # Leads with the reads-your-local-logs framing.
+    assert "where your quota actually goes" in result.output
     assert "~/.claude/projects" in result.output
     # Both halves of the first-run value are present.
     assert "quota" in result.output.lower()

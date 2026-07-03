@@ -18,7 +18,7 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 pipx install tokenjam && tj onboard
 ```
 
-<sub>The full local tool: captures your agent telemetry, runs the five analyzers, and serves the Lens dashboard + MCP server for Claude Code. Runs entirely on your machine. (<code>pipx</code> recommended — sidesteps PEP 668; <code>pip install tokenjam</code> works in a clean venv.) Just want a 15-second peek with no install? <code>uvx --from tokenjam tj</code> or <code>npx tokenjam</code> reads your existing <a href="https://github.com/ryoppippi/ccusage">Claude&nbsp;Code</a> sessions and shows where your quota goes.</sub>
+<sub>The full local tool: captures your agent telemetry, runs the five analyzers, and serves the Lens dashboard + MCP server for Claude Code. Runs entirely on your machine. (<code>pipx</code> recommended — sidesteps PEP 668; <code>pip install tokenjam</code> works in a clean venv.) Just want a 15-second peek with no install? <code>uvx --from tokenjam tj</code> or <code>npx tokenjam</code> reads your existing Claude&nbsp;Code sessions and shows where your quota goes.</sub>
 
 **No cloud · No signup · No vendor lock-in**
 
@@ -37,8 +37,7 @@ uvx --from tokenjam tj               # or:  npx tokenjam
 ```
 
 TokenJam ingests your existing Claude Code sessions from
-`~/.claude/projects/*.jsonl` (the same files [ccusage](https://github.com/ryoppippi/ccusage)
-reads) into a throwaway in-memory database and prints:
+`~/.claude/projects/*.jsonl` into a throwaway in-memory database and prints:
 
 - **Quota composition** — what share of your tokens went to *re-reading context*
   (history, CLAUDE.md, accumulated tool output) versus *net-new work*.
