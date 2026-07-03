@@ -274,29 +274,67 @@ def test_flush_returns_when_worker_not_started(tmp_path):
 
 
 def test_bounded_queue_drops_oldest_and_logs(tmp_path, caplog):
-    """Overflow drops the oldest queued span and logs it — never silent (blocker 3)."""
+    """Overflow drops the oldest queued span and logs it — never silent (blocker 3).
+
+    Determinism note: the overflow is forced, not raced. A blocking hook parks the
+    worker thread inside evaluate() on the very first span (via `entered`), and it
+    stays parked for the whole flood (via `release`). While the worker is provably
+    stuck — it can neither pull from nor drain the queue — we enqueue strictly more
+    than `HOOK_QUEUE_MAXSIZE` spans, so the queue MUST hit capacity and shed the
+    excess. No sleeps, no reliance on the worker being slow: we wait on `entered`
+    to confirm the worker is blocked before flooding, and the count of enqueued
+    spans exceeds capacity by a wide margin, so the drop is guaranteed.
+    """
     db = _duckdb(tmp_path)
     config = TjConfig(version="1")
     config.alerts.async_hooks = True
 
-    release = threading.Event()
+    entered = threading.Event()  # set once the worker is blocked inside evaluate()
+    release = threading.Event()  # cleared until we let the worker resume
 
     class _BlockingEngine:
         def evaluate(self, span) -> None:
-            # Hold the worker so the queue fills up and overflow kicks in.
-            release.wait(timeout=10.0)
+            # Signal that the worker has pulled a span off the queue and is now
+            # parked here; then hold it so the queue fills up and overflow kicks in.
+            # NOTE: no timeout on the wait — the flood enqueues 10k+ spans and a
+            # bounded wait could expire mid-flood, letting the worker wake, drain
+            # another span, and re-park, quietly relieving queue pressure and
+            # making the drop count nondeterministic (that timeout was the original
+            # flake). The test always calls release.set() before close(), so this
+            # can never hang the suite.
+            entered.set()
+            release.wait()
 
     pipeline = IngestPipeline(db=db, config=config, alert_engine=_BlockingEngine())
 
-    # Start the worker and let it pick up (and block on) the first span.
+    # Start the worker and let it pick up (and block on) the first span. Wait
+    # until the worker is provably parked inside evaluate() before flooding, so
+    # it can't drain the queue concurrently with the flood.
     pipeline.process(make_llm_span())
-    # Fill the queue to capacity while the worker is blocked, then overflow it.
+    assert entered.wait(timeout=10.0), "worker never blocked on the first span"
+
+    # The worker is now stuck on span #1 and the queue is empty. Enqueue far more
+    # than the queue can hold: capacity + a margin. With the worker unable to
+    # drain, the queue fills to HOOK_QUEUE_MAXSIZE and every span past that
+    # overflows — deterministically exactly `overflow_by` drops.
+    #
+    # Flood via the real overflow entry point (`_enqueue_hook`) rather than the
+    # full `process()`: the drop-oldest policy under test lives entirely in
+    # `_enqueue_hook`, and routing 10k+ spans through a real DuckDB write on each
+    # would add tens of seconds of DB I/O that has nothing to do with the queue
+    # behavior. This still exercises the exact production overflow code path.
     overflow_by = 5
     with caplog.at_level(logging.WARNING, logger="tokenjam.ingest"):
         for _ in range(HOOK_QUEUE_MAXSIZE + overflow_by):
-            pipeline.process(make_llm_span())
+            pipeline._enqueue_hook(make_llm_span())
 
-        assert pipeline._hook_dropped > 0, "overflow did not drop any span"
+        # The worker holds span #1 and never resumes during the flood, so the
+        # queue tops out at capacity and exactly the `overflow_by` excess spans
+        # are shed — deterministic, not a lower bound.
+        assert pipeline._hook_dropped == overflow_by, (
+            f"overflow dropped {pipeline._hook_dropped} spans; "
+            f"expected exactly {overflow_by}"
+        )
         assert any(
             "queue full" in r.message or "queue still full" in r.message
             for r in caplog.records
