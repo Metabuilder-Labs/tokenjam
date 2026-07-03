@@ -8,8 +8,47 @@ from tokenjam.core.models import (
     NormalizedSpan, SessionRecord,
     SpanStatus, SpanKind,
 )
+from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.utils.ids import new_uuid, new_trace_id, new_span_id
 from tokenjam.utils.time_parse import utcnow
+
+
+def make_invoke_agent_span(
+    agent_id: str = "test-agent",
+    session_id: str | None = None,
+    conversation_id: str | None = None,
+    duration_ms: float = 0.0,
+    start_time=None,
+    trace_id: str | None = None,
+    service_namespace: str | None = None,
+) -> NormalizedSpan:
+    """Create an ``invoke_agent`` span.
+
+    ``duration_ms == 0`` -> a zero-duration turn-start marker, exactly what the
+    Claude Code / Codex logs path emits for every ``user_prompt`` event
+    (``end_time == start_time``). These mark the *start* of a turn and must NOT
+    complete the session.
+
+    ``duration_ms > 0`` -> a real session-wrapping span, what the SDK
+    ``@watch()`` path emits to bracket a whole agent run. This DOES complete the
+    session.
+    """
+    now = start_time or utcnow()
+    end = now + timedelta(milliseconds=duration_ms)
+    return NormalizedSpan(
+        span_id=new_span_id(),
+        trace_id=trace_id or new_trace_id(),
+        name=GenAIAttributes.SPAN_INVOKE_AGENT,
+        kind=SpanKind.SERVER,
+        status_code=SpanStatus.OK,
+        start_time=now,
+        end_time=end,
+        duration_ms=duration_ms if duration_ms else None,
+        agent_id=agent_id,
+        session_id=session_id,
+        conversation_id=conversation_id,
+        service_namespace=service_namespace,
+    )
 
 
 def make_llm_span(
@@ -29,10 +68,13 @@ def make_llm_span(
     trace_id: str | None = None,
     span_id: str | None = None,
     session_id: str | None = None,
+    sub_agent_id: str | None = None,
     extra_attributes: dict | None = None,
     billing_account: str | None = "anthropic",
     request_params: dict | None = None,
     request_tools: dict | None = None,
+    service_namespace: str | None = None,
+    service_instance_id: str | None = None,
 ) -> NormalizedSpan:
     """
     Create a NormalizedSpan representing a single LLM call.
@@ -59,6 +101,7 @@ def make_llm_span(
         end_time=end,
         duration_ms=duration_ms,
         agent_id=agent_id,
+        sub_agent_id=sub_agent_id,
         session_id=session_id,
         provider=provider,
         model=model,
@@ -73,6 +116,8 @@ def make_llm_span(
         billing_account=billing_account,
         request_params=request_params,
         request_tools=request_tools,
+        service_namespace=service_namespace,
+        service_instance_id=service_instance_id,
     )
 
 
@@ -85,15 +130,30 @@ def make_tool_span(
     output_tokens: int = 0,
     conversation_id: str | None = None,
     trace_id: str | None = None,
+    tool_input: dict | str | None = None,
+    name: str = "gen_ai.tool.call",
 ) -> NormalizedSpan:
-    """Create a NormalizedSpan representing a single tool call."""
+    """Create a NormalizedSpan representing a single tool call.
+
+    Pass ``tool_input`` to set the ``gen_ai.tool.input`` attribute — retry-loop
+    detection needs an argument signature to tell a genuine repeat from normal
+    repeated tool use. ``name`` overrides the span name (e.g. to model a
+    non-execution ``claude_code.tool_decision`` event span).
+    """
+    import json as _json
+
     now = utcnow()
     end = now + timedelta(milliseconds=duration_ms)
+    attrs: dict = {}
+    if tool_input is not None:
+        attrs[GenAIAttributes.TOOL_INPUT] = (
+            tool_input if isinstance(tool_input, str) else _json.dumps(tool_input)
+        )
 
     return NormalizedSpan(
         span_id=new_span_id(),
         trace_id=trace_id or new_trace_id(),
-        name="gen_ai.tool.call",
+        name=name,
         kind=SpanKind.INTERNAL,
         status_code=SpanStatus(status),
         start_time=now,
@@ -104,6 +164,7 @@ def make_tool_span(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         conversation_id=conversation_id,
+        attributes=attrs,
     )
 
 
@@ -119,6 +180,12 @@ def make_session(
     status: str = "completed",
     duration_seconds: float = 60.0,
     plan_tier: str = "api",
+    started_at=None,
+    ended_at=None,
+    service_namespace: str | None = None,
+    service_instance_id: str | None = None,
+    run_id: str | None = None,
+    parent_session_id: str | None = None,
 ) -> SessionRecord:
     """
     Create a SessionRecord with sensible defaults.
@@ -126,15 +193,30 @@ def make_session(
     `plan_tier` defaults to "api" so existing tests see dollar figures
     rendered normally (least-disruption). Tests for subscription / local /
     unknown rendering paths should pass it explicitly.
+
+    Pass `started_at` / `ended_at` to control the timeline explicitly (e.g.
+    to test ordering by last activity, or the idle/stale lifecycle tiers);
+    otherwise they derive from `duration_seconds` ending at "now".
+
+    `service_instance_id` sets the per-terminal label (used by close-by-instance
+    and session-lifecycle tests); `service_namespace` sets the project grouping.
+
+    `run_id` ties this session to a fan-out harness run (cross-session run
+    grouping); `parent_session_id` is the optional spawning-session id for the
+    run tree.
     """
     now = utcnow()
-    started = now - timedelta(seconds=duration_seconds)
+    started = started_at or (now - timedelta(seconds=duration_seconds))
+    if ended_at is not None:
+        ended = ended_at
+    else:
+        ended = now if status == "completed" else None
 
     return SessionRecord(
         session_id=session_id or new_uuid(),
         agent_id=agent_id,
         started_at=started,
-        ended_at=now if status == "completed" else None,
+        ended_at=ended,
         conversation_id=conversation_id or new_uuid(),
         status=status,
         total_cost_usd=total_cost_usd,
@@ -143,6 +225,10 @@ def make_session(
         tool_call_count=tool_call_count,
         error_count=error_count,
         plan_tier=plan_tier,
+        service_namespace=service_namespace,
+        service_instance_id=service_instance_id,
+        run_id=run_id,
+        parent_session_id=parent_session_id,
     )
 
 
@@ -290,18 +376,71 @@ def make_claude_code_api_error_log(
     }
 
 
+def make_claude_transcript_assistant_line(
+    message_id: str | None = None,
+    input_tokens: int = 1000,
+    output_tokens: int = 200,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    model: str = "claude-opus-4-8",
+) -> dict:
+    """Build one ``assistant`` line of a Claude Code session transcript JSONL.
+
+    Mirrors the on-disk shape ``tj statusline`` reads from
+    ``~/.claude/projects/**/<session_id>.jsonl``: a top-level ``type=assistant``
+    record whose ``message`` carries an ``id`` and a ``usage`` block. Reuse the
+    same ``message_id`` across lines to exercise the streaming-dedup path (Claude
+    Code writes several transcript lines per message, all with cumulative usage).
+    """
+    return {
+        "type": "assistant",
+        "message": {
+            "id": message_id or f"msg_{new_uuid()}",
+            "model": model,
+            "usage": {
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read_input_tokens,
+                "cache_creation_input_tokens": cache_creation_input_tokens,
+            },
+        },
+    }
+
+
+def write_claude_transcript(path, records: list[dict]) -> str:
+    """Write ``records`` as JSONL to *path* and return the path as a string.
+
+    Accepts any mix of records (assistant lines from
+    ``make_claude_transcript_assistant_line`` plus user/system lines) so tests
+    can assert the statusline ignores non-assistant rows.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    p = _Path(path)
+    p.write_text("\n".join(_json.dumps(r) for r in records) + "\n", encoding="utf-8")
+    return str(p)
+
+
 def make_otlp_logs_body(
     log_records: list[dict],
     service_name: str = "claude-code",
+    resource_attributes: dict[str, str] | None = None,
 ) -> dict:
-    """Wrap log records in the full resourceLogs envelope."""
+    """Wrap log records in the full resourceLogs envelope.
+
+    `resource_attributes` adds extra string-valued resource attributes (e.g.
+    ``{"tokenjam.run_id": "run-1"}``) so tests can exercise resource-attr
+    capture (run grouping, service.namespace) on the logs path.
+    """
+    attributes = [
+        {"key": "service.name", "value": {"stringValue": service_name}},
+    ]
+    for key, value in (resource_attributes or {}).items():
+        attributes.append({"key": key, "value": {"stringValue": value}})
     return {
         "resourceLogs": [{
-            "resource": {
-                "attributes": [
-                    {"key": "service.name", "value": {"stringValue": service_name}},
-                ],
-            },
+            "resource": {"attributes": attributes},
             "scopeLogs": [{"logRecords": log_records}],
         }],
     }

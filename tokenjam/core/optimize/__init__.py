@@ -35,11 +35,14 @@ from tokenjam.core.optimize.runner import (
 )
 from tokenjam.core.optimize.types import (
     MODEL_DOWNGRADE_CAVEAT,
+    OPUS_QUOTA_AUDIT_CAVEAT,
     REUSE_HONESTY_CAVEAT,
     AnalyzerContext,
     BudgetProjection,
     DowngradeExample,
     DowngradeFinding,
+    OpusAuditExample,
+    OpusQuotaAudit,
     OptimizeReport,
     ReuseCluster,
     ReuseFinding,
@@ -55,6 +58,7 @@ from tokenjam.core.optimize.analyzers.budget_projection import (
 from tokenjam.core.optimize.analyzers.model_downgrade import (
     DOWNGRADE_CANDIDATES,
     analyze_model_downgrade,
+    audit_opus_quota,
 )
 
 __all__ = [
@@ -66,6 +70,9 @@ __all__ = [
     "DowngradeExample",
     "DowngradeFinding",
     "MODEL_DOWNGRADE_CAVEAT",
+    "OPUS_QUOTA_AUDIT_CAVEAT",
+    "OpusAuditExample",
+    "OpusQuotaAudit",
     "REUSE_HONESTY_CAVEAT",
     "OptimizeReport",
     "ReuseCluster",
@@ -73,6 +80,7 @@ __all__ = [
     "WindowSummary",
     "_cycle_bounds",
     "analyze_model_downgrade",
+    "audit_opus_quota",
     "build_report",
     "project_budget",
     "register",

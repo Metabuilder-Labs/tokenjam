@@ -59,8 +59,11 @@ def _execute():
     """Run the scenario logic, return (env, result)."""
     from datetime import timedelta
 
+    import json
+
     from tokenjam.core.models import NormalizedSpan, SpanKind, SpanStatus
     from tokenjam.demo.env import DemoEnvironment
+    from tokenjam.otel.semconv import GenAIAttributes
     from tokenjam.utils.ids import new_span_id, new_trace_id, new_uuid
     from tokenjam.utils.time_parse import utcnow
 
@@ -81,8 +84,11 @@ def _execute():
         conversation_id=conv_id,
     ))
 
-    # 5 identical failing tool calls — triggers RETRY_LOOP (threshold: 4 in last 6 spans)
+    # 5 IDENTICAL failing tool calls — triggers RETRY_LOOP. The identical
+    # gen_ai.tool.input is what makes this a genuine loop (the detector requires
+    # an argument signature, not just a repeated tool name).
     tool_name = "search_knowledge_base"
+    tool_input = json.dumps({"query": "reset password steps"})
     for i in range(5):
         t = now + timedelta(seconds=i * 3)
         env.process(NormalizedSpan(
@@ -98,6 +104,7 @@ def _execute():
             conversation_id=conv_id,
             tool_name=tool_name,
             status_message="connection timeout",
+            attributes={GenAIAttributes.TOOL_INPUT: tool_input},
         ))
 
     return env, env.build_result(AGENT_ID)

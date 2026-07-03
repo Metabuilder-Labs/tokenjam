@@ -18,6 +18,8 @@ from tokenjam.core.optimize.types import (
     AnalyzerContext,
     DowngradeExample,
     DowngradeFinding,
+    OpusAuditExample,
+    OpusQuotaAudit,
 )
 from tokenjam.core.pricing import get_rates
 
@@ -27,6 +29,16 @@ from tokenjam.core.pricing import get_rates
 SMALL_INPUT_TOKENS = 5_000
 SMALL_OUTPUT_TOKENS = 500
 SMALL_TOOL_CALLS = 5
+
+# Substring that identifies an Opus-family model name (after provider/date
+# normalisation). The quota audit scopes exclusively to Opus sessions — the
+# acute quota-burn class (research/evidence/feature-downsize.md). Matching on
+# the family substring tolerates version + date suffixes
+# (claude-opus-4-7, claude-opus-4-6-20260115, ...).
+OPUS_MODEL_SUBSTR = "opus"
+
+# Cap on the number of spot-check example sessions carried in the audit.
+OPUS_AUDIT_MAX_EXAMPLES = 5
 
 # Premium → cheaper alternative in the same provider family. Pricing for both
 # sides is resolved at runtime from pricing/models.toml; if either is missing
@@ -247,3 +259,164 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
     )
+
+
+# ---------------------------------------------------------------------------
+# Opus quota audit (retroactive Downsize, reframed as accountability)
+# ---------------------------------------------------------------------------
+# This runs the same structural heuristic as `downsize`, but scoped to Opus
+# sessions only and reframed as a "quota audit" rather than "cost optimization"
+# (issue #5; research/evidence/feature-downsize.md). The headline is
+# "% of your Opus quota reclaimable from Sonnet-shaped sessions" — Opus token
+# share, not dollars — because the subscription majority is on flat-rate plans
+# where dollar framing mis-targets them (subscription-vs-cost-framing.md). It
+# complements opusplan / `/model` (forward-looking) by answering the
+# backward-looking question those tools can't: "which of my PAST Opus sessions
+# were Sonnet-shaped?" Honest framing throughout — candidates to spot-check,
+# never "safe to downgrade".
+
+
+def _is_opus(provider: str, model: str) -> bool:
+    """True when the model is an Opus-family model worth auditing for downsize.
+
+    We only audit Opus sessions that ALSO have a known cheaper alternative in
+    `DOWNGRADE_CANDIDATES` (so the routing suggestion is real, not invented).
+    """
+    if OPUS_MODEL_SUBSTR not in (model or "").lower():
+        return False
+    return _lookup_downgrade(provider, model) is not None
+
+
+def audit_opus_quota(
+    conn,
+    since: datetime,
+    until: datetime,
+    agent_id: str | None,
+    window_days: float,
+) -> OpusQuotaAudit:
+    """Retroactive Opus quota audit over Claude Code (and other) sessions.
+
+    Walks Opus sessions in the window and flags those whose structural shape
+    (small input, small output, few tool calls) matches a class of work where a
+    cheaper same-family model is worth a spot-check. Quantifies the result as a
+    **share of Opus quota** (candidate Opus tokens / total Opus tokens) — never
+    a dollar figure as the headline.
+
+    Computes purely from already-backfilled token/model metadata; does NOT
+    depend on captured content (#3). Always returns an :class:`OpusQuotaAudit`
+    (never ``None``) so the renderer can show an honest empty state.
+    """
+    clauses = ["start_time >= $1", "start_time < $2", "session_id IS NOT NULL"]
+    params: list[Any] = [since, until]
+    if agent_id:
+        clauses.append(f"agent_id = ${len(params) + 1}")
+        params.append(agent_id)
+    where = " AND ".join(clauses)
+
+    # LLM spans grouped by session (one row per session, dominant model).
+    llm_rows = conn.execute(
+        f"SELECT session_id, "
+        f"FIRST(trace_id) AS trace_id, "
+        f"FIRST(agent_id) AS agent_id, "
+        f"MIN(start_time) AS start_time, MAX(end_time) AS end_time, "
+        f"MIN(provider) AS provider, "
+        f"MODE(model) AS model, "
+        f"COALESCE(SUM(input_tokens),0)  AS input_tokens, "
+        f"COALESCE(SUM(output_tokens),0) AS output_tokens, "
+        f"COALESCE(SUM(cache_tokens),0)  AS cache_tokens, "
+        f"COALESCE(SUM(cost_usd),0.0)    AS cost_usd "
+        f"FROM spans WHERE {where} AND model IS NOT NULL "
+        f"GROUP BY session_id",
+        params,
+    ).fetchall()
+
+    audit = OpusQuotaAudit(window_days=window_days)
+    if not llm_rows:
+        return audit
+
+    # Tool span counts per session (tool spans have model=NULL).
+    tool_rows = conn.execute(
+        f"SELECT session_id, COUNT(*) FROM spans "
+        f"WHERE {where} AND tool_name IS NOT NULL "
+        f"GROUP BY session_id",
+        params,
+    ).fetchall()
+    tool_counts: dict[str, int] = {r[0]: int(r[1] or 0) for r in tool_rows if r[0]}
+
+    candidate_examples: list[tuple[int, OpusAuditExample]] = []
+    suggestions: dict[str, str] = {}
+
+    for row in llm_rows:
+        session_id, trace_id, _agent, start_time, end_time, provider, model, \
+            in_tok, out_tok, cache_tok, cost = row
+        if not provider or not model:
+            continue
+        if not _is_opus(provider, model):
+            continue
+
+        session_tokens = int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
+        audit.opus_sessions += 1
+        audit.opus_tokens += session_tokens
+
+        alt = _lookup_downgrade(provider, model)
+        tool_calls = tool_counts.get(session_id, 0)
+        is_candidate = (
+            alt is not None
+            and in_tok < SMALL_INPUT_TOKENS
+            and out_tok < SMALL_OUTPUT_TOKENS
+            and tool_calls <= SMALL_TOOL_CALLS
+        )
+        if not is_candidate:
+            continue
+
+        audit.candidate_sessions += 1
+        audit.candidate_tokens += session_tokens
+        if alt:
+            suggestions[str(model)] = alt
+            # Best-effort implied dollar value (secondary signal for API users).
+            alt_unit = _alt_unit_cost(
+                provider, str(model), alt,
+                int(in_tok or 0), int(out_tok or 0), int(cache_tok or 0),
+            )
+            if alt_unit is not None:
+                audit.actual_cost_usd += float(cost or 0.0)
+                audit.alternative_cost_usd += alt_unit
+
+        duration = None
+        try:
+            if start_time and end_time:
+                duration = (end_time - start_time).total_seconds()
+        except Exception:  # noqa: BLE001
+            duration = None
+        candidate_examples.append((
+            session_tokens,
+            OpusAuditExample(
+                trace_id=str(trace_id) if trace_id else "",
+                session_id=str(session_id) if session_id else None,
+                model=str(model),
+                alt_model=str(alt) if alt else "",
+                input_tokens=int(in_tok or 0),
+                output_tokens=int(out_tok or 0),
+                cache_tokens=int(cache_tok or 0),
+                tool_calls=tool_calls,
+                duration_seconds=duration,
+                cost_usd=float(cost or 0.0),
+            ),
+        ))
+
+    audit.suggestions = suggestions
+    # Largest-quota candidates first — those are the most worthwhile spot-checks.
+    candidate_examples.sort(key=lambda pair: pair[0], reverse=True)
+    audit.examples = [ex for _tokens, ex in candidate_examples[:OPUS_AUDIT_MAX_EXAMPLES]]
+
+    audit.percent_quota_reclaimable = (
+        round(100.0 * audit.candidate_tokens / audit.opus_tokens, 1)
+        if audit.opus_tokens > 0 else 0.0
+    )
+    audit.percent_sessions = (
+        round(100.0 * audit.candidate_sessions / audit.opus_sessions, 1)
+        if audit.opus_sessions > 0 else 0.0
+    )
+    audit.actual_cost_usd = round(audit.actual_cost_usd, 6)
+    audit.alternative_cost_usd = round(audit.alternative_cost_usd, 6)
+    return audit

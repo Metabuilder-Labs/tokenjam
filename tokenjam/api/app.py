@@ -71,6 +71,7 @@ def create_app(
     from tokenjam.api.routes.metrics import router as metrics_router
     from tokenjam.api.routes.status import router as status_router
     from tokenjam.api.routes.sessions import router as sessions_router
+    from tokenjam.api.routes.runs import router as runs_router
     from tokenjam.api.routes.otlp import router as otlp_router
     from tokenjam.api.routes.budget import router as budget_router
     from tokenjam.api.routes.agents import router as agents_router
@@ -80,6 +81,7 @@ def create_app(
     from tokenjam.api.routes.analytics import router as analytics_router
     from tokenjam.api.routes.version import router as version_router, health_router
     from tokenjam.api.routes.policy import router as policy_router
+    from tokenjam.api.routes.loop import router as loop_router
 
     app.include_router(spans_router, prefix="/api/v1")
     app.include_router(traces_router, prefix="/api/v1")
@@ -89,6 +91,7 @@ def create_app(
     app.include_router(drift_router, prefix="/api/v1")
     app.include_router(status_router, prefix="/api/v1")
     app.include_router(sessions_router, prefix="/api/v1")
+    app.include_router(runs_router, prefix="/api/v1")
     app.include_router(budget_router, prefix="/api/v1")
     app.include_router(agents_router, prefix="/api/v1")
     app.include_router(optimize_router, prefix="/api/v1")
@@ -97,6 +100,7 @@ def create_app(
     app.include_router(analytics_router, prefix="/api/v1")
     app.include_router(version_router, prefix="/api/v1")
     app.include_router(policy_router, prefix="/api/v1")  # /policy/* enforcement reads (#223)
+    app.include_router(loop_router, prefix="/api/v1")  # /annotations, /expectations (#53)
     app.include_router(health_router)  # /health — no prefix, for uptime probes
     app.include_router(metrics_router)  # /metrics — no prefix
     app.include_router(otlp_router)  # /v1/traces, /v1/metrics, /v1/logs — no prefix

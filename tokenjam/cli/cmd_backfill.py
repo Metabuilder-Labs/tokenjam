@@ -31,9 +31,15 @@ def cmd_backfill() -> None:
 @click.option("--since-days", type=int, default=None,
               help="Deprecated alias for --since Nd.")
 @click.option("--quiet", is_flag=True, help="Suppress per-session progress output.")
+@click.option("--reingest", is_flag=True,
+              help="Update spans already in the DB in place (never duplicated): "
+                   "re-tags sub_agent_id on pre-column history AND backfills "
+                   "captured content (message text / tool_input) onto existing "
+                   "spans when [capture] was enabled after they were first "
+                   "ingested. Run this after turning on [capture].")
 @click.pass_context
 def claude_code(ctx: click.Context, root_path: str | None, since_value: str | None,
-                since_days: int | None, quiet: bool) -> None:
+                since_days: int | None, quiet: bool, reingest: bool) -> None:
     """Ingest Claude Code session logs from ~/.claude/projects/."""
     db = ctx.obj.get("db")
     if db is None:
@@ -79,7 +85,7 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
     # Pass config so backfilled sessions carry the declared plan tier (#176).
     result = ingest_claude_code(
         db, root=root, since=since, progress=progress,
-        config=ctx.obj.get("config"),
+        config=ctx.obj.get("config"), reingest=reingest,
     )
 
     if not quiet:
@@ -120,6 +126,11 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
             f"into {total} session{'s' if total != 1 else ''}.[/dim]"
         )
 
+    if result.spans_retagged:
+        console.print(
+            f"  [dim]Re-tagged {result.spans_retagged} existing spans "
+            f"(sub_agent_id refreshed).[/dim]"
+        )
     if result.spans_skipped_existing:
         console.print(
             f"  [dim]Skipped {result.spans_skipped_existing} spans already "

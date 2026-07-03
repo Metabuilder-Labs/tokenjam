@@ -82,33 +82,43 @@ tj optimize --json | python3 -c \
 
 - `cache-recommend` and `trim` both require `[capture] prompts = true`. With capture off (the default), each checks that prereq **first**, so `trim` prints the capture hint — **not** the `tokenjam[bloat]` install hint (you only reach the `[bloat]` hint once capture is on but the extra is missing). `script` likely reports no candidates on a fresh DB.
 
-## 4b. TokenMaxx tier classification
+## 4b. TokenMaxx quota/efficiency card (#7)
+
+The card is a quota/efficiency artifact (NOT a spend-tier flex): it leads with
+the overhead-vs-real-work composition from the `tj context` diagnostic and is
+quota-native for subscription plans.
 
 ```bash
 tj tokenmaxx
 
 tj tokenmaxx --json | python3 -c \
-  "import json,sys;d=json.load(sys.stdin);ok={'TokenSipper','TokenModerator','TokenMaxxer','TokenSuperMaxxer','TokenMegaMaxxer','TokenGigaMaxxer'};assert d['tier'] in ok,d['tier'];print('ok:',d['tier'])"
+  "import json,sys;d=json.load(sys.stdin);ok={'TokenMinimizer','LeanOperator','SteadyState','ContextHeavy','QuotaSink'};assert d['tier'] in ok,d['tier'];assert 'overhead_share' in d and 'work_share' in d;print('ok:',d['tier'],'overhead=%.2f'%d['overhead_share'])"
 ```
 
-Check the rendered report:
+Check the rendered card:
 
-- [ ] Bordered "TokenJam TokenMaxxing Report" panel renders
-- [ ] On the `api` plan: shows absolute spend, no multiplier line
-- [ ] Action line surfaces either the downsize savings or "no obvious savings flagged yet" (both valid)
+- [ ] Bordered "TokenJam Quota / Efficiency Card" panel renders
+- [ ] Headline is the composition ("X% overhead" vs "Y% real work"), NOT a dollar spend figure
+- [ ] On a subscription plan: figures read as "% of cycle tokens", NO `$` anywhere
+- [ ] Action line surfaces what's reclaimable (points at `tj context`)
 
-Then reconfigure to a subscription plan and re-run to confirm the multiplier line appears (use whichever plan matches your test config), then flip back to `api` so later steps render dollar figures:
+Then reconfigure to an `api` plan and re-run to confirm the secondary dollar
+line appears (demoted, labeled "Implied API value"), then flip back so later
+steps behave consistently:
 
 ```bash
-tj onboard --claude-code --reconfigure --plan max_5x
-tj tokenmaxx
 tj onboard --claude-code --reconfigure --plan api
+tj tokenmaxx     # api plan: "Implied API value: $… (calibration only)" appears
+tj tokenmaxx --weekly   # "Weekly Recap" title, "this week" window
+tj onboard --claude-code --reconfigure --plan max_5x
 ```
 
-- [ ] Multiplier line "That's N× your Max 5x plan cost ($100/mo flat)."
-- [ ] Tier may shift if the multiplier crosses a boundary
+- [ ] `api` plan shows the secondary "Implied API value" line (never the headline)
+- [ ] `--weekly` renders the "Quota Wrapped — Weekly Recap" title
 
-**Pass criteria:** the report renders without crashing, the JSON `tier` field carries one of the 6 tier names, and the multiplier line appears under a subscription plan.
+**Pass criteria:** the card renders without crashing, the JSON `tier` field
+carries one of the 5 efficiency-tier names, `overhead_share`/`work_share` are
+present, and a subscription plan renders no dollar figure.
 
 ## 5. Backfill adapters (smoke against committed fixtures)
 

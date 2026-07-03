@@ -2,6 +2,14 @@
 # Prices in USD per million tokens.
 # Submit a PR when provider prices change.
 
+# Claude Fable 5 — Anthropic's most capable widely released model.
+# See https://platform.claude.com/docs/en/pricing (cache_write = 5-minute write).
+[anthropic.claude-fable-5]
+input_per_mtok = 10.00
+output_per_mtok = 50.00
+cache_read_per_mtok = 1.00
+cache_write_per_mtok = 12.50
+
 [anthropic.claude-opus-4-8]
 input_per_mtok = 5.00
 output_per_mtok = 25.00
@@ -32,11 +40,21 @@ output_per_mtok = 15.00
 cache_read_per_mtok = 0.30
 cache_write_per_mtok = 3.75
 
+# Claude Sonnet 4.5 — same published rates as Sonnet 4.6.
+[anthropic.claude-sonnet-4-5]
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+cache_read_per_mtok = 0.30
+cache_write_per_mtok = 3.75
+
+# Claude Haiku 4.5 — current published rates (cache_write = 5-minute write).
+# See https://platform.claude.com/docs/en/about-claude/pricing. Do NOT
+# copy the retired Haiku 3.5 rates below (0.80/4.00/0.08/1.00) — issue #14.
 [anthropic.claude-haiku-4-5]
-input_per_mtok = 0.80
-output_per_mtok = 4.00
-cache_read_per_mtok = 0.08
-cache_write_per_mtok = 1.00
+input_per_mtok = 1.00
+output_per_mtok = 5.00
+cache_read_per_mtok = 0.10
+cache_write_per_mtok = 1.25
 
 # ─── Deprecated Anthropic base models ──────────────────────────────────────
 # These rows exist so dated variants (e.g. `claude-sonnet-4-20250514`,
@@ -106,6 +124,29 @@ output_per_mtok = 3.20
 input_per_mtok = 0.06
 output_per_mtok = 0.24
 
+[aws.us-amazon-nova-micro-v1]
+input_per_mtok = 0.035
+output_per_mtok = 0.14
+
+[aws.us-amazon-nova-premier-v1]
+input_per_mtok = 2.50
+output_per_mtok = 12.50
+
+# Anthropic-on-Bedrock (model IDs use the region/geo profile prefix, dots
+# flattened to hyphens, trailing ":N" version stripped — matches how
+# BedrockIntegration reports modelId). Rates match direct Anthropic API.
+[aws.us-anthropic-claude-opus-4-1-20250805-v1]
+input_per_mtok = 15.00
+output_per_mtok = 75.00
+cache_read_per_mtok = 1.50
+cache_write_per_mtok = 18.75
+
+[aws.global-anthropic-claude-opus-4-5-20251101-v1]
+input_per_mtok = 5.00
+output_per_mtok = 25.00
+cache_read_per_mtok = 0.50
+cache_write_per_mtok = 6.25
+
 # OpenAI-compatible providers (Groq, Together, Fireworks, xAI, Azure OpenAI)
 # use patch_openai() with a custom base_url — add their model names here
 # as they are encountered.
@@ -117,6 +158,24 @@ output_per_mtok = 0.79
 [xai.grok-3]
 input_per_mtok = 3.00
 output_per_mtok = 15.00
+
+[mistral.mistral-large-latest]
+input_per_mtok = 0.50
+output_per_mtok = 1.50
+
+[deepseek.deepseek-chat]
+input_per_mtok = 0.14
+output_per_mtok = 0.28
+cache_read_per_mtok = 0.0028
+
+[deepseek.deepseek-reasoner]
+input_per_mtok = 0.14
+output_per_mtok = 0.28
+cache_read_per_mtok = 0.0028
+
+[cohere.command-r-plus]
+input_per_mtok = 2.50
+output_per_mtok = 10.00
 
 # HUD managed inference (inference.hud.ai)
 [hud.claude-sonnet-4-5]

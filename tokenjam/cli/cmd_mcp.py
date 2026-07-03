@@ -1,4 +1,10 @@
-"""tj mcp — start the stdio MCP server."""
+"""tj mcp — start the stdio MCP server (for SDK / API users).
+
+The MCP is tj's in-request-path surface: it belongs in an SDK / API integration
+where tj already sits in the loop. Claude Code / Codex subscription users should
+NOT wire this — an in-loop MCP is a per-turn quota burden on them (ticket #59);
+`tj onboard --claude-code` gives them the zero-token statusline instead.
+"""
 from __future__ import annotations
 
 import shutil
@@ -54,7 +60,13 @@ def _start_and_wait(host: str, port: int, timeout: float = 10.0) -> bool:
 @click.command("mcp")
 @click.pass_context
 def cmd_mcp(ctx: click.Context) -> None:
-    """Start the TokenJam MCP server (stdio transport for Claude Code)."""
+    """Start the TokenJam MCP server (stdio transport, for SDK / API users).
+
+    The MCP puts tj in the request path — the right surface for SDK / API
+    integrations. Claude Code / Codex subscription users get tj out-of-band via
+    the zero-token statusline (`tj statusline`, wired by `tj onboard
+    --claude-code`) instead of paying the per-turn MCP quota burden (#59).
+    """
     from tokenjam.mcp.server import mcp, init
 
     config_path = find_config_file()

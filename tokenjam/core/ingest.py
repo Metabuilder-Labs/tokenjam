@@ -8,6 +8,7 @@ from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
 from tokenjam.core.config import TjConfig, SecurityConfig, CaptureConfig
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.utils.ids import new_uuid
+from tokenjam.utils.signatures import tool_arg_signature
 
 if TYPE_CHECKING:
     from tokenjam.core.db import StorageBackend
@@ -94,8 +95,18 @@ def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
     capture rides through the same gate: sampling parameters are gated with the
     request `prompts` toggle, and the tools/tool_choice payload (tool-definition
     content) is gated with `tool_inputs`.
+
+    Before dropping the raw tool input, derive a privacy-safe argument signature
+    (``tokenjam.tool_arg_sig``) and keep it — this is what retry-loop detection
+    uses to tell an identical repeated call from normal repeated tool use, so the
+    raw (possibly sensitive) input never has to be retained.
     """
     stripped = dict(attributes)
+    # Compute the arg signature from whatever input is present, regardless of the
+    # capture toggle, and persist it (the hash is non-sensitive).
+    sig = tool_arg_signature(stripped.get(GenAIAttributes.TOOL_INPUT))
+    if sig is not None:
+        stripped[TjAttributes.TOOL_ARG_SIG] = sig
     if not capture.prompts:
         stripped.pop(GenAIAttributes.PROMPT_CONTENT, None)
         for key in _REQUEST_PARAM_ATTRS:
@@ -198,10 +209,22 @@ class IngestPipeline:
 
         # 5. Session upsert (update running totals)
         session = self._build_or_update_session(span)
-        self.db.upsert_session(session)
 
-        # 5b. Complete session when invoke_agent span ends
-        if span.name == GenAIAttributes.SPAN_INVOKE_AGENT and span.end_time:
+        # 5b. Session lifecycle.
+        #
+        # A session is "completed" only when we see a *real* session-wrapping
+        # invoke_agent span — one whose end_time is strictly after its
+        # start_time. The SDK `@watch()` path emits exactly that: one span that
+        # brackets the whole agent run.
+        #
+        # The Claude Code / Codex logs path instead maps each `user_prompt`
+        # event to a zero-duration invoke_agent span (end_time == start_time)
+        # that marks the *start* of a turn, not the end of the session.
+        # Treating those markers as completions was the bug: every live session
+        # was force-completed on its first prompt (so the dashboard showed
+        # active work as "completed" with 0 duration), and the drift/alert
+        # session-end hooks fired on every single turn.
+        if self._is_session_end(span):
             session.status = "completed"
             self.db.upsert_session(session)
             if self.drift_detector and span.agent_id:
@@ -214,9 +237,34 @@ class IngestPipeline:
                     self.alert_engine.evaluate_session_end(session)
                 except Exception as exc:
                     logger.warning("AlertEngine session-end hook failed: %s", exc)
+        else:
+            # Any other span is ongoing activity. Streaming telemetry (the logs
+            # path) never sends an explicit end event, so a session that keeps
+            # receiving spans is still alive — re-activate a record that was
+            # previously (mis)marked completed. Genuinely idle sessions are
+            # surfaced as "stale" at read time via
+            # SessionRecord.effective_status (SESSION_STALE_THRESHOLD).
+            if session.status != "active":
+                session.status = "active"
+            self.db.upsert_session(session)
 
         # 6. Post-ingest hooks (never let hook errors kill the pipeline)
         self._run_hooks(span)
+
+    @staticmethod
+    def _is_session_end(span: NormalizedSpan) -> bool:
+        """True when the span is a real session-wrapping invoke_agent span.
+
+        Distinguishes the SDK `@watch()` session span (real duration) from the
+        zero-duration invoke_agent markers the Claude Code / Codex logs path
+        emits at the start of every turn (end_time == start_time).
+        """
+        return (
+            span.name == GenAIAttributes.SPAN_INVOKE_AGENT
+            and span.end_time is not None
+            and span.start_time is not None
+            and span.end_time > span.start_time
+        )
 
     def _resolve_session(self, span: NormalizedSpan) -> NormalizedSpan:
         """
@@ -253,6 +301,7 @@ class IngestPipeline:
             existing.input_tokens += span.input_tokens or 0
             existing.output_tokens += span.output_tokens or 0
             existing.cache_tokens += span.cache_tokens or 0
+            existing.cache_write_tokens += span.cache_write_tokens or 0
             if span.cost_usd is not None:
                 existing.total_cost_usd = (existing.total_cost_usd or 0.0) + span.cost_usd
             if span.tool_name:
@@ -268,6 +317,24 @@ class IngestPipeline:
                 resolved = self._resolve_plan_tier(span.billing_account)
                 if resolved != "unknown":
                     existing.plan_tier = resolved
+            # Late-resolve service_namespace: from the span if it now carries
+            # one, otherwise from the agent's configured project (server-side
+            # fallback for agents that never send service.namespace).
+            if existing.service_namespace is None:
+                resolved_ns = span.service_namespace or self._resolve_project(span.agent_id)
+                if resolved_ns:
+                    existing.service_namespace = resolved_ns
+            # Late-resolve the per-terminal instance id (display label).
+            if existing.service_instance_id is None and span.service_instance_id:
+                existing.service_instance_id = span.service_instance_id
+            # Self-heal cross-session run grouping: a session created before its
+            # telemetry carried the run markers (e.g. an early tool span) gets
+            # them backfilled when a later span declares them. Never overwrite a
+            # value already on the session.
+            if existing.run_id is None and span.run_id:
+                existing.run_id = span.run_id
+            if existing.parent_session_id is None and span.parent_session_id:
+                existing.parent_session_id = span.parent_session_id
             return existing
 
         # New session
@@ -283,10 +350,27 @@ class IngestPipeline:
             input_tokens=span.input_tokens or 0,
             output_tokens=span.output_tokens or 0,
             cache_tokens=span.cache_tokens or 0,
+            cache_write_tokens=span.cache_write_tokens or 0,
             tool_call_count=1 if span.tool_name else 0,
             error_count=1 if span.status_code == SpanStatus.ERROR else 0,
             plan_tier=plan_tier,
+            service_namespace=span.service_namespace or self._resolve_project(span.agent_id),
+            service_instance_id=span.service_instance_id,
+            run_id=span.run_id,
+            parent_session_id=span.parent_session_id,
         )
+
+    def _resolve_project(self, agent_id: str | None) -> str | None:
+        """Project name configured for this agent (``[agents.<id>].project``).
+
+        Server-side fallback for service.namespace so sessions group by project
+        even when the agent never sends service.namespace on the wire (e.g. an
+        already-running Claude Code session whose env was fixed at startup).
+        """
+        if not agent_id:
+            return None
+        agent_cfg = self.config.agents.get(agent_id)
+        return agent_cfg.project if agent_cfg else None
 
     def _resolve_plan_tier(self, billing_account: str | None) -> str:
         """
