@@ -147,6 +147,73 @@ def test_get_rates_returns_none_for_unknown():
     assert get_rates("nonexistent", "model") is None
 
 
+# ─── 1M-context / [1m] variants (PR #386) ──────────────────────────────────
+# The 1M context window bills at standard rates (the long-context premium was
+# removed 2026-03-13), so `[1m]` names must resolve to the base model's rates —
+# never fall through to the $0.50/$2.00 default. See core/pricing.py
+# `_strip_context_tag`.
+
+
+def test_get_rates_opus_4_8_1m_variant_resolves_to_base():
+    base = get_rates("anthropic", "claude-opus-4-8")
+    tagged = get_rates("anthropic", "claude-opus-4-8[1m]")
+    assert tagged is not None
+    assert tagged == base
+    # Guard against silently falling through to the default flat rate.
+    assert tagged.input_per_mtok == 5.00
+    assert tagged.output_per_mtok == 25.00
+    assert (tagged.input_per_mtok, tagged.output_per_mtok) != (0.50, 2.00)
+
+
+def test_get_rates_1m_variant_case_insensitive_bracket():
+    # `[1M]` (uppercase) resolves the same as `[1m]`.
+    assert get_rates("anthropic", "claude-opus-4-8[1M]") == get_rates(
+        "anthropic", "claude-opus-4-8"
+    )
+
+
+def test_get_rates_sonnet_and_fable_1m_variants():
+    assert get_rates("anthropic", "claude-sonnet-4-6[1m]") == get_rates(
+        "anthropic", "claude-sonnet-4-6"
+    )
+    assert get_rates("anthropic", "claude-fable-5[1m]") == get_rates(
+        "anthropic", "claude-fable-5"
+    )
+
+
+def test_get_rates_dated_and_context_tag_combined():
+    # A dated + context-tagged name still resolves to the base rates.
+    tagged = get_rates("anthropic", "claude-opus-4-8-20260528[1m]")
+    assert tagged is not None
+    assert tagged == get_rates("anthropic", "claude-opus-4-8")
+
+
+def test_get_rates_unknown_1m_variant_still_defaults():
+    # An unpriced base model tagged with [1m] still returns None (→ default).
+    assert get_rates("anthropic", "totally-made-up-model[1m]") is None
+
+
+# ─── Current OpenAI GPT-5 family (July 2026) ────────────────────────────────
+
+
+def test_get_rates_openai_gpt_5_5():
+    rates = get_rates("openai", "gpt-5.5")
+    assert rates is not None
+    assert rates.input_per_mtok == 5.00
+    assert rates.output_per_mtok == 30.00
+    assert rates.cache_read_per_mtok == 0.50
+
+
+def test_get_rates_openai_gpt_5_4_family():
+    assert get_rates("openai", "gpt-5.4").input_per_mtok == 2.50
+    assert get_rates("openai", "gpt-5.4-mini").input_per_mtok == 0.75
+    assert get_rates("openai", "gpt-5.4-nano").output_per_mtok == 1.25
+
+
+def test_get_rates_openai_unknown_model_defaults():
+    assert get_rates("openai", "gpt-9.9-imaginary") is None
+
+
 def test_get_rates_returns_model_rates_for_known():
     rates = get_rates("anthropic", "claude-haiku-4-5")
     assert rates is not None
