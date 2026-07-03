@@ -14,11 +14,11 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 [![License: MIT](https://img.shields.io/badge/license-MIT-3d8eff?labelColor=0d1117)](LICENSE)
 [![OTel](https://img.shields.io/badge/OTel-GenAI%20SemConv-3d8eff?labelColor=0d1117)](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
 
-```
-npx tokenjam
+```bash
+pipx install tokenjam && tj onboard
 ```
 
-<sub>Zero install, zero config. Reads the same <code>~/.claude/projects/*.jsonl</code> files <a href="https://github.com/ryoppippi/ccusage">ccusage</a> does and shows you <b>where your Claude Code quota actually goes</b> — no pip env, no daemon, no onboarding. Prefer Python? <code>uvx --from tokenjam tj</code> does the same. Ready to go deeper (live capture + dashboard + MCP)? <code>pipx install tokenjam &amp;&amp; tj onboard</code>.</sub>
+<sub>The full local tool: captures your agent telemetry, runs the five analyzers, and serves the Lens dashboard + MCP server for Claude Code. Runs entirely on your machine. (<code>pipx</code> recommended — sidesteps PEP 668; <code>pip install tokenjam</code> works in a clean venv.) Just want a 15-second peek with no install? <code>uvx --from tokenjam tj</code> or <code>npx tokenjam</code> reads your existing <a href="https://github.com/ryoppippi/ccusage">Claude&nbsp;Code</a> sessions and shows where your quota goes.</sub>
 
 **No cloud · No signup · No vendor lock-in**
 
@@ -28,13 +28,15 @@ npx tokenjam
 
 ---
 
-## 15-second start (no install)
+## 15-second peek — no install
+
+Not ready to install? Get the headline in one command:
 
 ```bash
-npx tokenjam                      # or:  uvx --from tokenjam tj
+uvx --from tokenjam tj               # or:  npx tokenjam
 ```
 
-One command, no setup. TokenJam ingests your existing Claude Code sessions from
+TokenJam ingests your existing Claude Code sessions from
 `~/.claude/projects/*.jsonl` (the same files [ccusage](https://github.com/ryoppippi/ccusage)
 reads) into a throwaway in-memory database and prints:
 
@@ -42,16 +44,9 @@ reads) into a throwaway in-memory database and prints:
   (history, CLAUDE.md, accumulated tool output) versus *net-new work*.
 - **A session timeline** — your most recent sessions, token spend, and re-read share.
 
-Nothing is written to disk, no daemon runs, no config is created. When you want
-live capture, the local dashboard, and the MCP server for Claude Code, install
-the full CLI and onboard:
+Nothing is written to disk, no daemon runs, no config is created. For live capture, the Lens dashboard, and the MCP server, use the full install above (`pipx install tokenjam && tj onboard`).
 
-```bash
-pipx install tokenjam        # or `pip install tokenjam` in a clean venv
-tj onboard
-```
-
-<sub>`npx tokenjam` and `uvx --from tokenjam tj` launch the Python CLI via `uvx`/`pipx` — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
+<sub>`uvx --from tokenjam tj` and `npx tokenjam` launch the Python CLI via `uvx`/`pipx` — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
 ---
 
