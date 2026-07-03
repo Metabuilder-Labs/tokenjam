@@ -6627,20 +6627,29 @@ function DashboardView({ params }) {
   // fetches independently, so a triage failure never blanks the explorer.
   const load = useCallback(async () => {
     try {
-      const status = await api('/status');
-      if (!status.agents || status.agents.length === 0) {
-        setD({ loading: false, empty: true, error: null });
-        return;
-      }
-      const [cost, compare, opt, al, drift, traces] = await Promise.all([
+      // Fetch /cost (load-bearing, no .catch) alongside /status and the rest so
+      // the empty gate can consider HISTORICAL spend, not just live agents. A DB
+      // whose sessions are all >24h old reports 0 active agents but still has a
+      // full cost history — that user upgrading to review past spend must NOT
+      // see "No data yet" (the front door was gating purely on active agents and
+      // returning before /cost was ever fetched — issue: historical-only empty).
+      const [cost, status, compare, opt, al, drift, traces] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
+        api('/status').catch(() => ({ agents: [] })),
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
         api('/optimize', { since, fast: 'true' }).catch(() => null),
         api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
         api('/drift').catch(() => ({ agents: [] })),
         api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
       ]);
-      setD({ loading: false, empty: false, error: null, cost, compare, opt,
+      // "No data yet" only when there is genuinely NO telemetry: no cost history
+      // AND no tokens AND no sessions/agents AND no traces. Historical cost or
+      // an optimize finding is enough to render the tiles.
+      const hasCost = (cost.total_cost_usd || 0) > 0 || (cost.total_tokens || 0) > 0;
+      const hasAgents = !!(status.agents && status.agents.length);
+      const hasTraces = !!(traces.traces && traces.traces.length);
+      const empty = !hasCost && !hasAgents && !hasTraces;
+      setD({ loading: false, empty, error: null, cost, compare, opt,
         alerts: al.alerts || [], drift, traces: traces.traces || [] });
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
