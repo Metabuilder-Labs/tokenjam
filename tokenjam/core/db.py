@@ -984,6 +984,19 @@ class DuckDBBackend:
         self._conn = duckdb.connect(str(db_path))
         run_migrations(self._conn)
         self._local = threading.local()
+        # Serializes *writes* across threads. Reads use per-thread cursors and
+        # stay lock-free (#124), but DuckDB uses optimistic concurrency control:
+        # two transactions mutating the same table from different threads can
+        # abort with a write-write conflict. In async-hooks mode the main thread
+        # writes spans/cost while the TjHookWorker thread writes alerts, so every
+        # mutating method takes this re-entrant lock. Held only for the duration
+        # of a single write, so it never blocks the concurrent read path.
+        self._write_lock = threading.RLock()
+
+    @property
+    def write_lock(self) -> "threading.RLock":
+        """Re-entrant lock guarding cross-thread writes (see __init__)."""
+        return self._write_lock
 
     @property
     def conn(self) -> duckdb.DuckDBPyConnection:
@@ -1014,81 +1027,86 @@ class DuckDBBackend:
         # Named-column INSERT so future migrations adding columns don't break
         # positional-arg ordering (migration 4 added billing_account at the
         # end of the table, but we don't want to silently rely on that).
-        self.conn.execute(
-            "INSERT INTO spans ("
-            "span_id, trace_id, parent_span_id, session_id, agent_id, "
-            "name, kind, status_code, status_message, start_time, end_time, "
-            "duration_ms, attributes, provider, model, tool_name, "
-            "input_tokens, output_tokens, cache_tokens, cost_usd, "
-            "request_type, conversation_id, events, billing_account, "
-            "cache_write_tokens, request_params, request_tools, sub_agent_id"
-            ") VALUES "
-            "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)",
-            [
-                span.span_id, span.trace_id, span.parent_span_id, span.session_id,
-                span.agent_id, span.name, span.kind.value, span.status_code.value,
-                span.status_message, span.start_time, span.end_time, span.duration_ms,
-                json.dumps(span.attributes), span.provider, span.model, span.tool_name,
-                span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
-                span.request_type, span.conversation_id, json.dumps(span.events),
-                span.billing_account, span.cache_write_tokens,
-                json.dumps(span.request_params) if span.request_params is not None else None,
-                json.dumps(span.request_tools) if span.request_tools is not None else None,
-                span.sub_agent_id,
-            ],
-        )
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO spans ("
+                "span_id, trace_id, parent_span_id, session_id, agent_id, "
+                "name, kind, status_code, status_message, start_time, end_time, "
+                "duration_ms, attributes, provider, model, tool_name, "
+                "input_tokens, output_tokens, cache_tokens, cost_usd, "
+                "request_type, conversation_id, events, billing_account, "
+                "cache_write_tokens, request_params, request_tools, sub_agent_id"
+                ") VALUES "
+                "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)",
+                [
+                    span.span_id, span.trace_id, span.parent_span_id, span.session_id,
+                    span.agent_id, span.name, span.kind.value, span.status_code.value,
+                    span.status_message, span.start_time, span.end_time, span.duration_ms,
+                    json.dumps(span.attributes), span.provider, span.model, span.tool_name,
+                    span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
+                    span.request_type, span.conversation_id, json.dumps(span.events),
+                    span.billing_account, span.cache_write_tokens,
+                    json.dumps(span.request_params) if span.request_params is not None else None,
+                    json.dumps(span.request_tools) if span.request_tools is not None else None,
+                    span.sub_agent_id,
+                ],
+            )
 
     def insert_alert(self, alert: Alert) -> None:
-        self.conn.execute(
-            "INSERT INTO alerts VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
-            [
-                alert.alert_id, alert.agent_id, alert.session_id, alert.span_id,
-                alert.fired_at, alert.type.value, alert.severity.value, alert.title,
-                json.dumps(alert.detail), alert.acknowledged, alert.suppressed,
-            ],
-        )
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO alerts VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
+                [
+                    alert.alert_id, alert.agent_id, alert.session_id, alert.span_id,
+                    alert.fired_at, alert.type.value, alert.severity.value, alert.title,
+                    json.dumps(alert.detail), alert.acknowledged, alert.suppressed,
+                ],
+            )
 
     def insert_validation(self, result: SchemaValidationResult) -> None:
-        self.conn.execute(
-            "INSERT INTO schema_validations VALUES ($1,$2,$3,$4,$5,$6)",
-            [
-                result.validation_id, result.span_id, result.agent_id,
-                result.validated_at, result.passed, json.dumps(result.errors),
-            ],
-        )
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO schema_validations VALUES ($1,$2,$3,$4,$5,$6)",
+                [
+                    result.validation_id, result.span_id, result.agent_id,
+                    result.validated_at, result.passed, json.dumps(result.errors),
+                ],
+            )
 
     def insert_policy_decision(self, decision: PolicyDecisionRecord) -> None:
         # Append-only audit log (#221). Named columns so future migrations stay safe.
-        self.conn.execute(
-            "INSERT INTO policy_decisions ("
-            "decision_id, ts, provider, pricing_mode, gate_decision, path, "
-            "policy_name, policy_kind, would_action, passthrough_tos, label, "
-            "suggest_only, envelope"
-            ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-            [
-                decision.decision_id, decision.ts, decision.provider,
-                decision.pricing_mode, decision.gate_decision, decision.path,
-                decision.policy_name, decision.policy_kind, decision.would_action,
-                decision.passthrough_tos, decision.label, decision.suggest_only,
-                json.dumps(decision.envelope) if decision.envelope is not None else None,
-            ],
-        )
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO policy_decisions ("
+                "decision_id, ts, provider, pricing_mode, gate_decision, path, "
+                "policy_name, policy_kind, would_action, passthrough_tos, label, "
+                "suggest_only, envelope"
+                ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                [
+                    decision.decision_id, decision.ts, decision.provider,
+                    decision.pricing_mode, decision.gate_decision, decision.path,
+                    decision.policy_name, decision.policy_kind, decision.would_action,
+                    decision.passthrough_tos, decision.label, decision.suggest_only,
+                    json.dumps(decision.envelope) if decision.envelope is not None else None,
+                ],
+            )
 
     def insert_savings_entry(self, entry: SavingsLedgerEntry) -> None:
-        self.conn.execute(
-            "INSERT INTO savings_ledger ("
-            "ledger_id, decision_id, ts, provider, pricing_mode, policy_name, "
-            "would_action, estimated_recoverable_usd, estimated_recoverable_tokens, "
-            "estimate_basis, billing_period, label, realized"
-            ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-            [
-                entry.ledger_id, entry.decision_id, entry.ts, entry.provider,
-                entry.pricing_mode, entry.policy_name, entry.would_action,
-                entry.estimated_recoverable_usd, entry.estimated_recoverable_tokens,
-                entry.estimate_basis, entry.billing_period, entry.label,
-                entry.realized,
-            ],
-        )
+        with self._write_lock:
+            self.conn.execute(
+                "INSERT INTO savings_ledger ("
+                "ledger_id, decision_id, ts, provider, pricing_mode, policy_name, "
+                "would_action, estimated_recoverable_usd, estimated_recoverable_tokens, "
+                "estimate_basis, billing_period, label, realized"
+                ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                [
+                    entry.ledger_id, entry.decision_id, entry.ts, entry.provider,
+                    entry.pricing_mode, entry.policy_name, entry.would_action,
+                    entry.estimated_recoverable_usd, entry.estimated_recoverable_tokens,
+                    entry.estimate_basis, entry.billing_period, entry.label,
+                    entry.realized,
+                ],
+            )
 
     def _decision_where(self, filters: PolicyDecisionFilters) -> tuple[str, list]:
         clauses: list[str] = ["1=1"]
@@ -1159,7 +1177,8 @@ class DuckDBBackend:
         # plan_tier: promote unknown → known on conflict; never overwrite a
         # session that already has a known tier (backfill re-runs must not
         # clobber historical tiers when config plan changes).
-        self.conn.execute(
+        with self._write_lock:
+            self.conn.execute(
             """
             INSERT INTO sessions (
                 session_id, agent_id, conversation_id, started_at, ended_at,
@@ -1211,7 +1230,8 @@ class DuckDBBackend:
         """
         if not session_ids:
             return
-        self.conn.execute(
+        with self._write_lock:
+            self.conn.execute(
             """
             UPDATE sessions AS s SET
                 input_tokens       = agg.input_tokens,
@@ -1238,7 +1258,8 @@ class DuckDBBackend:
         )
 
     def upsert_agent(self, agent: AgentRecord) -> None:
-        self.conn.execute(
+        with self._write_lock:
+            self.conn.execute(
             """
             INSERT INTO agents VALUES ($1,$2,$3,$4,$5,$6)
             ON CONFLICT (agent_id) DO UPDATE SET
@@ -1254,7 +1275,8 @@ class DuckDBBackend:
         )
 
     def upsert_baseline(self, baseline: DriftBaseline) -> None:
-        self.conn.execute(
+        with self._write_lock:
+            self.conn.execute(
             """
             INSERT INTO drift_baselines VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             ON CONFLICT (agent_id) DO UPDATE SET
@@ -1324,12 +1346,13 @@ class DuckDBBackend:
         ).fetchone()
         count = count_row[0] if count_row else 0
         if count:
-            self.conn.execute(
-                "UPDATE sessions SET status = 'closed', "
-                "ended_at = COALESCE(ended_at, $2) "
-                "WHERE service_instance_id = $1 AND status = 'active'",
-                [instance_id, now],
-            )
+            with self._write_lock:
+                self.conn.execute(
+                    "UPDATE sessions SET status = 'closed', "
+                    "ended_at = COALESCE(ended_at, $2) "
+                    "WHERE service_instance_id = $1 AND status = 'active'",
+                    [instance_id, now],
+                )
         return count
 
     def close_session_by_id(self, session_id: str) -> int:
@@ -1346,12 +1369,13 @@ class DuckDBBackend:
         ).fetchone()
         count = count_row[0] if count_row else 0
         if count:
-            self.conn.execute(
-                "UPDATE sessions SET status = 'closed', "
-                "ended_at = COALESCE(ended_at, $2) "
-                "WHERE session_id = $1 AND status = 'active'",
-                [session_id, now],
-            )
+            with self._write_lock:
+                self.conn.execute(
+                    "UPDATE sessions SET status = 'closed', "
+                    "ended_at = COALESCE(ended_at, $2) "
+                    "WHERE session_id = $1 AND status = 'active'",
+                    [session_id, now],
+                )
         return count
 
     def _trace_filter_where(self, filters: TraceFilters) -> tuple[str, list[object], int]:
@@ -1655,17 +1679,19 @@ class DuckDBBackend:
     # -- issue #309: queries moved off direct db.conn access in callers --
 
     def update_span_cost(self, span_id: str, cost_usd: float) -> None:
-        self.conn.execute(
-            "UPDATE spans SET cost_usd = $1 WHERE span_id = $2",
-            [cost_usd, span_id],
-        )
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE spans SET cost_usd = $1 WHERE span_id = $2",
+                [cost_usd, span_id],
+            )
 
     def increment_session_cost(self, session_id: str, delta_usd: float) -> None:
-        self.conn.execute(
-            "UPDATE sessions SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 "
-            "WHERE session_id = $2",
-            [delta_usd, session_id],
-        )
+        with self._write_lock:
+            self.conn.execute(
+                "UPDATE sessions SET total_cost_usd = COALESCE(total_cost_usd, 0) + $1 "
+                "WHERE session_id = $2",
+                [delta_usd, session_id],
+            )
 
     def get_distinct_agent_ids(self) -> list[str]:
         rows = self.conn.execute(
@@ -1757,7 +1783,8 @@ class DuckDBBackend:
             "SELECT COUNT(*) FROM spans WHERE start_time < $1", [cutoff]
         ).fetchone()
         count = result[0] if result else 0
-        self.conn.execute("DELETE FROM spans WHERE start_time < $1", [cutoff])
+        with self._write_lock:
+            self.conn.execute("DELETE FROM spans WHERE start_time < $1", [cutoff])
         return count
 
     def close(self) -> None:
@@ -1780,6 +1807,8 @@ class InMemoryBackend(DuckDBBackend):
         self._conn = duckdb.connect(":memory:")
         run_migrations(self._conn)
         self._local = threading.local()
+        # Inherited write methods take this lock (async-hooks concurrency, #124).
+        self._write_lock = threading.RLock()
 
 
 # ---------------------------------------------------------------------------
