@@ -5,7 +5,7 @@ queries through the REST API.
 """
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -162,9 +162,12 @@ class ApiBackend:
         return data.get("tools", [])
 
     def get_daily_cost(self, agent_id: str, day: date) -> float:
+        start = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+        end = start + timedelta(days=1)
         params: dict[str, str] = {
             "agent_id": agent_id,
-            "since": datetime(day.year, day.month, day.day).isoformat(),
+            "since": start.isoformat(),
+            "until": end.isoformat(),
             "group_by": "day",
         }
         data = self._get("/api/v1/cost", params)
