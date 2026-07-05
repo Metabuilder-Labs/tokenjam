@@ -6,13 +6,17 @@ continuing / post-compaction session resumes instead of re-investigating.
 
 Source resolution (all fail-soft — a brief must never break a session):
 
+  * ``--from-hook`` — the SessionStart-hook path. Reads the JSON Claude Code
+    pipes on stdin (``session_id`` / ``transcript_path`` / ``source``) and
+    briefs THAT session. Prevents a concurrent session in a different project
+    from cross-leaking its brief (which a global-mtime scan would do).
   * ``--transcript PATH`` — build the brief live from an explicit JSONL.
   * ``--session ID`` — prefer the durable ``session_story`` snapshot
     (``core/method_capture``, survives Claude Code's transcript prune); fall
     back to the live transcript when no snapshot exists.
-  * ``--last`` — the most recently active session: the newest transcript on
-    disk (the session you are resuming / just compacted), else the newest
-    persisted snapshot.
+  * ``--last`` — manual fallback: the most recently active session by mtime
+    (newest transcript on disk, else the newest persisted snapshot). Used by
+    the operator from a shell — NOT by the hook, whose stdin is authoritative.
 
 Deterministic, no LLM, out-of-band (zero in-loop token cost). Prints the brief
 to stdout; prints NOTHING (exit 0) when there is nothing to brief, so a
@@ -21,6 +25,8 @@ SessionStart/PostCompact hook can pipe it straight into ``additionalContext``.
 from __future__ import annotations
 
 import glob
+import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +35,7 @@ import click
 from tokenjam.core.method_capture import load_session_method
 from tokenjam.core.resume_brief import build_resume_brief
 from tokenjam.core.transcript import (
-    _read_records,
+    read_records,
     build_session_asks,
     build_session_story,
     resolve_projects_root,
@@ -54,7 +60,7 @@ def _from_transcript_path(path: Path) -> tuple[str, Any, Any, Any]:
     projects_root = path.parent.parent
     story = _safe(build_session_story, session_id, projects_root)
     asks = _safe(build_session_asks, session_id, projects_root)
-    records = _read_records(path) if path.exists() else None
+    records = read_records(path) if path.exists() else None
     return session_id, story, asks, records
 
 
@@ -76,7 +82,7 @@ def _load_for_session(
     ``records`` is read from the live file whenever it still exists.
     """
     path = _live_transcript_path(session_id, projects_root)
-    records = _read_records(path) if path else None
+    records = read_records(path) if path else None
 
     snapshot = None
     try:
@@ -112,6 +118,31 @@ def _mtime(path: str) -> float:
         return 0.0
 
 
+def _read_hook_stdin() -> dict[str, Any] | None:
+    """Read the SessionStart hook's stdin JSON, or None.
+
+    Claude Code pipes a JSON object to SessionStart hooks with fields including
+    ``session_id``, ``transcript_path``, and ``source``. Reading it is
+    load-bearing: the ``--last`` mtime scan is global across ALL projects, so
+    with any concurrent session — the exact fan-out scenario this feature is
+    for — it can inject the wrong project's brief. Always returns None (never
+    raises) so an empty / malformed / absent stdin degrades silently.
+    """
+    if sys.stdin.isatty():
+        return None
+    try:
+        raw = sys.stdin.read()
+    except OSError:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        obj = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
 def _latest_snapshot_session(db: Any) -> str | None:
     """Session id of the newest ``session_story`` snapshot, or None."""
     conn = getattr(db, "conn", None)
@@ -131,19 +162,42 @@ def _latest_snapshot_session(db: Any) -> str | None:
 @click.option("--session", "session_id", default=None,
               help="Session id to brief (snapshot-preferred, live fallback).")
 @click.option("--last", is_flag=True, default=False,
-              help="Brief the most recently active session.")
+              help="Manual: brief the most recently active session (by mtime).")
 @click.option("--transcript", "transcript_path", default=None,
               help="Build the brief live from an explicit transcript JSONL path.")
+@click.option("--from-hook", "from_hook", is_flag=True, default=False,
+              help="SessionStart-hook mode: read session_id / transcript_path "
+                   "from stdin JSON (Claude Code's SessionStart contract).")
 @click.pass_context
 def cmd_resume_brief(
     ctx: click.Context,
     session_id: str | None,
     last: bool,
     transcript_path: str | None,
+    from_hook: bool,
 ) -> None:
     """Emit a compact resume brief for a session (out-of-band, fail-soft)."""
-    if not (session_id or last or transcript_path):
-        raise click.UsageError("Provide --session <id>, --last, or --transcript <path>.")
+    if not (session_id or last or transcript_path or from_hook):
+        raise click.UsageError(
+            "Provide --session <id>, --last, --transcript <path>, or --from-hook."
+        )
+
+    # SessionStart-hook path: stdin JSON is authoritative. It carries the
+    # session the hook fired for, so pick transcript_path / session_id off it
+    # before falling back to anything mtime-based.
+    if from_hook:
+        payload = _read_hook_stdin() or {}
+        tp = payload.get("transcript_path")
+        if isinstance(tp, str) and tp:
+            transcript_path = tp
+        else:
+            sid_from_stdin = payload.get("session_id")
+            if isinstance(sid_from_stdin, str) and sid_from_stdin:
+                session_id = sid_from_stdin
+        # No usable signal from stdin → silently exit 0 (better than injecting
+        # a stranger session's brief via a global mtime scan).
+        if not (transcript_path or session_id):
+            return
 
     db = ctx.obj.get("db")
     verbose = ctx.obj.get("verbose", False)

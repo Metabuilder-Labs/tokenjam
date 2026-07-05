@@ -105,9 +105,17 @@ _RESUME_BRIEF_MARKER = "resume-brief"  # tj-managed marker (substring of command
 
 
 def _tj_resume_brief_command() -> str:
-    """Absolute `tj resume-brief --last` command, falling back to bare `tj`."""
+    """Absolute `tj resume-brief --from-hook` command, falling back to bare `tj`.
+
+    ``--from-hook`` reads the SessionStart hook's stdin JSON so the brief is
+    scoped to the session the hook fired for. The prior ``--last`` wiring
+    guessed by global mtime across ALL projects and could cross-leak a
+    concurrent session's brief — the exact fan-out scenario this feature is
+    for. Re-onboard rewires stale ``--last`` entries in place via the
+    ``resume-brief`` substring marker.
+    """
     exe = shutil.which("tj")
-    return f"{exe} resume-brief --last" if exe else "tj resume-brief --last"
+    return f"{exe} resume-brief --from-hook" if exe else "tj resume-brief --from-hook"
 
 
 def _is_tj_resume_brief_entry(entry: object) -> bool:
@@ -762,10 +770,12 @@ def _onboard_claude_code(
 
     # Wire the SessionStart resume-brief hook (zero in-loop token cost). Rides
     # this same read-merge-write. Installed by default: on a resumed /
-    # post-compaction session, `tj resume-brief --last` re-injects the prior
-    # method as additionalContext so the session resumes instead of
-    # re-investigating. Idempotent + non-destructive (foreign SessionStart hooks
-    # preserved); removed by `tj uninstall`.
+    # post-compaction session, `tj resume-brief --from-hook` reads the
+    # session_id / transcript_path Claude Code pipes on stdin and re-injects
+    # THAT session's prior method as additionalContext (a global-mtime scan
+    # could cross-leak a concurrent session's brief). Idempotent +
+    # non-destructive (foreign SessionStart hooks preserved); removed by
+    # `tj uninstall`.
     resume_brief_status = _wire_claude_resume_brief_hook(global_settings)
 
     # Install the output-trim PostToolUse hook (zero in-loop token cost). Rides
@@ -805,10 +815,11 @@ def _onboard_claude_code(
         "written": "installed (SessionStart: resume|compact)",
         "updated": "updated to current path",
         "kept": "already installed",
-        "skipped": "left alone (custom SessionStart hooks present)",
+        "skipped": "skipped — ~/.claude/settings.json has malformed hooks "
+                   "(expected object with SessionStart list); fix and re-run",
     }
     console.print(
-        f"[green]✓[/green] Resume-brief hook (tj resume-brief --last): "
+        f"[green]✓[/green] Resume-brief hook (tj resume-brief --from-hook): "
         f"{_RESUME_BRIEF_STATUS_MSG.get(resume_brief_status, resume_brief_status)}"
     )
 

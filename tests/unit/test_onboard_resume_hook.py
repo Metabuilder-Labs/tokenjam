@@ -24,7 +24,7 @@ def test_wire_into_empty_settings_writes():
     assert len(start) == 1
     assert start[0]["matcher"] == _RESUME_BRIEF_MATCHER
     assert _is_tj_resume_brief_entry(start[0])
-    assert "resume-brief --last" in start[0]["hooks"][0]["command"]
+    assert "resume-brief --from-hook" in start[0]["hooks"][0]["command"]
 
 
 def test_wire_is_idempotent():

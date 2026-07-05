@@ -103,7 +103,7 @@ def select_task_prompt(
         if _is_substantive_prompt(ask.get("prompt")):
             return (ask.get("prompt") or "").strip()
     task = (story or {}).get("task") if isinstance(story, dict) else ""
-    return (task or "").strip() if _is_substantive_prompt(task) else (task or "").strip()
+    return (task or "").strip() if _is_substantive_prompt(task) else ""
 
 
 def select_scope_ask(asks: dict[str, Any] | None) -> dict[str, Any] | None:

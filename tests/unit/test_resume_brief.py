@@ -88,6 +88,13 @@ def test_task_falls_back_to_story_task_when_no_asks():
     assert "Add a caching layer to the API" in brief
 
 
+def test_story_fallback_skips_slash_only_task():
+    # story-task fallback path: bare slash command must not surface as TASK
+    story = _story(task="/clear", steps=[_step("working")])
+    assert select_task_prompt(None, story) == ""
+    assert select_task_prompt({}, story) == ""
+
+
 # --- ask-scoping (reliability fix #2) ----------------------------------------
 
 def test_scope_is_last_substantive_ask():
@@ -109,7 +116,7 @@ def test_brief_scopes_progress_and_files_to_last_ask():
     assert "src/auth.py" not in brief
 
 
-# --- TodoWrite extraction (ticket #67 consumed) ------------------------------
+# --- TodoWrite extraction ----------------------------------------------------
 
 def test_extract_todos_returns_in_progress_and_pending():
     steps = [
@@ -197,9 +204,9 @@ def test_empty_inputs_return_empty_brief():
 
 
 def test_malformed_inputs_never_raise():
-    # garbage shapes must degrade, not explode
+    # garbage shapes must degrade, not explode — no exceptions, output type is str
     assert build_resume_brief({"steps": [{"bad": True}]}, {"asks": "not-a-list"}) != ""
-    assert build_resume_brief({"steps": [None, 3]}, None) != "" or True
+    assert isinstance(build_resume_brief({"steps": [None, 3]}, None), str)
     assert extract_todos("not-a-list") == ([], [])
     assert extract_working_files(None) == []
 
