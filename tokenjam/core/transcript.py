@@ -175,7 +175,7 @@ def _locate_transcript(session_id: str, projects_root: Path) -> Path | None:
     return Path(matches[0])
 
 
-def _read_records(path: Path) -> list[dict[str, Any]]:
+def read_records(path: Path) -> list[dict[str, Any]]:
     """Read a JSONL file into a list of dict records, tolerating bad lines."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -765,7 +765,7 @@ def build_session_asks(
     if path is None:
         return None
 
-    records = _read_records(path)
+    records = read_records(path)
     tool_status = _build_tool_status(records)
     boundaries = [i for i, r in enumerate(records) if _is_user_ask(r)]
 
@@ -833,7 +833,7 @@ def _build_story_from_path(
 ) -> dict[str, Any]:
     """Build one story from a located transcript ``path`` and (optionally) attach
     its subagents recursively, sharing ``budget`` / ``seen`` across the tree."""
-    records = _read_records(path)
+    records = read_records(path)
 
     tool_status = _build_tool_status(records)
     # Mark ask boundaries on the main thread (depth 0) so the Timeline can show
