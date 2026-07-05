@@ -214,15 +214,18 @@ def _proj_baseline(baseline) -> tuple | None:
 
 
 # (invoke, project) per parity method. ``now``/``trace_id`` are bound at seed
-# time so get_daily_cost targets the seeded day and get_trace_spans a real trace.
+# time so get_daily_cost targets the seeded historical day and get_trace_spans a
+# real trace. The historical daily-cost target is load-bearing: querying today
+# would not catch an API shim that forgot to send an `until` bound.
 def _parity_specs(now, trace_id):
+    historical_day = (now - timedelta(days=3)).date()
     return {
         "get_traces": (lambda b: b.get_traces(TraceFilters(limit=100)), _proj_traces),
         "get_trace_spans": (lambda b: b.get_trace_spans(trace_id), _proj_spans),
         "get_cost_summary": (lambda b: b.get_cost_summary(CostFilters()), _proj_cost),
         "get_alerts": (lambda b: b.get_alerts(AlertFilters()), _proj_alerts),
         "get_tool_calls": (lambda b: b.get_tool_calls(AGENT, None, None), _proj_tool_calls),
-        "get_daily_cost": (lambda b: b.get_daily_cost(AGENT, now.date()), _proj_daily_cost),
+        "get_daily_cost": (lambda b: b.get_daily_cost(AGENT, historical_day), _proj_daily_cost),
         "get_baseline": (lambda b: b.get_baseline(AGENT), _proj_baseline),
     }
 
@@ -262,8 +265,8 @@ def _build_dataset(now) -> _Dataset:
             span = dataclasses.replace(span, trace_id=trace_id)
         spans.append(span)
 
-    # A span three days back — get_daily_cost(today) must exclude it (the old
-    # shim bug summed cumulatively across days).
+    # A span three days back — get_daily_cost(historical_day) must return only
+    # this span, not the cumulative total from that day through now.
     spans.append(make_llm_span(
         agent_id=AGENT, session_id=SESSION, input_tokens=500, output_tokens=100,
         cost_usd=99.0, start_time=now - timedelta(days=3),
