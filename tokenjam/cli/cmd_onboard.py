@@ -218,7 +218,14 @@ def _print_instrument_agent_snippet() -> None:
     Anthropic. Falls back to the generic Anthropic snippet when nothing is
     detected (unchanged from pre-#85 behavior).
     """
-    matches = detect_stack(".")
+    # Stack detection is a nice-to-have outro, never load-bearing: if anything
+    # in manifest reading goes wrong (e.g. a non-UTF-8 manifest surfacing an
+    # unexpected error), degrade to the generic snippet rather than crashing
+    # a default-run command.
+    try:
+        matches = detect_stack(".")
+    except Exception:
+        matches = []
     if not matches:
         _print_generic_instrument_snippet()
         return

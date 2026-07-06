@@ -123,7 +123,9 @@ def _requirement_name(line: str) -> str | None:
 def _names_from_pyproject(path: Path) -> set[str]:
     try:
         data = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        # UnicodeDecodeError (a ValueError, not an OSError) fires when the
+        # manifest has non-UTF-8 bytes; fail open to "no detection".
         return set()
     names: set[str] = set()
 
@@ -157,7 +159,9 @@ def _names_from_requirements(path: Path) -> set[str]:
     names: set[str] = set()
     try:
         text = path.read_text()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # UnicodeDecodeError (a ValueError, not an OSError) fires when the
+        # manifest has non-UTF-8 bytes; fail open to "no detection".
         return names
     for line in text.splitlines():
         n = _requirement_name(line)
@@ -171,7 +175,9 @@ def _names_from_setup_cfg(path: Path) -> set[str]:
     parser = configparser.ConfigParser()
     try:
         parser.read(path)
-    except configparser.Error:
+    except (OSError, UnicodeDecodeError, configparser.Error):
+        # UnicodeDecodeError (a ValueError, not an OSError) fires when the
+        # manifest has non-UTF-8 bytes; fail open to "no detection".
         return names
     if parser.has_option("options", "install_requires"):
         for line in parser.get("options", "install_requires").splitlines():
