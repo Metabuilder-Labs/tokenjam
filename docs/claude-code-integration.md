@@ -77,6 +77,36 @@ The MCP server opens the DuckDB file read-only — no lock conflicts with `tj se
 
 Claude calls `setup_project`, which writes `.claude/settings.json` with `OTEL_RESOURCE_ATTRIBUTES=service.name=<project>` so spans from that project are tagged with the right agent ID.
 
+## Codex
+
+`tj onboard --codex` is a **smaller** integration than `tj onboard --claude-code` — Codex CLI exposes
+less to hook into, not because tj treats it as second-class. It wires OTel telemetry only:
+
+```bash
+tj onboard --codex
+# Restart Codex, then:
+tj tokenmaxx   # or: tj traces
+```
+
+This writes an `[otel]` block to `~/.codex/config.toml` pointing at `tj serve`'s OTLP endpoint. Codex
+CLI hardcodes `service.name="codex_exec"` in its binary regardless of `[otel.resource]`, so every Codex
+terminal's activity lands under one `codex_exec` agent tile — there is no per-project or per-terminal
+split like Claude Code gets.
+
+What `--codex` does **not** do, and why:
+- **No historical backfill** — no `tj backfill codex` adapter exists yet (Codex does write local
+  `~/.codex/sessions/*.jsonl` transcripts that look backfillable; see the investigation below).
+- **No statusline** — Codex's own TUI status line has no custom-command hook for tj to inject into.
+- **No MCP registration** — same reasoning as Claude Code: an in-loop MCP is a per-turn quota tax,
+  and Codex has no zero-cost statusline substitute to fall back on either.
+
+tj stays fully out-of-band for Codex: telemetry flows in automatically once you restart, and you read
+it with `tj tokenmaxx` / `tj traces` / the dashboard — no in-loop cost either way.
+
+See **[docs/agent-capability-matrix.md](agent-capability-matrix.md)** for the full Claude Code vs.
+Codex vs. Python SDK vs. OTLP capability breakdown, including the backfill/statusline parity
+investigation.
+
 ## Uninstalling
 
 ```bash

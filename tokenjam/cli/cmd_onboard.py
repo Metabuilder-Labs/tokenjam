@@ -1283,6 +1283,11 @@ def _onboard_codex(
         "Codex telemetry flows to tj automatically. Run[/dim]  tj tokenmaxx  "
         "[dim]/[/dim]  tj traces  [dim]for the deep dive.[/dim]"
     )
+    console.print(
+        "[dim]Codex gets a smaller subset of tj than Claude Code (no backfill, "
+        "no statusline, no per-terminal split) — see[/dim] "
+        "docs/agent-capability-matrix.md [dim]for the full breakdown.[/dim]"
+    )
     _print_restart_banner("Codex")
     console.print("[dim]After restarting, run:[/dim]  tj traces")
 
