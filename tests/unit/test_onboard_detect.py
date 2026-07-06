@@ -126,6 +126,33 @@ def test_empty_project_dir_yields_no_names(tmp_path):
     assert declared_package_names(tmp_path) == set()
 
 
+# --- non-UTF-8 manifests fail open (Greptile P1 on #407) --------------------
+# read_text() raises UnicodeDecodeError on non-UTF-8 bytes. That's a ValueError
+# subclass, NOT an OSError, so the fail-open guards must catch it explicitly or
+# `tj onboard` (a default-run command) crashes.
+
+
+def test_non_utf8_requirements_fails_open(tmp_path):
+    (tmp_path / "requirements.txt").write_bytes(b"langchain>=0.2\n\xff\xfe not utf-8\n")
+    # Must not raise UnicodeDecodeError; degrades to no detection.
+    assert declared_package_names(tmp_path) == set()
+    assert detect_stack(tmp_path) == []
+
+
+def test_non_utf8_pyproject_fails_open(tmp_path):
+    (tmp_path / "pyproject.toml").write_bytes(b"[project]\ndependencies = [\xff\xfe]\n")
+    assert declared_package_names(tmp_path) == set()
+    assert detect_stack(tmp_path) == []
+
+
+def test_non_utf8_setup_cfg_fails_open(tmp_path):
+    (tmp_path / "setup.cfg").write_bytes(
+        b"[options]\ninstall_requires =\n    openai\n\xff\xfe\n"
+    )
+    assert declared_package_names(tmp_path) == set()
+    assert detect_stack(tmp_path) == []
+
+
 # --- detect_stack: end-to-end matching --------------------------------------
 
 
