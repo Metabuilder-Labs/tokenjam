@@ -16,6 +16,11 @@
  *   3. `tj …`                      — an already-installed CLI on PATH
  *
  * If none are present we print actionable install guidance and exit non-zero.
+ *
+ * Note: tokenjam >=0.5.4 also ships a `tokenjam` console-script alias
+ * alongside `tj`, so bare `uvx tokenjam` / `pipx run tokenjam` work too. This
+ * wrapper keeps the explicit `--from tokenjam tj` / `--spec tokenjam tj` form
+ * below for back-compat with the 0.5.3 and earlier releases it also targets.
  */
 "use strict";
 

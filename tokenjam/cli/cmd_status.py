@@ -4,7 +4,7 @@ import json
 
 import click
 
-from tokenjam.core.models import AlertFilters
+from tokenjam.core.models import Alert, AlertFilters
 from tokenjam.utils.formatting import console, format_cost, format_tokens, status_icon
 from tokenjam.utils.time_parse import utcnow
 
@@ -80,6 +80,8 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
         if active_alerts:
             has_active_alerts = True
 
+        framing = _agent_framing(db, config, aid) if hasattr(db, "conn") else None
+
         agent_data = {
             "agent_id": aid,
             "status": session.status if session else "idle",
@@ -97,7 +99,7 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
         agents_data.append(agent_data)
 
         if not output_json:
-            _print_agent_status(agent_data, active_alerts, session)
+            _print_agent_status(agent_data, active_alerts, session, framing)
 
     # Count sessions with plan_tier='unknown' so the user knows to reconfigure.
     # Informational only — exit code stays driven by alert state.
@@ -141,7 +143,96 @@ def _fmt_dur(seconds: float | None, *, coarse: bool = False) -> str:
     return f"{mins}m {s}s"
 
 
-def _print_agent_status(data: dict, active_alerts: list, session: object | None) -> None:
+def _agent_framing(db, config, agent_id: str):
+    """Plan-tier framing for one agent's Cost line (#96).
+
+    Window-independent (per #177: the pricing mode is a property of the
+    user's plan, not the selected window) — the same `plan_determination_mix`
+    + `compute_framing` pairing `tj cost` / `tj optimize` / `tj tokenmaxx`
+    already use, so `tj status` doesn't invent a fourth convention. Returns
+    None in API mode (no direct conn) — callers fall back to raw format_cost.
+    """
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return None
+    from tokenjam.core.framing import WindowSummary, compute_framing, plan_determination_mix
+
+    mix = plan_determination_mix(conn, agent_id)
+    return compute_framing(config, WindowSummary(sessions=sum(mix.values()), plan_tier_mix=mix))
+
+
+def _framing_note(framing) -> str | None:
+    """The honesty note printed under the Cost today line (#96).
+
+    Mirrors `cmd_cost._cost_note`: prefers the framing's own qualifier_text
+    (only set for mixed subscription/API session history); otherwise
+    synthesizes a concise mode note so a pure subscription/local Cost line is
+    never unexplained. api/unknown -> None (unchanged rendering, no note)."""
+    if framing is None:
+        return None
+    if framing.qualifier_text:
+        return framing.qualifier_text
+    if framing.pricing_mode == "subscription":
+        return ("Subscription plan — flat-fee billing; cost shown as share of "
+                "your monthly plan, not dollars spent.")
+    if framing.pricing_mode == "local":
+        return "Local inference — no marginal cost; dollar figures suppressed."
+    return None
+
+
+def _cost_line(data: dict, framing) -> str:
+    """Render the 'Cost today' line, plan-tier-aware (#96).
+
+    Subscription plans are flat-fee: a raw "$0.00" (or any USD figure) line
+    misrepresents metered spend the user never incurs. Mirrors the
+    subscription/local gate `cmd_cost._cost_cell` uses via
+    `core/framing.render_dollar` — known-fee subscription plans (pro /
+    max_5x / max_20x / plus) show a % of cycle; unmetered plans (team /
+    enterprise, no declared fee) and local inference show "—". API/unknown
+    keep the historical dollar rendering.
+
+    `daily_limit` is a user-configured DAILY dollar cap (`budget.daily_usd`),
+    not a share of the monthly subscription fee — running it through
+    `render_dollar` would express a daily cap as a percentage of the wrong
+    cycle. It's always shown as its literal dollar amount with a `/day`
+    qualifier; only the spend-so-far figure is plan-tier-framed.
+    """
+    if framing is not None and framing.pricing_mode in ("subscription", "local"):
+        from tokenjam.core.framing import render_dollar
+        cost_str = render_dollar(data["cost_today"], framing)
+    else:
+        cost_str = format_cost(data["cost_today"])
+    if data["daily_limit"]:
+        cost_str += f" / {format_cost(data['daily_limit'])}/day limit"
+    return cost_str
+
+
+def _dedupe_alerts(alerts: list[Alert]) -> list[tuple[Alert, int]]:
+    """Collapse repeat alerts of the same type into one (alert, count) pair (#96).
+
+    The alert engine's dedup state (CooldownTracker, `_failure_rate_fired`) is
+    in-memory only and resets on process restart, so the DB can legitimately
+    hold multiple rows for the same (type, agent) pair — the query itself
+    (`get_alerts`) is a plain `SELECT`, no join, so there's no fanout to fix
+    there. Collapse at render time instead of dropping information: keep the
+    first (most recent, since `alerts` is fired_at DESC) occurrence of each
+    type and note how many fired.
+    """
+    first_seen: dict[str, Alert] = {}
+    counts: dict[str, int] = {}
+    order: list[str] = []
+    for alert in alerts:
+        key = alert.type.value
+        if key not in first_seen:
+            first_seen[key] = alert
+            counts[key] = 0
+            order.append(key)
+        counts[key] += 1
+    return [(first_seen[key], counts[key]) for key in order]
+
+
+def _print_agent_status(data: dict, active_alerts: list, session: object | None,
+                         framing=None) -> None:
     status = data["status"]
     icon = status_icon(status)
     style = "green" if status == "active" else "dim"
@@ -150,10 +241,10 @@ def _print_agent_status(data: dict, active_alerts: list, session: object | None)
                   f"{status}")
     console.print()
 
-    cost_str = format_cost(data["cost_today"])
-    if data["daily_limit"]:
-        cost_str += f" / {format_cost(data['daily_limit'])} limit"
-    console.print(f"  Cost today:     {cost_str}")
+    console.print(f"  Cost today:     {_cost_line(data, framing)}")
+    note = _framing_note(framing)
+    if note:
+        console.print(f"  [dim]{note}[/dim]")
 
     in_tok = format_tokens(data["input_tokens"])
     out_tok = format_tokens(data["output_tokens"])
@@ -178,10 +269,11 @@ def _print_agent_status(data: dict, active_alerts: list, session: object | None)
         console.print(f"  Active session: {data['session_id']}")
 
     console.print()
-    for alert in active_alerts:
+    for alert, count in _dedupe_alerts(active_alerts):
         from tokenjam.utils.formatting import severity_colour
         colour = severity_colour(alert.severity.value)
-        console.print(f"  [{colour}]{alert.title}[/]")
+        suffix = f" ×{count}" if count > 1 else ""
+        console.print(f"  [{colour}]{alert.title}{suffix}[/]")
 
     if not active_alerts:
         console.print("  [green]No active alerts[/green]")

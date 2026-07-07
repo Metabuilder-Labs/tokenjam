@@ -37,8 +37,11 @@ harness conforms to one thin correlation id.
 
 ## Easiest setup: the `setup_harness` MCP command
 
-If you use tj's MCP server (`tj mcp`, wired via `tj onboard --claude-code`), run
-this from **inside your harness repo** in Claude Code:
+`tj onboard --claude-code` does **not** wire the MCP server (an in-loop MCP is a
+per-turn quota tax on subscription users, ticket #59) — but this one-time setup
+helper is a legitimate reason to wire it temporarily. Run
+`claude mcp add tj --scope user -- tj mcp`, then from **inside your harness
+repo** in Claude Code:
 
 - **`setup_harness(mode="instrument")`** — writes a drop-in helper
   (`.tj/run-env.sh`) that mints one run id per launch and exports
@@ -51,7 +54,10 @@ this from **inside your harness repo** in Claude Code:
   recommendation.
 
 After wiring, launch a run and confirm the workers grouped in the Runs view (or
-re-run `mode="map"`).
+re-run `mode="map"`). Once `setup_harness` has done its job, deregister the MCP
+server (`claude mcp remove tj --scope user`) to avoid paying the per-turn tax
+on unrelated sessions — the `.tj/run-env.sh` helper it wrote keeps working
+without it.
 
 ## Wiring it by hand
 
