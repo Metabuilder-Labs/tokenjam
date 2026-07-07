@@ -66,6 +66,9 @@ def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
     # 14. Claude Code statusline wiring (issue #59) — the zero-token surface
     checks.append(_check_statusline_wiring(config))
 
+    # 15. Onboarded-but-silent — first-signal diagnosis (issue #80)
+    checks.append(_check_onboarding_first_signal(config, ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -602,6 +605,86 @@ def _check_statusline_wiring(config: object) -> dict:
         "message": (
             "Claude Code not detected. `tj onboard --claude-code` wires the "
             "zero-token tj statusline when you use it."
+        ),
+    }
+
+
+def _tj_statusline_wired() -> bool:
+    """True when ~/.claude/settings.json wires the tj statusline (a Claude Code
+    onboarding marker)."""
+    from pathlib import Path
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if not settings_path.exists():
+        return False
+    try:
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        sl = data.get("statusLine")
+        cmd = sl.get("command", "") if isinstance(sl, dict) else ""
+        return isinstance(cmd, str) and "tj statusline" in cmd
+    except Exception:
+        return False
+
+
+def _detect_onboarded_persona(config: object) -> str:
+    """Best-guess the onboarding persona from config, for a tailored cause.
+
+    Falls back to ``"sdk"`` — the fail-open path where a silent config is most
+    likely — when no Claude Code / Codex marker is present.
+    """
+    agent_ids = list(getattr(config, "agents", {}) or {})
+    if any(a.startswith("claude-code-") for a in agent_ids):
+        return "claude_code"
+    if "codex_exec" in agent_ids:
+        return "codex"
+    if _tj_statusline_wired():
+        return "claude_code"
+    return "sdk"
+
+
+def _check_onboarding_first_signal(config: object, db: object) -> dict:
+    """Diagnose the onboarded-but-zero-spans silent case (#80).
+
+    Two personas can finish onboarding "successfully" yet never emit a span: the
+    Claude Code path only starts telemetry after a restart, and the fail-open SDK
+    path swallows a typo'd agent_id / missing patch / dead daemon silently. When
+    the DB has zero spans but a config exists, surface the likely per-persona
+    cause instead of leaving the user staring at a blank Status page.
+
+    Reported at **info** level, not warning: doctor has no onboarding timestamp,
+    so it can't tell "just onboarded seconds ago" (expected empty) from "onboarded
+    long ago and silent" (the failure). Flagging every fresh setup as a warning
+    would be a false alarm and flip a clean `tj doctor` to exit 1. The info line
+    still carries the actionable per-persona cause. Complements
+    ``_check_span_staleness`` (which owns spans-exist-but-stale); this one owns the
+    spans-never-arrived case.
+    """
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Onboarding signal", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        row = conn.execute("SELECT COUNT(*) FROM spans").fetchone()
+    except duckdb.Error as e:
+        return {"name": "Onboarding signal", "level": "info",
+                "message": f"Skipped — could not count spans: {e}"}
+
+    total = int(row[0]) if row and row[0] is not None else 0
+    if total > 0:
+        return {"name": "Onboarding signal", "level": "ok",
+                "message": f"{total} span(s) recorded — telemetry is flowing."}
+
+    from tokenjam.core.onboard_verify import not_confirmed_cause
+
+    persona = _detect_onboarded_persona(config)
+    return {
+        "name": "Onboarding signal",
+        "level": "info",
+        "message": (
+            "Onboarded but no spans have been recorded yet. "
+            + not_confirmed_cause(persona)
         ),
     }
 

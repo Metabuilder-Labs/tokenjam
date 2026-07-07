@@ -312,9 +312,11 @@ Full version-by-version history: [GitHub Releases](https://github.com/Metabuilde
 TokenJam is MIT, and contributions are welcome — from a one-line pricing fix to a whole new framework integration. A few easy on-ramps:
 
 - 🟢 **[Good first issues →](https://github.com/Metabuilder-Labs/tokenjam/labels/good%20first%20issue)** — scoped, newcomer-friendly tasks, ready to pick up.
+- **Bugs** — notice something off? File a bug.
+- **Documentation** — struggled with something while getting started? Help the next person by writing or updating documentation.
 - 💸 **Model pricing** — `tokenjam/pricing/models.toml` is community-maintained. Fix a rate or add a model in a single PR — no issue needed.
 - 🔌 **Framework integrations** — provider/framework patches follow one clear pattern (`tokenjam/sdk/integrations/anthropic.py` is the reference). Open an issue first to align on approach.
-- 🤖 **Built with coding agents** — TokenJam is built by AI coding agents, and contributing with one is first-class. **Claude Code:** read [CLAUDE.md](CLAUDE.md) and run `/init` to bring your agent up to speed. **Codex / other agents:** [AGENTS.md](AGENTS.md) has the critical rules.
+- 🤖 **Coding Agents are first-class citizens** — TokenJam is built by Humans AND AI coding agents, and contributing with one is first-class. **Claude Code:** read [CLAUDE.md](CLAUDE.md) and run `/init` to bring your agent up to speed. **Codex / other agents:** [AGENTS.md](AGENTS.md) has the critical rules.
 
 Setup and the full dev workflow are in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
