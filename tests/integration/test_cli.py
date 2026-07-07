@@ -424,7 +424,10 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         assert statusline_checks and statusline_checks[0]["level"] == "warning"
         assert "tj onboard --claude-code" in statusline_checks[0]["message"]
 
-    # Case 3: MCP registered globally in Codex (~/.codex/config.toml) -> should be level: "ok"
+    # Case 3: MCP registered globally in Codex (~/.codex/config.toml) -> should
+    # be level "warning" (#94): Codex gets the same +36% quota-tax reasoning as
+    # Claude Code (see cmd_onboard.py's Codex path, which actively retires this
+    # legacy block), so a green check here would contradict the #59 decision.
     codex_dir = fake_home / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     codex_config = codex_dir / "config.toml"
@@ -435,17 +438,20 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
          patch("shutil.which", return_value=None), \
          patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         checks = json.loads(result.output)
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
-        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert mcp_checks and mcp_checks[0]["level"] == "warning"
         assert "Codex" in mcp_checks[0]["message"]
+        assert "#59" in mcp_checks[0]["message"]
 
     # Clean up codex file
     codex_config.unlink()
     codex_dir.rmdir()
 
-    # Case 4: MCP registered globally in Claude Code (~/.claude.json) -> should be level: "ok"
+    # Case 4: MCP registered globally in Claude Code (~/.claude.json) -> should
+    # be level "warning" (#94) — a green check for this state contradicts the
+    # #59 decision to keep MCP out of the Claude Code loop.
     claude_json = fake_home / ".claude.json"
     claude_json.write_text('{"mcpServers": {"tj": {"command": "tj"}}}')
 
@@ -454,16 +460,18 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
          patch("shutil.which", return_value=None), \
          patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         checks = json.loads(result.output)
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
-        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert mcp_checks and mcp_checks[0]["level"] == "warning"
         assert "Claude Code" in mcp_checks[0]["message"]
+        assert "claude mcp remove tj --scope user" in mcp_checks[0]["message"]
 
     # Clean up claude json file
     claude_json.unlink()
 
-    # Case 5: MCP registered locally in project-level .mcp.json -> should be level: "ok"
+    # Case 5: MCP registered locally in project-level .mcp.json -> should be
+    # level "warning" (#94) — same quota-tax reasoning applies at project scope.
     project_mcp = fake_cwd / ".mcp.json"
     project_mcp.write_text('{"mcpServers": {"tj": {"command": "tj"}}}')
 
@@ -472,10 +480,10 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
          patch("shutil.which", return_value=None), \
          patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         checks = json.loads(result.output)
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
-        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert mcp_checks and mcp_checks[0]["level"] == "warning"
         assert "project scope" in mcp_checks[0]["message"]
 
 

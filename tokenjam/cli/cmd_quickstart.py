@@ -18,7 +18,8 @@ Design (what makes it "zero-setup"):
       - a session timeline from :mod:`tokenjam.core.session_timeline`.
   * The output **leads with reads-your-local-logs + added-value framing** —
     "reads your ~/.claude session logs; here's where your quota actually goes" —
-    then ends on the opt-in "go deeper" pointer to ``tj onboard`` (daemon / MCP / live).
+    then ends on the opt-in "go deeper" pointer to ``tj onboard`` (daemon /
+    statusline / live capture).
 
 Because it manages its own transient DB, ``quickstart`` is registered in
 ``no_db_commands`` so the CLI never opens the on-disk DB or trips the daemon's
@@ -73,7 +74,7 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     no daemon, no onboarding. On a large history the first run caps at the
     most-recent sessions for speed (use `--full` for everything). Run
     `tj onboard` afterwards to go deeper (live capture, the dashboard, and the
-    MCP server for Claude Code).
+    zero-token statusline).
     """
     from pathlib import Path
 
@@ -282,8 +283,8 @@ def _render(diag, timeline, *, since: str,
     deeper = Text()
     deeper.append("Go deeper: ", style="bold")
     deeper.append("`tj onboard`", style="bold cyan")
-    deeper.append(" sets up live capture, the local dashboard, and the MCP "
-                  "server for Claude Code (the opt-in daemon path).", style="dim")
+    deeper.append(" sets up live capture, the local dashboard, and the "
+                  "zero-token statusline (the opt-in daemon path).", style="dim")
     console.print(deeper)
     console.print()
 
