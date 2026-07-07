@@ -59,7 +59,7 @@ class VerifyResult:
 
 def poll_for_first_span(
     backend: _ReadBackend,
-    since: datetime,
+    since: datetime | None,
     *,
     agent_id: str | None = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,

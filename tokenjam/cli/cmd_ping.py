@@ -8,6 +8,18 @@ machinery real agents use, and a local in-process exporter prints a "the patch I
 intercepting" confirmation that fires even when the daemon is down (the span is
 still captured locally). The command then reports where the span was delivered —
 a running ``tj serve`` over HTTP, or the local DuckDB.
+
+Exit code contract: 0 means delivery was *confirmed*, not merely attempted. In
+HTTP mode the span is POSTed asynchronously via ``BatchSpanProcessor``, and
+``TjHttpExporter.export()`` swallows network/auth failures into a logged
+``SpanExportResult.FAILURE`` rather than raising — so ``force_flush()`` returning
+without an exception does not mean the daemon actually stored the span. To make
+the exit code trustworthy for scripts/CI, HTTP-mode delivery is confirmed by
+polling the daemon's read API for the just-emitted span (reusing
+``onboard_verify``'s ``open_read_backend``/``poll_for_first_span``) before
+exiting 0. Direct (local DuckDB) mode writes synchronously inside
+``force_flush()`` (``TjSpanExporter.export()`` calls ``pipeline.process()``
+in-line), so a clean flush already means the span landed in the DB.
 """
 from __future__ import annotations
 
@@ -21,6 +33,12 @@ from tokenjam.utils.formatting import console
 # telemetry in the dashboard or analyzers.
 PING_AGENT_ID = "tj-ping"
 PING_MODEL = "tj-ping-test"
+
+# How long to wait for the daemon to confirm it stored the ping span before
+# giving up. Short: the span was already POSTed by the time we start polling,
+# so a healthy daemon confirms almost immediately.
+PING_CONFIRM_TIMEOUT_S = 8.0
+PING_CONFIRM_INTERVAL_S = 1.0
 
 
 class _ProofExporter:
@@ -52,7 +70,13 @@ class _ProofExporter:
               help="Emit a machine-readable result instead of prose.")
 @click.pass_context
 def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
-    """Emit a labeled test span to prove SDK instrumentation is wired up."""
+    """Emit a labeled test span to prove SDK instrumentation is wired up.
+
+    Exits 0 only once delivery is *confirmed* — HTTP mode polls the daemon's
+    read API for the span before exiting; exit 0 in HTTP mode never means
+    just "attempted". See the module docstring for why that distinction
+    matters.
+    """
     config = ctx.obj["config"]
 
     from opentelemetry import trace as trace_api
@@ -60,6 +84,7 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
 
     from tokenjam.sdk import bootstrap
     from tokenjam.sdk.agent import AgentSession, record_llm_call
+    from tokenjam.utils.time_parse import utcnow
 
     bootstrap.ensure_initialised()
 
@@ -72,6 +97,10 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
     if hasattr(provider, "add_span_processor"):
         provider.add_span_processor(SimpleSpanProcessor(proof))
         proof_attached = True
+
+    # Captured before emission so the confirmation poll below only matches
+    # this ping's span, not a stale one from an earlier run.
+    since = utcnow()
 
     # Emit one labeled test span through the real @watch()/record_llm_call path.
     with AgentSession(agent_id=agent_id):
@@ -91,14 +120,25 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
     mode = bootstrap.get_mode()
     intercepted = proof_attached and bool(proof.captured)
 
+    confirmed = False
+    confirm_error: str | None = None
+    if mode == "direct":
+        # Written synchronously above (see module docstring) — no read-back
+        # needed, and re-opening the DB here would contend with the write
+        # connection this same process already holds.
+        confirmed = True
+    elif mode == "http":
+        confirmed, confirm_error = _confirm_delivery(config, agent_id, since)
+
     if output_json:
         console.print_json(_json.dumps({
             "intercepted": intercepted,
             "delivery_mode": mode,
+            "confirmed": confirmed,
             "agent_id": agent_id,
             "model": PING_MODEL,
         }))
-        _exit_for_mode(ctx, mode)
+        _exit_for_confirmation(ctx, confirmed)
         return
 
     if intercepted:
@@ -114,10 +154,17 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
         )
 
     base_url = f"http://{config.api.host}:{config.api.port}"
-    if mode == "http":
+    if mode == "http" and confirmed:
         console.print(
-            f"[green]✓[/green] Delivered to [bold]tj serve[/bold] at {base_url}. "
-            "Run [bold]tj status[/bold] to see it."
+            f"[green]✓[/green] Delivered to [bold]tj serve[/bold] at {base_url} "
+            "(confirmed received). Run [bold]tj status[/bold] to see it."
+        )
+    elif mode == "http":
+        reason = f" ({confirm_error})" if confirm_error else ""
+        console.print(
+            f"[yellow]⚠[/yellow] Span emitted to [bold]tj serve[/bold] at {base_url} "
+            f"but not confirmed received{reason} — is [bold]tj serve[/bold] healthy? "
+            "Run [bold]tj status[/bold] to check."
         )
     elif mode == "direct":
         console.print(
@@ -131,11 +178,46 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
             "and re-run [bold]tj ping[/bold]."
         )
 
-    _exit_for_mode(ctx, mode)
+    _exit_for_confirmation(ctx, confirmed)
 
 
-def _exit_for_mode(ctx: click.Context, mode: str) -> None:
-    """Exit non-zero when the span was not stored, so scripts/CI can gate on it."""
-    if mode in ("http", "direct"):
-        ctx.exit(0)
-    ctx.exit(1)
+def _confirm_delivery(
+    config: object, agent_id: str, since: object
+) -> tuple[bool, str | None]:
+    """Poll the daemon's read API for the just-emitted ping span.
+
+    Returns ``(confirmed, error)``. ``error`` is set only when the read path
+    itself couldn't be resolved (daemon unreachable and the local DB is
+    locked/unavailable) — a clean "didn't arrive within the timeout" is
+    ``(False, None)``.
+    """
+    from tokenjam.core.onboard_verify import open_read_backend, poll_for_first_span
+
+    backend, _mode, error = open_read_backend(config)
+    if backend is None:
+        return False, error
+
+    try:
+        result = poll_for_first_span(
+            backend,
+            since,
+            agent_id=agent_id,
+            timeout_s=PING_CONFIRM_TIMEOUT_S,
+            interval_s=PING_CONFIRM_INTERVAL_S,
+        )
+    finally:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 — best-effort cleanup
+                pass
+
+    if result.error:
+        return False, result.error
+    return result.confirmed, None
+
+
+def _exit_for_confirmation(ctx: click.Context, confirmed: bool) -> None:
+    """Exit non-zero unless delivery was confirmed, so scripts/CI can gate on it."""
+    ctx.exit(0 if confirmed else 1)
