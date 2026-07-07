@@ -106,15 +106,16 @@ def not_confirmed_cause(persona: str) -> str:
     """
     if persona == "claude_code":
         return (
-            "Claude Code only starts sending telemetry after a restart. Open a "
-            "new terminal and launch `claude`, then re-run `tj doctor`. If you "
-            "already restarted, check the OTLP wiring with `tj doctor`."
+            "Claude Code only sends telemetry after a restart, and backfilled "
+            "history doesn't count as live — this waits for a new span. Restart "
+            "it (open a new terminal, launch `claude`), then run `tj doctor`, "
+            "which separates live from backfilled spans."
         )
     if persona == "codex":
         return (
-            "Codex only starts sending telemetry after a restart. Restart Codex, "
-            "then re-run `tj doctor`. If you already restarted, check the OTLP "
-            "wiring with `tj doctor`."
+            "Codex only sends telemetry after a restart, and backfilled history "
+            "doesn't count as live — this waits for a new span. Restart Codex, "
+            "then run `tj doctor`, which separates live from backfilled spans."
         )
     if persona == "sdk":
         return (
@@ -123,9 +124,10 @@ def not_confirmed_cause(persona: str) -> str:
             "then `tj status`."
         )
     return (
-        "If you use Claude Code / Codex, restart it so telemetry starts. If you "
-        "use the SDK, confirm patch_*()/@watch() run and the daemon is up — try "
-        "`tj ping`."
+        "If you use Claude Code / Codex, restart it so telemetry starts (backfilled "
+        "history doesn't count as live — this waits for a new span; `tj doctor` "
+        "separates the two). If you use the SDK, confirm patch_*()/@watch() run and "
+        "the daemon is up — try `tj ping`."
     )
 
 
