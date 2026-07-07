@@ -54,6 +54,12 @@ class _StubBackend:
     def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
         return [s for s in self.spans if s.trace_id == trace_id]
 
+    def get_session_id_for_trace(self, trace_id: str) -> str | None:
+        for s in self.spans:
+            if s.trace_id == trace_id and s.session_id:
+                return s.session_id
+        return None
+
 
 # ---------------------------------------------------------------------------
 # No-op hook stubs

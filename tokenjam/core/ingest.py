@@ -304,10 +304,10 @@ class IngestPipeline:
 
         # Look up session via trace_id sibling.
         if span.trace_id:
-            for sibling in self.db.get_trace_spans(span.trace_id):
-                if sibling.session_id:
-                    span.session_id = sibling.session_id
-                    return span
+            session_id = self.db.get_session_id_for_trace(span.trace_id)
+            if session_id:
+                span.session_id = session_id
+                return span
 
         # No existing session found — create a new session_id
         span.session_id = new_uuid()
