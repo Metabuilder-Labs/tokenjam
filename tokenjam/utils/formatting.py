@@ -2,6 +2,10 @@ from rich.console import Console
 from rich.table import Table
 from rich import box
 
+# Re-exported so Rich-context callers keep importing from one place; the bodies
+# live in the stdlib-only `humanize` module the zero-token statusline depends on.
+from tokenjam.utils.humanize import display_path, format_tokens  # noqa: F401
+
 console = Console()
 err_console = Console(stderr=True)
 
@@ -25,14 +29,6 @@ def format_cost(usd: float) -> str:
     if usd < 0.001:
         return f"${usd:.6f}"
     return f"${usd:.4f}"
-
-
-def format_tokens(n: int) -> str:
-    if n >= 1_000_000:
-        return f"{n/1_000_000:.1f}M"
-    if n >= 1_000:
-        return f"{n/1_000:.1f}k"
-    return str(n)
 
 
 def make_table(*headers: str, box_style=box.SIMPLE) -> Table:
