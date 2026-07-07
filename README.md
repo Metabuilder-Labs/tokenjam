@@ -268,6 +268,7 @@ tj serve               # start Lens + REST API
 | Configuration | [docs/configuration.md](docs/configuration.md) |
 | Architecture deep-dive | [docs/architecture.md](docs/architecture.md) |
 | Installation extras (Trim, framework patches) | [docs/installation.md](docs/installation.md) |
+| Non-interactive / CI setup (scripted `tj onboard`, Docker harnesses) | [docs/ci-setup.md](docs/ci-setup.md) |
 | Export to Grafana / Datadog / NDJSON | [docs/export.md](docs/export.md) |
 | NemoClaw sandbox observer | [docs/nemoclaw-integration.md](docs/nemoclaw-integration.md) |
 | Release notes | [GitHub Releases](https://github.com/Metabuilder-Labs/tokenjam/releases) |
