@@ -25,7 +25,24 @@ tj onboard --claude-code    # configure Claude Code telemetry
 tj onboard --no-daemon      # skip daemon installation
 tj onboard --budget 5.00    # set daily budget during setup
 tj onboard --force          # overwrite existing config
+tj onboard --verify         # poll for the first span after setup and report confirmed/not-confirmed
 ```
+
+Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` (plus `--project` for `--claude-code`) skip every prompt — see [Non-interactive / CI setup](ci-setup.md) for the exact invocation per persona. `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
+
+**`--verify` and `--no-daemon`:** verification polls for the first span through whichever read path is available. With the daemon running it reads over HTTP; with `--no-daemon`, the poller opens the DuckDB file directly — the same file the SDK would need to write to. If nothing else is writing yet (the pre-first-run case) this works; if something else holds the write lock, verification reports "start `tj serve`" rather than confirming, even though onboarding itself succeeded. Run `tj ping` instead to prove interception without touching the DB lock at all, or start `tj serve` temporarily to get a live confirmation.
+
+### `tj ping`
+
+Emit one clearly-labeled test span through the real SDK export path to prove instrumentation is wired up, without needing a whole agent. Reports whether the span was intercepted and where it was delivered (running daemon over HTTP, or local DuckDB directly).
+
+```bash
+tj ping
+tj ping --agent my-agent
+tj ping --json
+```
+
+Exit codes: 0 = intercepted and delivered, 1 = interception or delivery failed.
 
 ### `tj doctor`
 
