@@ -70,6 +70,7 @@ bloat     = ["llmlingua>=0.2"]
 
 [project.scripts]
 tj = "tokenjam.cli.main:cli"
+tokenjam = "tokenjam.cli.main:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/synthetic", "tests/agents", "tests/integration"]
