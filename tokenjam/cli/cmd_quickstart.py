@@ -281,11 +281,12 @@ def _render(diag, timeline, *, since: str,
     console.print(f"  [dim]{diag.caveat}[/dim]")
     console.print()
     deeper = Text()
-    deeper.append("Go deeper: ", style="bold")
-    deeper.append("`tj onboard`", style="bold cyan")
-    deeper.append(" sets up live capture, the local dashboard, and the "
-                  "zero-token statusline (the opt-in daemon path).", style="dim")
+    deeper.append("Go deeper", style="bold")
+    deeper.append(" — install and set up live capture, the local dashboard, "
+                  "and the zero-token statusline:", style="dim")
     console.print(deeper)
+    console.print()
+    console.print(Text("  pipx install tokenjam && tj onboard", style="bold cyan"))
     console.print()
 
 
