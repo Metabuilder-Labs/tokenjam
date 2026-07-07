@@ -24,10 +24,12 @@ from tests.factories import (
 
 
 # ---------------------------------------------------------------------------
-# Minimal in-memory storage stub (task 01 provides the real implementation)
+# Minimal in-memory storage stub — named _StubBackend to avoid collision
+# with tokenjam.core.db.InMemoryBackend, which is the real DuckDB-backed
+# in-memory backend used in integration tests.
 # ---------------------------------------------------------------------------
 
-class InMemoryBackend:
+class _StubBackend:
     """Stub StorageBackend that stores everything in dicts/lists."""
 
     def __init__(self) -> None:
@@ -48,6 +50,9 @@ class InMemoryBackend:
             if s.conversation_id == conversation_id:
                 return s
         return None
+
+    def get_trace_spans(self, trace_id: str) -> list[NormalizedSpan]:
+        return [s for s in self.spans if s.trace_id == trace_id]
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +82,11 @@ def _make_pipeline(
     *,
     security: SecurityConfig | None = None,
     capture: CaptureConfig | None = None,
-    db: InMemoryBackend | None = None,
+    db: _StubBackend | None = None,
     agents: dict | None = None,
-) -> tuple[IngestPipeline, InMemoryBackend]:
+) -> tuple[IngestPipeline, _StubBackend]:
     """Create an IngestPipeline with sensible defaults for testing."""
-    db = db or InMemoryBackend()
+    db = db or _StubBackend()
     config = TjConfig(
         version="1",
         security=security or SecurityConfig(),
@@ -213,6 +218,93 @@ class TestSessionResolution:
 
         assert db.spans[-1].session_id is not None
         assert len(db.sessions) == 1
+
+    def test_trace_id_resolves_to_session_of_sibling_span(self):
+        """Raw-OTLP cost spans without session_id attach to the session of a
+        sibling span on the same trace (#326).
+
+        Scenario: a fan-out harness emits an invoke_agent marker with a
+        session_id on trace T, then emits cost-bearing gen_ai.llm.call spans
+        on the same trace T but *without* a session_id.  _resolve_session must
+        attach those cost spans to the session from the marker span rather than
+        minting a fresh throwaway session for each.
+        """
+        trace_id = "trace-fanout-1"
+        pipeline, db = _make_pipeline()
+
+        # 1. Marker span — carries session_id "s1" and the shared trace_id.
+        marker = make_invoke_agent_span(session_id="s1", trace_id=trace_id)
+        pipeline.process(marker)
+        assert len(db.sessions) == 1
+
+        # 2. Cost span — same trace_id, no session_id, no conversation_id.
+        cost_span = make_llm_span(trace_id=trace_id)
+        cost_span.session_id = None
+        cost_span.conversation_id = None
+        pipeline.process(cost_span)
+
+        # Both spans must land on the same session.
+        assert db.spans[-1].session_id == "s1"
+        # No new session should have been created.
+        assert len(db.sessions) == 1
+
+    def test_spans_on_different_traces_get_independent_sessions(self):
+        """Spans on different traces are not accidentally merged (#326 guard).
+
+        Even when two spans lack a session_id, if their trace_ids differ they
+        must each get their own independent session.
+        """
+        pipeline, db = _make_pipeline()
+
+        span_a = make_llm_span(trace_id="trace-A")
+        span_a.session_id = None
+        span_a.conversation_id = None
+        pipeline.process(span_a)
+
+        span_b = make_llm_span(trace_id="trace-B")
+        span_b.session_id = None
+        span_b.conversation_id = None
+        pipeline.process(span_b)
+
+        session_id_a = db.spans[0].session_id
+        session_id_b = db.spans[1].session_id
+        assert session_id_a is not None
+        assert session_id_b is not None
+        assert session_id_a != session_id_b
+        assert len(db.sessions) == 2
+
+    def test_cost_span_before_marker_gets_own_session(self):
+        """Ordering caveat: if a cost span arrives before the session-marker on
+        the same trace, the trace lookup finds no session-bearing sibling yet
+        and a fresh session is minted.
+
+        This is a known, documented limitation of the step-3 resolution in
+        _resolve_session (#326).  On every real ingestion path the marker span
+        is emitted first, so this ordering does not occur in practice.  The
+        test exists to lock in the behaviour and flag it clearly if the code
+        ever attempts to retroactively re-parent such spans.
+        """
+        trace_id = "trace-reverse-order"
+        pipeline, db = _make_pipeline()
+
+        # 1. Cost span arrives first — no sibling with a session_id yet.
+        cost_span = make_llm_span(trace_id=trace_id)
+        cost_span.session_id = None
+        cost_span.conversation_id = None
+        pipeline.process(cost_span)
+
+        minted_session_id = db.spans[0].session_id
+        assert minted_session_id is not None
+        assert len(db.sessions) == 1
+
+        # 2. Marker span arrives second with its own session_id.
+        marker = make_invoke_agent_span(session_id="s-marker", trace_id=trace_id)
+        pipeline.process(marker)
+
+        # The marker keeps its own session; cost span keeps the minted one.
+        assert db.spans[0].session_id == minted_session_id
+        assert db.spans[1].session_id == "s-marker"
+        assert len(db.sessions) == 2
 
 
 # ===========================================================================
@@ -354,7 +446,7 @@ class TestErrorHandling:
 
     def test_hook_failure_does_not_crash_pipeline(self):
         """Post-ingest hook errors are logged, not propagated."""
-        db = InMemoryBackend()
+        db = _StubBackend()
         config = TjConfig(version="1")
 
         class FailingCostEngine:
