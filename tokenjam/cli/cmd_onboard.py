@@ -203,19 +203,26 @@ def _unwire_claude_resume_brief_hook(settings: dict) -> bool:
               help="Project name to group this repo under in the dashboard "
                    "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
                    "'aquanode'). Defaults to the git org. Used with --claude-code.")
+@click.option("--verify", is_flag=True, default=False,
+              help="After setup, poll for the first span from the newly "
+                   "configured source and report whether telemetry is flowing "
+                   "(distinguishes 'wired and receiving' from 'configured but "
+                   "silent'). Runs non-interactively; skips the prompt.")
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
-                reconfigure: bool, plan: str | None, project_override: str | None) -> None:
+                reconfigure: bool, plan: str | None, project_override: str | None,
+                verify: bool) -> None:
     """Interactive setup wizard for tj."""
     # Branded welcome moment (#240) — shown once at the top of every onboard
     # flow (plain / --claude-code / --codex) before any prompt or config check.
     print_welcome_banner()
     if claude_code:
-        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan, project_override)
+        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
+                             project_override, verify=verify)
         return
     if codex:
-        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan)
+        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan, verify=verify)
         return
     existing = find_config_file()
     if existing and not force:
@@ -410,6 +417,90 @@ retention_days = 90
     )
     console.print()
 
+    # First-signal verification (#80): the SDK is fail-open, so a typo'd
+    # agent_id / missing patch / dead daemon leaves the user silent. Reload the
+    # just-written config so the poller reads the same DB/API the daemon uses.
+    try:
+        from tokenjam.core.config import load_config as _load_written_config
+        written_config = _load_written_config(str(config_path.resolve()))
+    except Exception:
+        written_config = None
+    if written_config is not None:
+        _maybe_verify_onboarding(written_config, persona="sdk", verify=verify)
+
+
+def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> None:
+    """Run first-signal verification if ``--verify`` was passed, or offer it
+    interactively. No-op when neither applies (non-interactive without the flag).
+
+    ``persona`` is one of ``"sdk"``, ``"claude_code"``, ``"codex"`` and drives
+    the instruction shown and the not-confirmed cause.
+    """
+    if not verify:
+        if not sys.stdin.isatty():
+            return
+        if not click.confirm(
+            "\nVerify tj is receiving telemetry now?", default=False
+        ):
+            return
+    _run_onboard_verification(config, persona)
+
+
+def _run_onboard_verification(
+    config: object, persona: str, *, timeout_s: float = 60.0
+) -> None:
+    """Open a read-only path to spans and poll for the first one after now,
+    reporting confirmed / not-confirmed with the per-persona likely cause."""
+    from tokenjam.core.onboard_verify import (
+        not_confirmed_cause,
+        open_read_backend,
+        poll_for_first_span,
+    )
+    from tokenjam.utils.time_parse import utcnow
+
+    backend, _mode, error = open_read_backend(config)
+    if backend is None:
+        console.print(f"\n[yellow]Can't verify yet[/yellow] \u2014 {error}.")
+        console.print(
+            "Start [bold]tj serve[/bold], then run [bold]tj doctor[/bold] to check."
+        )
+        return
+
+    try:
+        since = utcnow()
+        if persona == "sdk":
+            console.print(
+                "\n[bold]Verifying\u2026[/bold] trigger one span now \u2014 run your agent, "
+                "or in another terminal run [bold]tj ping[/bold]."
+            )
+        else:
+            console.print(
+                "\n[bold]Verifying\u2026[/bold] waiting for the first telemetry. If you "
+                "haven't yet, [bold]restart[/bold] the agent runtime now."
+            )
+        console.print(f"[dim]Polling for up to {int(timeout_s)}s\u2026[/dim]")
+        result = poll_for_first_span(backend, since, timeout_s=timeout_s)
+    finally:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    if result.confirmed:
+        console.print(
+            f"[green]\u2713 Receiving telemetry![/green] First span arrived after "
+            f"{result.elapsed_s:.0f}s \u2014 you're wired up."
+        )
+    elif result.error:
+        console.print(f"[yellow]Couldn't verify[/yellow] \u2014 {result.error}.")
+    else:
+        console.print(
+            f"[yellow]\u26a0 No telemetry yet[/yellow] after {int(timeout_s)}s. "
+            + not_confirmed_cause(persona)
+        )
+
 
 _ANTHROPIC_PLAN_CHOICES = [
     ("api",      "API (per-token billing through console.anthropic.com)"),
@@ -552,6 +643,7 @@ def _onboard_claude_code(
     reconfigure: bool = False,
     plan_override: str | None = None,
     project_override: str | None = None,
+    verify: bool = False,
 ) -> None:
     """Configure Claude Code to send telemetry to tj."""
     from tokenjam.core.config import (
@@ -980,6 +1072,8 @@ def _onboard_claude_code(
     )
     console.print(f"[dim]After restarting, run:[/dim]  tj status --agent {agent_id}")
 
+    _maybe_verify_onboarding(config, persona="claude_code", verify=verify)
+
 
 def _onboard_codex(
     ctx: click.Context,
@@ -988,6 +1082,7 @@ def _onboard_codex(
     force: bool,
     reconfigure: bool = False,
     plan_override: str | None = None,
+    verify: bool = False,
 ) -> None:
     """Configure Codex CLI to send telemetry to tj."""
     try:
@@ -1231,6 +1326,8 @@ def _onboard_codex(
     )
     _print_restart_banner("Codex")
     console.print("[dim]After restarting, run:[/dim]  tj traces")
+
+    _maybe_verify_onboarding(config, persona="codex", verify=verify)
 
 
 def _print_restart_banner(app_name: str) -> None:
