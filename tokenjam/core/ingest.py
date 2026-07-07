@@ -284,8 +284,14 @@ class IngestPipeline:
 
     def _resolve_session(self, span: NormalizedSpan) -> NormalizedSpan:
         """
-        If the span has a conversation_id and a matching session exists,
-        use that session_id. Otherwise create a new session_id.
+        Resolve or create a session_id for the span.
+
+        Resolution order:
+        1. Span already carries a session_id — keep it.
+        2. Span carries a conversation_id that matches an existing session — use that.
+        3. Span carries a trace_id that matches spans already written for a known
+           session — attach to that session (#326).
+        4. None of the above — mint a fresh session_id.
         """
         if span.session_id:
             return span
@@ -294,6 +300,13 @@ class IngestPipeline:
             existing = self.db.get_session_by_conversation(span.conversation_id)
             if existing is not None:
                 span.session_id = existing.session_id
+                return span
+
+        # Look up session via trace_id sibling.
+        if span.trace_id:
+            session_id = self.db.get_session_id_for_trace(span.trace_id)
+            if session_id:
+                span.session_id = session_id
                 return span
 
         # No existing session found — create a new session_id
