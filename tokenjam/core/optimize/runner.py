@@ -36,6 +36,7 @@ ANALYZER_ORDER: list[str] = [
     "reuse",
     "trim",
     "subagent",
+    "summarize",
 ]
 
 THIN_DATA_DAYS = 7
@@ -332,6 +333,10 @@ def _build_finding_constructors() -> dict:
         SubagentRightsizingFinding,
         SubagentRow,
     )
+    from tokenjam.core.optimize.analyzers.summarize import (
+        SummarizeCandidate,
+        SummarizeFinding,
+    )
     from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
@@ -434,6 +439,17 @@ def _build_finding_constructors() -> dict:
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
+    def _summarize(d: dict) -> SummarizeFinding:
+        cands = [SummarizeCandidate(**c) for c in d.get("candidates") or []]
+        return SummarizeFinding(
+            candidates=cands,
+            files=int(d.get("files", 0)),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
+        )
+
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
@@ -441,6 +457,7 @@ def _build_finding_constructors() -> dict:
         "reuse": _reuse,
         "trim": _prompt_bloat,
         "subagent": _subagent,
+        "summarize": _summarize,
     }
 
 
