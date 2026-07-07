@@ -326,7 +326,7 @@ Key flag: `--off` on `killswitch` releases pass-through mode.
 
 ## Integration entrypoints
 
-These are wired by `tj onboard --claude-code` and invoked by Claude Code itself (via hooks / the statusline / the shell wrapper), not typically run by hand — documented here for completeness and troubleshooting.
+These are wired by `tj onboard --claude-code` (except `tj hook cap-output`, which is opt-in) and invoked by Claude Code itself (via hooks / the statusline / the shell wrapper), not typically run by hand — documented here for completeness and troubleshooting.
 
 ### `tj statusline`
 
