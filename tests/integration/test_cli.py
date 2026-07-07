@@ -1258,6 +1258,121 @@ def test_optimize_json_includes_plan_and_pricing_mode(runner, db, config):
         assert "monthly_tokens_freed" in data["downgrade"]
 
 
+def test_optimize_ranks_findings_by_reclaimable_share_not_registry_order(runner, db, config):
+    """#97: a downsize finding whose candidates hold a negligible share of
+    the window's tokens must not occupy the numbered ① slot ahead of a
+    finding that's actually reclaiming a meaningful fraction of the window
+    — the exact bug: "① Model downgrade: 28% of sessions match" when those
+    sessions held ~0% of the window's tokens, because downsize always
+    rendered first (ANALYZER_ORDER), not by size of the opportunity.
+    """
+    from datetime import timedelta
+    from tests.factories import make_llm_span, make_session, make_tool_span
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+
+    # Small-opus downsize candidate: matches the structural heuristic, but
+    # its tokens are a tiny fraction of the window once the noise below is
+    # added (1_200 / ~501_200 ≈ 0.2%).
+    db.insert_span(make_llm_span(
+        agent_id="test-agent", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.03,
+        session_id="small-opus", start_time=now - timedelta(days=1),
+    ))
+
+    # Noise: large LLM sessions that don't match the downgrade shape (input
+    # far exceeds SMALL_INPUT_TOKENS) but dominate window.total_tokens.
+    for i in range(10):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", model="claude-sonnet-4-5", provider="anthropic",
+            input_tokens=50_000, output_tokens=1_000, cost_usd=1.0,
+            session_id=f"noise-{i}", start_time=now - timedelta(days=1),
+        ))
+
+    # Identical-signature cluster: 20 single-tool-call sessions, each with
+    # 5_000 session-level tokens — ~20% of the window, dwarfing the downsize
+    # candidate's ~0.2%. (Both the script and reuse analyzers key off this
+    # same repeated-tool-sequence signal; whichever surfaces a cluster wins
+    # the top slot — the point being it's not downsize.)
+    for i in range(20):
+        sid = f"cluster-{i}"
+        db.upsert_session(make_session(
+            agent_id="test-agent", session_id=sid,
+            input_tokens=4_000, output_tokens=1_000, total_cost_usd=0.05,
+        ))
+        tool = make_tool_span(agent_id="test-agent", tool_name="Read")
+        tool.session_id = sid
+        tool.start_time = now - timedelta(days=1)
+        db.insert_span(tool)
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+
+    # The bigger reclaimable-share finding leads — not downsize, even though
+    # downsize always ran first in ANALYZER_ORDER.
+    assert "① Workflow restructure" in out or "① Reuse" in out
+    # ...and downsize no longer gets the fixed ① slot it always used to.
+    assert "① Model downgrade" not in out
+    # It's still surfaced — honesty discipline forbids a silent drop — just
+    # collapsed into the de-minimis pointer list instead of a numbered slot.
+    assert "Minor findings" in out
+    assert "Model downgrade" in out
+    assert "of window tokens" in out
+
+
+def test_optimize_downsize_cta_matches_claude_code_persona(runner, db, config):
+    """#97: a window dominated by claude-code-* sessions gets the Claude Code
+    routing CTA (route export / subagent right-sizing / /compact), not the
+    SDK-only `tjb run --original ... --candidate ...` command a subscription
+    user has no way to act on."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+    db.upsert_session(make_session(
+        agent_id="claude-code-my-project", session_id="s-small", plan_tier="max_5x",
+    ))
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-my-project", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.03,
+        session_id="s-small", start_time=now - timedelta(days=1),
+    ))
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+
+    assert "tj route export --target ccr" in out
+    assert "tj optimize subagent" in out
+    assert "/compact" in out
+    # tjb is still mentioned, but only as the secondary SDK note.
+    assert "If you also run SDK agents" in out
+
+
+def test_optimize_downsize_cta_unchanged_for_sdk_persona(runner, db, config):
+    """A non-Claude-Code (SDK/API) persona keeps the original tjb CTA."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span
+    from tokenjam.utils.time_parse import utcnow
+
+    db.insert_span(make_llm_span(
+        agent_id="sdk-worker", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.03,
+        session_id="s-small", start_time=utcnow() - timedelta(days=1),
+    ))
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+
+    assert "Candidate only — prove it holds before switching:" in out
+    assert "pip install tokenjam-bench" in out
+    assert "tj route export --target ccr" not in out
+
+
 def test_cost_compare_renders_window_diff(runner, db, config):
     """`tj cost --compare previous` produces a diff report against the prior window."""
     from datetime import timedelta

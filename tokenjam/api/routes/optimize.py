@@ -19,7 +19,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
+from tokenjam.core.framing import (
+    WindowSummary,
+    agent_persona_mix,
+    compute_framing,
+    plan_tier_mix,
+)
 from tokenjam.core.optimize import ANALYZER_REGISTRY, build_report, report_to_dict
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -110,6 +115,17 @@ def get_optimize(
             payload["plan_tier_mix"] = {}
     else:
         payload["plan_tier_mix"] = {}
+
+    # Agent-persona mix (#97) — same best-effort daemon-mode plumbing as
+    # plan_tier_mix above, so the CLI's downsize CTA can tell a Claude Code
+    # subscriber from an SDK/API developer whether or not the daemon is up.
+    if conn is not None:
+        try:
+            payload["agent_persona_mix"] = agent_persona_mix(conn, since_dt, until_dt, agent_id)
+        except Exception:
+            payload["agent_persona_mix"] = {}
+    else:
+        payload["agent_persona_mix"] = {}
 
     # Plan-tier framing block (#110) — built from the report window + the
     # plan-tier mix above, so the local web UI frames recoverable-savings and
