@@ -384,6 +384,35 @@ def test_doctor_no_staleness_warning_when_no_spans(runner, db, config, tmp_path)
     assert not any(c["level"] == "warning" for c in checks)
 
 
+def test_doctor_onboarding_signal_info_when_silent(runner, db, config, tmp_path):
+    """Onboarded-but-zero-spans (#80) surfaces an actionable info line — never a
+    warning, so a fresh setup still exits 0."""
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 0
+    checks = json.loads(result.output)
+    signal = [c for c in checks if c["name"] == "Onboarding signal"]
+    assert signal and signal[0]["level"] == "info"
+    assert "no spans" in signal[0]["message"].lower()
+
+
+def test_doctor_onboarding_signal_ok_with_spans(runner, db, config, tmp_path):
+    """Once any span exists, the onboarding-signal check goes green."""
+    _clean_doctor_config(config, tmp_path)
+    db.insert_span(make_llm_span(agent_id="test-agent", start_time=utcnow()))
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 0
+    checks = json.loads(result.output)
+    signal = [c for c in checks if c["name"] == "Onboarding signal"]
+    assert signal and signal[0]["level"] == "ok"
+
+
 def test_doctor_warns_on_schema_without_capture(runner, db, config, tmp_path):
     config.agents["test-agent"] = AgentConfig(output_schema="schema.json")
     config.capture.tool_outputs = False

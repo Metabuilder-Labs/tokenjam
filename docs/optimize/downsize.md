@@ -44,3 +44,4 @@ JSON output mirrors the same data with top-level `plan` and `pricing_mode` field
 - [Cache](cache.md) — measure and improve prompt-cache usage
 - [Script](script.md) — find workflows that look like deterministic shell scripts
 - [Trim](trim.md) — identify low-significance tokens in captured prompts
+- [Subagent](subagent.md) — the same over-powered heuristic, scoped to subagents instead of whole sessions

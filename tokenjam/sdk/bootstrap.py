@@ -17,6 +17,16 @@ _lock = threading.Lock()
 _initialised = False
 _provider = None
 _pipeline = None
+# Where spans are being delivered after bootstrap, for surfaces (e.g. `tj ping`)
+# that want to tell the user. One of: "uninitialised", "http" (posting to a
+# running `tj serve`), "direct" (writing local DuckDB), "failed" (neither — the
+# SDK stays fail-open and drops spans).
+_mode = "uninitialised"
+
+
+def get_mode() -> str:
+    """Return the current span-delivery mode set by :func:`ensure_initialised`."""
+    return _mode
 
 
 def ensure_initialised() -> None:
@@ -24,7 +34,7 @@ def ensure_initialised() -> None:
     Idempotent bootstrap. Safe to call multiple times / from multiple threads.
     Sets up: config -> DuckDB -> IngestPipeline -> TjSpanExporter -> TracerProvider.
     """
-    global _initialised, _provider, _pipeline
+    global _initialised, _provider, _pipeline, _mode
     if _initialised:
         return
 
@@ -40,6 +50,7 @@ def ensure_initialised() -> None:
 
             # Check if tj serve is running — use HTTP exporter if so
             if _try_http_mode(config):
+                _mode = "http"
                 _initialised = True
                 atexit.register(_shutdown)
                 return
@@ -52,6 +63,7 @@ def ensure_initialised() -> None:
             pipeline = build_default_pipeline(db, config)
             _pipeline = pipeline
             _provider = build_tracer_provider(config, pipeline)
+            _mode = "direct"
             _initialised = True
 
             # Ensure spans are flushed on exit
@@ -66,11 +78,13 @@ def ensure_initialised() -> None:
                 try:
                     config = load_config()
                     if _try_http_mode(config):
+                        _mode = "http"
                         _initialised = True
                         atexit.register(_shutdown)
                         return
                 except Exception:
                     pass
+            _mode = "failed"
             logger.warning("TokenJam bootstrap failed — spans will not be recorded: %s", exc)
             _initialised = True  # Don't retry on every call
 
