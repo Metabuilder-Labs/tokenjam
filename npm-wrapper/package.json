@@ -12,7 +12,8 @@
     "directory": "npm-wrapper"
   },
   "bin": {
-    "tj": "bin/tj.js"
+    "tj": "bin/tj.js",
+    "tokenjam": "bin/tj.js"
   },
   "files": [
     "bin/tj.js",

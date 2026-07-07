@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from tokenjam.core.onboard_verify import (
     VerifyResult,
     not_confirmed_cause,
@@ -100,6 +98,16 @@ def test_cause_is_persona_specific():
     # Unknown persona covers both failure modes.
     generic = not_confirmed_cause("???")
     assert "Claude Code" in generic and "SDK" in generic
+
+
+def test_restart_causes_explain_backfill_is_not_live():
+    # The pointer at doctor no longer falsely reassures (doctor now separates
+    # live from backfilled), but the message must say why verify can report "no
+    # telemetry" while backfilled data sits on disk (#102).
+    for persona in ("claude_code", "codex"):
+        cause = not_confirmed_cause(persona).lower()
+        assert "backfilled" in cause
+        assert "live" in cause
 
 
 # --- open_read_backend ------------------------------------------------------

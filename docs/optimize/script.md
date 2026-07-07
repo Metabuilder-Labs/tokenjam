@@ -87,3 +87,4 @@ it claims structural identity, which is a different (and weaker) thing.
 - [Downsize](downsize.md) — flag sessions whose shape matches a cheaper-model candidate
 - [Cache](cache.md) — measure and improve prompt-cache usage
 - [Trim](trim.md) — identify low-significance tokens in captured prompts
+- [Subagent](subagent.md) — per-subagent cost breakdown and right-sizing candidates (Claude Code only)

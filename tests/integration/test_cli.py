@@ -106,14 +106,15 @@ def _seed_agent_and_session(db, agent_id="test-agent"):
     return session
 
 
-def _seed_alert(db, agent_id="test-agent", acknowledged=False, suppressed=False):
+def _seed_alert(db, agent_id="test-agent", acknowledged=False, suppressed=False,
+                 alert_type=AlertType.COST_BUDGET_DAILY, title="Daily budget exceeded"):
     """Insert an alert into the DB."""
     alert = Alert(
         alert_id=new_uuid(),
         fired_at=utcnow(),
-        type=AlertType.COST_BUDGET_DAILY,
+        type=alert_type,
         severity=Severity.WARNING,
-        title="Daily budget exceeded",
+        title=title,
         detail={"message": "Agent exceeded $5.00 daily budget"},
         agent_id=agent_id,
         acknowledged=acknowledged,
@@ -155,6 +156,82 @@ def test_status_json_includes_active_and_elapsed(runner, db, config):
     a = json.loads(result.output)["agents"][0]
     assert "active_seconds" in a and "duration_seconds" in a
     assert a["active_seconds"] == 4.0   # 4000 ms of spans
+
+
+def test_status_dedupes_duplicate_alerts_of_same_type(runner, db, config):
+    """The alert engine's in-memory dedup state (CooldownTracker,
+    `_failure_rate_fired`) resets on process restart, so the DB can
+    legitimately hold two rows for the same (type, agent) pair (#96). The
+    human-readable `tj status` render must collapse repeats into one line
+    with a count rather than printing the same alert line twice."""
+    _seed_agent_and_session(db)
+    _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
+    _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 1
+    assert result.output.count("failure_rate — test-agent") == 1
+    assert "×2" in result.output
+
+
+def test_status_distinct_alert_types_are_not_collapsed(runner, db, config):
+    """Two DIFFERENT alert types for the same agent must both still render —
+    dedup is keyed on (type, agent), not agent alone."""
+    _seed_agent_and_session(db)
+    _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
+    _seed_alert(db, alert_type=AlertType.RETRY_LOOP, title="retry_loop — test-agent")
+    result = _invoke(runner, db, config, ["status"])
+    assert "failure_rate — test-agent" in result.output
+    assert "retry_loop — test-agent" in result.output
+    assert "×2" not in result.output
+
+
+def test_status_subscription_plan_shows_no_raw_dollar_line(runner, db):
+    """Subscription-tier users must not see a raw '$0.00' Cost today line
+    (#96) — the workspace rule is subscription users see plan-share framing,
+    never raw spend they don't pay. Mirrors `tj cost`'s honesty note."""
+    from tokenjam.core.config import ProviderBudget
+
+    session = make_session(agent_id="test-agent", plan_tier="max_5x")
+    db.upsert_session(session)
+    sub_config = TjConfig(version="1", budgets={"anthropic": ProviderBudget(plan="max_5x")})
+
+    result = _invoke(runner, db, sub_config, ["status"])
+    assert result.exit_code == 0
+    assert "$0.00" not in result.output
+    assert "$0.000000" not in result.output
+    assert "Cost today:     0.0% of cycle" in result.output
+    assert "Subscription plan" in result.output
+
+
+def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):
+    """API-billed users keep the historical raw-dollar Cost today line."""
+    _seed_agent_and_session(db)
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 0
+    assert "Cost today:     $0.00" in result.output
+    assert "Subscription plan" not in result.output
+
+
+def test_status_subscription_plan_with_daily_limit_shows_literal_dollar_cap(runner, db):
+    """A subscription-framed agent with a per-agent `daily_usd` limit must show
+    that limit as its literal dollar amount with a `/day` qualifier, not as a
+    percentage of the monthly subscription cycle — a user-configured DAILY
+    dollar cap has no relationship to the MONTHLY cycle `render_dollar` uses
+    for framed spend. Only the spend-so-far figure stays plan-tier-framed."""
+    from tokenjam.core.config import ProviderBudget
+
+    session = make_session(agent_id="test-agent", plan_tier="max_5x")
+    db.upsert_session(session)
+    sub_config = TjConfig(
+        version="1",
+        budgets={"anthropic": ProviderBudget(plan="max_5x")},
+        agents={"test-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
+    )
+
+    result = _invoke(runner, db, sub_config, ["status"])
+    assert result.exit_code == 0
+    assert "Cost today:     0.0% of cycle / $5.00/day limit" in result.output
+    assert "% of cycle limit" not in result.output
 
 
 # -- traces tests --
@@ -251,6 +328,24 @@ def test_doctor_exits_2_when_errors_present(runner, db, config):
     with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=None):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 2
+
+
+def test_doctor_sdk_only_setup_exits_0(runner, db, config, tmp_path):
+    # A pure-SDK install (no ~/.claude, no claude-code-* agent) is fully correct;
+    # the inapplicable statusline-wiring check must be info, not warning, so
+    # doctor exits 0. A `claude` binary merely on PATH must not flip it (#105).
+    # HOME is already pointed at a throwaway dir (no ~/.claude) by the autouse
+    # isolation fixture, and the config fixture has only a non-Claude-Code agent.
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 0
+    checks = json.loads(result.output)
+    statusline_checks = [c for c in checks if c["name"] == "Statusline wiring"]
+    assert statusline_checks and statusline_checks[0]["level"] == "info"
+    assert "SDK" in statusline_checks[0]["message"]
 
 
 def _clean_doctor_config(config, tmp_path):
@@ -435,10 +530,13 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
         assert mcp_checks and mcp_checks[0]["level"] == "info"
 
-    # Case 2: Claude Code CLI is on PATH but the MCP is NOT registered. Post-#59
-    # the MCP is an SDK-only surface, so its absence for a coding agent is the
-    # correct state and must NOT warn (it's "info"). Instead the STATUSLINE check
-    # warns, because the zero-token statusline isn't wired yet.
+    # Case 2: a real Claude Code context (~/.claude present) but the MCP is NOT
+    # registered. Post-#59 the MCP is an SDK-only surface, so its absence for a
+    # coding agent is the correct state and must NOT warn (it's "info"). Instead
+    # the STATUSLINE check warns, because the zero-token statusline isn't wired
+    # yet. Post-#105 the warning keys off the Claude Code context (~/.claude),
+    # NOT a `claude` binary on PATH — so establish that context explicitly.
+    (fake_home / ".claude").mkdir(parents=True, exist_ok=True)
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", side_effect=lambda cmd: "/bin/claude" if cmd == "claude" else None), \
@@ -453,7 +551,14 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         assert statusline_checks and statusline_checks[0]["level"] == "warning"
         assert "tj onboard --claude-code" in statusline_checks[0]["message"]
 
-    # Case 3: MCP registered globally in Codex (~/.codex/config.toml) -> should be level: "ok"
+    # Drop the Claude Code context again so the later Codex/SDK cases (which
+    # assert exit 0) don't inherit the statusline warning it triggers.
+    (fake_home / ".claude").rmdir()
+
+    # Case 3: MCP registered globally in Codex (~/.codex/config.toml) -> should
+    # be level "warning" (#94): Codex gets the same +36% quota-tax reasoning as
+    # Claude Code (see cmd_onboard.py's Codex path, which actively retires this
+    # legacy block), so a green check here would contradict the #59 decision.
     codex_dir = fake_home / ".codex"
     codex_dir.mkdir(parents=True, exist_ok=True)
     codex_config = codex_dir / "config.toml"
@@ -464,17 +569,20 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
          patch("shutil.which", return_value=None), \
          patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         checks = json.loads(result.output)
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
-        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert mcp_checks and mcp_checks[0]["level"] == "warning"
         assert "Codex" in mcp_checks[0]["message"]
+        assert "#59" in mcp_checks[0]["message"]
 
     # Clean up codex file
     codex_config.unlink()
     codex_dir.rmdir()
 
-    # Case 4: MCP registered globally in Claude Code (~/.claude.json) -> should be level: "ok"
+    # Case 4: MCP registered globally in Claude Code (~/.claude.json) -> should
+    # be level "warning" (#94) — a green check for this state contradicts the
+    # #59 decision to keep MCP out of the Claude Code loop.
     claude_json = fake_home / ".claude.json"
     claude_json.write_text('{"mcpServers": {"tj": {"command": "tj"}}}')
 
@@ -483,16 +591,18 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
          patch("shutil.which", return_value=None), \
          patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         checks = json.loads(result.output)
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
-        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert mcp_checks and mcp_checks[0]["level"] == "warning"
         assert "Claude Code" in mcp_checks[0]["message"]
+        assert "claude mcp remove tj --scope user" in mcp_checks[0]["message"]
 
     # Clean up claude json file
     claude_json.unlink()
 
-    # Case 5: MCP registered locally in project-level .mcp.json -> should be level: "ok"
+    # Case 5: MCP registered locally in project-level .mcp.json -> should be
+    # level "warning" (#94) — same quota-tax reasoning applies at project scope.
     project_mcp = fake_cwd / ".mcp.json"
     project_mcp.write_text('{"mcpServers": {"tj": {"command": "tj"}}}')
 
@@ -501,11 +611,40 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
          patch("shutil.which", return_value=None), \
          patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
-        assert result.exit_code == 0
+        assert result.exit_code == 1
         checks = json.loads(result.output)
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
-        assert mcp_checks and mcp_checks[0]["level"] == "ok"
+        assert mcp_checks and mcp_checks[0]["level"] == "warning"
         assert "project scope" in mcp_checks[0]["message"]
+
+
+def test_doctor_mcp_wiring_message_renders_bracket_literal(runner, db, config, tmp_path):
+    """The Codex removal hint contains the literal TOML section header
+    `[mcp_servers.tj]`. In human (non-JSON) rendering, `_print_check` feeds
+    the message straight into `console.print`, and Rich treats an unescaped
+    `[...]` as a markup tag — stripping it instead of printing it (same class
+    of bug as #157 / PR #407). The console-rendered check must show the
+    bracket text verbatim."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    fake_cwd = tmp_path / "fake_cwd"
+    fake_cwd.mkdir()
+
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    (codex_dir / "config.toml").write_text("[mcp_servers.tj]\ncommand = 'tj'\nargs = ['mcp']\n")
+
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor"])
+
+    assert "[mcp_servers.tj]" in result.output
 
 
 # -- since flag parsing --
@@ -1142,6 +1281,121 @@ def test_optimize_json_includes_plan_and_pricing_mode(runner, db, config):
     # For subscription, downgrade payload carries monthly_tokens_freed
     if data.get("downgrade"):
         assert "monthly_tokens_freed" in data["downgrade"]
+
+
+def test_optimize_ranks_findings_by_reclaimable_share_not_registry_order(runner, db, config):
+    """#97: a downsize finding whose candidates hold a negligible share of
+    the window's tokens must not occupy the numbered ① slot ahead of a
+    finding that's actually reclaiming a meaningful fraction of the window
+    — the exact bug: "① Model downgrade: 28% of sessions match" when those
+    sessions held ~0% of the window's tokens, because downsize always
+    rendered first (ANALYZER_ORDER), not by size of the opportunity.
+    """
+    from datetime import timedelta
+    from tests.factories import make_llm_span, make_session, make_tool_span
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+
+    # Small-opus downsize candidate: matches the structural heuristic, but
+    # its tokens are a tiny fraction of the window once the noise below is
+    # added (1_200 / ~501_200 ≈ 0.2%).
+    db.insert_span(make_llm_span(
+        agent_id="test-agent", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.03,
+        session_id="small-opus", start_time=now - timedelta(days=1),
+    ))
+
+    # Noise: large LLM sessions that don't match the downgrade shape (input
+    # far exceeds SMALL_INPUT_TOKENS) but dominate window.total_tokens.
+    for i in range(10):
+        db.insert_span(make_llm_span(
+            agent_id="test-agent", model="claude-sonnet-4-5", provider="anthropic",
+            input_tokens=50_000, output_tokens=1_000, cost_usd=1.0,
+            session_id=f"noise-{i}", start_time=now - timedelta(days=1),
+        ))
+
+    # Identical-signature cluster: 20 single-tool-call sessions, each with
+    # 5_000 session-level tokens — ~20% of the window, dwarfing the downsize
+    # candidate's ~0.2%. (Both the script and reuse analyzers key off this
+    # same repeated-tool-sequence signal; whichever surfaces a cluster wins
+    # the top slot — the point being it's not downsize.)
+    for i in range(20):
+        sid = f"cluster-{i}"
+        db.upsert_session(make_session(
+            agent_id="test-agent", session_id=sid,
+            input_tokens=4_000, output_tokens=1_000, total_cost_usd=0.05,
+        ))
+        tool = make_tool_span(agent_id="test-agent", tool_name="Read")
+        tool.session_id = sid
+        tool.start_time = now - timedelta(days=1)
+        db.insert_span(tool)
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+
+    # The bigger reclaimable-share finding leads — not downsize, even though
+    # downsize always ran first in ANALYZER_ORDER.
+    assert "① Workflow restructure" in out or "① Reuse" in out
+    # ...and downsize no longer gets the fixed ① slot it always used to.
+    assert "① Model downgrade" not in out
+    # It's still surfaced — honesty discipline forbids a silent drop — just
+    # collapsed into the de-minimis pointer list instead of a numbered slot.
+    assert "Minor findings" in out
+    assert "Model downgrade" in out
+    assert "of window tokens" in out
+
+
+def test_optimize_downsize_cta_matches_claude_code_persona(runner, db, config):
+    """#97: a window dominated by claude-code-* sessions gets the Claude Code
+    routing CTA (route export / subagent right-sizing / /compact), not the
+    SDK-only `tjb run --original ... --candidate ...` command a subscription
+    user has no way to act on."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+    db.upsert_session(make_session(
+        agent_id="claude-code-my-project", session_id="s-small", plan_tier="max_5x",
+    ))
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-my-project", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.03,
+        session_id="s-small", start_time=now - timedelta(days=1),
+    ))
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+
+    assert "tj route export --target ccr" in out
+    assert "tj optimize subagent" in out
+    assert "/compact" in out
+    # tjb is still mentioned, but only as the secondary SDK note.
+    assert "If you also run SDK agents" in out
+
+
+def test_optimize_downsize_cta_unchanged_for_sdk_persona(runner, db, config):
+    """A non-Claude-Code (SDK/API) persona keeps the original tjb CTA."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span
+    from tokenjam.utils.time_parse import utcnow
+
+    db.insert_span(make_llm_span(
+        agent_id="sdk-worker", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1000, output_tokens=200, cost_usd=0.03,
+        session_id="s-small", start_time=utcnow() - timedelta(days=1),
+    ))
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0
+    out = result.output
+
+    assert "Candidate only — prove it holds before switching:" in out
+    assert "pip install tokenjam-bench" in out
+    assert "tj route export --target ccr" not in out
 
 
 def test_cost_compare_renders_window_diff(runner, db, config):
