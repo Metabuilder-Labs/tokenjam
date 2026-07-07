@@ -47,6 +47,20 @@ tj ping --json
 
 Exit codes: 0 = intercepted and delivered, 1 = interception or delivery failed.
 
+### `tj quickstart`
+
+Zero-install, zero-config first run. Reads the same `~/.claude/projects/*.jsonl` files ccusage does — no pip env, no config, no daemon, no on-disk DB (a transient in-memory backend). Shows quota composition (re-read vs. net-new work) and a session timeline, then points at `tj onboard` to go deeper.
+
+```bash
+tj quickstart
+tj quickstart --since 7d
+tj quickstart --full          # lift the first-run cap (default: most-recent 300 sessions)
+tj quickstart --root <path>   # override the Claude Code projects root
+tj quickstart --json
+```
+
+Key flags: `--since`, `--root`, `--full`, `--json`.
+
 ### `tj doctor`
 
 Health check — validates config, database connectivity, ingest secret, and alert channel reachability.
@@ -88,6 +102,43 @@ tj cost --group-by day      # group by day
 tj cost --group-by agent    # group by agent
 tj cost --group-by tool     # group by tool
 ```
+
+### `tj context`
+
+Diagnose where your Claude Code quota goes: what share of tokens is re-reading prior context (conversation history, CLAUDE.md, tool output) vs. net-new work, plus recurring inclusions (capture-gated) and `/compact` candidates. Subscription plans see a token-share/quota headline; API plans see dollars as a secondary line. Needs a direct DB connection or a running `tj serve` (computed server-side when the daemon holds the write lock).
+
+```bash
+tj context
+tj context --since 7d --agent my-agent
+tj context --json
+```
+
+Key flags: `--since`, `--agent`, `--json`.
+
+### `tj quota-audit`
+
+Retroactive audit of your Opus quota: which past Opus sessions were structurally Sonnet-shaped (small input/output, few tool calls)? Reports the percent of Opus quota reclaimable, example sessions to spot-check, and an optional tuned routing-config export. Quota-share framing, never a dollar "saving" claim. Needs a direct DB connection (can't run against a live `tj serve`).
+
+```bash
+tj quota-audit
+tj quota-audit --since 30d --agent my-agent
+tj quota-audit --export-config claude-code
+tj quota-audit --json
+```
+
+Key flags: `--since`, `--agent`, `--export-config`, `--json`.
+
+### `tj savings`
+
+Show tokens reclaimed by the `tj hook cap-output` output-trim hook (estimated, char/4 — the "prove" half of tj's measure → act → prove loop; `tj context` is the "measure" half). Reads the append-only JSONL sink, never the DB.
+
+```bash
+tj savings
+tj savings --session <session_id>
+tj savings --json
+```
+
+Key flags: `--session`, `--json`.
 
 ### `tj alerts`
 
@@ -201,6 +252,18 @@ tj tokenmaxx --json
 
 Key flags: `--since`, `--json`.
 
+### `tj pricing`
+
+Read-only inspection of the resolved model pricing table — one row per `(provider, model)` with input/output/cache-read/cache-write rates in USD per million tokens, plus a `source` column (`override` vs. `packaged`).
+
+```bash
+tj pricing list
+tj pricing list --model claude-opus
+tj pricing list --json
+```
+
+Key flags: `--model`, `--json`.
+
 ### `tj backfill`
 
 Ingest historical telemetry from local Claude Code logs or external observability exports.
@@ -229,6 +292,25 @@ tj report --reuse my-agent --no-open
 ```
 
 Key flags: `--trim [agent_id]`, `--reuse [agent_id]`, `--since`, `--no-open`.
+
+### `tj summarize`
+
+Structure-aware prompt summarization (advisory). `list` scans for prompt files worth summarizing and estimates the per-call token saving (read-only). `prep` wraps a prompt's structure behind verbatim markers and emits it for a model to rewrite — `--via claude-p` or `--via api` runs the rewrite for you in one shot. `check` verifies a rewrite preserved every structure block (a hard gate) and stages it. `apply` writes a staged rewrite back to the file (default dry-run; `--go` writes, with a backup); `undo` restores from that backup.
+
+```bash
+tj summarize list
+tj summarize list --recursive --json
+tj summarize prep path/to/prompt.md
+tj summarize prep path/to/prompt.md --via claude-p
+tj summarize check path/to/prompt.md --summary rewrite.md --prepped-hash <hash>
+tj summarize apply path/to/prompt.md
+tj summarize apply --go
+tj summarize undo path/to/prompt.md --go
+```
+
+Subcommands: `list`, `prep`, `check`, `apply`, `undo`.
+
+Key flags: `list` — `--recursive`, `--repo`, `--no-global`, `--ext`, `--min-prose`, `--json`; `prep` — `--via claude-p|api`, `--ratio`, `--json`; `check` — `--summary`, `--prepped-hash`, `--json`; `apply`/`undo` — `--go`, `--dry-run`, `--json`.
 
 ### `tj policy`
 
@@ -262,6 +344,59 @@ Subcommands: `enable`, `disable`, `status`, `killswitch`.
 
 Key flag: `--off` on `killswitch` releases pass-through mode.
 
+## Integration entrypoints
+
+These are wired by `tj onboard --claude-code` (except `tj hook cap-output`, which is opt-in) and invoked by Claude Code itself (via hooks / the statusline / the shell wrapper), not typically run by hand — documented here for completeness and troubleshooting.
+
+### `tj statusline`
+
+Zero-model-token status line for Claude Code. Reads the session payload JSON Claude Code pipes on stdin and prints one line: model, session token total, and the re-read share (cache-read ÷ total tokens), with a `/compact` nudge once re-reading dominates. Runs out-of-band after each turn — never enters the model's context, so it costs no quota. Wired into `~/.claude/settings.json`'s `statusLine` by `tj onboard --claude-code`.
+
+```bash
+tj statusline   # reads payload JSON on stdin; not meant to be typed interactively
+```
+
+### `tj resume-brief`
+
+Hands a resuming (or post-compaction) session a compact brief of its prior method — task, progress, dead ends, working files — instead of re-investigating. Deterministic, no LLM, zero in-loop token cost. `tj onboard --claude-code` wires `--from-hook` into a `SessionStart` hook automatically.
+
+```bash
+tj resume-brief --from-hook       # SessionStart-hook mode: reads session_id/transcript_path from stdin
+tj resume-brief --session <id>
+tj resume-brief --transcript <path>
+tj resume-brief --last            # manual: most recently active session by mtime
+```
+
+Key flags: `--from-hook`, `--session`, `--transcript`, `--last` (exactly one is expected).
+
+### `tj hook`
+
+Claude Code hook entrypoints installed out-of-band by `tj onboard`. Currently one subcommand, `cap-output`: a `PostToolUse` hook that trims a bloated tool output before it enters context (fail-open — any error leaves the original output untouched). Default-off; opt in via `[hooks.output_cap].enabled = true` then re-run `tj onboard --claude-code`.
+
+```bash
+tj hook cap-output   # reads the PostToolUse event JSON on stdin
+```
+
+### `tj otel-resource-attrs`
+
+Prints this project's OTel resource attributes (`service.name=claude-code-<repo>[,service.namespace=<project>]`) on one bare line. Called by the `claude` shell wrapper (installed by `tj onboard --claude-code`) to build each terminal's `OTEL_RESOURCE_ATTRIBUTES`, appending a per-terminal `service.instance.id`.
+
+```bash
+tj otel-resource-attrs
+```
+
+### `tj session-end`
+
+Reports a terminal's Claude Code session(s) as closed, so the dashboard archives that tile immediately (Claude Code emits no close event of its own). Called best-effort by the `claude` shell wrapper on exit/interrupt; talks to the running daemon over HTTP and never touches the DB directly. Always exits 0 — a failure here must never break the user's shell.
+
+```bash
+tj session-end --instance <terminal-id>
+tj session-end --session <session_id>
+tj session-end -v --instance <terminal-id>   # -v surfaces what happened on failure
+```
+
+Key flags: `--instance`, `--session` (at least one required).
+
 ### `tj demo`
 
 Run reproducible Agent Incident Library scenarios without API keys or external services.
@@ -276,7 +411,7 @@ Key flag: `--json`.
 
 ### `tj mcp`
 
-Start the MCP server (stdio transport for Claude Code). Registered automatically by `tj onboard --claude-code`.
+Start the MCP server (stdio transport, for SDK / API integrations). `tj onboard --claude-code` / `--codex` do **not** register it — an in-loop MCP is a per-turn quota tax on subscription users (ticket #59); wire it manually with `claude mcp add tj --scope user -- tj mcp` only if you're building an SDK / API integration.
 
 ```bash
 tj mcp

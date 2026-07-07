@@ -11,13 +11,15 @@ tj status --agent claude-code-<project>
 
 `tj onboard --claude-code` does everything in one shot:
 - Creates a shared config at `~/.config/tj/config.toml` (one config for all your projects)
-- Writes OTLP exporter vars to `~/.claude/settings.json` so Claude Code sends telemetry automatically
-- Tags this project's sessions by writing `OTEL_RESOURCE_ATTRIBUTES=service.name=claude-code-<project>` to `.claude/settings.json`
+- Writes OTLP exporter vars to the **global** `~/.claude/settings.json` so Claude Code sends telemetry automatically
+- Installs a `claude` shell wrapper into `~/.zshrc` (and `~/.bashrc` if it exists) that tags each terminal with a distinct `service.instance.id` — derived from `--as <name>` if you pass it, else the tty — so concurrent terminals render as separate dashboard tiles. The wrapper calls `tj otel-resource-attrs` for the project's `service.name`/`service.namespace`, appends the per-terminal id, and reports the session closed (`tj session-end`) when `claude` exits so its tile archives
+- **Removes** any hardcoded `OTEL_RESOURCE_ATTRIBUTES` previously written to this project's `.claude/settings.json` — that value would override the wrapper's per-terminal env (Claude Code's `settings.json` `env` block wins over shell env) and collapse every terminal back into one dashboard tile
 - Wires the **zero-token statusline** into `~/.claude/settings.json` (`"statusLine": {"type": "command", "command": "tj statusline"}`) — non-destructively; an existing statusLine you (or another tool) authored is left untouched
+- Wires a **SessionStart resume-brief hook** (`tj resume-brief --from-hook`) so a resumed or post-compaction session is handed its prior method (task, progress, dead ends, working files) as `additionalContext` instead of re-investigating — also zero token cost, also non-destructive of any existing `SessionStart` hook
 - Installs a background daemon (launchd on macOS, systemd on Linux) to keep `tj serve` alive across restarts
 - Adds Docker harness-compatible OTLP env vars to `~/.zshrc`
 
-**Claude Code must be restarted** after running `tj onboard --claude-code` for the new `settings.json` env vars to take effect.
+**Claude Code must be restarted** after running `tj onboard --claude-code` for the new `settings.json` env vars to take effect. Restarting your terminal (or opening a new one) picks up the updated shell wrapper and rc-file env vars.
 
 ## Adding a second (or third) project
 

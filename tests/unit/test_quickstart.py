@@ -150,8 +150,9 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     # Both halves of the first-run value are present.
     assert "quota" in result.output.lower()
     assert "Session timeline" in result.output
-    # The opt-in "go deeper" pointer keeps the daemon path discoverable.
-    assert "tj onboard" in result.output
+    # The opt-in "go deeper" pointer prints the full pasteable install command,
+    # since the quickstart audience has no `tj` on PATH (it ran via `npx tokenjam`).
+    assert "pipx install tokenjam && tj onboard" in result.output
 
 
 def test_quickstart_json_emits_both_views(tmp_path):

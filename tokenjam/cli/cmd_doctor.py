@@ -4,6 +4,7 @@ import json
 
 import click
 import duckdb
+from rich.markup import escape
 
 from tokenjam.core.config import find_config_file, load_config
 from tokenjam.utils.formatting import console, display_path
@@ -518,22 +519,37 @@ def _check_mcp_wiring(config: object) -> dict:
 
     # The MCP is an SDK / API surface, not a Claude Code / Codex one (#59): an
     # in-loop MCP is a per-turn quota burden on subscription users, so its
-    # ABSENCE for a coding agent is the correct state, never a warning. If it is
-    # registered (an SDK user, or a legacy CC/Codex registration) just report it.
+    # ABSENCE for a coding agent is the correct state, never a warning. A
+    # registration found in Claude Code, Codex, or project scope is exactly
+    # the quota-tax footgun this check exists to catch (`tj onboard` hasn't
+    # written any of these since #59 — see cmd_onboard.py's Codex path,
+    # which actively retires a legacy block) — flag it, don't green-check it.
     if has_codex or has_claude or has_project:
         found_locations = []
+        removal_hints = []
         if has_codex:
             found_locations.append("Codex (global)")
+            removal_hints.append(
+                "`tj onboard --codex --reconfigure` retires the legacy "
+                "[mcp_servers.tj] block"
+            )
         if has_claude:
             found_locations.append("Claude Code (global)")
+            removal_hints.append("`claude mcp remove tj --scope user` to deregister")
         if has_project:
             found_locations.append("project scope")
+            removal_hints.append(
+                "remove the `tj` entry from .mcp.json / .claude.json in this project"
+            )
         return {
             "name": "MCP wiring",
-            "level": "ok",
+            "level": "warning",
             "message": (
-                f"MCP server registered in {', '.join(found_locations)} "
-                "(the in-request-path surface for SDK / API use)."
+                f"MCP server registered in {', '.join(found_locations)} — an "
+                "in-loop MCP is a per-turn quota tax on subscription users "
+                "(+36% measured, ticket #59), not the recommended surface for "
+                "Claude Code / Codex. Remove it: " + "; ".join(removal_hints) + ". "
+                "The MCP is meant for SDK / API integrations only."
             ),
         }
 
@@ -755,4 +771,7 @@ def _print_check(check: dict) -> None:
     icons = {"ok": "[green]\u2713[/green]", "warning": "[yellow]\u26a0[/yellow]",
              "error": "[red]\u2717[/red]", "info": "[blue]i[/blue]"}
     icon = icons.get(level, "?")
-    console.print(f"  {icon}  {check['name']}: {check['message']}")
+    # Check names/messages are plain text, not Rich markup \u2014 a literal
+    # bracketed value inside one (e.g. the `[mcp_servers.tj]` TOML section
+    # header) would otherwise be parsed as a markup tag and stripped.
+    console.print(f"  {icon}  {escape(check['name'])}: {escape(check['message'])}")

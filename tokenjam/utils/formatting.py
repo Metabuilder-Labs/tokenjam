@@ -26,9 +26,15 @@ def status_icon(status: str) -> str:
 
 
 def format_cost(usd: float) -> str:
-    if usd < 0.001:
-        return f"${usd:.6f}"
-    return f"${usd:.4f}"
+    """Format a USD amount for display (#96).
+
+    Under $100: 2 decimal places ("$12.50"). At or above $100: whole dollars
+    with thousands separators ("$1,042") — sub-dollar precision on large
+    figures (e.g. "$29488.0100") reads as false precision, not accuracy.
+    """
+    if usd >= 100:
+        return f"${usd:,.0f}"
+    return f"${usd:,.2f}"
 
 
 def make_table(*headers: str, box_style=box.SIMPLE) -> Table:

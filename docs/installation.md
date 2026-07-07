@@ -7,7 +7,7 @@ TokenJam ships as a Python package on PyPI and a TypeScript SDK on npm. Pick the
 The fastest way to see value — **no install, no config, no daemon**:
 
 ```bash
-npx tokenjam                      # or:  uvx --from tokenjam tj
+npx tokenjam                      # or:  uvx tokenjam
 ```
 
 This runs `tj quickstart`: it reads your existing Claude Code sessions from
@@ -22,15 +22,17 @@ written to disk and no background process starts.
   launcher that shells out to the Python CLI via the first available runner
   (`uvx` → `pipx run` → an installed `tj`). All arguments pass straight through,
   so `npx tokenjam quickstart --since 7d`, `npx tokenjam optimize`, etc. all work.
-- `uvx --from tokenjam tj` runs the Python CLI directly with [uv](https://docs.astral.sh/uv/)'s
-  ephemeral runner. (The `--from tokenjam` is required because the PyPI package
-  is `tokenjam` while the command is `tj`.)
+- `uvx tokenjam` runs the Python CLI directly with [uv](https://docs.astral.sh/uv/)'s
+  ephemeral runner. (The PyPI package `tokenjam` ships both a `tj` command and a
+  `tokenjam` alias, so `uvx tokenjam` and `uvx --from tokenjam tj` are equivalent —
+  use the longer `--from` form if you're on an older tokenjam release without the
+  alias.)
 
 **Requirements:** a Python runner — `uv` (recommended) or `pipx`. `npx tokenjam` prints
 install guidance if neither is present.
 
-When you're ready for live capture, the local dashboard, and the MCP server for
-Claude Code, install the full CLI (below) and run `tj onboard`.
+When you're ready for live capture, the local dashboard, and the zero-token
+statusline, install the full CLI (below) and run `tj onboard`.
 
 ## Base install
 
