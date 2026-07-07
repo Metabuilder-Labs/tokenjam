@@ -2,13 +2,16 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import click
 from rich.markup import escape as _rich_escape
 
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
+    agent_persona_mix,
     config_declared_plan,
+    dominant_persona,
     dominant_plan,
     plan_tier_mix,
     pricing_mode_for,
@@ -33,7 +36,10 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 # Plan-tier framing helpers (PLAN_LABEL_AND_FEE, pricing_mode_for,
 # dominant_plan, config_declared_plan, plan_tier_mix) live in
 # tokenjam.core.framing — the single source shared with cmd_tokenmaxx and the
-# REST API. See issue #110.
+# REST API. See issue #110. agent_persona_mix / dominant_persona (also
+# framing.py) classify the window's dominant user (Claude Code subscriber vs
+# SDK/API developer) so the downsize finding's call-to-action matches the
+# levers that persona actually has — see #97.
 
 
 @click.command("optimize")
@@ -151,6 +157,10 @@ def cmd_optimize(
         # #68 §12 follow-up #29, so the CLI can render subscription /
         # local / unknown framings correctly under daemon mode.
         plan_mix = report_dict.get("plan_tier_mix") or {}
+        # Agent-persona mix (#97) — same daemon-mode plumbing as plan_mix
+        # above, so the downsize CTA matches persona whether or not the
+        # daemon is up.
+        agent_mix = report_dict.get("agent_persona_mix") or {}
     else:
         row = conn.execute(
             "SELECT COUNT(*) FROM spans WHERE model IS NOT NULL"
@@ -183,10 +193,12 @@ def cmd_optimize(
         )
 
         plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
+        agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
 
     dominant = dominant_plan(plan_mix)
     pricing_mode = pricing_mode_for(dominant)
     declared_plan = config_declared_plan(config)
+    persona = dominant_persona(agent_mix, declared_plan=declared_plan)
 
     # --export-config branch: write the snippet to disk and exit. Skips
     # the normal rendering path. The user reads the snippet file and
@@ -242,6 +254,8 @@ def cmd_optimize(
         payload["plan_tier_mix"] = plan_mix
         payload["plan"] = dominant
         payload["pricing_mode"] = pricing_mode
+        payload["agent_persona_mix"] = agent_mix
+        payload["persona"] = persona
         if cost_diff is not None:
             from tokenjam.cli.cmd_cost import _diff_to_dict
             payload["compare"] = _diff_to_dict(cost_diff)
@@ -267,6 +281,7 @@ def cmd_optimize(
         dominant_plan=dominant, pricing_mode=pricing_mode,
         declared_plan=declared_plan,
         requested=list(findings) if findings else None,
+        persona=persona,
     )
     if cost_diff is not None:
         from tokenjam.cli.cmd_cost import _render_diff
@@ -276,6 +291,94 @@ def cmd_optimize(
         from tokenjam.cli.cmd_cost import _render_diff_dict
         console.print("\n[bold]Window comparison[/bold]")
         _render_diff_dict(cost_diff_dict)
+
+
+# ---------------------------------------------------------------------------
+# Finding ranking (#97) — order the numbered slots by reclaimable share of
+# the window's tokens, instead of ANALYZER_ORDER (registry order).
+# ---------------------------------------------------------------------------
+
+# Minimum estimated-recoverable-token share of the window for a finding to
+# occupy a numbered slot. Below this, ranking by share is noise — a finding
+# whose analyzer merely happened to run first shouldn't outrank one that's
+# actually reclaiming a meaningful fraction of the window. Findings below the
+# threshold still render, just collapsed into the "Minor findings" pointer
+# list instead of a numbered slot.
+DE_MINIMIS_SHARE = 0.01
+
+# Display labels for the "Minor findings" collapsed pointer list — must match
+# the header text each renderer prints in its numbered form.
+_MINOR_FINDING_LABELS = {
+    "downsize":        "Model downgrade",
+    "cache":           "Cache efficacy",
+    "cache-recommend": "Cache recommend",
+    "script":          "Workflow restructure",
+    "reuse":           "Reuse",
+    "trim":            "Prompt bloat",
+    "subagent":        "Subagent right-sizing",
+}
+
+
+def _numbered_marker(n: int) -> str:
+    """Circled-digit marker for a ranked finding's slot (①, ②, … ⑳)."""
+    if 1 <= n <= 20:
+        return chr(0x2460 + n - 1)
+    return f"({n})"  # defensive — no report should ever have this many
+
+
+def _reclaimable_share(finding: Any, window_total_tokens: int) -> float | None:
+    """Estimated-recoverable-tokens share of the window, for ranking.
+
+    Returns ``None`` — not 0.0 — when the finding has no quantified estimate
+    at all (analyzer disabled, no candidates, or cache-recommend, which
+    recommends a cache_control placement rather than a token count). Those
+    findings still render in full (they're not "de-minimis", they're
+    "unranked") — only a finding with a real-but-tiny share collapses into
+    the Minor findings pointer list. Conflating the two would hide an
+    analyzer's own diagnostic empty-state message (e.g. "no tool spans in
+    this window") behind a generic pointer.
+    """
+    tokens = getattr(finding, "estimated_recoverable_tokens", None)
+    if tokens is None or window_total_tokens <= 0:
+        return None
+    return max(float(tokens), 0.0) / window_total_tokens
+
+
+def _rank_findings(
+    report: OptimizeReport, requested: list[str] | None,
+) -> list[tuple[str, float | None]]:
+    """Rank findings with something to show by reclaimable token share
+    (largest first; unranked findings — no quantified estimate — sort last).
+    Ties fall back to ANALYZER_ORDER for determinism.
+    """
+    window_tokens = report.window.total_tokens
+    order = ["downsize", *_FINDING_RENDERERS.keys()]
+    order_index = {name: i for i, name in enumerate(order)}
+
+    items: list[tuple[str, float | None]] = []
+    # Render an explicit "no candidates" empty state when the downsize
+    # analyzer ran but found nothing — the Optimize web tab does this
+    # (PR #130 / issue #126) and the CLI used to silently skip the section,
+    # which makes reviewers think the analyzer didn't run. Skip the empty
+    # state when the user asked for a different positional subset
+    # (`tj optimize cache` shouldn't mention downsize at all).
+    downsize_was_requested = (not requested) or ("downsize" in requested)
+    if report.downgrade is not None:
+        items.append(("downsize", _reclaimable_share(report.downgrade, window_tokens)))
+    elif downsize_was_requested:
+        items.append(("downsize", None))
+
+    for name, finding in (report.findings or {}).items():
+        if name not in _FINDING_RENDERERS:
+            continue
+        items.append((name, _reclaimable_share(finding, window_tokens)))
+
+    items.sort(key=lambda item: (
+        item[1] is None,
+        -(item[1] or 0.0),
+        order_index.get(item[0], len(order)),
+    ))
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +393,7 @@ def _render_report(
     pricing_mode: str = "unknown",
     declared_plan: str | None = None,
     requested: list[str] | None = None,
+    persona: str = "unknown",
 ) -> None:
     w = report.window
     scope_tag = f", {agent}" if agent else ""
@@ -380,29 +484,58 @@ def _render_report(
     if report.notes:
         console.print()
 
-    # ----- Model-downgrade body -----
-    # Render an explicit "no candidates" empty state when the analyzer ran
-    # but found nothing — the Optimize web tab does this (PR #130 / issue
-    # #126) and the CLI used to silently skip the section, which makes
-    # reviewers think the analyzer didn't run. Skip the empty state when
-    # the user asked for a different positional subset (`tj optimize cache`
-    # shouldn't mention downsize at all).
-    downsize_was_requested = (not requested) or ("downsize" in requested)
-    if report.downgrade is not None:
-        _render_downgrade(
-            report.downgrade,
-            pricing_mode=("unknown" if all_unknown else pricing_mode),
-        )
+    # ----- Findings, ranked by reclaimable share of the window's tokens -----
+    # Findings used to render in ANALYZER_ORDER (registry order), so a
+    # nothing-burger could occupy the top numbered slot just because its
+    # analyzer happened to run first — e.g. "① Model downgrade: 28% of
+    # sessions match" when those sessions held ~0% of the window's tokens
+    # (#97). Rank by estimated_recoverable_tokens / window.total_tokens
+    # instead. Three buckets:
+    #   major    — real, meaningful share: numbered slot, full render.
+    #   unranked — no quantified estimate at all (disabled / no candidates):
+    #              full render (own empty-state message), unnumbered — same
+    #              as the historical behavior, so diagnostic detail ("no tool
+    #              spans in this window") never disappears.
+    #   minor    — real but de-minimis share: collapsed to a one-line pointer
+    #              so it can't crowd out a finding that actually matters.
+    ranked = _rank_findings(report, requested)
+    major = [item for item in ranked if item[1] is not None and item[1] >= DE_MINIMIS_SHARE]
+    unranked = [item for item in ranked if item[1] is None]
+    minor = [item for item in ranked if item[1] is not None and item[1] < DE_MINIMIS_SHARE]
+
+    def _render_finding(name: str, marker: str) -> None:
+        if name == "downsize":
+            if report.downgrade is not None:
+                _render_downgrade(
+                    report.downgrade,
+                    pricing_mode=("unknown" if all_unknown else pricing_mode),
+                    persona=persona,
+                    marker=marker,
+                )
+            else:
+                console.print(
+                    f"{_finding_header(marker, 'Model downgrade:')} "
+                    "[dim]no candidates in this window — sessions don't match "
+                    "the smaller-model shape (small input/output, few tool "
+                    "calls).[/dim]"
+                )
+        else:
+            _FINDING_RENDERERS[name](
+                report.findings[name], pricing_mode=pricing_mode, marker=marker,
+            )
+
+    for slot, (name, _share) in enumerate(major, start=1):
+        _render_finding(name, _numbered_marker(slot))
         console.print()
-    elif downsize_was_requested:
-        console.print(
-            "  [bold]① Downsize:[/bold] "
-            "[dim]no candidates in this window — sessions don't match the "
-            "smaller-model shape (small input/output, few tool calls).[/dim]"
-        )
+
+    for name, _share in unranked:
+        _render_finding(name, "")
         console.print()
 
     # ----- Budget projection -----
+    # Not part of the reclaimable-share ranking above — it's a forward-looking
+    # cap/overage exposure, not a recoverable-tokens finding, so it always
+    # renders in its own section rather than competing for a numbered slot.
     # Subscription users don't have a dollar-denominated budget projection;
     # the [budget.<provider>] section may exist as a self-imposed soft
     # ceiling, but rendering it as a hard cap would mislead. Suppress in
@@ -412,28 +545,44 @@ def _render_report(
             _render_budget(proj)
             console.print()
 
-    # ----- Wave-2 findings (cache, cache-recommend,
-    # script, trim) — these attach to report.findings
-    # rather than typed slots. Dispatch to a per-finding renderer; ignore
-    # any unknown finding names (forward-compatible with future analyzers).
-    rendered_any_wave2 = False
-    for name, finding in (report.findings or {}).items():
-        renderer = _FINDING_RENDERERS.get(name)
-        if renderer is None:
-            continue
-        renderer(finding, pricing_mode=pricing_mode)
+    # ----- Minor findings -----
+    # De-minimis-share findings stay visible (never silently dropped — the
+    # honesty discipline forbids a quiet skip) but collapsed to a one-line
+    # pointer instead of a full render, so a near-zero finding can't crowd
+    # out the ones that actually matter.
+    if minor:
+        console.print(
+            f"  [dim]Minor findings (< {DE_MINIMIS_SHARE * 100:.0f}% of window "
+            f"tokens):[/dim]"
+        )
+        for name, share in minor:
+            # `minor` is filtered to `item[1] is not None` above; the
+            # assertion below just narrows the type for mypy.
+            assert share is not None
+            label = _MINOR_FINDING_LABELS.get(name, name)
+            if name == "downsize":
+                # The exact scenario this ranking fixes (#97): the analyzer
+                # found session-shape candidates, but they hold a negligible
+                # share of the window's tokens — say so plainly rather than
+                # "no candidates" (that empty state is the `unranked` bucket,
+                # which only holds report.downgrade is None).
+                assert report.downgrade is not None
+                console.print(
+                    f"     [dim]• {label} — "
+                    f"{report.downgrade.percent_of_sessions:.0f}% of sessions "
+                    f"match, but only ~{share * 100:.1f}% of window tokens. "
+                    f"Run [bold]tj optimize downsize[/bold] for detail.[/dim]"
+                )
+            else:
+                console.print(
+                    f"     [dim]• {label} — ~{share * 100:.1f}% of window "
+                    f"tokens. Run [bold]tj optimize {name}[/bold] for "
+                    f"detail.[/dim]"
+                )
         console.print()
-        rendered_any_wave2 = True
 
-    # Only show the catch-all when truly nothing rendered. The earlier
-    # condition missed the Wave-2 findings dict, so cache /
-    # cache-recommend / script / trim were silently
-    # falling into "No candidates flagged" (issue #68 §15).
-    rendered_any = (
-        report.downgrade is not None
-        or downsize_was_requested  # we emit a "no candidates" empty state
-        or (pricing_mode == "api" and bool(report.budgets))
-        or rendered_any_wave2
+    rendered_any = bool(major) or bool(unranked) or bool(minor) or (
+        pricing_mode == "api" and bool(report.budgets)
     )
     if not rendered_any:
         console.print(
@@ -463,7 +612,12 @@ def _sampling_ci_suffix(d: DowngradeFinding) -> str:
     )
 
 
-def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
+def _render_downgrade(
+    d: DowngradeFinding,
+    pricing_mode: str = "api",
+    persona: str = "unknown",
+    marker: str = "①",
+) -> None:
     """
     Render the downsize finding for the given pricing mode.
 
@@ -473,9 +627,12 @@ def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
                     against your plan cap"
     - local:        token-only framing for capacity planning
     - unknown:      structural-only, no savings figures
+
+    `persona` picks the call-to-action at the bottom (#97) — see
+    `_render_downgrade_cta`.
     """
     console.print(
-        f"  [bold]① Model downgrade:[/bold] "
+        f"  [bold]{marker} Model downgrade:[/bold] "
         f"{d.percent_of_sessions:.0f}% of sessions match a smaller-model "
         f"candidate shape"
     )
@@ -553,17 +710,71 @@ def _render_downgrade(d: DowngradeFinding, pricing_mode: str = "api") -> None:
         f"     [yellow]![/yellow] [italic]{MODEL_DOWNGRADE_CAVEAT}[/italic]"
     )
     if d.bench_command:
+        _render_downgrade_cta(d.bench_command, persona)
+
+
+def _render_downgrade_cta(bench_command: str, persona: str) -> None:
+    """
+    Persona-aware call-to-action for the downsize finding (#97).
+
+    A Claude Code subscription user can't pass `--original`/`--candidate` to
+    pick a model per request — their real levers are exporting a routing
+    config, right-sizing subagents, and `/compact`. `tokenjam-bench` (which
+    runs the swap directly against a provider API key) is the right CTA for
+    an SDK/API developer, and only a secondary note for anyone who also runs
+    SDK agents. A mixed window shows both, labeled. Persona "sdk" and the
+    defensive "unknown" fallback both get the original, unchanged CTA.
+    """
+    console.print()
+    if persona == "claude-code":
+        console.print(
+            "     [bold]Candidate only — review before routing:[/bold]"
+        )
+        console.print(
+            "       tj route export --target ccr   "
+            "[dim]# or --target litellm[/dim]"
+        )
+        console.print(
+            "       tj optimize subagent            "
+            "[dim]# right-size subagent models/context[/dim]"
+        )
+        console.print(
+            "       /compact                        "
+            "[dim]# trim context mid-session[/dim]"
+        )
         console.print()
+        console.print(
+            "     [dim]If you also run SDK agents against these models:[/dim]"
+        )
+        console.print("       [dim]pip install tokenjam-bench[/dim]")
+        for line in bench_command.split("\n"):
+            console.print(f"       [dim]{line}[/dim]")
+    elif persona == "mixed":
+        console.print(
+            "     [bold]Candidate only — review before routing:[/bold]"
+        )
+        console.print("     [dim]Claude Code sessions:[/dim]")
+        console.print(
+            "       tj route export --target ccr   "
+            "[dim]# or --target litellm[/dim]"
+        )
+        console.print("       tj optimize subagent")
+        console.print("       /compact")
+        console.print("     [dim]SDK sessions:[/dim]")
+        console.print("       pip install tokenjam-bench")
+        for line in bench_command.split("\n"):
+            console.print(f"       {line}")
+    else:  # persona in {"sdk", "unknown"} — unchanged original CTA
         console.print(
             "     [bold]Candidate only — prove it holds before switching:[/bold]"
         )
         console.print("       pip install tokenjam-bench")
-        for line in d.bench_command.split("\n"):
+        for line in bench_command.split("\n"):
             console.print(f"       {line}")
 
 
 def _render_budget(p: BudgetProjection) -> None:
-    headline = f"  [bold]② Budget projection ({p.provider}, " \
+    headline = f"  [bold]Budget projection ({p.provider}, " \
                f"{format_cost(p.budget_usd)}/cycle):[/bold] "
 
     if not p.over_budget:
@@ -713,19 +924,29 @@ def _export_snippet(
 # dict keyed by analyzer name). _FINDING_RENDERERS at the bottom maps each
 # analyzer's registration name to the function that renders its finding.
 #
-# Each renderer takes (finding, pricing_mode=str) and prints to the global
-# `console`. Adding a new analyzer: add a renderer here and an entry in the
-# dispatch table. cmd_optimize._render_report iterates report.findings and
-# calls into here.
+# Each renderer takes (finding, pricing_mode=str, marker=str) and prints to
+# the global `console`. `marker` is the numbered slot assigned by
+# `_rank_findings` (e.g. "②") — empty when the finding rendered outside the
+# ranked list. Adding a new analyzer: add a renderer here, an entry in the
+# dispatch table, and a label in `_MINOR_FINDING_LABELS`. cmd_optimize.
+# _render_report ranks report.findings by reclaimable share and calls in here.
 
-def _render_cache_efficacy(finding, *, pricing_mode: str = "api") -> None:
+def _finding_header(marker: str, label: str) -> str:
+    """Bold header line for a ranked finding, e.g. '② Cache efficacy:'."""
+    prefix = f"{marker} " if marker else ""
+    return f"  [bold]{prefix}{label}[/bold]"
+
+
+def _render_cache_efficacy(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
     """
     Render the cache finding — current caching-ratio table per
     (provider, model). When any rows are flagged, surface them prominently;
     otherwise show the full table dimmed so the user sees the underlying
     data even when no recommendation is warranted.
     """
-    console.print("  [bold]Cache efficacy:[/bold]")
+    console.print(_finding_header(marker, "Cache efficacy:"))
     if not finding.rows:
         console.print(
             "     [dim]No LLM spans with provider/model in this window.[/dim]"
@@ -765,13 +986,15 @@ def _render_cache_efficacy(finding, *, pricing_mode: str = "api") -> None:
         )
 
 
-def _render_cache_recommend(finding, *, pricing_mode: str = "api") -> None:
+def _render_cache_recommend(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
     """
     Render the cache-recommend finding — Anthropic-only v1 breakpoint
     candidates. When the analyzer is disabled (capture.prompts off), surface
     the hint instead of an empty table.
     """
-    console.print("  [bold]Cache recommend:[/bold]")
+    console.print(_finding_header(marker, "Cache recommend:"))
     if not finding.enabled:
         # Hint includes the install / config instruction from the analyzer.
         # _rich_escape because the hint contains TOML section names like
@@ -821,12 +1044,14 @@ def _render_cache_recommend(finding, *, pricing_mode: str = "api") -> None:
         )
 
 
-def _render_workflow_restructure(finding, *, pricing_mode: str = "api") -> None:
+def _render_workflow_restructure(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
     """
     Render the script (Script) finding — clusters of sessions
     matching the same (tool_name, arg_shape) signature.
     """
-    console.print("  [bold]Workflow restructure:[/bold]")
+    console.print(_finding_header(marker, "Workflow restructure:"))
     if not finding.clusters:
         if finding.sessions_examined == 0:
             console.print(
@@ -880,13 +1105,15 @@ def _render_workflow_restructure(finding, *, pricing_mode: str = "api") -> None:
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
-def _render_prompt_bloat(finding, *, pricing_mode: str = "api") -> None:
+def _render_prompt_bloat(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
     """
     Render the trim (Trim) finding — LLMLingua-2 token-significance
     summary. When the analyzer is disabled (either capture off or extra
     not installed), surface the hint.
     """
-    console.print("  [bold]Prompt bloat:[/bold]")
+    console.print(_finding_header(marker, "Prompt bloat:"))
     if not finding.enabled:
         if finding.hint:
             # Escape Rich markup — hints can contain TOML section names
@@ -937,14 +1164,16 @@ def _render_prompt_bloat(finding, *, pricing_mode: str = "api") -> None:
     )
 
 
-def _render_reuse(finding, *, pricing_mode: str = "api") -> None:
+def _render_reuse(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
     """
     Render the reuse (Reuse) finding — clusters of sessions whose planning
     skeleton repeats. Two recoverable numbers per cluster: cache-reuse (reuse
     the existing skeleton) and script-replacement (replace every planning call
     with a deterministic template). Framed per pricing mode.
     """
-    console.print("  [bold]Reuse:[/bold]")
+    console.print(_finding_header(marker, "Reuse:"))
     if not finding.clusters:
         console.print(
             "     [dim]No repeated planning detected above threshold "
@@ -1000,13 +1229,15 @@ def _render_reuse(finding, *, pricing_mode: str = "api") -> None:
         )
 
 
-def _render_subagent(finding, *, pricing_mode: str = "api") -> None:
+def _render_subagent(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
     """
     Render the subagent right-sizing finding — how much of the window's cost ran
     inside subagents, plus the structurally-flagged candidates (over-powered
     model / over-provisioned context).
     """
-    console.print("  [bold]Subagent right-sizing:[/bold]")
+    console.print(_finding_header(marker, "Subagent right-sizing:"))
     if not finding.total_subagents:
         console.print(
             "     [dim]No subagent (Task-tool) activity in this window.[/dim]"
