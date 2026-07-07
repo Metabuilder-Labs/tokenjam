@@ -212,6 +212,28 @@ def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):
     assert "Subscription plan" not in result.output
 
 
+def test_status_subscription_plan_with_daily_limit_shows_literal_dollar_cap(runner, db):
+    """A subscription-framed agent with a per-agent `daily_usd` limit must show
+    that limit as its literal dollar amount with a `/day` qualifier, not as a
+    percentage of the monthly subscription cycle — a user-configured DAILY
+    dollar cap has no relationship to the MONTHLY cycle `render_dollar` uses
+    for framed spend. Only the spend-so-far figure stays plan-tier-framed."""
+    from tokenjam.core.config import ProviderBudget
+
+    session = make_session(agent_id="test-agent", plan_tier="max_5x")
+    db.upsert_session(session)
+    sub_config = TjConfig(
+        version="1",
+        budgets={"anthropic": ProviderBudget(plan="max_5x")},
+        agents={"test-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
+    )
+
+    result = _invoke(runner, db, sub_config, ["status"])
+    assert result.exit_code == 0
+    assert "Cost today:     0.0% of cycle / $5.00/day limit" in result.output
+    assert "% of cycle limit" not in result.output
+
+
 # -- traces tests --
 
 def test_traces_json_output_is_valid_json(runner, db, config):

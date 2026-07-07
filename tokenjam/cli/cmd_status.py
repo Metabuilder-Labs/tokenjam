@@ -190,16 +190,20 @@ def _cost_line(data: dict, framing) -> str:
     max_5x / max_20x / plus) show a % of cycle; unmetered plans (team /
     enterprise, no declared fee) and local inference show "—". API/unknown
     keep the historical dollar rendering.
+
+    `daily_limit` is a user-configured DAILY dollar cap (`budget.daily_usd`),
+    not a share of the monthly subscription fee — running it through
+    `render_dollar` would express a daily cap as a percentage of the wrong
+    cycle. It's always shown as its literal dollar amount with a `/day`
+    qualifier; only the spend-so-far figure is plan-tier-framed.
     """
     if framing is not None and framing.pricing_mode in ("subscription", "local"):
         from tokenjam.core.framing import render_dollar
         cost_str = render_dollar(data["cost_today"], framing)
-        if data["daily_limit"]:
-            cost_str += f" / {render_dollar(data['daily_limit'], framing)} limit"
-        return cost_str
-    cost_str = format_cost(data["cost_today"])
+    else:
+        cost_str = format_cost(data["cost_today"])
     if data["daily_limit"]:
-        cost_str += f" / {format_cost(data['daily_limit'])} limit"
+        cost_str += f" / {format_cost(data['daily_limit'])}/day limit"
     return cost_str
 
 
