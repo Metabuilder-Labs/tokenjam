@@ -82,7 +82,7 @@ def run(task: str) -> str:
     ...
 ```
 
-→ [Python SDK](docs/python-sdk.md) · [TypeScript SDK](docs/typescript-sdk.md) · [Codex onboarding](docs/installation.md) · [OTel-compatible agents](docs/framework-support.md)
+→ [Python SDK](docs/python-sdk.md) · [TypeScript SDK](docs/typescript-sdk.md) · [Codex onboarding](docs/claude-code-integration.md#codex) · [OTel-compatible agents](docs/framework-support.md)
 
 ---
 
