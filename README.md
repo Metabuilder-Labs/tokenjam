@@ -27,7 +27,7 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 **See where your Claude Code quota goes — 15 seconds, no install** (reads the session logs you already have):
 
 ```bash
-npx tokenjam                          # or: uvx --from tokenjam tj quickstart
+npx tokenjam                          # or: uvx tokenjam
 ```
 
 **Keep it** — the full install adds live capture, all 8 analyzers, Lens (the local dashboard), and the zero-token statusline:
@@ -43,7 +43,7 @@ Zero config, no signup, local-first: `npx tokenjam` reads the Claude Code sessio
 - **Quota composition** — what share of your tokens went to *re-reading context* (history, CLAUDE.md, accumulated tool output) versus *net-new work*.
 - **A session timeline** — your most recent sessions, token spend, and re-read share.
 
-<sub>`npx tokenjam` and `uvx --from tokenjam tj quickstart` launch the Python CLI via `uvx`/`pipx` under the hood — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
+<sub>`npx tokenjam` and `uvx tokenjam` launch the Python CLI via `uvx`/`pipx` under the hood — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
 ---
 
