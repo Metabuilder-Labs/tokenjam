@@ -55,11 +55,16 @@ def db():
 
 
 def test_api_plan_shows_raw_dollars(db):
-    """API users see the historical raw-dollar COST rendering, unchanged."""
+    """API users see the historical raw-dollar COST rendering, unchanged.
+
+    format_cost (#96) rounds amounts >= $100 to whole dollars with thousands
+    separators, so $2599.13 renders as "$2,599" rather than the un-rounded
+    cents.
+    """
     _seed(db, plan_tier="api", cost_usd=2599.13)
     result = _invoke(db, _config("api"), ["cost", "--since", "30d", "--group-by", "model"])
     assert result.exit_code == 0, result.output
-    assert "$2599.13" in result.output          # raw dollars preserved
+    assert "$2,599" in result.output             # raw dollars preserved
     assert "% of cycle" not in result.output     # no subscription reframing
     assert "Subscription plan" not in result.output
 
@@ -70,7 +75,7 @@ def test_subscription_plan_suppresses_raw_dollars(db):
     _seed(db, plan_tier="max_5x", cost_usd=2599.13)
     result = _invoke(db, _config("max_5x"), ["cost", "--since", "30d", "--group-by", "model"])
     assert result.exit_code == 0, result.output
-    assert "$2599.13" not in result.output       # raw dollars suppressed
+    assert "$2,599" not in result.output         # raw dollars suppressed
     # render_dollar's "X% of cycle" framing (the COST column may wrap it, so
     # match the distinctive token rather than the whole phrase).
     assert "cycle" in result.output
@@ -83,5 +88,5 @@ def test_unknown_plan_keeps_dollars_with_qualifier(db):
     _seed(db, plan_tier="unknown", cost_usd=2599.13)
     result = _invoke(db, _config(None), ["cost", "--since", "30d", "--group-by", "model"])
     assert result.exit_code == 0, result.output
-    assert "$2599.13" in result.output           # dollars still shown
+    assert "$2,599" in result.output             # dollars still shown
     assert "may overstate" in result.output       # qualifier surfaced

@@ -106,14 +106,15 @@ def _seed_agent_and_session(db, agent_id="test-agent"):
     return session
 
 
-def _seed_alert(db, agent_id="test-agent", acknowledged=False, suppressed=False):
+def _seed_alert(db, agent_id="test-agent", acknowledged=False, suppressed=False,
+                 alert_type=AlertType.COST_BUDGET_DAILY, title="Daily budget exceeded"):
     """Insert an alert into the DB."""
     alert = Alert(
         alert_id=new_uuid(),
         fired_at=utcnow(),
-        type=AlertType.COST_BUDGET_DAILY,
+        type=alert_type,
         severity=Severity.WARNING,
-        title="Daily budget exceeded",
+        title=title,
         detail={"message": "Agent exceeded $5.00 daily budget"},
         agent_id=agent_id,
         acknowledged=acknowledged,
@@ -155,6 +156,60 @@ def test_status_json_includes_active_and_elapsed(runner, db, config):
     a = json.loads(result.output)["agents"][0]
     assert "active_seconds" in a and "duration_seconds" in a
     assert a["active_seconds"] == 4.0   # 4000 ms of spans
+
+
+def test_status_dedupes_duplicate_alerts_of_same_type(runner, db, config):
+    """The alert engine's in-memory dedup state (CooldownTracker,
+    `_failure_rate_fired`) resets on process restart, so the DB can
+    legitimately hold two rows for the same (type, agent) pair (#96). The
+    human-readable `tj status` render must collapse repeats into one line
+    with a count rather than printing the same alert line twice."""
+    _seed_agent_and_session(db)
+    _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
+    _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 1
+    assert result.output.count("failure_rate — test-agent") == 1
+    assert "×2" in result.output
+
+
+def test_status_distinct_alert_types_are_not_collapsed(runner, db, config):
+    """Two DIFFERENT alert types for the same agent must both still render —
+    dedup is keyed on (type, agent), not agent alone."""
+    _seed_agent_and_session(db)
+    _seed_alert(db, alert_type=AlertType.FAILURE_RATE, title="failure_rate — test-agent")
+    _seed_alert(db, alert_type=AlertType.RETRY_LOOP, title="retry_loop — test-agent")
+    result = _invoke(runner, db, config, ["status"])
+    assert "failure_rate — test-agent" in result.output
+    assert "retry_loop — test-agent" in result.output
+    assert "×2" not in result.output
+
+
+def test_status_subscription_plan_shows_no_raw_dollar_line(runner, db):
+    """Subscription-tier users must not see a raw '$0.00' Cost today line
+    (#96) — the workspace rule is subscription users see plan-share framing,
+    never raw spend they don't pay. Mirrors `tj cost`'s honesty note."""
+    from tokenjam.core.config import ProviderBudget
+
+    session = make_session(agent_id="test-agent", plan_tier="max_5x")
+    db.upsert_session(session)
+    sub_config = TjConfig(version="1", budgets={"anthropic": ProviderBudget(plan="max_5x")})
+
+    result = _invoke(runner, db, sub_config, ["status"])
+    assert result.exit_code == 0
+    assert "$0.00" not in result.output
+    assert "$0.000000" not in result.output
+    assert "Cost today:     0.0% of cycle" in result.output
+    assert "Subscription plan" in result.output
+
+
+def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):
+    """API-billed users keep the historical raw-dollar Cost today line."""
+    _seed_agent_and_session(db)
+    result = _invoke(runner, db, config, ["status"])
+    assert result.exit_code == 0
+    assert "Cost today:     $0.00" in result.output
+    assert "Subscription plan" not in result.output
 
 
 # -- traces tests --
