@@ -22,18 +22,26 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 ---
 
-## Quickstart — zero config, no signup
+## Quickstart
+
+**See where your Claude Code quota goes — 15 seconds, no install** (reads the session logs you already have):
 
 ```bash
 npx tokenjam                          # or: uvx --from tokenjam tj quickstart
 ```
 
-Zero config, no signup: this reads the Claude Code session transcripts you already have on disk (`~/.claude/projects/*.jsonl`), loads them into a throwaway in-memory database, and prints:
+**Keep it** — the full install adds live capture, all 8 analyzers, Lens (the local dashboard), and the zero-token statusline:
+
+```bash
+pipx install tokenjam && tj onboard
+```
+
+Building your own agent with the SDK? Install *in your project* (`pip install tokenjam`) — see the table below.
+
+Zero config, no signup, local-first: `npx tokenjam` reads the Claude Code session transcripts you already have on disk (`~/.claude/projects/*.jsonl`) into a throwaway in-memory database. Nothing is written to disk, no daemon runs, no config is created. It prints:
 
 - **Quota composition** — what share of your tokens went to *re-reading context* (history, CLAUDE.md, accumulated tool output) versus *net-new work*.
 - **A session timeline** — your most recent sessions, token spend, and re-read share.
-
-Nothing is written to disk, no daemon runs, no config is created. When you're ready for live capture, the Lens dashboard, and the MCP server, install for real — see the table below for your path, or jump straight to `pipx install tokenjam && tj onboard`.
 
 <sub>`npx tokenjam` and `uvx --from tokenjam tj quickstart` launch the Python CLI via `uvx`/`pipx` under the hood — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
@@ -159,11 +167,11 @@ Detects clusters of sessions where your agent re-plans the same work and exports
 
 ### 🧩 Subagent right-sizing
 
-Breaks a session's cost down per subagent (Claude Code `Task` calls) and flags ones that ran on a premium model or were handed more context than the work needed — often the majority of a session's spend, hidden inside the parent total.
+Breaks a session's cost down per subagent (Claude Code `Task` calls) and flags ones that ran on a premium model or were handed more context than the work needed — sometimes a large share of a session's spend, hidden inside the parent total.
 
 <pre><code>tj optimize subagent</code></pre>
 
-[Details →](docs/optimize/)
+[Details →](docs/optimize/subagent.md)
 
 </td>
 </tr>
@@ -171,7 +179,13 @@ Breaks a session's cost down per subagent (Claude Code `Task` calls) and flags o
 
 `tj optimize` (no args) runs every analyzer — the six above, plus `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen) and `cache-recommend` (the Cache card's breakpoint-suggestion half, above). Run a subset with `tj optimize downsize cache reuse`.
 
-`tj serve` brings every analyzer's findings, your real spend, and your alerts together in **Lens**, a local browser dashboard — see below.
+### 🔭 Lens
+
+`tj serve` brings every analyzer's findings, your real spend, and your alerts together in one local browser dashboard. No cloud, no signup, fully offline.
+
+<pre><code>tj serve</code></pre>
+
+[Details →](https://tokenjam.dev/products/lens)
 
 ---
 
