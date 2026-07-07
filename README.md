@@ -16,7 +16,7 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 **No cloud · No signup · No vendor lock-in**
 
-<!-- TODO: replace with real terminal screenshot of tj quickstart output (ccusage-style) -->
+<img src="docs/assets/tj-quickstart-hero.png" alt="tj quickstart output: a quota-composition panel showing what share of tokens went to re-reading context vs. net-new work, plus a session timeline with per-session token counts and re-read percentages" width="720">
 
 </div>
 
@@ -51,6 +51,9 @@ Nothing is written to disk, no daemon runs, no config is created. When you're re
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion — no SDK, no patch |
 
 LlamaIndex and the OpenAI Agents SDK ship their own native OTel support — point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
+
+Prefer a single page stacking all five paths in order, each ending with a verify step? See
+[docs/getting-started.md](docs/getting-started.md).
 
 ---
 
@@ -248,6 +251,8 @@ tj serve               # start Lens + REST API
 
 | Topic | Where |
 |---|---|
+| 🚦 Getting started — every entry path, least to most commitment | [docs/getting-started.md](docs/getting-started.md) |
+| ⏱️ The first hour — what to do once data flows | [docs/first-hour.md](docs/first-hour.md) |
 | 🪶 Downsize / Cache / Script / Trim deep-dives | [docs/optimize/](docs/optimize/) |
 | 🔁 Reuse analyzer deep-dive | [docs/optimize/reuse.md](docs/optimize/reuse.md) |
 | 🧪 Prove a downsize candidate holds (TokenJam Bench) | [tokenjam-bench](https://github.com/Metabuilder-Labs/tokenjam-bench) |
