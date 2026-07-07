@@ -46,6 +46,16 @@ output_per_mtok = 25.00
 cache_read_per_mtok = 0.50
 cache_write_per_mtok = 6.25
 
+# Claude Sonnet 5 — introductory pricing in effect through 2026-08-31 (see
+# https://platform.claude.com/docs/en/about-claude/pricing#claude-sonnet-5-introductory-pricing);
+# standard pricing ($3/$15 input/output) takes over 2026-09-01 — update this
+# row then. cache_write = 5-minute write.
+[anthropic.claude-sonnet-5]
+input_per_mtok = 2.00
+output_per_mtok = 10.00
+cache_read_per_mtok = 0.20
+cache_write_per_mtok = 2.50
+
 [anthropic.claude-sonnet-4-6]
 input_per_mtok = 3.00
 output_per_mtok = 15.00

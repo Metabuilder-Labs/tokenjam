@@ -391,7 +391,7 @@ Key flag: `--json`.
 
 ### `tj mcp`
 
-Start the MCP server (stdio transport for Claude Code). Registered automatically by `tj onboard --claude-code`.
+Start the MCP server (stdio transport, for SDK / API integrations). `tj onboard --claude-code` / `--codex` do **not** register it — an in-loop MCP is a per-turn quota tax on subscription users (ticket #59); wire it manually with `claude mcp add tj --scope user -- tj mcp` only if you're building an SDK / API integration.
 
 ```bash
 tj mcp

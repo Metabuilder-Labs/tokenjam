@@ -29,8 +29,8 @@ written to disk and no background process starts.
 **Requirements:** a Python runner — `uv` (recommended) or `pipx`. `npx tokenjam` prints
 install guidance if neither is present.
 
-When you're ready for live capture, the local dashboard, and the MCP server for
-Claude Code, install the full CLI (below) and run `tj onboard`.
+When you're ready for live capture, the local dashboard, and the zero-token
+statusline, install the full CLI (below) and run `tj onboard`.
 
 ## Base install
 
