@@ -114,6 +114,19 @@ def test_deprecated_anthropic_base_models_are_priced():
     assert cost == pytest.approx(4.8)  # 0.8 + 4
 
 
+def test_ping_test_model_is_free_and_silent(caplog):
+    """`tj ping` (#80) emits its proof-of-life span under model tj-ping-test.
+    Issue #92 — that model previously had no pricing row, so every ping fell
+    through to default rates and printed a "No pricing data" notice on a
+    command whose whole purpose is a clean confidence check. The packaged
+    all-zero row (pricing/models.toml) must price it at exactly $0 with no
+    fallback warning."""
+    with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
+        cost = calculate_cost("anthropic", "tj-ping-test", 1, 1)
+    assert cost == 0.0
+    assert "No pricing data" not in caplog.text
+
+
 def test_calculate_cost_zero_tokens_returns_zero_no_warning(caplog):
     with caplog.at_level(logging.WARNING, logger="tokenjam.core.cost"):
         cost = calculate_cost("anthropic", "claude-haiku-4-5", 0, 0)
