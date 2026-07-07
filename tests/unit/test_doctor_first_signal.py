@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pytest
-
 from tokenjam.cli.cmd_doctor import (
     _check_onboarding_first_signal,
     _detect_onboarded_persona,
@@ -55,12 +53,43 @@ def test_flags_info_when_onboarded_but_zero_spans(monkeypatch):
     assert "Claude Code" in check["message"]  # per-persona cause
 
 
-def test_ok_once_a_span_exists():
+def test_ok_once_a_live_span_exists():
     db = InMemoryBackend()
     db.insert_span(make_llm_span(agent_id="my-agent"))
     check = _check_onboarding_first_signal(_config(["my-agent"]), db)
     assert check["level"] == "ok"
     assert "flowing" in check["message"].lower()
+    assert "live" in check["message"].lower()
+
+
+def test_backfill_only_is_not_reported_as_flowing(monkeypatch):
+    # The #102 contradiction: a DB with only backfilled spans must NOT read
+    # "telemetry is flowing" (which contradicts `--verify` polling for a live
+    # span). It reports the honest backfill-vs-live state instead.
+    monkeypatch.setattr("tokenjam.cli.cmd_doctor._tj_statusline_wired", lambda: False)
+    db = InMemoryBackend()
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-myproj",
+        extra_attributes={"source": "backfill.claude_code"},
+    ))
+    check = _check_onboarding_first_signal(_config(["claude-code-myproj"]), db)
+    assert check["level"] == "info"
+    assert "flowing" not in check["message"].lower()
+    assert "backfilled" in check["message"].lower()
+    assert "live" in check["message"].lower()
+
+
+def test_live_span_counts_as_flowing_even_alongside_backfill():
+    db = InMemoryBackend()
+    db.insert_span(make_llm_span(
+        agent_id="my-agent",
+        extra_attributes={"source": "backfill.claude_code"},
+    ))
+    db.insert_span(make_llm_span(agent_id="my-agent"))  # one genuinely live span
+    check = _check_onboarding_first_signal(_config(["my-agent"]), db)
+    assert check["level"] == "ok"
+    assert "flowing" in check["message"].lower()
+    assert "1 live" in check["message"]
 
 
 def test_sdk_persona_cause_points_at_ping(monkeypatch):

@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import click
 import pytest
 
 from tokenjam.cli import cmd_onboard
 from tokenjam.core.onboard_verify import VerifyResult
+
+
+def _ctx() -> click.Context:
+    return click.Context(cmd_onboard.cmd_onboard)
 
 
 def _config():
@@ -82,3 +87,55 @@ def test_maybe_verify_skips_noninteractive_without_flag(monkeypatch):
     monkeypatch.setattr(cmd_onboard.sys.stdin, "isatty", lambda: False)
     cmd_onboard._maybe_verify_onboarding(_config(), persona="sdk", verify=False)
     assert calls == []
+
+
+# --- --verify-only (the lean post-restart re-check, #102) -------------------
+
+
+def test_verify_only_sdk_loads_config_and_polls(monkeypatch, tmp_path):
+    cfg = tmp_path / ".tj" / "config.toml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text('version = "1"\n')
+    calls = []
+    monkeypatch.setattr(cmd_onboard, "find_config_file", lambda: cfg)
+    monkeypatch.setattr(cmd_onboard, "load_config", lambda _p: _config(), raising=False)
+    monkeypatch.setattr(
+        cmd_onboard, "_run_onboard_verification",
+        lambda config, persona: calls.append(persona),
+    )
+    # `load_config` is imported lazily inside the helper.
+    monkeypatch.setattr("tokenjam.core.config.load_config", lambda _p: _config())
+
+    cmd_onboard._run_verify_only(_ctx(), claude_code=False, codex=False)
+    assert calls == ["sdk"]
+
+
+def test_verify_only_claude_code_reads_global_config(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    global_cfg = home / ".config" / "tj" / "config.toml"
+    global_cfg.parent.mkdir(parents=True)
+    global_cfg.write_text('version = "1"\n')
+    monkeypatch.setenv("HOME", str(home))
+    calls = []
+    monkeypatch.setattr("tokenjam.core.config.load_config", lambda _p: _config())
+    monkeypatch.setattr(
+        cmd_onboard, "_run_onboard_verification",
+        lambda config, persona: calls.append(persona),
+    )
+    cmd_onboard._run_verify_only(_ctx(), claude_code=True, codex=False)
+    assert calls == ["claude_code"]
+
+
+def test_verify_only_errors_cleanly_when_no_config(monkeypatch, capsys):
+    monkeypatch.setattr(cmd_onboard, "find_config_file", lambda: None)
+    called = []
+    monkeypatch.setattr(
+        cmd_onboard, "_run_onboard_verification",
+        lambda config, persona: called.append(persona),
+    )
+    with pytest.raises(click.exceptions.Exit) as exc:
+        cmd_onboard._run_verify_only(_ctx(), claude_code=False, codex=False)
+    assert exc.value.exit_code == 1
+    out = capsys.readouterr().out
+    assert "No tj config found" in out
+    assert called == []  # never polled

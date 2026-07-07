@@ -6,7 +6,7 @@ import click
 import duckdb
 
 from tokenjam.core.config import find_config_file, load_config
-from tokenjam.utils.formatting import console
+from tokenjam.utils.formatting import console, display_path
 
 
 @click.command("doctor")
@@ -97,7 +97,7 @@ def _check_config() -> dict:
                     "message": "No config file found. Run `tj onboard` to create one."}
         load_config(str(path))
         return {"name": "Config file", "level": "ok",
-                "message": f"Found and valid: {path}"}
+                "message": f"Found and valid: {display_path(path)}"}
     except Exception as e:
         return {"name": "Config file", "level": "error",
                 "message": f"Config parse error: {e}"}
@@ -116,7 +116,7 @@ def _check_db(config: object) -> dict:
         conn = duckdb.connect(str(db_path))
         conn.close()
         return {"name": "DuckDB writable", "level": "ok",
-                "message": f"Database accessible: {db_path}"}
+                "message": f"Database accessible: {display_path(db_path)}"}
     except Exception as e:
         # DuckDB raises "Could not set lock on file ... Conflicting lock
         # is held in ... PID N" when another process (the daemon, in the
@@ -549,14 +549,40 @@ def _check_mcp_wiring(config: object) -> dict:
     }
 
 
+def _claude_code_context(config: object) -> bool:
+    """True when there's positive evidence the user runs tj *with* Claude Code.
+
+    Two signals, both scoped to THIS user's tj setup rather than the machine as a
+    whole:
+      * a Claude Code home dir (``~/.claude``) exists, or
+      * a ``claude-code-*`` agent is present in config (created by
+        ``tj onboard --claude-code`` and its backfill).
+
+    Deliberately NOT a signal: a ``claude`` binary on ``$PATH``. The CLI can be
+    installed machine-wide while a given user onboards tj SDK-only, so keying the
+    missing-statusline warning off the binary flipped a correct, fully-configured
+    SDK install's ``tj doctor`` to exit 1 (#105). (Uses the simple ``~/.claude`` +
+    agent-prefix heuristics; the core/framing persona helpers land on a later
+    branch and aren't available here.)
+    """
+    from pathlib import Path
+
+    if (Path.home() / ".claude").exists():
+        return True
+    agent_ids = list(getattr(config, "agents", {}) or {})
+    return any(a.startswith("claude-code-") for a in agent_ids)
+
+
 def _check_statusline_wiring(config: object) -> dict:
     """Check whether the zero-token tj statusline is wired into Claude Code (#59).
 
-    The statusline is tj's out-of-band Claude Code surface. If ``claude`` is
-    present but the statusLine isn't tj's, nudge the user to onboard; a foreign
-    statusLine is fine (we never clobber it) and reported as info.
+    The statusline is tj's out-of-band Claude Code surface. When there's a Claude
+    Code context (see :func:`_claude_code_context`) but the statusLine isn't tj's,
+    nudge the user to onboard (warning); a foreign statusLine is fine (we never
+    clobber it) and reported as info. On a machine with no Claude Code context —
+    a pure-SDK install — the check is purely informational so ``tj doctor`` still
+    exits 0 (#105).
     """
-    import shutil
     from pathlib import Path
 
     settings_path = Path.home() / ".claude" / "settings.json"
@@ -579,7 +605,6 @@ def _check_statusline_wiring(config: object) -> dict:
             "message": "tj statusline wired into Claude Code (zero token cost).",
         }
 
-    claude_present = bool(shutil.which("claude")) or (Path.home() / ".claude").exists()
     if statusline is not None:
         return {
             "name": "Statusline wiring",
@@ -590,7 +615,7 @@ def _check_statusline_wiring(config: object) -> dict:
                 "re-read / quota line."
             ),
         }
-    if claude_present:
+    if _claude_code_context(config):
         return {
             "name": "Statusline wiring",
             "level": "warning",
@@ -603,8 +628,9 @@ def _check_statusline_wiring(config: object) -> dict:
         "name": "Statusline wiring",
         "level": "info",
         "message": (
-            "Claude Code not detected. `tj onboard --claude-code` wires the "
-            "zero-token tj statusline when you use it."
+            "Claude Code not detected — this looks like an SDK-only setup. "
+            "`tj onboard --claude-code` wires the zero-token tj statusline if "
+            "you also use Claude Code."
         ),
     }
 
@@ -649,16 +675,24 @@ def _check_onboarding_first_signal(config: object, db: object) -> dict:
     Two personas can finish onboarding "successfully" yet never emit a span: the
     Claude Code path only starts telemetry after a restart, and the fail-open SDK
     path swallows a typo'd agent_id / missing patch / dead daemon silently. When
-    the DB has zero spans but a config exists, surface the likely per-persona
-    cause instead of leaving the user staring at a blank Status page.
+    the DB has zero *live* spans but a config exists, surface the likely
+    per-persona cause instead of leaving the user staring at a blank Status page.
 
-    Reported at **info** level, not warning: doctor has no onboarding timestamp,
-    so it can't tell "just onboarded seconds ago" (expected empty) from "onboarded
-    long ago and silent" (the failure). Flagging every fresh setup as a warning
-    would be a false alarm and flip a clean `tj doctor` to exit 1. The info line
-    still carries the actionable per-persona cause. Complements
+    Live vs backfill (#102): a bare `COUNT(*)` counts backfilled history too, so
+    a Claude-Code user who onboarded and got 25 backfilled spans reads "telemetry
+    is flowing" here while `tj onboard --verify` (which waits for a *new*, live
+    span) says "no telemetry yet" — the two directly contradict each other on the
+    same on-disk state. Backfill spans carry `attributes.source = 'backfill.*'`,
+    so we split the count and only treat *live* spans as "flowing"; a backfill-only
+    DB gets the honest "restart and it will appear" message instead.
+
+    Reported at **info** level (not warning) in the silent cases: doctor has no
+    onboarding timestamp, so it can't tell "just onboarded seconds ago" (expected
+    empty) from "onboarded long ago and silent" (the failure). Flagging every
+    fresh setup as a warning would be a false alarm and flip a clean `tj doctor`
+    to exit 1. The info line still carries the actionable cause. Complements
     ``_check_span_staleness`` (which owns spans-exist-but-stale); this one owns the
-    spans-never-arrived case.
+    no-live-spans case.
     """
     conn = getattr(db, "conn", None)
     if conn is None:
@@ -666,15 +700,42 @@ def _check_onboarding_first_signal(config: object, db: object) -> dict:
                 "message": "Skipped — CLI is running through the HTTP API "
                            "fallback (stop `tj serve` to access the DB directly)."}
     try:
-        row = conn.execute("SELECT COUNT(*) FROM spans").fetchone()
+        row = conn.execute(
+            """
+            SELECT
+              COUNT(*) AS total,
+              COUNT(*) FILTER (
+                WHERE json_extract_string(attributes, '$.source') LIKE 'backfill.%'
+              ) AS backfill
+            FROM spans
+            """
+        ).fetchone()
     except duckdb.Error as e:
         return {"name": "Onboarding signal", "level": "info",
                 "message": f"Skipped — could not count spans: {e}"}
 
     total = int(row[0]) if row and row[0] is not None else 0
-    if total > 0:
+    backfill = int(row[1]) if row and row[1] is not None else 0
+    live = total - backfill
+
+    if live > 0:
+        note = f" ({backfill} backfilled)" if backfill else ""
         return {"name": "Onboarding signal", "level": "ok",
-                "message": f"{total} span(s) recorded — telemetry is flowing."}
+                "message": f"{live} live span(s) recorded{note} — telemetry is flowing."}
+
+    if backfill > 0:
+        # Onboarded, history backfilled, but nothing live since — the exact state
+        # where `--verify` correctly reports "no telemetry yet". Say why, and what
+        # to do, instead of a reassuring raw count.
+        return {
+            "name": "Onboarding signal",
+            "level": "info",
+            "message": (
+                f"{backfill} backfilled session span(s) present, but no LIVE "
+                "telemetry since onboarding — restart Claude Code (or your agent "
+                "runtime) and new activity will appear here."
+            ),
+        }
 
     from tokenjam.core.onboard_verify import not_confirmed_cause
 
