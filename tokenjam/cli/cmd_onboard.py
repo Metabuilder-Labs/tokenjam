@@ -12,6 +12,7 @@ import click
 from rich.markup import escape
 
 from tokenjam.cli.banner import print_welcome_banner
+from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
 from tokenjam.core.config import find_config_file
 from tokenjam.utils.formatting import console
 
@@ -175,6 +176,73 @@ def _unwire_claude_resume_brief_hook(settings: dict) -> bool:
         if not hooks:
             settings.pop("hooks", None)
     return True
+
+
+def _print_generic_instrument_snippet() -> None:
+    """The one-size-fits-all Anthropic snippet — fallback when detection finds nothing."""
+    console.print("[dim]     from tokenjam.sdk import watch[/dim]")
+    console.print("[dim]     from tokenjam.sdk.integrations.anthropic import patch_anthropic[/dim]")
+    console.print()
+    console.print("[dim]     patch_anthropic()[/dim]")
+    console.print()
+    console.print('[dim]     @watch(agent_id="my-agent")[/dim]')
+    console.print("[dim]     def run(task):[/dim]")
+    console.print("[dim]         ...[/dim]")
+
+
+def _print_matched_instrument_snippet(match: SdkMatch) -> None:
+    """One detected SDK/framework's tailored `patch_*()` + `@watch()` snippet."""
+    console.print(f"[dim]     # {match.label}[/dim]")
+    console.print("[dim]     from tokenjam.sdk import watch[/dim]")
+    console.print(f"[dim]     {match.import_line}[/dim]")
+    console.print()
+    console.print(f"[dim]     {match.patch_call}[/dim]")
+    console.print()
+    console.print('[dim]     @watch(agent_id="my-agent")[/dim]')
+    console.print("[dim]     def run(task):[/dim]")
+    console.print("[dim]         ...[/dim]")
+    hint = install_hint(match)
+    if hint:
+        console.print()
+        # escape(): the extras bracket (e.g. "tokenjam[langchain]") would
+        # otherwise be swallowed as Rich markup — same class of bug as #157.
+        console.print(f"[dim]     {escape(hint)}[/dim]")
+
+
+def _print_instrument_agent_snippet() -> None:
+    """Print the bare-onboard "instrument your agent" snippet (issue #85).
+
+    Detects the current project's declared LLM provider SDKs / agent
+    frameworks (via `onboard_detect.detect_stack`) and prints a tailored
+    `patch_*()` call + install hint per match, instead of always assuming
+    Anthropic. Falls back to the generic Anthropic snippet when nothing is
+    detected (unchanged from pre-#85 behavior).
+    """
+    # Stack detection is a nice-to-have outro, never load-bearing: if anything
+    # in manifest reading goes wrong (e.g. a non-UTF-8 manifest surfacing an
+    # unexpected error), degrade to the generic snippet rather than crashing
+    # a default-run command.
+    try:
+        matches = detect_stack(".")
+    except Exception:
+        matches = []
+    if not matches:
+        _print_generic_instrument_snippet()
+        return
+    for i, match in enumerate(matches):
+        if i > 0:
+            console.print()
+        _print_matched_instrument_snippet(match)
+    if any(m.key == "litellm" for m in matches) and len(matches) > 1:
+        console.print()
+        console.print(
+            "[dim]     # Note: patch_litellm() alone covers every provider "
+            "it routes — the individual[/dim]"
+        )
+        console.print(
+            "[dim]     # provider patches above are only needed for calls "
+            "made outside LiteLLM.[/dim]"
+        )
 
 
 @click.command("onboard")
@@ -382,14 +450,7 @@ retention_days = 90
     console.print()
     console.print("  1. Instrument your agent:")
     console.print()
-    console.print("[dim]     from tokenjam.sdk import watch[/dim]")
-    console.print("[dim]     from tokenjam.sdk.integrations.anthropic import patch_anthropic[/dim]")
-    console.print()
-    console.print("[dim]     patch_anthropic()[/dim]")
-    console.print()
-    console.print('[dim]     @watch(agent_id="my-agent")[/dim]')
-    console.print("[dim]     def run(task):[/dim]")
-    console.print("[dim]         ...[/dim]")
+    _print_instrument_agent_snippet()
     console.print()
     console.print("  2. Run your agent \u2014 spans are recorded automatically")
     console.print()
@@ -1323,6 +1384,11 @@ def _onboard_codex(
         "[dim]Codex has no statusline surface, so tj stays out-of-band: your "
         "Codex telemetry flows to tj automatically. Run[/dim]  tj tokenmaxx  "
         "[dim]/[/dim]  tj traces  [dim]for the deep dive.[/dim]"
+    )
+    console.print(
+        "[dim]Codex gets a smaller subset of tj than Claude Code (no backfill, "
+        "no statusline, no per-terminal split) — see[/dim] "
+        "docs/agent-capability-matrix.md [dim]for the full breakdown.[/dim]"
     )
     _print_restart_banner("Codex")
     console.print("[dim]After restarting, run:[/dim]  tj traces")
