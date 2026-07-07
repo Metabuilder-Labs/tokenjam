@@ -47,7 +47,7 @@ Nothing is written to disk, no daemon runs, no config is created. When you're re
 | **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
 | **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code (below) | Live capture from your own agent process, no CLI-specific backfill |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
-| **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>` (or `helicone`) | One-time import of your existing traces into the local DB |
+| **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone` — same flags) | One-time import of your existing traces into the local DB |
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion — no SDK, no patch |
 
 LlamaIndex and the OpenAI Agents SDK ship their own native OTel support — point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
@@ -110,9 +110,10 @@ Flags sessions where a cheaper model in the same family is worth a look. Never c
 
 ### 💾 Cache
 
-Shows your current caching ratio per (provider, model) and suggests Anthropic prompt-cache breakpoints from stable prefixes in your real usage.
+Shows your current caching ratio per (provider, model) and suggests Anthropic prompt-cache breakpoints from stable prefixes in your real usage. Two related CLI names under one product — `cache` measures the ratio, `cache-recommend` suggests the breakpoints.
 
-<pre><code>tj optimize cache</code></pre>
+<pre><code>tj optimize cache
+tj optimize cache-recommend</code></pre>
 
 [Details →](docs/optimize/cache.md)
 
@@ -168,7 +169,7 @@ Breaks a session's cost down per subagent (Claude Code `Task` calls) and flags o
 </tr>
 </table>
 
-Run all six analyzers with `tj optimize`. Run several with `tj optimize downsize cache reuse`.
+`tj optimize` (no args) runs every analyzer — the six above, plus `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen) and `cache-recommend` (the Cache card's breakpoint-suggestion half, above). Run a subset with `tj optimize downsize cache reuse`.
 
 `tj serve` brings every analyzer's findings, your real spend, and your alerts together in **Lens**, a local browser dashboard — see below.
 
@@ -231,7 +232,7 @@ Bench reports measured pass-rate on a suite, never "certified" or "quality prese
 ## CLI
 
 ```bash
-tj optimize            # all six cost-optimization analyzers
+tj optimize            # every analyzer (the six above, plus budget-projection + cache-recommend)
 tj optimize downsize   # one analyzer (positional args)
 tj tokenmaxx           # shareable spend-tier callout
 tj status              # current cost, tokens, active alerts
