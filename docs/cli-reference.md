@@ -28,7 +28,7 @@ tj onboard --force          # overwrite existing config
 tj onboard --verify         # poll for the first span after setup and report confirmed/not-confirmed
 ```
 
-Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` (plus `--project` for `--claude-code`) skip every prompt — see [Non-interactive / CI setup](ci-setup.md) for the exact invocation per persona. `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
+Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` (plus `--project` for `--claude-code`) skip every prompt — use these to run onboarding unattended (CI, Docker, a script). `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
 
 **`--verify` and `--no-daemon`:** verification polls for the first span through whichever read path is available. With the daemon running it reads over HTTP; with `--no-daemon`, the poller opens the DuckDB file directly — the same file the SDK would need to write to. If nothing else is writing yet (the pre-first-run case) this works; if something else holds the write lock, verification reports "start `tj serve`" rather than confirming, even though onboarding itself succeeded. Run `tj ping` instead to prove interception without touching the DB lock at all, or start `tj serve` temporarily to get a live confirmation.
 
