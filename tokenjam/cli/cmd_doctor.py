@@ -4,6 +4,7 @@ import json
 
 import click
 import duckdb
+from rich.markup import escape
 
 from tokenjam.core.config import find_config_file, load_config
 from tokenjam.utils.formatting import console
@@ -626,4 +627,7 @@ def _print_check(check: dict) -> None:
     icons = {"ok": "[green]\u2713[/green]", "warning": "[yellow]\u26a0[/yellow]",
              "error": "[red]\u2717[/red]", "info": "[blue]i[/blue]"}
     icon = icons.get(level, "?")
-    console.print(f"  {icon}  {check['name']}: {check['message']}")
+    # Check names/messages are plain text, not Rich markup \u2014 a literal
+    # bracketed value inside one (e.g. the `[mcp_servers.tj]` TOML section
+    # header) would otherwise be parsed as a markup tag and stripped.
+    console.print(f"  {icon}  {escape(check['name'])}: {escape(check['message'])}")

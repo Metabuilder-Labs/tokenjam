@@ -487,6 +487,35 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         assert "project scope" in mcp_checks[0]["message"]
 
 
+def test_doctor_mcp_wiring_message_renders_bracket_literal(runner, db, config, tmp_path):
+    """The Codex removal hint contains the literal TOML section header
+    `[mcp_servers.tj]`. In human (non-JSON) rendering, `_print_check` feeds
+    the message straight into `console.print`, and Rich treats an unescaped
+    `[...]` as a markup tag — stripping it instead of printing it (same class
+    of bug as #157 / PR #407). The console-rendered check must show the
+    bracket text verbatim."""
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    fake_cwd = tmp_path / "fake_cwd"
+    fake_cwd.mkdir()
+
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+
+    codex_dir = fake_home / ".codex"
+    codex_dir.mkdir(parents=True, exist_ok=True)
+    (codex_dir / "config.toml").write_text("[mcp_servers.tj]\ncommand = 'tj'\nargs = ['mcp']\n")
+
+    with patch("pathlib.Path.home", return_value=fake_home), \
+         patch("pathlib.Path.cwd", return_value=fake_cwd), \
+         patch("shutil.which", return_value=None), \
+         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor"])
+
+    assert "[mcp_servers.tj]" in result.output
+
+
 # -- since flag parsing --
 
 def test_since_flag_parses_all_formats(runner, db, config):
