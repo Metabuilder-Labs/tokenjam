@@ -27,6 +27,7 @@ import os
 import click
 
 from tokenjam.core.usage import session_usage
+from tokenjam.utils.humanize import format_tokens
 
 # Re-read share (cache-read ÷ total tokens over the session) thresholds. Past
 # WARN the context is mostly re-reading itself; past CRIT it is almost entirely
@@ -107,7 +108,7 @@ def render_line(data: dict) -> str:
             total, reread_pct = session_shares(path)
         except Exception:
             return "  ".join(parts)
-        parts.append(f"{total / 1e6:.1f}M tok")
+        parts.append(f"{format_tokens(total)} tok")
         badge, nudge = _badge_and_nudge(reread_pct)
         parts.append(f"{badge} re-read {reread_pct:.0f}%")
         if nudge:

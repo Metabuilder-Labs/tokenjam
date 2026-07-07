@@ -330,6 +330,24 @@ def test_doctor_exits_2_when_errors_present(runner, db, config):
     assert result.exit_code == 2
 
 
+def test_doctor_sdk_only_setup_exits_0(runner, db, config, tmp_path):
+    # A pure-SDK install (no ~/.claude, no claude-code-* agent) is fully correct;
+    # the inapplicable statusline-wiring check must be info, not warning, so
+    # doctor exits 0. A `claude` binary merely on PATH must not flip it (#105).
+    # HOME is already pointed at a throwaway dir (no ~/.claude) by the autouse
+    # isolation fixture, and the config fixture has only a non-Claude-Code agent.
+    _clean_doctor_config(config, tmp_path)
+    config_file = tmp_path / "tokenjam.toml"
+    config_file.write_text('version = "1"\n')
+    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        result = _invoke(runner, db, config, ["doctor", "--json"])
+    assert result.exit_code == 0
+    checks = json.loads(result.output)
+    statusline_checks = [c for c in checks if c["name"] == "Statusline wiring"]
+    assert statusline_checks and statusline_checks[0]["level"] == "info"
+    assert "SDK" in statusline_checks[0]["message"]
+
+
 def _clean_doctor_config(config, tmp_path):
     """Configure `config` so only the check under test can produce a warning."""
     config.storage.path = str(tmp_path / "test.duckdb")
@@ -512,10 +530,13 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
         assert mcp_checks and mcp_checks[0]["level"] == "info"
 
-    # Case 2: Claude Code CLI is on PATH but the MCP is NOT registered. Post-#59
-    # the MCP is an SDK-only surface, so its absence for a coding agent is the
-    # correct state and must NOT warn (it's "info"). Instead the STATUSLINE check
-    # warns, because the zero-token statusline isn't wired yet.
+    # Case 2: a real Claude Code context (~/.claude present) but the MCP is NOT
+    # registered. Post-#59 the MCP is an SDK-only surface, so its absence for a
+    # coding agent is the correct state and must NOT warn (it's "info"). Instead
+    # the STATUSLINE check warns, because the zero-token statusline isn't wired
+    # yet. Post-#105 the warning keys off the Claude Code context (~/.claude),
+    # NOT a `claude` binary on PATH — so establish that context explicitly.
+    (fake_home / ".claude").mkdir(parents=True, exist_ok=True)
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", side_effect=lambda cmd: "/bin/claude" if cmd == "claude" else None), \
@@ -529,6 +550,10 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         statusline_checks = [c for c in checks if c["name"] == "Statusline wiring"]
         assert statusline_checks and statusline_checks[0]["level"] == "warning"
         assert "tj onboard --claude-code" in statusline_checks[0]["message"]
+
+    # Drop the Claude Code context again so the later Codex/SDK cases (which
+    # assert exit 0) don't inherit the statusline warning it triggers.
+    (fake_home / ".claude").rmdir()
 
     # Case 3: MCP registered globally in Codex (~/.codex/config.toml) -> should
     # be level "warning" (#94): Codex gets the same +36% quota-tax reasoning as

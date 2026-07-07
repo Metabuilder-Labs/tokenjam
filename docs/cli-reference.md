@@ -25,7 +25,27 @@ tj onboard --claude-code    # configure Claude Code telemetry
 tj onboard --no-daemon      # skip daemon installation
 tj onboard --budget 5.00    # set daily budget during setup
 tj onboard --force          # overwrite existing config
+tj onboard --verify         # poll for the first span after setup and report confirmed/not-confirmed
+tj onboard --verify-only    # skip setup; just re-poll an existing install (post-restart re-check)
 ```
+
+Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` (plus `--project` for `--claude-code`) skip every prompt — use these to run onboarding unattended (CI, Docker, a script). `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
+
+**`--verify-only`** is the lightweight post-restart re-check: it skips the whole wizard (no config rewrite, no summary, no restart banner) and only polls an already-configured install for its first *live* span. Use it after you've restarted Claude Code / Codex — `tj onboard --claude-code --verify-only` (or `--codex`, or bare for an SDK install) reads that persona's existing config and reports confirmed / not-confirmed. Backfilled history doesn't count here; the poll waits for a new live span.
+
+**`--verify` and `--no-daemon`:** verification polls for the first span through whichever read path is available. With the daemon running it reads over HTTP; with `--no-daemon`, the poller opens the DuckDB file directly — the same file the SDK would need to write to. If nothing else is writing yet (the pre-first-run case) this works; if something else holds the write lock, verification reports "start `tj serve`" rather than confirming, even though onboarding itself succeeded. Run `tj ping` instead to prove interception without touching the DB lock at all, or start `tj serve` temporarily to get a live confirmation.
+
+### `tj ping`
+
+Emit one clearly-labeled test span through the real SDK export path to prove instrumentation is wired up, without needing a whole agent. Reports whether the span was intercepted and where it was delivered (running daemon over HTTP, or local DuckDB directly).
+
+```bash
+tj ping
+tj ping --agent my-agent
+tj ping --json
+```
+
+Exit codes: 0 = intercepted and delivered, 1 = interception or delivery failed.
 
 ### `tj quickstart`
 

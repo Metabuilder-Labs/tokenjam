@@ -242,3 +242,12 @@ output_per_mtok = 10.00
 [hud.claude-sonnet-4-5]
 input_per_mtok = 3.00
 output_per_mtok = 15.00
+
+# Internal test models — never billed. `tj ping` (#80) emits its 1-in/1-out
+# proof-of-life span under this model id; without a row here it fell through
+# to the default rates and printed a "No pricing data" notice on every ping,
+# which is noisy for a command whose whole purpose is a clean confidence
+# check (#92). All-zero rates keep ping spans at exactly $0 cost.
+[anthropic.tj-ping-test]
+input_per_mtok = 0.0
+output_per_mtok = 0.0
