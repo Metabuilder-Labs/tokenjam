@@ -7,6 +7,7 @@ explicit basis, and a clean report_to_dict/report_from_dict round-trip.
 """
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 import pytest
@@ -78,12 +79,15 @@ def test_empty_scan_yields_no_tokens_but_keeps_basis(db, monkeypatch):
     assert f.estimate_basis
 
 
-def test_scan_error_never_breaks_the_report(db, monkeypatch):
+def test_scan_error_never_breaks_the_report(db, monkeypatch, caplog):
     def boom(**kw):
         raise OSError("disk gone")
     monkeypatch.setattr("tokenjam.core.summarize.candidates.list_candidates", boom)
-    f = _run(db)
+    with caplog.at_level(logging.DEBUG, logger="tokenjam.core.optimize.analyzers.summarize"):
+        f = _run(db)
     assert f.files == 0 and f.estimated_recoverable_tokens is None
+    # the swallow must leave a trail (not silent) so a real regression is diagnosable
+    assert any("scan failed" in r.message for r in caplog.records)
 
 
 def test_finding_round_trips(db, monkeypatch):

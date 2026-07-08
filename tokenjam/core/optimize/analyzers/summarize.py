@@ -18,10 +18,13 @@ usage-ranked/amortized path is deferred. Every user-visible string says
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
+
+logger = logging.getLogger(__name__)
 
 # Surfaced verbatim next to the recoverable figure (contract requires an explicit
 # basis; states the filesystem/per-call basis so it isn't mistaken for a
@@ -76,6 +79,13 @@ def run(ctx: AnalyzerContext) -> None:
     try:
         scan = list_candidates(config=ctx.config)  # read-only, never writes
     except Exception:
+        # Empty finding on any scan failure so a filesystem hiccup never breaks the
+        # optimize report — but log it: a silent broad-swallow would hide a real
+        # code/config regression in list_candidates as if it were a benign hiccup.
+        logger.debug(
+            "summarize analyzer: candidate scan failed; returning empty finding",
+            exc_info=True,
+        )
         ctx.report.findings["summarize"] = finding
         return
 
