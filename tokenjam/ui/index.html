@@ -6300,9 +6300,9 @@ function OptimizeView({ params }) {
   const sf = st.opt && st.opt.findings ? st.opt.findings.summarize : null;
   const sfCands = sf && sf.candidates ? [...sf.candidates].sort((a, b) => b.est_tokens_saved - a.est_tokens_saved) : [];
   const sfTok = sfCands.reduce((s, c) => s + (c.est_tokens_saved || 0), 0);
-  const sfSrcTok = sfCands.reduce((s, c) => s + Math.round((c.total_chars || 0) / 4), 0);
-  const sfAvgPct = sfSrcTok > 0 ? Math.round(sfTok / sfSrcTok * 100) : 0;
-  const sfRedPct = c => { const t = Math.round((c.total_chars || 0) / 4); return t > 0 ? Math.round(c.est_tokens_saved / t * 100) : 0; };
+  // Prose-reduction %s come from the analyzer (#423) — single source of truth;
+  // the UI renders them and never re-derives chars/CHARS_PER_TOKEN in JS.
+  const sfAvgPct = sf && sf.reduction_pct != null ? sf.reduction_pct : 0;
   // Applied vs outstanding. The scan (sfTok) is the STILL-recoverable opportunity —
   // it drops already-applied files by design. Applied savings come from the backup
   // meta (est_tokens_saved recorded at apply). % applied = applied / (applied + outstanding).
@@ -6387,7 +6387,7 @@ function OptimizeView({ params }) {
                   <td class="mono" title=${c.path}>${c.path.split('/').slice(-2).join('/')}</td>
                   <td class="dim" style="font-size:11px">${c.scope}</td>
                   <td class="mono" style="text-align:right;color:var(--accent)">~${c.est_tokens_saved}</td>
-                  <td class="mono" style="text-align:right">${sfRedPct(c)}%</td>
+                  <td class="mono" style="text-align:right">${c.reduction_pct != null ? c.reduction_pct : 0}%</td>
                 </tr>`)}
                 ${sfCands.length > 6 ? html`<tr><td colspan="4" class="dim" style="font-size:11px">+${sfCands.length - 6} more · <a class="sz-link" href="#/optimize/summarize">see all →</a></td></tr>` : null}
               </tbody>

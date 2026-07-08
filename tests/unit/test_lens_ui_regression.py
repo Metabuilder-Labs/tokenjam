@@ -2039,3 +2039,12 @@ def test_summarize_batch_calls_are_null_safe(html):
     # property access never crashes a run/apply that actually succeeded (Greptile #426).
     assert "(await apiPostOrDetail('/summarize/run', { path, mode: engine, ratio: 0.5 })) || {}" in html
     assert "(await apiPostOrDetail('/summarize/apply', { path, go: true })) || {}" in html
+
+
+def test_summarize_reduction_pct_is_server_computed(html):
+    # Anil #426: prose-reduction % is analysis, not presentation — the box tile and
+    # per-file column render the analyzer's reduction_pct (#423); no JS chars/4.
+    assert "sf.reduction_pct != null ? sf.reduction_pct : 0" in html
+    assert "c.reduction_pct != null ? c.reduction_pct : 0" in html
+    assert "sfRedPct" not in html      # old per-file chars/4 helper gone
+    assert "sfSrcTok" not in html      # old source-token derivation gone
