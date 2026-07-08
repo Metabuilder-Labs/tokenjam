@@ -1856,3 +1856,199 @@ def test_delta_pct_capped_to_avoid_four_digit_percentages(html):
     assert "'>999%'" in html
     # The old unguarded raw-percentage render is gone from both chips.
     assert "${Math.abs(pct).toFixed(1)}% vs prev" not in html
+
+
+# --- Optimize ▸ Summarize (Track B) UI: curate → run → review/apply --------- #
+def test_summarize_nav_child_and_route(html):
+    # A nested "Summarize" child under Optimize, revealed only while the Optimize
+    # section is active, routing to #/optimize/summarize (the router already
+    # splits view/param). The nav reveal logic shows children per active section.
+    assert 'href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize"' in html
+    assert "if (route.param === 'summarize') return html`<${SummarizeView} params=${p} />`;" in html
+    # nav-child reveal: a child shows only while its section is active.
+    assert "el.classList.contains('nav-child')" in html
+    assert "el.style.display = (v === view) ? 'flex' : 'none';" in html
+
+
+def test_summarize_component_present(html):
+    assert "function SummarizeView" in html
+    # The four-phase flow (engine gate → curate → run → review) is what makes the
+    # screen worth more than the all-or-nothing CLI (DEC-034 granularity).
+    assert "const [phase, setPhase] = useState('engine')" in html
+    for phase in ("phase === 'review'", "phase === 'run'", "phase === 'curate'"):
+        assert phase in html, f"missing phase branch {phase}"
+
+
+def test_summarize_engine_gate_is_capabilities_driven(html):
+    # The page starts on a capability-gated engine chooser (never defaulted), so a
+    # dead engine (no key / no `claude`) is disabled with its reason.
+    assert "api('/summarize/capabilities')" in html
+    assert "const avail = cap ? cap.available : false;" in html
+    # all three engines are offered; claude_p is normalized to the wire's claude-p
+    assert "id === 'claude_p' ? 'claude-p' : id" in html
+
+
+def test_summarize_curator_wires_to_candidates_scan(html):
+    # The curator reads the read-only core scan (candidates) + staged records;
+    # status is derived (staged files still appear in the scan until applied).
+    assert "api('/summarize/candidates'" in html
+    assert "api('/summarize/staged')" in html
+    assert "const statusOf = c => stagedPaths.has(c.path) ? 'staged' : 'candidate';" in html
+    # candidate fields come straight off ScanResult.to_dict (no fabricated shapes)
+    assert "c.prose_words" in html
+    assert "c.est_tokens_saved" in html
+
+
+def test_summarize_run_covers_all_three_engines(html):
+    # api/claude-p loop the per-file run route with a progress bar; manual walks
+    # prep → paste-back → check with no outbound call.
+    assert "apiPostOrDetail('/summarize/run', { path, mode: engine, ratio: 0.5 })" in html
+    assert "apiPostOrDetail('/summarize/prep', { path, ratio: 0.5 })" in html
+    assert "apiPostOrDetail('/summarize/check', { path: manPrep.path, summary: manSummary, source_hash: manPrep.source_sha256 })" in html
+
+
+def test_summarize_apply_is_guarded_and_dry_run_until_click(html):
+    # The UI's only file-writing action goes through core apply_staged with
+    # go:true set ONLY on an explicit per-file/checked Apply. Reject is a
+    # client-side dismiss (no destructive endpoint invented).
+    assert "apiPostOrDetail('/summarize/apply', { path, go: true })" in html
+    # a bare go-less (dry-run) default must not be silently escalated elsewhere
+    assert "go: true }" in html
+    # honesty: the write is described as backed-up (the drift-refusal is enforced by
+    # core + surfaced via apiPostOrDetail's 409 detail, not asserted as fixed copy).
+    assert "backs up first" in html
+
+
+def test_summarize_error_helper_surfaces_server_detail(html):
+    # run/apply/undo surface 409/502 reasons (drift, model failure) via a helper
+    # that raises the server `detail`, not a bare "API 409".
+    assert "async function apiPostOrDetail(path, body)" in html
+    assert "(data && data.detail) ? data.detail : `API ${resp.status}`" in html
+
+
+def test_optimize_dashboard_links_into_summarize_screen(html):
+    # The Track A cost signal on Optimize is the doorway: the Summarize waste-row
+    # is a link + a "Review →" CTA into the screen.
+    assert '<a class="sz-link" href="#/optimize/summarize">${r.title}</a>' in html
+    assert "r.title === 'Summarize'" in html
+
+
+def test_optimize_has_dedicated_summarize_box(html):
+    # A dedicated Summarize box on Optimize, rendered from the filesystem finding
+    # (st.opt.findings.summarize) so it shows even with no telemetry / no cost chart.
+    assert "st.opt.findings ? st.opt.findings.summarize : null" in html
+    assert 'id="opt-summarize"' in html
+    # The honest DEC-032 tile set: files · est tokens recoverable/call · avg reduction.
+    assert "summarizable file" in html
+    assert "est. tokens recoverable / call" in html
+    assert "avg prose reduction" in html
+    # Tokens-first + explicit basis + never "saves you" (Rule 14).
+    assert "estimated · tokens" in html
+    assert "${sf.estimate_basis}" in html
+    box = html[html.index('id="opt-summarize"'):html.index('id="opt-summarize"') + 1400]
+    assert "saves you" not in box.lower()
+
+
+def test_optimize_box_shows_applied_vs_outstanding(html):
+    # The scan figure is STILL-recoverable (applied files are dropped). Applied
+    # savings come from the backup meta (est_tokens_saved), and the box shows
+    # % applied = applied / (applied + outstanding) with an honest scope caveat.
+    assert "api('/summarize/backups')" in html                         # OptimizeView fetches backups
+    assert "const sfApplied = (st.bk || []).reduce" in html
+    assert "const sfTotal = sfApplied + sfTok;" in html
+    assert "sfTotal > 0 ? Math.round(sfApplied / sfTotal * 100)" in html
+    assert "% applied" in html
+    assert "still recoverable here" in html
+    # honest denominator caveat (applied is cumulative; outstanding is this scan).
+    assert "Applied counts every run; still-recoverable is this scan." in html
+
+
+def test_review_diff_is_per_block_with_layman_hint(html):
+    # The diff modal groups the unified diff into per-hunk blocks (no raw @@ header)
+    # with +/- counts, and leads with a plain-language legend.
+    assert "function diffBlocks(diffText)" in html
+    assert "const mfBlocks = mf ? diffBlocks(mf.diff) : [];" in html
+    assert "Block ${i + 1}" in html
+    assert "lines removed" in html and "lines added" in html
+    assert "unchanged lines are kept verbatim" in html
+    # the cryptic @@ hunk header is dropped by diffBlocks, not shown raw
+    assert "ln.startsWith('@@')) { cur = " in html
+
+
+def test_summarize_honesty_no_realized_savings_language(html):
+    # Rule 14: estimates are "(est.)" / "estimated", never "saves you". The tally
+    # and run rows qualify the token figure as an estimate.
+    start = html.index("function SummarizeView")
+    end = html.index("// Analytics explorer (#210)")
+    view = html[start:end]
+    assert "tok/call saved (est.)" in view
+    assert "saves you" not in view.lower()
+
+
+def test_summarize_undo_restores_applied_from_backup(html):
+    # An APPLIED file can be reverted via POST /summarize/undo (core restores the
+    # gzip backup; 409 on drift/missing surfaced). The row goes terminal 'reverted'.
+    assert "apiPostOrDetail('/summarize/undo', { path, go: true })" in html
+    assert "const undoPath = async path =>" in html
+    assert "[path]: 'reverted'" in html
+    # Reachable from the review: inline row link (applied only) + modal footer.
+    assert ">undo</span>" in html
+    assert "Undo (restore backup)" in html
+    # 'reverted' is a first-class terminal state (filter + count).
+    assert "{ v: 'reverted', t: 'Reverted' }" in html
+    assert "const revertedCount = revRows.filter(r => stOf(r.path) === 'reverted').length;" in html
+
+
+def test_summarize_undo_reachable_for_prior_applies_via_backups(html):
+    # Undo is not only in-session: GET /summarize/backups lists files with a gzip
+    # backup so a file applied in ANY earlier session can be undone from the review
+    # (and is advertised on the entry hub). This is the persistent undo surface.
+    assert "api('/summarize/backups')" in html
+    assert "const [backups, setBackups] = useState([]);" in html
+    # A backups section in the review with a per-file Undo button + can't-undo reason.
+    assert "Applied earlier — undo" in html
+    assert "onClick=${() => undoPath(b.source_path)}" in html
+    assert "can't undo — ${b.reason}" in html
+    # Freshly-applied files are surfaced as undoable (refresh after apply); the entry
+    # hub advertises undoable backups.
+    assert "loadBackups();" in html
+    assert "applied summary(ies) can be undone" in html
+
+
+def test_summarize_scan_guards_against_toggle_race(html):
+    # Two guards (Greptile #426 + reviewer follow-up): (1) a seq guard discards a
+    # slower earlier scan's out-of-order response; (2) toggles merge into a ref
+    # SYNCHRONOUSLY so a second toggle before re-render can't rebuild the other
+    # value from a stale closure.
+    assert "const scanSeq = useRef(0);" in html
+    assert "if (seq !== scanSeq.current) return;" in html
+    assert "const scanOpts = useRef(" in html
+    assert "scanOpts.current = { ...scanOpts.current, ...opts };" in html
+    assert "loadScan({ recursive: e.target.checked })" in html
+    assert "loadScan({ repo: e.target.checked })" in html
+
+
+def test_summarize_bulk_apply_excludes_structure_failed(html):
+    # Bulk "Apply checked" excludes structure_ok===false to match the per-file
+    # modal's disabled guard (core re-skips it server-side too; UI stays consistent).
+    assert "s.path === p && s.structure_ok === false" in html
+    # Reject is a client-side dismiss (no write) → its OWN unfiltered set, so apply
+    # guards structure while reject can always clear a row from the view.
+    assert "const rvCheckedReject = [...revChecked].filter(p => stOf(p) === 'staged');" in html
+    assert "rvCheckedReject.forEach(p => n[p] = 'rejected')" in html
+
+
+def test_summarize_batch_calls_are_null_safe(html):
+    # apiPostOrDetail returns null on a 200-with-empty-body; normalize to {} so a
+    # property access never crashes a run/apply that actually succeeded (Greptile #426).
+    assert "(await apiPostOrDetail('/summarize/run', { path, mode: engine, ratio: 0.5 })) || {}" in html
+    assert "(await apiPostOrDetail('/summarize/apply', { path, go: true })) || {}" in html
+
+
+def test_summarize_reduction_pct_is_server_computed(html):
+    # Anil #426: prose-reduction % is analysis, not presentation — the box tile and
+    # per-file column render the analyzer's reduction_pct (#423); no JS chars/4.
+    assert "sf.reduction_pct != null ? sf.reduction_pct : 0" in html
+    assert "c.reduction_pct != null ? c.reduction_pct : 0" in html
+    assert "sfRedPct" not in html      # old per-file chars/4 helper gone
+    assert "sfSrcTok" not in html      # old source-token derivation gone
