@@ -761,16 +761,23 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
             )
         return f"skipped ({exc})", False, 0
 
-    total = int(getattr(result, "sessions_total", 0) or 0)
+    def _rf(obj_key: str, dict_key: str, default: float = 0):
+        # ingest_codex currently returns a summary dict; a future alignment to
+        # BackfillResult (an object) reads the same way — forward-compatible.
+        if isinstance(result, dict):
+            return result.get(dict_key, default)
+        return getattr(result, obj_key, default)
+
+    total = int(_rf("sessions_total", "sessions_seen") or 0)
     if total <= 0:
         return None, False, 0
-    new = int(getattr(result, "sessions_new", total) or 0)
+    new = int(_rf("sessions_new", "sessions_written", total) or 0)
     existing = total - new
-    cost = float(getattr(result, "total_cost_usd", 0.0) or 0.0)
+    cost = float(_rf("total_cost_usd", "total_cost_usd", 0.0) or 0.0)
+    spend = f" · ${cost:.0f} total spend" if cost > 0 else ""
     msg = (
         f"{new} new ({existing} already present) · "
-        f"{total} total session{'s' if total != 1 else ''} · "
-        f"${cost:.0f} total spend"
+        f"{total} total session{'s' if total != 1 else ''}{spend}"
     )
     return msg, True, total
 
