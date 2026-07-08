@@ -265,7 +265,7 @@ Integration tests use `httpx.AsyncClient` with `httpx.ASGITransport(app=app)` ag
 
 ### Session Continuity
 
-When a span has a `conversation_id` matching an existing session, it's attributed to that session (even across process restarts). New `conversation_id` = new session.
+When a span has a `conversation_id` matching an existing session, it's attributed to that session (even across process restarts). New `conversation_id` = new session. If a span lacks both `session_id` and `conversation_id`, it is attributed to the session of any existing sibling span on the same `trace_id`.
 
 ## Critical Rules
 
