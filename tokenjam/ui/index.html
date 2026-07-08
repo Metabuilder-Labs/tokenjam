@@ -1452,6 +1452,97 @@ code.md-code {
 .mb-meta { font-size: 9px; color: var(--text-faint); }
 .mb-tcap { margin-top: 11px; font-size: 11.5px; color: var(--text-dim); }
 
+/* ============================================================
+   Optimize ▸ Summarize (Track B) — curator + run + review/apply.
+   Uses the monochrome design tokens (--accent for intensity,
+   --brand for links) so it reads as one system with the rest of Lens.
+   ============================================================ */
+.sidebar a.nav-child { display: none; padding-left: 38px; font-size: 13px; color: var(--text-faint); }
+.sidebar a.nav-child.active { color: var(--accent); }
+.sidebar a.nav-child .icon { font-size: 12px; opacity: .6; }
+.nav-badge { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--text-faint); margin-left: auto; }
+.sz-link { color: var(--brand); cursor: pointer; text-decoration: none; }
+.sz-link:hover { text-decoration: underline; }
+.sz-sub { font-size: 13.5px; color: var(--text-dim); font-weight: 400; }
+/* Neutral helper/caption text — calm (not warn-yellow), readable, capped width. */
+.sz-note { font-size: 13px; color: var(--text-dim); line-height: 1.55; max-width: 74ch; margin: 0; }
+
+/* Engine gate */
+.sz-engines { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 16px; margin: 4px 0; }
+.sz-engine { text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; cursor: pointer; transition: border-color .15s; color: var(--text); font-family: inherit; }
+.sz-engine:hover:not(:disabled) { border-color: var(--accent); }
+.sz-engine:disabled { opacity: .5; cursor: not-allowed; }
+.sz-eng-name { font-family: 'Geist', sans-serif; font-weight: 700; font-size: 16px; }
+.sz-eng-tag { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); margin-top: 4px; }
+.sz-eng-desc { font-size: 13px; color: var(--text-dim); margin-top: 10px; line-height: 1.55; }
+.sz-eng-off { font-size: 12px; color: var(--warn); margin-top: 10px; }
+
+/* Curator / review filterable box */
+.cur-filters { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:0 0 14px; }
+.cur-seg { display:inline-flex; align-items:center; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+.cur-seg .seg-label { padding:0 9px; color:var(--text-faint); font-size:10.5px; text-transform:uppercase; letter-spacing:.05em; }
+.cur-seg button { background:var(--surface); border:none; border-left:1px solid var(--border); color:var(--text-dim); padding:6px 12px; cursor:pointer; font-family:'Geist Mono',monospace; font-size:12.5px; }
+.cur-seg button.on { background:rgba(var(--accent-rgb),0.12); color:var(--accent); }
+.cur-search { flex:1; min-width:180px; background:var(--surface); border:1px solid var(--border); border-radius:6px; color:var(--text); padding:8px 12px; font-family:'Geist Mono',monospace; font-size:13px; }
+.cur-listhead { display:flex; align-items:center; gap:16px; margin:12px 2px 8px; font-size:12.5px; color:var(--text-faint); }
+.cur-listhead .sz-link { cursor:pointer; }
+.cur-table { width:100%; border-collapse:collapse; }
+.cur-table th { text-align:left; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-faint); padding:9px 12px; border-bottom:1px solid var(--border); }
+.cur-table td { padding:10px 12px; border-bottom:1px solid var(--border); font-size:13px; }
+.cur-row.added { opacity:.42; }
+.cur-addbar { display:flex; align-items:center; gap:14px; margin-top:16px; flex-wrap:wrap; }
+.cur-btn { font-size:13px; padding:9px 16px; border-radius:6px; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; font-family:'Geist Mono',monospace; }
+.cur-btn:hover:not(:disabled) { border-color:var(--accent); }
+.cur-btn.primary { background:rgba(var(--accent-rgb),0.16); border-color:rgba(var(--accent-rgb),0.4); color:var(--accent); }
+.cur-btn:disabled { opacity:.4; cursor:not-allowed; }
+.cur-tally { border:1px solid var(--border); border-radius:9px; background:var(--surface); padding:16px 18px; margin:0; cursor:pointer; transition:border-color .15s; }
+.cur-tally.empty { cursor:default; }
+.cur-tally:not(.empty):hover { border-color:rgba(var(--accent-rgb),0.5); }
+.cur-tally-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
+.cur-tally-count { font-family:'Geist Mono',monospace; font-size:24px; color:var(--accent); }
+.cur-tally-count small { font-size:13px; color:var(--text-dim); }
+.cur-tally-hint { font-size:12px; color:var(--text-faint); }
+.cur-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; max-height:64px; overflow:hidden; }
+.cur-chip { font-family:'Geist Mono',monospace; font-size:12px; background:rgba(var(--accent-rgb),0.08); border:1px solid rgba(var(--accent-rgb),0.25); color:var(--text-dim); border-radius:4px; padding:3px 8px; white-space:nowrap; }
+.cur-chip.more { background:transparent; border-color:var(--border); color:var(--text-faint); }
+.cur-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.62); display:flex; align-items:center; justify-content:center; z-index:60; padding:24px; }
+.cur-modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:min(760px,100%); max-height:84vh; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.55); }
+.cur-modal-head { display:flex; align-items:center; gap:10px; padding:16px 18px; border-bottom:1px solid var(--border); }
+.cur-modal-title { font-size:15px; font-weight:600; }
+.cur-modal-x { margin-left:auto; background:none; border:none; color:var(--text-dim); font-size:18px; cursor:pointer; line-height:1; }
+.cur-modal-body { padding:16px 18px; overflow-y:auto; }
+.cur-modal-foot { padding:14px 18px; border-top:1px solid var(--border); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.cur-mrow { display:flex; align-items:center; gap:12px; padding:9px 0; border-bottom:1px solid var(--border); font-size:13px; }
+.cur-mrow .path { font-family:'Geist Mono',monospace; flex:1; word-break:break-all; }
+.cur-mrow .rm { background:none; border:1px solid var(--border); color:var(--error); border-radius:4px; width:24px; height:24px; cursor:pointer; line-height:1; flex:0 0 auto; }
+.cur-mrow .rm:hover { border-color:var(--error); }
+.cur-cwd { font-size:12px; color:var(--text-faint); margin:0 2px; line-height:1.5; }
+.cur-cwd code { color:var(--text-dim); }
+.cur-listbox { max-height:380px; overflow-y:auto; border:1px solid var(--border); border-radius:9px; background:var(--surface); }
+.cur-donenote { margin-left:auto; }
+.rev-note { margin:0; }
+.rev-state { margin-left:auto; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; border-radius:4px; padding:3px 9px; border:1px solid var(--border); }
+.rev-state.staged { color:var(--warn); border-color:rgba(245,166,35,.4); }
+.rev-state.applied { color:var(--success); border-color:rgba(12,228,144,.4); }
+.rev-state.rejected { color:var(--text-faint); }
+.rev-state.reverted { color:var(--text-dim); border-color:var(--border); }
+.rev-diff { font-family:'Geist Mono',monospace; font-size:12.5px; line-height:1.6; white-space:pre-wrap; word-break:break-word; margin:12px 0 0; }
+.sz-diffblock { border:1px solid var(--border); border-radius:6px; padding:9px 11px 11px; margin:0 0 10px; background:var(--surface2); }
+.sz-diffblock-h { font-family:'Geist Mono',monospace; font-size:11.5px; color:var(--text-dim); }
+/* Run progress + manual copy block */
+.sz-prog { height:8px; border-radius:4px; background:var(--surface3); overflow:hidden; margin:0; }
+.sz-prog > div { height:100%; background:var(--brand); transition:width .2s; }
+.sz-runrow { display:flex; align-items:center; gap:12px; font-size:13px; padding:9px 4px; border-bottom:1px solid var(--border); font-family:'Geist Mono',monospace; }
+.sz-spin { display:inline-block; color:var(--brand); animation:sz-spin 1s linear infinite; }
+@keyframes sz-spin { to { transform:rotate(360deg); } }
+/* Optimize ▸ Summarize cost box (Track A tiles) */
+.sz-tiles { display:flex; gap:16px; flex-wrap:wrap; margin:6px 0; }
+.sz-tile { flex:1 1 150px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:16px 18px; }
+.sz-tile-v { font-family:'Geist Mono',monospace; font-size:26px; font-weight:700; color:var(--accent); }
+.sz-tile-l { font-size:12.5px; color:var(--text-dim); margin-top:5px; }
+.sz-copybox { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:14px 16px; max-height:320px; overflow:auto; font-family:'Geist Mono',monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+.sz-ta { width:100%; min-height:130px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:12px 14px; font-family:'Geist Mono',monospace; font-size:13px; resize:vertical; }
+
 </style>
 <script>
   // Apply theme before paint to prevent flash of incorrect theme
@@ -1475,6 +1566,7 @@ code.md-code {
   <a href="#/alerts" class="nav-link" data-view="alerts"><span class="icon">!</span> Alerts</a>
   <a href="#/drift" class="nav-link" data-view="drift"><span class="icon">~</span> Drift</a>
   <a href="#/optimize" class="nav-link" data-view="optimize"><span class="icon">&#9889;</span> Optimize</a>
+  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
   <a href="#/budget" class="nav-link" data-view="budget"><span class="icon">$</span> Budget</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
@@ -1522,6 +1614,25 @@ async function apiPost(path, body) {
   });
   if (!resp.ok) throw new Error(`API ${resp.status}`);
   return resp.json();
+}
+
+// Like apiPost, but raises the server's error `detail` as the message so the
+// caller can show WHY (Summarize's run/apply/undo surface 409 drift / 502 model
+// failures whose reason the user needs — a bare "API 409" isn't actionable).
+async function apiPostOrDetail(path, body) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
+  const resp = await fetch('/api/v1' + path, {
+    method: 'POST', headers, body: JSON.stringify(body),
+  });
+  let data = null;
+  try { data = await resp.json(); } catch (e) { /* no/empty body */ }
+  if (!resp.ok) {
+    const err = new Error((data && data.detail) ? data.detail : `API ${resp.status}`);
+    err.status = resp.status;
+    throw err;
+  }
+  return data;
 }
 
 // --- Helpers ---
@@ -6148,7 +6259,7 @@ function OptimizeView({ params }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [] });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -6159,7 +6270,9 @@ function OptimizeView({ params }) {
       // Cost-by-component + recoverable-waste overlay (#211). Best-effort: a
       // failure must not blank the Optimize screen.
       const comp = await api('/cost/components', { since, agent_id: agentId || undefined }).catch(() => null);
-      setSt({ loading: false, error: null, opt, cmp, comp });
+      // Applied summaries (for the Summarize box's applied-vs-outstanding progress).
+      const bk = await api('/summarize/backups').then(r => r.backups || []).catch(() => []);
+      setSt({ loading: false, error: null, opt, cmp, comp, bk });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
@@ -6179,6 +6292,25 @@ function OptimizeView({ params }) {
   const waste = buildComponentWaste(st.comp, useTokens);
   const wasteFmtY = useTokens ? fmtTokens : fmtCost;
   const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;
+
+  // Summarize (Track A) box — the honest DEC-032 tile set (files · est tokens
+  // recoverable/call · avg prose reduction), rendered straight from the filesystem
+  // finding so it shows even when there's no telemetry for the cost chart. Tokens-
+  // first (no $: the finding leaves usd None by design); every figure is "estimated".
+  const sf = st.opt && st.opt.findings ? st.opt.findings.summarize : null;
+  const sfCands = sf && sf.candidates ? [...sf.candidates].sort((a, b) => b.est_tokens_saved - a.est_tokens_saved) : [];
+  const sfTok = sfCands.reduce((s, c) => s + (c.est_tokens_saved || 0), 0);
+  // Prose-reduction %s come from the analyzer (#423) — single source of truth;
+  // the UI renders them and never re-derives chars/CHARS_PER_TOKEN in JS.
+  const sfAvgPct = sf && sf.reduction_pct != null ? sf.reduction_pct : 0;
+  // Applied vs outstanding. The scan (sfTok) is the STILL-recoverable opportunity —
+  // it drops already-applied files by design. Applied savings come from the backup
+  // meta (est_tokens_saved recorded at apply). % applied = applied / (applied + outstanding).
+  // Applied is cumulative across runs (backups are global); outstanding is this scan.
+  const sfApplied = (st.bk || []).reduce((s, b) => s + (b.est_tokens_saved || 0), 0);
+  const sfAppliedN = (st.bk || []).filter(b => (b.est_tokens_saved || 0) > 0).length;
+  const sfTotal = sfApplied + sfTok;
+  const sfPctApplied = sfTotal > 0 ? Math.round(sfApplied / sfTotal * 100) : 0;
 
   return html`
     <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -6221,14 +6353,49 @@ function OptimizeView({ params }) {
             <div class="waste-list">
               ${waste.recSegs.map(r => html`
                 <div class="waste-row">
-                  <span class="waste-name">${r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
-                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)} <span class="estimated-tag" title=${r.caveat || r.basis}>estimated recoverable</span></span>
+                  <span class="waste-name">${r.title === 'Summarize'
+                    ? html`<a class="sz-link" href="#/optimize/summarize">${r.title}</a>`
+                    : r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
+                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)} <span class="estimated-tag" title=${r.caveat || r.basis}>estimated recoverable</span>${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
               `)}
             </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window — no estimated waste from any analyzer.</div>`}
           ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
         </div>` : null}
+
+      ${sf ? html`
+        <section class="opt-section" id="opt-summarize">
+          <div class="opt-title">
+            <span>Summarize <span class="dim" style="font-weight:400;font-size:12px">· structure-aware prompt summaries</span></span>
+            <a class="sz-link" href="#/optimize/summarize" style="font-size:13px">Review →</a>
+          </div>
+          ${sf.files > 0 ? html`
+            <div class="sz-tiles">
+              <div class="sz-tile"><div class="sz-tile-v">${sf.files}</div><div class="sz-tile-l">summarizable file${sf.files === 1 ? '' : 's'}</div></div>
+              <div class="sz-tile"><div class="sz-tile-v">~${fmtTokens(sfTok)}</div><div class="sz-tile-l">est. tokens recoverable / call</div></div>
+              <div class="sz-tile"><div class="sz-tile-v">${sfAvgPct}%</div><div class="sz-tile-l">avg prose reduction</div></div>
+            </div>
+            ${sfApplied > 0 ? html`<div style="margin:14px 0 2px">
+              <div class="sz-prog" style="height:10px"><div style=${'width:' + sfPctApplied + '%;background:var(--success)'}></div></div>
+              <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b> — ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
+            </div>` : null}
+            <table class="opt-table" style="margin-top:12px">
+              <thead><tr><th>File</th><th>Scope</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
+              <tbody>
+                ${sfCands.slice(0, 6).map((c, i) => html`<tr key=${i}>
+                  <td class="mono" title=${c.path}>${c.path.split('/').slice(-2).join('/')}</td>
+                  <td class="dim" style="font-size:11px">${c.scope}</td>
+                  <td class="mono" style="text-align:right;color:var(--accent)">~${c.est_tokens_saved}</td>
+                  <td class="mono" style="text-align:right">${c.reduction_pct != null ? c.reduction_pct : 0}%</td>
+                </tr>`)}
+                ${sfCands.length > 6 ? html`<tr><td colspan="4" class="dim" style="font-size:11px">+${sfCands.length - 6} more · <a class="sz-link" href="#/optimize/summarize">see all →</a></td></tr>` : null}
+              </tbody>
+            </table>
+            <div class="sz-note" style="font-size:12px;margin-top:12px">Estimated per-call token reduction from a filesystem scan — advisory; review each rewrite before applying. <span class="estimated-tag" title=${sf.estimate_basis}>estimated · tokens</span></div>
+          ` : html`<div class="opt-line dim">No summarizable prompt files in this scan. <a class="sz-link" href="#/optimize/summarize">Open Summarize →</a></div>`}
+        </section>` : null}
+
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}
@@ -6236,6 +6403,613 @@ function OptimizeView({ params }) {
         ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtFramedDollar(b.projected_overage_usd, framing)}</span>` : '— within budget'}</div>`)}
       </section>` : null}
     ` : null}
+  `;
+}
+
+// ============================
+// Optimize ▸ Summarize (Track B) — curate → run → review/apply.
+// ============================
+// The Optimize dashboard SHOWS the recoverable signal (the Track A `summarize`
+// analyzer); THIS screen DOES the work. Its reason to exist vs. `tj summarize`
+// on the CLI is granularity (DEC-034): the CLI applies all-or-nothing, here you
+// pick a subset, run the structure-aware summarizer per file, review each diff,
+// and apply individually. Every write goes through core `apply_staged` (owner +
+// content-hash-drift + symlink guards, gzip backup, dry-run until an explicit
+// per-file Apply — no flag bypasses a guard). All data comes from
+// /api/v1/summarize/* (core in-process; the run route is `tj serve`'s first
+// outbound LLM caller — capabilities-gated so dead engines are disabled).
+function diffLine(ln, i) {
+  let col = 'var(--text-faint)';
+  if (ln.startsWith('+')) col = 'var(--success)';
+  else if (ln.startsWith('-')) col = 'var(--error)';
+  return html`<div key=${i} style=${'color:' + col}>${ln || ' '}</div>`;
+}
+
+// Group a unified diff into per-hunk "blocks" so the review shows the change
+// block-by-block instead of one wall of @@ noise. Drops the ---/+++ file headers
+// and the cryptic @@ hunk header; each hunk becomes a block with +/- line counts.
+function diffBlocks(diffText) {
+  const out = [];
+  let cur = null;
+  for (const ln of (diffText || '').split('\n')) {
+    if (ln.startsWith('--- ') || ln.startsWith('+++ ')) continue;
+    if (ln.startsWith('@@')) { cur = { add: 0, del: 0, lines: [] }; out.push(cur); continue; }
+    if (!cur) { cur = { add: 0, del: 0, lines: [] }; out.push(cur); }
+    if (ln.startsWith('+')) cur.add++;
+    else if (ln.startsWith('-')) cur.del++;
+    cur.lines.push(ln);
+  }
+  return out.filter(b => b.lines.some(l => l.trim()));
+}
+
+function SummarizeView({ params }) {
+  // Flow: engine (capability gate) → curate → run → review. The engine is
+  // chosen per visit (page starts on the gate, never defaulted).
+  const [phase, setPhase] = useState('engine');
+  const [engine, setEngine] = useState(null);          // 'api' | 'claude-p' | 'manual'
+  const [caps, setCaps] = useState(null);
+  const [capErr, setCapErr] = useState(null);
+
+  // Scan + staged data (read-only reads).
+  const [scan, setScan] = useState(null);              // ScanResult.to_dict
+  const [staged, setStaged] = useState([]);            // staged records (CheckVerdict + source_sha256)
+  const [backups, setBackups] = useState([]);          // applied files that still have a gzip backup (undo surface)
+  const [dataErr, setDataErr] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [recursive, setRecursive] = useState(false);
+  const [repoScope, setRepoScope] = useState(false);
+  const scanSeq = useRef(0);   // discards a slower earlier scan's response (out-of-order landing)
+  const scanOpts = useRef({ recursive: false, repo: false });   // synchronous source of truth for the toggles (no stale closure)
+
+  // Curator.
+  const [checked, setChecked] = useState(() => new Set());
+  const [added, setAdded] = useState(() => new Set());
+  const [kind, setKind] = useState('all');
+  const [scope, setScope] = useState('all');
+  const [status, setStatus] = useState('all');
+  const [query, setQuery] = useState('');
+  const [modal, setModal] = useState(null);            // 'review' | 'approve'
+  const [mQuery, setMQuery] = useState('');
+
+  // Run.
+  const [runList, setRunList] = useState([]);          // ordered basket snapshot
+  const [runState, setRunState] = useState(null);      // api/claude-p batch progress
+  const [tick, setTick] = useState(0);                 // 1s ticker so the in-flight run row shows live elapsed
+  const [manIdx, setManIdx] = useState(0);             // manual per-file stepper
+  const [manPrep, setManPrep] = useState(null);
+  const [manSummary, setManSummary] = useState('');
+  const [manBusy, setManBusy] = useState(false);
+  const [manErr, setManErr] = useState(null);
+
+  // Review.
+  const [revChecked, setRevChecked] = useState(() => new Set());
+  const [revModal, setRevModal] = useState(null);      // staged path whose diff is open
+  const [rvState, setRvState] = useState('all');
+  const [rvKind, setRvKind] = useState('all');
+  const [rvScope, setRvScope] = useState('all');
+  const [rvQuery, setRvQuery] = useState('');
+  const [fileStates, setFileStates] = useState({});    // path -> 'applied' | 'rejected' (client overlay)
+  const [applyMsg, setApplyMsg] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  // The scan omits already-summarized files by design; a file that's been run
+  // but not yet applied is still a candidate AND has a staged record → 'staged'.
+  const cands = scan ? scan.candidates : [];
+  const stagedPaths = new Set(staged.map(s => s.path));
+  const candByPath = {};
+  cands.forEach(c => { candByPath[c.path] = c; });
+  const statusOf = c => stagedPaths.has(c.path) ? 'staged' : 'candidate';
+
+  // ---- loaders (all core in-process) ----
+  const loadCaps = async () => {
+    try { setCaps(await api('/summarize/capabilities')); }
+    catch (e) { setCapErr(e.message || String(e)); }
+  };
+  const loadScan = async (opts) => {
+    // Merge the toggle into a ref SYNCHRONOUSLY: a second toggle handled before the
+    // re-render must not rebuild the other value from a stale closure (the seq guard
+    // would otherwise make that stale-but-later request authoritative).
+    if (opts) scanOpts.current = { ...scanOpts.current, ...opts };
+    const { recursive: rec, repo: rp } = scanOpts.current;
+    const seq = ++scanSeq.current;
+    setLoading(true); setDataErr(null);
+    try {
+      const [sc, stg] = await Promise.all([
+        api('/summarize/candidates', { recursive: rec || undefined, repo: rp || undefined }),
+        api('/summarize/staged'),
+      ]);
+      if (seq !== scanSeq.current) return;   // a newer scan superseded this response — drop it
+      setScan(sc); setStaged(stg.staged || []);
+    } catch (e) { if (seq === scanSeq.current) setDataErr(e.message || String(e)); }
+    if (seq === scanSeq.current) setLoading(false);
+  };
+  const loadStaged = async () => {
+    try { const stg = await api('/summarize/staged'); setStaged(stg.staged || []); }
+    catch (e) { setDataErr(e.message || String(e)); }
+  };
+  const loadBackups = async () => {
+    try { const bk = await api('/summarize/backups'); setBackups(bk.backups || []); }
+    catch (e) { /* backups are a convenience surface; don't block the screen on them */ }
+  };
+
+  // Mount: capabilities (which engines work) + any already-staged work, so the
+  // start screen can offer "review N staged" WITHOUT forcing an engine choice
+  // (reviewing/applying staged rewrites needs no LLM — only running does).
+  useEffect(() => { loadCaps(); loadStaged(); loadBackups(); }, []);
+
+  // While a batch run is in flight, tick once a second so the in-flight row shows
+  // live elapsed time (a claude-p file can take 30-90s; silence reads as "hung").
+  const runActive = phase === 'run' && !!runState && runState.running;
+  useEffect(() => {
+    if (!runActive) return undefined;
+    const id = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [runActive]);
+
+  const pickEngine = e => { setEngine(e); setPhase('curate'); loadScan(); };
+
+  // ---- curator ----
+  const seg = (val, set, opts, label) => html`
+    <div class="cur-seg"><span class="seg-label">${label}</span>
+      ${opts.map(o => html`<button class=${val === o.v ? 'on' : ''} onClick=${() => set(o.v)}>${o.t}</button>`)}
+    </div>`;
+  const baseMatch = c =>
+    (kind === 'all' || c.kind === kind) &&
+    (scope === 'all' || c.scope === scope) &&
+    (status === 'all' || statusOf(c) === status) &&
+    (query === '' || c.path.toLowerCase().includes(query.toLowerCase()));
+  const visible = cands.filter(baseMatch);
+  const selectable = visible.filter(c => !added.has(c.path));
+  const checkedCount = [...checked].filter(p => !added.has(p)).length;
+
+  const toggle = p => setChecked(prev => { const n = new Set(prev); n.has(p) ? n.delete(p) : n.add(p); return n; });
+  const checkShown = () => setChecked(prev => { const n = new Set(prev); selectable.forEach(c => n.add(c.path)); return n; });
+  const uncheckShown = () => setChecked(prev => { const n = new Set(prev); visible.forEach(c => n.delete(c.path)); return n; });
+  const doAdd = () => { setAdded(prev => { const n = new Set(prev); checked.forEach(p => n.add(p)); return n; }); setChecked(new Set()); };
+  const removeAdded = p => setAdded(prev => { const n = new Set(prev); n.delete(p); return n; });
+  const clearAll = () => setAdded(new Set());
+  const clearShownModal = () => setAdded(prev => { const n = new Set(prev); [...prev].filter(p => mQuery === '' || p.toLowerCase().includes(mQuery.toLowerCase())).forEach(p => n.delete(p)); return n; });
+  const openModal = m => { setMQuery(''); setModal(m); };
+
+  const addedList = [...added].map(p => candByPath[p]).filter(Boolean);
+  const addedTok = addedList.reduce((s, c) => s + (c.est_tokens_saved || 0), 0);
+  const modalList = addedList.filter(c => mQuery === '' || c.path.toLowerCase().includes(mQuery.toLowerCase()));
+
+  // Smart tally: individual chips while few; collapse to directory groups past a cap.
+  const CHIP_CAP = 8;
+  const dirOf = p => { const i = p.lastIndexOf('/'); return i < 0 ? './' : p.slice(0, i + 1); };
+  let chipEls;
+  if (addedList.length <= CHIP_CAP) {
+    chipEls = addedList.map((c, i) => html`<span class="cur-chip" key=${i}>${c.path}</span>`);
+  } else {
+    const groups = {};
+    addedList.forEach(c => { const k = dirOf(c.path); groups[k] = (groups[k] || 0) + 1; });
+    const sorted = Object.entries(groups).sort((a, b) => b[1] - a[1]);
+    chipEls = [
+      ...sorted.slice(0, CHIP_CAP).map(([dir, n], i) => html`<span class="cur-chip" key=${i}>${dir} <span class="dim">×${n}</span></span>`),
+      ...(sorted.length > CHIP_CAP ? [html`<span class="cur-chip more" key="more">+${sorted.length - CHIP_CAP} dirs</span>`] : []),
+    ];
+  }
+
+  // ---- run transitions ----
+  const approve = () => {
+    const list = [...added];
+    setRunList(list); setModal(null); setFileStates({}); setRevChecked(new Set()); setApplyMsg(null);
+    if (engine === 'manual') {
+      setManIdx(0); setManSummary(''); setManErr(null); setPhase('run'); prepFile(list[0]);
+    } else {
+      setPhase('run'); runBatch(list);
+    }
+  };
+  const runBatch = async list => {
+    setRunState({ total: list.length, done: 0, current: null, results: [], running: true });
+    for (const path of list) {
+      setRunState(s => ({ ...s, current: path, curStart: Date.now() }));
+      try {
+        const r = (await apiPostOrDetail('/summarize/run', { path, mode: engine, ratio: 0.5 })) || {};
+        const ok = !!(r.verdict && r.verdict.staged);
+        const note = r.skipped_note || (r.verdict && !r.verdict.structure_ok ? (r.verdict.reason || 'structure check did not pass') : '');
+        setRunState(s => ({ ...s, done: s.done + 1, results: [...s.results, { path, ok, note, amortization: r.amortization, cost_unknown: r.cost_unknown }] }));
+      } catch (e) {
+        setRunState(s => ({ ...s, done: s.done + 1, results: [...s.results, { path, ok: false, error: true, note: e.message || String(e) }] }));
+      }
+    }
+    setRunState(s => ({ ...s, current: null, running: false }));
+    await loadStaged();
+  };
+  const prepFile = async path => {
+    if (!path) { await loadStaged(); setPhase('review'); return; }
+    setManBusy(true); setManErr(null); setManSummary('');
+    try { setManPrep(await apiPostOrDetail('/summarize/prep', { path, ratio: 0.5 })); }
+    catch (e) { setManErr(e.message || String(e)); setManPrep({ path, wrapped_prompt: '', system_rules: '', source_sha256: '', note: '', error: true }); }
+    setManBusy(false);
+  };
+  const manNext = async () => {
+    const next = manIdx + 1;
+    if (next >= runList.length) { await loadStaged(); setPhase('review'); return; }
+    setManIdx(next); await prepFile(runList[next]);
+  };
+  const manCheck = async () => {
+    if (!manPrep || !manPrep.source_sha256) return;
+    setManBusy(true); setManErr(null);
+    try { await apiPostOrDetail('/summarize/check', { path: manPrep.path, summary: manSummary, source_hash: manPrep.source_sha256 }); }
+    catch (e) { setManErr(e.message || String(e)); setManBusy(false); return; }
+    await manNext();
+    setManBusy(false);
+  };
+
+  // ---- review ----
+  const revRows = staged.map(s => { const c = candByPath[s.path]; return { ...s, kind: c ? c.kind : 'other', scope: c ? c.scope : '—' }; });
+  const stOf = p => fileStates[p] || 'staged';
+  const rvMatch = r => {
+    const st = stOf(r.path);
+    return (rvState === 'all' || st === rvState) &&
+      (rvKind === 'all' || r.kind === rvKind) &&
+      (rvScope === 'all' || r.scope === rvScope) &&
+      (rvQuery === '' || r.path.toLowerCase().includes(rvQuery.toLowerCase()));
+  };
+  const rvVisible = revRows.filter(rvMatch);
+  const rvSelectable = rvVisible.filter(r => stOf(r.path) === 'staged');
+  // Reject is a client-side dismiss (no write), so it filters nothing — any row can
+  // be cleared from the view. Apply WRITES, so it excludes structure_ok===false
+  // (defense-in-depth; core is the real guard — check() never stages a failed rewrite
+  // and apply_staged re-skips one server-side).
+  const rvCheckedReject = [...revChecked].filter(p => stOf(p) === 'staged');
+  const rvCheckedStaged = rvCheckedReject.filter(
+    p => !staged.some(s => s.path === p && s.structure_ok === false));
+  const appliedCount = revRows.filter(r => stOf(r.path) === 'applied').length;
+  const rejectedCount = revRows.filter(r => stOf(r.path) === 'rejected').length;
+  const revertedCount = revRows.filter(r => stOf(r.path) === 'reverted').length;
+  const stagedCount = revRows.length - appliedCount - rejectedCount - revertedCount;
+  const rvToggle = p => setRevChecked(prev => { const n = new Set(prev); n.has(p) ? n.delete(p) : n.add(p); return n; });
+  const rvCheckShown = () => setRevChecked(prev => { const n = new Set(prev); rvSelectable.forEach(r => n.add(r.path)); return n; });
+  const rvUncheckShown = () => setRevChecked(prev => { const n = new Set(prev); rvVisible.forEach(r => n.delete(r.path)); return n; });
+  const shortP = p => { const i = p.lastIndexOf('/'); return i < 0 ? p : '…/' + p.slice(i + 1); };
+  const setMsg = (text, tone) => setApplyMsg({ text, tone: tone || 'ok' });
+
+  // Apply writes via core apply_staged (go=true). Staging is NOT reloaded after —
+  // applied files are cleared from disk on write, but we keep the row visible and
+  // overlay 'applied' via fileStates so the review stays legible for this session.
+  const applyPaths = async paths => {
+    if (!paths.length) return;
+    setBusy(true);
+    const results = [];
+    for (const path of paths) {
+      try {
+        const r = (await apiPostOrDetail('/summarize/apply', { path, go: true })) || {};
+        if (r.applied && r.applied.length) { results.push({ path, ok: true }); setFileStates(s => ({ ...s, [path]: 'applied' })); }
+        else { results.push({ path, ok: false, reason: (r.skipped && r.skipped[0]) ? r.skipped[0].reason : 'not applied' }); }
+      } catch (e) { results.push({ path, ok: false, reason: e.message || String(e) }); }
+    }
+    setRevChecked(new Set()); setBusy(false);
+    const okN = results.filter(r => r.ok).length;
+    const fails = results.filter(r => !r.ok);
+    setMsg('Applied ' + okN + ' file(s).' + (fails.length ? ' ' + fails.length + ' skipped — ' + fails.map(f => shortP(f.path) + ' (' + f.reason + ')').join('; ') : ''), fails.length ? 'warn' : 'ok');
+    loadBackups();   // newly-applied files now have a backup → surface them as undoable
+  };
+  const applyChecked = () => applyPaths(rvCheckedStaged);
+  const rejectChecked = () => {
+    setFileStates(s => { const n = { ...s }; rvCheckedReject.forEach(p => n[p] = 'rejected'); return n; });
+    setRevChecked(new Set());
+  };
+  // Undo restores an APPLIED file from its gzip backup via core `undo` (go=true).
+  // Refuses (409) if the file changed since apply or the backup is gone — the
+  // reason is surfaced. On success the row goes terminal 'reverted' (its staged
+  // copy was already cleared at apply, so it can't be re-applied — re-run to redo).
+  const undoPath = async path => {
+    setBusy(true);
+    try {
+      await apiPostOrDetail('/summarize/undo', { path, go: true });
+      setFileStates(s => ({ ...s, [path]: 'reverted' }));
+      setBackups(bs => bs.filter(b => b.source_path !== path));   // no longer undoable (now == original)
+      setMsg('Reverted ' + shortP(path) + ' — restored from backup.', 'ok');
+    } catch (e) { setMsg('Undo failed for ' + shortP(path) + ' — ' + (e.message || String(e)), 'warn'); }
+    setBusy(false);
+  };
+  const reRun = async path => {
+    if (engine === 'manual') return;
+    setBusy(true);
+    try {
+      await apiPostOrDetail('/summarize/run', { path, mode: engine, ratio: 0.5 });
+      const one = await api('/summarize/staged', { path });
+      if (one.staged && one.staged.length) {
+        setStaged(prev => prev.map(s => s.path === path ? one.staged[0] : s));
+        setFileStates(s => { const n = { ...s }; delete n[path]; return n; });
+      }
+    } catch (e) { setMsg('Re-run failed for ' + shortP(path) + ' — ' + (e.message || String(e)), 'warn'); }
+    setBusy(false);
+  };
+
+  // ======================= RENDER =======================
+  if (phase === 'engine') {
+    const eng = (id, name, tag, desc) => {
+      const cap = caps ? caps[id] : null;
+      const avail = cap ? cap.available : false;
+      const val = id === 'claude_p' ? 'claude-p' : id;
+      return html`<button class="sz-engine" disabled=${!avail} onClick=${() => avail && pickEngine(val)}>
+        <div class="sz-eng-name">${name}</div>
+        <div class="sz-eng-tag">${tag}</div>
+        <div class="sz-eng-desc">${desc}</div>
+        ${!avail && cap && cap.reason ? html`<div class="sz-eng-off">${cap.reason}</div>` : null}
+      </button>`;
+    };
+    return html`
+      <div style="margin:0 0 4px"><a class="sz-link" href="#/optimize">← Optimize</a></div>
+      <div class="page-title">Summarize <span class="sz-sub">· structure-aware prompt summarization</span></div>
+      <div class="sz-note">Rewrites prose only — code, tables and ${'<tj-keep>'} blocks stay verbatim. Nothing is written until you review each rewrite and Apply.</div>
+      ${staged.length ? html`<div class="cur-tally" style="cursor:pointer;margin-top:14px" onClick=${() => setPhase('review')}>
+        <div class="cur-tally-head">
+          <div class="cur-tally-count">${staged.length} <small>staged rewrite(s) ready to review — no engine needed</small></div>
+          <div class="cur-tally-hint">Review & apply →</div>
+        </div>
+      </div>` : null}
+      ${backups.filter(b => b.undoable).length ? html`<div class="dim" style="font-size:12px;margin-top:8px">${backups.filter(b => b.undoable).length} applied summary(ies) can be undone — <span class="sz-link" onClick=${() => setPhase('review')}>review & undo →</span></div>` : null}
+      <div class="sz-sub" style="font-weight:600;margin:18px 0 2px">Summarize new files</div>
+      <div class="sz-note" style="margin-bottom:6px">How to produce the summaries:</div>
+      ${capErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">Couldn't load engine availability: ${capErr}</div></div>` : null}
+      ${!caps && !capErr ? html`<div class="shimmer" style="height:140px"></div>` : null}
+      ${caps ? html`<div class="sz-engines">
+        ${eng('api', 'API', '$ at cost · your key', 'Calls Anthropic with your key. Billed per rewrite; the review shows cost and break-even.')}
+        ${eng('claude_p', 'Claude CLI', 'against your Claude limits', 'Runs the local `claude` CLI. No dollar cost — uses your Claude limits. Local host only.')}
+        ${eng('manual', 'Manual', 'no outbound calls', 'Copy a ready-made prompt into any Claude session, paste the reply back. Nothing leaves this machine.')}
+      </div>` : null}
+    `;
+  }
+
+  if (phase === 'run' && engine !== 'manual') {
+    const rs = runState || { total: runList.length, done: 0, current: null, results: [], running: true };
+    const pct = rs.total ? Math.round(rs.done / rs.total * 100) : 100;
+    const okN = rs.results.filter(r => r.ok).length;
+    const elapsed = rs.curStart ? Math.max(0, Math.round((Date.now() - rs.curStart) / 1000)) : 0;
+    return html`
+      <div class="page-title">Summarize <span class="sz-sub">· running via ${engine}</span></div>
+      <div class="sz-note">Summarizing ${rs.total} file(s), one at a time${engine === 'claude-p' ? ' — ~30–90s each via claude-p' : ''}. Results are staged; <b>nothing is written yet</b>.</div>
+      <div class="sz-prog"><div style=${'width:' + pct + '%'}></div></div>
+      <div class="dim" style="font-size:12px;margin-bottom:10px">${rs.done} / ${rs.total} done${rs.running && rs.current ? ' · running ' + shortP(rs.current) + ' (' + elapsed + 's)' : (rs.running ? '' : ' · complete')}</div>
+      <div class="cur-listbox" style="max-height:360px">
+        ${rs.results.map((r, i) => html`<div class="sz-runrow" key=${i}>
+          <span style=${'color:' + (r.ok ? 'var(--success)' : (r.error ? 'var(--error)' : 'var(--warn)'))}>${r.ok ? '✓' : (r.error ? '✕' : '—')}</span>
+          <span style="flex:1;word-break:break-all">${r.path}</span>
+          ${r.amortization ? html`<span class="dim">${fmtCost(r.amortization.rewrite_usd)}${r.amortization.break_even_calls != null ? ' · breaks even after ' + r.amortization.break_even_calls + ' calls' : ''}${r.amortization.rates_known ? '' : ' (est. rates)'}</span>`
+            : (r.cost_unknown ? html`<span class="dim">cost unknown</span>` : null)}
+          ${!r.ok && r.note ? html`<span class="dim" title=${r.note}>${r.note.length > 44 ? r.note.slice(0, 44) + '…' : r.note}</span>` : null}
+        </div>`)}
+        ${rs.running && rs.current ? html`<div class="sz-runrow">
+          <span class="sz-spin">⟳</span>
+          <span style="flex:1;word-break:break-all">${rs.current}</span>
+          <span class="dim">summarizing${'.'.repeat((tick % 3) + 1)} · ${elapsed}s</span>
+        </div>` : null}
+        ${rs.results.length === 0 && !(rs.running && rs.current) ? html`<div class="dim" style="padding:16px;text-align:center">Starting…</div>` : null}
+      </div>
+      <div class="cur-addbar">
+        <button class="cur-btn primary" disabled=${rs.running} onClick=${() => setPhase('review')}>Review ${okN} staged →</button>
+        <button class="cur-btn" disabled=${rs.running} onClick=${() => setPhase('curate')}>← back to curator</button>
+      </div>
+    `;
+  }
+
+  if (phase === 'run' && engine === 'manual') {
+    const total = runList.length;
+    const path = runList[manIdx];
+    const belowGate = manPrep && !manPrep.error && !manPrep.wrapped_prompt;
+    const full = manPrep ? (manPrep.system_rules ? manPrep.system_rules + '\n\n' : '') + manPrep.wrapped_prompt : '';
+    return html`
+      <div class="page-title">Summarize <span class="sz-sub">· manual — file ${Math.min(manIdx + 1, total)} of ${total}</span></div>
+      <div class="dim" style="font-size:12.5px;margin-bottom:10px;font-family:'Geist Mono',monospace">${path}</div>
+      ${manBusy ? html`<div class="shimmer" style="height:120px"></div>` : null}
+      ${manErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">${manErr}</div></div>` : null}
+      ${!manBusy && manPrep && !manPrep.error && !belowGate ? html`
+        <div class="sz-note">Paste this into a <b>new</b> Claude session, then paste the reply below and Check & stage.</div>
+        <div style="font-size:12px;color:var(--text-faint);margin:8px 0">${manPrep.prose_words} prose words → target ~${manPrep.target_prose_words} · ${manPrep.protected_blocks} protected block(s)</div>
+        <div class="sz-copybox">${full}</div>
+        <button class="cur-btn" style="margin:8px 0" onClick=${() => navigator.clipboard && navigator.clipboard.writeText(full)}>Copy</button>
+        <textarea class="sz-ta" placeholder="Paste Claude's summary here…" value=${manSummary} onInput=${e => setManSummary(e.target.value)}></textarea>
+        <div class="cur-addbar">
+          <button class="cur-btn primary" disabled=${manBusy || !manSummary.trim()} onClick=${manCheck}>Check & stage →</button>
+          <button class="cur-btn" disabled=${manBusy} onClick=${manNext}>Skip this file</button>
+          <button class="cur-btn" style="margin-left:auto" onClick=${() => setPhase('curate')}>← back to curator</button>
+        </div>
+      ` : null}
+      ${!manBusy && belowGate ? html`
+        <div class="opt-caveat">${manPrep.note || 'Below the prose gate — not worth summarizing.'}</div>
+        <div class="cur-addbar"><button class="cur-btn primary" onClick=${manNext}>Skip →</button><button class="cur-btn" onClick=${() => setPhase('curate')}>← back to curator</button></div>
+      ` : null}
+    `;
+  }
+
+  if (phase === 'review') {
+    const mf = revModal ? revRows.find(r => r.path === revModal) : null;
+    const mst = mf ? stOf(mf.path) : null;
+    const mfBlocks = mf ? diffBlocks(mf.diff) : [];
+    return html`
+      <div style="margin:0 0 4px"><span class="sz-link" onClick=${() => setPhase(engine ? 'curate' : 'engine')}>← ${engine ? 'back to curator' : 'back to start'}</span></div>
+      <div class="page-title">Summarize <span class="sz-sub">· review & apply</span></div>
+      <div class="sz-note rev-note">${revRows.length} staged. Structure is guaranteed; <b>meaning may change</b> — click a row for its diff. <b>Apply</b> writes the file (backs up first); <b>Reject</b> dismisses it here.</div>
+      ${dataErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">${dataErr}</div></div>` : null}
+      ${applyMsg ? html`<div class="opt-caveat" style=${'font-style:normal;color:' + (applyMsg.tone === 'warn' ? 'var(--warn)' : 'var(--success)')}>${applyMsg.text}</div>` : null}
+      <div class="cur-filters">
+        ${seg(rvState, setRvState, [{ v: 'all', t: 'All' }, { v: 'staged', t: 'Staged' }, { v: 'applied', t: 'Applied' }, { v: 'rejected', t: 'Rejected' }, { v: 'reverted', t: 'Reverted' }], 'State')}
+        ${seg(rvKind, setRvKind, [{ v: 'all', t: 'All' }, { v: 'prompt', t: 'Prompt' }, { v: 'other', t: 'Other' }], 'Kind')}
+        ${seg(rvScope, setRvScope, [{ v: 'all', t: 'All' }, { v: 'global', t: 'Global' }, { v: 'repo', t: 'Repo' }, { v: 'project', t: 'Project' }], 'Scope')}
+        <input class="cur-search" placeholder="search files…" value=${rvQuery} onInput=${e => setRvQuery(e.target.value)} />
+      </div>
+      <div class="cur-listhead">
+        <span>${rvVisible.length} shown · <b style="color:var(--warn)">${stagedCount}</b> staged · <b style="color:var(--success)">${appliedCount}</b> applied · <b>${rejectedCount}</b> rejected${revertedCount ? html` · <b>${revertedCount}</b> reverted` : null}</span>
+        <span class="sz-link" onClick=${rvCheckShown}>Check shown</span>
+        <span class="sz-link" onClick=${rvUncheckShown}>Uncheck shown</span>
+      </div>
+      <div class="cur-listbox">
+        <table class="cur-table">
+          <thead><tr><th style="width:26px"></th><th>File</th><th>Kind</th><th>Scope</th><th style="text-align:right">Saved</th><th>Structure</th><th>State</th></tr></thead>
+          <tbody>
+            ${rvVisible.map((r, i) => {
+              const st = stOf(r.path);
+              const term = st !== 'staged';
+              return html`<tr class=${'cur-row' + (term ? ' added' : '')} key=${i}>
+                <td>${term ? html`<span class="dim">—</span>` : html`<input type="checkbox" checked=${revChecked.has(r.path)} onChange=${() => rvToggle(r.path)} />`}</td>
+                <td class="mono"><span class="sz-link" title="review the diff" onClick=${() => setRevModal(r.path)}>${r.path}</span></td>
+                <td><span class="dim" style="font-size:12px">${r.kind}</span></td>
+                <td><span class="dim" style="font-size:12px">${r.scope}</span></td>
+                <td class="mono" style="text-align:right;color:var(--accent)">~${r.est_tokens_saved}</td>
+                <td>${r.structure_ok ? html`<span class="badge badge-ok">ok</span>` : html`<span class="badge badge-error">fail</span>`}</td>
+                <td><span class=${'rev-state ' + st}>${st}</span>${st === 'applied' ? html` <span class="sz-link" style="font-size:11px" title="restore this file from its backup" onClick=${() => undoPath(r.path)}>undo</span>` : null}</td>
+              </tr>`;
+            })}
+            ${rvVisible.length === 0 ? html`<tr><td colspan="7" class="dim" style="padding:16px;text-align:center">${revRows.length === 0 ? 'Nothing staged. Run the summarizer from the curator.' : 'No files match these filters.'}</td></tr>` : null}
+          </tbody>
+        </table>
+      </div>
+      <div class="cur-addbar">
+        <button class="cur-btn primary" disabled=${busy || rvCheckedStaged.length === 0} onClick=${applyChecked}>Apply checked ${rvCheckedStaged.length ? '(' + rvCheckedStaged.length + ') ' : ''}→</button>
+        <button class="cur-btn" disabled=${busy || rvCheckedReject.length === 0} onClick=${rejectChecked}>Reject checked</button>
+        <span class="dim" style="font-size:12px">Click a row for its diff.</span>
+        <a class="cur-btn" style="margin-left:auto;text-decoration:none" href="#/optimize">Done → Optimize</a>
+      </div>
+      ${revRows.length > 0 && stagedCount === 0 ? html`<div class="opt-caveat" style="font-style:normal;color:var(--success);margin-top:12px">✓ All ${revRows.length} rewrite(s) resolved — ${appliedCount} applied, ${rejectedCount} rejected${revertedCount ? ', ' + revertedCount + ' reverted' : ''}.${appliedCount ? ' Applied one you didn\'t want? Undo it below.' : ''} <a class="sz-link" href="#/optimize">Back to Optimize</a> · <span class="sz-link" onClick=${() => setPhase(engine ? 'curate' : 'engine')}>summarize more →</span></div>` : null}
+
+      ${backups.length ? html`<div class="opt-section" style="margin:16px 0 4px">
+        <div class="opt-title" style="font-size:14px">Applied earlier — undo <span class="dim" style="font-weight:400;font-size:12px">· restores the original from backup</span></div>
+        ${backups.map((b, i) => html`<div class="sz-runrow" key=${i}>
+          <span style="color:var(--success)">✓</span>
+          <span class="mono" style="flex:1;word-break:break-all">${b.source_path}</span>
+          ${b.applied_at ? html`<span class="dim" style="font-size:12px">${b.applied_at.slice(0, 16).replace('T', ' ')}</span>` : null}
+          ${b.undoable
+            ? html`<button class="cur-btn" disabled=${busy} onClick=${() => undoPath(b.source_path)}>Undo</button>`
+            : html`<span class="dim" style="font-size:12px" title=${b.reason}>can't undo — ${b.reason}</span>`}
+        </div>`)}
+      </div>` : null}
+      ${mf ? html`
+        <div class="cur-overlay" onClick=${() => setRevModal(null)}>
+          <div class="cur-modal" onClick=${e => e.stopPropagation()}>
+            <div class="cur-modal-head">
+              <span class="cur-modal-title mono">${mf.path}</span>
+              <span class=${'rev-state ' + mst} style="margin-left:6px">${mst}</span>
+              <button class="cur-modal-x" onClick=${() => setRevModal(null)} title="Close">✕</button>
+            </div>
+            <div class="cur-modal-body">
+              <div style="font-size:12.5px;margin-bottom:8px">
+                ${mf.structure_ok ? html`<span class="badge badge-ok">structure ok</span>` : html`<span class="badge badge-error">structure fail</span>`}
+                <span class="dim"> ${mf.words_before.toLocaleString()} → ${mf.words_after.toLocaleString()} words · ~${mf.est_tokens_saved} tok/call saved${mf.produced_by ? ' · via ' + mf.produced_by : ''}</span>
+              </div>
+              ${(mf.must_keep_removed && mf.must_keep_removed.length) ? html`<div class="opt-caveat" style="margin-top:0">Must-keep phrases changed: ${mf.must_keep_removed.length} removed${mf.must_keep_added && mf.must_keep_added.length ? ', ' + mf.must_keep_added.length + ' added' : ''} — check the diff before applying.</div>` : null}
+              ${mf.note ? html`<div class="dim" style="font-size:12.5px">${mf.note}</div>` : null}
+              <div class="sz-note" style="font-size:12px;margin:0 0 10px"><span style="color:var(--error)">−</span> lines removed · <span style="color:var(--success)">+</span> lines added · unchanged lines are kept verbatim (code, tables, ${'<tj-keep>'} blocks). Shown per changed block:</div>
+              ${mfBlocks.length ? mfBlocks.map((b, i) => html`<div class="sz-diffblock" key=${i}>
+                <div class="sz-diffblock-h">Block ${i + 1} · <span style="color:var(--error)">−${b.del}</span> <span style="color:var(--success)">+${b.add}</span> · ${b.del === 0 ? 'added' : (b.add === 0 ? 'removed' : 'prose rewritten')}</div>
+                <pre class="rev-diff" style="margin:6px 0 0">${b.lines.map(diffLine)}</pre>
+              </div>`) : html`<div class="dim" style="font-size:12.5px">No textual changes.</div>`}
+            </div>
+            <div class="cur-modal-foot">
+              ${mst === 'staged' ? html`
+                <button class="cur-btn primary" disabled=${busy || !mf.structure_ok} onClick=${() => { setRevModal(null); applyPaths([mf.path]); }}>Apply (writes, backs up)</button>
+                <button class="cur-btn" disabled=${busy} onClick=${() => { setFileStates(s => ({ ...s, [mf.path]: 'rejected' })); setRevModal(null); }}>Reject</button>
+                ${engine && engine !== 'manual' ? html`<button class="cur-btn" disabled=${busy} onClick=${() => { setRevModal(null); reRun(mf.path); }}>Re-run via ${engine}</button>` : null}
+              ` : null}
+              ${mst === 'applied' ? html`<button class="cur-btn" disabled=${busy} onClick=${() => { setRevModal(null); undoPath(mf.path); }}>Undo (restore backup)</button>` : null}
+              <button class="cur-btn" style="margin-left:auto" onClick=${() => setRevModal(null)}>Close</button>
+            </div>
+          </div>
+        </div>` : null}
+    `;
+  }
+
+  // phase === 'curate'
+  return html`
+    <div style="margin:0 0 4px"><a class="sz-link" href="#/optimize">← Optimize</a> <span class="dim" style="font-size:12px">· engine: ${engine} · <span class="sz-link" onClick=${() => setPhase('engine')}>change</span></span></div>
+    <div class="page-title">Summarize <span class="sz-sub">· curator — pick files to summarize</span></div>
+
+    <div class=${'cur-tally' + (addedList.length ? '' : ' empty')} onClick=${() => addedList.length && openModal('review')}>
+      <div class="cur-tally-head">
+        <div class="cur-tally-count">${addedList.length} <small>file${addedList.length === 1 ? '' : 's'} added · ~${addedTok.toLocaleString()} tok/call saved (est.)</small></div>
+        <div class="cur-tally-hint">${addedList.length ? 'click to review / remove' : 'check rows below, then Add →'}</div>
+      </div>
+      ${addedList.length ? html`<div class="cur-chips">${chipEls}</div>` : null}
+    </div>
+
+    ${staged.length ? html`<div class="opt-caveat" style="font-style:normal">${staged.length} file(s) already staged from an earlier run or the <code>tj summarize</code> CLI — <span class="sz-link" onClick=${() => setPhase('review')}>Review & apply →</span></div>` : null}
+
+    <div class="cur-filters">
+      ${seg(kind, setKind, [{ v: 'all', t: 'All' }, { v: 'prompt', t: 'Prompt' }, { v: 'other', t: 'Other' }], 'Kind')}
+      ${seg(scope, setScope, [{ v: 'all', t: 'All' }, { v: 'global', t: 'Global' }, { v: 'repo', t: 'Repo' }, { v: 'project', t: 'Project' }], 'Scope')}
+      ${seg(status, setStatus, [{ v: 'all', t: 'All' }, { v: 'candidate', t: 'Candidate' }, { v: 'staged', t: 'Staged' }], 'Status')}
+      <input class="cur-search" list="sz-files" placeholder="search files…" value=${query} onInput=${e => setQuery(e.target.value)} />
+      <datalist id="sz-files">${cands.map((c, i) => html`<option value=${c.path} key=${i}></option>`)}</datalist>
+    </div>
+
+    <div class="cur-cwd">
+      ${scan ? html`scanning <code>${scan.root || 'catalog defaults (cwd prompts + ~/ globals)'}</code> · ${scan.count} candidate(s) · ${scan.globals_checked} global(s) checked${scan.recursive ? ' · recursive' : ''}${scan.walk_capped ? ' · walk capped' : ''}` : 'scanning…'}
+      <label style="margin-left:12px"><input type="checkbox" checked=${recursive} onChange=${e => { setRecursive(e.target.checked); loadScan({ recursive: e.target.checked }); }} /> recursive</label>
+      <label style="margin-left:8px"><input type="checkbox" checked=${repoScope} onChange=${e => { setRepoScope(e.target.checked); loadScan({ repo: e.target.checked }); }} /> repo</label>
+      <span class="sz-link" style="margin-left:10px" onClick=${() => loadScan()}>Rescan</span>
+    </div>
+    ${scan && scan.note ? html`<div class="cur-cwd">${scan.note}</div>` : null}
+    <div class="cur-cwd"><span class="dim"><b>Kind</b> = agent-file match vs other · <b>Scope</b> = where found (global / repo / project / path)</span></div>
+
+    ${dataErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">Couldn't scan: ${dataErr}</div><button class="btn" onClick=${() => loadScan()}>Retry</button></div>` : null}
+    ${loading ? html`<div class="shimmer" style="height:200px"></div>` : null}
+
+    ${!loading ? html`
+    <div class="cur-listhead">
+      <span>${visible.length} shown${added.size ? ' · ' + added.size + ' in basket' : ''}</span>
+      <span class="sz-link" onClick=${checkShown}>Check shown</span>
+      <span class="sz-link" onClick=${uncheckShown}>Uncheck shown</span>
+    </div>
+    <div class="cur-listbox">
+      <table class="cur-table">
+        <thead><tr><th style="width:26px"></th><th>File</th><th title="prompt = catalog-matched agent file; else other">Kind</th><th title="global (~/) · repo (git root) · project (cwd) · path (explicit)">Scope</th><th style="text-align:right">Words</th><th style="text-align:right">Tok/call</th><th>Status</th></tr></thead>
+        <tbody>
+          ${visible.map((c, i) => {
+            const isAdded = added.has(c.path);
+            const st = statusOf(c);
+            return html`<tr class=${'cur-row' + (isAdded ? ' added' : '')} key=${i}>
+              <td>${isAdded ? html`<span class="dim" title="in basket">✓</span>` : html`<input type="checkbox" checked=${checked.has(c.path)} onChange=${() => toggle(c.path)} />`}</td>
+              <td class="mono">${c.path}</td>
+              <td><span class="dim" style="font-size:12px">${c.kind}</span></td>
+              <td><span class="dim" style="font-size:12px">${c.scope}</span></td>
+              <td class="mono" style="text-align:right">${c.prose_words.toLocaleString()}</td>
+              <td class="mono" style="text-align:right;color:var(--accent)">~${c.est_tokens_saved}</td>
+              <td class="dim" style="font-size:12px">${st}</td>
+            </tr>`;
+          })}
+          ${visible.length === 0 ? html`<tr><td colspan="7" class="dim" style="padding:16px;text-align:center">${cands.length === 0 ? 'No summarizable files found. Try recursive / repo, or open a project with prompt files.' : 'No files match these filters.'}</td></tr>` : null}
+        </tbody>
+      </table>
+    </div>
+    <div class="cur-addbar">
+      <button class="cur-btn primary" disabled=${checkedCount === 0} onClick=${doAdd}>Add ${checkedCount ? checkedCount + ' ' : ''}→</button>
+      <span class="dim" style="font-size:12px">Checked rows move to the basket.</span>
+      <button class="cur-btn" style="margin-left:auto" disabled=${added.size === 0} onClick=${() => openModal('approve')}>Finish (${added.size}) →</button>
+    </div>
+    ` : null}
+
+    <div class="sz-note" style="font-size:12px;margin-top:14px"><b>Finish → Approve</b> runs the summarizer${engine === 'manual' ? ' (you paste each result back)' : ' via ' + engine} — you review each rewrite before applying.</div>
+
+    ${modal ? html`
+      <div class="cur-overlay" onClick=${() => setModal(null)}>
+        <div class="cur-modal" onClick=${e => e.stopPropagation()}>
+          <div class="cur-modal-head">
+            <span class="cur-modal-title">${modal === 'approve' ? 'Approve ' + added.size + ' file' + (added.size === 1 ? '' : 's') + ' to summarize?' : 'Basket — ' + added.size + ' file' + (added.size === 1 ? '' : 's')}</span>
+            <button class="cur-modal-x" onClick=${() => setModal(null)} title="Close — go back and change">✕</button>
+          </div>
+          <div class="cur-modal-body">
+            <input class="cur-search" style="width:100%;margin-bottom:10px" placeholder="search basket…" value=${mQuery} onInput=${e => setMQuery(e.target.value)} />
+            ${modalList.length === 0
+              ? html`<div class="dim" style="padding:14px;text-align:center">${added.size === 0 ? 'Basket is empty.' : 'No items match.'}</div>`
+              : modalList.map((c, i) => html`<div class="cur-mrow" key=${i}>
+                  <span class="path">${c.path}</span>
+                  <span class="dim mono" style="font-size:12px">~${c.est_tokens_saved} tok/call</span>
+                  <button class="rm" title="Remove from basket" onClick=${() => removeAdded(c.path)}>✕</button>
+                </div>`)}
+          </div>
+          <div class="cur-modal-foot">
+            <button class="cur-btn" disabled=${modalList.length === 0} onClick=${clearShownModal}>Clear shown</button>
+            <button class="cur-btn" disabled=${added.size === 0} onClick=${clearAll}>Clear all</button>
+            ${modal === 'approve'
+              ? html`<button class="cur-btn primary" style="margin-left:auto" disabled=${added.size === 0} onClick=${approve}>${engine === 'manual' ? 'Approve ' + added.size + ' — prep first →' : 'Approve ' + added.size + ' — run via ' + engine + ' →'}</button>`
+              : html`<button class="cur-btn primary" style="margin-left:auto" onClick=${() => setModal(null)}>Done</button>`}
+          </div>
+        </div>
+      </div>` : null}
   `;
 }
 
@@ -6802,12 +7576,23 @@ function App() {
     }
   }, []);
 
-  // Update active nav link
+  // Update active nav link + reveal nested children of the active section.
   useEffect(() => {
+    const view = route.view, param = route.param || '';
     document.querySelectorAll('.nav-link').forEach(el => {
-      el.classList.toggle('active', el.dataset.view === route.view);
+      const v = el.dataset.view || '';
+      if (el.classList.contains('nav-child')) {
+        // "Click Optimize → expand": show a child only while its section is active.
+        el.style.display = (v === view) ? 'flex' : 'none';
+        el.classList.toggle('active', v === view && (el.dataset.param || '') === param);
+      } else {
+        // A parent yields the highlight to a child that matches the current param.
+        const childActive = v === view && param !== '' &&
+          !!document.querySelector('.nav-child[data-view="' + v + '"][data-param="' + param + '"]');
+        el.classList.toggle('active', v === view && !childActive);
+      }
     });
-  }, [route.view]);
+  }, [route.view, route.param]);
 
   const p = route.params;
   switch (route.view) {
@@ -6829,7 +7614,9 @@ function App() {
     case 'analytics': return html`<${AnalyticsView} params=${p} />`;
     case 'alerts': return html`<${AlertsView} params=${p} />`;
     case 'drift': return html`<${DriftView} params=${p} />`;
-    case 'optimize': return html`<${OptimizeView} params=${p} />`;
+    case 'optimize':
+      if (route.param === 'summarize') return html`<${SummarizeView} params=${p} />`;
+      return html`<${OptimizeView} params=${p} />`;
     case 'budget': return html`<${BudgetView} params=${p} />`;
     default: return html`<div class="empty">Page not found.</div>`;
   }
