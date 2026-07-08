@@ -8,7 +8,7 @@ it actually worked before you move on.
 ## 1. Zero-config evaluator — no install commitment
 
 ```bash
-npx tokenjam                          # or: uvx --from tokenjam tj quickstart
+npx tokenjam                          # or: uvx tokenjam quickstart
 ```
 
 Reads the Claude Code session logs you already have on disk (`~/.claude/projects/*.jsonl`) into a
