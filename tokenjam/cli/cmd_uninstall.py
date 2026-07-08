@@ -12,23 +12,47 @@ import click
 from tokenjam.utils.formatting import console
 
 
+def _installed_via_pipx() -> bool:
+    """True when this tj lives in a pipx-managed venv.
+
+    A pipx install lives at ~/.local/share/pipx/venvs/tokenjam/... — detecting
+    that is how we tell pipx installs apart from a plain pip / venv install.
+    """
+    return "pipx/venvs/" in sys.executable.replace("\\", "/")
+
+
 def _package_uninstall_hint() -> str:
     """Return the right uninstall command for how the user installed.
 
-    pipx is the canonical install path (per README and docs/installation.md).
-    A pipx install lives at ~/.local/share/pipx/venvs/tokenjam/... — detect
-    that and recommend `pipx uninstall`, otherwise fall back to `pip uninstall`
-    for venv / pip installs.
+    pipx is the canonical install path (per README and docs/installation.md);
+    otherwise fall back to `pip uninstall` for venv / pip installs.
     """
-    if "pipx/venvs/" in sys.executable.replace("\\", "/"):
-        return "pipx uninstall tokenjam"
-    return "pip uninstall tokenjam"
+    return "pipx uninstall tokenjam" if _installed_via_pipx() else "pip uninstall tokenjam"
+
+
+def _package_reinstall_hint() -> str:
+    """Return the command that actually reinstalls FRESH.
+
+    A plain `pipx install tokenjam` / `pip install tokenjam` no-ops when the
+    package is already present — the source of the confusing "fresh install"
+    that silently does nothing. Point pipx users at `pipx upgrade` (or
+    `pipx install --force`) and pip users at `pip install --upgrade`.
+    """
+    if _installed_via_pipx():
+        return "pipx upgrade tokenjam  (or: pipx install --force tokenjam)"
+    return "pip install --upgrade tokenjam"
 
 
 @click.command("uninstall")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
+@click.option(
+    "--remove-package",
+    is_flag=True,
+    help="Also remove the tokenjam package (runs pipx/pip uninstall). "
+    "With --yes, removes it without a second prompt.",
+)
 @click.pass_context
-def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
+def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
     """Remove all TokenJam data, config, and daemon."""
     if not yes:
         confirmed = click.confirm(
@@ -177,5 +201,66 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
             console.print(f"  [yellow]Could not clean {zshrc}: {exc}[/yellow]")
 
     console.print()
-    console.print("[green]TokenJam data and config removed.[/green]")
-    console.print(f"To remove the package itself, run: [bold]{_package_uninstall_hint()}[/bold]")
+    console.print("[green]TokenJam data, config, and wiring removed.[/green]")
+    console.print("[dim]The tokenjam package itself is still installed.[/dim]")
+
+    # 12. Optionally remove the package too (safe, opt-in, default No).
+    uninstall_cmd = _package_uninstall_hint()
+    do_remove = remove_package
+    if not do_remove and not yes:
+        do_remove = click.confirm(
+            f"Also remove the tokenjam package now? (runs {uninstall_cmd})",
+            default=False,
+        )
+
+    if do_remove:
+        _remove_package(uninstall_cmd)
+        return
+
+    # Package left in place: spell out the two-step so a later reinstall isn't
+    # a silent no-op (a plain `pipx/pip install` no-ops when already present).
+    console.print()
+    console.print("Next steps:")
+    console.print(f"  Fully remove the package:  [bold]{uninstall_cmd}[/bold]")
+    console.print(f"  Reinstall FRESH:           [bold]{_package_reinstall_hint()}[/bold]")
+    console.print(
+        "  [dim]A plain `install` no-ops when tokenjam is already present — "
+        "use the upgrade/--force form above to reinstall.[/dim]"
+    )
+
+
+def _remove_package(uninstall_cmd: str) -> None:
+    """Run the package uninstall when we can, else print the exact command.
+
+    Only pipx is auto-run: it's the canonical install path and safe to invoke
+    non-interactively. For pip / venv installs we print the command instead of
+    guessing (a wrong `pip uninstall` in the wrong environment is worse than a
+    copy-paste)."""
+    if _installed_via_pipx() and shutil.which("pipx"):
+        console.print()
+        console.print(f"Running: [bold]{uninstall_cmd}[/bold]")
+        result = subprocess.run(
+            ["pipx", "uninstall", "tokenjam"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            console.print("[green]tokenjam package removed.[/green]")
+            console.print(
+                f"  [dim]To reinstall FRESH: {_package_reinstall_hint()}[/dim]"
+            )
+        else:
+            console.print(
+                f"  [yellow]Could not remove the package automatically: "
+                f"{result.stderr.strip() or result.stdout.strip()}[/yellow]"
+            )
+            console.print(f"  Run manually: [bold]{uninstall_cmd}[/bold]")
+        return
+
+    # Not a pipx install (or pipx missing) — print the right command, don't guess.
+    console.print()
+    console.print(
+        "  [yellow]Can't safely auto-remove this install "
+        "(not a pipx-managed venv).[/yellow]"
+    )
+    console.print(f"  Remove the package with: [bold]{uninstall_cmd}[/bold]")
