@@ -28,8 +28,11 @@ def _meta_path(config: TjConfig, path: str) -> Path:
     return backups_dir(config) / f"{stage_key(path)}.meta.json"
 
 
-def save(config: TjConfig, path: str, original: str, output: str) -> None:
-    """Gzip the original + write the meta (one-level — replaces any prior backup for ``path``)."""
+def save(config: TjConfig, path: str, original: str, output: str, est_tokens_saved: int = 0) -> None:
+    """Gzip the original + write the meta (one-level — replaces any prior backup for ``path``).
+
+    ``est_tokens_saved`` is recorded so the Optimize box can report applied savings
+    (the read-only scan drops applied files, so their saving is otherwise lost)."""
     d = backups_dir(config)
     d.mkdir(parents=True, exist_ok=True)
     _orig_path(config, path).write_bytes(gzip.compress(original.encode("utf-8")))
@@ -38,6 +41,7 @@ def save(config: TjConfig, path: str, original: str, output: str) -> None:
             "source_path": path,
             "original_sha256": sha256(original),
             "output_sha256": sha256(output),
+            "est_tokens_saved": int(est_tokens_saved),
             "applied_at": utcnow().isoformat(),
         }, ensure_ascii=False),
         encoding="utf-8",
@@ -58,6 +62,61 @@ def recorded_output(config: TjConfig, path: str) -> str | None:
         return json.loads(f.read_text(encoding="utf-8"))["output_sha256"]
     except (OSError, json.JSONDecodeError, KeyError):
         return None
+
+
+def list_backups(config: TjConfig) -> list[dict]:
+    """Every applied file that still has a backup — the Lens 'undo' surface.
+
+    Each record: ``source_path``, ``applied_at``, plus a computed ``undoable`` flag
+    (+ ``reason`` when false). A backup is undoable iff the gzip blob is present, the
+    file still exists, is not a symlink, and its CURRENT content matches what apply
+    wrote — the same conditions ``undo`` enforces, surfaced up front so the UI can
+    show why a row can't be undone.
+    """
+    d = backups_dir(config)
+    if not d.exists():
+        return []
+    out: list[dict] = []
+    for meta_f in sorted(d.glob("*.meta.json")):
+        try:
+            meta = json.loads(meta_f.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        sp = meta.get("source_path")
+        if not sp:
+            continue
+        # Pair the blob to THIS meta file by name — don't recompute stage_key from
+        # source_path, which resolves symlinks and would map a now-symlinked source
+        # to a different key and spuriously read as "backup file missing".
+        orig_f = meta_f.with_name(meta_f.name[: -len(".meta.json")] + ".orig.gz")
+        p = Path(sp).expanduser()
+        undoable, reason = True, ""
+        if not orig_f.exists():
+            # meta.json without its gzip blob (deleted/cleaned) — undo() would 409;
+            # report it up front rather than offering an Undo that can't run.
+            undoable, reason = False, "backup file missing"
+        elif p.is_symlink():
+            # is_symlink() before exists(): exists() follows the link, so a broken
+            # symlink would otherwise be mislabelled "file no longer exists".
+            undoable, reason = False, "symlink — refusing to restore through it"
+        elif not p.exists():
+            undoable, reason = False, "file no longer exists"
+        else:
+            try:
+                current = p.read_text(encoding="utf-8")
+            except OSError:
+                undoable, reason = False, "cannot read the file"
+            else:
+                if sha256(current) != meta.get("output_sha256"):
+                    undoable, reason = False, "changed since apply — undo would lose newer edits"
+        out.append({
+            "source_path": sp,
+            "applied_at": meta.get("applied_at", ""),
+            "est_tokens_saved": int(meta.get("est_tokens_saved", 0) or 0),
+            "undoable": undoable,
+            "reason": reason,
+        })
+    return out
 
 
 def load_original(config: TjConfig, path: str, current: str | None) -> str:
