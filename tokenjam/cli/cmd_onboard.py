@@ -304,6 +304,32 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     if codex:
         _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan, verify=verify)
         return
+
+    # Path-branched first run (#448): the bare `tj onboard` no longer assumes an
+    # SDK/API user. It opens with "How do you use AI agents?" and routes to the
+    # matching flow, so a Claude Code user (the most common case) gets a
+    # backfill + statusline rather than an SDK snippet and a live-span verify
+    # that can never succeed. `--claude-code` / `--codex` above stay as shortcuts
+    # that skip the question. `--reconfigure` is still per-provider only, so it
+    # keeps its early error below. We only branch interactively — a non-tty bare
+    # invocation (scripts, CI) falls through to the historical generic SDK path
+    # so existing automation is byte-for-byte unchanged.
+    if not reconfigure and _is_interactive():
+        choice = _prompt_usage_path()
+        if choice == "claude_code":
+            _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
+                                 project_override, verify=verify)
+            return
+        if choice == "codex":
+            _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
+                           verify=verify)
+            return
+        if choice == "combination":
+            _onboard_combination(ctx, budget, no_daemon, force, plan,
+                                  project_override, verify=verify)
+            return
+        # choice == "sdk" → fall through to the generic SDK/API path below.
+
     existing = find_config_file()
     if existing and not force:
         # --reconfigure is only meaningful with --claude-code / --codex.
@@ -501,6 +527,10 @@ retention_days = 90
     if written_config is not None:
         _maybe_verify_onboarding(written_config, persona="sdk", verify=verify)
 
+    # Shared closing banner (#448): the SDK path has no backfill, so this is the
+    # branded home screen + next-best-actions with no session count.
+    _print_setup_complete_home()
+
 
 def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> None:
     """Run first-signal verification if ``--verify`` was passed, or offer it
@@ -647,6 +677,133 @@ def _prompt_plan(provider_label: str, choices: list[tuple[str, str]],
         show_default=True,
     )
     return keys[int(raw) - 1]
+
+
+def _is_interactive() -> bool:
+    """True when onboard is running against a terminal (a human is present).
+
+    Wrapped in a helper (rather than calling ``sys.stdin.isatty()`` inline) so
+    it's a single, testable seam — Click's CliRunner swaps ``sys.stdin`` for a
+    non-tty buffer, so tests patch this to force the interactive path.
+    """
+    try:
+        return sys.stdin.isatty()
+    except (ValueError, AttributeError):
+        return False
+
+
+_USAGE_PATH_CHOICES = [
+    ("claude_code", "Claude Code"),
+    ("codex",       "Codex"),
+    ("sdk",         "Your own agents (Python/TS SDK or API)"),
+    ("combination", "A combination of the above"),
+]
+
+
+def _prompt_usage_path() -> str:
+    """Ask the path question that opens the bare `tj onboard` (#448).
+
+    Returns the chosen path key: ``claude_code`` / ``codex`` / ``sdk`` /
+    ``combination``. The caller routes to the matching flow. Only called when
+    interactive (the non-tty path keeps the historical generic SDK behavior).
+    """
+    console.print()
+    console.print("[bold]How do you use AI agents?[/bold]")
+    for i, (_key, desc) in enumerate(_USAGE_PATH_CHOICES, start=1):
+        console.print(f"  {i}) {desc}")
+    raw = click.prompt(
+        "Choose",
+        type=click.IntRange(1, len(_USAGE_PATH_CHOICES)),
+        default=1,
+        show_default=True,
+    )
+    return _USAGE_PATH_CHOICES[int(raw) - 1][0]
+
+
+def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
+    """Best-effort Codex backfill, called defensively (#448).
+
+    The Codex on-disk backfill adapter (`tj backfill codex`) is being added by
+    another workstream and may not have landed yet. This resolves it at runtime
+    via a guarded import so the combination / --codex flows work whether or not
+    that adapter exists. When it's unavailable, returns forward-only framing so
+    the caller can say "wired — data flows as you use Codex" instead of claiming
+    a backfill that didn't happen (honesty discipline, Rule 14).
+
+    Returns ``(message, has_data, sessions_total)``:
+      * ``message`` — a human summary line, or None if nothing to report.
+      * ``has_data`` — True only when at least one session was actually ingested.
+      * ``sessions_total`` — distinct sessions ingested (0 when unavailable).
+    """
+    try:
+        from tokenjam.core.ingest_adapters.codex import (  # type: ignore[import]
+            ingest_codex,
+        )
+    except Exception:
+        # Adapter not shipped yet (or import error) — forward-only, no claim.
+        return None, False, 0
+
+    try:
+        from tokenjam.core.db import open_db
+        db = open_db(config.storage)
+        try:
+            result = ingest_codex(db, config=config)
+        finally:
+            db.close()
+    except Exception as exc:
+        err = str(exc).lower()
+        if "lock" in err or "i/o error" in err or "io error" in err:
+            return (
+                "skipped — daemon holds the DB write lock. "
+                "Stop the daemon (`tj stop`) and re-run `tj backfill codex`.",
+                False,
+                0,
+            )
+        return f"skipped ({exc})", False, 0
+
+    total = int(getattr(result, "sessions_total", 0) or 0)
+    if total <= 0:
+        return None, False, 0
+    new = int(getattr(result, "sessions_new", total) or 0)
+    existing = total - new
+    cost = float(getattr(result, "total_cost_usd", 0.0) or 0.0)
+    msg = (
+        f"{new} new ({existing} already present) · "
+        f"{total} total session{'s' if total != 1 else ''} · "
+        f"${cost:.0f} total spend"
+    )
+    return msg, True, total
+
+
+def _print_setup_complete_home(
+    *, sessions_backfilled: int = 0, has_data: bool = False,
+    days: int | None = None,
+) -> None:
+    """Every onboard path ends here (#448): the branded home banner + tailored
+    next-best-actions, so the closing screen is consistent no matter which path
+    the user took.
+
+    Reuses ``cli/home.print_home`` for the "You're set up" next-best-actions
+    block (config is always written by the time we reach here), prefixed with an
+    honest one-line "N sessions backfilled" note when a backfill actually
+    happened. Copy stays honest — no promised savings (Critical Rule 14).
+    """
+    from tokenjam.cli.home import print_home
+
+    console.print()
+    if has_data and sessions_backfilled > 0:
+        span = f" across the last {days} days" if days else ""
+        console.print(
+            f"[bold green]You're set up.[/bold green] "
+            f"[green]{sessions_backfilled} session"
+            f"{'s' if sessions_backfilled != 1 else ''} backfilled"
+            f"{span}.[/green]"
+        )
+    else:
+        console.print("[bold green]You're set up.[/bold green]")
+    # print_home() re-renders the banner + the configured next-best-actions
+    # (tj status / tokenmaxx / optimize / serve).
+    print_home()
 
 
 def _prompt_daily_budget(budget: float | None) -> float:
@@ -886,6 +1043,7 @@ def _onboard_claude_code(
     backfill_msg: str | None = None
     backfill_has_data = False
     backfill_days: int | None = None
+    backfill_sessions_total = 0
     try:
         from tokenjam.core.backfill import (
             CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code,
@@ -910,6 +1068,7 @@ def _onboard_claude_code(
                     # Report new / already-present / total so a re-run reads as
                     # "13 total" rather than "1 session" (#238).
                     total = result.sessions_total
+                    backfill_sessions_total = total
                     pieces = [
                         f"{result.sessions_new} new "
                         f"({result.sessions_existing} already present) · "
@@ -1192,6 +1351,16 @@ def _onboard_claude_code(
 
     _maybe_verify_onboarding(config, persona="claude_code", verify=verify)
 
+    # Shared closing banner (#448): every onboard path ends on the branded home
+    # screen + tailored next-best-actions. For Claude Code the success signal is
+    # the backfill ("N sessions backfilled"), NOT a live span — the log parse
+    # already ran above.
+    _print_setup_complete_home(
+        sessions_backfilled=backfill_sessions_total,
+        has_data=backfill_has_data,
+        days=backfill_days,
+    )
+
 
 def _onboard_codex(
     ctx: click.Context,
@@ -1372,6 +1541,11 @@ def _onboard_codex(
                 "Removed the previously-registered [mcp_servers.tj] block "
                 "(tj is out-of-band for Codex — see `tj` CLI reports)."
             )
+        # Even on the "already configured" fast path, attempt a defensive Codex
+        # backfill so re-onboarding picks up any newly-written on-disk logs (#448).
+        cx_msg, cx_has, cx_total = _try_backfill_codex(config)
+        if cx_msg:
+            console.print(f"  Backfilled:          {cx_msg}")
         _finish_onboard_serve(
             str(config_path.resolve()),
             want_daemon=not no_daemon,
@@ -1382,6 +1556,9 @@ def _onboard_codex(
             force=force,
         )
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=no_daemon)
+        _print_setup_complete_home(
+            sessions_backfilled=cx_total, has_data=cx_has,
+        )
         return
 
     otel_block = _codex_otel_toml_block(port, secret, agent_id)
@@ -1399,6 +1576,15 @@ def _onboard_codex(
     # own managed block, never a user-authored one.
     new_content, mcp_was_removed = _codex_strip_tj_mcp_from_content(new_content)
     codex_config_path.write_text(new_content)
+
+    # --- Attempt a Codex backfill (#448) ---
+    # The per-Codex flow is OTel/forward wiring; a separate workstream is adding
+    # an on-disk Codex backfill adapter (`tj backfill codex`). Call it
+    # defensively — if the adapter hasn't landed yet, we fall back to
+    # forward-only framing rather than claiming a backfill that didn't happen
+    # (honesty discipline, Rule 14). Run before daemon install so a freshly
+    # started serve doesn't hold the DuckDB write lock (#71).
+    codex_backfill_msg, codex_has_data, codex_sessions_total = _try_backfill_codex(config)
 
     # --- Install / restart serve after DB writes ---
     _finish_onboard_serve(
@@ -1425,6 +1611,8 @@ def _onboard_codex(
     if secret:
         console.print(f"  Ingest secret:       {secret[:8]}...")
     console.print("  Integration:         out-of-band (OTel telemetry — zero token cost)")
+    if codex_backfill_msg:
+        console.print(f"  Backfilled:          {codex_backfill_msg}")
     if mcp_was_removed:
         # Plain echo: Rich would treat [mcp_servers.tj] as a markup tag and strip it.
         click.echo(
@@ -1432,8 +1620,9 @@ def _onboard_codex(
             "(no per-turn quota burden)."
         )
     # Lead with the wins that need no restart, THEN the restart note (#240).
-    # Codex onboarding doesn't backfill, so there's no "already loaded" claim.
-    _print_next_steps_nudge(has_data=False)
+    # `has_data` is True only when the Codex backfill actually ingested sessions
+    # (adapter present + on-disk history); otherwise forward-only framing.
+    _print_next_steps_nudge(has_data=codex_has_data)
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")
@@ -1441,20 +1630,124 @@ def _onboard_codex(
     # tj can't put its re-read line inline the way it does for Claude Code. tj
     # stays fully out-of-band: it ingests Codex's OTel telemetry, and you read
     # it with the `tj` CLI. No in-loop MCP burden.
+    if not codex_has_data:
+        # Forward-only: no on-disk history was ingested (adapter not shipped yet,
+        # or no Codex logs) — say so honestly rather than implying past data.
+        console.print(
+            "[dim]Wired — Codex telemetry flows to tj as you use Codex.[/dim]"
+        )
     console.print(
         "[dim]Codex has no statusline surface, so tj stays out-of-band: your "
         "Codex telemetry flows to tj automatically. Run[/dim]  tj tokenmaxx  "
         "[dim]/[/dim]  tj traces  [dim]for the deep dive.[/dim]"
     )
     console.print(
-        "[dim]Codex gets a smaller subset of tj than Claude Code (no backfill, "
-        "no statusline, no per-terminal split) — see[/dim] "
+        "[dim]Codex gets a smaller subset of tj than Claude Code (no statusline, "
+        "no per-terminal split) — see[/dim] "
         "docs/agent-capability-matrix.md [dim]for the full breakdown.[/dim]"
     )
     _print_restart_banner("Codex")
     console.print("[dim]After restarting, run:[/dim]  tj traces")
 
     _maybe_verify_onboarding(config, persona="codex", verify=verify)
+
+    # Shared closing banner (#448).
+    _print_setup_complete_home(
+        sessions_backfilled=codex_sessions_total,
+        has_data=codex_has_data,
+    )
+
+
+def _onboard_combination(
+    ctx: click.Context,
+    budget: float | None,
+    no_daemon: bool,
+    force: bool,
+    plan_override: str | None = None,
+    project_override: str | None = None,
+    verify: bool = False,
+) -> None:
+    """The "combination" path (#448): the user runs more than one kind of agent.
+
+    Asks which surfaces they use (Claude Code, Codex, custom SDK/API agents),
+    runs the necessary backfills for the coding-agent surfaces, reports what was
+    done, then shows the SDK instrumentation snippet for their custom agents —
+    one coherent sequence ending in the shared home banner.
+
+    Wiring is delegated to the existing per-path onboarders so config/statusline/
+    OTel setup stays DRY and correct; this function only orchestrates the
+    ordering and the closing summary.
+    """
+    console.print()
+    console.print("[bold]Which do you use?[/bold] [dim](answer each)[/dim]")
+    uses_cc = click.confirm("  Claude Code", default=True)
+    uses_codex = click.confirm("  Codex", default=False)
+    uses_sdk = click.confirm(
+        "  Your own agents (Python/TS SDK or API)", default=True
+    )
+
+    if not (uses_cc or uses_codex or uses_sdk):
+        console.print(
+            "[yellow]Nothing selected.[/yellow] Re-run [bold]tj onboard[/bold] "
+            "and pick at least one."
+        )
+        ctx.exit(1)
+        return
+
+    done: list[str] = []
+
+    # --- Claude Code (full flow: config + statusline + auto-backfill) ---
+    if uses_cc:
+        console.print()
+        console.print("[bold]Setting up Claude Code…[/bold]")
+        _onboard_claude_code(
+            ctx, budget, no_daemon, force, reconfigure=False,
+            plan_override=plan_override, project_override=project_override,
+            verify=False,
+        )
+        done.append("Claude Code")
+
+    # --- Codex (full flow: OTel wiring) then a defensive backfill ---
+    if uses_codex:
+        console.print()
+        console.print("[bold]Setting up Codex…[/bold]")
+        _onboard_codex(
+            ctx, budget, no_daemon, force, reconfigure=False,
+            plan_override=plan_override, verify=False,
+        )
+        # The per-Codex onboarder is forward-only (no backfill of its own); try
+        # the on-disk Codex backfill defensively so combination reports it too.
+        try:
+            from tokenjam.core.config import load_config as _lc
+            global_path = Path.home() / ".config" / "tj" / "config.toml"
+            if global_path.exists():
+                codex_cfg = _lc(str(global_path))
+                cx_msg, _cx_has, _cx_n = _try_backfill_codex(codex_cfg)
+                if cx_msg:
+                    console.print(f"  Codex backfilled:    {cx_msg}")
+        except Exception:
+            pass
+        done.append("Codex")
+
+    # --- Custom SDK / API agents: show the instrument snippet ---
+    if uses_sdk:
+        console.print()
+        console.print("[bold]Instrument your own agents:[/bold]")
+        console.print()
+        _print_instrument_agent_snippet()
+        console.print()
+        console.print(
+            "  Then run your agent and verify a live span is flowing with "
+            "[bold]tj ping[/bold] (in another terminal)."
+        )
+        done.append("SDK/API")
+
+    console.print()
+    console.print(
+        f"[bold green]Combination setup complete[/bold green] "
+        f"[dim]({', '.join(done)})[/dim]"
+    )
+    _print_setup_complete_home()
 
 
 def _print_restart_banner(app_name: str) -> None:
