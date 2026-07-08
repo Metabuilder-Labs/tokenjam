@@ -334,6 +334,7 @@ def _build_finding_constructors() -> dict:
         SubagentRow,
     )
     from tokenjam.core.optimize.analyzers.summarize import (
+        SUMMARIZE_HONESTY_CAVEAT,
         SummarizeCandidate,
         SummarizeFinding,
     )
@@ -448,6 +449,9 @@ def _build_finding_constructors() -> dict:
             estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
+            caveat=d.get("caveat", SUMMARIZE_HONESTY_CAVEAT),
+            reduction_pct=d.get("reduction_pct"),
+            avg_reduction_pct=d.get("avg_reduction_pct"),
         )
 
     return {

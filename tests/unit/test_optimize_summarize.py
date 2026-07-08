@@ -18,6 +18,7 @@ from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
 from tokenjam.core.summarize.candidates import Candidate, ScanResult
 from tokenjam.utils.time_parse import utcnow
+from tests.factories import make_llm_span, make_session
 
 
 @pytest.fixture
@@ -48,7 +49,16 @@ def _patch_scan(monkeypatch, cands: list[Candidate]) -> None:
     )
 
 
+def _seed_window(db) -> None:
+    """One qualifying LLM call in the window so the analyzer runs — it
+    window-guards on a dead window (no telemetry → no per-call saving to attach).
+    Content is irrelevant; the finding is filesystem-derived."""
+    db.upsert_session(make_session(session_id="s0"))
+    db.insert_span(make_llm_span(session_id="s0", start_time=utcnow() - timedelta(days=1)))
+
+
 def _run(db) -> object:
+    _seed_window(db)
     since, until = _window()
     report = build_report(db=db, config=TjConfig(version="1"),
                           since=since, until=until, findings=["summarize"])
@@ -68,6 +78,28 @@ def test_sums_per_call_tokens_drops_zero_saving(db, monkeypatch):
     assert f.estimate_confidence == "heuristic"
     assert f.estimate_basis                          # explicit basis required by contract
     assert {c.path for c in f.candidates} == {"./CLAUDE.md", "./AGENTS.md"}
+    # Mandatory honesty caveat carried as the field default (Rule 14).
+    assert "meaning may change" in f.caveat
+    # Prose reduction %s computed server-side (_cand sets total_chars = saved*12,
+    # so source tokens = saved*3 → every file reduces ~33%). Per-file + aggregate.
+    assert all(c.reduction_pct == 33 for c in f.candidates)
+    assert f.reduction_pct == 33
+    assert f.avg_reduction_pct == 33
+
+
+def test_dead_window_contributes_nothing(db, monkeypatch):
+    # No telemetry in the window → no per-call saving to attach; the analyzer must
+    # NOT scan the filesystem and must emit no recoverable figure (#211 invariant).
+    def must_not_run(**kw):
+        raise AssertionError("summarize scan ran on a dead telemetry window")
+    monkeypatch.setattr("tokenjam.core.summarize.candidates.list_candidates", must_not_run)
+    since, until = _window()   # empty db → total_tokens == 0
+    report = build_report(db=db, config=TjConfig(version="1"),
+                          since=since, until=until, findings=["summarize"])
+    f = report.findings["summarize"]
+    assert f.files == 0
+    assert f.estimated_recoverable_tokens is None
+    assert f.reduction_pct is None
 
 
 def test_empty_scan_yields_no_tokens_but_keeps_basis(db, monkeypatch):
@@ -91,14 +123,21 @@ def test_scan_error_never_breaks_the_report(db, monkeypatch, caplog):
 
 
 def test_finding_round_trips(db, monkeypatch):
+    _seed_window(db)
     _patch_scan(monkeypatch, [_cand("./CLAUDE.md", 410)])
     since, until = _window()
     report = build_report(db=db, config=TjConfig(version="1"),
                           since=since, until=until, findings=["summarize"])
     payload = report_to_dict(report)
-    assert payload["findings"]["summarize"]["estimated_recoverable_tokens"] == 410
-    assert payload["findings"]["summarize"]["estimated_recoverable_usd"] is None
+    sd = payload["findings"]["summarize"]
+    assert sd["estimated_recoverable_tokens"] == 410
+    assert sd["estimated_recoverable_usd"] is None
+    assert "meaning may change" in sd["caveat"]       # caveat survives serialization
+    assert sd["reduction_pct"] == 33 and sd["avg_reduction_pct"] == 33
     back = report_from_dict(payload).findings["summarize"]
     assert back.files == 1
     assert back.estimated_recoverable_tokens == 410
     assert back.candidates[0].path == "./CLAUDE.md"
+    assert back.candidates[0].reduction_pct == 33     # per-file % survives the round-trip
+    assert "meaning may change" in back.caveat        # and the caveat survives the ctor
+    assert back.reduction_pct == 33 and back.avg_reduction_pct == 33

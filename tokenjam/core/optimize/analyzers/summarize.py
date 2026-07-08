@@ -8,13 +8,21 @@ prompt-token reduction available by summarizing those files' prose. It carries
 the #111 recoverable-savings contract so the Overview waste band and the
 `/cost/components` overlay pick it up with no UI change (registry-driven).
 
+Window-guarded: like every other recoverable finding, it contributes nothing on
+a dead telemetry window (`ctx.summary.total_tokens == 0`). A window with no calls
+has no per-call saving to attach a recoverable figure to, and surfacing one would
+break the empty-window overlay invariant (#211) — a dead window must show no
+recoverable waste. The filesystem scan is skipped entirely until the window shows
+activity.
+
 Honesty discipline (Critical Rule 14 + `core/summarize/estimate.py`): the figure
 we can stand behind from a file alone is **tokens**. A per-call dollar amount at
 default rates is noise, and the meaningful *amortized* dollar needs a real
 per-file call count (telemetry) we don't have — so `estimated_recoverable_usd`
 is left `None` (the contract's "no estimate available for this state"), and the
 usage-ranked/amortized path is deferred. Every user-visible string says
-"estimated" / "review before applying" — never "saves you".
+"estimated" / "review before applying" — never "saves you"; the mandatory
+`caveat` names summary's one risk (meaning may change, structure won't).
 """
 from __future__ import annotations
 
@@ -23,6 +31,7 @@ from dataclasses import dataclass, field
 
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +46,14 @@ SUMMARIZE_ESTIMATE_BASIS = (
     "telemetry). Advisory; review each rewrite before applying."
 )
 
+# Mandatory caveat (Rule 14) — carried as the dataclass default like the other
+# recoverable findings' caveats (MODEL_DOWNGRADE_CAVEAT etc.) so no surface can
+# drop it. Names summary's ONE risk: structure is guaranteed (restore-by-id),
+# meaning is not.
+SUMMARIZE_HONESTY_CAVEAT = (
+    "Structure is guaranteed; meaning may change — review each rewrite before applying."
+)
+
 
 @dataclass
 class SummarizeCandidate:
@@ -46,7 +63,8 @@ class SummarizeCandidate:
     kind: str          # "prompt" | "other"
     scope: str         # global | project | repo | path
     est_tokens_saved: int
-    total_chars: int = 0   # source size, so the UI can render an avg-reduction % (DEC-032 tile)
+    total_chars: int = 0     # source size (feeds the aggregate reduction %)
+    reduction_pct: int = 0   # per-file prose reduction %, computed server-side (no JS chars/4)
 
 
 @dataclass
@@ -63,6 +81,25 @@ class SummarizeFinding:
     estimated_recoverable_tokens: int | None = None
     estimate_basis: str = ""
     estimate_confidence: str = "heuristic"
+    caveat: str = SUMMARIZE_HONESTY_CAVEAT
+    # Prose-reduction %s computed server-side (single source of truth — the Lens
+    # screen renders these instead of re-deriving chars/CHARS_PER_TOKEN in JS):
+    #   reduction_pct     = aggregate saved ÷ source tokens across all candidates
+    #   avg_reduction_pct = mean of the per-file reduction %s
+    reduction_pct: int | None = None
+    avg_reduction_pct: int | None = None
+
+
+def _src_tokens(total_chars: int) -> int:
+    """Source-token estimate for a file's raw size, on the shared chars→tokens
+    constant (not a magic /4) so the % matches the rest of the pipeline."""
+    return round(total_chars / CHARS_PER_TOKEN)
+
+
+def _reduction_pct(est_tokens_saved: int, total_chars: int) -> int:
+    """Per-file prose reduction % (saved ÷ source tokens), on the shared basis."""
+    src = _src_tokens(total_chars)
+    return round(est_tokens_saved / src * 100) if src > 0 else 0
 
 
 @register("summarize")
@@ -73,9 +110,18 @@ def run(ctx: AnalyzerContext) -> None:
     catalog-default (a handful of known prompt files) so it's cheap enough for the
     polling Overview; a filesystem hiccup never breaks the optimize report.
     """
+    finding = SummarizeFinding(estimate_basis=SUMMARIZE_ESTIMATE_BASIS)
+
+    # Window-guard: a dead telemetry window has no calls to realize a per-call
+    # saving against, so — like every recoverable finding — contribute nothing
+    # rather than leak a filesystem figure into the empty-window overlay (#211).
+    # Also skips the scan entirely on an idle window.
+    if ctx.summary.total_tokens == 0:
+        ctx.report.findings["summarize"] = finding
+        return
+
     from tokenjam.core.summarize.candidates import list_candidates
 
-    finding = SummarizeFinding(estimate_basis=SUMMARIZE_ESTIMATE_BASIS)
     try:
         scan = list_candidates(config=ctx.config)  # read-only, never writes
     except Exception:
@@ -96,6 +142,7 @@ def run(ctx: AnalyzerContext) -> None:
             scope=c.scope,
             est_tokens_saved=c.est_tokens_saved,
             total_chars=c.total_chars,
+            reduction_pct=_reduction_pct(c.est_tokens_saved, c.total_chars),
         )
         for c in scan.candidates
         if c.est_tokens_saved > 0
@@ -106,4 +153,15 @@ def run(ctx: AnalyzerContext) -> None:
             c.est_tokens_saved for c in finding.candidates
         )
         # estimated_recoverable_usd intentionally left None — see module docstring.
+        # Prose-reduction %s, computed here so the UI has a single compute path:
+        #   reduction_pct     = token-weighted aggregate (saved ÷ source tokens)
+        #   avg_reduction_pct = mean of the per-file reduction %s
+        total_src = sum(_src_tokens(c.total_chars) for c in finding.candidates)
+        if total_src > 0:
+            finding.reduction_pct = round(
+                finding.estimated_recoverable_tokens / total_src * 100
+            )
+        finding.avg_reduction_pct = round(
+            sum(c.reduction_pct for c in finding.candidates) / len(finding.candidates)
+        )
     ctx.report.findings["summarize"] = finding
