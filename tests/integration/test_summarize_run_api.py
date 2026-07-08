@@ -3,9 +3,13 @@
 `run` makes tj serve an outbound LLM caller; here delivery/session are
 monkeypatched so nothing real is called — we prove the routes normalize modes,
 serialize verdict/amortization, and map refuse/deliver failures to
-409/502/400/404. prep/check are the manual (no-outbound) path.
+409/502/400/404. `run` is also gated behind the `[summarize] allow_outbound_run`
+opt-in (DEC-031) — refused 403 when off. prep/check are the manual (no-outbound)
+path and need no opt-in.
 """
 from __future__ import annotations
+
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -16,10 +20,13 @@ from tokenjam.core.config import (
     ApiConfig,
     SecurityConfig,
     StorageConfig,
+    SummarizeConfig,
     TjConfig,
 )
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
+
+PROSE = "Always act carefully and never drop a required step when you respond. " * 30
 
 
 @pytest.fixture
@@ -38,6 +45,9 @@ def config(tmp_path):
         security=SecurityConfig(ingest_secret="s"),
         api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
         storage=StorageConfig(path=str(tmp_path / "telemetry.duckdb")),
+        # Run tests exercise the outbound route, so opt-in is on here; the default
+        # (off) is exercised by test_run_refused_when_outbound_disabled.
+        summarize=SummarizeConfig(allow_outbound_run=True),
     )
 
 
@@ -166,3 +176,39 @@ async def test_check_stages_and_maps_drift_409(client, monkeypatch):
     monkeypatch.setattr("tokenjam.core.summarize.session.check", refuse)
     assert (await client.post("/api/v1/summarize/check",
                               json={"path": "./x.md", "summary": "s", "source_hash": "abc"})).status_code == 409
+
+
+async def test_run_refused_when_outbound_disabled(db, config):
+    # Default posture (DEC-031): outbound run is off until the user opts in, so a
+    # POST is refused 403 — no spend on a default install. Manual path is unaffected.
+    off = replace(config, summarize=SummarizeConfig(allow_outbound_run=False))
+    app = create_app(config=off, db=db, ingest_pipeline=IngestPipeline(db=db, config=off))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as c:
+        r = await c.post("/api/v1/summarize/run", json={"path": "./x.md", "mode": "api"})
+    assert r.status_code == 403
+    assert "allow_outbound_run" in r.json()["detail"]
+
+
+async def test_check_missing_file_returns_404(client, monkeypatch):
+    # File vanished between prep and check → 404, parity with /prep and /run.
+    def gone(config, path, summary, source_hash, **kw):
+        raise FileNotFoundError(path)
+    monkeypatch.setattr("tokenjam.core.summarize.session.check", gone)
+    r = await client.post("/api/v1/summarize/check",
+                          json={"path": "./gone.md", "summary": "s", "source_hash": "abc"})
+    assert r.status_code == 404
+
+
+async def test_check_structure_fail_never_stages(client, config, tmp_path):
+    # Real core (no mock): a summary that drops a protected block fails the structure
+    # gate — the route returns structure_ok=false/staged=false and NOTHING is written
+    # to the staging store. Closes the seam where the other check tests monkeypatch core.
+    from tokenjam.core.summarize import session
+    p = tmp_path / "CLAUDE.md"
+    p.write_text(PROSE + "\n```\nkeep = 'me'\n```\n", encoding="utf-8")
+    prep = (await client.post("/api/v1/summarize/prep", json={"path": str(p)})).json()
+    broken = "Be brief."   # no <tj-keep> markers → protected block dropped → structure fails
+    v = (await client.post("/api/v1/summarize/check", json={
+        "path": str(p), "summary": broken, "source_hash": prep["source_sha256"]})).json()
+    assert v["structure_ok"] is False and v["staged"] is False
+    assert session.list_staged(config) == []

@@ -282,8 +282,14 @@ class SummarizeConfig:
     `TJ_ANTHROPIC_API_KEY`). There is NO default: only frontier models are validated to
     preserve structure (DEC-029 / DEF-010), and a weak model just fails the structure
     check and stages nothing — so the user must choose one explicitly.
+
+    `allow_outbound_run` gates `POST /summarize/run` — the only server route that
+    spends the user's money / drives their subscription (DEC-031). Default OFF: the
+    outbound run surface is inert on a fresh install until the user knowingly turns it
+    on. The manual (prep + paste-back check) path never goes outbound and is unaffected.
     """
     api_model: str | None = None
+    allow_outbound_run: bool = False
 
 
 @dataclass
@@ -553,7 +559,10 @@ def _parse(raw: dict) -> TjConfig:
     )
     hooks = HooksConfig(output_cap=cap_output)
 
-    summarize = SummarizeConfig(api_model=raw.get("summarize", {}).get("api_model"))
+    summarize = SummarizeConfig(
+        api_model=raw.get("summarize", {}).get("api_model"),
+        allow_outbound_run=bool(raw.get("summarize", {}).get("allow_outbound_run", False)),
+    )
 
     defaults_raw = raw.get("defaults", {})
     defaults_budget_raw = defaults_raw.get("budget", {})

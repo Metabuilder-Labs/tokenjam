@@ -67,6 +67,18 @@ def post_summarize_run(request: Request, body: RunRequest) -> dict[str, Any]:
     from tokenjam.core.summarize.delivery import DeliveryError, summarize_via
     from tokenjam.core.summarize.session import SummarizeRefused
 
+    cfg = _config(request)
+    # Conscious opt-in (DEC-031): this is the only route that spends the user's
+    # money / drives their subscription, so it stays inert until they knowingly
+    # enable it. Manual prep+check (no outbound) needs no flag.
+    if not cfg.summarize.allow_outbound_run:
+        raise HTTPException(
+            status_code=403,
+            detail="Outbound summarize run is disabled. Set `[summarize] allow_outbound_run = true` "
+                   "to enable server-side runs (they spend your API key / drive your subscription). "
+                   "The manual copy-paste flow (/summarize/prep + /summarize/check) needs no opt-in.",
+        )
+
     mode = body.mode.replace("_", "-")
     if mode not in ("api", "claude-p"):
         raise HTTPException(
@@ -74,7 +86,7 @@ def post_summarize_run(request: Request, body: RunRequest) -> dict[str, Any]:
             detail="mode must be 'api' or 'claude-p' (manual uses /summarize/prep + /summarize/check).",
         )
     try:
-        result = summarize_via(_config(request), body.path, mode, ratio=body.ratio)
+        result = summarize_via(cfg, body.path, mode, ratio=body.ratio)
     except FileNotFoundError as exc:
         # summarize_via preps first (reads the file); a missing path is a 404, like
         # /summarize/prep — not an unhandled 500.
@@ -117,3 +129,6 @@ def post_summarize_check(request: Request, body: CheckRequest) -> dict[str, Any]
         return check(_config(request), body.path, body.summary, body.source_hash).to_dict()
     except SummarizeRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        # File vanished between prep and check → 404, parity with /prep and /run.
+        raise HTTPException(status_code=404, detail=f"cannot read {body.path}: {exc}") from exc
