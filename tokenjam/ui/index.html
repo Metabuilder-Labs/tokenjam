@@ -6650,7 +6650,11 @@ function SummarizeView({ params }) {
   };
   const rvVisible = revRows.filter(rvMatch);
   const rvSelectable = rvVisible.filter(r => stOf(r.path) === 'staged');
-  const rvCheckedStaged = [...revChecked].filter(p => stOf(p) === 'staged');
+  // Bulk apply excludes structure_ok===false to match the per-file modal's disabled
+  // guard. Defense-in-depth only: check() never stages a failed rewrite and
+  // apply_staged re-skips one server-side — core is the real guarantee.
+  const rvCheckedStaged = [...revChecked].filter(
+    p => stOf(p) === 'staged' && !staged.some(s => s.path === p && s.structure_ok === false));
   const appliedCount = revRows.filter(r => stOf(r.path) === 'applied').length;
   const rejectedCount = revRows.filter(r => stOf(r.path) === 'rejected').length;
   const revertedCount = revRows.filter(r => stOf(r.path) === 'reverted').length;

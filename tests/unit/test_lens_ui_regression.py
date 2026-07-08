@@ -2028,6 +2028,12 @@ def test_summarize_scan_guards_against_toggle_race(html):
     assert "loadScan({ repo: e.target.checked })" in html
 
 
+def test_summarize_bulk_apply_excludes_structure_failed(html):
+    # Bulk "Apply checked" excludes structure_ok===false to match the per-file
+    # modal's disabled guard (core re-skips it server-side too; UI stays consistent).
+    assert "s.path === p && s.structure_ok === false" in html
+
+
 def test_summarize_batch_calls_are_null_safe(html):
     # apiPostOrDetail returns null on a 200-with-empty-body; normalize to {} so a
     # property access never crashes a run/apply that actually succeeded (Greptile #426).
