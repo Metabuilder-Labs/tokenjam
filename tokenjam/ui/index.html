@@ -6650,11 +6650,13 @@ function SummarizeView({ params }) {
   };
   const rvVisible = revRows.filter(rvMatch);
   const rvSelectable = rvVisible.filter(r => stOf(r.path) === 'staged');
-  // Bulk apply excludes structure_ok===false to match the per-file modal's disabled
-  // guard. Defense-in-depth only: check() never stages a failed rewrite and
-  // apply_staged re-skips one server-side — core is the real guarantee.
-  const rvCheckedStaged = [...revChecked].filter(
-    p => stOf(p) === 'staged' && !staged.some(s => s.path === p && s.structure_ok === false));
+  // Reject is a client-side dismiss (no write), so it filters nothing — any row can
+  // be cleared from the view. Apply WRITES, so it excludes structure_ok===false
+  // (defense-in-depth; core is the real guard — check() never stages a failed rewrite
+  // and apply_staged re-skips one server-side).
+  const rvCheckedReject = [...revChecked].filter(p => stOf(p) === 'staged');
+  const rvCheckedStaged = rvCheckedReject.filter(
+    p => !staged.some(s => s.path === p && s.structure_ok === false));
   const appliedCount = revRows.filter(r => stOf(r.path) === 'applied').length;
   const rejectedCount = revRows.filter(r => stOf(r.path) === 'rejected').length;
   const revertedCount = revRows.filter(r => stOf(r.path) === 'reverted').length;
@@ -6687,7 +6689,7 @@ function SummarizeView({ params }) {
   };
   const applyChecked = () => applyPaths(rvCheckedStaged);
   const rejectChecked = () => {
-    setFileStates(s => { const n = { ...s }; rvCheckedStaged.forEach(p => n[p] = 'rejected'); return n; });
+    setFileStates(s => { const n = { ...s }; rvCheckedReject.forEach(p => n[p] = 'rejected'); return n; });
     setRevChecked(new Set());
   };
   // Undo restores an APPLIED file from its gzip backup via core `undo` (go=true).
@@ -6859,7 +6861,7 @@ function SummarizeView({ params }) {
       </div>
       <div class="cur-addbar">
         <button class="cur-btn primary" disabled=${busy || rvCheckedStaged.length === 0} onClick=${applyChecked}>Apply checked ${rvCheckedStaged.length ? '(' + rvCheckedStaged.length + ') ' : ''}→</button>
-        <button class="cur-btn" disabled=${busy || rvCheckedStaged.length === 0} onClick=${rejectChecked}>Reject checked</button>
+        <button class="cur-btn" disabled=${busy || rvCheckedReject.length === 0} onClick=${rejectChecked}>Reject checked</button>
         <span class="dim" style="font-size:12px">Click a row for its diff.</span>
         <a class="cur-btn" style="margin-left:auto;text-decoration:none" href="#/optimize">Done → Optimize</a>
       </div>

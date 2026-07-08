@@ -2032,6 +2032,10 @@ def test_summarize_bulk_apply_excludes_structure_failed(html):
     # Bulk "Apply checked" excludes structure_ok===false to match the per-file
     # modal's disabled guard (core re-skips it server-side too; UI stays consistent).
     assert "s.path === p && s.structure_ok === false" in html
+    # Reject is a client-side dismiss (no write) → its OWN unfiltered set, so apply
+    # guards structure while reject can always clear a row from the view.
+    assert "const rvCheckedReject = [...revChecked].filter(p => stOf(p) === 'staged');" in html
+    assert "rvCheckedReject.forEach(p => n[p] = 'rejected')" in html
 
 
 def test_summarize_batch_calls_are_null_safe(html):
