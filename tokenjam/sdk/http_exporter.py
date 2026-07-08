@@ -19,11 +19,19 @@ class TjHttpExporter(SpanExporter):
 
     def __init__(self, endpoint: str, ingest_secret: str) -> None:
         self._endpoint = endpoint
-        self._ingest_secret = ingest_secret
+        self._ingest_secret = ingest_secret or ""
         self._headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {ingest_secret}",
         }
+        # Only attach the Bearer header when a secret is actually configured.
+        # Sending "Authorization: Bearer " (empty secret) is an illegal HTTP
+        # header value — httpx raises LocalProtocolError before the request
+        # is even sent, so the span export fails outright (#: `tj ping`
+        # reported "emitted … but not confirmed received"). Omitting the
+        # header lets the request go out; if tj serve requires auth it 401s,
+        # which is handled gracefully in export() below.
+        if self._ingest_secret:
+            self._headers["Authorization"] = f"Bearer {self._ingest_secret}"
         # Cumulative count of spans dropped on auth failure. Exposed so
         # `tj doctor` can surface this in a future enhancement (#68 §2).
         self.dropped_auth_failures = 0
