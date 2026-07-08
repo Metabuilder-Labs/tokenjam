@@ -60,7 +60,7 @@ def recorded_output(config: TjConfig, path: str) -> str | None:
         return None
     try:
         return json.loads(f.read_text(encoding="utf-8"))["output_sha256"]
-    except (OSError, json.JSONDecodeError, KeyError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError):
         return None
 
 
@@ -80,7 +80,7 @@ def list_backups(config: TjConfig) -> list[dict]:
     for meta_f in sorted(d.glob("*.meta.json")):
         try:
             meta = json.loads(meta_f.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             continue
         sp = meta.get("source_path")
         if not sp:
@@ -104,7 +104,9 @@ def list_backups(config: TjConfig) -> list[dict]:
         else:
             try:
                 current = p.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, UnicodeDecodeError):
+                # UnicodeDecodeError is a ValueError, not an OSError — catch it too, or
+                # one non-UTF-8 applied file 500s the whole /backups response (#424).
                 undoable, reason = False, "cannot read the file"
             else:
                 if sha256(current) != meta.get("output_sha256"):
@@ -129,10 +131,17 @@ def load_original(config: TjConfig, path: str, current: str | None) -> str:
     orig_f, meta_f = _orig_path(config, path), _meta_path(config, path)
     if not (orig_f.exists() and meta_f.exists()):
         raise SummarizeRefused(f"no summarize backup for {path} — nothing to undo.")
-    if current is not None:
-        meta = json.loads(meta_f.read_text(encoding="utf-8"))
-        if sha256(current) != meta["output_sha256"]:
-            raise SummarizeRefused(
-                f"{path} has changed since `tj summarize apply` wrote it — "
-                "refusing to undo (newer edits would be lost).")
-    return gzip.decompress(orig_f.read_bytes()).decode("utf-8")
+    try:
+        if current is not None:
+            meta = json.loads(meta_f.read_text(encoding="utf-8"))
+            if sha256(current) != meta["output_sha256"]:
+                raise SummarizeRefused(
+                    f"{path} has changed since `tj summarize apply` wrote it — "
+                    "refusing to undo (newer edits would be lost).")
+        return gzip.decompress(orig_f.read_bytes()).decode("utf-8")
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, KeyError) as exc:
+        # Corrupt/unreadable sidecar or blob (non-UTF-8, truncated JSON, missing key,
+        # bad gzip) → refuse cleanly (undo() → 409), never a 500. (The drift
+        # SummarizeRefused above is a different type and propagates untouched.)
+        raise SummarizeRefused(
+            f"summarize backup for {path} is unreadable or corrupt — cannot undo.") from exc
