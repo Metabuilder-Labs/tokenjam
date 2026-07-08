@@ -127,6 +127,17 @@ async def test_run_maps_refuse_409_and_delivery_502(client, monkeypatch):
     assert (await client.post("/api/v1/summarize/run", json={"path": "./x.md", "mode": "api"})).status_code == 502
 
 
+async def test_run_missing_file_returns_404(client, monkeypatch):
+    # summarize_via preps first (reads the file); a missing path raises
+    # FileNotFoundError, which the route maps to 404 like /prep — not a 500.
+    def missing(config, path, mode, *, ratio=0.5):
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr("tokenjam.core.summarize.delivery.summarize_via", missing)
+    r = await client.post("/api/v1/summarize/run", json={"path": "./nope.md", "mode": "api"})
+    assert r.status_code == 404
+
+
 async def test_prep_returns_wrapped_prompt_and_404_on_missing(client, monkeypatch):
     monkeypatch.setattr("tokenjam.core.summarize.session.prepare",
                         lambda *, path, ratio=0.5: _prep(path))

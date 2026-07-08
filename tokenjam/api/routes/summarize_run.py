@@ -75,6 +75,10 @@ def post_summarize_run(request: Request, body: RunRequest) -> dict[str, Any]:
         )
     try:
         result = summarize_via(_config(request), body.path, mode, ratio=body.ratio)
+    except FileNotFoundError as exc:
+        # summarize_via preps first (reads the file); a missing path is a 404, like
+        # /summarize/prep — not an unhandled 500.
+        raise HTTPException(status_code=404, detail=f"cannot read {body.path}: {exc}") from exc
     except SummarizeRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DeliveryError as exc:
@@ -97,7 +101,9 @@ def post_summarize_prep(request: Request, body: PrepRequest) -> dict[str, Any]:
         return prepare(path=body.path, ratio=body.ratio).to_dict()
     except SummarizeRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except OSError as exc:
+    except FileNotFoundError as exc:
+        # Only a missing file is a 404; other OSErrors (permission, is-a-directory)
+        # are genuine server errors and should surface as 500, not be masked as 404.
         raise HTTPException(status_code=404, detail=f"cannot read {body.path}: {exc}") from exc
 
 
