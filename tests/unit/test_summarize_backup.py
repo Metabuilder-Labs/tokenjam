@@ -69,3 +69,32 @@ def test_not_undoable_when_file_gone(cfg, tmp_path):
     p.unlink()
     (rec,) = backup.list_backups(cfg)
     assert rec["undoable"] is False and rec["reason"] == "file no longer exists"
+
+
+def test_non_utf8_file_is_not_undoable_and_does_not_crash(cfg, tmp_path):
+    # UnicodeDecodeError is a ValueError, not OSError — a non-UTF-8 applied file must
+    # come back undoable=False, not raise and 500 the whole /backups response (#424).
+    sp, p = _applied(cfg, tmp_path)
+    p.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81\x82")
+    (rec,) = backup.list_backups(cfg)
+    assert rec["source_path"] == sp
+    assert rec["undoable"] is False and rec["reason"] == "cannot read the file"
+
+
+def test_load_original_refuses_corrupt_meta(cfg, tmp_path):
+    # A non-UTF-8 / truncated / key-missing meta sidecar must make undo refuse (→409),
+    # not raise UnicodeDecodeError/JSONDecodeError/KeyError out of undo() as a 500 (#429).
+    from tokenjam.core.summarize.session import SummarizeRefused
+    sp, _ = _applied(cfg, tmp_path)
+    backup._meta_path(cfg, sp).write_bytes(b"\xff\xfe not json, not utf-8 \x80")
+    with pytest.raises(SummarizeRefused):
+        backup.load_original(cfg, sp, current="whatever")
+
+
+def test_load_original_refuses_corrupt_blob(cfg, tmp_path):
+    # A corrupt gzip blob → SummarizeRefused, not a bare OSError/BadGzipFile 500.
+    from tokenjam.core.summarize.session import SummarizeRefused
+    sp, _ = _applied(cfg, tmp_path)
+    backup._orig_path(cfg, sp).write_bytes(b"this is not a gzip stream")
+    with pytest.raises(SummarizeRefused):
+        backup.load_original(cfg, sp, current=None)
