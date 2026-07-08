@@ -2013,3 +2013,23 @@ def test_summarize_undo_reachable_for_prior_applies_via_backups(html):
     # hub advertises undoable backups.
     assert "loadBackups();" in html
     assert "applied summary(ies) can be undone" in html
+
+
+def test_summarize_scan_guards_against_toggle_race(html):
+    # Two guards (Greptile #426 + reviewer follow-up): (1) a seq guard discards a
+    # slower earlier scan's out-of-order response; (2) toggles merge into a ref
+    # SYNCHRONOUSLY so a second toggle before re-render can't rebuild the other
+    # value from a stale closure.
+    assert "const scanSeq = useRef(0);" in html
+    assert "if (seq !== scanSeq.current) return;" in html
+    assert "const scanOpts = useRef(" in html
+    assert "scanOpts.current = { ...scanOpts.current, ...opts };" in html
+    assert "loadScan({ recursive: e.target.checked })" in html
+    assert "loadScan({ repo: e.target.checked })" in html
+
+
+def test_summarize_batch_calls_are_null_safe(html):
+    # apiPostOrDetail returns null on a 200-with-empty-body; normalize to {} so a
+    # property access never crashes a run/apply that actually succeeded (Greptile #426).
+    assert "(await apiPostOrDetail('/summarize/run', { path, mode: engine, ratio: 0.5 })) || {}" in html
+    assert "(await apiPostOrDetail('/summarize/apply', { path, go: true })) || {}" in html

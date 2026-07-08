@@ -6458,6 +6458,8 @@ function SummarizeView({ params }) {
   const [loading, setLoading] = useState(false);
   const [recursive, setRecursive] = useState(false);
   const [repoScope, setRepoScope] = useState(false);
+  const scanSeq = useRef(0);   // discards a slower earlier scan's response (out-of-order landing)
+  const scanOpts = useRef({ recursive: false, repo: false });   // synchronous source of truth for the toggles (no stale closure)
 
   // Curator.
   const [checked, setChecked] = useState(() => new Set());
@@ -6503,18 +6505,23 @@ function SummarizeView({ params }) {
     try { setCaps(await api('/summarize/capabilities')); }
     catch (e) { setCapErr(e.message || String(e)); }
   };
-  const loadScan = async (opts = {}) => {
-    const rec = opts.recursive !== undefined ? opts.recursive : recursive;
-    const rp = opts.repo !== undefined ? opts.repo : repoScope;
+  const loadScan = async (opts) => {
+    // Merge the toggle into a ref SYNCHRONOUSLY: a second toggle handled before the
+    // re-render must not rebuild the other value from a stale closure (the seq guard
+    // would otherwise make that stale-but-later request authoritative).
+    if (opts) scanOpts.current = { ...scanOpts.current, ...opts };
+    const { recursive: rec, repo: rp } = scanOpts.current;
+    const seq = ++scanSeq.current;
     setLoading(true); setDataErr(null);
     try {
       const [sc, stg] = await Promise.all([
         api('/summarize/candidates', { recursive: rec || undefined, repo: rp || undefined }),
         api('/summarize/staged'),
       ]);
+      if (seq !== scanSeq.current) return;   // a newer scan superseded this response — drop it
       setScan(sc); setStaged(stg.staged || []);
-    } catch (e) { setDataErr(e.message || String(e)); }
-    setLoading(false);
+    } catch (e) { if (seq === scanSeq.current) setDataErr(e.message || String(e)); }
+    if (seq === scanSeq.current) setLoading(false);
   };
   const loadStaged = async () => {
     try { const stg = await api('/summarize/staged'); setStaged(stg.staged || []); }
@@ -6599,7 +6606,7 @@ function SummarizeView({ params }) {
     for (const path of list) {
       setRunState(s => ({ ...s, current: path, curStart: Date.now() }));
       try {
-        const r = await apiPostOrDetail('/summarize/run', { path, mode: engine, ratio: 0.5 });
+        const r = (await apiPostOrDetail('/summarize/run', { path, mode: engine, ratio: 0.5 })) || {};
         const ok = !!(r.verdict && r.verdict.staged);
         const note = r.skipped_note || (r.verdict && !r.verdict.structure_ok ? (r.verdict.reason || 'structure check did not pass') : '');
         setRunState(s => ({ ...s, done: s.done + 1, results: [...s.results, { path, ok, note, amortization: r.amortization, cost_unknown: r.cost_unknown }] }));
@@ -6663,7 +6670,7 @@ function SummarizeView({ params }) {
     const results = [];
     for (const path of paths) {
       try {
-        const r = await apiPostOrDetail('/summarize/apply', { path, go: true });
+        const r = (await apiPostOrDetail('/summarize/apply', { path, go: true })) || {};
         if (r.applied && r.applied.length) { results.push({ path, ok: true }); setFileStates(s => ({ ...s, [path]: 'applied' })); }
         else { results.push({ path, ok: false, reason: (r.skipped && r.skipped[0]) ? r.skipped[0].reason : 'not applied' }); }
       } catch (e) { results.push({ path, ok: false, reason: e.message || String(e) }); }
