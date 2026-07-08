@@ -68,9 +68,10 @@ def list_backups(config: TjConfig) -> list[dict]:
     """Every applied file that still has a backup — the Lens 'undo' surface.
 
     Each record: ``source_path``, ``applied_at``, plus a computed ``undoable`` flag
-    (+ ``reason`` when false). A backup is undoable iff the file still exists, is not
-    a symlink, and its CURRENT content matches what apply wrote — the same conditions
-    ``undo`` enforces, surfaced up front so the UI can show why a row can't be undone.
+    (+ ``reason`` when false). A backup is undoable iff the gzip blob is present, the
+    file still exists, is not a symlink, and its CURRENT content matches what apply
+    wrote — the same conditions ``undo`` enforces, surfaced up front so the UI can
+    show why a row can't be undone.
     """
     d = backups_dir(config)
     if not d.exists():
@@ -84,12 +85,22 @@ def list_backups(config: TjConfig) -> list[dict]:
         sp = meta.get("source_path")
         if not sp:
             continue
+        # Pair the blob to THIS meta file by name — don't recompute stage_key from
+        # source_path, which resolves symlinks and would map a now-symlinked source
+        # to a different key and spuriously read as "backup file missing".
+        orig_f = meta_f.with_name(meta_f.name[: -len(".meta.json")] + ".orig.gz")
         p = Path(sp).expanduser()
         undoable, reason = True, ""
-        if not p.exists():
-            undoable, reason = False, "file no longer exists"
+        if not orig_f.exists():
+            # meta.json without its gzip blob (deleted/cleaned) — undo() would 409;
+            # report it up front rather than offering an Undo that can't run.
+            undoable, reason = False, "backup file missing"
         elif p.is_symlink():
+            # is_symlink() before exists(): exists() follows the link, so a broken
+            # symlink would otherwise be mislabelled "file no longer exists".
             undoable, reason = False, "symlink — refusing to restore through it"
+        elif not p.exists():
+            undoable, reason = False, "file no longer exists"
         else:
             try:
                 current = p.read_text(encoding="utf-8")
