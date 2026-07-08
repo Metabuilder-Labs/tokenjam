@@ -66,4 +66,9 @@ jobs:
         working-directory: npm-wrapper
         run: npm publish --access public
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # The unscoped `tokenjam` wrapper is owned by a different npm account
+          # than the @tokenjam org packages, so it publishes with its own
+          # dedicated secret (granular token scoped to just this package).
+          # NPM_TOKEN (the @tokenjam org token) cannot publish it — v0.5.3 and
+          # v0.5.4 both failed E403 on exactly that mismatch.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_WRAPPER_TOKEN }}
