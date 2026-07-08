@@ -79,7 +79,8 @@ def apply_staged(config: TjConfig, path: str | None = None, *, go: bool = False)
             skipped.append({"path": sp, "reason": "changed since check — re-prep it"})
             continue
         if go:
-            backup.save(config, sp, original=current, output=e["restored"])
+            backup.save(config, sp, original=current, output=e["restored"],
+                        est_tokens_saved=int(e.get("est_tokens_saved", 0) or 0))
             _atomic_write(p, e["restored"])
             clear(config, sp)
         applied.append({"path": sp, "est_tokens_saved": e["est_tokens_saved"], "diff": e["diff"]})
