@@ -286,3 +286,16 @@ def test_undo_refuses_symlink(cfg, tmp_path):
     link.symlink_to(real)
     with pytest.raises(SummarizeRefused, match="symlink"):
         undo(cfg, str(link))
+
+
+def test_staged_reads_skip_corrupt_and_unreadable(cfg):
+    # Our staged records are always UTF-8 JSON, but a half-written / hand-edited /
+    # non-UTF-8 file must not crash the readers (Greptile #429 follow-up): list_staged
+    # skips it, read_staged returns None — instead of a UnicodeDecodeError 500.
+    from tokenjam.core.summarize import session
+    d = session.results_dir(cfg)
+    d.mkdir(parents=True, exist_ok=True)
+    path = "/tmp/whatever.md"
+    (d / f"{session.stage_key(path)}.json").write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    assert list_staged(cfg) == []            # skipped, not a crash
+    assert read_staged(cfg, path) is None    # unreadable → None, not a raise

@@ -189,14 +189,41 @@ async def test_run_refused_when_outbound_disabled(db, config):
     assert "allow_outbound_run" in r.json()["detail"]
 
 
-async def test_check_missing_file_returns_404(client, monkeypatch):
-    # File vanished between prep and check → 404, parity with /prep and /run.
-    def gone(config, path, summary, source_hash, **kw):
-        raise FileNotFoundError(path)
-    monkeypatch.setattr("tokenjam.core.summarize.session.check", gone)
+async def test_check_missing_file_returns_409_real(client, tmp_path):
+    # check() guards missing files with is_file → SummarizeRefused, so a REAL missing
+    # file is 409 (its documented "vanished since prep" contract) — not the 404 an
+    # earlier mocked test wrongly asserted. (Contrast /prep + /run below, which DO 404
+    # via prepare's FileNotFoundError — verified per-function, not assumed.)
     r = await client.post("/api/v1/summarize/check",
-                          json={"path": "./gone.md", "summary": "s", "source_hash": "abc"})
-    assert r.status_code == 404
+                          json={"path": str(tmp_path / "gone.md"), "summary": "s", "source_hash": "abc"})
+    assert r.status_code == 409
+
+
+async def test_check_non_utf8_returns_409_real(client, tmp_path):
+    # Non-UTF-8 file → check()'s read raises UnicodeDecodeError → SummarizeRefused → 409,
+    # not an uncaught 500. Real file, no mock.
+    p = tmp_path / "CLAUDE.md"
+    p.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    r = await client.post("/api/v1/summarize/check",
+                          json={"path": str(p), "summary": "s", "source_hash": "abc"})
+    assert r.status_code == 409
+
+
+async def test_prep_non_utf8_returns_409_real(client, tmp_path):
+    # prepare → _read maps UnicodeDecodeError → SummarizeRefused → 409 (missing still 404).
+    p = tmp_path / "CLAUDE.md"
+    p.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    r = await client.post("/api/v1/summarize/prep", json={"path": str(p)})
+    assert r.status_code == 409
+
+
+async def test_run_non_utf8_returns_409_real(client, tmp_path):
+    # Outbound run reads via prepare first, so a non-UTF-8 file is refused (409) BEFORE
+    # any model call — real file, flag-on fixture, no outbound reached.
+    p = tmp_path / "CLAUDE.md"
+    p.write_bytes(b"\xff\xfe not valid utf-8 \x80\x81")
+    r = await client.post("/api/v1/summarize/run", json={"path": str(p), "mode": "api"})
+    assert r.status_code == 409
 
 
 async def test_check_structure_fail_never_stages(client, config, tmp_path):

@@ -122,13 +122,11 @@ def post_summarize_prep(request: Request, body: PrepRequest) -> dict[str, Any]:
 @router.post("/summarize/check", dependencies=[Depends(require_api_key)])
 def post_summarize_check(request: Request, body: CheckRequest) -> dict[str, Any]:
     """Manual step 2 (no outbound): verify the pasted-back summary + stage it if structure
-    holds. 409 if the file changed since prep (the summary was built against another version)."""
+    holds. 409 if the file is missing/changed/non-UTF-8 since prep — `check()` guards all of
+    those as SummarizeRefused (it never raises FileNotFoundError), so 409 is the whole story."""
     from tokenjam.core.summarize.session import SummarizeRefused, check
 
     try:
         return check(_config(request), body.path, body.summary, body.source_hash).to_dict()
     except SummarizeRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except FileNotFoundError as exc:
-        # File vanished between prep and check → 404, parity with /prep and /run.
-        raise HTTPException(status_code=404, detail=f"cannot read {body.path}: {exc}") from exc
