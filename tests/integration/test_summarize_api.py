@@ -3,10 +3,14 @@ staged / backups + apply / undo.
 
 Core scan + staging + apply are exercised by their own unit tests; here we prove
 the routes wire to core, shape the payloads, and (capabilities) reflect the host
-honestly. list_candidates / session / apply / backup are monkeypatched for
-determinism — no real writes.
+honestly. Most tests monkeypatch list_candidates / session / apply for
+determinism; the real-core apply tests at the end drive `POST /apply` end-to-end
+against a temp file (no mocks) to close that seam — the drift/owner/symlink/backup
+guards must hold through the route, not just in the unit tests.
 """
 from __future__ import annotations
+
+import re
 
 import httpx
 import pytest
@@ -22,6 +26,9 @@ from tokenjam.core.config import (
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.core.summarize.candidates import Candidate, ScanResult
+
+PROSE = "Always act carefully and never drop a required step when you respond. " * 30
+_MARKER_RE = re.compile(r'<tj-keep id="\d+"[^>]*?(?:/>|>.*?</tj-keep>)', re.DOTALL)
 
 
 @pytest.fixture
@@ -160,3 +167,39 @@ async def test_undo_ok_and_drift_returns_409(client, monkeypatch):
     assert ok.status_code == 200 and ok.json()["restored"] is True
     bad = await client.post("/api/v1/summarize/undo", json={"path": "./drifted.md", "go": True})
     assert bad.status_code == 409
+
+
+# ---- real-core apply through the route (no mocks — closes the monkeypatch seam) ----
+
+def _stage_real(config, tmp_path, name="CLAUDE.md"):
+    """Write a real prompt file and stage a structure-preserving rewrite via core
+    (prep/check live in the run PR, so we stage directly and drive WRITE via /apply)."""
+    from tokenjam.core.summarize import session
+    p = tmp_path / name
+    p.write_text(PROSE + "\n```\nkeep = 'me'\n```\n", encoding="utf-8")
+    prep = session.prepare(path=str(p))
+    summary = "Be careful; never skip a step. " + " ".join(_MARKER_RE.findall(prep.wrapped_prompt))
+    verdict = session.check(config, str(p), summary, prep.source_sha256)
+    assert verdict.staged
+    return p
+
+
+async def test_apply_go_writes_and_backs_up_real_core(client, config, tmp_path):
+    from tokenjam.core.summarize import backup, session
+    p = _stage_real(config, tmp_path)
+    before = p.read_text()
+    r = (await client.post("/api/v1/summarize/apply", json={"path": str(p), "go": True})).json()
+    assert r["dry_run"] is False
+    assert [a["path"] for a in r["applied"]] == [str(p)] and r["skipped"] == []
+    assert p.read_text() != before                       # file was rewritten
+    assert any(b["source_path"] == str(p) for b in backup.list_backups(config))   # backup written
+    assert session.list_staged(config) == []             # staging cleared after apply
+
+
+async def test_apply_skips_drift_through_route_real_core(client, config, tmp_path):
+    p = _stage_real(config, tmp_path)
+    p.write_text("hand-edited after staging\n", encoding="utf-8")   # drift
+    r = (await client.post("/api/v1/summarize/apply", json={"path": str(p), "go": True})).json()
+    assert r["applied"] == []
+    assert any("changed since check" in s["reason"] for s in r["skipped"])
+    assert p.read_text() == "hand-edited after staging\n"           # never overwritten
