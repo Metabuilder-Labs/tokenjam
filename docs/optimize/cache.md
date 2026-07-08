@@ -65,3 +65,4 @@ this is the right level.
 - [Downsize](downsize.md) — flag sessions whose shape matches a cheaper-model candidate
 - [Script](script.md) — find workflows that look like deterministic shell scripts
 - [Trim](trim.md) — identify low-significance tokens in captured prompts
+- [Subagent](subagent.md) — per-subagent cost breakdown and right-sizing candidates (Claude Code only)

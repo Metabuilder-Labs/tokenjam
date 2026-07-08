@@ -48,6 +48,9 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
         "statusline",
         "quickstart",
+        # `ping` emits a test span through the SDK (which resolves its own
+        # HTTP-vs-direct path); it must not take the CLI's DuckDB lock (#80).
+        "ping",
         # `hook` fires on every tool call and must never take the DuckDB lock
         # (#61); `savings` reads the append-only JSONL sink, not the DB.
         "hook", "savings",
@@ -125,6 +128,7 @@ from tokenjam.cli.cmd_session_end import cmd_session_end  # noqa: E402
 from tokenjam.cli.cmd_statusline import cmd_statusline  # noqa: E402
 from tokenjam.cli.cmd_loop import cmd_loop  # noqa: E402
 from tokenjam.cli.cmd_resume_brief import cmd_resume_brief  # noqa: E402
+from tokenjam.cli.cmd_ping import cmd_ping  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 cli.add_command(cmd_status, name="status")
@@ -155,6 +159,7 @@ cli.add_command(cmd_session_end, name="session-end")
 cli.add_command(cmd_statusline, name="statusline")
 cli.add_command(cmd_loop, name="loop")
 cli.add_command(cmd_resume_brief, name="resume-brief")
+cli.add_command(cmd_ping, name="ping")
 
 # cmd_drift is provided by task 05 — register if available
 try:

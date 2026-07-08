@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tokenjam"
-version = "0.5.3"
+version = "0.5.4"
 description = "TokenJam — local-first OTel-native observability for Autonomous AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -70,6 +70,7 @@ bloat     = ["llmlingua>=0.2"]
 
 [project.scripts]
 tj = "tokenjam.cli.main:cli"
+tokenjam = "tokenjam.cli.main:cli"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/synthetic", "tests/agents", "tests/integration"]

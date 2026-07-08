@@ -412,6 +412,8 @@ Key runtime dependency: `pytz` is required by DuckDB for `TIMESTAMPTZ` column ha
   - [`cache.md`](docs/optimize/cache.md) — `cache` (current caching ratio) + `cache-recommend` (Anthropic-only breakpoint suggestions)
   - [`script.md`](docs/optimize/script.md) — `script` clustering by `(tool_name, arg_shape)` signature (file: `workflow_restructure.py`)
   - [`trim.md`](docs/optimize/trim.md) — LLMLingua-2 token-significance classifier (`trim`, file: `prompt_bloat.py`), install + capture requirements, performance numbers
+  - [`reuse.md`](docs/optimize/reuse.md) — clusters sessions sharing a repeated planning skeleton (`reuse`), exports each as a reviewable template for a slash command / saved prompt / script
+  - [`subagent.md`](docs/optimize/subagent.md) — per-subagent right-sizing (`subagent`, file: `subagent_rightsizing.py`), Claude Code-only (keys off `sub_agent_id`, populated only by CC backfill)
 - **[AGENTS.md](AGENTS.md)** — codebase conventions for contributors (referenced from the top-level README).
 - **Backfill adapters** — `docs/backfill/overview.md` lists the four sources (`claude-code` / `langfuse` / `helicone` / `otlp`) with the partnership-posture framing; per-adapter pages document modes (URL / file), field mapping, idempotency, and v1 limitations.
 - **[docs/policy/overview.md](docs/policy/overview.md)** — read-only preview of the unified policy surface (`tj policy list`). Notes that the `add` / `edit` / `apply` subcommands and the underlying `[policy]` config migration land next sprint.

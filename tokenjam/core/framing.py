@@ -531,3 +531,90 @@ def plan_determination_mix(conn: Any, agent_id: str | None = None) -> dict[str, 
     narrows to a single agent when set — the plan is per-agent, not per-window.
     """
     return plan_tier_mix(conn, None, None, agent_id)
+
+
+# ---------------------------------------------------------------------------
+# Persona detection (#97) — Claude Code subscriber vs SDK/API developer.
+# ---------------------------------------------------------------------------
+# `tj optimize`'s downsize finding used to print an SDK-only call-to-action
+# (`tjb run --original ... --candidate ...`) regardless of who was running it.
+# A Claude Code subscription user can't pick a model per request — their real
+# levers are exporting a routing config, right-sizing subagents, and
+# `/compact`. Detecting the dominant persona lets the CLI render the CTA that
+# actually matches the user's levers.
+
+# `tj onboard --claude-code` / `tj backfill claude-code` stamp every ingested
+# session's agent_id as `claude-code-<slug>` (see backfill.py
+# _agent_id_from_cwd, session_timeline.py SessionSummary.project_label) — the
+# one existing convention that distinguishes a Claude Code session from any
+# other runtime (SDK, other CLIs).
+CLAUDE_CODE_AGENT_PREFIX = "claude-code-"
+
+# A window is "claude-code" or "sdk" dominated at this threshold; between the
+# two, both audiences are meaningfully represented and the CTA should label
+# and show both rather than pick one.
+_PERSONA_DOMINANT_FRACTION = 0.8
+
+
+def agent_persona_mix(
+    conn: Any,
+    since: Any = None,
+    until: Any = None,
+    agent_id: str | None = None,
+) -> dict[str, int]:
+    """Count sessions by whether their agent_id looks like Claude Code.
+
+    Mirrors :func:`plan_tier_mix`'s query shape (same optional since/until/
+    agent_id window, same ``sessions`` table). Returns
+    ``{"claude_code": N, "other": M}``.
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if since is not None:
+        params.append(since)
+        clauses.append("started_at >= $" + str(len(params)))
+    if until is not None:
+        params.append(until)
+        clauses.append("started_at < $" + str(len(params)))
+    if agent_id:
+        params.append(agent_id)
+        clauses.append("agent_id = $" + str(len(params)))
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = "SELECT agent_id FROM sessions" + where
+    rows = conn.execute(sql, params).fetchall()
+    mix = {"claude_code": 0, "other": 0}
+    for (aid,) in rows:
+        if aid and str(aid).startswith(CLAUDE_CODE_AGENT_PREFIX):
+            mix["claude_code"] += 1
+        else:
+            mix["other"] += 1
+    return mix
+
+
+def dominant_persona(
+    agent_mix: dict[str, int], declared_plan: str | None = None,
+) -> str:
+    """Classify the analyzed window's dominant user persona.
+
+    Returns one of ``"claude-code"``, ``"sdk"``, ``"mixed"``, ``"unknown"``.
+
+    Primary signal is the ``agent_id`` prefix (:data:`CLAUDE_CODE_AGENT_PREFIX`).
+    Falls back to the declared plan tier only when no session in the window
+    carries an identifiable agent_id (e.g. raw OTLP ingestion that never ran
+    ``tj onboard``) — a declared Claude Code subscription tier (pro / max_5x /
+    max_20x) still implies a Claude Code user even before agent-id attribution
+    exists, and a declared ``api`` plan implies an SDK/API developer.
+    """
+    total = sum(agent_mix.values())
+    if total == 0:
+        if declared_plan in {"pro", "max_5x", "max_20x"}:
+            return "claude-code"
+        if declared_plan == "api":
+            return "sdk"
+        return "unknown"
+    cc_fraction = agent_mix.get("claude_code", 0) / total
+    if cc_fraction >= _PERSONA_DOMINANT_FRACTION:
+        return "claude-code"
+    if cc_fraction <= (1 - _PERSONA_DOMINANT_FRACTION):
+        return "sdk"
+    return "mixed"

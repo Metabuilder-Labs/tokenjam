@@ -7,7 +7,7 @@ TokenJam ships as a Python package on PyPI and a TypeScript SDK on npm. Pick the
 The fastest way to see value — **no install, no config, no daemon**:
 
 ```bash
-npx tokenjam                      # or:  uvx --from tokenjam tj
+npx tokenjam                      # or:  uvx tokenjam
 ```
 
 This runs `tj quickstart`: it reads your existing Claude Code sessions from
@@ -22,15 +22,17 @@ written to disk and no background process starts.
   launcher that shells out to the Python CLI via the first available runner
   (`uvx` → `pipx run` → an installed `tj`). All arguments pass straight through,
   so `npx tokenjam quickstart --since 7d`, `npx tokenjam optimize`, etc. all work.
-- `uvx --from tokenjam tj` runs the Python CLI directly with [uv](https://docs.astral.sh/uv/)'s
-  ephemeral runner. (The `--from tokenjam` is required because the PyPI package
-  is `tokenjam` while the command is `tj`.)
+- `uvx tokenjam` runs the Python CLI directly with [uv](https://docs.astral.sh/uv/)'s
+  ephemeral runner. (The PyPI package `tokenjam` ships both a `tj` command and a
+  `tokenjam` alias, so `uvx tokenjam` and `uvx --from tokenjam tj` are equivalent —
+  use the longer `--from` form if you're on an older tokenjam release without the
+  alias.)
 
 **Requirements:** a Python runner — `uv` (recommended) or `pipx`. `npx tokenjam` prints
 install guidance if neither is present.
 
-When you're ready for live capture, the local dashboard, and the MCP server for
-Claude Code, install the full CLI (below) and run `tj onboard`.
+When you're ready for live capture, the local dashboard, and the zero-token
+statusline, install the full CLI (below) and run `tj onboard`.
 
 ## Base install
 
@@ -134,3 +136,7 @@ tj doctor
 ```
 
 `tj doctor` checks config validity, DB connectivity, ingest secret presence, daemon health, and (when applicable) alert-channel reachability. Exit code 0 = clean, 1 = warnings, 2 = errors.
+
+To confirm telemetry is actually flowing (not just that setup completed), use `tj onboard --verify` (polls for the first span right after setup) or run `tj ping` any time afterward (emits one labeled test span and reports where it landed). If you've already set up and just restarted Claude Code / Codex, `tj onboard --claude-code --verify-only` (or `--codex`) skips the wizard entirely and only re-polls for a live span — no config rewrite, no summary replay. Note that backfilled history doesn't count as live: verification waits for a *new* span, so a fresh install with only backfilled sessions will report "no telemetry yet" until the restarted runtime emits one (`tj doctor` distinguishes the two). All are covered in the [CLI reference](cli-reference.md). Running onboarding unattended (CI, Docker, a script)? Use the non-interactive flags (`--plan`, `--budget`, `--no-daemon`, `--project`) documented in the [CLI reference](cli-reference.md) to skip every prompt.
+
+**`--no-daemon` installs:** verification needs a read path to the database that doesn't compete with a concurrent writer — DuckDB is single-writer. With the daemon running, verification reads over HTTP and there's no conflict. Without it, the poller opens the DuckDB file directly, which only works if nothing else is writing to it at that moment. If your agent (or the SDK) is trying to write concurrently, you'll see `Can't verify yet — the database is locked (is tj serve running?)…` followed by `Start tj serve, then run tj doctor to check` — that's lock contention, not a failure of onboarding itself. Two ways around it: start `tj serve` temporarily (`tj serve &`, verify, then `tj stop`), or run `tj ping`, which proves interception through its own local proof-of-life exporter and works whether or not the daemon is up.

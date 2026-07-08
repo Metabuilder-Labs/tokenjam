@@ -147,6 +147,30 @@ def test_line_reports_model_and_tokens(tmp_path):
     assert "2.0M tok" in line
 
 
+def _line_for_total(tmp_path, total: int) -> str:
+    """Render a line whose session total is exactly *total* tokens."""
+    path = write_claude_transcript(tmp_path / "s.jsonl", [
+        make_claude_transcript_assistant_line(
+            message_id="m1", input_tokens=total, output_tokens=0,
+            cache_read_input_tokens=0, cache_creation_input_tokens=0,
+        ),
+    ])
+    return render_line({"model": "m", "transcript_path": path})
+
+
+def test_sub_million_session_renders_k_not_zero_megabytes(tmp_path):
+    # The #103 bug: a ~42k-token session rendered as a trust-eroding "0.0M tok".
+    line = _line_for_total(tmp_path, 42_300)
+    assert "42.3k tok" in line
+    assert "0.0M" not in line
+
+
+def test_million_boundary_switches_to_megabytes(tmp_path):
+    # Just below a million stays in k; exactly a million flips to M.
+    assert "999.0k tok" in _line_for_total(tmp_path, 999_000)
+    assert "1.0M tok" in _line_for_total(tmp_path, 1_000_000)
+
+
 # --- transcript discovery ---------------------------------------------------
 
 
@@ -163,8 +187,9 @@ def test_glob_fallback_locates_session_by_id(tmp_path, monkeypatch):
     ])
     monkeypatch.setenv("HOME", str(fake_home))
     line = render_line({"session_id": "sess-123", "model": "m"})
-    assert "1000" not in line  # tokens rendered in M, not raw
-    assert "0.0M tok" in line
+    # A sub-1M session human-sizes to `k`, not a misleading "0.0M".
+    assert "1.0k tok" in line
+    assert "0.0M" not in line
 
 
 # --- fail-safe contract -----------------------------------------------------

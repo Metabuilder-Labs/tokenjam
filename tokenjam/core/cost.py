@@ -46,8 +46,9 @@ def calculate_cost(
         if key not in _UNKNOWN_MODEL_WARNED:
             _UNKNOWN_MODEL_WARNED.add(key)
             logger.warning(
-                "No pricing data for %s/%s — using default rates. "
-                "Add to tokenjam/pricing/models.toml to get accurate costs.",
+                "No pricing data for %s/%s — using default rates (cost figures "
+                "may be inaccurate). Upgrade tokenjam for current pricing, or "
+                "add an override to ~/.config/tj/pricing.toml — see `tj pricing list`.",
                 provider, model,
             )
         rates = ModelRates(

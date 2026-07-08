@@ -14,7 +14,7 @@ from rich.markup import escape
 from tokenjam.cli.banner import print_welcome_banner
 from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
 from tokenjam.core.config import find_config_file
-from tokenjam.utils.formatting import console
+from tokenjam.utils.formatting import console, display_path
 
 # --- output-trim (`tj hook cap-output`) PostToolUse hook wiring --------------
 # Installed into ~/.claude/settings.json out-of-band (zero in-loop token cost).
@@ -271,19 +271,38 @@ def _print_instrument_agent_snippet() -> None:
               help="Project name to group this repo under in the dashboard "
                    "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
                    "'aquanode'). Defaults to the git org. Used with --claude-code.")
+@click.option("--verify", is_flag=True, default=False,
+              help="After setup, poll for the first span from the newly "
+                   "configured source and report whether telemetry is flowing "
+                   "(distinguishes 'wired and receiving' from 'configured but "
+                   "silent'). Runs non-interactively; skips the prompt.")
+@click.option("--verify-only", "verify_only", is_flag=True, default=False,
+              help="Skip setup and only poll for the first live span against an "
+                   "existing config — the lightweight post-restart re-check. "
+                   "Does not rewrite config or replay the summary. Pair with "
+                   "--claude-code / --codex to select that persona's config.")
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
-                reconfigure: bool, plan: str | None, project_override: str | None) -> None:
+                reconfigure: bool, plan: str | None, project_override: str | None,
+                verify: bool, verify_only: bool) -> None:
     """Interactive setup wizard for tj."""
+    # --verify-only is the documented post-restart re-check: config already
+    # exists, the user just restarted the agent, and re-running the whole wizard
+    # (config rewrite + full summary + restart banner) only to poll is wasteful
+    # noise (#102). Skip straight to the poll, before the banner and any setup.
+    if verify_only:
+        _run_verify_only(ctx, claude_code=claude_code, codex=codex)
+        return
     # Branded welcome moment (#240) — shown once at the top of every onboard
     # flow (plain / --claude-code / --codex) before any prompt or config check.
     print_welcome_banner()
     if claude_code:
-        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan, project_override)
+        _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
+                             project_override, verify=verify)
         return
     if codex:
-        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan)
+        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan, verify=verify)
         return
     existing = find_config_file()
     if existing and not force:
@@ -471,6 +490,129 @@ retention_days = 90
     )
     console.print()
 
+    # First-signal verification (#80): the SDK is fail-open, so a typo'd
+    # agent_id / missing patch / dead daemon leaves the user silent. Reload the
+    # just-written config so the poller reads the same DB/API the daemon uses.
+    try:
+        from tokenjam.core.config import load_config as _load_written_config
+        written_config = _load_written_config(str(config_path.resolve()))
+    except Exception:
+        written_config = None
+    if written_config is not None:
+        _maybe_verify_onboarding(written_config, persona="sdk", verify=verify)
+
+
+def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> None:
+    """Run first-signal verification if ``--verify`` was passed, or offer it
+    interactively. No-op when neither applies (non-interactive without the flag).
+
+    ``persona`` is one of ``"sdk"``, ``"claude_code"``, ``"codex"`` and drives
+    the instruction shown and the not-confirmed cause.
+    """
+    if not verify:
+        if not sys.stdin.isatty():
+            return
+        if not click.confirm(
+            "\nVerify tj is receiving telemetry now?", default=False
+        ):
+            return
+    _run_onboard_verification(config, persona)
+
+
+def _run_onboard_verification(
+    config: object, persona: str, *, timeout_s: float = 60.0
+) -> None:
+    """Open a read-only path to spans and poll for the first one after now,
+    reporting confirmed / not-confirmed with the per-persona likely cause."""
+    from tokenjam.core.onboard_verify import (
+        not_confirmed_cause,
+        open_read_backend,
+        poll_for_first_span,
+    )
+    from tokenjam.utils.time_parse import utcnow
+
+    backend, _mode, error = open_read_backend(config)
+    if backend is None:
+        console.print(f"\n[yellow]Can't verify yet[/yellow] \u2014 {error}.")
+        console.print(
+            "Start [bold]tj serve[/bold], then run [bold]tj doctor[/bold] to check."
+        )
+        return
+
+    try:
+        since = utcnow()
+        if persona == "sdk":
+            console.print(
+                "\n[bold]Verifying\u2026[/bold] trigger one span now \u2014 run your agent, "
+                "or in another terminal run [bold]tj ping[/bold]."
+            )
+        else:
+            console.print(
+                "\n[bold]Verifying\u2026[/bold] waiting for the first telemetry. If you "
+                "haven't yet, [bold]restart[/bold] the agent runtime now."
+            )
+        console.print(f"[dim]Polling for up to {int(timeout_s)}s\u2026[/dim]")
+        result = poll_for_first_span(backend, since, timeout_s=timeout_s)
+    finally:
+        close = getattr(backend, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    if result.confirmed:
+        console.print(
+            f"[green]\u2713 Receiving telemetry![/green] First span arrived after "
+            f"{result.elapsed_s:.0f}s \u2014 you're wired up."
+        )
+    elif result.error:
+        console.print(f"[yellow]Couldn't verify[/yellow] \u2014 {result.error}.")
+    else:
+        console.print(
+            f"[yellow]\u26a0 No telemetry yet[/yellow] after {int(timeout_s)}s. "
+            + not_confirmed_cause(persona)
+        )
+
+
+def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> None:
+    """Poll an already-configured install for its first live span, skipping setup.
+
+    The persona (and which config to read) follows the same flag the user
+    onboarded with: ``--claude-code`` / ``--codex`` read the global config;
+    bare reads the nearest project/SDK config via ``find_config_file``. Errors
+    out cleanly when no config exists yet — that's an "run `tj onboard` first"
+    situation, not a verification failure.
+    """
+    from tokenjam.core.config import load_config
+
+    if claude_code or codex:
+        global_path = Path.home() / ".config" / "tj" / "config.toml"
+        persona = "claude_code" if claude_code else "codex"
+        config_path: Path | None = global_path if global_path.exists() else None
+    else:
+        found = find_config_file()
+        config_path = Path(found) if found else None
+        persona = "sdk"
+
+    if config_path is None:
+        console.print(
+            "[red]No tj config found.[/red] Run [bold]tj onboard[/bold] "
+            "(optionally with --claude-code / --codex) first, then "
+            "[bold]tj onboard --verify-only[/bold]."
+        )
+        ctx.exit(1)
+        return
+
+    try:
+        config = load_config(str(config_path.resolve()))
+    except Exception as exc:  # noqa: BLE001 — surface a clean message, no traceback
+        console.print(f"[red]Could not load config[/red] at {display_path(config_path)}: {exc}")
+        ctx.exit(1)
+        return
+
+    _run_onboard_verification(config, persona)
+
 
 _ANTHROPIC_PLAN_CHOICES = [
     ("api",      "API (per-token billing through console.anthropic.com)"),
@@ -613,6 +755,7 @@ def _onboard_claude_code(
     reconfigure: bool = False,
     plan_override: str | None = None,
     project_override: str | None = None,
+    verify: bool = False,
 ) -> None:
     """Configure Claude Code to send telemetry to tj."""
     from tokenjam.core.config import (
@@ -690,7 +833,7 @@ def _onboard_claude_code(
             config.agents[agent_id].budget.daily_usd = budget
         config_path = global_config_path
         write_config(config, config_path)
-        console.print(f"  tj config updated: {config_path}")
+        console.print(f"  tj config updated: {display_path(config_path)}", soft_wrap=True)
     else:
         ingest_secret = secrets.token_hex(32)
         if plan_override:
@@ -720,7 +863,7 @@ def _onboard_claude_code(
         config_path = global_config_path
         config_path.parent.mkdir(parents=True, exist_ok=True)
         write_config(config, config_path)
-        console.print(f"  tj config written to: {config_path}")
+        console.print(f"  tj config written to: {display_path(config_path)}", soft_wrap=True)
         if _sync_secret_to_codex(ingest_secret):
             console.print("  Codex config updated to match new ingest secret.")
 
@@ -967,8 +1110,12 @@ def _onboard_claude_code(
 
     console.print()
     console.print("[bold green]Claude Code observability configured.[/bold green]")
-    console.print(f"  Global settings:     {global_settings_path}")
-    console.print(f"  Project settings:    {project_settings_path}")
+    console.print(
+        f"  Global settings:     {display_path(global_settings_path)}", soft_wrap=True
+    )
+    console.print(
+        f"  Project settings:    {display_path(project_settings_path)}", soft_wrap=True
+    )
     _print_statusline_status(statusline_status)
     if removed_resource_attr:
         console.print(
@@ -978,8 +1125,10 @@ def _onboard_claude_code(
     console.print("  Shell env:           ~/.zshrc (harness-compatible endpoint)")
     if wrapper_files:
         console.print(
-            f"  claude wrapper:      {', '.join(wrapper_files)} "
-            "(per-terminal naming)"
+            f"  claude wrapper:      "
+            f"{', '.join(display_path(w) for w in wrapper_files)} "
+            "(per-terminal naming)",
+            soft_wrap=True,
         )
         console.print(
             "  [dim]The claude wrapper controls OTEL_RESOURCE_ATTRIBUTES per "
@@ -1041,6 +1190,8 @@ def _onboard_claude_code(
     )
     console.print(f"[dim]After restarting, run:[/dim]  tj status --agent {agent_id}")
 
+    _maybe_verify_onboarding(config, persona="claude_code", verify=verify)
+
 
 def _onboard_codex(
     ctx: click.Context,
@@ -1049,6 +1200,7 @@ def _onboard_codex(
     force: bool,
     reconfigure: bool = False,
     plan_override: str | None = None,
+    verify: bool = False,
 ) -> None:
     """Configure Codex CLI to send telemetry to tj."""
     try:
@@ -1119,7 +1271,7 @@ def _onboard_codex(
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
         write_config(config, config_path)
-        console.print(f"  tj config updated: {config_path}")
+        console.print(f"  tj config updated: {display_path(config_path)}", soft_wrap=True)
     else:
         ingest_secret = secrets.token_hex(32)
         if plan_override:
@@ -1148,7 +1300,7 @@ def _onboard_codex(
         )
         config_path.parent.mkdir(parents=True, exist_ok=True)
         write_config(config, config_path)
-        console.print(f"  tj config written to: {config_path}")
+        console.print(f"  tj config written to: {display_path(config_path)}", soft_wrap=True)
         if _sync_secret_to_claude_code(ingest_secret):
             console.print("  Claude Code config updated to match new ingest secret.")
 
@@ -1261,8 +1413,12 @@ def _onboard_codex(
 
     console.print()
     console.print("[bold green]Codex CLI observability configured.[/bold green]")
-    console.print(f"  Codex config:        {codex_config_path}")
-    console.print(f"  TokenJam config:     {config_path}")
+    console.print(
+        f"  Codex config:        {display_path(codex_config_path)}", soft_wrap=True
+    )
+    console.print(
+        f"  TokenJam config:     {display_path(config_path)}", soft_wrap=True
+    )
     if budget and budget > 0:
         console.print(f"  Daily budget:        ${budget:.2f}")
     console.print(f"  OTLP endpoint:       http://127.0.0.1:{port}/v1/logs")
@@ -1297,6 +1453,8 @@ def _onboard_codex(
     )
     _print_restart_banner("Codex")
     console.print("[dim]After restarting, run:[/dim]  tj traces")
+
+    _maybe_verify_onboarding(config, persona="codex", verify=verify)
 
 
 def _print_restart_banner(app_name: str) -> None:

@@ -84,3 +84,4 @@ the region removed. The caveat surfaces this in every report.
 - [Downsize](downsize.md) — flag sessions whose shape matches a cheaper-model candidate
 - [Cache](cache.md) — measure and improve prompt-cache usage
 - [Script](script.md) — find workflows that look like deterministic shell scripts
+- [Subagent](subagent.md) — per-subagent cost breakdown and right-sizing candidates (Claude Code only)
