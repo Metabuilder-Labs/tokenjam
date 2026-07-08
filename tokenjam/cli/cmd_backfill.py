@@ -11,6 +11,10 @@ from tokenjam.core.backfill import (
     BackfillResult,
     ingest_claude_code,
 )
+from tokenjam.core.ingest_adapters.codex import (
+    CODEX_SESSIONS_ROOT,
+    ingest_codex,
+)
 from tokenjam.core.ingest_adapters.helicone import ingest_helicone
 from tokenjam.core.ingest_adapters.langfuse import ingest_langfuse
 from tokenjam.core.ingest_adapters.otlp import ingest_otlp
@@ -147,6 +151,63 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
         console.print(
             "  [dim]Less than 7 days of history available — `tj optimize` will "
             "flag thin-data projections.[/dim]"
+        )
+
+
+@cmd_backfill.command("codex")
+@click.option("--root", "root_path", default=None,
+              help=f"Override Codex sessions root (default {CODEX_SESSIONS_ROOT}).")
+@click.option("--since", "since_value", default=None,
+              help="Only ingest sessions since a window like 30d, 7d, or YYYY-MM-DD.")
+@click.pass_context
+def codex(ctx: click.Context, root_path: str | None,
+          since_value: str | None) -> None:
+    """Ingest Codex CLI session logs from ~/.codex/sessions/."""
+    db = ctx.obj.get("db")
+    if db is None:
+        raise click.ClickException("backfill requires a database connection.")
+
+    root = Path(root_path).expanduser() if root_path else CODEX_SESSIONS_ROOT
+    if not root.exists():
+        console.print(f"[yellow]No Codex logs found at {root}.[/yellow]")
+        console.print(
+            "[dim]This is normal if the Codex CLI hasn't been used on this "
+            "machine yet — backfill will be useful once it has.[/dim]"
+        )
+        return
+
+    since = None
+    if since_value:
+        try:
+            since = parse_since(since_value)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="'--since'") from exc
+
+    console.print(f"Backfilling Codex sessions from {root} …")
+    try:
+        result = ingest_codex(
+            db, root=root, since=since, config=ctx.obj.get("config"),
+        )
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    if result["sessions_seen"] == 0:
+        console.print(
+            "[yellow]No sessions found.[/yellow] "
+            "[dim]Use the Codex CLI for a while, then re-run.[/dim]"
+        )
+        return
+
+    console.print(
+        f"[green]✓[/green] Saw [bold]{result['sessions_seen']}[/bold] "
+        f"session(s); wrote [bold]{result['sessions_written']}[/bold] new "
+        f"session(s), [bold]{result['spans_written']}[/bold] new span(s); "
+        f"skipped [bold]{result['spans_skipped']}[/bold] already present."
+    )
+    if result["sessions_failed"]:
+        console.print(
+            f"  [yellow]Warning: {result['sessions_failed']} session(s) "
+            f"failed to parse.[/yellow]"
         )
 
 
