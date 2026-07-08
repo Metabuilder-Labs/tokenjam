@@ -25,7 +25,9 @@ from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO
 
 
 class SummarizeRefused(Exception):
-    """File changed or vanished since prep — re-prep before check/apply (carries the house-voice text)."""
+    """Refusing to summarize/apply a file (carries the house-voice text): it changed or
+    vanished since prep, isn't valid UTF-8, is a symlink, or otherwise can't be processed.
+    Callers surface it as a 409 / re-prep prompt."""
 
 
 CHECK_NOTE = (
@@ -115,7 +117,13 @@ def sha256(text: str) -> str:
 
 
 def _read(path: str) -> str:
-    return Path(path).expanduser().read_text(encoding="utf-8")
+    try:
+        return Path(path).expanduser().read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # A non-UTF-8 prompt file can't be summarized — refuse cleanly (callers map
+        # SummarizeRefused → 409) instead of letting a ValueError (not an OSError)
+        # crash the read. Missing files still raise FileNotFoundError (→ 404).
+        raise SummarizeRefused(f"{path} isn't valid UTF-8 — cannot summarize it.") from exc
 
 
 def _refuse_symlink(path: str) -> None:
@@ -166,8 +174,8 @@ def list_staged(config: TjConfig) -> list[dict]:
     for f in sorted(d.glob("*.json")):
         try:
             out.append(json.loads(f.read_text(encoding="utf-8")))
-        except json.JSONDecodeError:
-            continue                                  # skip a half-written/corrupt entry
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue                                  # skip a half-written/corrupt/unreadable entry
     return out
 
 
@@ -175,7 +183,10 @@ def read_staged(config: TjConfig, path: str) -> dict | None:
     f = results_dir(config) / f"{stage_key(path)}.json"
     if not f.exists():
         return None
-    parsed: dict = json.loads(f.read_text(encoding="utf-8"))
+    try:
+        parsed: dict = json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None                                   # corrupt/unreadable → treat as no record
     return parsed
 
 
@@ -244,7 +255,13 @@ def check(config: TjConfig, path: str, summary: str, source_hash: str,
         raise SummarizeRefused(
             f"{path} not found (moved or deleted since prep) — re-run `tj summarize prep`.")
     p = p.resolve()   # canonical absolute — `apply` must not reinterpret a relative path against its cwd
-    current = p.read_text(encoding="utf-8")
+    try:
+        current = p.read_text(encoding="utf-8")
+    except FileNotFoundError as exc:   # vanished between the is_file check above and here (TOCTOU)
+        raise SummarizeRefused(
+            f"{path} not found (moved or deleted since prep) — re-run `tj summarize prep`.") from exc
+    except UnicodeDecodeError as exc:
+        raise SummarizeRefused(f"{path} isn't valid UTF-8 — cannot summarize it.") from exc
     if sha256(current) != source_hash:
         raise SummarizeRefused(
             f"{path} changed since `tj summarize prep` — re-run prep, then check.")
