@@ -115,6 +115,18 @@ tj context --json
 
 Key flags: `--since`, `--agent`, `--json`.
 
+### `tj session-story`
+
+Turn-by-turn reconstruction of *how* a Claude Code session attempted its task — its ordered moves (`delegate` / `dead_end` / `verify` / `act`), and for every subagent delegation, that subagent's mandate plus a factual tool-category tally (reads/edits/searches/commands) and its own recursively-rendered method spine. With no `--session`, auto-selects the most recent session with real activity. Reads the on-disk transcript, falling back to a persisted snapshot when the transcript was pruned; needs a direct DB connection or a running `tj serve` (the daemon does the reconstruction+fallback server-side when it holds the write lock).
+
+```bash
+tj session-story
+tj session-story --session <session-id>
+tj session-story --json
+```
+
+Key flags: `--session`, `--last` (default when `--session` is omitted), `--json`.
+
 ### `tj quota-audit`
 
 Retroactive audit of your Opus quota: which past Opus sessions were structurally Sonnet-shaped (small input/output, few tool calls)? Reports the percent of Opus quota reclaimable, example sessions to spot-check, and an optional tuned routing-config export. Quota-share framing, never a dollar "saving" claim. Needs a direct DB connection (can't run against a live `tj serve`).

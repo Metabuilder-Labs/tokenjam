@@ -337,6 +337,41 @@ class ApiBackend:
             params["agent_id"] = agent_id
         return self._get("/api/v1/reuse/clusters", params)
 
+    def find_last_substantial_session(
+        self, min_tool_calls: int = 1
+    ) -> str | None:
+        """Most-recent session id with at least `min_tool_calls` tool calls.
+
+        Mirrors the direct-DB `--last` resolution in `tj session-story` when the
+        daemon holds the write lock. `/sessions` already returns rows newest
+        first, so the first qualifying row is the answer. Returns None when no
+        session clears the floor (or the list is empty).
+        """
+        data = self._get("/api/v1/sessions")
+        for s in data.get("sessions", []):
+            if (s.get("tool_call_count") or 0) >= min_tool_calls:
+                sid = s.get("session_id")
+                if sid:
+                    return sid
+        return None
+
+    def fetch_session_story(
+        self, session_id: str, subagents: bool = True
+    ) -> dict:
+        """Fetch a session's reconstructed story from `tj serve`.
+
+        Used by `tj session-story` when the local DuckDB connection is
+        unavailable (daemon holds the write lock). The daemon already did the
+        transcript reconstruction + snapshot fallback, so this returns the raw
+        `{"available": bool, ...}` payload (`available`/`reason`/`from_snapshot`
+        + the story fields) verbatim for the CLI to render. See issue #63 for
+        the same daemon-availability pattern behind `tj context`.
+        """
+        return self._get(
+            f"/api/v1/sessions/{session_id}/story",
+            {"subagents": subagents},
+        )
+
     def fetch_context_diagnostic(
         self,
         *,
