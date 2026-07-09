@@ -194,18 +194,20 @@ def _render(diag, timeline, *, since: str,
     sections.append(head)
     sections.append(Text(""))
 
+    # Quota-weighted, not raw tokens (#119): cache reads are discounted well
+    # below a base input token in both API pricing and Anthropic's subscription
+    # rate-limit weighting, so a raw token share overstates re-reading's actual
+    # quota cost. diag.quota_weighted_reread_share applies that discount (and
+    # output's premium) — see context_diagnostic.py's CACHE_READ_QUOTA_WEIGHT.
     reread = Text()
-    reread.append(f"{_pct(diag.reread_share)} ", style="bold red")
-    reread.append("of your tokens went to ", style="")
+    reread.append(f"{_pct(diag.quota_weighted_reread_share)} ", style="bold red")
+    reread.append("of your quota went to ", style="")
     reread.append("re-reading context", style="bold")
     reread.append(" (history, CLAUDE.md, tool output)", style="dim")
     sections.append(reread)
 
-    work_share = (
-        diag.total_work_tokens / diag.total_tokens if diag.total_tokens else 0.0
-    )
     work = Text()
-    work.append(f"{_pct(work_share)} ", style="bold green")
+    work.append(f"{_pct(diag.quota_weighted_work_share)} ", style="bold green")
     work.append("went to ", style="")
     work.append("net-new work", style="bold")
     work.append(" (uncached input + output)", style="dim")
@@ -219,19 +221,30 @@ def _render(diag, timeline, *, since: str,
     detail.append(f"{format_tokens(diag.total_work_tokens)} tokens", style="bold")
     sections.append(detail)
 
+    # Aggregate only — never named past sessions (#119). A user has thousands
+    # of sessions and never returns to one closed days ago, so a per-session
+    # retrospective callout is unactionable noise; the only place a burn signal
+    # is actionable is the LIVE session, which the statusline already nudges.
     if diag.compact_candidates:
         sections.append(Text(""))
-        ch = Text("Biggest reclaim opportunities", style="bold")
-        sections.append(ch)
-        for c in diag.compact_candidates[:3]:
-            line = Text("  · ", style="dim")
-            line.append(f"session {c.session_id[:12]}", style="bold")
-            line.append(f"  {_pct(c.reread_share)} re-read, "
-                        f"{format_tokens(c.reread_tokens)} cache "
-                        f"({c.turns} turns)", style="dim")
-            sections.append(line)
+        candidate_reread = sum(c.reread_tokens for c in diag.compact_candidates)
+        share_of_reread = (
+            candidate_reread / diag.total_reread_tokens
+            if diag.total_reread_tokens else 0.0
+        )
+        agg = Text()
+        agg.append(
+            f"{len(diag.compact_candidates)} of your {diag.sessions} sessions",
+            style="bold",
+        )
+        agg.append(" ran context-heavy enough to warrant a mid-session ")
+        agg.append("/compact", style="bold")
+        agg.append(f" — {_pct(share_of_reread)} of this window's re-read tokens.",
+                    style="dim")
+        sections.append(agg)
         sections.append(Text(
-            "    → /compact mid-session (or start fresh) to reclaim that quota.",
+            "The statusline flags this live, before a session ends — "
+            "a closed session can't be reclaimed.",
             style="green",
         ))
 

@@ -125,6 +125,22 @@ SUBAGENT_UNACCOUNTED_NOTE = (
 # detection query and any future renderer agree on it.
 DELEGATION_TOOL_NAME = "task"
 
+# Quota-weighted headline (#119). `diag.reread_share` above is a RAW token
+# share — it mixes "tokens" and "quota" framings, because cache-read tokens
+# are discounted well below a base input token in both API pricing and
+# Anthropic's subscription rate-limit weighting. tokenjam's own pricing table
+# (tokenjam/pricing/models.toml) prices every current Claude model at a fixed
+# ratio to its base input rate: cache reads at 0.1x, output at 5x — consistent
+# across every Anthropic model row, not a per-model coincidence. Weighting raw
+# token counts by these ratios turns "% of tokens" into "% of quota" without a
+# live per-model pricing lookup at render time. New-input and cache-write
+# (cache-miss) tokens keep their raw weight of 1.0 — they are genuinely new
+# content this turn, not a re-read, so they're outside the discount this
+# reflects. Named constants (not inlined) so the ratio's provenance is visible
+# at every call site.
+CACHE_READ_QUOTA_WEIGHT = 0.1
+OUTPUT_QUOTA_WEIGHT = 5.0
+
 # A re-read share at or above this fraction is "context-heavy" and worth a
 # compact / restructure look. Calibrated against the community signal that
 # steady-state CC turns can run well above this once history + CLAUDE.md grow.
@@ -214,6 +230,37 @@ class TurnComposition:
     def cache_miss_share(self) -> float:
         total = self.total_tokens
         return (self.cache_miss_tokens / total) if total else 0.0
+
+    @property
+    def quota_weighted_tokens(self) -> float:
+        """This turn's tokens weighted by quota cost, not raw count (#119).
+
+        Cache reads count for ``CACHE_READ_QUOTA_WEIGHT`` of a base token;
+        output counts for ``OUTPUT_QUOTA_WEIGHT``. See the constants' docstring
+        for the pricing-table provenance.
+
+        Not consumed by any renderer yet — quickstart uses the window-level
+        ``ContextDiagnostic.quota_weighted_reread_share`` below. This per-turn
+        variant is deliberate groundwork for #122 (tj context / tj tokenmaxx
+        switching their own headlines to quota-weighted shares). Do not remove
+        as unused.
+        """
+        return (
+            self.reread_tokens * CACHE_READ_QUOTA_WEIGHT
+            + self.new_input_tokens
+            + self.output_tokens * OUTPUT_QUOTA_WEIGHT
+            + self.cache_write_tokens
+        )
+
+    @property
+    def quota_weighted_reread_share(self) -> float:
+        """Re-read's share of this turn's QUOTA-weighted tokens, not raw count.
+
+        Groundwork for #122, same as ``quota_weighted_tokens`` above — not
+        consumed by any renderer yet. Do not remove as unused.
+        """
+        total = self.quota_weighted_tokens
+        return (self.reread_tokens * CACHE_READ_QUOTA_WEIGHT / total) if total else 0.0
 
 
 @dataclass
@@ -311,6 +358,47 @@ class ContextDiagnostic:
     def cache_miss_share(self) -> float:
         total = self.total_tokens
         return (self.total_cache_miss_tokens / total) if total else 0.0
+
+    @property
+    def total_quota_weighted_tokens(self) -> float:
+        """Window tokens weighted by quota cost, not raw count (#119).
+
+        Cache reads count for ``CACHE_READ_QUOTA_WEIGHT`` of a base token;
+        output counts for ``OUTPUT_QUOTA_WEIGHT``. See the constants' docstring
+        for the pricing-table provenance.
+        """
+        return (
+            self.total_reread_tokens * CACHE_READ_QUOTA_WEIGHT
+            + self.total_new_input_tokens
+            + self.total_output_tokens * OUTPUT_QUOTA_WEIGHT
+            + self.total_cache_write_tokens
+        )
+
+    @property
+    def quota_weighted_reread_share(self) -> float:
+        """Re-read's share of the window's QUOTA-weighted tokens (#119).
+
+        This is the headline number: ``reread_share`` above mixes "tokens" and
+        "quota" framings because cache reads are billed at a fraction of a base
+        token. This property is what the "% of your quota" headline should read.
+        """
+        total = self.total_quota_weighted_tokens
+        return (
+            (self.total_reread_tokens * CACHE_READ_QUOTA_WEIGHT / total)
+            if total else 0.0
+        )
+
+    @property
+    def quota_weighted_work_share(self) -> float:
+        """Net-new work's share of the window's QUOTA-weighted tokens (#119)."""
+        total = self.total_quota_weighted_tokens
+        if not total:
+            return 0.0
+        weighted_work = (
+            self.total_new_input_tokens
+            + self.total_output_tokens * OUTPUT_QUOTA_WEIGHT
+        )
+        return weighted_work / total
 
     @property
     def subagent_accounting_partial(self) -> bool:
@@ -923,6 +1011,11 @@ def diagnostic_to_dict(diag: ContextDiagnostic) -> dict[str, Any]:
         "total_tokens": diag.total_tokens,
         "reread_share": round(diag.reread_share, 4),
         "cache_miss_share": round(diag.cache_miss_share, 4),
+        # Quota-weighted headline (#119) — cache reads discounted, output
+        # weighted heavier, per the pricing-table ratios cited on the constants.
+        "total_quota_weighted_tokens": round(diag.total_quota_weighted_tokens, 2),
+        "quota_weighted_reread_share": round(diag.quota_weighted_reread_share, 4),
+        "quota_weighted_work_share": round(diag.quota_weighted_work_share, 4),
         "total_cost_usd": round(diag.total_cost_usd, 6),
         "heaviest_turns": [
             {
