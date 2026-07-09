@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -90,7 +92,7 @@ def _package_reinstall_hint() -> str:
     return "pip install --upgrade tokenjam"
 
 
-def _package_fresh_install_hint() -> str:
+def _package_fresh_install_hint(manager: str | None = None) -> str:
     """Return the command that reinstalls after the package was fully removed.
 
     Once the venv is gone, `pipx upgrade` / `uv tool upgrade` fail ("not
@@ -99,12 +101,191 @@ def _package_fresh_install_hint() -> str:
     `_package_reinstall_hint()`, which is only correct while the package
     REMAINS in place (a plain install would no-op then, so it points at
     upgrade/--force).
+
+    `manager` overrides the current-process auto-detection (one of
+    `PersistentInstall.manager`'s values: "pipx" / "uv-tool" / "pip") — pass
+    the manager of the install that was just removed via
+    `_find_persistent_install()`. This matters because `tj uninstall` almost
+    always runs from an ephemeral `uvx`/`pipx run` process (the npx wrapper's
+    default), whose OWN `sys.executable` never matches the persistent
+    pipx/uv-tool install it just removed on the user's behalf.
     """
-    if _installed_via_pipx():
+    if manager is None:
+        if _installed_via_pipx():
+            manager = "pipx"
+        elif _installed_via_uv_tool():
+            manager = "uv-tool"
+        else:
+            manager = "pip"
+    if manager == "pipx":
         return "pipx install tokenjam"
-    if _installed_via_uv_tool():
+    if manager == "uv-tool":
         return "uv tool install tokenjam"
     return "pip install tokenjam"
+
+
+@dataclass(frozen=True)
+class PersistentInstall:
+    """One persistent tokenjam install found somewhere on the machine —
+    independent of how the CURRENT `tj` process happens to be running (see
+    `_find_persistent_install()`)."""
+
+    manager: str              # "pipx" | "uv-tool" | "pip"
+    auto: bool                # True: safe to auto-run `argv` non-interactively
+    argv: list[str] | None    # subprocess argv when auto=True, else None
+    display: str              # human-readable command, for prompts + printing
+
+
+_MANAGER_LABEL = {"pipx": "pipx", "uv-tool": "uv tool", "pip": "pip"}
+
+
+def _pipx_home() -> Path:
+    """pipx's data dir — `PIPX_HOME` overrides the default `~/.local/pipx`."""
+    override = os.environ.get("PIPX_HOME")
+    return Path(override) if override else Path.home() / ".local" / "pipx"
+
+
+def _uv_data_home() -> Path:
+    """uv's data dir — `XDG_DATA_HOME` overrides the default `~/.local/share`."""
+    override = os.environ.get("XDG_DATA_HOME")
+    base = Path(override) if override else Path.home() / ".local" / "share"
+    return base / "uv"
+
+
+def _pipx_has_tokenjam() -> bool:
+    """Authoritative: `pipx list --json` reports a `tokenjam` venv. Falls
+    back to a dir probe (`${PIPX_HOME:-~/.local/pipx}/venvs/tokenjam`) only
+    when the `pipx` binary is missing or the command errors — e.g. probing
+    from an ephemeral `uvx`/`pipx run` process that has no `pipx` on its own
+    PATH, even though a persistent pipx install exists elsewhere on the
+    machine."""
+    pipx_bin = shutil.which("pipx")
+    if pipx_bin:
+        try:
+            result = subprocess.run(
+                [pipx_bin, "list", "--json"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                return "tokenjam" in data.get("venvs", {})
+        except Exception:
+            pass
+    return (_pipx_home() / "venvs" / "tokenjam").exists()
+
+
+def _uv_tool_has_tokenjam() -> bool:
+    """Authoritative: `uv tool list` reports a `tokenjam` tool. Falls back to
+    a dir probe (`${XDG_DATA_HOME:-~/.local/share}/uv/tools/tokenjam`) only
+    when `uv` is missing or the command errors. `uv tool list` has no --json
+    output today, so text-parse it — only unindented lines that don't start
+    with `-` are package names (indented `- <entrypoint>` lines list each
+    tool's installed scripts, not other packages)."""
+    uv_bin = shutil.which("uv")
+    if uv_bin:
+        try:
+            result = subprocess.run(
+                [uv_bin, "tool", "list"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    if not line or line[0].isspace() or line.lstrip().startswith("-"):
+                        continue
+                    if line.split()[0] == "tokenjam":
+                        return True
+                return False
+        except Exception:
+            pass
+    return (_uv_data_home() / "tools" / "tokenjam").exists()
+
+
+def _pip_tj_on_path() -> str | None:
+    """Return a persistent `tj` on PATH that is a plain pip / editable-dev
+    install — i.e. neither pipx- nor uv-tool-managed (those are already
+    covered by `_pipx_has_tokenjam()`/`_uv_tool_has_tokenjam()`) nor an
+    ephemeral cache shim (`uvx`/`pipx run` — nothing to remove there).
+    None if `tj` isn't found on PATH, or it resolves to one of those other
+    categories."""
+    tj_path = shutil.which("tj")
+    if not tj_path:
+        return None
+    norm = tj_path.replace("\\", "/")
+    if "pipx/venvs/" in norm or "/uv/tools/" in norm:
+        return None
+    if (
+        "/uv/archive-" in norm or "/uv/builds-" in norm
+        or ".cache/uv/" in norm or "/pipx/.cache/" in norm
+    ):
+        return None
+    return tj_path
+
+
+def _find_persistent_install() -> list[PersistentInstall]:
+    """Probe the ENVIRONMENT — not the current process — for every
+    persistent tokenjam install on the machine.
+
+    `npx tokenjam uninstall` always runs `tj` via an ephemeral `uvx`/
+    `pipx run` venv (see npm-wrapper/bin/tj.js's runner preference), so the
+    `sys.executable`-based helpers above (`_installed_via_pipx()`,
+    `_is_ephemeral_runner()`, etc.) always report "this process is
+    ephemeral" on that path — the WRONG signal for what `tj uninstall`
+    should remove. A user who separately `pipx install`ed tokenjam still has
+    that install sitting on disk; only probing the environment (not
+    `sys.executable`) finds it, so it can actually be removed from within an
+    ephemeral `npx tokenjam uninstall` run instead of silently leaving it
+    behind while claiming success.
+
+    Checks, in order: `pipx list --json` (dir-probe fallback), `uv tool
+    list` (dir-probe fallback), then a plain `tj` on PATH that is neither of
+    those managers nor an ephemeral cache shim (a plain pip install or an
+    editable dev checkout). Returns EVERY match, not just the first — pipx
+    and uv-tool installs can coexist on one machine, and `tj uninstall`
+    removes every auto-removable one it finds.
+    """
+    installs: list[PersistentInstall] = []
+    if _pipx_has_tokenjam():
+        installs.append(PersistentInstall(
+            manager="pipx", auto=True,
+            argv=["pipx", "uninstall", "tokenjam"],
+            display="pipx uninstall tokenjam",
+        ))
+    if _uv_tool_has_tokenjam():
+        installs.append(PersistentInstall(
+            manager="uv-tool", auto=True,
+            argv=["uv", "tool", "uninstall", "tokenjam"],
+            display="uv tool uninstall tokenjam",
+        ))
+    if _pip_tj_on_path():
+        installs.append(PersistentInstall(
+            manager="pip", auto=False, argv=None,
+            display="pip uninstall tokenjam",
+        ))
+    return installs
+
+
+def _uninstall_confirm_prompt(installs: list[PersistentInstall]) -> str:
+    """Build the `tj uninstall` confirm prompt so it states EXACTLY what will
+    happen. Detection (`_find_persistent_install()`) runs BEFORE this is
+    called (see `cmd_uninstall`) — the prompt must never promise a package
+    removal that won't actually happen, or fail to mention one that will
+    (Greptile P1 on #443)."""
+    base = (
+        "This will delete all TokenJam data (config, telemetry history, "
+        "daemon, shell wiring)"
+    )
+    auto = [i for i in installs if i.auto]
+    manual = [i for i in installs if not i.auto]
+    clauses = []
+    if auto:
+        labels = " and ".join(_MANAGER_LABEL[i.manager] for i in auto)
+        clauses.append(f"and uninstall the tokenjam package (via {labels})")
+    if manual:
+        cmds = " / ".join(i.display for i in manual)
+        clauses.append(f"your package install will need `{cmds}` (shown after)")
+    if clauses:
+        base += ", " + "; ".join(clauses)
+    return base + ". Continue?"
 
 
 @click.command("uninstall")
@@ -116,34 +297,38 @@ def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
     The full symmetric counterpart to `tj onboard`. For a config-only reset
     that leaves the tokenjam CLI installed (e.g. to reconfigure or pause),
     use `tj reset` instead.
+
+    Package detection is environment-wide (`_find_persistent_install()`),
+    not based on the current process — `tj uninstall` almost always runs via
+    an ephemeral `uvx`/`pipx run` venv (the npx wrapper's default), and that
+    process's own `sys.executable` says nothing about a persistent pipx/
+    uv-tool install sitting elsewhere on the machine.
     """
+    # Detect FIRST so the confirmation prompt states exactly what will
+    # happen — never promising a package removal that won't occur, or vice
+    # versa.
+    installs = _find_persistent_install()
+
     if not yes:
-        confirmed = click.confirm(
-            "This will delete all TokenJam data (config, telemetry history, "
-            "daemon, shell wiring) AND remove the tokenjam package itself. "
-            "Continue?",
-            default=False,
-        )
+        confirmed = click.confirm(_uninstall_confirm_prompt(installs), default=False)
         if not confirmed:
             console.print("[dim]Cancelled.[/dim]")
             return
 
     _teardown_side_effects(ctx)
 
-    # Package removal (#121, now the default — see #442). `tj uninstall` is
-    # meant to be the single symmetric counterpart to `tj onboard` — but an
-    # ephemeral runner (uvx/pipx run, incl. via the npx wrapper) has no
-    # persistent package to remove in the first place.
-    if _is_ephemeral_runner():
+    if not installs:
         console.print(
-            "[dim]Running via an ephemeral runner (uvx/pipx run) — "
-            "nothing persistent to remove; onboarding side-effects above are "
-            "already cleaned.[/dim]"
+            "[dim]No persistent tokenjam install found on this machine — "
+            "nothing to remove; the config/wiring cleanup above is already "
+            "done.[/dim]"
         )
         return
 
+    console.print()
     console.print("[dim]Removing the tokenjam package...[/dim]")
-    _remove_package(_package_uninstall_hint())
+    for install in installs:
+        _remove_persistent_install(install)
 
 
 def _teardown_side_effects(ctx: click.Context) -> None:
@@ -316,10 +501,10 @@ def _teardown_side_effects(ctx: click.Context) -> None:
     console.print("[green]TokenJam data, config, and wiring removed.[/green]")
 
 
-def _run_auto_uninstall(argv: list[str], uninstall_cmd: str) -> None:
+def _run_auto_uninstall(argv: list[str], uninstall_cmd: str, manager: str) -> None:
     """Shared runner for the pipx/uv-tool auto-remove branches: run `argv`,
-    then report success (with the fresh-install hint) or fall back to the
-    manual command on failure."""
+    then report success (with the fresh-install hint for `manager`) or fall
+    back to the manual command on failure."""
     console.print()
     console.print(f"Running: [bold]{uninstall_cmd}[/bold]")
     result = subprocess.run(argv, capture_output=True, text=True)
@@ -327,9 +512,11 @@ def _run_auto_uninstall(argv: list[str], uninstall_cmd: str) -> None:
         console.print("[green]tokenjam package removed.[/green]")
         # The venv is gone now, so upgrade would fail ("not installed") —
         # point at the plain fresh install, not the upgrade/--force reinstall
-        # hint (#430).
+        # hint (#430). `manager` is the install that was JUST removed, not
+        # necessarily what the current (often ephemeral) process would guess.
         console.print(
-            f"  [dim]To reinstall FRESH: {_package_fresh_install_hint()}[/dim]"
+            f"  [dim]To reinstall FRESH: "
+            f"{_package_fresh_install_hint(manager)}[/dim]"
         )
     else:
         console.print(
@@ -339,26 +526,22 @@ def _run_auto_uninstall(argv: list[str], uninstall_cmd: str) -> None:
         console.print(f"  Run manually: [bold]{uninstall_cmd}[/bold]")
 
 
-def _remove_package(uninstall_cmd: str) -> None:
-    """Run the package uninstall when we can, else print the exact command.
+def _remove_persistent_install(install: PersistentInstall) -> None:
+    """Execute (pipx/uv-tool) or print (pip/editable) removal for one
+    detected persistent install (`_find_persistent_install()`).
 
-    Only pipx and `uv tool` are auto-run: both are isolated, canonical install
-    paths safe to invoke non-interactively. For pip / venv installs we print
-    the command instead of guessing (a wrong `pip uninstall` in the wrong
-    environment is worse than a copy-paste)."""
-    if _installed_via_pipx() and shutil.which("pipx"):
-        _run_auto_uninstall(["pipx", "uninstall", "tokenjam"], uninstall_cmd)
+    Only pipx and `uv tool` are auto-run: both are isolated, canonical
+    install paths safe to invoke non-interactively. For pip / editable-dev
+    installs we print the command instead of guessing — a wrong
+    `pip uninstall` in the wrong (possibly shared/live) environment is worse
+    than a copy-paste."""
+    if install.auto and install.argv:
+        _run_auto_uninstall(install.argv, install.display, install.manager)
         return
 
-    if _installed_via_uv_tool() and shutil.which("uv"):
-        _run_auto_uninstall(["uv", "tool", "uninstall", "tokenjam"], uninstall_cmd)
-        return
-
-    # Not a pipx/uv-tool install (or the tool binary is missing) — print the
-    # right command, don't guess.
     console.print()
     console.print(
         "  [yellow]Can't safely auto-remove this install "
         "(not a pipx- or uv-tool-managed venv).[/yellow]"
     )
-    console.print(f"  Remove the package with: [bold]{uninstall_cmd}[/bold]")
+    console.print(f"  Remove the package with: [bold]{install.display}[/bold]")
