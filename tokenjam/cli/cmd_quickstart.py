@@ -288,6 +288,11 @@ def _render(diag, timeline, *, since: str,
     console.print()
     console.print(Text("  pipx install tokenjam && tj onboard", style="bold cyan"))
     console.print()
+    console.print(Text(
+        "  tj onboard also gives you a local web dashboard of all this "
+        "— no signup.", style="dim",
+    ))
+    console.print()
 
 
 def _bar(value: int, maximum: int, width: int = 16) -> str:

@@ -153,6 +153,9 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     # The opt-in "go deeper" pointer prints the full pasteable install command,
     # since the quickstart audience has no `tj` on PATH (it ran via `npx tokenjam`).
     assert "pipx install tokenjam && tj onboard" in result.output
+    # The outro also sells the local web dashboard (#120) — the most
+    # product-looking asset shouldn't be invisible at the conversion moment.
+    assert "local web dashboard" in result.output
 
 
 def test_quickstart_json_emits_both_views(tmp_path):
