@@ -33,7 +33,7 @@ def _installed_via_uv_tool() -> bool:
 
 def _is_ephemeral_runner() -> bool:
     """True when this process is a throwaway venv from `uvx`/`uv tool run` or
-    `pipx run` — there is no persistent tokenjam install to purge.
+    `pipx run` — there is no persistent tokenjam install to remove.
 
     Verified empirically: `uvx --from tokenjam tj ...` materializes its venv
     under uv's cache dir (.../uv/archive-<rev>/<hash>/...), never under
@@ -44,10 +44,11 @@ def _is_ephemeral_runner() -> bool:
     Deliberately narrow: matching on a bare "/uv/" substring also caught
     uv-managed Python *runtimes* (.../uv/python/cpython-.../bin/python3) and
     uv-tool installs (.../uv/tools/...) — both persistent installs, not
-    ephemeral ones — which silently no-opped `tj uninstall --purge` for
-    those users. Only uv's cache dirs (archive/builds, or the generic
-    .cache/uv/ prefix) count as ephemeral; uv doesn't pin the "archive-v0"
-    suffix forever, so match the prefix rather than the exact revision.
+    ephemeral ones — which silently no-opped `tj uninstall`'s package-removal
+    step for those users. Only uv's cache dirs (archive/builds, or the
+    generic .cache/uv/ prefix) count as ephemeral; uv doesn't pin the
+    "archive-v0" suffix forever, so match the prefix rather than the exact
+    revision.
     """
     if _installed_via_pipx() or _installed_via_uv_tool():
         return False
@@ -108,29 +109,53 @@ def _package_fresh_install_hint() -> str:
 
 @click.command("uninstall")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
-@click.option(
-    "--purge",
-    "--remove-package",
-    "remove_package",
-    is_flag=True,
-    help="Also remove the tokenjam package: runs the uninstall for "
-    "pipx- or uv-tool-managed installs, or prints the command to run for "
-    "pip/venv installs. A no-op (with an explanation) when running from an "
-    "ephemeral runner (uvx/pipx run) — there's nothing persistent to "
-    "remove. With --yes, proceeds without a second prompt.",
-)
 @click.pass_context
-def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
-    """Remove all TokenJam data, config, and daemon."""
+def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
+    """Remove TokenJam entirely: config/daemon/wiring AND the tokenjam package.
+
+    The full symmetric counterpart to `tj onboard`. For a config-only reset
+    that leaves the tokenjam CLI installed (e.g. to reconfigure or pause),
+    use `tj reset` instead.
+    """
     if not yes:
         confirmed = click.confirm(
-            "This will delete all TokenJam data including telemetry history. Continue?",
+            "This will delete all TokenJam data (config, telemetry history, "
+            "daemon, shell wiring) AND remove the tokenjam package itself. "
+            "Continue?",
             default=False,
         )
         if not confirmed:
             console.print("[dim]Cancelled.[/dim]")
             return
 
+    _teardown_side_effects(ctx)
+
+    # Package removal (#121, now the default — see #442). `tj uninstall` is
+    # meant to be the single symmetric counterpart to `tj onboard` — but an
+    # ephemeral runner (uvx/pipx run, incl. via the npx wrapper) has no
+    # persistent package to remove in the first place.
+    if _is_ephemeral_runner():
+        console.print(
+            "[dim]Running via an ephemeral runner (uvx/pipx run) — "
+            "nothing persistent to remove; onboarding side-effects above are "
+            "already cleaned.[/dim]"
+        )
+        return
+
+    console.print("[dim]Removing the tokenjam package...[/dim]")
+    _remove_package(_package_uninstall_hint())
+
+
+def _teardown_side_effects(ctx: click.Context) -> None:
+    """Reverse everything `tj onboard` wires up — stop/unregister the daemon,
+    deregister the Claude Code MCP server, delete TokenJam's config/DB/temp
+    files, and strip the tj-managed `~/.zshrc` OTEL block + `claude()`
+    wrapper + per-project `settings.json` env vars. Does NOT touch the
+    tokenjam package itself.
+
+    Shared by `tj uninstall` (this, plus removing the package) and `tj reset`
+    (this only — package stays installed, ready for `tj onboard` again).
+    """
     # 1. Stop tj serve if running
     from tokenjam.cli.cmd_stop import cmd_stop
     ctx.invoke(cmd_stop)
@@ -289,55 +314,6 @@ def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
 
     console.print()
     console.print("[green]TokenJam data, config, and wiring removed.[/green]")
-
-    # 12. Package removal (#121). `npx tokenjam uninstall` is meant to be the
-    # single symmetric counterpart to `npx tokenjam onboard` — but an
-    # ephemeral runner (uvx/pipx run, incl. via the npx wrapper) has no
-    # persistent package to remove in the first place. Detect that first so
-    # --purge / the prompt never offer to remove something that isn't there.
-    if _is_ephemeral_runner():
-        console.print(
-            "[dim]Running via an ephemeral runner (uvx/pipx run) — "
-            "nothing persistent to remove; onboarding side-effects above are "
-            "already cleaned.[/dim]"
-        )
-        if remove_package:
-            console.print("[dim]--purge is a no-op here.[/dim]")
-        return
-
-    console.print("[dim]The tokenjam package itself is still installed.[/dim]")
-
-    uninstall_cmd = _package_uninstall_hint()
-    do_remove = remove_package
-    if not do_remove and not yes:
-        # pipx/uv-tool installs are auto-run; pip/venv installs only get the
-        # command printed (a wrong `pip uninstall` in the wrong env is
-        # worse), so word the prompt to match what will actually happen
-        # (#430).
-        prompt_action = (
-            f"runs {uninstall_cmd}"
-            if _installed_via_pipx() or _installed_via_uv_tool()
-            else f"prints {uninstall_cmd} for you to run"
-        )
-        do_remove = click.confirm(
-            f"Also remove the tokenjam package now? ({prompt_action})",
-            default=False,
-        )
-
-    if do_remove:
-        _remove_package(uninstall_cmd)
-        return
-
-    # Package left in place: spell out the two-step so a later reinstall isn't
-    # a silent no-op (a plain `pipx/pip install` no-ops when already present).
-    console.print()
-    console.print("Next steps:")
-    console.print(f"  Fully remove the package:  [bold]{uninstall_cmd}[/bold]")
-    console.print(f"  Reinstall FRESH:           [bold]{_package_reinstall_hint()}[/bold]")
-    console.print(
-        "  [dim]A plain `install` no-ops when tokenjam is already present — "
-        "use the upgrade/--force form above to reinstall.[/dim]"
-    )
 
 
 def _run_auto_uninstall(argv: list[str], uninstall_cmd: str) -> None:
