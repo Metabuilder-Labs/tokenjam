@@ -19,6 +19,7 @@ from tokenjam.cli.cmd_statusline import (
     REREAD_CRIT,
     REREAD_WARN,
     cmd_statusline,
+    format_status_line,
     render_line,
     session_shares,
 )
@@ -169,6 +170,30 @@ def test_million_boundary_switches_to_megabytes(tmp_path):
     # Just below a million stays in k; exactly a million flips to M.
     assert "999.0k tok" in _line_for_total(tmp_path, 999_000)
     assert "1.0M tok" in _line_for_total(tmp_path, 1_000_000)
+
+
+# --- format_status_line (shared with `tj quickstart`'s live preview) --------
+
+
+def test_format_status_line_model_only_when_no_figures():
+    assert format_status_line("Opus 4.8", None, None) == "◆ Opus 4.8"
+
+
+def test_format_status_line_matches_render_line_for_same_inputs(tmp_path):
+    # The preview (cmd_quickstart) calls format_status_line directly with a
+    # point-in-time (total, reread_pct); it must render BYTE-IDENTICAL text to
+    # what render_line would produce for a transcript with those same final
+    # figures, since that's the whole point of sharing the formatter.
+    path = write_claude_transcript(tmp_path / "s.jsonl", [
+        make_claude_transcript_assistant_line(
+            message_id="m1", input_tokens=200, output_tokens=100,
+            cache_read_input_tokens=9500, cache_creation_input_tokens=200,
+        ),
+    ])
+    via_render_line = render_line({"model": "Opus 4.8", "transcript_path": path})
+    total, reread_pct = session_shares(path)
+    via_formatter = format_status_line("Opus 4.8", total, reread_pct)
+    assert via_formatter == via_render_line
 
 
 # --- transcript discovery ---------------------------------------------------

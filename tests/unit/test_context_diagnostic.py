@@ -184,6 +184,104 @@ def test_per_turn_composition_separates_reread_from_work(db):
     assert diag.heaviest_turns[0].reread_tokens == COMPACT_MIN_CACHE_TOKENS + 50_000
 
 
+def test_quota_weighted_reread_share_discounts_cache_reads(db):
+    """#119: the raw `reread_share` mixes "tokens" and "quota" framings — cache
+    reads are billed at a fraction of a base token, so a raw share overstates
+    re-reading's actual quota cost. `quota_weighted_reread_share` applies the
+    documented discount (cache reads x0.1, output x5) and should read
+    meaningfully lower than the raw share for this cache-read-heavy fixture.
+    """
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+
+    # Raw share is dominated by cache reads (see
+    # test_per_turn_composition_separates_reread_from_work).
+    assert diag.reread_share > 0.85
+
+    # Manually replicate the weighting to pin the exact expected value rather
+    # than just asserting a direction, catching any future formula drift.
+    reread = diag.total_reread_tokens
+    new_input = diag.total_new_input_tokens
+    output = diag.total_output_tokens
+    cache_write = diag.total_cache_write_tokens
+    expected_total = reread * 0.1 + new_input + output * 5.0 + cache_write
+    expected_share = (reread * 0.1) / expected_total
+
+    assert diag.total_quota_weighted_tokens == pytest.approx(expected_total)
+    assert diag.quota_weighted_reread_share == pytest.approx(expected_share)
+
+    # The discount moves the headline substantially — this is the bug: a raw
+    # share reads as ~90%+ while the quota-weighted share is well under half.
+    assert diag.quota_weighted_reread_share < 0.5
+    assert diag.quota_weighted_reread_share < diag.reread_share - 0.3
+
+    # Work's quota-weighted share is NOT the raw work share either (output is
+    # weighted 5x heavier than a base input token).
+    assert diag.quota_weighted_work_share != pytest.approx(
+        diag.total_work_tokens / diag.total_tokens
+    )
+
+
+def test_quota_weighted_fields_in_json_payload(db):
+    """The quota-weighted headline fields round-trip into the `--json` payload."""
+    from tokenjam.core.context_diagnostic import diagnostic_to_dict
+
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+    payload = diagnostic_to_dict(diag)
+
+    assert payload["quota_weighted_reread_share"] == round(
+        diag.quota_weighted_reread_share, 4
+    )
+    assert payload["quota_weighted_work_share"] == round(
+        diag.quota_weighted_work_share, 4
+    )
+    assert payload["total_quota_weighted_tokens"] == round(
+        diag.total_quota_weighted_tokens, 2
+    )
+    # Sanity: the quota-weighted share is meaningfully below the raw share.
+    assert payload["quota_weighted_reread_share"] < payload["reread_share"]
+
+
+def test_quota_weight_constants_match_anthropic_pricing_table():
+    """#119: `CACHE_READ_QUOTA_WEIGHT` / `OUTPUT_QUOTA_WEIGHT` are asserted
+    constants, not a live pricing lookup — so a future Anthropic pricing change
+    in tokenjam/pricing/models.toml must fail this test loudly instead of
+    silently drifting the quickstart headline away from what it claims to be
+    (the whole credibility property #119 exists to fix)."""
+    from tokenjam.core.context_diagnostic import (
+        CACHE_READ_QUOTA_WEIGHT,
+        OUTPUT_QUOTA_WEIGHT,
+    )
+    from tokenjam.core.pricing import load_pricing_table
+
+    anthropic_rates = load_pricing_table().get("anthropic", {})
+    assert anthropic_rates, "expected at least one anthropic pricing row"
+
+    checked = 0
+    for model, rates in anthropic_rates.items():
+        if rates.input_per_mtok <= 0:
+            continue  # skip the zero-priced internal test model (tj-ping-test)
+        checked += 1
+        cache_read_ratio = rates.cache_read_per_mtok / rates.input_per_mtok
+        output_ratio = rates.output_per_mtok / rates.input_per_mtok
+        assert cache_read_ratio == pytest.approx(CACHE_READ_QUOTA_WEIGHT), (
+            f"{model}: cache_read/input ratio {cache_read_ratio} != "
+            f"CACHE_READ_QUOTA_WEIGHT {CACHE_READ_QUOTA_WEIGHT} — pricing drifted, "
+            f"update the constant (and re-verify the quickstart headline)."
+        )
+        assert output_ratio == pytest.approx(OUTPUT_QUOTA_WEIGHT), (
+            f"{model}: output/input ratio {output_ratio} != "
+            f"OUTPUT_QUOTA_WEIGHT {OUTPUT_QUOTA_WEIGHT} — pricing drifted, "
+            f"update the constant (and re-verify the quickstart headline)."
+        )
+    assert checked > 0
+
+
 def test_cache_miss_broken_out_as_named_overhead(db):
     """#11: cache-creation tokens are surfaced as their own named overhead
     category (prompt-cache MISS), distinct from re-read and net-new work."""
