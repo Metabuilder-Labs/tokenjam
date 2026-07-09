@@ -88,8 +88,15 @@ def test_remove_package_flag_runs_pipx(runner):
 
 def test_remove_package_flag_non_pipx_prints_command(runner):
     """--remove-package on a non-pipx install must NOT guess/run — it prints
-    the right command instead."""
+    the right command instead.
+
+    Mocks `_installed_via_uv_tool` and `_is_ephemeral_runner` too (not just
+    `_installed_via_pipx`) so this is hermetic — otherwise it silently
+    depends on whatever venv the CI runner's `sys.executable` happens to
+    live under (e.g. a uv-managed venv would flip the branch taken)."""
     with patch.object(uninstall_mod, "_installed_via_pipx", return_value=False), \
+         patch.object(uninstall_mod, "_installed_via_uv_tool", return_value=False), \
+         patch.object(uninstall_mod, "_is_ephemeral_runner", return_value=False), \
          patch.object(uninstall_mod.subprocess, "run") as run:
         result = _run(runner, "--remove-package")
     assert result.exit_code == 0, result.output

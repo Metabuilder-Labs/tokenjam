@@ -87,6 +87,30 @@ def test_strip_removes_both_legacy_markers_at_once():
     assert "stale-tj-token" not in cleaned
 
 
+def test_strip_removes_sentinel_block_with_no_trailing_newline():
+    """A managed block that is the LAST line of the file, with no final
+    newline, must still be stripped — the sentinel regex previously required
+    a hard `\\n` after `_ZSHRC_OTEL_END`, silently no-opping here and leaving
+    a bearer token behind after "removal"."""
+    block = _zshrc_otel_block(7391, "secret123")
+    text = "# unrelated line\n" + block.rstrip("\n")  # no trailing newline
+    assert not text.endswith("\n")
+    cleaned = _strip_zshrc_otel_blocks(text)
+    assert _ZSHRC_OTEL_START not in cleaned
+    assert "Authorization=Bearer secret123" not in cleaned
+    assert "# unrelated line" in cleaned
+
+
+def test_strip_removes_legacy_marker_block_with_no_trailing_newline():
+    """Same no-final-newline case for the legacy-marker path."""
+    text = "# unrelated line\n" + _LEGACY_TJ_BLOCK.rstrip("\n")
+    assert not text.endswith("\n")
+    cleaned = _strip_zshrc_otel_blocks(text)
+    assert "# tj harness observability" not in cleaned
+    assert "stale-tj-token" not in cleaned
+    assert "# unrelated line" in cleaned
+
+
 def test_strip_is_noop_on_text_without_managed_blocks():
     text = "export PATH=/usr/bin:$PATH\nalias ll='ls -la'\n"
     assert _strip_zshrc_otel_blocks(text) == text

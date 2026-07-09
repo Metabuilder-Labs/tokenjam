@@ -36,15 +36,26 @@ def _is_ephemeral_runner() -> bool:
     `pipx run` — there is no persistent tokenjam install to purge.
 
     Verified empirically: `uvx --from tokenjam tj ...` materializes its venv
-    under uv's cache dir (.../uv/archive-v0/<hash>/...), never under
+    under uv's cache dir (.../uv/archive-<rev>/<hash>/...), never under
     .../uv/tools/. `pipx run` lands in the same place when pipx delegates to
     uv (its default backend whenever uv is on PATH); pipx's own non-uv
     fallback instead uses its run-cache at .../pipx/.cache/<hash>/.
+
+    Deliberately narrow: matching on a bare "/uv/" substring also caught
+    uv-managed Python *runtimes* (.../uv/python/cpython-.../bin/python3) and
+    uv-tool installs (.../uv/tools/...) — both persistent installs, not
+    ephemeral ones — which silently no-opped `tj uninstall --purge` for
+    those users. Only uv's cache dirs (archive/builds, or the generic
+    .cache/uv/ prefix) count as ephemeral; uv doesn't pin the "archive-v0"
+    suffix forever, so match the prefix rather than the exact revision.
     """
     if _installed_via_pipx() or _installed_via_uv_tool():
         return False
     exe = sys.executable.replace("\\", "/")
-    return "/uv/" in exe or "/pipx/.cache/" in exe
+    if "/uv/python/" in exe or "/uv/tools/" in exe:
+        return False
+    is_uv_cache = "/uv/archive-" in exe or "/uv/builds-" in exe or ".cache/uv/" in exe
+    return is_uv_cache or "/pipx/.cache/" in exe
 
 
 def _package_uninstall_hint() -> str:

@@ -954,18 +954,23 @@ def _strip_zshrc_otel_blocks(text: str) -> str:
     sentinel-delimited block AND any legacy single-marker block, however many
     accumulated. Shared by onboard (replace-all before writing one fresh
     block) and uninstall (removal only). Idempotent: text with no managed
-    blocks is returned unchanged."""
+    blocks is returned unchanged.
+
+    Both patterns treat the trailing newline after the block as optional
+    (``(?:\\n|$)``/``\\n?``) — requiring a hard ``\\n`` missed a managed block
+    that happens to be the last line of a file with no final newline, leaving
+    a bearer token behind after "removal"."""
     import re as _re
 
     cleaned = _re.sub(
-        rf"{_re.escape(_ZSHRC_OTEL_START)}\n.*?{_re.escape(_ZSHRC_OTEL_END)}\n",
+        rf"{_re.escape(_ZSHRC_OTEL_START)}\n.*?{_re.escape(_ZSHRC_OTEL_END)}(?:\n|$)",
         "",
         text,
         flags=_re.DOTALL,
     )
     for marker in _ZSHRC_OTEL_LEGACY_MARKERS:
         cleaned = _re.sub(
-            rf"{_re.escape(marker)}\n(?:export [^\n]+\n)*",
+            rf"{_re.escape(marker)}\n(?:export [^\n]+(?:\n|$))*",
             "",
             cleaned,
         )
@@ -2354,6 +2359,10 @@ def _unwire_claude_wrapper() -> list[str]:
     (#117: uninstall previously left this wrapper behind, breaking every
     subsequent ``claude`` launch once the tj package was removed).
 
+    The trailing newline after the end marker is optional (``(?:\n|$)``) —
+    requiring a hard ``\n`` silently no-opped on a block that happens to be
+    the last line of a file with no final newline.
+
     Returns the list of rc files that were actually modified.
     """
     import re as _re
@@ -2366,7 +2375,7 @@ def _unwire_claude_wrapper() -> list[str]:
         if _WRAPPER_MARKER not in text:
             continue
         updated = _re.sub(
-            _re.escape(_WRAPPER_MARKER) + r".*?" + _re.escape(_WRAPPER_END_MARKER) + r"\n",
+            _re.escape(_WRAPPER_MARKER) + r".*?" + _re.escape(_WRAPPER_END_MARKER) + r"(?:\n|$)",
             "",
             text,
             flags=_re.DOTALL,

@@ -44,6 +44,22 @@ def test_plain_pip_venv_is_neither_pipx_uv_tool_nor_ephemeral():
         assert uninstall_mod._is_ephemeral_runner() is False
 
 
+def test_uv_managed_python_runtime_is_not_ephemeral():
+    """A `pip install`-into-a-uv-managed-Python setup must NOT be classified
+    as ephemeral — that previously caused `tj uninstall --purge` to silently
+    no-op for these users (the `/uv/` substring check also matched uv's
+    managed *Python runtime* paths, not just its throwaway cache venvs).
+    """
+    with _exe(
+        "/Users/x/.local/share/uv/python/cpython-3.12.4-macos-aarch64-none/"
+        "bin/python3"
+    ):
+        assert uninstall_mod._installed_via_uv_tool() is False
+        assert uninstall_mod._is_ephemeral_runner() is False
+        # Falls through to the plain pip/venv path.
+        assert uninstall_mod._package_uninstall_hint() == "pip uninstall tokenjam"
+
+
 # --- ephemeral runners: ephemeral, NOT a persistent install ------------------
 
 

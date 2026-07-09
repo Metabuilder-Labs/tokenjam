@@ -72,6 +72,28 @@ def test_unwire_is_idempotent_noop_when_absent(fake_home):
     assert (fake_home / ".zshrc").read_text() == "echo hi\n"
 
 
+def test_unwire_strips_block_with_no_trailing_newline(fake_home):
+    """A block that is the LAST line of the rc file, with no final newline,
+    must still be stripped — the regex previously required a hard `\\n`
+    after `_WRAPPER_END_MARKER`, silently no-opping here and leaving the
+    wrapper (and its embedded `tj` calls) behind."""
+    zshrc = fake_home / ".zshrc"
+    _install_claude_wrapper()
+    text = zshrc.read_text()
+    assert text.endswith("\n")
+    zshrc.write_text(text.rstrip("\n"))  # drop the final newline
+    assert not zshrc.read_text().endswith("\n")
+
+    removed = _unwire_claude_wrapper()
+    assert str(zshrc) in removed
+
+    cleaned = zshrc.read_text()
+    assert _WRAPPER_MARKER not in cleaned
+    assert _WRAPPER_END_MARKER not in cleaned
+    assert "claude()" not in cleaned
+    assert "tj " not in cleaned
+
+
 def test_unwire_preserves_surrounding_content(fake_home):
     zshrc = fake_home / ".zshrc"
     zshrc.write_text("export FOO=bar\nalias ll='ls -la'\n")
