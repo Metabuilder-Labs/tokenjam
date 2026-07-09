@@ -2293,6 +2293,41 @@ def _install_claude_wrapper() -> list[str]:
     return written
 
 
+def _unwire_claude_wrapper() -> list[str]:
+    """Remove the ``claude`` shell-wrapper block from the user's shell rc files.
+
+    The counterpart to ``_install_claude_wrapper()`` — strips the exact
+    ``_WRAPPER_MARKER`` .. ``_WRAPPER_END_MARKER`` block (marker-delimited,
+    not a fragile regex on the body, so it can't accidentally eat unrelated
+    rc content) from ``~/.zshrc`` and ``~/.bashrc`` (whichever exist).
+    Idempotent — a no-op when the block is absent. Used by ``tj uninstall``
+    (#117: uninstall previously left this wrapper behind, breaking every
+    subsequent ``claude`` launch once the tj package was removed).
+
+    Returns the list of rc files that were actually modified.
+    """
+    import re as _re
+
+    removed: list[str] = []
+    for rc in (Path.home() / ".zshrc", Path.home() / ".bashrc"):
+        if not rc.exists():
+            continue
+        text = rc.read_text()
+        if _WRAPPER_MARKER not in text:
+            continue
+        updated = _re.sub(
+            _re.escape(_WRAPPER_MARKER) + r".*?" + _re.escape(_WRAPPER_END_MARKER) + r"\n",
+            "",
+            text,
+            flags=_re.DOTALL,
+        )
+        if updated != text:
+            rc.write_text(updated)
+            removed.append(str(rc))
+
+    return removed
+
+
 def _derive_project_name() -> str:
     """
     Derive a meaningful project name for the agent ID.
