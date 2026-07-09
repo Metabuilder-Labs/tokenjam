@@ -282,16 +282,11 @@ def _render(diag, timeline, *, since: str,
     console.print()
     deeper = Text()
     deeper.append("Go deeper", style="bold")
-    deeper.append(" — install and set up live capture, the local dashboard, "
-                  "and the zero-token statusline:", style="dim")
+    deeper.append(" — live capture, Lens (the local dashboard), and the "
+                  "zero-token statusline. No signup:", style="dim")
     console.print(deeper)
     console.print()
     console.print(Text("  npx tokenjam onboard", style="bold cyan"))
-    console.print()
-    console.print(Text(
-        "  tj onboard also gives you a local web dashboard of all this "
-        "— no signup.", style="dim",
-    ))
     console.print()
 
 

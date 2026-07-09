@@ -158,6 +158,26 @@ def test_install_falls_back_to_pipx_when_uv_missing(monkeypatch, tmp_path):
     assert calls[0][0] == "pipx"
 
 
+def test_install_falls_back_to_path_when_bin_dir_is_customized(monkeypatch, tmp_path):
+    """`UV_TOOL_BIN_DIR` / `PIPX_BIN_DIR` (or a customized install prefix) can
+    place `tj` somewhere other than the default `~/.local/bin` — the default
+    dir check must not be the only signal, or a successful install there gets
+    reported as failed and the guard falls through to the ephemeral path it
+    exists to avoid (Greptile P1)."""
+    monkeypatch.setattr(cmd_onboard, "_LOCAL_BIN_DIR", tmp_path)  # empty: no tj here
+    custom_tj = "/opt/custom/bin/tj"
+    monkeypatch.setattr(
+        cmd_onboard.shutil, "which",
+        lambda bin_: {"uv": "/usr/bin/uv", "tj": custom_tj}.get(bin_),
+    )
+    monkeypatch.setattr(
+        cmd_onboard.subprocess, "run",
+        lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
+    )
+    result = cmd_onboard._install_tokenjam_persistently()
+    assert result == custom_tj
+
+
 def test_install_returns_none_when_no_runner_available(monkeypatch):
     monkeypatch.setattr(cmd_onboard.shutil, "which", lambda bin_: None)
     assert cmd_onboard._install_tokenjam_persistently() is None

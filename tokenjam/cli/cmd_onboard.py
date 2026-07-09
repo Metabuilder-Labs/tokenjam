@@ -226,9 +226,16 @@ def _install_tokenjam_persistently() -> str | None:
         combined = f"{result.stdout}\n{result.stderr}".lower()
         if result.returncode != 0 and "already" not in combined:
             continue
+        # The default shim dir covers a stock install; `UV_TOOL_BIN_DIR` /
+        # `PIPX_BIN_DIR` (or a customized PATH) can place `tj` elsewhere, and
+        # missing that would silently fall through to the ephemeral path this
+        # guard exists to avoid — so also resolve `tj` via PATH.
         tj_path = _LOCAL_BIN_DIR / "tj"
         if tj_path.exists():
             return str(tj_path)
+        on_path = shutil.which("tj")
+        if on_path:
+            return on_path
     return None
 
 

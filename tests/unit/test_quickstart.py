@@ -155,9 +155,12 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     # already have (#120) — the ephemeral-runner guard in `tj onboard` now
     # makes this safe, unlike the earlier tool-switching `pipx install` CTA.
     assert "npx tokenjam onboard" in result.output
-    # The outro also sells the local web dashboard (#120) — the most
-    # product-looking asset shouldn't be invisible at the conversion moment.
-    assert "local web dashboard" in result.output
+    # The outro sells the local dashboard (#120) exactly once — the most
+    # product-looking asset shouldn't be invisible at the conversion moment,
+    # but a second, redundant mention right under the CTA was dropped (#436
+    # review) to keep the outro tight and consistent with the npx-form CTA.
+    assert result.output.count("dashboard") == 1
+    assert "Lens" in result.output
 
 
 def test_quickstart_json_emits_both_views(tmp_path):
