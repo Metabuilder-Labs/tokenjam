@@ -222,10 +222,7 @@ class TestDefensiveCodexBackfill:
 
 
 class TestSetupCompleteHome:
-    def test_reports_backfill_count_when_present(self, monkeypatch, capsys):
-        monkeypatch.setattr(
-            "tokenjam.cli.home.find_config_file", lambda: "/tmp/x.toml",
-        )
+    def test_reports_backfill_count_when_present(self, capsys):
         _print_setup_complete_home(
             sessions_backfilled=7, has_data=True, days=30,
         )
@@ -240,11 +237,8 @@ class TestSetupCompleteHome:
         assert "tj optimize" not in out
         assert "tj --help" in out
 
-    def test_no_count_claim_without_data(self, monkeypatch, capsys):
+    def test_no_count_claim_without_data(self, capsys):
         """Honesty: never claim a backfill count when nothing was ingested."""
-        monkeypatch.setattr(
-            "tokenjam.cli.home.find_config_file", lambda: "/tmp/x.toml",
-        )
         _print_setup_complete_home(sessions_backfilled=0, has_data=False)
         out = capsys.readouterr().out
         assert "You're set up." in out
