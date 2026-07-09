@@ -14,6 +14,7 @@ from click.testing import CliRunner
 
 import tokenjam.core.backfill as backfill_mod
 from tokenjam.cli.cmd_onboard import (
+    _onboard_combination,
     _print_setup_complete_home,
     _prompt_usage_path,
     _try_backfill_codex,
@@ -244,3 +245,109 @@ class TestSetupCompleteHome:
         out = capsys.readouterr().out
         assert "You're set up." in out
         assert "backfilled" not in out.lower()
+
+
+# --- Combination path: backfill + banner run exactly once (#432) -------------
+
+
+class TestCombinationPathNoDoubleRun:
+    """The combination flow (#432) delegates to `_onboard_claude_code` and
+    `_onboard_codex` for wiring, then runs the Codex backfill once and prints the
+    closing home banner once at the very end. Before the fix, `_onboard_codex`
+    ran its own backfill AND printed the banner, `_onboard_claude_code` printed
+    the banner too, and combination did both again — the Codex backfill ran twice
+    and the banner printed up to three times.
+    """
+
+    def _stub(self, monkeypatch):
+        counters: dict[str, int] = {
+            "banner": 0, "codex_backfill": 0, "cc_standalone_true": 0,
+            "codex_standalone_true": 0,
+        }
+
+        def _cc(*a, **k):
+            if k.get("standalone", True):
+                counters["cc_standalone_true"] += 1
+
+        def _codex(*a, **k):
+            if k.get("standalone", True):
+                counters["codex_standalone_true"] += 1
+
+        def _backfill(_cfg):
+            counters["codex_backfill"] += 1
+            return ("1 new (0 already present) · 1 total session", True, 1)
+
+        def _banner(*a, **k):
+            counters["banner"] += 1
+
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard._onboard_claude_code", _cc,
+        )
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard._onboard_codex", _codex,
+        )
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard._try_backfill_codex", _backfill,
+        )
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard._print_setup_complete_home", _banner,
+        )
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard._print_instrument_agent_snippet",
+            lambda *a, **k: None,
+        )
+        # The Codex backfill leg loads the global config; make it a no-op path so
+        # the stubbed `_try_backfill_codex` (not disk) is what runs.
+        monkeypatch.setattr(
+            "tokenjam.core.config.load_config", lambda *a, **k: object(),
+        )
+        return counters
+
+    def _run(self, monkeypatch, answers, tmp_path):
+        import click as _click
+
+        counters = self._stub(monkeypatch)
+        replies = iter(answers)
+        monkeypatch.setattr(
+            _click, "confirm", lambda *a, **k: next(replies),
+        )
+        # The Codex backfill leg only fires when the global config exists; point
+        # HOME at a tmp dir with the file present so it runs (stubbed) once.
+        home = tmp_path / "home"
+        (home / ".config" / "tj").mkdir(parents=True)
+        (home / ".config" / "tj" / "config.toml").write_text('version = "1"\n')
+        monkeypatch.setattr("pathlib.Path.home", lambda: home)
+
+        class _Ctx:
+            def exit(self, code=0):
+                raise SystemExit(code)
+
+        _onboard_combination(
+            _Ctx(), None, True, False,
+            plan_override=None, project_override=None, verify=False,
+        )
+        return counters
+
+    def test_banner_prints_exactly_once_all_surfaces(self, monkeypatch, tmp_path):
+        # Answer yes to Claude Code, Codex, and SDK.
+        counters = self._run(monkeypatch, [True, True, True], tmp_path)
+        assert counters["banner"] == 1
+
+    def test_codex_backfill_runs_exactly_once(self, monkeypatch, tmp_path):
+        counters = self._run(monkeypatch, [True, True, True], tmp_path)
+        assert counters["codex_backfill"] == 1
+
+    def test_sub_onboarders_invoked_non_standalone(self, monkeypatch, tmp_path):
+        """The per-path onboarders must be called with standalone=False so they
+        skip their own backfill + banner on the combination path."""
+        counters = self._run(monkeypatch, [True, True, False], tmp_path)
+        # Neither sub-onboarder was called with standalone=True (the default).
+        assert counters["cc_standalone_true"] == 0
+        assert counters["codex_standalone_true"] == 0
+
+    def test_banner_once_even_codex_only(self, monkeypatch, tmp_path):
+        # Claude Code no, Codex yes, SDK no — still exactly one banner, one
+        # backfill.
+        counters = self._run(monkeypatch, [False, True, False], tmp_path)
+        assert counters["banner"] == 1
+        assert counters["codex_backfill"] == 1

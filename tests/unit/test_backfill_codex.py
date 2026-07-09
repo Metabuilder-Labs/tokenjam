@@ -254,6 +254,32 @@ def test_ingest_is_idempotent(tmp_path):
         db.close()
 
 
+def test_ingest_is_idempotent_on_duckdb_bulk_path(tmp_path):
+    """The DuckDB path exercises the bulk `_existing_span_ids` idempotency check
+    (#433) — one `WHERE span_id IN (...)` per session instead of a SELECT per
+    span. A re-run must still skip every already-present span."""
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.db import DuckDBBackend
+
+    _write_rollout(tmp_path, "sess-idem-db", [
+        _session_meta_line("sess-idem-db"),
+        _turn_context_line("gpt-5.5"),
+        _function_call_line("shell", "call_a"),
+        _token_count_line(500, 0, 100),
+        _token_count_line(300, 0, 50),
+    ])
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        r1 = ingest_codex(db, root=tmp_path)
+        assert r1["spans_written"] == 3  # 1 tool + 2 llm turns
+        assert r1["spans_skipped"] == 0
+        r2 = ingest_codex(db, root=tmp_path)
+        assert r2["spans_written"] == 0
+        assert r2["spans_skipped"] == 3
+    finally:
+        db.close()
+
+
 def test_ingest_propagates_config_plan_tier(tmp_path):
     # Config declares an OpenAI plan -> sessions get that plan_tier, not
     # "unknown". Mirrors the Claude Code backfill #176 behavior.

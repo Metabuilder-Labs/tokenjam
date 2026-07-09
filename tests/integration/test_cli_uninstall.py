@@ -79,6 +79,11 @@ def test_remove_package_flag_runs_pipx(runner):
         ["pipx", "uninstall", "tokenjam"], capture_output=True, text=True
     )
     assert "tokenjam package removed" in result.output
+    # After a SUCCESSFUL removal the venv is gone, so `pipx upgrade` would fail
+    # ("not installed"). The reinstall hint must be a fresh `pipx install`, not
+    # upgrade/--force (#430).
+    assert "pipx install tokenjam" in result.output
+    assert "pipx upgrade" not in result.output
 
 
 def test_remove_package_flag_non_pipx_prints_command(runner):
@@ -103,6 +108,18 @@ def test_prompt_offered_when_interactive(runner):
     assert result.exit_code == 0, result.output
     assert "Also remove the tokenjam package now?" in result.output
     assert "package itself is still installed" in result.output
+
+
+def test_prompt_wording_matches_install_type(runner):
+    """The confirm prompt must describe what actually happens: pipx installs are
+    auto-run, pip/venv installs only get the command printed (#430)."""
+    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=True):
+        res_pipx = runner.invoke(cmd_uninstall, [], input="y\nn\n")
+    assert "runs pipx uninstall tokenjam" in res_pipx.output
+
+    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=False):
+        res_pip = runner.invoke(cmd_uninstall, [], input="y\nn\n")
+    assert "prints pip uninstall tokenjam" in res_pip.output
 
 
 def test_pipx_uninstall_failure_falls_back_to_manual(runner):

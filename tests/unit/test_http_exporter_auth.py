@@ -32,12 +32,14 @@ def test_header_is_well_formed_bearer_when_secret_present() -> None:
     assert value[len("Bearer "):] == secret
 
 
-@pytest.mark.parametrize("empty_secret", ["", None])
+@pytest.mark.parametrize("empty_secret", ["", None, " ", "   ", "\t", "\n"])
 def test_no_authorization_header_when_secret_missing(empty_secret) -> None:
-    # ``None`` can slip through if a caller passes an unset config field.
+    # ``None`` can slip through if a caller passes an unset config field, and a
+    # whitespace-only secret is treated as absent (#431) — otherwise
+    # ``Bearer  `` (a stray space) is the same illegal header value.
     exporter = TjHttpExporter(ENDPOINT, empty_secret)  # type: ignore[arg-type]
 
-    # Never emit an empty Bearer — omit the header entirely.
+    # Never emit an empty / whitespace Bearer — omit the header entirely.
     assert "Authorization" not in exporter._headers
-    assert all(v != "Bearer " for v in exporter._headers.values())
+    assert all(not v.startswith("Bearer ") for v in exporter._headers.values())
     assert exporter._headers.get("Content-Type") == "application/json"

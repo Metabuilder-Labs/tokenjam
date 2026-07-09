@@ -43,13 +43,29 @@ def _package_reinstall_hint() -> str:
     return "pip install --upgrade tokenjam"
 
 
+def _package_fresh_install_hint() -> str:
+    """Return the command that reinstalls after the package was fully removed.
+
+    Once the venv is gone, `pipx upgrade tokenjam` fails ("not installed") — the
+    right command is the plain `pipx install tokenjam` (a fresh install, no venv
+    to upgrade). This is distinct from `_package_reinstall_hint()`, which is only
+    correct while the package REMAINS in place (a plain install would no-op then,
+    so it points at upgrade/--force).
+    """
+    return (
+        "pipx install tokenjam" if _installed_via_pipx()
+        else "pip install tokenjam"
+    )
+
+
 @click.command("uninstall")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.option(
     "--remove-package",
     is_flag=True,
-    help="Also remove the tokenjam package (runs pipx/pip uninstall). "
-    "With --yes, removes it without a second prompt.",
+    help="Also remove the tokenjam package: runs the uninstall for "
+    "pipx-managed installs, or prints the command to run for pip/venv "
+    "installs. With --yes, proceeds without a second prompt.",
 )
 @click.pass_context
 def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
@@ -208,8 +224,15 @@ def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
     uninstall_cmd = _package_uninstall_hint()
     do_remove = remove_package
     if not do_remove and not yes:
+        # pipx installs are auto-run; pip/venv installs only get the command
+        # printed (a wrong `pip uninstall` in the wrong env is worse), so word
+        # the prompt to match what will actually happen (#430).
+        prompt_action = (
+            f"runs {uninstall_cmd}" if _installed_via_pipx()
+            else f"prints {uninstall_cmd} for you to run"
+        )
         do_remove = click.confirm(
-            f"Also remove the tokenjam package now? (runs {uninstall_cmd})",
+            f"Also remove the tokenjam package now? ({prompt_action})",
             default=False,
         )
 
@@ -246,8 +269,10 @@ def _remove_package(uninstall_cmd: str) -> None:
         )
         if result.returncode == 0:
             console.print("[green]tokenjam package removed.[/green]")
+            # The venv is gone now, so `pipx upgrade` would fail — point at the
+            # plain fresh install, not the upgrade/--force reinstall hint (#430).
             console.print(
-                f"  [dim]To reinstall FRESH: {_package_reinstall_hint()}[/dim]"
+                f"  [dim]To reinstall FRESH: {_package_fresh_install_hint()}[/dim]"
             )
         else:
             console.print(
