@@ -155,6 +155,67 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     assert "pipx install tokenjam && tj onboard" in result.output
 
 
+# ── Quota-weighted headline + no named-session reclaim list (#119) ──────────
+#
+# The headline used to report a RAW token share as "quota" (mixing the two
+# framings) and named individual ended sessions as "actionable" — but a user
+# never returns to a session closed days ago, so a per-session retrospective
+# callout is unactionable noise. The headline must now read as quota-weighted,
+# and the default output must never name a past session.
+
+def test_quickstart_headline_reads_as_quota_not_raw_tokens(tmp_path):
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "of your quota went to" in result.output
+    # The old raw-token wording is gone.
+    assert "of your tokens went to" not in result.output
+
+
+def _heavy_reread_fixture_root(tmp_path: Path) -> Path:
+    """A session with one huge-cache-read turn — clears the compact-candidate
+    thresholds (>= 200k re-read tokens, >= 80% re-read share) so the aggregate
+    reclaim line renders."""
+    root = tmp_path / "projects"
+    _make_session_file(root, "sess-heavy", "/Users/me/projHeavy", [
+        _assistant("h1", "sess-heavy", "/Users/me/projHeavy",
+                   "2026-06-20T10:00:00.000Z",
+                   input_tokens=500, output_tokens=200, cache_read=300_000),
+    ])
+    return root
+
+
+def test_quickstart_reclaim_section_is_aggregate_not_named_sessions(tmp_path):
+    root = _heavy_reread_fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    # Rich wraps panel text to console width and interleaves the panel's own
+    # box-drawing border characters, so compare against normalized output
+    # (whitespace-collapsed, borders stripped) rather than a raw substring.
+    stripped = result.output.translate({ord(c): " " for c in "│╭╮╰╯─"})
+    normalized = " ".join(stripped.split())
+
+    assert result.exit_code == 0, result.output
+    # The old per-session list (and its heading) is gone entirely.
+    assert "Biggest reclaim opportunities" not in result.output
+    assert "sess-heavy" not in result.output
+    # An aggregate line takes its place — no named session, live-signal framing.
+    assert "ran context-heavy enough to warrant a mid-session" in normalized
+    assert "/compact" in normalized
+    assert "a closed session can't be reclaimed" in normalized
+
+
+def test_quickstart_no_compact_candidates_omits_reclaim_section(tmp_path):
+    """A history with no context-heavy sessions renders no reclaim section at
+    all (same gating as before — this isn't about forcing the line to show)."""
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "ran context-heavy enough to warrant a mid-session" not in result.output
+    assert "Biggest reclaim opportunities" not in result.output
+
+
 def test_quickstart_json_emits_both_views(tmp_path):
     root = _fixture_root(tmp_path)
     result = _invoke_quickstart(["--root", str(root), "--since", "90d", "--json"])

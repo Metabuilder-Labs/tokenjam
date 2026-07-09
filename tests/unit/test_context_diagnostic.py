@@ -184,6 +184,69 @@ def test_per_turn_composition_separates_reread_from_work(db):
     assert diag.heaviest_turns[0].reread_tokens == COMPACT_MIN_CACHE_TOKENS + 50_000
 
 
+def test_quota_weighted_reread_share_discounts_cache_reads(db):
+    """#119: the raw `reread_share` mixes "tokens" and "quota" framings — cache
+    reads are billed at a fraction of a base token, so a raw share overstates
+    re-reading's actual quota cost. `quota_weighted_reread_share` applies the
+    documented discount (cache reads x0.1, output x5) and should read
+    meaningfully lower than the raw share for this cache-read-heavy fixture.
+    """
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+
+    # Raw share is dominated by cache reads (see
+    # test_per_turn_composition_separates_reread_from_work).
+    assert diag.reread_share > 0.85
+
+    # Manually replicate the weighting to pin the exact expected value rather
+    # than just asserting a direction, catching any future formula drift.
+    reread = diag.total_reread_tokens
+    new_input = diag.total_new_input_tokens
+    output = diag.total_output_tokens
+    cache_write = diag.total_cache_write_tokens
+    expected_total = reread * 0.1 + new_input + output * 5.0 + cache_write
+    expected_share = (reread * 0.1) / expected_total
+
+    assert diag.total_quota_weighted_tokens == pytest.approx(expected_total)
+    assert diag.quota_weighted_reread_share == pytest.approx(expected_share)
+
+    # The discount moves the headline substantially — this is the bug: a raw
+    # share reads as ~90%+ while the quota-weighted share is well under half.
+    assert diag.quota_weighted_reread_share < 0.5
+    assert diag.quota_weighted_reread_share < diag.reread_share - 0.3
+
+    # Work's quota-weighted share is NOT the raw work share either (output is
+    # weighted 5x heavier than a base input token).
+    assert diag.quota_weighted_work_share != pytest.approx(
+        diag.total_work_tokens / diag.total_tokens
+    )
+
+
+def test_quota_weighted_fields_in_json_payload(db):
+    """The quota-weighted headline fields round-trip into the `--json` payload."""
+    from tokenjam.core.context_diagnostic import diagnostic_to_dict
+
+    _seed_multi_session(db)
+    diag = compute_context_diagnostic(
+        db.conn, SINCE, UNTIL, tool_inputs_captured=True
+    )
+    payload = diagnostic_to_dict(diag)
+
+    assert payload["quota_weighted_reread_share"] == round(
+        diag.quota_weighted_reread_share, 4
+    )
+    assert payload["quota_weighted_work_share"] == round(
+        diag.quota_weighted_work_share, 4
+    )
+    assert payload["total_quota_weighted_tokens"] == round(
+        diag.total_quota_weighted_tokens, 2
+    )
+    # Sanity: the quota-weighted share is meaningfully below the raw share.
+    assert payload["quota_weighted_reread_share"] < payload["reread_share"]
+
+
 def test_cache_miss_broken_out_as_named_overhead(db):
     """#11: cache-creation tokens are surfaced as their own named overhead
     category (prompt-cache MISS), distinct from re-read and net-new work."""
