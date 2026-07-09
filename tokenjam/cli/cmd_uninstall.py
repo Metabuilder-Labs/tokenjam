@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -199,17 +198,16 @@ def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {proj_settings}: {exc}[/yellow]")
 
-    # 11. Remove # tj harness observability block from ~/.zshrc
+    # 11. Remove tj-managed OTEL block(s) from ~/.zshrc — current sentinel AND
+    # any legacy marker (#118), so an install that accumulated blocks under an
+    # older marker (pre-rebrand or pre-sentinel) gets fully cleaned up, not
+    # just the current-marker block.
     zshrc = Path.home() / ".zshrc"
     if zshrc.exists():
         try:
+            from tokenjam.cli.cmd_onboard import _strip_zshrc_otel_blocks
             text = zshrc.read_text()
-            # Match the marker line plus all following export lines (any count)
-            cleaned = re.sub(
-                r"# tj harness observability\n(?:export [^\n]+\n)*",
-                "",
-                text,
-            )
+            cleaned = _strip_zshrc_otel_blocks(text)
             if cleaned != text:
                 zshrc.write_text(cleaned)
                 console.print(f"  Removed TokenJam env block from {zshrc}")
