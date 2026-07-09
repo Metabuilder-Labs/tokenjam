@@ -65,12 +65,16 @@ def assistant_message_key(record: dict, msg: dict, line_no: int) -> str:
     return msg.get("id") or record.get("uuid") or str(line_no)
 
 
-def iter_assistant_usage(lines: Iterable[str]) -> Iterator[tuple[str, AssistantUsage]]:
-    """Yield ``(message_key, usage)`` for each assistant record carrying usage.
+def _iter_assistant_records(
+    lines: Iterable[str],
+) -> Iterator[tuple[dict, dict, int, AssistantUsage]]:
+    """Yield ``(record, msg, line_no, usage)`` for each billable assistant record.
 
-    Skips non-JSON lines, non-assistant records, and empty-usage records (no
-    cost contribution) — mirroring the filters ``core/backfill`` applies so both
-    paths see the same set of billable turns.
+    Skips non-JSON lines, non-assistant records, and empty/zero-usage records
+    (no cost contribution) — mirroring the filters ``core/backfill`` applies so
+    all readers see the same set of billable turns. Shared by
+    ``iter_assistant_usage`` and ``iter_assistant_turns`` so the two can never
+    disagree on which records count as a turn.
     """
     for line_no, line in enumerate(lines, start=1):
         try:
@@ -87,7 +91,67 @@ def iter_assistant_usage(lines: Iterable[str]) -> Iterator[tuple[str, AssistantU
         usage = parse_usage(msg.get("usage"))
         if usage.total == 0:
             continue
+        yield record, msg, line_no, usage
+
+
+def iter_assistant_usage(lines: Iterable[str]) -> Iterator[tuple[str, AssistantUsage]]:
+    """Yield ``(message_key, usage)`` for each assistant record carrying usage."""
+    for record, msg, line_no, usage in _iter_assistant_records(lines):
         yield assistant_message_key(record, msg, line_no), usage
+
+
+def iter_assistant_turns(
+    lines: Iterable[str],
+) -> Iterator[tuple[str, str | None, AssistantUsage]]:
+    """Yield ``(message_key, model, usage)`` for each assistant record carrying usage.
+
+    Same record + key as ``iter_assistant_usage`` but also surfaces the raw
+    ``model`` id Claude Code stamped on that record. Needed by point-in-time
+    previews (e.g. ``tj quickstart``'s "what you'd see live" section) that show
+    the model in effect at a specific turn, not just the session aggregate.
+    """
+    for record, msg, line_no, usage in _iter_assistant_records(lines):
+        yield assistant_message_key(record, msg, line_no), msg.get("model"), usage
+
+
+def iter_cumulative_usage(
+    lines: Iterable[str],
+) -> Iterator[tuple[int, str | None, AssistantUsage]]:
+    """Yield ``(turn_index, model, cumulative_usage)`` after each assistant turn.
+
+    ``turn_index`` is the 1-based count of distinct assistant turns seen so far
+    (after last-wins dedup); ``model`` is the raw model id on the record that
+    produced this yield; ``cumulative_usage`` is the running last-wins-deduped
+    total through that turn. The final yielded ``cumulative_usage`` always
+    equals ``session_usage`` over the same lines — same dedup key + last-wins
+    policy, just surfaced incrementally.
+
+    Powers point-in-time previews (``tj quickstart``'s "what you'd have seen
+    live" section) that need the statusline's numbers as they stood mid-session,
+    not only the final total.
+    """
+    latest: dict[str, AssistantUsage] = {}
+    running = AssistantUsage()
+    turn_index = 0
+    for key, model, usage in iter_assistant_turns(lines):
+        prev = latest.get(key)
+        if prev is None:
+            turn_index += 1
+            running = AssistantUsage(
+                running.input_tokens + usage.input_tokens,
+                running.output_tokens + usage.output_tokens,
+                running.cache_read_tokens + usage.cache_read_tokens,
+                running.cache_write_tokens + usage.cache_write_tokens,
+            )
+        else:
+            running = AssistantUsage(
+                running.input_tokens - prev.input_tokens + usage.input_tokens,
+                running.output_tokens - prev.output_tokens + usage.output_tokens,
+                running.cache_read_tokens - prev.cache_read_tokens + usage.cache_read_tokens,
+                running.cache_write_tokens - prev.cache_write_tokens + usage.cache_write_tokens,
+            )
+        latest[key] = usage
+        yield turn_index, model, running
 
 
 def session_usage(lines: Iterable[str]) -> AssistantUsage:

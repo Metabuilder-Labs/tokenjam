@@ -150,9 +150,84 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     # Both halves of the first-run value are present.
     assert "quota" in result.output.lower()
     assert "Session timeline" in result.output
-    # The opt-in "go deeper" pointer prints the full pasteable install command,
-    # since the quickstart audience has no `tj` on PATH (it ran via `npx tokenjam`).
-    assert "pipx install tokenjam && tj onboard" in result.output
+    # The opt-in "go deeper" pointer prints the one-paste CTA: the audience
+    # just ran `npx tokenjam`, so `npx tokenjam onboard` is the same tool they
+    # already have (#120) — the ephemeral-runner guard in `tj onboard` now
+    # makes this safe, unlike the earlier tool-switching `pipx install` CTA.
+    assert "npx tokenjam onboard" in result.output
+    # The outro sells the local dashboard (#120) exactly once — the most
+    # product-looking asset shouldn't be invisible at the conversion moment,
+    # but a second, redundant mention right under the CTA was dropped (#436
+    # review) to keep the outro tight and consistent with the npx-form CTA.
+    assert result.output.count("dashboard") == 1
+    assert "Lens" in result.output
+
+
+# ── Quota-weighted headline + no named-session reclaim list (#119) ──────────
+#
+# The headline used to report a RAW token share as "quota" (mixing the two
+# framings) and named individual ended sessions as "actionable" — but a user
+# never returns to a session closed days ago, so a per-session retrospective
+# callout is unactionable noise. The headline must now read as quota-weighted,
+# and the default output must never name a past session.
+
+def test_quickstart_headline_reads_as_quota_not_raw_tokens(tmp_path):
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "of your quota went to" in result.output
+    # The old raw-token wording is gone.
+    assert "of your tokens went to" not in result.output
+
+
+def _heavy_reread_fixture_root(tmp_path: Path) -> Path:
+    """A session with one huge-cache-read turn — clears the compact-candidate
+    thresholds (>= 200k re-read tokens, >= 80% re-read share) so the aggregate
+    reclaim line renders."""
+    root = tmp_path / "projects"
+    _make_session_file(root, "sess-heavy", "/Users/me/projHeavy", [
+        _assistant("h1", "sess-heavy", "/Users/me/projHeavy",
+                   "2026-06-20T10:00:00.000Z",
+                   input_tokens=500, output_tokens=200, cache_read=300_000),
+    ])
+    return root
+
+
+def test_quickstart_reclaim_section_is_aggregate_not_named_sessions(tmp_path):
+    root = _heavy_reread_fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    # Rich wraps panel text to console width and interleaves the panel's own
+    # box-drawing border characters, so compare against normalized output
+    # (whitespace-collapsed, borders stripped) rather than a raw substring.
+    stripped = result.output.translate({ord(c): " " for c in "│╭╮╰╯─"})
+    normalized = " ".join(stripped.split())
+
+    assert result.exit_code == 0, result.output
+    # The old per-session list (and its heading) is gone entirely.
+    assert "Biggest reclaim opportunities" not in result.output
+    # The aggregate reclaim line inside the quota-composition panel never
+    # names a session (#119). Scope this to the panel itself: the SEPARATE
+    # statusline live preview section (#438) legitimately names one session
+    # as a concrete "what you'd have seen live" example — a whole-output
+    # check would false-positive against that unrelated, later section.
+    panel_text = result.output.split("With the statusline installed")[0]
+    assert "sess-heavy" not in panel_text
+    # An aggregate line takes its place — no named session, live-signal framing.
+    assert "ran context-heavy enough to warrant a mid-session" in normalized
+    assert "/compact" in normalized
+    assert "a closed session can't be reclaimed" in normalized
+
+
+def test_quickstart_no_compact_candidates_omits_reclaim_section(tmp_path):
+    """A history with no context-heavy sessions renders no reclaim section at
+    all (same gating as before — this isn't about forcing the line to show)."""
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "ran context-heavy enough to warrant a mid-session" not in result.output
+    assert "Biggest reclaim opportunities" not in result.output
 
 
 def test_quickstart_json_emits_both_views(tmp_path):
@@ -303,3 +378,161 @@ def test_quickstart_json_reports_cap_metadata(tmp_path, monkeypatch):
     assert payload["backfill"]["sessions_ingested"] == 6
     assert payload["backfill"]["limit_reached"] is True
     assert payload["backfill"]["max_sessions"] == 6
+
+
+# ── Statusline live preview ("what you'd see live") ──────────────────────────
+#
+# `_display_model_name` reconstructs "Sonnet 4.5" from the raw transcript
+# `claude-sonnet-4-5-20250929` id every fixture session below uses.
+
+def _flat(output: str) -> str:
+    """Collapse Rich's line-wrapping so long-sentence substring checks aren't
+    sensitive to where the terminal happened to wrap a word."""
+    return " ".join(output.split())
+
+
+def _session_with_crossing(root: Path, session_id: str, cwd: str, base_date: str,
+                            *, n_turns: int, crossing_turn: int) -> Path:
+    """A synthetic session whose cumulative re-read %% stays low through
+    `crossing_turn - 1`, then jumps hard enough that it crosses REREAD_WARN
+    (70%%) starting exactly at `crossing_turn` (1-indexed) and stays crossed.
+    """
+    records = []
+    for i in range(1, n_turns + 1):
+        ts = f"{base_date}T10:{i:02d}:00.000Z"
+        cache = 20 if i < crossing_turn else 100_000
+        records.append(_assistant(
+            f"{session_id}-{i}", session_id, cwd, ts,
+            input_tokens=100, output_tokens=50, cache_read=cache,
+        ))
+    return _make_session_file(root, session_id, cwd, records)
+
+
+def test_quickstart_preview_shows_most_recent_substantial_crossing_session(
+    tmp_path, monkeypatch,
+):
+    from tokenjam.cli import cmd_quickstart as q
+    from tokenjam.cli.cmd_statusline import format_status_line
+
+    monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 3)
+    root = tmp_path / "projects"
+    # Older, more turns, but NOT more recent -> must lose to the recent one.
+    _session_with_crossing(
+        root, "sess-old", "/Users/me/projA", "2026-06-10",
+        n_turns=10, crossing_turn=2,
+    )
+    # Recent AND substantial (5 >= PREVIEW_MIN_TURNS=3) -> wins on recency.
+    recent_path = _session_with_crossing(
+        root, "sess-recent", "/Users/me/projB", "2026-06-25",
+        n_turns=5, crossing_turn=3,
+    )
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "With the statusline installed" in flat
+    assert "session sess-recent would have shown this at turn 3" in flat
+    assert "tj onboard" in flat.split("With the statusline installed")[1]
+
+    # Formatter reuse: the rendered line is byte-identical to what
+    # format_status_line produces for the FIRST turn whose cumulative re-read
+    # crosses the nudge threshold — never a hand-rolled duplicate of the live
+    # statusline's text.
+    from tokenjam.cli.cmd_statusline import REREAD_WARN
+    from tokenjam.core.usage import iter_cumulative_usage
+    with open(recent_path, encoding="utf-8") as fh:
+        crossing = next(
+            (turn_index, usage) for turn_index, _model, usage in iter_cumulative_usage(fh)
+            if usage.total and 100.0 * usage.cache_read_tokens / usage.total >= REREAD_WARN
+        )
+    turn_index, usage = crossing
+    assert turn_index == 3
+    total = usage.total
+    reread_pct = 100.0 * usage.cache_read_tokens / total
+    expected_line = format_status_line("Sonnet 4.5", total, reread_pct)
+    assert expected_line in result.output
+
+
+def test_quickstart_preview_stops_walking_after_first_substantial_candidate(
+    tmp_path, monkeypatch,
+):
+    """Sessions are walked most-recent-first; once the most-recent SUBSTANTIAL
+    crossing candidate is found, selection must stop rather than re-reading
+    every remaining session's transcript — a large `~/.claude` history would
+    otherwise blow past quickstart's fast-first-run budget."""
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 3)
+    root = tmp_path / "projects"
+    # Most-recent session is ALREADY substantial + crossing -> must win
+    # without inspecting any of the five older sessions below it.
+    _session_with_crossing(
+        root, "sess-newest", "/Users/me/projZ", "2026-06-28",
+        n_turns=5, crossing_turn=2,
+    )
+    for i in range(5):
+        _session_with_crossing(
+            root, f"sess-old-{i}", f"/Users/me/proj{i}", f"2026-06-{10 + i:02d}",
+            n_turns=5, crossing_turn=2,
+        )
+
+    calls: list[str] = []
+    original_walk = q._walk_for_preview
+
+    def _counting_walk(path):
+        calls.append(path)
+        return original_walk(path)
+
+    monkeypatch.setattr(q, "_walk_for_preview", _counting_walk)
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    assert "session sess-newest" in _flat(result.output)
+    # Only the winning (most-recent, already-substantial) candidate's
+    # transcript was walked -- the 5 older sessions were never opened.
+    assert len(calls) == 1
+
+
+def test_quickstart_preview_falls_back_to_largest_when_none_substantial(
+    tmp_path, monkeypatch,
+):
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 50)  # neither session qualifies
+    root = tmp_path / "projects"
+    _session_with_crossing(
+        root, "sess-recent", "/Users/me/projB", "2026-06-25",
+        n_turns=5, crossing_turn=3,
+    )
+    _session_with_crossing(
+        root, "sess-old", "/Users/me/projA", "2026-06-10",
+        n_turns=8, crossing_turn=5,
+    )
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    # Neither is "substantial" -> falls back to the largest (by turns), not
+    # simply the most recent.
+    flat = _flat(result.output)
+    assert "session sess-old would have shown this at turn 5" in flat
+
+
+def test_quickstart_preview_omitted_when_no_session_crosses_threshold(tmp_path):
+    root = tmp_path / "projects"
+    # Healthy sessions: tiny cache reads relative to input/output, never near
+    # the 70% nudge threshold.
+    _make_session_file(root, "sess-a", "/Users/me/projA", [
+        _assistant("a1", "sess-a", "/Users/me/projA", "2026-06-20T10:00:00.000Z",
+                   input_tokens=1000, output_tokens=200, cache_read=10),
+    ])
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    assert "With the statusline installed" not in result.output
+
+
+def test_quickstart_preview_omitted_when_no_sessions(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    result = _invoke_quickstart(["--root", str(missing)])
+    assert result.exit_code == 0, result.output
+    assert "With the statusline installed" not in result.output

@@ -178,6 +178,118 @@ def _unwire_claude_resume_brief_hook(settings: dict) -> bool:
     return True
 
 
+# --- Ephemeral-runner guard (#120) -------------------------------------------
+# `npx tokenjam onboard` delegates to `uvx --from tokenjam tj onboard` (or
+# `pipx run --spec tokenjam tj onboard`) — both resolve `sys.executable` into a
+# throwaway, cache-managed venv that is not kept on PATH once this process
+# exits. Onboard wires a background daemon and a Claude Code statusline that
+# both invoke `tj` afterward; under an ephemeral runner those references go
+# stale the moment the session ends. This guard detects that situation and
+# offers (or performs) a persistent install before any wiring happens.
+
+_LOCAL_BIN_DIR = Path.home() / ".local" / "bin"
+
+
+def _is_ephemeral_runner() -> bool:
+    """True when this process is running from a throwaway uvx/pipx-run venv
+    rather than a persistent install.
+
+    Persistent installs resolve `sys.executable` into a stable, named
+    location:
+      - `uv tool install`  → .../uv/tools/<pkg>/...
+      - `pipx install`     → .../pipx/venvs/<pkg>/...  (see `_installed_via_pipx`
+        in cmd_uninstall.py — same signature, different concern)
+    Ephemeral `uvx` / `pipx run` executions resolve into a cache directory
+    instead (e.g. `~/.cache/uv/archive-v0/...` for uvx).
+    """
+    exe = sys.executable.replace("\\", "/")
+    if "/uv/tools/" in exe or "/pipx/venvs/" in exe:
+        return False
+    return "/uv/" in exe or "/pipx/" in exe
+
+
+def _install_tokenjam_persistently() -> str | None:
+    """Best-effort persistent install via `uv tool install` (preferred) or
+    `pipx install`. Returns the absolute path to the newly installed `tj`, or
+    None if neither runner is available or the install failed.
+    """
+    candidates: list[list[str]] = []
+    if shutil.which("uv"):
+        candidates.append(["uv", "tool", "install", "tokenjam"])
+    if shutil.which("pipx"):
+        candidates.append(["pipx", "install", "tokenjam"])
+    for cmd in candidates:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except Exception:
+            continue
+        combined = f"{result.stdout}\n{result.stderr}".lower()
+        if result.returncode != 0 and "already" not in combined:
+            continue
+        # The default shim dir covers a stock install; `UV_TOOL_BIN_DIR` /
+        # `PIPX_BIN_DIR` (or a customized PATH) can place `tj` elsewhere, and
+        # missing that would silently fall through to the ephemeral path this
+        # guard exists to avoid — so also resolve `tj` via PATH.
+        tj_path = _LOCAL_BIN_DIR / "tj"
+        if tj_path.exists():
+            return str(tj_path)
+        on_path = shutil.which("tj")
+        if on_path:
+            return on_path
+    return None
+
+
+def _maybe_guard_ephemeral_runner(ctx: click.Context) -> None:
+    """If running under an ephemeral uvx/pipx-run env, offer a persistent
+    install and re-exec onboard through it (#120). No-op for the common case
+    (already-installed `tj`, plain pip/venv) — zero behavior change there.
+    """
+    if not _is_ephemeral_runner():
+        return
+
+    console.print(
+        "\n[yellow]Heads up:[/yellow] you're running via a temporary "
+        "uvx/pipx-run environment. [bold]tj onboard[/bold] wires a "
+        "background daemon and a Claude Code statusline that both need a "
+        "persistent [bold]tj[/bold] on PATH — those would go stale the "
+        "moment this session ends."
+    )
+
+    if not _is_interactive():
+        console.print(
+            "[dim]Non-interactive — continuing without a persistent "
+            "install. Run [bold]pipx install tokenjam && tj onboard[/bold] "
+            "(or [bold]uv tool install tokenjam[/bold]) for a setup that "
+            "survives.[/dim]\n"
+        )
+        return
+
+    if not click.confirm(
+        "Install tokenjam persistently now (uv tool install / pipx "
+        "install), then continue onboarding?", default=True,
+    ):
+        console.print(
+            "[dim]Continuing without a persistent install — re-run "
+            "[bold]pipx install tokenjam && tj onboard[/bold] "
+            "later.[/dim]\n"
+        )
+        return
+
+    console.print("[dim]Installing tokenjam…[/dim]")
+    tj_path = _install_tokenjam_persistently()
+    if tj_path is None:
+        console.print(
+            "[red]Persistent install failed.[/red] Continuing this "
+            "session ephemerally — run [bold]pipx install tokenjam && "
+            "tj onboard[/bold] yourself afterward.\n"
+        )
+        return
+
+    console.print(f"[green]✓[/green] Installed — re-running onboard via {tj_path}\n")
+    result = subprocess.run([tj_path, *sys.argv[1:]])
+    ctx.exit(result.returncode)
+
+
 def _print_generic_instrument_snippet() -> None:
     """The one-size-fits-all Anthropic snippet — fallback when detection finds nothing."""
     console.print("[dim]     from tokenjam.sdk import watch[/dim]")
@@ -294,6 +406,14 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     if verify_only:
         _run_verify_only(ctx, claude_code=claude_code, codex=codex)
         return
+    # Ephemeral-runner guard (#120): onboard below wires a daemon + Claude Code
+    # statusline that both invoke `tj` after this process exits. Under
+    # `uvx --from tokenjam tj onboard` / `pipx run --spec tokenjam tj onboard`
+    # (what the `npx tokenjam onboard` wrapper delegates to) there is no
+    # persistent `tj` left on PATH once this run ends, so those references
+    # would go stale. Offer (or perform) a persistent install and re-exec
+    # onboard through it before any wiring happens.
+    _maybe_guard_ephemeral_runner(ctx)
     # Branded welcome moment (#240) — shown once at the top of every onboard
     # flow (plain / --claude-code / --codex) before any prompt or config check.
     print_welcome_banner()
