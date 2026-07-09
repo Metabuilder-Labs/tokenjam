@@ -378,6 +378,46 @@ def test_quickstart_preview_shows_most_recent_substantial_crossing_session(
     assert expected_line in result.output
 
 
+def test_quickstart_preview_stops_walking_after_first_substantial_candidate(
+    tmp_path, monkeypatch,
+):
+    """Sessions are walked most-recent-first; once the most-recent SUBSTANTIAL
+    crossing candidate is found, selection must stop rather than re-reading
+    every remaining session's transcript — a large `~/.claude` history would
+    otherwise blow past quickstart's fast-first-run budget."""
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 3)
+    root = tmp_path / "projects"
+    # Most-recent session is ALREADY substantial + crossing -> must win
+    # without inspecting any of the five older sessions below it.
+    _session_with_crossing(
+        root, "sess-newest", "/Users/me/projZ", "2026-06-28",
+        n_turns=5, crossing_turn=2,
+    )
+    for i in range(5):
+        _session_with_crossing(
+            root, f"sess-old-{i}", f"/Users/me/proj{i}", f"2026-06-{10 + i:02d}",
+            n_turns=5, crossing_turn=2,
+        )
+
+    calls: list[str] = []
+    original_walk = q._walk_for_preview
+
+    def _counting_walk(path):
+        calls.append(path)
+        return original_walk(path)
+
+    monkeypatch.setattr(q, "_walk_for_preview", _counting_walk)
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    assert "session sess-newest" in _flat(result.output)
+    # Only the winning (most-recent, already-substantial) candidate's
+    # transcript was walked -- the 5 older sessions were never opened.
+    assert len(calls) == 1
+
+
 def test_quickstart_preview_falls_back_to_largest_when_none_substantial(
     tmp_path, monkeypatch,
 ):

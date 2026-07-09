@@ -417,14 +417,20 @@ def _select_preview_session(
         if not path:
             continue
         turns, crossing = _walk_for_preview(path)
-        if crossing is not None:
-            candidates.append(_PreviewCandidate(session, turns, crossing))
+        if crossing is None:
+            continue
+        candidate = _PreviewCandidate(session, turns, crossing)
+        if turns >= PREVIEW_MIN_TURNS:
+            # Sessions are walked most-recent-first, so the first substantial
+            # crossing candidate IS the winner — stop here rather than
+            # re-reading the rest of a possibly-large (up to `--full`) history.
+            # The largest-by-turns fallback below only matters when NO
+            # candidate is substantial, a case this early return never hides.
+            return candidate
+        candidates.append(candidate)
 
     if not candidates:
         return None
-    substantial = [c for c in candidates if c.turns >= PREVIEW_MIN_TURNS]
-    if substantial:
-        return substantial[0]  # most-recent among the substantial ones
     return max(candidates, key=lambda c: c.turns)
 
 
@@ -440,6 +446,7 @@ def _render_statusline_preview(timeline: SessionTimeline, root: Path | None) -> 
     picked = _select_preview_session(timeline, root)
     if picked is None:
         return
+    assert picked.crossing is not None  # invariant: only crossing candidates are ever selected
 
     turn_index, model_raw, usage = picked.crossing
     total = usage.total
