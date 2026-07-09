@@ -94,6 +94,28 @@ def _badge_and_nudge(reread_pct: float) -> tuple[str, str | None]:
     return _BADGE_OK, None
 
 
+def format_status_line(
+    model_name: str, total: int | None, reread_pct: float | None
+) -> str:
+    """Build the statusline string from already-resolved figures.
+
+    Shared by the live line (``render_line``, fed the hook's per-turn payload)
+    and ``tj quickstart``'s "what you'd see live" preview section (fed a
+    point-in-time figure from a past transcript) — so the two surfaces render
+    IDENTICAL text for identical inputs and the preview can never drift from
+    the real product. ``total``/``reread_pct`` of ``None`` degrades to the
+    model-only segment (mirrors "no transcript" / "unreadable transcript").
+    """
+    parts = [f"◆ {model_name}"]  # ◆ model
+    if total is not None and reread_pct is not None:
+        parts.append(f"{format_tokens(total)} tok")
+        badge, nudge = _badge_and_nudge(reread_pct)
+        parts.append(f"{badge} re-read {reread_pct:.0f}%")
+        if nudge:
+            parts.append(nudge)
+    return "  ".join(parts)
+
+
 def render_line(data: dict) -> str:
     """Build the one-line statusline string from a parsed payload.
 
@@ -101,19 +123,15 @@ def render_line(data: dict) -> str:
     badge, and the compaction nudge only when a transcript is found and readable.
     Never raises — a transcript read failure degrades to the model-only line.
     """
-    parts = [f"◆ {_model_name(data)}"]  # ◆ model
+    model_name = _model_name(data)
     path = find_transcript(data)
-    if path:
-        try:
-            total, reread_pct = session_shares(path)
-        except Exception:
-            return "  ".join(parts)
-        parts.append(f"{format_tokens(total)} tok")
-        badge, nudge = _badge_and_nudge(reread_pct)
-        parts.append(f"{badge} re-read {reread_pct:.0f}%")
-        if nudge:
-            parts.append(nudge)
-    return "  ".join(parts)
+    if not path:
+        return format_status_line(model_name, None, None)
+    try:
+        total, reread_pct = session_shares(path)
+    except Exception:
+        return format_status_line(model_name, None, None)
+    return format_status_line(model_name, total, reread_pct)
 
 
 @click.command("statusline")

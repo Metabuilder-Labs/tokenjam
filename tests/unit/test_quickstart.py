@@ -372,3 +372,161 @@ def test_quickstart_json_reports_cap_metadata(tmp_path, monkeypatch):
     assert payload["backfill"]["sessions_ingested"] == 6
     assert payload["backfill"]["limit_reached"] is True
     assert payload["backfill"]["max_sessions"] == 6
+
+
+# ── Statusline live preview ("what you'd see live") ──────────────────────────
+#
+# `_display_model_name` reconstructs "Sonnet 4.5" from the raw transcript
+# `claude-sonnet-4-5-20250929` id every fixture session below uses.
+
+def _flat(output: str) -> str:
+    """Collapse Rich's line-wrapping so long-sentence substring checks aren't
+    sensitive to where the terminal happened to wrap a word."""
+    return " ".join(output.split())
+
+
+def _session_with_crossing(root: Path, session_id: str, cwd: str, base_date: str,
+                            *, n_turns: int, crossing_turn: int) -> Path:
+    """A synthetic session whose cumulative re-read %% stays low through
+    `crossing_turn - 1`, then jumps hard enough that it crosses REREAD_WARN
+    (70%%) starting exactly at `crossing_turn` (1-indexed) and stays crossed.
+    """
+    records = []
+    for i in range(1, n_turns + 1):
+        ts = f"{base_date}T10:{i:02d}:00.000Z"
+        cache = 20 if i < crossing_turn else 100_000
+        records.append(_assistant(
+            f"{session_id}-{i}", session_id, cwd, ts,
+            input_tokens=100, output_tokens=50, cache_read=cache,
+        ))
+    return _make_session_file(root, session_id, cwd, records)
+
+
+def test_quickstart_preview_shows_most_recent_substantial_crossing_session(
+    tmp_path, monkeypatch,
+):
+    from tokenjam.cli import cmd_quickstart as q
+    from tokenjam.cli.cmd_statusline import format_status_line
+
+    monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 3)
+    root = tmp_path / "projects"
+    # Older, more turns, but NOT more recent -> must lose to the recent one.
+    _session_with_crossing(
+        root, "sess-old", "/Users/me/projA", "2026-06-10",
+        n_turns=10, crossing_turn=2,
+    )
+    # Recent AND substantial (5 >= PREVIEW_MIN_TURNS=3) -> wins on recency.
+    recent_path = _session_with_crossing(
+        root, "sess-recent", "/Users/me/projB", "2026-06-25",
+        n_turns=5, crossing_turn=3,
+    )
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    flat = _flat(result.output)
+    assert "With the statusline installed" in flat
+    assert "session sess-recent would have shown this at turn 3" in flat
+    assert "tj onboard" in flat.split("With the statusline installed")[1]
+
+    # Formatter reuse: the rendered line is byte-identical to what
+    # format_status_line produces for the FIRST turn whose cumulative re-read
+    # crosses the nudge threshold — never a hand-rolled duplicate of the live
+    # statusline's text.
+    from tokenjam.cli.cmd_statusline import REREAD_WARN
+    from tokenjam.core.usage import iter_cumulative_usage
+    with open(recent_path, encoding="utf-8") as fh:
+        crossing = next(
+            (turn_index, usage) for turn_index, _model, usage in iter_cumulative_usage(fh)
+            if usage.total and 100.0 * usage.cache_read_tokens / usage.total >= REREAD_WARN
+        )
+    turn_index, usage = crossing
+    assert turn_index == 3
+    total = usage.total
+    reread_pct = 100.0 * usage.cache_read_tokens / total
+    expected_line = format_status_line("Sonnet 4.5", total, reread_pct)
+    assert expected_line in result.output
+
+
+def test_quickstart_preview_stops_walking_after_first_substantial_candidate(
+    tmp_path, monkeypatch,
+):
+    """Sessions are walked most-recent-first; once the most-recent SUBSTANTIAL
+    crossing candidate is found, selection must stop rather than re-reading
+    every remaining session's transcript — a large `~/.claude` history would
+    otherwise blow past quickstart's fast-first-run budget."""
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 3)
+    root = tmp_path / "projects"
+    # Most-recent session is ALREADY substantial + crossing -> must win
+    # without inspecting any of the five older sessions below it.
+    _session_with_crossing(
+        root, "sess-newest", "/Users/me/projZ", "2026-06-28",
+        n_turns=5, crossing_turn=2,
+    )
+    for i in range(5):
+        _session_with_crossing(
+            root, f"sess-old-{i}", f"/Users/me/proj{i}", f"2026-06-{10 + i:02d}",
+            n_turns=5, crossing_turn=2,
+        )
+
+    calls: list[str] = []
+    original_walk = q._walk_for_preview
+
+    def _counting_walk(path):
+        calls.append(path)
+        return original_walk(path)
+
+    monkeypatch.setattr(q, "_walk_for_preview", _counting_walk)
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    assert "session sess-newest" in _flat(result.output)
+    # Only the winning (most-recent, already-substantial) candidate's
+    # transcript was walked -- the 5 older sessions were never opened.
+    assert len(calls) == 1
+
+
+def test_quickstart_preview_falls_back_to_largest_when_none_substantial(
+    tmp_path, monkeypatch,
+):
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 50)  # neither session qualifies
+    root = tmp_path / "projects"
+    _session_with_crossing(
+        root, "sess-recent", "/Users/me/projB", "2026-06-25",
+        n_turns=5, crossing_turn=3,
+    )
+    _session_with_crossing(
+        root, "sess-old", "/Users/me/projA", "2026-06-10",
+        n_turns=8, crossing_turn=5,
+    )
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    # Neither is "substantial" -> falls back to the largest (by turns), not
+    # simply the most recent.
+    flat = _flat(result.output)
+    assert "session sess-old would have shown this at turn 5" in flat
+
+
+def test_quickstart_preview_omitted_when_no_session_crosses_threshold(tmp_path):
+    root = tmp_path / "projects"
+    # Healthy sessions: tiny cache reads relative to input/output, never near
+    # the 70% nudge threshold.
+    _make_session_file(root, "sess-a", "/Users/me/projA", [
+        _assistant("a1", "sess-a", "/Users/me/projA", "2026-06-20T10:00:00.000Z",
+                   input_tokens=1000, output_tokens=200, cache_read=10),
+    ])
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    assert "With the statusline installed" not in result.output
+
+
+def test_quickstart_preview_omitted_when_no_sessions(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    result = _invoke_quickstart(["--root", str(missing)])
+    assert result.exit_code == 0, result.output
+    assert "With the statusline installed" not in result.output
