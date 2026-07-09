@@ -132,8 +132,15 @@ def _run_claude_code(tmp_path, plan_choice: str):
 
 
 def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
-    # Choice 3 == max_5x (subscription) → no API-ceiling prompt to interleave.
-    res = _run_claude_code(tmp_path, "3")
+    # Choice 1 == api: the only tier that still gets a daily-budget prompt
+    # (#128 — subscription tiers have $0 marginal cost and skip it silently).
+    # Answers: plan(1=api) → API spend ceiling(0) → daily budget(0).
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        res = runner.invoke(
+            cmd_onboard, ["--claude-code", "--no-daemon", "--project", "testproj"],
+            input="1\n0\n0\n", obj={},
+        )
     assert res.exit_code == 0, res.output
     out = res.output
     assert "How do you pay for Claude?" in out
