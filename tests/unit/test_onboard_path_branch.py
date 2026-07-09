@@ -233,8 +233,12 @@ class TestSetupCompleteHome:
         assert "You're set up." in out
         assert "7 sessions backfilled" in out
         assert "last 30 days" in out
-        # Next-best-actions from print_home.
-        assert "tj optimize" in out
+        # No second command list here: the onboard flows print their own
+        # curated next-steps block just above this close — a duplicate
+        # next-best-actions list was founder-flagged (2026-07). Just the
+        # help pointer.
+        assert "tj optimize" not in out
+        assert "tj --help" in out
 
     def test_no_count_claim_without_data(self, monkeypatch, capsys):
         """Honesty: never claim a backfill count when nothing was ingested."""
