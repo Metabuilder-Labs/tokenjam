@@ -56,6 +56,15 @@ def test_unknown_tier_still_prompts(monkeypatch):
     assert _prompt_daily_budget(None, "unknown") == 7.0
 
 
+def test_none_tier_still_prompts(monkeypatch):
+    # `plan_tier=None` (no resolved tier) must behave like `unknown`, not like
+    # a subscription tier — never silently assume $0 for an unresolved plan.
+    import click as _click
+
+    monkeypatch.setattr(_click, "prompt", lambda *a, **k: 3.0)
+    assert _prompt_daily_budget(None, None) == 3.0
+
+
 @pytest.mark.parametrize(
     "plan_tier", sorted(SUBSCRIPTION_PLAN_TIERS | {"local", "api", "unknown"}),
 )

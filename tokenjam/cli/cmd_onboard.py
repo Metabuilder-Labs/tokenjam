@@ -934,7 +934,7 @@ def _print_setup_complete_home(
     print_home()
 
 
-def _prompt_daily_budget(budget: float | None, plan_tier: str) -> float:
+def _prompt_daily_budget(budget: float | None, plan_tier: str | None) -> float:
     """Prompt for the per-agent daily-budget alert threshold, unless already
     supplied via --budget or the just-resolved plan tier has no marginal
     per-token cost. Called AFTER the plan prompt so onboard reads plan-first
@@ -946,12 +946,14 @@ def _prompt_daily_budget(budget: float | None, plan_tier: str) -> float:
     their plan contradicts the framing discipline ``core/framing.py`` already
     applies everywhere else (dollar figures suppressed for those tiers), and
     the ``[budget.<provider>]`` USD monthly ceiling already skips them by
-    design. Only ``api`` (and ``unknown``, if ever reachable here) get
-    prompted. ``--budget`` always wins regardless of tier.
+    design. Only ``api`` and ``unknown`` get prompted — and ``None`` (no
+    resolved tier, e.g. an existing config with no plan section yet) behaves
+    like ``unknown``: still prompt rather than assume $0. ``--budget`` always
+    wins regardless of tier.
     """
     if budget is not None:
         return budget
-    if plan_tier in SUBSCRIPTION_PLAN_TIERS or plan_tier == "local":
+    if plan_tier is not None and (plan_tier in SUBSCRIPTION_PLAN_TIERS or plan_tier == "local"):
         return 0.0
     return click.prompt(
         "Daily budget in USD (0 = no limit, default 0)",
