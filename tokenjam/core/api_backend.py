@@ -337,6 +337,13 @@ class ApiBackend:
             params["agent_id"] = agent_id
         return self._get("/api/v1/reuse/clusters", params)
 
+    #: `/sessions` page size for `find_last_substantial_session`. The floor is
+    #: usually 1 tool call, so the newest row almost always qualifies — this
+    #: cap just needs to survive a handful of non-substantial rows at the head
+    #: of the list without pulling a user's entire (possibly thousands-row)
+    #: sessions table over HTTP just to inspect the first few (Greptile, PR #448).
+    _LAST_SESSION_PAGE_SIZE = 25
+
     def find_last_substantial_session(
         self, min_tool_calls: int = 1
     ) -> str | None:
@@ -344,10 +351,16 @@ class ApiBackend:
 
         Mirrors the direct-DB `--last` resolution in `tj session-story` when the
         daemon holds the write lock. `/sessions` already returns rows newest
-        first, so the first qualifying row is the answer. Returns None when no
-        session clears the floor (or the list is empty).
+        first, so the first qualifying row within the fetched page is the
+        answer. Fetches only `_LAST_SESSION_PAGE_SIZE` rows via `/sessions`'
+        `limit` param, not the whole table. Returns None when no session in
+        that page clears the floor (or the list is empty) — a session further
+        back than the page never gets picked as "last", which is the honest
+        trade-off for not transferring a user's entire session history.
         """
-        data = self._get("/api/v1/sessions")
+        data = self._get(
+            "/api/v1/sessions", {"limit": self._LAST_SESSION_PAGE_SIZE}
+        )
         for s in data.get("sessions", []):
             if (s.get("tool_call_count") or 0) >= min_tool_calls:
                 sid = s.get("session_id")

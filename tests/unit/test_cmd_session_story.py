@@ -250,3 +250,53 @@ def test_subagent_delegation_renders_with_tool_tally(tmp_path, monkeypatch):
     assert "1 edit" in result.output
     assert "wasted" not in result.output.lower()
     assert "good" not in result.output.lower()
+
+
+# --- API-shim path (tj serve holds the DuckDB write lock) --------------------
+#
+# These exercise ApiBackend directly (mirrors test_drift.py's
+# TestApiBackendGetBaseline pattern: monkeypatch `_get` and assert on the call
+# args) rather than the full CLI, since the CLI-level dual-path selection is
+# just `hasattr(db, "conn")` / `isinstance(db, ApiBackend)` — already implicit
+# in every `_invoke(db, ...)` test above using a real InMemoryBackend.
+
+def test_find_last_substantial_session_requests_a_capped_page(monkeypatch):
+    """`/sessions` is NOT paginated by the caller unbounded — a user with
+    thousands of sessions must not have the whole table pulled over HTTP just
+    to find the first row with real activity (Greptile, PR #448)."""
+    from tokenjam.core.api_backend import ApiBackend
+
+    backend = ApiBackend("http://localhost:8000")
+    calls: list[tuple[str, dict | None]] = []
+
+    def _fake_get(path, params=None):
+        calls.append((path, params))
+        return {"sessions": [
+            {"session_id": "sess-1", "tool_call_count": 0},
+            {"session_id": "sess-2", "tool_call_count": 5},
+        ]}
+
+    monkeypatch.setattr(backend, "_get", _fake_get)
+    result = backend.find_last_substantial_session(min_tool_calls=1)
+
+    assert result == "sess-2"
+    assert len(calls) == 1
+    path, params = calls[0]
+    assert path == "/api/v1/sessions"
+    assert params == {"limit": backend._LAST_SESSION_PAGE_SIZE}
+    assert params["limit"] < 1000  # a real cap, not "everything"
+
+
+def test_find_last_substantial_session_none_when_page_has_no_qualifying_row(
+    monkeypatch,
+):
+    from tokenjam.core.api_backend import ApiBackend
+
+    backend = ApiBackend("http://localhost:8000")
+    monkeypatch.setattr(
+        backend, "_get",
+        lambda path, params=None: {"sessions": [
+            {"session_id": "sess-1", "tool_call_count": 0},
+        ]},
+    )
+    assert backend.find_last_substantial_session(min_tool_calls=1) is None
