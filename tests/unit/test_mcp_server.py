@@ -971,3 +971,32 @@ def test_summarize_apply_then_undo_roundtrip(tmp_path):
 
 def test_summarize_apply_no_config():
     assert "error" in _tool_summarize_apply(None, None, False)
+
+
+def test_mcp_server_tool_count():
+    """Verify that the MCP server registers the expected number of tools.
+    This catches documentation drift when new tools are added or removed.
+    If this test fails, update docs/claude-code-integration.md and
+    docs/architecture.md with the new tool count and tool list.
+    """
+    import re
+    from pathlib import Path
+    from tokenjam.mcp import server as mcp_module
+
+    # Read server.py and count @mcp.tool() decorators
+    server_path = Path(mcp_module.__file__)
+    server_src = server_path.read_text()
+
+    # Find all @mcp.tool() decorators followed by function definitions
+    tool_pattern = r'@mcp\.tool\(\)\s*\ndef\s+(\w+)\s*\('
+    tools_found = re.findall(tool_pattern, server_src)
+
+    # The expected tool count; update this when new tools are added
+    expected_count = 23
+    tool_count = len(tools_found)
+    assert tool_count == expected_count, (
+        f"MCP tool count mismatch: found {tool_count}, expected {expected_count}. "
+        f"Update docs/claude-code-integration.md (tool table) and "
+        f"docs/architecture.md (tool count reference) to match. "
+        f"Tools: {sorted(tools_found)}"
+    )
