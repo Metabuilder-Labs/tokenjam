@@ -15,25 +15,25 @@ from tokenjam.otel.otlp_parsing import (
     safe_int as _safe_int,        # noqa: F401  (re-exported)
 )
 from tokenjam.utils.ids import new_span_id
+from tokenjam.api.routes._body import read_otlp_body
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
 
 @router.post("/spans")
 async def ingest_spans(request: Request) -> JSONResponse:
     """
     Accept a batch of spans in OTLP JSON format.
     Auth is enforced by IngestAuthMiddleware.
-    Returns 200 even on partial rejection; 400 only if body is entirely malformed.
+    Returns 200 even on partial rejection; 400 only if the body is entirely unparseable.
     """
     try:
-        body = await request.json()
-    except Exception:
+        body = await read_otlp_body(request)
+    except ValueError as exc:
         return JSONResponse(
             status_code=400,
-            content={"error": "Invalid JSON body"},
+            content={"error": f"could not parse OTLP body: {exc}"},
         )
 
     if not isinstance(body, dict) or "resourceSpans" not in body:

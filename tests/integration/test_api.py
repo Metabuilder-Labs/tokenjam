@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import json
 
 import pytest
 import httpx
@@ -192,6 +194,136 @@ async def test_post_spans_partial_rejection_returns_200(client, db, config):
     assert data["ingested"] == 1
     assert data["rejected"] == 1
     assert len(data["rejections"]) == 1
+
+
+# ── Gzip ingest (issue #365) ────────────────────────────────────────────────
+
+async def test_post_spans_gzip_with_content_encoding_header_succeeds(client):
+    """OTel Collector default: gzip body + Content-Encoding: gzip header → 200."""
+    raw = gzip.compress(json.dumps(_otlp_body()).encode())
+    resp = await client.post(
+        "/api/v1/spans",
+        content=raw,
+        headers={
+            "Authorization": f"Bearer {INGEST_SECRET}",
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ingested"] == 1
+    assert data["rejected"] == 0
+
+
+async def test_post_spans_gzip_without_header_sniff_fallback_succeeds(client):
+    """Misconfigured exporter: gzip body but no Content-Encoding header → sniff and succeed."""
+    raw = gzip.compress(json.dumps(_otlp_body()).encode())
+    resp = await client.post(
+        "/api/v1/spans",
+        content=raw,
+        headers={
+            "Authorization": f"Bearer {INGEST_SECRET}",
+            "Content-Type": "application/json",
+            # Intentionally no Content-Encoding header
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ingested"] == 1
+    assert data["rejected"] == 0
+
+
+async def test_post_spans_corrupt_gzip_with_header_returns_400_with_reason(client):
+    """Corrupt gzip + Content-Encoding: gzip header → 400 with descriptive error."""
+    resp = await client.post(
+        "/api/v1/spans",
+        content=b"\x1f\x8b\x00\x00corrupt garbage",
+        headers={
+            "Authorization": f"Bearer {INGEST_SECRET}",
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+        },
+    )
+    assert resp.status_code == 400
+    data = resp.json()
+    assert "error" in data
+    assert "could not parse OTLP body" in data["error"]
+
+
+async def test_post_spans_invalid_json_error_message_contains_reason(client):
+    """Plain invalid (non-gzip) body → 400 with a reason in the error message."""
+    resp = await client.post(
+        "/api/v1/spans",
+        content=b"not json at all",
+        headers={
+            "Authorization": f"Bearer {INGEST_SECRET}",
+            "Content-Type": "application/json",
+        },
+    )
+    assert resp.status_code == 400
+    data = resp.json()
+    assert "error" in data
+    assert "could not parse OTLP body" in data["error"]
+
+
+async def test_post_spans_corrupt_gzip_sniff_path_returns_400(client):
+    """Corrupt body with gzip magic bytes but no header → sniff path → 400 with reason."""
+    resp = await client.post(
+        "/api/v1/spans",
+        content=b"\x1f\x8b\x00\x00corrupt garbage",
+        headers={
+            "Authorization": f"Bearer {INGEST_SECRET}",
+            "Content-Type": "application/json",
+            # No Content-Encoding: gzip header — hits the sniff branch
+        },
+    )
+    assert resp.status_code == 400
+    data = resp.json()
+    assert "error" in data
+    assert "could not parse OTLP body" in data["error"]
+
+
+async def test_otlp_traces_alias_gzip_with_header_succeeds(client):
+    """/v1/traces delegates to ingest_spans and inherits gzip support."""
+    raw = gzip.compress(json.dumps(_otlp_body()).encode())
+    resp = await client.post(
+        "/v1/traces",
+        content=raw,
+        headers={
+            "Authorization": f"Bearer {INGEST_SECRET}",
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ingested"] == 1
+
+
+async def test_otlp_logs_gzip_with_header_succeeds(client):
+    """/v1/logs also decompresses gzip bodies (Content-Encoding: gzip)."""
+    log_body = {
+        "resourceLogs": [{
+            "resource": {
+                "attributes": [
+                    {"key": "gen_ai.agent.id", "value": {"stringValue": "test-agent"}},
+                ]
+            },
+            "scopeLogs": [],
+        }]
+    }
+    raw = gzip.compress(json.dumps(log_body).encode())
+    resp = await client.post(
+        "/v1/logs",
+        content=raw,
+        headers={
+            "Authorization": f"Bearer {INGEST_SECRET}",
+            "Content-Type": "application/json",
+            "Content-Encoding": "gzip",
+        },
+    )
+    assert resp.status_code == 200
 
 
 # ── GET endpoints ──────────────────────────────────────────────────────────
