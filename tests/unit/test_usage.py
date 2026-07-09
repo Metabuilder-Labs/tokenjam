@@ -12,7 +12,9 @@ import json
 from tokenjam.core.usage import (
     AssistantUsage,
     assistant_message_key,
+    iter_assistant_turns,
     iter_assistant_usage,
+    iter_cumulative_usage,
     parse_usage,
     session_usage,
 )
@@ -97,3 +99,70 @@ def test_session_usage_no_id_records_counted_separately():
         _line(uuid="b", input_tokens=100),
     ]
     assert session_usage(lines).total == 200
+
+
+# --- iter_assistant_turns (model + usage per record) ------------------------
+
+
+def _line_with_model(model: str, **kwargs) -> str:
+    line = json.loads(_line(**kwargs))
+    line["message"]["model"] = model
+    return json.dumps(line)
+
+
+def test_iter_assistant_turns_surfaces_model_alongside_usage():
+    lines = [
+        _line_with_model("claude-opus-4-8", message_id="m1", input_tokens=100),
+        _line_with_model("claude-sonnet-4-5", message_id="m2", input_tokens=200),
+    ]
+    got = [(key, model) for key, model, _usage in iter_assistant_turns(lines)]
+    assert got == [("m1", "claude-opus-4-8"), ("m2", "claude-sonnet-4-5")]
+
+
+def test_iter_assistant_turns_same_filter_as_iter_assistant_usage():
+    lines = [
+        json.dumps({"type": "user", "message": {"content": "hi"}}),
+        "not json",
+        _line(message_id="m0", input_tokens=0, output_tokens=0),  # empty usage
+        _line_with_model("claude-opus-4-8", message_id="m1", input_tokens=500),
+    ]
+    got = list(iter_assistant_turns(lines))
+    assert got == [("m1", "claude-opus-4-8", AssistantUsage(500, 0, 0, 0))]
+
+
+# --- iter_cumulative_usage (point-in-time preview walk) ----------------------
+
+
+def test_iter_cumulative_usage_accumulates_across_distinct_turns():
+    lines = [
+        _line_with_model("claude-opus-4-8", message_id="m1", input_tokens=100),
+        _line_with_model("claude-opus-4-8", message_id="m2", cache_read_input_tokens=300),
+    ]
+    got = list(iter_cumulative_usage(lines))
+    assert got == [
+        (1, "claude-opus-4-8", AssistantUsage(100, 0, 0, 0)),
+        (2, "claude-opus-4-8", AssistantUsage(100, 0, 300, 0)),
+    ]
+
+
+def test_iter_cumulative_usage_growing_snapshot_does_not_advance_turn():
+    # A mid-stream growing snapshot under the SAME message id updates the
+    # running total in place — it is not a new turn.
+    lines = [
+        _line_with_model("claude-opus-4-8", message_id="m1", input_tokens=100, output_tokens=10),
+        _line_with_model("claude-opus-4-8", message_id="m1", input_tokens=100, output_tokens=400),
+    ]
+    got = list(iter_cumulative_usage(lines))
+    assert [turn for turn, _model, _usage in got] == [1, 1]
+    assert got[-1][2] == AssistantUsage(100, 400, 0, 0)
+
+
+def test_iter_cumulative_usage_final_total_matches_session_usage():
+    lines = [
+        _line_with_model("claude-opus-4-8", message_id="m1", input_tokens=100, output_tokens=10),
+        _line_with_model("claude-opus-4-8", message_id="m1", input_tokens=100, output_tokens=400),
+        _line_with_model("claude-sonnet-4-5", message_id="m2", cache_read_input_tokens=5000),
+    ]
+    *_rest, last = iter_cumulative_usage(lines)
+    _turn, _model, final = last
+    assert final == session_usage(lines)
