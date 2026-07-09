@@ -243,7 +243,7 @@ def _render(diag, timeline, *, since: str,
                     style="dim")
         sections.append(agg)
         sections.append(Text(
-            "    The statusline flags this live, before a session ends — "
+            "The statusline flags this live, before a session ends — "
             "a closed session can't be reclaimed.",
             style="green",
         ))

@@ -247,6 +247,41 @@ def test_quota_weighted_fields_in_json_payload(db):
     assert payload["quota_weighted_reread_share"] < payload["reread_share"]
 
 
+def test_quota_weight_constants_match_anthropic_pricing_table():
+    """#119: `CACHE_READ_QUOTA_WEIGHT` / `OUTPUT_QUOTA_WEIGHT` are asserted
+    constants, not a live pricing lookup — so a future Anthropic pricing change
+    in tokenjam/pricing/models.toml must fail this test loudly instead of
+    silently drifting the quickstart headline away from what it claims to be
+    (the whole credibility property #119 exists to fix)."""
+    from tokenjam.core.context_diagnostic import (
+        CACHE_READ_QUOTA_WEIGHT,
+        OUTPUT_QUOTA_WEIGHT,
+    )
+    from tokenjam.core.pricing import load_pricing_table
+
+    anthropic_rates = load_pricing_table().get("anthropic", {})
+    assert anthropic_rates, "expected at least one anthropic pricing row"
+
+    checked = 0
+    for model, rates in anthropic_rates.items():
+        if rates.input_per_mtok <= 0:
+            continue  # skip the zero-priced internal test model (tj-ping-test)
+        checked += 1
+        cache_read_ratio = rates.cache_read_per_mtok / rates.input_per_mtok
+        output_ratio = rates.output_per_mtok / rates.input_per_mtok
+        assert cache_read_ratio == pytest.approx(CACHE_READ_QUOTA_WEIGHT), (
+            f"{model}: cache_read/input ratio {cache_read_ratio} != "
+            f"CACHE_READ_QUOTA_WEIGHT {CACHE_READ_QUOTA_WEIGHT} — pricing drifted, "
+            f"update the constant (and re-verify the quickstart headline)."
+        )
+        assert output_ratio == pytest.approx(OUTPUT_QUOTA_WEIGHT), (
+            f"{model}: output/input ratio {output_ratio} != "
+            f"OUTPUT_QUOTA_WEIGHT {OUTPUT_QUOTA_WEIGHT} — pricing drifted, "
+            f"update the constant (and re-verify the quickstart headline)."
+        )
+    assert checked > 0
+
+
 def test_cache_miss_broken_out_as_named_overhead(db):
     """#11: cache-creation tokens are surfaced as their own named overhead
     category (prompt-cache MISS), distinct from re-read and net-new work."""

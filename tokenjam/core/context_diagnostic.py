@@ -238,6 +238,12 @@ class TurnComposition:
         Cache reads count for ``CACHE_READ_QUOTA_WEIGHT`` of a base token;
         output counts for ``OUTPUT_QUOTA_WEIGHT``. See the constants' docstring
         for the pricing-table provenance.
+
+        Not consumed by any renderer yet — quickstart uses the window-level
+        ``ContextDiagnostic.quota_weighted_reread_share`` below. This per-turn
+        variant is deliberate groundwork for #122 (tj context / tj tokenmaxx
+        switching their own headlines to quota-weighted shares). Do not remove
+        as unused.
         """
         return (
             self.reread_tokens * CACHE_READ_QUOTA_WEIGHT
@@ -248,7 +254,11 @@ class TurnComposition:
 
     @property
     def quota_weighted_reread_share(self) -> float:
-        """Re-read's share of this turn's QUOTA-weighted tokens, not raw count."""
+        """Re-read's share of this turn's QUOTA-weighted tokens, not raw count.
+
+        Groundwork for #122, same as ``quota_weighted_tokens`` above — not
+        consumed by any renderer yet. Do not remove as unused.
+        """
         total = self.quota_weighted_tokens
         return (self.reread_tokens * CACHE_READ_QUOTA_WEIGHT / total) if total else 0.0
 
