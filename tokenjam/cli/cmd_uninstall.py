@@ -164,16 +164,23 @@ def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
                 del env[k]
             if removed:
                 gs["env"] = env
-            # Remove the tj-managed SessionStart resume-brief hook (idempotent,
-            # non-destructive — foreign SessionStart hooks are preserved).
-            from tokenjam.cli.cmd_onboard import _unwire_claude_resume_brief_hook
+            # Remove the tj-managed SessionStart resume-brief hook and the
+            # opt-in PostToolUse output-cap hook (both idempotent,
+            # non-destructive — foreign hooks of either kind are preserved).
+            from tokenjam.cli.cmd_onboard import (
+                _unwire_claude_output_cap_hook,
+                _unwire_claude_resume_brief_hook,
+            )
             hook_removed = _unwire_claude_resume_brief_hook(gs)
-            if removed or hook_removed:
+            cap_removed = _unwire_claude_output_cap_hook(gs)
+            if removed or hook_removed or cap_removed:
                 global_settings_path.write_text(json.dumps(gs, indent=2) + "\n")
             if removed:
                 console.print(f"  Cleaned {len(removed)} TokenJam env vars from {global_settings_path}")
             if hook_removed:
                 console.print(f"  Removed tj resume-brief SessionStart hook from {global_settings_path}")
+            if cap_removed:
+                console.print(f"  Removed tj output-cap PostToolUse hook from {global_settings_path}")
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {global_settings_path}: {exc}[/yellow]")
 
@@ -215,6 +222,19 @@ def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
                 console.print(f"  Removed TokenJam env block from {zshrc}")
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {zshrc}: {exc}[/yellow]")
+
+    # Remove the `claude()` shell wrapper (`# tj per-terminal naming` ..
+    # `# end tj per-terminal naming`) from ~/.zshrc / ~/.bashrc. This is the
+    # counterpart to `_install_claude_wrapper()` in cmd_onboard.py — without
+    # it, a leftover `claude()` function calls `tj` on every launch, which
+    # errors once the package is removed (#117).
+    from tokenjam.cli.cmd_onboard import _unwire_claude_wrapper
+    try:
+        wrapper_removed = _unwire_claude_wrapper()
+        for rc_path in wrapper_removed:
+            console.print(f"  Removed claude() shell wrapper from {rc_path}")
+    except Exception as exc:
+        console.print(f"  [yellow]Could not clean claude() shell wrapper: {exc}[/yellow]")
 
     console.print()
     console.print("[green]TokenJam data, config, and wiring removed.[/green]")
