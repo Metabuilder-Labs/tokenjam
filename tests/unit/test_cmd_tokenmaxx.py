@@ -275,11 +275,15 @@ def test_json_weekly_flag_round_trips(db):
 # ───────────────────────────── error paths ────────────────────────────────
 
 def test_requires_direct_db_connection(db):
-    # Mirrors cmd_context / cmd_quota_audit: a connection-less backend (API shim
-    # style) is rejected with a clear daemon-down hint.
+    # A backend that is neither a direct DuckDB connection nor an ApiBackend
+    # (i.e. can't reach a running daemon either) is rejected by the DataAccess
+    # seam with a clean, unified hint — not a traceback. A real ApiBackend is
+    # instead routed through the daemon (see tests/integration/test_tokenmaxx_serve.py).
     class _NoConn:
         pass
 
     result = _invoke(_NoConn(), _config("max_5x"))
     assert result.exit_code != 0
-    assert "direct database connection" in str(result.output) + str(result.exception)
+    combined = str(result.output) + str(result.exception)
+    assert "direct DuckDB connection" in combined
+    assert "tj serve" in combined

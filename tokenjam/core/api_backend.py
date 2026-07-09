@@ -358,6 +358,28 @@ class ApiBackend:
             params["agent_id"] = agent_id
         return self._get("/api/v1/context", params)
 
+    def fetch_opus_quota_audit(
+        self,
+        *,
+        since: str = "30d",
+        agent_id: str | None = None,
+    ) -> dict:
+        """
+        Fetch the server-computed Opus quota audit from `tj serve`.
+
+        Used by `tj quota-audit` when the local DuckDB connection is unavailable
+        (the daemon holds the write lock). The audit aggregates per-session
+        token/model metadata the shim can't expose at this grain, so the daemon
+        (which owns the direct connection) computes it and returns
+        `audit_to_dict(audit)` plus the `framing` block. The CLI reconstructs via
+        `audit_from_dict` + `Framing(**framing)`. Mirrors
+        `fetch_context_diagnostic` / `/api/v1/context`.
+        """
+        params: dict[str, Any] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        return self._get("/api/v1/quota-audit", params)
+
     def close(self) -> None:
         self.client.close()
 
