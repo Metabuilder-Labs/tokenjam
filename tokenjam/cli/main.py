@@ -110,6 +110,7 @@ from tokenjam.cli.cmd_export import cmd_export  # noqa: E402
 from tokenjam.cli.cmd_serve import cmd_serve  # noqa: E402
 from tokenjam.cli.cmd_stop import cmd_stop  # noqa: E402
 from tokenjam.cli.cmd_uninstall import cmd_uninstall  # noqa: E402
+from tokenjam.cli.cmd_reset import cmd_reset  # noqa: E402
 from tokenjam.cli.cmd_doctor import cmd_doctor  # noqa: E402
 from tokenjam.cli.cmd_budget import cmd_budget  # noqa: E402
 from tokenjam.cli.cmd_optimize import cmd_optimize  # noqa: E402
@@ -141,6 +142,7 @@ cli.add_command(cmd_export, name="export")
 cli.add_command(cmd_serve, name="serve")
 cli.add_command(cmd_stop, name="stop")
 cli.add_command(cmd_uninstall, name="uninstall")
+cli.add_command(cmd_reset, name="reset")
 cli.add_command(cmd_doctor, name="doctor")
 cli.add_command(cmd_budget, name="budget")
 cli.add_command(cmd_optimize, name="optimize")

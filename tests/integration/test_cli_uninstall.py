@@ -1,10 +1,17 @@
-"""CLI tests for `tj uninstall` messaging + optional package removal.
+"""CLI tests for `tj uninstall` — full removal by default (#442), with
+package detection now ENVIRONMENT-WIDE via `_find_persistent_install()`
+rather than the current process's `sys.executable` (Greptile P1 on #443):
+`npx tokenjam uninstall` always runs `tj` via an ephemeral `uvx`/`pipx run`
+venv, so the old `sys.executable`-based detection always reported "nothing
+to remove" even when a persistent pipx/uv-tool install existed elsewhere on
+the machine — and the confirm prompt lied about what would actually happen.
 
-These focus on the closing UX (issue: uninstall/reinstall confusion) — the
-two-step "package remains; reinstall FRESH with upgrade/--force" messaging and
-the optional package-removal prompt. Filesystem side effects are neutered by
-pointing HOME at a tmp dir and mocking subprocess/shutil so nothing real is
-touched.
+These tests patch `_find_persistent_install()` directly to drive
+`cmd_uninstall`'s prompt wording and execution; the detection function's own
+probing logic (subprocess + dir-probe fallback) is unit-tested in
+tests/unit/test_uninstall_persistent_install.py. Filesystem side effects are
+neutered by pointing HOME at a tmp dir and mocking subprocess/shutil so
+nothing real is touched.
 """
 from __future__ import annotations
 
@@ -14,7 +21,7 @@ import pytest
 from click.testing import CliRunner
 
 from tokenjam.cli import cmd_uninstall as uninstall_mod
-from tokenjam.cli.cmd_uninstall import cmd_uninstall
+from tokenjam.cli.cmd_uninstall import PersistentInstall, cmd_uninstall
 
 
 @pytest.fixture
@@ -34,6 +41,12 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     # cmd_stop is invoked first; stub it out so it doesn't poke the real daemon.
     monkeypatch.setattr("tokenjam.cli.cmd_stop.cmd_stop", MagicMock())
+    # `_find_persistent_install()`'s dir-probe fallback reads these directly
+    # (not via Path.home()) — unset so a developer's/CI runner's real
+    # PIPX_HOME/XDG_DATA_HOME can never leak a real tokenjam install into a
+    # test that doesn't explicitly mock `_find_persistent_install()`.
+    monkeypatch.delenv("PIPX_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
     with patch.object(uninstall_mod.shutil, "which", return_value=None):
         yield
 
@@ -42,37 +55,26 @@ def _run(runner, *args, **kwargs):
     return runner.invoke(cmd_uninstall, ["--yes", *args], **kwargs)
 
 
-def test_messaging_states_package_remains(runner):
-    """Default (no --remove-package, --yes): package left in place, two-step
-    guidance printed, and the FRESH-reinstall command is upgrade/--force."""
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=True):
-        result = _run(runner)
-    assert result.exit_code == 0, result.output
-    out = result.output
-    assert "package itself is still installed" in out
-    assert "pipx uninstall tokenjam" in out
-    # FRESH reinstall must NOT be a bare `pipx install` (that no-ops).
-    assert "pipx upgrade tokenjam" in out
-    assert "pipx install --force tokenjam" in out
-    assert "no-ops when tokenjam is already present" in out
+_PIPX_INSTALL = PersistentInstall(
+    manager="pipx", auto=True,
+    argv=["pipx", "uninstall", "tokenjam"], display="pipx uninstall tokenjam",
+)
+_UV_TOOL_INSTALL = PersistentInstall(
+    manager="uv-tool", auto=True,
+    argv=["uv", "tool", "uninstall", "tokenjam"],
+    display="uv tool uninstall tokenjam",
+)
+_PIP_INSTALL = PersistentInstall(
+    manager="pip", auto=False, argv=None, display="pip uninstall tokenjam",
+)
 
 
-def test_reinstall_hint_for_pip_install(runner):
-    """Non-pipx install: hint is pip uninstall + pip install --upgrade."""
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=False):
-        result = _run(runner)
-    assert result.exit_code == 0, result.output
-    assert "pip uninstall tokenjam" in result.output
-    assert "pip install --upgrade tokenjam" in result.output
-
-
-def test_remove_package_flag_runs_pipx(runner):
-    """--remove-package on a pipx install runs `pipx uninstall tokenjam`."""
+def test_default_removes_package_for_pipx_install(runner):
+    """A detected persistent pipx install is auto-removed by default."""
     fake = MagicMock(returncode=0, stdout="", stderr="")
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=True), \
-         patch.object(uninstall_mod.shutil, "which", side_effect=lambda c: "/usr/bin/pipx" if c == "pipx" else None), \
+    with patch.object(uninstall_mod, "_find_persistent_install", return_value=[_PIPX_INSTALL]), \
          patch.object(uninstall_mod.subprocess, "run", return_value=fake) as run:
-        result = _run(runner, "--remove-package")
+        result = _run(runner)
     assert result.exit_code == 0, result.output
     run.assert_called_once_with(
         ["pipx", "uninstall", "tokenjam"], capture_output=True, text=True
@@ -80,63 +82,18 @@ def test_remove_package_flag_runs_pipx(runner):
     assert "tokenjam package removed" in result.output
     # After a SUCCESSFUL removal the venv is gone, so `pipx upgrade` would fail
     # ("not installed"). The reinstall hint must be a fresh `pipx install`, not
-    # upgrade/--force (#430).
+    # upgrade/--force (#430) — and must reflect the MANAGER that was actually
+    # removed (pipx), not the current (often ephemeral) process's guess.
     assert "pipx install tokenjam" in result.output
     assert "pipx upgrade" not in result.output
 
 
-def test_remove_package_flag_non_pipx_prints_command(runner):
-    """--remove-package on a non-pipx install must NOT guess/run — it prints
-    the right command instead.
-
-    Mocks `_installed_via_uv_tool` and `_is_ephemeral_runner` too (not just
-    `_installed_via_pipx`) so this is hermetic — otherwise it silently
-    depends on whatever venv the CI runner's `sys.executable` happens to
-    live under (e.g. a uv-managed venv would flip the branch taken)."""
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=False), \
-         patch.object(uninstall_mod, "_installed_via_uv_tool", return_value=False), \
-         patch.object(uninstall_mod, "_is_ephemeral_runner", return_value=False), \
-         patch.object(uninstall_mod.subprocess, "run") as run:
-        result = _run(runner, "--remove-package")
-    assert result.exit_code == 0, result.output
-    # Only cmd_stop (mocked) — no pipx/pip uninstall subprocess fired.
-    run.assert_not_called()
-    assert "not a pipx- or uv-tool-managed venv" in result.output
-    assert "pip uninstall tokenjam" in result.output
-
-
-def test_prompt_offered_when_interactive(runner):
-    """Without --yes, the user is asked whether to also remove the package;
-    answering No leaves it and prints the two-step guidance."""
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=True):
-        # First prompt: confirm delete-all (y). Second: also remove package (n).
-        result = runner.invoke(cmd_uninstall, [], input="y\nn\n")
-    assert result.exit_code == 0, result.output
-    assert "Also remove the tokenjam package now?" in result.output
-    assert "package itself is still installed" in result.output
-
-
-def test_prompt_wording_matches_install_type(runner):
-    """The confirm prompt must describe what actually happens: pipx installs are
-    auto-run, pip/venv installs only get the command printed (#430)."""
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=True):
-        res_pipx = runner.invoke(cmd_uninstall, [], input="y\nn\n")
-    assert "runs pipx uninstall tokenjam" in res_pipx.output
-
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=False):
-        res_pip = runner.invoke(cmd_uninstall, [], input="y\nn\n")
-    assert "prints pip uninstall tokenjam" in res_pip.output
-
-
-def test_remove_package_flag_runs_uv_tool(runner):
-    """--purge (alias for --remove-package) on a uv-tool install runs
-    `uv tool uninstall tokenjam` (#121)."""
+def test_default_removes_package_for_uv_tool_install(runner):
+    """A detected persistent uv-tool install is auto-removed by default."""
     fake = MagicMock(returncode=0, stdout="", stderr="")
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=False), \
-         patch.object(uninstall_mod, "_installed_via_uv_tool", return_value=True), \
-         patch.object(uninstall_mod.shutil, "which", side_effect=lambda c: "/usr/bin/uv" if c == "uv" else None), \
+    with patch.object(uninstall_mod, "_find_persistent_install", return_value=[_UV_TOOL_INSTALL]), \
          patch.object(uninstall_mod.subprocess, "run", return_value=fake) as run:
-        result = _run(runner, "--purge")
+        result = _run(runner)
     assert result.exit_code == 0, result.output
     run.assert_called_once_with(
         ["uv", "tool", "uninstall", "tokenjam"], capture_output=True, text=True
@@ -146,50 +103,117 @@ def test_remove_package_flag_runs_uv_tool(runner):
     assert "uv tool upgrade" not in result.output
 
 
-def test_uv_tool_reinstall_hint(runner):
-    """Non-pipx, uv-tool install: hint is `uv tool uninstall` + `uv tool
-    upgrade` (#121)."""
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=False), \
-         patch.object(uninstall_mod, "_installed_via_uv_tool", return_value=True):
+def test_default_prints_command_for_pip_install(runner):
+    """A detected pip/editable install is never auto-run — only printed
+    (guessing the wrong environment, or nuking a shared/live/editable-dev
+    venv, is worse than a copy-paste)."""
+    with patch.object(uninstall_mod, "_find_persistent_install", return_value=[_PIP_INSTALL]), \
+         patch.object(uninstall_mod.subprocess, "run") as run:
         result = _run(runner)
     assert result.exit_code == 0, result.output
-    assert "uv tool uninstall tokenjam" in result.output
-    assert "uv tool upgrade tokenjam" in result.output
+    run.assert_not_called()
+    assert "not a pipx- or uv-tool-managed venv" in result.output
+    assert "pip uninstall tokenjam" in result.output
 
 
-def test_purge_is_noop_on_ephemeral_runner(runner):
-    """`--purge` on an ephemeral runner (uvx/pipx run — no persistent
-    install) must not attempt any removal; it explains why and exits clean
-    (#121)."""
-    with patch.object(uninstall_mod, "_is_ephemeral_runner", return_value=True), \
+def test_default_noop_when_nothing_persistent_found(runner):
+    """No persistent install anywhere → no package-removal attempt, clean exit."""
+    with patch.object(uninstall_mod, "_find_persistent_install", return_value=[]), \
          patch.object(uninstall_mod.subprocess, "run") as run:
-        result = _run(runner, "--purge")
+        result = _run(runner)
     assert result.exit_code == 0, result.output
     run.assert_not_called()
-    assert "no persistent" in result.output.lower() or "nothing persistent" in result.output.lower()
-    assert "--purge is a no-op here" in result.output
-    # The (inapplicable) "package still installed" two-step must not print.
-    assert "package itself is still installed" not in result.output
+    assert "no persistent tokenjam install found" in result.output.lower()
 
 
-def test_no_purge_prompt_on_ephemeral_runner(runner):
-    """Without --purge/--yes, an ephemeral runner must not ask to remove a
-    package that was never persistently installed (#121)."""
-    with patch.object(uninstall_mod, "_is_ephemeral_runner", return_value=True):
+def test_both_pipx_and_uv_tool_present_removes_both(runner):
+    """If BOTH a pipx and a uv-tool install exist on the machine, `tj
+    uninstall` removes each auto-removable one, not just the first."""
+    fake = MagicMock(returncode=0, stdout="", stderr="")
+    with patch.object(
+        uninstall_mod, "_find_persistent_install",
+        return_value=[_PIPX_INSTALL, _UV_TOOL_INSTALL],
+    ), patch.object(uninstall_mod.subprocess, "run", return_value=fake) as run:
+        result = _run(runner)
+    assert result.exit_code == 0, result.output
+    assert run.call_count == 2
+    run.assert_any_call(
+        ["pipx", "uninstall", "tokenjam"], capture_output=True, text=True
+    )
+    run.assert_any_call(
+        ["uv", "tool", "uninstall", "tokenjam"], capture_output=True, text=True
+    )
+
+
+# -- Honest confirm prompt (Greptile P1 on #443) -----------------------------
+#
+# Detection now runs BEFORE the prompt is built, and is environment-wide
+# (`_find_persistent_install()`), not based on the current process. Before
+# this fix, `npx tokenjam uninstall` — which always runs `tj` via an
+# ephemeral uvx/pipx-run venv — would introspect ITS OWN `sys.executable`,
+# always conclude "ephemeral, nothing to remove", and both the prompt and
+# the outcome would silently leave a persistent pipx/uv-tool install behind.
+
+
+def test_prompt_promises_removal_when_persistent_pipx_present(runner):
+    """Without --yes: even when the CURRENT process is an ephemeral
+    uvx/pipx-run runner, if `_find_persistent_install()` detects a
+    persistent pipx install elsewhere on the machine, the prompt promises
+    package removal — and answering yes actually removes it."""
+    fake = MagicMock(returncode=0, stdout="", stderr="")
+    with patch.object(uninstall_mod, "_is_ephemeral_runner", return_value=True), \
+         patch.object(uninstall_mod, "_find_persistent_install", return_value=[_PIPX_INSTALL]), \
+         patch.object(uninstall_mod.subprocess, "run", return_value=fake) as run:
         result = runner.invoke(cmd_uninstall, [], input="y\n")
     assert result.exit_code == 0, result.output
-    assert "Also remove the tokenjam package now?" not in result.output
-    assert "nothing persistent to remove" in result.output.lower()
+    assert "uninstall the tokenjam package (via pipx)" in result.output
+    run.assert_called_once()
+    assert "tokenjam package removed" in result.output
+
+
+def test_prompt_does_not_mention_package_when_nothing_persistent(runner):
+    """Without --yes: if nothing persistent is found anywhere, the prompt
+    must NOT claim it will remove a package — only config/daemon/wiring."""
+    with patch.object(uninstall_mod, "_find_persistent_install", return_value=[]), \
+         patch.object(uninstall_mod.subprocess, "run") as run:
+        result = runner.invoke(cmd_uninstall, [], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "uninstall the tokenjam package" not in result.output
+    assert "config, telemetry history" in result.output
+    run.assert_not_called()
+
+
+def test_prompt_wording_for_pip_install_defers_to_shown_command(runner):
+    """Without --yes: a pip/editable install's prompt says the command will
+    be shown after (never auto-run), instead of claiming an automatic
+    removal."""
+    with patch.object(uninstall_mod, "_find_persistent_install", return_value=[_PIP_INSTALL]), \
+         patch.object(uninstall_mod.subprocess, "run") as run:
+        result = runner.invoke(cmd_uninstall, [], input="y\n")
+    assert result.exit_code == 0, result.output
+    assert "will need `pip uninstall tokenjam` (shown after)" in result.output
+    run.assert_not_called()
+    assert "pip uninstall tokenjam" in result.output
+
+
+def test_declining_confirm_cancels_everything(runner):
+    """Declining the single prompt cancels the whole operation — no teardown,
+    no package removal attempted."""
+    with patch.object(uninstall_mod, "_find_persistent_install", return_value=[_PIPX_INSTALL]), \
+         patch.object(uninstall_mod.subprocess, "run") as run:
+        result = runner.invoke(cmd_uninstall, [], input="n\n")
+    assert result.exit_code == 0, result.output
+    assert "Cancelled" in result.output
+    run.assert_not_called()
 
 
 def test_pipx_uninstall_failure_falls_back_to_manual(runner):
     """If pipx uninstall fails, we surface the error and the manual command
     rather than claiming success."""
     fake = MagicMock(returncode=1, stdout="", stderr="boom")
-    with patch.object(uninstall_mod, "_installed_via_pipx", return_value=True), \
-         patch.object(uninstall_mod.shutil, "which", side_effect=lambda c: "/usr/bin/pipx" if c == "pipx" else None), \
+    with patch.object(uninstall_mod, "_find_persistent_install", return_value=[_PIPX_INSTALL]), \
          patch.object(uninstall_mod.subprocess, "run", return_value=fake):
-        result = _run(runner, "--remove-package")
+        result = _run(runner)
     assert result.exit_code == 0, result.output
     assert "Could not remove the package automatically" in result.output
     assert "pipx uninstall tokenjam" in result.output

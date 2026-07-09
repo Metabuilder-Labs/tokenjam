@@ -443,9 +443,22 @@ tj stop
 
 ### `tj uninstall`
 
-Remove all TokenJam data, config, daemon, MCP registration, and env vars.
+Full removal: all TokenJam data, config, daemon, MCP registration, and env vars — AND the `tokenjam`
+package itself (pipx/uv-tool installs are removed automatically; a plain pip/venv install gets the
+exact `pip uninstall` command printed instead of a guess). The symmetric counterpart to `tj onboard`.
 
 ```bash
 tj uninstall          # interactive confirmation
 tj uninstall --yes    # skip confirmation
+```
+
+### `tj reset`
+
+Config-only teardown — the same wiring/config cleanup as `tj uninstall` above, but leaves the
+`tokenjam` package installed so `tj onboard` works again without reinstalling. Use this to reconfigure
+or pause TokenJam.
+
+```bash
+tj reset          # interactive confirmation
+tj reset --yes    # skip confirmation
 ```
