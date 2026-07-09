@@ -206,7 +206,13 @@ def test_quickstart_reclaim_section_is_aggregate_not_named_sessions(tmp_path):
     assert result.exit_code == 0, result.output
     # The old per-session list (and its heading) is gone entirely.
     assert "Biggest reclaim opportunities" not in result.output
-    assert "sess-heavy" not in result.output
+    # The aggregate reclaim line inside the quota-composition panel never
+    # names a session (#119). Scope this to the panel itself: the SEPARATE
+    # statusline live preview section (#438) legitimately names one session
+    # as a concrete "what you'd have seen live" example — a whole-output
+    # check would false-positive against that unrelated, later section.
+    panel_text = result.output.split("With the statusline installed")[0]
+    assert "sess-heavy" not in panel_text
     # An aggregate line takes its place — no named session, live-signal framing.
     assert "ran context-heavy enough to warrant a mid-session" in normalized
     assert "/compact" in normalized
