@@ -6,9 +6,10 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.backfill_progress import backfill_progress
 from tokenjam.core.backfill import (
     CLAUDE_CODE_PROJECTS_ROOT,
-    BackfillResult,
+    count_claude_code_sessions_in_scope,
     ingest_claude_code,
 )
 from tokenjam.core.ingest_adapters.codex import (
@@ -71,30 +72,17 @@ def claude_code(ctx: click.Context, root_path: str | None, since_value: str | No
             raise click.BadParameter("amount must be > 0", param_hint="'--since-days'")
         since = utcnow() - timedelta(days=since_days)
 
-    state = {"last_print": 0}
-
-    def progress(parsed, result: BackfillResult) -> None:
-        if quiet:
-            return
-        if result.sessions_seen - state["last_print"] >= 1:
-            console.print(
-                f"  [dim]({result.conversations_seen} conversations, "
-                f"{result.spans_ingested} new spans, "
-                f"{format_cost(result.total_cost_usd)} total)[/dim]",
-                end="\r",
-            )
-            state["last_print"] = result.sessions_seen
+    # Cheap pre-count (stat() only, no parsing) so the shared progress counter
+    # can show "N/total" rather than a bare running count (#443).
+    total_in_scope = count_claude_code_sessions_in_scope(root=root, since=since)
 
     console.print(f"Backfilling Claude Code sessions from {root} …")
     # Pass config so backfilled sessions carry the declared plan tier (#176).
-    result = ingest_claude_code(
-        db, root=root, since=since, progress=progress,
-        config=ctx.obj.get("config"), reingest=reingest,
-    )
-
-    if not quiet:
-        # Clear the carriage-return line
-        console.print(" " * 80, end="\r")
+    with backfill_progress(total_in_scope, quiet=quiet) as progress:
+        result = ingest_claude_code(
+            db, root=root, since=since, progress=progress,
+            config=ctx.obj.get("config"), reingest=reingest,
+        )
 
     if result.sessions_seen == 0:
         console.print(
