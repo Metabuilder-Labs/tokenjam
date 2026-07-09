@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from click.testing import CliRunner
@@ -1767,6 +1767,90 @@ def test_onboard_claude_code_wrapper_writes_bashrc_when_present(runner, tmp_path
     bashrc_text = bashrc.read_text()
     assert "# existing bashrc" in bashrc_text  # preserved
     assert "claude() {" in bashrc_text
+
+
+# -- onboard --claude-code zshrc OTEL block: sentinel + replace-all (#118) --
+
+def test_onboard_claude_code_replaces_legacy_zshrc_otel_markers(runner, tmp_path):
+    """A ~/.zshrc carrying BOTH an old-marker block (pre-rebrand
+    "# ocw harness observability") and a current-marker block
+    ("# tj harness observability") — the exact shape reported in #118 — ends
+    up with exactly ONE managed block after onboard, not three."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+    zshrc.write_text(
+        "# my own env\nexport FOO=bar\n\n"
+        "# ocw harness observability\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        "export OTEL_LOGS_EXPORTER=otlp\n"
+        "export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:7391\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-ocw-token"\n'
+        "\n"
+        "# tj harness observability\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        "export OTEL_LOGS_EXPORTER=otlp\n"
+        "export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
+        "export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:7391\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-tj-token"\n'
+    )
+
+    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
+        result = runner.invoke(cli, [
+            "onboard", "--claude-code", "--no-daemon", "--budget", "5.0",
+            "--plan", "max_20x", "--project", "aquanode",
+        ])
+
+    assert result.exit_code == 0, result.output
+    text = zshrc.read_text()
+    assert text.count("harness observability") == 0  # both legacy markers gone
+    assert text.count(">>> tokenjam OTEL (managed) >>>") == 1  # exactly one block
+    assert "stale-ocw-token" not in text
+    assert "stale-tj-token" not in text
+    assert "export FOO=bar" in text  # user's own content preserved
+
+
+def test_uninstall_removes_legacy_and_current_zshrc_otel_blocks(runner, tmp_path, monkeypatch):
+    """`tj uninstall` strips every managed OTEL block from ~/.zshrc — the
+    current sentinel-delimited block AND any legacy marker left over from an
+    older install — leaving zero tj OTEL exports (#118)."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    zshrc = fake_home / ".zshrc"
+    zshrc.write_text(
+        "# my own env\nexport FOO=bar\n\n"
+        "# ocw harness observability\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-ocw-token"\n'
+        "\n"
+        "# tj harness observability\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-tj-token"\n'
+        "\n"
+        "# >>> tokenjam OTEL (managed) >>>\n"
+        "export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer current-token"\n'
+        "# <<< tokenjam OTEL <<<\n"
+    )
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.chdir(tmp_path)
+    # Never poke a real running daemon (SIGTERM via pgrep) or shell out to the
+    # real `claude` CLI's MCP deregister — same isolation as test_cli_uninstall.py.
+    monkeypatch.setattr("tokenjam.cli.cmd_stop.cmd_stop", MagicMock())
+    monkeypatch.setattr("tokenjam.cli.cmd_uninstall.shutil.which", lambda _name: None)
+
+    result = runner.invoke(cli, ["uninstall", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    text = zshrc.read_text()
+    assert "harness observability" not in text
+    assert ">>> tokenjam OTEL (managed) >>>" not in text
+    assert "OTEL_EXPORTER_OTLP_HEADERS" not in text
+    assert "export FOO=bar" in text  # user's own content preserved
 
 
 # -- session-end tests --

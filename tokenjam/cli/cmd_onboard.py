@@ -911,6 +911,67 @@ def _print_statusline_status(status: str) -> None:
         )
 
 
+# --- zshrc OTEL export block (harness observability) ----------------------
+# Installed into ~/.zshrc so harness (Docker) sessions pick up the OTLP env
+# vars automatically. Delimited by a STABLE, content-based sentinel pair that
+# is never renamed — earlier revisions keyed on a bare single-line comment
+# marker instead ("# ocw harness observability" pre-rebrand, then "# tj
+# harness observability" after), so a block written under an older marker was
+# invisible to both re-onboard's replace-in-place and `tj uninstall`'s
+# removal. Consequence: a real ~/.zshrc could carry BOTH an old-marker block
+# and a new-marker block, each with a different bearer token — re-onboard
+# APPENDED a second block instead of replacing the first (stale secrets
+# accumulate in the user's shell rc), and uninstall only removed the current
+# marker's block, leaving the old one behind (#118). onboard now strips ALL
+# managed blocks (current sentinel + every legacy marker) before writing
+# exactly one fresh block; uninstall strips the same set.
+
+_ZSHRC_OTEL_START = "# >>> tokenjam OTEL (managed) >>>"
+_ZSHRC_OTEL_END = "# <<< tokenjam OTEL <<<"
+# Legacy single-line markers used before the sentinel pair (pre-#118): each
+# preceded a run of `export ...` lines with no closing delimiter.
+_ZSHRC_OTEL_LEGACY_MARKERS = (
+    "# tj harness observability",
+    "# ocw harness observability",
+)
+
+
+def _zshrc_otel_block(port: int, secret: str) -> str:
+    """Build one fresh sentinel-delimited OTEL export block for ~/.zshrc."""
+    return (
+        f"{_ZSHRC_OTEL_START}\n"
+        f"export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
+        f"export OTEL_LOGS_EXPORTER=otlp\n"
+        f"export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
+        f"export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:{port}\n"
+        f'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer {secret}"\n'
+        f"{_ZSHRC_OTEL_END}\n"
+    )
+
+
+def _strip_zshrc_otel_blocks(text: str) -> str:
+    """Remove every tj-managed OTEL block from ~/.zshrc content — the current
+    sentinel-delimited block AND any legacy single-marker block, however many
+    accumulated. Shared by onboard (replace-all before writing one fresh
+    block) and uninstall (removal only). Idempotent: text with no managed
+    blocks is returned unchanged."""
+    import re as _re
+
+    cleaned = _re.sub(
+        rf"{_re.escape(_ZSHRC_OTEL_START)}\n.*?{_re.escape(_ZSHRC_OTEL_END)}\n",
+        "",
+        text,
+        flags=_re.DOTALL,
+    )
+    for marker in _ZSHRC_OTEL_LEGACY_MARKERS:
+        cleaned = _re.sub(
+            rf"{_re.escape(marker)}\n(?:export [^\n]+\n)*",
+            "",
+            cleaned,
+        )
+    return cleaned
+
+
 def _onboard_claude_code(
     ctx: click.Context,
     budget: float | None,
@@ -1242,28 +1303,17 @@ def _onboard_claude_code(
     # Native Claude Code uses settings.json (127.0.0.1) written above instead.
     zshrc = Path.home() / ".zshrc"
     zshrc.touch(exist_ok=True)
-    marker = "# tj harness observability"
     zshrc_text = zshrc.read_text()
-    new_block = (
-        f"\n{marker}\n"
-        f"export CLAUDE_CODE_ENABLE_TELEMETRY=1\n"
-        f"export OTEL_LOGS_EXPORTER=otlp\n"
-        f"export OTEL_EXPORTER_OTLP_PROTOCOL=http/json\n"
-        f"export OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:{port}\n"
-        f'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer {secret}"\n'
-    )
-    if marker not in zshrc_text:
-        with zshrc.open("a") as f:
-            f.write(new_block)
-    else:
-        # Marker already present — replace the entire block to keep the secret in sync.
-        import re as _re
-        updated = _re.sub(
-            r"# tj harness observability\n(?:export [^\n]+\n)*",
-            new_block.lstrip("\n"),
-            zshrc_text,
-        )
-        zshrc.write_text(updated)
+    # Replace-all (#118): strip every managed block — current sentinel AND any
+    # legacy marker left over from a pre-rebrand or pre-sentinel install —
+    # then write exactly one fresh block. A bare `not in` check on a single
+    # marker string missed blocks written under an older marker, so re-onboard
+    # would append a second block with a stale bearer token instead of
+    # replacing it.
+    stripped = _strip_zshrc_otel_blocks(zshrc_text)
+    new_block = _zshrc_otel_block(port, secret)
+    updated = (stripped.rstrip("\n") + "\n\n" + new_block) if stripped.strip() else new_block
+    zshrc.write_text(updated)
 
     # --- Per-terminal naming: install the `claude` shell wrapper ---
     # Tags each terminal with a distinct service.instance.id so concurrent
