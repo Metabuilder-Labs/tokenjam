@@ -286,7 +286,7 @@ def _render(diag, timeline, *, since: str,
                   "and the zero-token statusline:", style="dim")
     console.print(deeper)
     console.print()
-    console.print(Text("  pipx install tokenjam && tj onboard", style="bold cyan"))
+    console.print(Text("  npx tokenjam onboard", style="bold cyan"))
     console.print()
     console.print(Text(
         "  tj onboard also gives you a local web dashboard of all this "
