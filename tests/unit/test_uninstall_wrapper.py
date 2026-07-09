@@ -126,6 +126,11 @@ def test_uninstall_cli_removes_wrapper_and_cap_hook(tmp_path, monkeypatch):
     monkeypatch.setattr("pathlib.Path.home", lambda: home)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("tokenjam.cli.cmd_stop.cmd_stop", MagicMock())
+    # `_find_persistent_install()`'s dir-probe fallback reads these directly
+    # (not via Path.home()) — unset so a real PIPX_HOME/XDG_DATA_HOME on the
+    # dev/CI machine can't leak into this test's package-removal step.
+    monkeypatch.delenv("PIPX_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
 
     # Seed a fixture ~/.zshrc as `tj onboard --claude-code` would leave it:
     # the OTEL harness-observability block, then the claude() wrapper.
