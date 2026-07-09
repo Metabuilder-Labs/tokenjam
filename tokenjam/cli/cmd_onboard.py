@@ -920,8 +920,16 @@ def _onboard_claude_code(
     plan_override: str | None = None,
     project_override: str | None = None,
     verify: bool = False,
+    standalone: bool = True,
 ) -> None:
-    """Configure Claude Code to send telemetry to tj."""
+    """Configure Claude Code to send telemetry to tj.
+
+    ``standalone`` is True on the single-path flow (`tj onboard --claude-code`)
+    and False when this runs as one leg of the combination flow (#432). On the
+    combination path the closing home banner must print exactly once, at the end
+    of `_onboard_combination` — so we suppress it here when not standalone. The
+    inline Claude Code backfill still runs (it is only ever invoked from here).
+    """
     from tokenjam.core.config import (
         AgentConfig, BudgetConfig, ProviderBudget, TjConfig, SecurityConfig,
         load_config, write_config,
@@ -1361,12 +1369,14 @@ def _onboard_claude_code(
     # Shared closing banner (#448): every onboard path ends on the branded home
     # screen + tailored next-best-actions. For Claude Code the success signal is
     # the backfill ("N sessions backfilled"), NOT a live span — the log parse
-    # already ran above.
-    _print_setup_complete_home(
-        sessions_backfilled=backfill_sessions_total,
-        has_data=backfill_has_data,
-        days=backfill_days,
-    )
+    # already ran above. On the combination path this is deferred to
+    # `_onboard_combination` so the banner prints exactly once (#432).
+    if standalone:
+        _print_setup_complete_home(
+            sessions_backfilled=backfill_sessions_total,
+            has_data=backfill_has_data,
+            days=backfill_days,
+        )
 
 
 def _onboard_codex(
@@ -1377,8 +1387,18 @@ def _onboard_codex(
     reconfigure: bool = False,
     plan_override: str | None = None,
     verify: bool = False,
+    standalone: bool = True,
 ) -> None:
-    """Configure Codex CLI to send telemetry to tj."""
+    """Configure Codex CLI to send telemetry to tj.
+
+    ``standalone`` is True on the single-path flow (`tj onboard --codex`) and
+    False when this runs as one leg of the combination flow (#432). When not
+    standalone we skip BOTH the internal Codex backfill and the closing home
+    banner: `_onboard_combination` runs the Codex backfill exactly once itself
+    and prints the banner exactly once at the very end. Running the backfill
+    here too would double-run it, and printing the banner here would show it up
+    to three times.
+    """
     try:
         import tomllib  # type: ignore[import]
     except ImportError:
@@ -1550,9 +1570,13 @@ def _onboard_codex(
             )
         # Even on the "already configured" fast path, attempt a defensive Codex
         # backfill so re-onboarding picks up any newly-written on-disk logs (#448).
-        cx_msg, cx_has, cx_total = _try_backfill_codex(config)
-        if cx_msg:
-            console.print(f"  Backfilled:          {cx_msg}")
+        # On the combination path the backfill is run once by the caller, so skip
+        # it here to avoid double-running (#432).
+        cx_has, cx_total = False, 0
+        if standalone:
+            cx_msg, cx_has, cx_total = _try_backfill_codex(config)
+            if cx_msg:
+                console.print(f"  Backfilled:          {cx_msg}")
         _finish_onboard_serve(
             str(config_path.resolve()),
             want_daemon=not no_daemon,
@@ -1563,9 +1587,10 @@ def _onboard_codex(
             force=force,
         )
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=no_daemon)
-        _print_setup_complete_home(
-            sessions_backfilled=cx_total, has_data=cx_has,
-        )
+        if standalone:
+            _print_setup_complete_home(
+                sessions_backfilled=cx_total, has_data=cx_has,
+            )
         return
 
     otel_block = _codex_otel_toml_block(port, secret, agent_id)
@@ -1590,8 +1615,14 @@ def _onboard_codex(
     # defensively — if the adapter hasn't landed yet, we fall back to
     # forward-only framing rather than claiming a backfill that didn't happen
     # (honesty discipline, Rule 14). Run before daemon install so a freshly
-    # started serve doesn't hold the DuckDB write lock (#71).
-    codex_backfill_msg, codex_has_data, codex_sessions_total = _try_backfill_codex(config)
+    # started serve doesn't hold the DuckDB write lock (#71). On the combination
+    # path the caller runs this backfill exactly once, so skip it here (#432).
+    codex_backfill_msg: str | None = None
+    codex_has_data, codex_sessions_total = False, 0
+    if standalone:
+        codex_backfill_msg, codex_has_data, codex_sessions_total = (
+            _try_backfill_codex(config)
+        )
 
     # --- Install / restart serve after DB writes ---
     _finish_onboard_serve(
@@ -1658,11 +1689,13 @@ def _onboard_codex(
 
     _maybe_verify_onboarding(config, persona="codex", verify=verify)
 
-    # Shared closing banner (#448).
-    _print_setup_complete_home(
-        sessions_backfilled=codex_sessions_total,
-        has_data=codex_has_data,
-    )
+    # Shared closing banner (#448). On the combination path this is deferred to
+    # `_onboard_combination` so the banner prints exactly once (#432).
+    if standalone:
+        _print_setup_complete_home(
+            sessions_backfilled=codex_sessions_total,
+            has_data=codex_has_data,
+        )
 
 
 def _onboard_combination(
@@ -1710,7 +1743,7 @@ def _onboard_combination(
         _onboard_claude_code(
             ctx, budget, no_daemon, force, reconfigure=False,
             plan_override=plan_override, project_override=project_override,
-            verify=False,
+            verify=False, standalone=False,
         )
         done.append("Claude Code")
 
@@ -1720,10 +1753,11 @@ def _onboard_combination(
         console.print("[bold]Setting up Codex…[/bold]")
         _onboard_codex(
             ctx, budget, no_daemon, force, reconfigure=False,
-            plan_override=plan_override, verify=False,
+            plan_override=plan_override, verify=False, standalone=False,
         )
-        # The per-Codex onboarder is forward-only (no backfill of its own); try
-        # the on-disk Codex backfill defensively so combination reports it too.
+        # Run the on-disk Codex backfill exactly once here. Passing
+        # standalone=False above suppressed the per-path onboarder's own backfill
+        # so it doesn't double-run (#432).
         try:
             from tokenjam.core.config import load_config as _lc
             global_path = Path.home() / ".config" / "tj" / "config.toml"

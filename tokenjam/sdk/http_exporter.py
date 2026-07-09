@@ -29,8 +29,10 @@ class TjHttpExporter(SpanExporter):
         # is even sent, so the span export fails outright (#: `tj ping`
         # reported "emitted … but not confirmed received"). Omitting the
         # header lets the request go out; if tj serve requires auth it 401s,
-        # which is handled gracefully in export() below.
-        if self._ingest_secret:
+        # which is handled gracefully in export() below. A blank / whitespace-only
+        # secret is treated as absent — otherwise "Bearer  " (a stray space) is
+        # the same illegal header value (#431).
+        if self._ingest_secret.strip():
             self._headers["Authorization"] = f"Bearer {self._ingest_secret}"
         # Cumulative count of spans dropped on auth failure. Exposed so
         # `tj doctor` can surface this in a future enhancement (#68 §2).
