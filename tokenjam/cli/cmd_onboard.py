@@ -431,15 +431,9 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         _run_verify_only(ctx, claude_code=claude_code, codex=codex)
         return
     if backfill_days is not None and backfill_all:
-        console.print(
-            "[red]Use either --backfill-days or --backfill-all, not both.[/red]"
-        )
-        ctx.exit(1)
-        return
+        raise click.UsageError("Use either --backfill-days or --backfill-all, not both.")
     if backfill_days is not None and backfill_days <= 0:
-        console.print("[red]--backfill-days must be > 0.[/red]")
-        ctx.exit(1)
-        return
+        raise click.UsageError("--backfill-days must be > 0.")
     # Ephemeral-runner guard (#120): onboard below wires a daemon + Claude Code
     # statusline that both invoke `tj` after this process exits. Under
     # `uvx --from tokenjam tj onboard` / `pipx run --spec tokenjam tj onboard`

@@ -47,7 +47,10 @@ def backfill_progress(total: int | None, *, quiet: bool = False) -> Iterator[Pro
     tokens_seen = 0
 
     def _line(result: BackfillResult) -> str:
-        count = f"{result.sessions_seen:,}/{total:,}" if total else f"{result.sessions_seen:,}"
+        count = (
+            f"{result.sessions_seen:,}/{total:,}" if total is not None
+            else f"{result.sessions_seen:,}"
+        )
         return f"Backfilling {count} sessions · {format_tokens(tokens_seen)} tokens read"
 
     def _accumulate(parsed: ParsedSession) -> None:
