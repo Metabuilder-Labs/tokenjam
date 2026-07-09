@@ -23,9 +23,10 @@ fallback — this seam makes that split explicit at one choke point
 """
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, TypeVar, runtime_checkable
 
 import click
+import httpx
 
 from tokenjam.core.context_diagnostic import (
     ContextDiagnostic,
@@ -124,6 +125,13 @@ class ServeDataAccess:
     The daemon owns the direct connection, so it computes the diagnostic / audit
     server-side and returns the serialized dataclass + a ``framing`` block; this
     reconstructs both so the command renders exactly as the direct path would.
+
+    The daemon can crash, restart, or time out mid-command, and the fetchers
+    ``raise_for_status`` on a 5xx — so every call runs through
+    :func:`_through_serve`, which turns any transport or malformed-payload error
+    into a clean, actionable :class:`click.ClickException` rather than letting an
+    ``httpx`` traceback escape to the user (the guard the old bespoke serve path
+    had, restored at the seam).
     """
 
     def __init__(self, db: Any) -> None:
@@ -132,14 +140,52 @@ class ServeDataAccess:
     def context_diagnostic(
         self, *, since: str, agent_id: str | None,
     ) -> tuple[ContextDiagnostic, Framing]:
-        payload = self._db.fetch_context_diagnostic(since=since, agent_id=agent_id)
-        return diagnostic_from_dict(payload), _framing_from_payload(payload)
+        def build() -> tuple[ContextDiagnostic, Framing]:
+            payload = self._db.fetch_context_diagnostic(since=since, agent_id=agent_id)
+            return diagnostic_from_dict(payload), _framing_from_payload(payload)
+        return _through_serve("context diagnostic", build)
 
     def quota_audit(
         self, *, since: str, agent_id: str | None,
     ) -> tuple[OpusQuotaAudit, Framing]:
-        payload = self._db.fetch_opus_quota_audit(since=since, agent_id=agent_id)
-        return audit_from_dict(payload), _framing_from_payload(payload)
+        def build() -> tuple[OpusQuotaAudit, Framing]:
+            payload = self._db.fetch_opus_quota_audit(since=since, agent_id=agent_id)
+            return audit_from_dict(payload), _framing_from_payload(payload)
+        return _through_serve("Opus quota audit", build)
+
+
+_T = TypeVar("_T")
+
+
+def _through_serve(what: str, build: Callable[[], _T]) -> _T:
+    """Run a serve-backed fetch+reconstruct, mapping failures to ClickException.
+
+    Catches the ``httpx`` error family (connection refused / timeout / 5xx via
+    ``raise_for_status``) and malformed-payload errors from the reconstruction
+    (bad JSON, unexpected shape) — the ways a daemon that dies, restarts, or
+    version-skews mid-command surfaces — and re-raises a single actionable error
+    instead of a raw traceback.
+    """
+    try:
+        return build()
+    except httpx.HTTPError as exc:
+        raise click.ClickException(
+            f"tj serve stopped responding while fetching the {what} "
+            f"({_cause(exc)}). Check `tj status` or restart the daemon, or stop "
+            f"it (`tj stop`) to run directly against the database."
+        ) from exc
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+        raise click.ClickException(
+            f"tj serve returned an unreadable {what} response ({_cause(exc)}). "
+            f"The daemon may be a different version — restart it, or stop it "
+            f"(`tj stop`) to run directly against the database."
+        ) from exc
+
+
+def _cause(exc: Exception) -> str:
+    """A short human cause string for an error message (type + message)."""
+    text = str(exc).strip()
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
 
 
 def _direct_framing(
