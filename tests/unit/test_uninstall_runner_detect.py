@@ -46,9 +46,10 @@ def test_plain_pip_venv_is_neither_pipx_uv_tool_nor_ephemeral():
 
 def test_uv_managed_python_runtime_is_not_ephemeral():
     """A `pip install`-into-a-uv-managed-Python setup must NOT be classified
-    as ephemeral — that previously caused `tj uninstall --purge` to silently
-    no-op for these users (the `/uv/` substring check also matched uv's
-    managed *Python runtime* paths, not just its throwaway cache venvs).
+    as ephemeral — that previously caused `tj uninstall`'s package-removal
+    step to silently no-op for these users (the `/uv/` substring check also
+    matched uv's managed *Python runtime* paths, not just its throwaway
+    cache venvs).
     """
     with _exe(
         "/Users/x/.local/share/uv/python/cpython-3.12.4-macos-aarch64-none/"

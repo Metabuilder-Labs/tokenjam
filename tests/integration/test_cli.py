@@ -1869,6 +1869,10 @@ def test_uninstall_removes_legacy_and_current_zshrc_otel_blocks(runner, tmp_path
     # real `claude` CLI's MCP deregister — same isolation as test_cli_uninstall.py.
     monkeypatch.setattr("tokenjam.cli.cmd_stop.cmd_stop", MagicMock())
     monkeypatch.setattr("tokenjam.cli.cmd_uninstall.shutil.which", lambda _name: None)
+    # `_find_persistent_install()`'s dir-probe fallback reads these directly
+    # (not via $HOME) — unset so a real PIPX_HOME/XDG_DATA_HOME can't leak in.
+    monkeypatch.delenv("PIPX_HOME", raising=False)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
 
     result = runner.invoke(cli, ["uninstall", "--yes"])
 

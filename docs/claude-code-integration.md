@@ -109,37 +109,41 @@ See **[docs/agent-capability-matrix.md](agent-capability-matrix.md)** for the fu
 Codex vs. Python SDK vs. OTLP capability breakdown, including the backfill/statusline parity
 investigation.
 
-## Uninstalling
+## Uninstalling (and resetting)
 
 Set up and remove are a symmetric one-command pair:
 
 ```bash
 npx tokenjam onboard --claude-code   # one paste to set up
-npx tokenjam uninstall [--purge]     # one paste to remove
+npx tokenjam uninstall               # one paste to remove — config AND the package
 ```
 
-`npx tokenjam uninstall` (equivalently `tj uninstall` if you have a persistent install on PATH) cleans
-up everything set by `tj onboard --claude-code`:
+`npx tokenjam uninstall` (equivalently `tj uninstall` if you have a persistent install on PATH) does a
+**full removal**: everything set up by `tj onboard --claude-code`, plus the `tokenjam` package itself.
+It cleans up:
 - Stops and removes the background daemon (launchd/systemd)
 - Deregisters the MCP server from Claude Code
 - Deletes `~/.tj/` (telemetry database)
 - Deletes `~/.config/tj/` (global config and projects index)
 - Removes OTLP env vars from `~/.claude/settings.json`
 - Removes `OTEL_RESOURCE_ATTRIBUTES` from `.claude/settings.json` in every onboarded project
-- Removes the harness env block from `~/.zshrc`
+- Removes the harness env block from `~/.zshrc`, and the `claude()` shell wrapper
 
-That cleans up onboarding's side effects, but leaves the `tokenjam` package itself installed — pass
-`--purge` to remove it too (or answer "y" to the prompt `tj uninstall` shows when run interactively
-without `--yes`):
+...then removes the package: it detects how you installed and runs the matching removal command —
+`pipx uninstall tokenjam` or `uv tool uninstall tokenjam` are run automatically (both are isolated,
+canonical install paths); a plain `pip`/venv install instead prints the exact `pip uninstall tokenjam`
+command to run yourself (guessing the wrong environment is worse than a copy-paste). If you're running
+via an **ephemeral** runner — `npx tokenjam`'s default `uvx`/`pipx run` fallback, or
+`uvx tokenjam uninstall` directly — there's no persistent package to remove in the first place, so that
+step is a safe no-op that says so; the config/wiring cleanup above still runs either way.
+
+If you just want to **reconfigure or pause** TokenJam — wipe its config/daemon/wiring but keep the CLI
+installed so `tj onboard` works again without reinstalling — use `tj reset` instead:
 
 ```bash
-npx tokenjam uninstall --purge --yes
+npx tokenjam reset --yes
 ```
 
-`--purge` detects how you installed and runs the matching removal command — `pipx uninstall tokenjam`
-or `uv tool uninstall tokenjam` are run automatically (both are isolated, canonical install paths); a
-plain `pip`/venv install instead prints the exact `pip uninstall tokenjam` command to run yourself
-(guessing the wrong environment is worse than a copy-paste). If you're running via an **ephemeral**
-runner — `npx tokenjam`'s default `uvx`/`pipx run` fallback, or `uvx tokenjam uninstall` directly —
-there's no persistent package to remove in the first place, so `--purge` is a safe no-op that says so;
-the onboarding side-effects above are still fully cleaned either way.
+`tj reset` runs the exact same config/wiring teardown as `tj uninstall` above, minus the package-removal
+step. `npx tokenjam reset` and `npx tokenjam uninstall` both work through the wrapper's runner
+passthrough the same way `onboard` does.

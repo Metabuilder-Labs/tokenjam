@@ -542,6 +542,40 @@ def iter_claude_code_sessions(
         yielded += 1
 
 
+def count_claude_code_sessions_in_scope(
+    root: Path | None = None,
+    since: datetime | None = None,
+    max_sessions: int | None = None,
+) -> int:
+    """Cheaply count how many Claude Code session files `ingest_claude_code`
+    would walk for the given `root`/`since`/`max_sessions` — `stat()` calls
+    only, no file is opened or parsed.
+
+    Mirrors `iter_claude_code_sessions`'s file selection (the `since` mtime
+    pre-filter, the `max_sessions` cap) closely enough to size a progress bar
+    or print a heads-up before a potentially slow ingest starts (#443); it is
+    NOT exact (it counts conversation *files*, matching `sessions_seen`, not
+    the post-parse distinct-session count a full ingest reports), but it's
+    the same cheap estimate `tj quickstart`'s first-run cap already accepts.
+    """
+    base = root or CLAUDE_CODE_PROJECTS_ROOT
+    if not base.exists() or not base.is_dir():
+        return 0
+    paths = list(base.rglob("*.jsonl"))
+    if since is not None:
+        kept = []
+        for p in paths:
+            try:
+                mtime = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                continue
+            if mtime >= since:
+                kept.append(p)
+        paths = kept
+    total = len(paths)
+    return min(total, max_sessions) if max_sessions is not None else total
+
+
 def session_record_from_parsed(
     parsed: ParsedSession, plan_tier: str = "unknown",
 ) -> SessionRecord:
@@ -870,4 +904,5 @@ __all__ = [
     "iter_claude_code_sessions",
     "ingest_claude_code",
     "session_record_from_parsed",
+    "count_claude_code_sessions_in_scope",
 ]
