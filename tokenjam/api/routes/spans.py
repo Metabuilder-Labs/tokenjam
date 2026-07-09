@@ -1,10 +1,7 @@
 """POST /api/v1/spans — OTLP JSON span ingest endpoint."""
 from __future__ import annotations
 
-import gzip
-import json
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -18,43 +15,11 @@ from tokenjam.otel.otlp_parsing import (
     safe_int as _safe_int,        # noqa: F401  (re-exported)
 )
 from tokenjam.utils.ids import new_span_id
+from tokenjam.api.routes._body import read_otlp_body
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-async def _read_otlp_body(request: Request) -> dict[str, Any]:
-    """Return the parsed JSON body, decompressing gzip if needed.
-
-    Decompresses when Content-Encoding: gzip is set, or when the body starts
-    with the gzip magic bytes (\\x1f\\x8b) as a fallback for exporters that
-    compress without setting the header. Raises ValueError on any failure.
-    """
-    raw = await request.body()
-
-    # 1. Honour explicit Content-Encoding header
-    if request.headers.get("content-encoding", "").lower() == "gzip":
-        try:
-            raw = gzip.decompress(raw)
-        except Exception as exc:
-            # gzip.decompress can raise OSError, EOFError, or zlib.error
-            raise ValueError(f"gzip decompression failed: {exc}") from exc
-    # 2. Sniff fallback — gzip magic bytes present but no Content-Encoding header
-    elif raw[:2] == b"\x1f\x8b":
-        try:
-            raw = gzip.decompress(raw)
-        except Exception as exc:
-            # gzip.decompress can raise OSError, EOFError, or zlib.error
-            raise ValueError(
-                f"body appears gzip-compressed but decompression failed: {exc}"
-            ) from exc
-
-    try:
-        return json.loads(raw)  # type: ignore[no-any-return]
-    except Exception as exc:
-        raise ValueError(f"JSON decode failed: {exc}") from exc
-
 
 @router.post("/spans")
 async def ingest_spans(request: Request) -> JSONResponse:
@@ -64,7 +29,7 @@ async def ingest_spans(request: Request) -> JSONResponse:
     Returns 200 even on partial rejection; 400 only if the body is entirely unparseable.
     """
     try:
-        body = await _read_otlp_body(request)
+        body = await read_otlp_body(request)
     except ValueError as exc:
         return JSONResponse(
             status_code=400,

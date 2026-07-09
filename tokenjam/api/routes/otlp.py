@@ -16,7 +16,8 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from tokenjam.api.routes.spans import _read_otlp_body, ingest_spans
+from tokenjam.api.routes.spans import ingest_spans
+from tokenjam.api.routes._body import read_otlp_body
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ async def otlp_logs(request: Request) -> JSONResponse:
     from tokenjam.api.routes.logs import parse_log_records
 
     try:
-        body = await _read_otlp_body(request)
+        body = await read_otlp_body(request)
     except ValueError as exc:
         return JSONResponse(status_code=400, content={"error": f"could not parse OTLP body: {exc}"})
 
