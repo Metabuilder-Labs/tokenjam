@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import sys
@@ -21,51 +20,104 @@ def _installed_via_pipx() -> bool:
     return "pipx/venvs/" in sys.executable.replace("\\", "/")
 
 
+def _installed_via_uv_tool() -> bool:
+    """True when this tj lives in a `uv tool install`-managed venv.
+
+    A persistent uv tool install lives at .../uv/tools/tokenjam/... (verified:
+    `uv tool install cowsay` puts its venv at ~/.local/share/uv/tools/cowsay/).
+    That's distinct from the ephemeral venvs `uvx`/`uv tool run` spin up, which
+    live under uv's *cache* dir instead — see `_is_ephemeral_runner()`.
+    """
+    return "/uv/tools/" in sys.executable.replace("\\", "/")
+
+
+def _is_ephemeral_runner() -> bool:
+    """True when this process is a throwaway venv from `uvx`/`uv tool run` or
+    `pipx run` — there is no persistent tokenjam install to purge.
+
+    Verified empirically: `uvx --from tokenjam tj ...` materializes its venv
+    under uv's cache dir (.../uv/archive-<rev>/<hash>/...), never under
+    .../uv/tools/. `pipx run` lands in the same place when pipx delegates to
+    uv (its default backend whenever uv is on PATH); pipx's own non-uv
+    fallback instead uses its run-cache at .../pipx/.cache/<hash>/.
+
+    Deliberately narrow: matching on a bare "/uv/" substring also caught
+    uv-managed Python *runtimes* (.../uv/python/cpython-.../bin/python3) and
+    uv-tool installs (.../uv/tools/...) — both persistent installs, not
+    ephemeral ones — which silently no-opped `tj uninstall --purge` for
+    those users. Only uv's cache dirs (archive/builds, or the generic
+    .cache/uv/ prefix) count as ephemeral; uv doesn't pin the "archive-v0"
+    suffix forever, so match the prefix rather than the exact revision.
+    """
+    if _installed_via_pipx() or _installed_via_uv_tool():
+        return False
+    exe = sys.executable.replace("\\", "/")
+    if "/uv/python/" in exe or "/uv/tools/" in exe:
+        return False
+    is_uv_cache = "/uv/archive-" in exe or "/uv/builds-" in exe or ".cache/uv/" in exe
+    return is_uv_cache or "/pipx/.cache/" in exe
+
+
 def _package_uninstall_hint() -> str:
     """Return the right uninstall command for how the user installed.
 
-    pipx is the canonical install path (per README and docs/installation.md);
-    otherwise fall back to `pip uninstall` for venv / pip installs.
+    pipx and `uv tool` are both isolated, canonical install paths (per
+    README and docs/installation.md); otherwise fall back to `pip uninstall`
+    for venv / pip installs.
     """
-    return "pipx uninstall tokenjam" if _installed_via_pipx() else "pip uninstall tokenjam"
+    if _installed_via_pipx():
+        return "pipx uninstall tokenjam"
+    if _installed_via_uv_tool():
+        return "uv tool uninstall tokenjam"
+    return "pip uninstall tokenjam"
 
 
 def _package_reinstall_hint() -> str:
     """Return the command that actually reinstalls FRESH.
 
-    A plain `pipx install tokenjam` / `pip install tokenjam` no-ops when the
-    package is already present — the source of the confusing "fresh install"
-    that silently does nothing. Point pipx users at `pipx upgrade` (or
-    `pipx install --force`) and pip users at `pip install --upgrade`.
+    A plain `pipx install tokenjam` / `uv tool install tokenjam` /
+    `pip install tokenjam` no-ops when the package is already present — the
+    source of the confusing "fresh install" that silently does nothing. Point
+    pipx users at `pipx upgrade` (or `pipx install --force`), uv tool users at
+    `uv tool upgrade` (or `uv tool install --force`), and pip users at
+    `pip install --upgrade`.
     """
     if _installed_via_pipx():
         return "pipx upgrade tokenjam  (or: pipx install --force tokenjam)"
+    if _installed_via_uv_tool():
+        return "uv tool upgrade tokenjam  (or: uv tool install --force tokenjam)"
     return "pip install --upgrade tokenjam"
 
 
 def _package_fresh_install_hint() -> str:
     """Return the command that reinstalls after the package was fully removed.
 
-    Once the venv is gone, `pipx upgrade tokenjam` fails ("not installed") — the
-    right command is the plain `pipx install tokenjam` (a fresh install, no venv
-    to upgrade). This is distinct from `_package_reinstall_hint()`, which is only
-    correct while the package REMAINS in place (a plain install would no-op then,
-    so it points at upgrade/--force).
+    Once the venv is gone, `pipx upgrade` / `uv tool upgrade` fail ("not
+    installed") — the right command is the plain install form (a fresh
+    install, no venv to upgrade). This is distinct from
+    `_package_reinstall_hint()`, which is only correct while the package
+    REMAINS in place (a plain install would no-op then, so it points at
+    upgrade/--force).
     """
-    return (
-        "pipx install tokenjam" if _installed_via_pipx()
-        else "pip install tokenjam"
-    )
+    if _installed_via_pipx():
+        return "pipx install tokenjam"
+    if _installed_via_uv_tool():
+        return "uv tool install tokenjam"
+    return "pip install tokenjam"
 
 
 @click.command("uninstall")
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.option(
+    "--purge",
     "--remove-package",
+    "remove_package",
     is_flag=True,
     help="Also remove the tokenjam package: runs the uninstall for "
-    "pipx-managed installs, or prints the command to run for pip/venv "
-    "installs. With --yes, proceeds without a second prompt.",
+    "pipx- or uv-tool-managed installs, or prints the command to run for "
+    "pip/venv installs. A no-op (with an explanation) when running from an "
+    "ephemeral runner (uvx/pipx run) — there's nothing persistent to "
+    "remove. With --yes, proceeds without a second prompt.",
 )
 @click.pass_context
 def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
@@ -164,16 +216,23 @@ def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
                 del env[k]
             if removed:
                 gs["env"] = env
-            # Remove the tj-managed SessionStart resume-brief hook (idempotent,
-            # non-destructive — foreign SessionStart hooks are preserved).
-            from tokenjam.cli.cmd_onboard import _unwire_claude_resume_brief_hook
+            # Remove the tj-managed SessionStart resume-brief hook and the
+            # opt-in PostToolUse output-cap hook (both idempotent,
+            # non-destructive — foreign hooks of either kind are preserved).
+            from tokenjam.cli.cmd_onboard import (
+                _unwire_claude_output_cap_hook,
+                _unwire_claude_resume_brief_hook,
+            )
             hook_removed = _unwire_claude_resume_brief_hook(gs)
-            if removed or hook_removed:
+            cap_removed = _unwire_claude_output_cap_hook(gs)
+            if removed or hook_removed or cap_removed:
                 global_settings_path.write_text(json.dumps(gs, indent=2) + "\n")
             if removed:
                 console.print(f"  Cleaned {len(removed)} TokenJam env vars from {global_settings_path}")
             if hook_removed:
                 console.print(f"  Removed tj resume-brief SessionStart hook from {global_settings_path}")
+            if cap_removed:
+                console.print(f"  Removed tj output-cap PostToolUse hook from {global_settings_path}")
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {global_settings_path}: {exc}[/yellow]")
 
@@ -199,36 +258,65 @@ def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {proj_settings}: {exc}[/yellow]")
 
-    # 11. Remove # tj harness observability block from ~/.zshrc
+    # 11. Remove tj-managed OTEL block(s) from ~/.zshrc — current sentinel AND
+    # any legacy marker (#118), so an install that accumulated blocks under an
+    # older marker (pre-rebrand or pre-sentinel) gets fully cleaned up, not
+    # just the current-marker block.
     zshrc = Path.home() / ".zshrc"
     if zshrc.exists():
         try:
+            from tokenjam.cli.cmd_onboard import _strip_zshrc_otel_blocks
             text = zshrc.read_text()
-            # Match the marker line plus all following export lines (any count)
-            cleaned = re.sub(
-                r"# tj harness observability\n(?:export [^\n]+\n)*",
-                "",
-                text,
-            )
+            cleaned = _strip_zshrc_otel_blocks(text)
             if cleaned != text:
                 zshrc.write_text(cleaned)
                 console.print(f"  Removed TokenJam env block from {zshrc}")
         except Exception as exc:
             console.print(f"  [yellow]Could not clean {zshrc}: {exc}[/yellow]")
 
+    # Remove the `claude()` shell wrapper (`# tj per-terminal naming` ..
+    # `# end tj per-terminal naming`) from ~/.zshrc / ~/.bashrc. This is the
+    # counterpart to `_install_claude_wrapper()` in cmd_onboard.py — without
+    # it, a leftover `claude()` function calls `tj` on every launch, which
+    # errors once the package is removed (#117).
+    from tokenjam.cli.cmd_onboard import _unwire_claude_wrapper
+    try:
+        wrapper_removed = _unwire_claude_wrapper()
+        for rc_path in wrapper_removed:
+            console.print(f"  Removed claude() shell wrapper from {rc_path}")
+    except Exception as exc:
+        console.print(f"  [yellow]Could not clean claude() shell wrapper: {exc}[/yellow]")
+
     console.print()
     console.print("[green]TokenJam data, config, and wiring removed.[/green]")
+
+    # 12. Package removal (#121). `npx tokenjam uninstall` is meant to be the
+    # single symmetric counterpart to `npx tokenjam onboard` — but an
+    # ephemeral runner (uvx/pipx run, incl. via the npx wrapper) has no
+    # persistent package to remove in the first place. Detect that first so
+    # --purge / the prompt never offer to remove something that isn't there.
+    if _is_ephemeral_runner():
+        console.print(
+            "[dim]Running via an ephemeral runner (uvx/pipx run) — "
+            "nothing persistent to remove; onboarding side-effects above are "
+            "already cleaned.[/dim]"
+        )
+        if remove_package:
+            console.print("[dim]--purge is a no-op here.[/dim]")
+        return
+
     console.print("[dim]The tokenjam package itself is still installed.[/dim]")
 
-    # 12. Optionally remove the package too (safe, opt-in, default No).
     uninstall_cmd = _package_uninstall_hint()
     do_remove = remove_package
     if not do_remove and not yes:
-        # pipx installs are auto-run; pip/venv installs only get the command
-        # printed (a wrong `pip uninstall` in the wrong env is worse), so word
-        # the prompt to match what will actually happen (#430).
+        # pipx/uv-tool installs are auto-run; pip/venv installs only get the
+        # command printed (a wrong `pip uninstall` in the wrong env is
+        # worse), so word the prompt to match what will actually happen
+        # (#430).
         prompt_action = (
-            f"runs {uninstall_cmd}" if _installed_via_pipx()
+            f"runs {uninstall_cmd}"
+            if _installed_via_pipx() or _installed_via_uv_tool()
             else f"prints {uninstall_cmd} for you to run"
         )
         do_remove = click.confirm(
@@ -252,40 +340,49 @@ def cmd_uninstall(ctx: click.Context, yes: bool, remove_package: bool) -> None:
     )
 
 
+def _run_auto_uninstall(argv: list[str], uninstall_cmd: str) -> None:
+    """Shared runner for the pipx/uv-tool auto-remove branches: run `argv`,
+    then report success (with the fresh-install hint) or fall back to the
+    manual command on failure."""
+    console.print()
+    console.print(f"Running: [bold]{uninstall_cmd}[/bold]")
+    result = subprocess.run(argv, capture_output=True, text=True)
+    if result.returncode == 0:
+        console.print("[green]tokenjam package removed.[/green]")
+        # The venv is gone now, so upgrade would fail ("not installed") —
+        # point at the plain fresh install, not the upgrade/--force reinstall
+        # hint (#430).
+        console.print(
+            f"  [dim]To reinstall FRESH: {_package_fresh_install_hint()}[/dim]"
+        )
+    else:
+        console.print(
+            f"  [yellow]Could not remove the package automatically: "
+            f"{result.stderr.strip() or result.stdout.strip()}[/yellow]"
+        )
+        console.print(f"  Run manually: [bold]{uninstall_cmd}[/bold]")
+
+
 def _remove_package(uninstall_cmd: str) -> None:
     """Run the package uninstall when we can, else print the exact command.
 
-    Only pipx is auto-run: it's the canonical install path and safe to invoke
-    non-interactively. For pip / venv installs we print the command instead of
-    guessing (a wrong `pip uninstall` in the wrong environment is worse than a
-    copy-paste)."""
+    Only pipx and `uv tool` are auto-run: both are isolated, canonical install
+    paths safe to invoke non-interactively. For pip / venv installs we print
+    the command instead of guessing (a wrong `pip uninstall` in the wrong
+    environment is worse than a copy-paste)."""
     if _installed_via_pipx() and shutil.which("pipx"):
-        console.print()
-        console.print(f"Running: [bold]{uninstall_cmd}[/bold]")
-        result = subprocess.run(
-            ["pipx", "uninstall", "tokenjam"],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0:
-            console.print("[green]tokenjam package removed.[/green]")
-            # The venv is gone now, so `pipx upgrade` would fail — point at the
-            # plain fresh install, not the upgrade/--force reinstall hint (#430).
-            console.print(
-                f"  [dim]To reinstall FRESH: {_package_fresh_install_hint()}[/dim]"
-            )
-        else:
-            console.print(
-                f"  [yellow]Could not remove the package automatically: "
-                f"{result.stderr.strip() or result.stdout.strip()}[/yellow]"
-            )
-            console.print(f"  Run manually: [bold]{uninstall_cmd}[/bold]")
+        _run_auto_uninstall(["pipx", "uninstall", "tokenjam"], uninstall_cmd)
         return
 
-    # Not a pipx install (or pipx missing) — print the right command, don't guess.
+    if _installed_via_uv_tool() and shutil.which("uv"):
+        _run_auto_uninstall(["uv", "tool", "uninstall", "tokenjam"], uninstall_cmd)
+        return
+
+    # Not a pipx/uv-tool install (or the tool binary is missing) — print the
+    # right command, don't guess.
     console.print()
     console.print(
         "  [yellow]Can't safely auto-remove this install "
-        "(not a pipx-managed venv).[/yellow]"
+        "(not a pipx- or uv-tool-managed venv).[/yellow]"
     )
     console.print(f"  Remove the package with: [bold]{uninstall_cmd}[/bold]")

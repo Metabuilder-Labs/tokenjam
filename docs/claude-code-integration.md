@@ -111,15 +111,15 @@ investigation.
 
 ## Uninstalling
 
-```bash
-# Remove all TokenJam data, config, daemon, MCP registration, and env vars from every onboarded project:
-tj uninstall --yes
+Set up and remove are a symmetric one-command pair:
 
-# Then remove the package itself (tj uninstall intentionally skips this):
-pip uninstall tokenjam -y
+```bash
+npx tokenjam onboard --claude-code   # one paste to set up
+npx tokenjam uninstall [--purge]     # one paste to remove
 ```
 
-`tj uninstall` cleans up everything set by `tj onboard --claude-code`:
+`npx tokenjam uninstall` (equivalently `tj uninstall` if you have a persistent install on PATH) cleans
+up everything set by `tj onboard --claude-code`:
 - Stops and removes the background daemon (launchd/systemd)
 - Deregisters the MCP server from Claude Code
 - Deletes `~/.tj/` (telemetry database)
@@ -127,3 +127,19 @@ pip uninstall tokenjam -y
 - Removes OTLP env vars from `~/.claude/settings.json`
 - Removes `OTEL_RESOURCE_ATTRIBUTES` from `.claude/settings.json` in every onboarded project
 - Removes the harness env block from `~/.zshrc`
+
+That cleans up onboarding's side effects, but leaves the `tokenjam` package itself installed — pass
+`--purge` to remove it too (or answer "y" to the prompt `tj uninstall` shows when run interactively
+without `--yes`):
+
+```bash
+npx tokenjam uninstall --purge --yes
+```
+
+`--purge` detects how you installed and runs the matching removal command — `pipx uninstall tokenjam`
+or `uv tool uninstall tokenjam` are run automatically (both are isolated, canonical install paths); a
+plain `pip`/venv install instead prints the exact `pip uninstall tokenjam` command to run yourself
+(guessing the wrong environment is worse than a copy-paste). If you're running via an **ephemeral**
+runner — `npx tokenjam`'s default `uvx`/`pipx run` fallback, or `uvx tokenjam uninstall` directly —
+there's no persistent package to remove in the first place, so `--purge` is a safe no-op that says so;
+the onboarding side-effects above are still fully cleaned either way.
