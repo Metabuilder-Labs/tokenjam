@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from tokenjam.core.backfill import _existing_span_ids
 from tokenjam.core.cost import calculate_cost
 from tokenjam.core.models import (
     NormalizedSpan,
@@ -431,14 +432,20 @@ def ingest_codex(
         seen_session_ids.add(parsed.session_id)
         try:
             inserted = 0
+            # Bulk idempotency (#433): partition the session's spans into
+            # new-vs-existing with ONE chunked `WHERE span_id IN (...)` query
+            # (via the shared `_existing_span_ids` helper the Claude Code path
+            # uses) instead of a SELECT per span. When the backend has no `conn`
+            # (e.g. InMemoryBackend), fall back to plain inserts and let the
+            # PRIMARY KEY conflict skip duplicates.
+            if conn is not None:
+                existing = _existing_span_ids(conn, [s.span_id for s in parsed.spans])
+            else:
+                existing = set()
             for span in parsed.spans:
-                if conn is not None:
-                    existing = conn.execute(
-                        "SELECT 1 FROM spans WHERE span_id = $1", [span.span_id]
-                    ).fetchone()
-                    if existing:
-                        spans_skipped += 1
-                        continue
+                if span.span_id in existing:
+                    spans_skipped += 1
+                    continue
                 try:
                     db.insert_span(span)
                     inserted += 1
