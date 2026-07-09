@@ -30,10 +30,14 @@ share re-derived from the JSONL, never a projected saving.
 """
 from __future__ import annotations
 
+import glob as _glob
 import json as _json
+import re as _re
+from pathlib import Path
 
 import click
 
+from tokenjam.cli.cmd_statusline import REREAD_WARN, format_status_line
 from tokenjam.core.backfill import (
     CLAUDE_CODE_PROJECTS_ROOT,
     ingest_claude_code,
@@ -41,9 +45,12 @@ from tokenjam.core.backfill import (
 from tokenjam.core.context_diagnostic import compute_context_diagnostic
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.session_timeline import (
+    SessionTimeline,
+    TimelineSession,
     compute_session_timeline,
     timeline_to_dict,
 )
+from tokenjam.core.usage import AssistantUsage, iter_cumulative_usage
 from tokenjam.utils.formatting import console, format_cost, format_tokens
 from tokenjam.utils.time_parse import parse_since, utcnow
 
@@ -53,6 +60,12 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 # of sessions) and disclose the cap; `--full` lifts it for the complete picture.
 # ~300 sessions keeps the slowest plausible session shapes comfortably in budget.
 DEFAULT_MAX_SESSIONS = 300
+
+# "Substantial" floor for the statusline live-preview (#120-adjacent): the
+# most-recent session is only worth previewing the nudge on if it actually ran
+# long enough to feel like a real session, not a two-turn smoke test. Below
+# this we fall back to the largest recent session that crossed the threshold.
+PREVIEW_MIN_TURNS = 20
 
 
 @click.command("quickstart")
@@ -120,7 +133,8 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
         return
 
     _render(diag, timeline, since=since,
-            limit_reached=result.limit_reached, max_sessions=max_sessions)
+            limit_reached=result.limit_reached, max_sessions=max_sessions,
+            root=root)
 
 
 # ───────────────────────────── rendering ──────────────────────────────────
@@ -152,7 +166,8 @@ def _render_no_sessions(result, since: str, output_json: bool) -> None:
 
 
 def _render(diag, timeline, *, since: str,
-            limit_reached: bool = False, max_sessions: int | None = None) -> None:
+            limit_reached: bool = False, max_sessions: int | None = None,
+            root: Path | None = None) -> None:
     from rich.console import Group
     from rich.panel import Panel
     from rich.table import Table
@@ -243,6 +258,10 @@ def _render(diag, timeline, *, since: str,
         padding=(1, 2),
     ))
 
+    # ── Statusline live preview (self-contained; omits silently if no
+    # candidate session ever crosses the nudge threshold). ──
+    _render_statusline_preview(timeline, root)
+
     # ── Session timeline. ──
     table = Table(box=box.SIMPLE, show_header=True, header_style="bold dim",
                   title="Session timeline (most recent)", title_justify="left",
@@ -296,3 +315,149 @@ def _bar(value: int, maximum: int, width: int = 16) -> str:
         return ""
     filled = max(1, round(width * value / maximum)) if value > 0 else 0
     return "[cyan]" + ("█" * filled) + "[/cyan]" + ("─" * (width - filled))
+
+
+# ─────────────────────── statusline live preview ───────────────────────────
+#
+# `tj quickstart` is a read-only, one-shot report; `tj statusline` is the live
+# product it upsells (a zero-token Claude Code statusline, updated every turn).
+# This section renders — using the SAME `format_status_line` formatter the
+# live statusline calls — the line the user's own most-recent substantial
+# session would have shown at the exact turn its re-read share crossed the
+# nudge threshold. Forward-looking framing only: it previews the LIVE
+# experience, it is not advice about the (already-ended) session shown.
+
+
+def _display_model_name(raw: str | None) -> str:
+    """Best-effort human display name for a raw transcript `model` id.
+
+    The live statusline gets a ready-made `display_name` from Claude Code's
+    hook payload (see `cmd_statusline._model_name`); this preview only has the
+    raw JSONL `message.model` string (e.g. `claude-opus-4-8-20260115`), so it
+    reconstructs the same "Family X.Y" shape. Falls back to the raw string for
+    shapes it doesn't recognize (e.g. `<synthetic>`).
+    """
+    if not raw:
+        return "?"
+    stripped = _re.sub(r"-\d{8}$", "", raw)  # trailing -YYYYMMDD build stamp
+    m = _re.match(r"^claude-([a-z]+)-([\d-]+)$", stripped)
+    if m:
+        family, version = m.groups()
+        return f"{family.capitalize()} {version.replace('-', '.')}"
+    m = _re.match(r"^claude-([a-z]+)$", stripped)
+    if m:
+        return m.group(1).capitalize()
+    if _re.match(r"^[a-z]+$", stripped):
+        return stripped.capitalize()
+    return raw
+
+
+def _transcript_path_for(session_id: str, root: Path) -> str | None:
+    """Resolve a session id to its on-disk transcript path under `root`.
+
+    Same glob shape as the live statusline's `find_transcript` fallback, but
+    honors quickstart's own `--root` override instead of hardcoding
+    `~/.claude/projects` — quickstart already ingested from `root`, so the
+    preview must look in the same place.
+    """
+    pattern = str(root / "**" / f"{session_id}.jsonl")
+    hits = _glob.glob(pattern, recursive=True)
+    return hits[0] if hits else None
+
+
+class _PreviewCandidate:
+    """One timeline session's preview-selection scoring (see `_select_preview_session`)."""
+
+    __slots__ = ("session", "turns", "crossing")
+
+    def __init__(self, session: TimelineSession, turns: int,
+                 crossing: tuple[int, str | None, AssistantUsage] | None) -> None:
+        self.session = session
+        self.turns = turns
+        self.crossing = crossing
+
+
+def _walk_for_preview(path: str) -> tuple[int, tuple[int, str | None, AssistantUsage] | None]:
+    """Walk one transcript once: return `(total_turns, first_threshold_crossing)`.
+
+    `first_threshold_crossing` is `(turn_index, model, cumulative_usage)` for
+    the first turn whose cumulative re-read %% reaches the live statusline's
+    nudge threshold (`REREAD_WARN`), or None if the session never crosses it.
+    Reuses `core.usage.iter_cumulative_usage` — the exact cumulative walk the
+    live statusline's own numbers are built from — so this can't show a figure
+    the real statusline wouldn't have shown at that point. Never raises: an
+    unreadable transcript degrades to "no candidate" (0, None).
+    """
+    turns = 0
+    crossing: tuple[int, str | None, AssistantUsage] | None = None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for turn_index, model, usage in iter_cumulative_usage(fh):
+                turns = turn_index
+                if crossing is None:
+                    total = usage.total
+                    reread_pct = (100.0 * usage.cache_read_tokens / total) if total else 0.0
+                    if reread_pct >= REREAD_WARN:
+                        crossing = (turn_index, model, usage)
+    except Exception:
+        return 0, None
+    return turns, crossing
+
+
+def _select_preview_session(
+    timeline: SessionTimeline, root: Path,
+) -> _PreviewCandidate | None:
+    """Pick the session to preview: the most-recent substantial session that
+    crossed the nudge threshold; if none is substantial enough, the largest
+    (by turns) that still crossed it; if none ever crossed it, None.
+    """
+    candidates: list[_PreviewCandidate] = []
+    for session in timeline.sessions:  # already most-recent-first
+        path = _transcript_path_for(session.session_id, root)
+        if not path:
+            continue
+        turns, crossing = _walk_for_preview(path)
+        if crossing is not None:
+            candidates.append(_PreviewCandidate(session, turns, crossing))
+
+    if not candidates:
+        return None
+    substantial = [c for c in candidates if c.turns >= PREVIEW_MIN_TURNS]
+    if substantial:
+        return substantial[0]  # most-recent among the substantial ones
+    return max(candidates, key=lambda c: c.turns)
+
+
+def _render_statusline_preview(timeline: SessionTimeline, root: Path | None) -> None:
+    """"What you'd see live" preview section — self-contained; prints nothing
+    when there is no session to preview (no history, no readable transcript,
+    or no session ever crossed the nudge threshold)."""
+    if root is None or not timeline.sessions:
+        return
+
+    from rich.text import Text
+
+    picked = _select_preview_session(timeline, root)
+    if picked is None:
+        return
+
+    turn_index, model_raw, usage = picked.crossing
+    total = usage.total
+    reread_pct = (100.0 * usage.cache_read_tokens / total) if total else 0.0
+    line = format_status_line(_display_model_name(model_raw), total, reread_pct)
+
+    console.print()
+    intro = Text()
+    intro.append("With the statusline installed, ", style="dim")
+    intro.append(f"session {picked.session.session_id[:12]}", style="bold")
+    intro.append(f" would have shown this at turn {turn_index}:", style="dim")
+    console.print(intro)
+    console.print()
+    console.print(Text(f"  {line}", style="bold"))
+    console.print()
+    outro = Text()
+    outro.append("That's live, every turn, for zero model tokens — ", style="dim")
+    outro.append("tj onboard", style="bold cyan")
+    outro.append(" sets it up.", style="dim")
+    console.print(outro)
+    console.print()
