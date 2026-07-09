@@ -848,7 +848,10 @@ def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
 
 
 def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
-    """Budget prompt is shown when --budget is not passed."""
+    """Budget prompt is shown when --budget is not passed, for the `api` plan
+    tier — the only tier with a per-token marginal cost. Subscription tiers
+    (e.g. max_20x) skip this prompt entirely (#128); see
+    test_onboard_claude_code_skips_budget_prompt_for_subscription_plan below."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
@@ -856,13 +859,37 @@ def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
-        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x", "--project", "aquanode"], input="7.0\n")
+        # --plan api skips both the plan-tier prompt and the API-spend-ceiling
+        # prompt (that one only fires without --plan); "7.0\n" answers the
+        # daily-budget prompt.
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "api", "--project", "aquanode"], input="7.0\n")
 
     assert result.exit_code == 0
     assert mock_write.called
     saved_config = mock_write.call_args[0][0]
     agent_id = next(k for k in saved_config.agents if k.startswith("claude-code-"))
     assert saved_config.agents[agent_id].budget.daily_usd == 7.0
+
+
+def test_onboard_claude_code_skips_budget_prompt_for_subscription_plan(runner, tmp_path):
+    """Regression for #128: a subscription plan tier (max_20x) has $0/day
+    marginal cost, so onboard must not ask for a USD daily budget at all —
+    no prompt, no [agents.<id>.budget] daily_usd written."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+
+    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
+         patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
+         patch("tokenjam.core.config.write_config") as mock_write:
+        result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--plan", "max_20x", "--project", "aquanode"])
+
+    assert result.exit_code == 0, result.output
+    assert "Daily budget in USD" not in result.output
+    assert mock_write.called
+    saved_config = mock_write.call_args[0][0]
+    agent_id = next(k for k in saved_config.agents if k.startswith("claude-code-"))
+    assert saved_config.agents[agent_id].budget.daily_usd is None
 
 
 def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):

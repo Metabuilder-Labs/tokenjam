@@ -14,6 +14,7 @@ from rich.markup import escape
 from tokenjam.cli.banner import print_welcome_banner
 from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
 from tokenjam.core.config import find_config_file
+from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
 
 # --- Claude Code backfill scope (#443) ---------------------------------------
@@ -964,12 +965,27 @@ def _print_setup_complete_home(
     print_home()
 
 
-def _prompt_daily_budget(budget: float | None) -> float:
+def _prompt_daily_budget(budget: float | None, plan_tier: str | None) -> float:
     """Prompt for the per-agent daily-budget alert threshold, unless already
-    supplied via --budget. Called AFTER the plan prompt so onboard reads
-    plan-first (#240)."""
+    supplied via --budget or the just-resolved plan tier has no marginal
+    per-token cost. Called AFTER the plan prompt so onboard reads plan-first
+    (#240).
+
+    Gated on plan_tier (#128): flat-rate subscription plans
+    (``SUBSCRIPTION_PLAN_TIERS``) and local inference have a $0/day marginal
+    cost, so asking for a USD budget ceiling right after the user just named
+    their plan contradicts the framing discipline ``core/framing.py`` already
+    applies everywhere else (dollar figures suppressed for those tiers), and
+    the ``[budget.<provider>]`` USD monthly ceiling already skips them by
+    design. Only ``api`` and ``unknown`` get prompted — and ``None`` (no
+    resolved tier, e.g. an existing config with no plan section yet) behaves
+    like ``unknown``: still prompt rather than assume $0. ``--budget`` always
+    wins regardless of tier.
+    """
     if budget is not None:
         return budget
+    if plan_tier is not None and (plan_tier in SUBSCRIPTION_PLAN_TIERS or plan_tier == "local"):
+        return 0.0
     return click.prompt(
         "Daily budget in USD (0 = no limit, default 0)",
         type=float, default=0.0, show_default=False,
@@ -1270,6 +1286,7 @@ def _onboard_claude_code(
             if "anthropic" in config.budgets else None
         )
         plan_changed = False
+        plan = existing_plan
         # Prompt for plan tier when:
         #   - this is a fresh onboard for this agent (no existing plan), or
         #   - the user passed --reconfigure to explicitly re-prompt
@@ -1300,7 +1317,7 @@ def _onboard_claude_code(
                 config.budgets["anthropic"] = ProviderBudget(
                     usd=usd, cycle_start_day=1, plan=plan,
                 )
-        budget = _prompt_daily_budget(budget)
+        budget = _prompt_daily_budget(budget, plan)
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
         config_path = global_config_path
@@ -1321,7 +1338,7 @@ def _onboard_claude_code(
             )
             if ceiling > 0:
                 usd = ceiling
-        budget = _prompt_daily_budget(budget)
+        budget = _prompt_daily_budget(budget, plan)
         daily_usd = budget if budget and budget > 0 else None
         agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd), project=namespace)}
         config = TjConfig(
@@ -1755,6 +1772,7 @@ def _onboard_codex(
             if "openai" in config.budgets else None
         )
         plan_changed = False
+        plan = existing_plan
         if existing_plan is None or reconfigure or plan_override:
             if plan_override:
                 plan = plan_override
@@ -1778,7 +1796,7 @@ def _onboard_codex(
                 config.budgets["openai"] = ProviderBudget(
                     usd=usd, cycle_start_day=1, plan=plan,
                 )
-        budget = _prompt_daily_budget(budget)
+        budget = _prompt_daily_budget(budget, plan)
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
         write_config(config, config_path)
@@ -1798,7 +1816,7 @@ def _onboard_codex(
             )
             if ceiling > 0:
                 usd = ceiling
-        budget = _prompt_daily_budget(budget)
+        budget = _prompt_daily_budget(budget, plan)
         daily_usd = budget if budget and budget > 0 else None
         agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd))}
         config = TjConfig(
