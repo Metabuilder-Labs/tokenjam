@@ -92,13 +92,15 @@ function shouldRefresh() {
   }
 }
 
-// Called only AFTER `uvx --refresh` has actually returned (not before we
-// spawn it). If the refresh's download is interrupted partway through
-// (network drop, Ctrl-C, OOM kill), spawnSync never returns normally, this
-// never runs, and the *next* invocation still sees a stale/missing
-// timestamp and retries `--refresh`. Writing the timestamp up front instead
-// would mark the cache "fresh" the moment we decided to refresh even if
-// that refresh never completed, silently pinning a broken/partial
+// Called only AFTER `uvx --refresh` has actually returned with a zero exit
+// status (not before we spawn it, and not on failure). If the refresh's
+// download is interrupted partway through (network drop, Ctrl-C, OOM kill),
+// spawnSync never returns normally, this never runs. If it returns but uv
+// exits non-zero (PyPI unreachable, partial download), the caller also
+// skips this call. Either way the *next* invocation still sees a
+// stale/missing timestamp and retries `--refresh`. Writing the timestamp up
+// front, or unconditionally on return, would mark the cache "fresh" even
+// though that refresh never completed, silently pinning a broken/partial
 // environment for a full 24h. Best-effort/fail-open: swallow fs errors.
 function markRefreshed() {
   try {
@@ -127,7 +129,7 @@ function main() {
       stdio: "inherit",
     });
     if (result.error) continue; // try the next runner on spawn failure
-    if (doRefresh) markRefreshed();
+    if (doRefresh && result.status === 0) markRefreshed();
     process.exit(result.status === null ? 1 : result.status);
   }
 
