@@ -16,6 +16,22 @@ from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
 from tokenjam.core.config import find_config_file
 from tokenjam.utils.formatting import console, display_path
 
+# --- Claude Code backfill scope (#443) ---------------------------------------
+# `tj onboard --claude-code` used to backfill the ENTIRE on-disk history with
+# no cap and no progress output — on a large `~/.claude/projects` (thousands of
+# JSONL files) that's 10-30+ minutes of silent, 100%-CPU work right after "tj
+# config written to...", indistinguishable from a hang at the exact moment a
+# new user's trust is most fragile. Mirrors `tj quickstart`'s DEFAULT_MAX_SESSIONS
+# cap (#13) but scopes by *time* (`since`) instead of a session count, since
+# onboard's backfill is meant to be completable in full later via
+# `tj backfill claude-code` — the prompt below always says so.
+DEFAULT_BACKFILL_DAYS = 30
+
+# Above this many in-scope sessions, print a one-line heads-up before the
+# (still potentially slow) ingest starts, so a big "everything" choice or a
+# very active last-30-days window doesn't look like a hang either.
+_BACKFILL_HEADSUP_THRESHOLD = 300
+
 # --- output-trim (`tj hook cap-output`) PostToolUse hook wiring --------------
 # Installed into ~/.claude/settings.json out-of-band (zero in-loop token cost).
 # Idempotent + non-destructive: a tj-managed entry is detected by the
@@ -383,6 +399,13 @@ def _print_instrument_agent_snippet() -> None:
               help="Project name to group this repo under in the dashboard "
                    "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
                    "'aquanode'). Defaults to the git org. Used with --claude-code.")
+@click.option("--backfill-days", "backfill_days", type=int, default=None,
+              help=f"Backfill only the last N days of Claude Code history "
+                   f"(default {DEFAULT_BACKFILL_DAYS} when neither this nor "
+                   f"--backfill-all is set). Skips the interactive scope prompt.")
+@click.option("--backfill-all", "backfill_all", is_flag=True, default=False,
+              help="Backfill the entire Claude Code history instead of the "
+                   "default recent window. Skips the interactive scope prompt.")
 @click.option("--verify", is_flag=True, default=False,
               help="After setup, poll for the first span from the newly "
                    "configured source and report whether telemetry is flowing "
@@ -397,6 +420,7 @@ def _print_instrument_agent_snippet() -> None:
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
                 reconfigure: bool, plan: str | None, project_override: str | None,
+                backfill_days: int | None, backfill_all: bool,
                 verify: bool, verify_only: bool) -> None:
     """Interactive setup wizard for tj."""
     # --verify-only is the documented post-restart re-check: config already
@@ -405,6 +429,16 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     # noise (#102). Skip straight to the poll, before the banner and any setup.
     if verify_only:
         _run_verify_only(ctx, claude_code=claude_code, codex=codex)
+        return
+    if backfill_days is not None and backfill_all:
+        console.print(
+            "[red]Use either --backfill-days or --backfill-all, not both.[/red]"
+        )
+        ctx.exit(1)
+        return
+    if backfill_days is not None and backfill_days <= 0:
+        console.print("[red]--backfill-days must be > 0.[/red]")
+        ctx.exit(1)
         return
     # Ephemeral-runner guard (#120): onboard below wires a daemon + Claude Code
     # statusline that both invoke `tj` after this process exits. Under
@@ -419,7 +453,8 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     print_welcome_banner()
     if claude_code:
         _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
-                             project_override, verify=verify)
+                             project_override, verify=verify,
+                             backfill_days=backfill_days, backfill_all=backfill_all)
         return
     if codex:
         _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan, verify=verify)
@@ -438,7 +473,8 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         choice = _prompt_usage_path()
         if choice == "claude_code":
             _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
-                                 project_override, verify=verify)
+                                 project_override, verify=verify,
+                                 backfill_days=backfill_days, backfill_all=backfill_all)
             return
         if choice == "codex":
             _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
@@ -446,7 +482,8 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
             return
         if choice == "combination":
             _onboard_combination(ctx, budget, no_daemon, force, plan,
-                                  project_override, verify=verify)
+                                  project_override, verify=verify,
+                                  backfill_days=backfill_days, backfill_all=backfill_all)
             return
         # choice == "sdk" → fall through to the generic SDK/API path below.
 
@@ -945,6 +982,87 @@ def _prompt_daily_budget(budget: float | None) -> float:
     )
 
 
+def _resolve_backfill_scope(
+    backfill_days: int | None, backfill_all: bool,
+):
+    """Resolve the Claude Code backfill window (#443).
+
+    Returns ``(since, is_full, max_sessions)``:
+      - ``is_full=True`` (``since``/``max_sessions`` both ``None``) means
+        "everything" — the full `tj backfill claude-code` path, unbounded.
+      - Otherwise ``since`` is the cutoff for `ingest_claude_code`, and
+        ``max_sessions`` is an additional cap (or ``None`` for none).
+
+    The "fast" default (interactive choice 1, and the non-interactive
+    fallback) pairs `since` with `max_sessions`. `since` alone measured as
+    NOT reliably bounding the work on an actively-used machine — the mtime
+    pre-filter it relies on barely excludes anything when most session files
+    have recent mtimes regardless of the conversation's actual age, so a
+    "last 30 days" on an old, huge history would still parse nearly
+    everything before the (correct but late) `ended_at` filter drops it.
+    `max_sessions` (mirroring `tj quickstart`'s `DEFAULT_MAX_SESSIONS` cap,
+    #13 — kept as the SAME constant so the two don't drift) guarantees
+    bounded work regardless of mtime patterns.
+
+    `--backfill-days N` is a scripting flag and means exactly what it says —
+    days only, no implicit cap — so automation gets what it asked for.
+    `--backfill-all` means everything, uncapped.
+
+    Precedence, matching the ``--plan``/``--budget`` non-interactive contract:
+    an explicit flag always skips the prompt. Otherwise an interactive
+    terminal gets a two-choice menu (default: fast/recent). A non-interactive
+    terminal (no TTY — CI, piped output, a non-interactive `uvx`/`npx`
+    install) can never answer a prompt, so it silently takes the same fast
+    default and prints one line explaining why, instead of hanging.
+    """
+    from datetime import timedelta
+
+    from tokenjam.cli.cmd_quickstart import DEFAULT_MAX_SESSIONS
+    from tokenjam.utils.time_parse import utcnow
+
+    def _print_complete_later_tip(days: int) -> None:
+        console.print(
+            f"[dim]  Backfilling the last {days} days. Run "
+            f"`tj backfill claude-code` afterwards for your full history.[/dim]"
+        )
+
+    if backfill_all:
+        return None, True, None
+    if backfill_days is not None:
+        _print_complete_later_tip(backfill_days)
+        return utcnow() - timedelta(days=backfill_days), False, None
+
+    if _is_interactive():
+        console.print()
+        console.print("[bold]Backfill your Claude Code history:[/bold]")
+        console.print(
+            f"  1) Last {DEFAULT_BACKFILL_DAYS} days "
+            f"[dim](most recent {DEFAULT_MAX_SESSIONS} sessions — fast, "
+            f"recommended)[/dim]"
+        )
+        console.print("  2) Everything")
+        choice = click.prompt(
+            "Choose", type=click.IntRange(1, 2), default=1, show_default=True,
+        )
+        if choice == 2:
+            return None, True, None
+        _print_complete_later_tip(DEFAULT_BACKFILL_DAYS)
+        return (
+            utcnow() - timedelta(days=DEFAULT_BACKFILL_DAYS), False,
+            DEFAULT_MAX_SESSIONS,
+        )
+
+    console.print(
+        f"[dim]Non-interactive: backfilling the last {DEFAULT_BACKFILL_DAYS} "
+        f"days (most recent {DEFAULT_MAX_SESSIONS} sessions) by default. Run "
+        f"`tj backfill claude-code` afterwards for your full history, or pass "
+        f"--backfill-all next time.[/dim]"
+    )
+    return (
+        utcnow() - timedelta(days=DEFAULT_BACKFILL_DAYS), False, DEFAULT_MAX_SESSIONS,
+    )
+
+
 def _print_next_steps_nudge(*, has_data: bool, days: int | None = None) -> None:
     """Curated post-onboard nudge (#240).
 
@@ -1107,6 +1225,8 @@ def _onboard_claude_code(
     project_override: str | None = None,
     verify: bool = False,
     standalone: bool = True,
+    backfill_days: int | None = None,
+    backfill_all: bool = False,
 ) -> None:
     """Configure Claude Code to send telemetry to tj.
 
@@ -1243,17 +1363,43 @@ def _onboard_claude_code(
     # DuckDB write lock (#71). Idempotent — safe to re-run.
     backfill_msg: str | None = None
     backfill_has_data = False
-    backfill_days: int | None = None
+    backfill_span_days: int | None = None
     backfill_sessions_total = 0
     try:
+        from tokenjam.cli.backfill_progress import backfill_progress
         from tokenjam.core.backfill import (
-            CLAUDE_CODE_PROJECTS_ROOT, ingest_claude_code,
+            CLAUDE_CODE_PROJECTS_ROOT,
+            count_claude_code_sessions_in_scope,
+            ingest_claude_code,
         )
         if CLAUDE_CODE_PROJECTS_ROOT.exists():
             from tokenjam.core.db import open_db
             try:
+                since, _backfill_is_full, max_sessions = _resolve_backfill_scope(
+                    backfill_days, backfill_all,
+                )
+                total_in_scope = count_claude_code_sessions_in_scope(
+                    since=since, max_sessions=max_sessions,
+                )
+                if total_in_scope > _BACKFILL_HEADSUP_THRESHOLD:
+                    console.print(
+                        f"[dim]  ~{total_in_scope:,} sessions in scope — this "
+                        f"may take a few minutes.[/dim]"
+                    )
                 db = open_db(config.storage)
-                result = ingest_claude_code(db, config=config)
+                with backfill_progress(total_in_scope) as backfill_progress_cb:
+                    result = ingest_claude_code(
+                        db, config=config, since=since,
+                        max_sessions=max_sessions,
+                        progress=backfill_progress_cb,
+                    )
+                if result.limit_reached and max_sessions is not None:
+                    console.print(
+                        f"[yellow]  Showing your most-recent {max_sessions} "
+                        f"sessions for a fast first run[/yellow] — run "
+                        f"[bold]tj backfill claude-code[/bold] for your full "
+                        f"history."
+                    )
                 post_apply = _try_apply_declared_plans(
                     config, reconcile=reconfigure and plan_changed,
                 )
@@ -1265,7 +1411,7 @@ def _onboard_claude_code(
                     days = None
                     if result.earliest and result.latest:
                         days = (result.latest - result.earliest).days
-                    backfill_days = days
+                    backfill_span_days = days
                     # Report new / already-present / total so a re-run reads as
                     # "13 total" rather than "1 session" (#238).
                     total = result.sessions_total
@@ -1527,7 +1673,7 @@ def _onboard_claude_code(
     )
     console.print()
     # Lead with the wins that need no restart, THEN the restart note (#240).
-    _print_next_steps_nudge(has_data=backfill_has_data, days=backfill_days)
+    _print_next_steps_nudge(has_data=backfill_has_data, days=backfill_span_days)
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")
@@ -1550,7 +1696,7 @@ def _onboard_claude_code(
         _print_setup_complete_home(
             sessions_backfilled=backfill_sessions_total,
             has_data=backfill_has_data,
-            days=backfill_days,
+            days=backfill_span_days,
         )
 
 
@@ -1881,6 +2027,8 @@ def _onboard_combination(
     plan_override: str | None = None,
     project_override: str | None = None,
     verify: bool = False,
+    backfill_days: int | None = None,
+    backfill_all: bool = False,
 ) -> None:
     """The "combination" path (#448): the user runs more than one kind of agent.
 
@@ -1919,6 +2067,7 @@ def _onboard_combination(
             ctx, budget, no_daemon, force, reconfigure=False,
             plan_override=plan_override, project_override=project_override,
             verify=False, standalone=False,
+            backfill_days=backfill_days, backfill_all=backfill_all,
         )
         done.append("Claude Code")
 

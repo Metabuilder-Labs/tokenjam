@@ -10,6 +10,7 @@ from click.testing import CliRunner
 from tokenjam.cli import cmd_backfill as cmd_backfill_module
 from tokenjam.core.backfill import (
     BackfillResult,
+    count_claude_code_sessions_in_scope,
     ingest_claude_code,
     iter_claude_code_sessions,
     parse_claude_code_session,
@@ -514,6 +515,78 @@ def test_claude_code_backfill_rejects_two_since_flags(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "Use either --since or --since-days" in result.output
+
+
+# --- #443: cheap in-scope session count (progress bar total + heads-up) -----
+
+
+def test_count_sessions_in_scope_no_root_returns_zero(tmp_path):
+    assert count_claude_code_sessions_in_scope(root=tmp_path / "no-such-dir") == 0
+
+
+def test_count_sessions_in_scope_counts_all_files_with_no_since(tmp_path):
+    for i in range(5):
+        _make_session_file(tmp_path, f"sess-{i}", "/Users/me/proj", [
+            _assistant_record(f"u{i}", "claude-sonnet-4-5-20250929", 10, 5,
+                              "2026-06-20T10:00:00.000Z", f"sess-{i}", "/Users/me/proj"),
+        ])
+    assert count_claude_code_sessions_in_scope(root=tmp_path) == 5
+
+
+def test_count_sessions_in_scope_honors_since_mtime_filter(tmp_path):
+    old = _make_session_file(tmp_path, "sess-old", "/Users/me/proj", [
+        _assistant_record("u1", "claude-sonnet-4-5-20250929", 10, 5,
+                          "2020-01-01T10:00:00.000Z", "sess-old", "/Users/me/proj"),
+    ])
+    _make_session_file(tmp_path, "sess-new", "/Users/me/proj", [
+        _assistant_record("u2", "claude-sonnet-4-5-20250929", 10, 5,
+                          "2026-06-20T10:00:00.000Z", "sess-new", "/Users/me/proj"),
+    ])
+    import os
+    import time
+    old_time = time.time() - 3600 * 24 * 400  # 400 days ago
+    os.utime(old, (old_time, old_time))
+
+    cutoff = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert count_claude_code_sessions_in_scope(root=tmp_path, since=cutoff) == 1
+
+
+def test_count_sessions_in_scope_caps_at_max_sessions(tmp_path):
+    for i in range(10):
+        _make_session_file(tmp_path, f"sess-{i}", "/Users/me/proj", [
+            _assistant_record(f"u{i}", "claude-sonnet-4-5-20250929", 10, 5,
+                              "2026-06-20T10:00:00.000Z", f"sess-{i}", "/Users/me/proj"),
+        ])
+    assert count_claude_code_sessions_in_scope(root=tmp_path, max_sessions=4) == 4
+    assert count_claude_code_sessions_in_scope(root=tmp_path, max_sessions=100) == 10
+
+
+def test_ingest_since_and_max_sessions_together_caps_and_keeps_most_recent(tmp_path):
+    """The onboard "fast" path (#443) passes `since` AND `max_sessions`
+    together — `since` alone doesn't reliably bound the work on a machine
+    where most session files share recent mtimes, so `max_sessions` is the
+    real guarantee. Confirms both apply: `limit_reached` fires, and the cap
+    keeps the most-recent (by mtime) sessions, not an arbitrary subset."""
+    import os
+
+    for i in range(10):
+        sid = f"sess-{i:02d}"
+        path = _make_session_file(tmp_path, sid, _CWD, [
+            _assistant_record(f"u{i}", "claude-sonnet-4-5-20250929", 10, 5,
+                              "2026-06-20T10:00:00.000Z", sid, _CWD),
+        ])
+        # Newer index => newer mtime; all comfortably within `since`.
+        os.utime(path, (1_900_000_000 + i, 1_900_000_000 + i))
+
+    db = InMemoryBackend()
+    since = datetime(2020, 1, 1, tzinfo=timezone.utc)  # wide enough to include all 10
+    result = ingest_claude_code(db, root=tmp_path, since=since, max_sessions=4)
+
+    assert result.limit_reached is True
+    assert result.sessions_ingested == 4
+    session_ids = {r[0] for r in db.conn.execute("SELECT session_id FROM sessions").fetchall()}
+    # The 4 highest-indexed (newest-mtime) sessions were kept, not the oldest.
+    assert session_ids == {"sess-06", "sess-07", "sess-08", "sess-09"}
 
 
 # --- #294: dedup resumed/branched sessions (over-counted tokens) -------------- #
