@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -971,3 +972,46 @@ def test_summarize_apply_then_undo_roundtrip(tmp_path):
 
 def test_summarize_apply_no_config():
     assert "error" in _tool_summarize_apply(None, None, False)
+
+
+def test_mcp_server_tool_count():
+    """Verify MCP server tool count matches documentation.
+    Parses docs to extract the stated tool count, then verifies the server.py
+    registers exactly that many @mcp.tool() decorators. This catches drift in
+    both directions: adding tools without updating docs, or updating docs
+    without implementing tools.
+    """
+    from tokenjam.mcp import server as mcp_module
+
+    # Read server.py and count @mcp.tool() decorators
+    server_path = Path(mcp_module.__file__)
+    server_src = server_path.read_text()
+    tool_pattern = r'@mcp\.tool\(\)\s*\ndef\s+(\w+)\s*\('
+    tools_found = re.findall(tool_pattern, server_src)
+    actual_count = len(tools_found)
+
+    # Parse docs/claude-code-integration.md for stated tool count
+    doc_path = server_path.parent.parent.parent / "docs" / "claude-code-integration.md"
+    doc_src = doc_path.read_text()
+    # Look for "you have X tools available in every session:"
+    doc_match = re.search(r'you have (\d+) tools available in every session:', doc_src)
+    assert doc_match, "Could not find tool count statement in claude-code-integration.md"
+    doc_stated_count = int(doc_match.group(1))
+
+    # Parse docs/architecture.md for stated tool count
+    arch_path = doc_path.parent / "architecture.md"
+    arch_src = arch_path.read_text()
+    # Look for "It exposes X tools."
+    arch_match = re.search(r'It exposes (\d+) tools\.', arch_src)
+    assert arch_match, "Could not find tool count statement in architecture.md"
+    arch_stated_count = int(arch_match.group(1))
+
+    # All three must match: server reality, claude-code-integration docs, architecture docs
+    assert actual_count == doc_stated_count == arch_stated_count, (
+        f"MCP tool count mismatch:\n"
+        f"  Actual in server.py: {actual_count} tools\n"
+        f"  Stated in claude-code-integration.md: {doc_stated_count}\n"
+        f"  Stated in architecture.md: {arch_stated_count}\n"
+        f"  Tools found: {sorted(tools_found)}\n"
+        f"If you added a tool, update both docs with the new count and tool list."
+    )

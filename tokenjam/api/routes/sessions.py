@@ -77,11 +77,16 @@ async def list_sessions(
     request: Request,
     status: str | None = None,
     agent_id: str | None = None,
+    limit: int | None = None,
 ) -> dict:
     """Enumerate sessions one row per session, newest first.
 
     `status` filters by session status (e.g. 'active'); `agent_id` scopes to a
-    single agent. Both are optional.
+    single agent. `limit` caps the number of rows returned (still newest-first)
+    — optional, default None returns every matching session as before. Added
+    for callers that only need the head of the list (e.g. `tj session-story`'s
+    ApiBackend.find_last_substantial_session, which otherwise pulled the whole
+    table just to inspect the first few rows).
     """
     db = request.app.state.db
     conn = getattr(db, "conn", None)
@@ -98,12 +103,16 @@ async def list_sessions(
         clauses.append(f"agent_id = ${len(params)}")
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
 
-    rows = conn.execute(
+    query = (
         "SELECT session_id, agent_id, started_at, total_cost_usd, "
         "input_tokens, output_tokens, tool_call_count, error_count "
-        f"FROM sessions{where} ORDER BY started_at DESC",
-        params,
-    ).fetchall()
+        f"FROM sessions{where} ORDER BY started_at DESC"
+    )
+    if limit is not None:
+        params.append(limit)
+        query += f" LIMIT ${len(params)}"
+
+    rows = conn.execute(query, params).fetchall()
     sessions = [
         {
             "session_id": r[0],

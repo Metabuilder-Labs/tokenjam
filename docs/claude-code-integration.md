@@ -53,7 +53,7 @@ The wiring is non-destructive: if you already have a `statusLine` (hand-authored
 
 ## MCP server — for SDK / API users, not Claude Code
 
-The MCP is tj's **in-request-path** surface, meant for **SDK / API** integrations where tj already sits in the loop (real-time enforcement, policy, budgets). It is **not** wired for Claude Code by `tj onboard --claude-code`, and you shouldn't add it as a Claude Code subscription user: an in-loop MCP is a **per-turn quota burden** (a measured A/B showed **+36%** model-weighted quota vs a no-tj control) — the exact tax the out-of-band statusline above avoids. SDK / API users who want the in-loop tools can wire it manually with `claude mcp add tj --scope user -- tj mcp`. After doing so you have 13 tools available in every session:
+The MCP is tj's **in-request-path** surface, meant for **SDK / API** integrations where tj already sits in the loop (real-time enforcement, policy, budgets). It is **not** wired for Claude Code by `tj onboard --claude-code`, and you shouldn't add it as a Claude Code subscription user: an in-loop MCP is a **per-turn quota burden** (a measured A/B showed **+36%** model-weighted quota vs a no-tj control) — the exact tax the out-of-band statusline above avoids. SDK / API users who want the in-loop tools can wire it manually with `claude mcp add tj --scope user -- tj mcp`. After doing so you have 23 tools available in every session:
 
 | Tool | What it does |
 |---|---|
@@ -69,7 +69,17 @@ The MCP is tj's **in-request-path** surface, meant for **SDK / API** integration
 | `get_drift_report` | Behavioral drift baseline vs latest session |
 | `acknowledge_alert` | Mark an alert as acknowledged |
 | `setup_project` | Configure a project to send telemetry to TokenJam |
+| `setup_harness` | Wire a fan-out harness into TokenJam's run grouping |
+| `get_optimize_report` | Cost-saving candidates and budget projections |
 | `open_dashboard` | Open the web UI — starts `tj serve` on demand if needed |
+| `get_policy_status` | Active policies and recent policy decisions |
+| `get_savings_summary` | Estimated savings from configured policies |
+| `suggest_policies` | Policy recommendations from usage patterns |
+| `list_summarize_candidates` | Prompt files worth summarizing for token reduction |
+| `summarize_prep` | Prepare a prompt for structure-aware summarization |
+| `summarize_check` | Verify a summary and stage for review |
+| `summarize_apply` | Apply staged summarization results to files |
+| `summarize_undo` | Restore the most recent summarization backup |
 
 The MCP server opens the DuckDB file read-only — no lock conflicts with `tj serve` if both are running. The single write operation (`acknowledge_alert`) opens a short-lived read-write connection only for its UPDATE.
 

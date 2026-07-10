@@ -536,3 +536,44 @@ def test_quickstart_preview_omitted_when_no_sessions(tmp_path):
     result = _invoke_quickstart(["--root", str(missing)])
     assert result.exit_code == 0, result.output
     assert "With the statusline installed" not in result.output
+
+
+# ── Session Story teaser (reuses `tj session-story`'s own renderer) ─────────
+
+def test_quickstart_session_story_teaser_appears_for_qualifying_session(
+    tmp_path, monkeypatch,
+):
+    """The teaser renders for the SAME session the statusline preview already
+    picked — no extra file globbing, just the shared renderer on that session's
+    already-confirmed-readable transcript."""
+    from tokenjam.cli import cmd_quickstart as q
+
+    monkeypatch.setattr(q, "PREVIEW_MIN_TURNS", 3)
+    root = tmp_path / "projects"
+    _session_with_crossing(
+        root, "sess-recent", "/Users/me/projB", "2026-06-25",
+        n_turns=5, crossing_turn=3,
+    )
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    assert "Session Story" in result.output
+    assert "tj session-story" in result.output
+    # The teaser follows the statusline preview in the output, not before it.
+    assert result.output.index("With the statusline installed") < result.output.index(
+        "Session Story"
+    )
+
+
+def test_quickstart_session_story_teaser_omitted_when_no_preview_candidate(tmp_path):
+    """Silent degrade: no crossing session -> no statusline preview -> no
+    Session Story teaser either (nothing to reuse the selection from)."""
+    root = tmp_path / "projects"
+    _make_session_file(root, "sess-a", "/Users/me/projA", [
+        _assistant("a1", "sess-a", "/Users/me/projA", "2026-06-20T10:00:00.000Z",
+                   input_tokens=1000, output_tokens=200, cache_read=10),
+    ])
+
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+    assert result.exit_code == 0, result.output
+    assert "Session Story" not in result.output

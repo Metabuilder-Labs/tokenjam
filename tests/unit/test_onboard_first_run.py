@@ -39,6 +39,8 @@ def test_nudge_leads_with_no_restart_wins(capsys):
     assert "pip install tokenjam-bench" in out
     assert "already loaded" in out
     assert "last 30 days" in out
+    # tokenmaxx is the efficiency card, never a spend brag.
+    assert "spend tier" not in out
 
 
 def test_nudge_without_data_omits_already_loaded_claim(capsys):
@@ -55,6 +57,43 @@ def test_nudge_with_data_but_unknown_days_avoids_bogus_count(capsys):
     out = capsys.readouterr().out
     assert "already loaded" in out
     assert "last None days" not in out
+
+
+def test_nudge_claude_code_persona_leads_with_quota_diagnosis(capsys):
+    """CC users get the quota-diagnosis commands; tjb is an SDK workflow and
+    must not appear on the Claude Code list."""
+    _print_next_steps_nudge(
+        has_data=True, days=30, persona="claude_code", daemon_running=True,
+    )
+    out = capsys.readouterr().out
+    assert "tj context" in out
+    assert "tj quota-audit" in out
+    assert "tj tokenmaxx" in out
+    assert "tjb" not in out
+    assert "tokenjam-bench" not in out
+    # Lead with the diagnosis pair.
+    assert out.index("tj context") < out.index("tj quota-audit") < out.index("tj tokenmaxx")
+
+
+def test_nudge_daemon_running_never_suggests_tj_serve(capsys):
+    """Onboarding just installed the daemon — Lens is already up; suggesting
+    `tj serve` invites a port conflict."""
+    _print_next_steps_nudge(
+        has_data=True, days=30, persona="claude_code", daemon_running=True,
+    )
+    out = capsys.readouterr().out
+    assert "tj serve" not in out
+    assert "already running" in out
+    assert "http://127.0.0.1:7391/" in out
+
+
+def test_nudge_no_daemon_still_points_at_tj_serve(capsys):
+    _print_next_steps_nudge(
+        has_data=False, persona="claude_code", daemon_running=False,
+    )
+    out = capsys.readouterr().out
+    assert "tj serve" in out
+    assert "already running" not in out
 
 
 # --- Bare `tj` home screen --------------------------------------------------
@@ -148,16 +187,57 @@ def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
     assert out.index("How do you pay for Claude?") < out.index("Daily budget in USD"), out
 
 
-def test_claude_code_nudge_precedes_restart_banner(_isolated_claude_code, tmp_path):
+def test_claude_code_restart_banner_precedes_nudge(_isolated_claude_code, tmp_path):
+    """Founder-review order (2026-07): the one REQUIRED action (restart) is the
+    visually primary element, next steps come after it, connection details
+    are a dim footer at the end."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Next steps" in out
     assert "Restart" in out
-    # Lead with the no-restart wins, THEN the restart note (#240).
-    assert out.index("Next steps") < out.index("Restart"), out
+    assert out.index("Restart") < out.index("Next steps"), out
+    assert out.index("Next steps") < out.index("Connection details"), out
     # No backfill happened here, so no "already loaded" over-claim.
     assert "already loaded" not in out
+
+
+def test_claude_code_restart_banner_says_resume_is_safe(_isolated_claude_code, tmp_path):
+    """'Restart' reads like losing your conversation — the banner must say
+    resuming is safe, or users defer the restart (and their telemetry)."""
+    res = _run_claude_code(tmp_path, "3")
+    assert res.exit_code == 0, res.output
+    flat = " ".join(res.output.split())
+    assert "claude --resume" in flat
+    assert "conversation survives" in flat
+
+
+def test_claude_code_no_pre_restart_verify_prompt(_isolated_claude_code, tmp_path):
+    """The interactive 'verify now?' poll can only time out before the restart
+    it depends on — CC gets a verify-after-restarting pointer instead."""
+    res = _run_claude_code(tmp_path, "3")
+    assert res.exit_code == 0, res.output
+    assert "Verify tj is receiving telemetry now?" not in res.output
+    assert "--verify-only" in res.output
+
+
+def test_claude_code_asks_project_name_after_agent_questions(
+    _isolated_claude_code, tmp_path,
+):
+    """Prompt order: usage/plan questions first, THEN project name (founder
+    direction 2026-07 — the project-name question wedged between the two
+    agent questions broke their grouping)."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        # plan(3=max_5x, no ceiling/budget prompts) → project name (default).
+        res = runner.invoke(
+            cmd_onboard, ["--claude-code", "--no-daemon"], input="3\n\n", obj={},
+        )
+    assert res.exit_code == 0, res.output
+    out = res.output
+    assert "How do you pay for Claude?" in out
+    assert "Project name" in out
+    assert out.index("How do you pay for Claude?") < out.index("Project name"), out
 
 
 def test_claude_code_shows_welcome_banner(_isolated_claude_code, tmp_path):

@@ -203,3 +203,27 @@ def test_default_window_actually_filters_old_session(
     # Only the recent (2026-06-25) session is within a 30-day-from-now window;
     # the 2020 session must be excluded from the backfilled total.
     assert "1 total session" in res.output
+
+
+# --- Backfill summary dollar line is plan-gated (framing discipline) ----------
+
+
+def test_backfill_summary_hides_spend_for_subscription_plan(
+    _isolated_claude_code_with_history, tmp_path,
+):
+    """A Pro/Max user just declared a flat-fee subscription — the backfill
+    summary must not answer with "$N total spend" (core/framing.py suppresses
+    dollar figures for subscription tiers on every other surface)."""
+    res = _run_claude_code(tmp_path, "--plan", "max_20x", input_str="")
+    assert res.exit_code == 0, res.output
+    assert "total session" in res.output  # backfill itself still reported
+    assert "total spend" not in res.output
+
+
+def test_backfill_summary_keeps_spend_for_api_plan(
+    _isolated_claude_code_with_history, tmp_path,
+):
+    """Per-token billing keeps the dollar line — it's their real marginal cost."""
+    res = _run_claude_code(tmp_path, "--plan", "api", input_str="0\n")
+    assert res.exit_code == 0, res.output
+    assert "total spend" in res.output

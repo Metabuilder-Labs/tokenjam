@@ -690,8 +690,22 @@ def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> N
 
     ``persona`` is one of ``"sdk"``, ``"claude_code"``, ``"codex"`` and drives
     the instruction shown and the not-confirmed cause.
+
+    Restart-dependent personas (claude_code / codex) are never OFFERED the
+    interactive poll here: their first span can't arrive until the agent
+    runtime restarts, which hasn't happened yet at this point in onboarding —
+    saying yes would poll for 60s and always time out. They get a
+    verify-after-restarting pointer instead. An explicit ``--verify`` still
+    polls (the user asked for it, and the poll copy tells them to restart now).
     """
     if not verify:
+        if persona in ("claude_code", "codex"):
+            flag = "--claude-code" if persona == "claude_code" else "--codex"
+            console.print(
+                f"[dim]Verify after restarting:[/dim]  "
+                f"tj onboard {flag} --verify-only"
+            )
+            return
         if not sys.stdin.isatty():
             return
         if not click.confirm(
@@ -942,13 +956,15 @@ def _print_setup_complete_home(
     next-best-actions, so the closing screen is consistent no matter which path
     the user took.
 
-    Reuses ``cli/home.print_home`` for the "You're set up" next-best-actions
-    block (config is always written by the time we reach here), prefixed with an
-    honest one-line "N sessions backfilled" note when a backfill actually
-    happened. Copy stays honest — no promised savings (Critical Rule 14).
+    Renders a consistent "You're set up" close + an honest one-line
+    "N sessions backfilled" note when a backfill actually happened (the
+    branded welcome banner already printed at the top of the flow).
+    Deliberately does NOT re-render
+    ``cli/home.print_home``'s next-best-actions list — the onboard flows
+    print their own curated next-steps block just above, and a second command
+    list on the same screen read as duplication (founder review, 2026-07).
+    Copy stays honest — no promised savings (Critical Rule 14).
     """
-    from tokenjam.cli.home import print_home
-
     console.print()
     if has_data and sessions_backfilled > 0:
         span = f" across the last {days} days" if days else ""
@@ -960,9 +976,8 @@ def _print_setup_complete_home(
         )
     else:
         console.print("[bold green]You're set up.[/bold green]")
-    # print_home() re-renders the banner + the configured next-best-actions
-    # (tj status / tokenmaxx / optimize / serve).
-    print_home()
+    console.print("[dim]Full command list:[/dim]  tj --help  "
+                  "[dim]· home screen:[/dim]  tj")
 
 
 def _prompt_daily_budget(budget: float | None, plan_tier: str | None) -> float:
@@ -1073,15 +1088,25 @@ def _resolve_backfill_scope(
     )
 
 
-def _print_next_steps_nudge(*, has_data: bool, days: int | None = None) -> None:
-    """Curated post-onboard nudge (#240).
+def _print_next_steps_nudge(
+    *,
+    has_data: bool,
+    days: int | None = None,
+    persona: str = "sdk",
+    daemon_running: bool = False,
+    port: int = 7391,
+) -> None:
+    """Curated post-onboard nudge (#240), persona-aware.
 
-    Leads with the commands that work on the just-backfilled data *immediately*
-    — no Claude Code restart required — because onboard otherwise ends on
-    "Restart Claude Code", the exact point we lose new users. The restart note
-    (for live telemetry) is printed separately, after this. Curated to ~3
-    high-wow commands rather than a `--help` wall; copy stays honest (no
-    promised savings — Critical Rule 14).
+    Commands that work on the just-backfilled data *immediately* — no Claude
+    Code restart required. Claude Code users lead with the quota-diagnosis
+    commands (the reason tj is on their machine); ``tjb`` is an SDK-persona
+    workflow (re-run your own agent on a cheaper model) so it only appears on
+    the generic list. When onboarding just installed the daemon, Lens is
+    already serving — suggesting ``tj serve`` there invites a port conflict, so
+    the Lens line says "already running" instead. Curated to ~4 high-wow
+    commands rather than a `--help` wall; copy stays honest (no promised
+    savings — Critical Rule 14).
     """
     console.print()
     if has_data:
@@ -1095,10 +1120,25 @@ def _print_next_steps_nudge(*, has_data: bool, days: int | None = None) -> None:
             "[bold]▸ Next steps[/bold]  [dim]these work right now:[/dim]"
         )
     console.print()
-    console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable spend tier[/dim]")
-    console.print("  [bold]tj optimize[/bold]    [dim]cost-saving candidates from your usage[/dim]")
-    console.print("  [bold]tjb[/bold]            [dim]prove a cheaper model still holds (pip install tokenjam-bench)[/dim]")
-    console.print("  [bold]tj serve[/bold]       [dim]open Lens (web UI) at http://127.0.0.1:7391/[/dim]")
+    lens_url = f"http://127.0.0.1:{port}/"
+    if daemon_running:
+        lens_line = (
+            f"  [bold]Lens (web UI)[/bold]  [dim]already running → {lens_url}[/dim]"
+        )
+    else:
+        lens_line = (
+            f"  [bold]tj serve[/bold]       [dim]open Lens (web UI) at {lens_url}[/dim]"
+        )
+    if persona == "claude_code":
+        console.print("  [bold]tj context[/bold]     [dim]where your quota goes — re-read vs real work[/dim]")
+        console.print("  [bold]tj quota-audit[/bold] [dim]how much Opus went to Sonnet-shaped sessions[/dim]")
+        console.print(lens_line)
+        console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable efficiency tier[/dim]")
+    else:
+        console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable efficiency tier[/dim]")
+        console.print("  [bold]tj optimize[/bold]    [dim]cost-saving candidates from your usage[/dim]")
+        console.print("  [bold]tjb[/bold]            [dim]prove a cheaper model still holds (pip install tokenjam-bench)[/dim]")
+        console.print(lens_line)
     console.print()
 
 
@@ -1259,27 +1299,16 @@ def _onboard_claude_code(
 
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
-    # Project name = OTel service.namespace, the key the dashboard groups by.
-    # A meta-repo (e.g. git repo "harness" holding all of "aquanode") wants a
-    # human project name, so prompt with the repo name as default. --project
-    # skips the prompt for non-interactive use.
-    if project_override:
-        namespace = project_override
-    else:
-        namespace = click.prompt(
-            "Project name (groups related repos under one dashboard tile)",
-            default=project_name, show_default=True,
-        ).strip() or project_name
 
     # Plan-first (#240): resolve the plan tier before prompting for the daily
     # budget — "How do you pay?" is the more important, more natural opener.
+    # The project-name prompt comes after BOTH agent questions (usage path,
+    # plan): it's dashboard bookkeeping, and wedging it between the two broke
+    # their natural grouping.
     if global_config_path.exists() and not force:
         config = load_config(str(global_config_path))
         if agent_id not in config.agents:
             config.agents[agent_id] = AgentConfig()
-        # Server-side project mapping so already-running sessions group by
-        # project without restarting the agent (see AgentConfig.project).
-        config.agents[agent_id].project = namespace
 
         existing_plan = (
             config.budgets["anthropic"].plan
@@ -1320,6 +1349,10 @@ def _onboard_claude_code(
         budget = _prompt_daily_budget(budget, plan)
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
+        namespace = _prompt_project_name(project_override, project_name)
+        # Server-side project mapping so already-running sessions group by
+        # project without restarting the agent (see AgentConfig.project).
+        config.agents[agent_id].project = namespace
         config_path = global_config_path
         write_config(config, config_path)
         console.print(f"  tj config updated: {display_path(config_path)}", soft_wrap=True)
@@ -1340,6 +1373,7 @@ def _onboard_claude_code(
                 usd = ceiling
         budget = _prompt_daily_budget(budget, plan)
         daily_usd = budget if budget and budget > 0 else None
+        namespace = _prompt_project_name(project_override, project_name)
         agents = {agent_id: AgentConfig(budget=BudgetConfig(daily_usd=daily_usd), project=namespace)}
         config = TjConfig(
             version="1",
@@ -1434,7 +1468,14 @@ def _onboard_claude_code(
                     ]
                     if days is not None:
                         pieces.append(f"over {days} day{'s' if days != 1 else ''}")
-                    pieces.append(f"${result.total_cost_usd:.0f} total spend")
+                    # Dollar spend only for per-token billing: flat-fee
+                    # subscription and local tiers get dollar figures
+                    # suppressed everywhere else (core/framing.py), and a
+                    # "$N total spend" two prompts after the user declared a
+                    # $100/mo subscription reads as tj ignoring its own
+                    # question.
+                    if not (plan and (plan in SUBSCRIPTION_PLAN_TIERS or plan == "local")):
+                        pieces.append(f"${result.total_cost_usd:.0f} total spend")
                     backfill_msg = ", ".join(pieces)
             except Exception as exc:
                 _err = str(exc).lower()
@@ -1614,55 +1655,28 @@ def _onboard_claude_code(
         force=force,
     )
 
+    # ── Completion screen (founder review, 2026-07): what got wired → the one
+    # required action (restart, prominent) → next steps → connection details
+    # (dim footer) → verify pointer. The old screen led with a config dump and
+    # buried the restart box below the next-steps list.
     console.print()
     console.print("[bold green]Claude Code observability configured.[/bold green]")
-    console.print(
-        f"  Global settings:     {display_path(global_settings_path)}", soft_wrap=True
-    )
-    console.print(
-        f"  Project settings:    {display_path(project_settings_path)}", soft_wrap=True
-    )
     _print_statusline_status(statusline_status)
-    if removed_resource_attr:
-        console.print(
-            "  [yellow]Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from project "
-            "settings[/yellow] (the claude wrapper now sets it per terminal)."
-        )
-    console.print("  Shell env:           ~/.zshrc (harness-compatible endpoint)")
+    console.print(
+        "  Telemetry:           Claude Code → tj, out-of-band "
+        "(global settings + ~/.zshrc)"
+    )
     if wrapper_files:
         console.print(
-            f"  claude wrapper:      "
-            f"{', '.join(display_path(w) for w in wrapper_files)} "
-            "(per-terminal naming)",
-            soft_wrap=True,
+            "  claude wrapper:      per-terminal dashboard tiles (~/.zshrc)"
         )
-        console.print(
-            "  [dim]The claude wrapper controls OTEL_RESOURCE_ATTRIBUTES per "
-            "terminal (service.instance.id); project settings.json no longer "
-            "sets it.[/dim]"
-        )
-    console.print(f"  Agent ID:            {agent_id}")
-    if budget and budget > 0:
-        console.print(f"  Daily budget:        ${budget:.2f}")
-    console.print(f"  OTLP endpoint:       http://127.0.0.1:{port} (native)")
-    console.print(f"                       http://host.docker.internal:{port} (harness)")
-    if secret:
-        console.print(f"  Ingest secret:       {secret[:8]}...")
     if backfill_msg:
         console.print(f"  Backfilled:          {backfill_msg}")
-    # Surface what we wrote for [budget.anthropic]: the user's plan tier, and
-    # the spending ceiling only when one is set (API users may opt in to one).
-    from tokenjam.core.config import load_config as _lc
-    try:
-        _cfg = _lc(str(global_config_path))
-        _ab = _cfg.budgets.get("anthropic")
-        if _ab is not None and _ab.plan:
-            _line = f"[budget.anthropic] plan = \"{_ab.plan}\""
-            if _ab.usd:
-                _line += f", usd = {_ab.usd}"
-            console.print(f"  Budget projection:   {_line}")
-    except Exception:
-        pass
+    if want_daemon:
+        console.print(
+            f"  Lens (web UI):       http://127.0.0.1:{port}/ "
+            "(the daemon keeps it running)"
+        )
     console.print()
     # tj is out-of-band for Claude Code: the statusline (zero model tokens),
     # not an in-loop MCP server. Say so explicitly so users know where tj lives.
@@ -1679,22 +1693,67 @@ def _onboard_claude_code(
             "share and nudges [bold]/compact[/bold] when re-reading eats your "
             "quota.[/dim]"
         )
-    console.print(
-        "[dim]For the deep dive, run[/dim]  tj tokenmaxx  [dim]/[/dim]  tj optimize"
-    )
     console.print()
-    # Lead with the wins that need no restart, THEN the restart note (#240).
-    _print_next_steps_nudge(has_data=backfill_has_data, days=backfill_span_days)
-    if not want_daemon:
-        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
-        console.print("[dim]Start the server:[/dim]  tj serve")
-    _print_restart_banner("Claude Code")
+    _print_restart_banner(
+        "Claude Code",
+        resume_hint=(
+            "Your conversation survives: exit, then relaunch with "
+            '"claude --resume" (or "claude -c") to pick up exactly where you '
+            "left off — tj's resume brief hands the session a recap on resume."
+        ),
+    )
     console.print(
         "[dim]Open a new terminal, then launch with[/dim]  claude  "
         "[dim](each terminal becomes its own dashboard tile;[/dim] "
         "claude --as <name> [dim]to label it).[/dim]"
     )
     console.print(f"[dim]After restarting, run:[/dim]  tj status --agent {agent_id}")
+    if not want_daemon:
+        _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
+    _print_next_steps_nudge(
+        has_data=backfill_has_data, days=backfill_span_days,
+        persona="claude_code", daemon_running=want_daemon, port=port,
+    )
+    # Connection details, demoted to a dim footer: needed for debugging and
+    # harness setups, noise for the first-run payoff moment.
+    console.print("[dim]Connection details[/dim]")
+    console.print(
+        f"[dim]  Global settings:    {display_path(global_settings_path)}[/dim]",
+        soft_wrap=True,
+    )
+    console.print(
+        f"[dim]  Project settings:   {display_path(project_settings_path)}[/dim]",
+        soft_wrap=True,
+    )
+    if removed_resource_attr:
+        console.print(
+            "  [yellow]Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from project "
+            "settings[/yellow] [dim](the claude wrapper now sets it per "
+            "terminal).[/dim]"
+        )
+    console.print(f"[dim]  Agent ID:           {agent_id}[/dim]")
+    if budget and budget > 0:
+        console.print(f"[dim]  Daily budget:       ${budget:.2f}[/dim]")
+    console.print(
+        f"[dim]  OTLP endpoint:      http://127.0.0.1:{port} (native) · "
+        f"http://host.docker.internal:{port} (harness)[/dim]"
+    )
+    if secret:
+        console.print(f"[dim]  Ingest secret:      {secret[:8]}...[/dim]")
+    # Surface what we wrote for [budget.anthropic]: the user's plan tier, and
+    # the spending ceiling only when one is set (API users may opt in to one).
+    from tokenjam.core.config import load_config as _lc
+    try:
+        _cfg = _lc(str(global_config_path))
+        _ab = _cfg.budgets.get("anthropic")
+        if _ab is not None and _ab.plan:
+            _line = f"[budget.anthropic] plan = \"{_ab.plan}\""
+            if _ab.usd:
+                _line += f", usd = {_ab.usd}"
+            console.print(f"[dim]  Budget projection:  {escape(_line)}[/dim]")
+    except Exception:
+        pass
+    console.print()
 
     _maybe_verify_onboarding(config, persona="claude_code", verify=verify)
 
@@ -1993,7 +2052,9 @@ def _onboard_codex(
     # Lead with the wins that need no restart, THEN the restart note (#240).
     # `has_data` is True only when the Codex backfill actually ingested sessions
     # (adapter present + on-disk history); otherwise forward-only framing.
-    _print_next_steps_nudge(has_data=codex_has_data)
+    _print_next_steps_nudge(
+        has_data=codex_has_data, daemon_running=want_daemon, port=port,
+    )
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
         console.print("[dim]Start the server:[/dim]  tj serve")
@@ -2127,7 +2188,7 @@ def _onboard_combination(
     _print_setup_complete_home()
 
 
-def _print_restart_banner(app_name: str) -> None:
+def _print_restart_banner(app_name: str, *, resume_hint: str | None = None) -> None:
     """Render a prominent restart-required banner at the end of onboarding.
 
     Coding agents (Claude Code, Codex) read their OTLP exporter env vars once
@@ -2135,6 +2196,10 @@ def _print_restart_banner(app_name: str) -> None:
     secret, an already-running instance keeps exporting to the stale endpoint
     and today's spans silently never reach TokenJam (issue #179). A single dim
     one-liner was too easy to miss, so make this a Rich panel.
+
+    ``resume_hint`` softens the ask for runtimes with session resume: "restart"
+    reads like losing your conversation, which it isn't — say so, or users
+    defer the restart (and their telemetry) to some future cold start.
     """
     from rich.panel import Panel
     from rich.text import Text
@@ -2143,6 +2208,8 @@ def _print_restart_banner(app_name: str) -> None:
     body.append("Restart ", style="bold")
     body.append(app_name, style="bold yellow")
     body.append(" now for the new settings to take effect.\n", style="bold")
+    if resume_hint:
+        body.append(resume_hint + "\n")
     body.append(
         f"A {app_name} session already running will keep sending telemetry to "
         "the old endpoint — today's activity won't reach TokenJam until you "
@@ -2690,6 +2757,23 @@ def _derive_project_name() -> str:
     except Exception:
         pass
     return Path.cwd().name.lower()
+
+
+def _prompt_project_name(project_override: str | None, default: str) -> str:
+    """Resolve the dashboard project name (the OTel ``service.namespace`` the
+    dashboard groups by).
+
+    A meta-repo (e.g. git repo "harness" holding all of "aquanode") wants a
+    human project name, so prompt with the repo name as default. ``--project``
+    skips the prompt for non-interactive use. Asked AFTER the two agent
+    questions (usage path, plan) — see the ordering note at the call sites.
+    """
+    if project_override:
+        return project_override
+    return click.prompt(
+        "Project name (groups related repos under one dashboard tile)",
+        default=default, show_default=True,
+    ).strip() or default
 
 
 def _daemon_already_running() -> bool:

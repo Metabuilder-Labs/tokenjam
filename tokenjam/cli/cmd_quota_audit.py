@@ -25,21 +25,19 @@ metadata the API shim does not expose at this grain).
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from typing import Any
 
 import click
 
-from tokenjam.core.framing import (
-    Framing,
-    WindowSummary,
-    compute_framing,
-    plan_determination_mix,
+from tokenjam.cli.data_access import resolve_data_access
+from tokenjam.core.framing import Framing
+from tokenjam.core.optimize.types import (
+    DowngradeFinding,
+    OpusQuotaAudit,
+    audit_to_dict,
 )
-from tokenjam.core.optimize.analyzers.model_downgrade import audit_opus_quota
-from tokenjam.core.optimize.types import DowngradeFinding, OpusQuotaAudit
 from tokenjam.utils.formatting import console, format_cost, format_tokens
-from tokenjam.utils.time_parse import parse_since, utcnow
+from tokenjam.utils.time_parse import parse_since
 
 
 @click.command("quota-audit")
@@ -63,23 +61,18 @@ def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
     if db is None or config is None:
         raise click.ClickException("quota-audit requires a database connection.")
 
-    conn = getattr(db, "conn", None)
-    if conn is None:
-        raise click.ClickException(
-            "tj quota-audit needs a direct database connection. It can't run "
-            "against a live `tj serve` — stop the daemon (`tj stop`) and re-run, "
-            "or run from a project without the daemon up."
-        )
-
+    # Validate the window up-front so the direct and serve paths agree on the
+    # error message.
     try:
-        since_dt = parse_since(since)
+        parse_since(since)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
-    until_dt = utcnow()
-    window_days = max((until_dt - since_dt).total_seconds() / 86400.0, 1.0 / 86400.0)
 
-    audit = audit_opus_quota(conn, since_dt, until_dt, agent, window_days)
-    framing = _framing_for(conn, config, audit, agent)
+    # One seam, two backends: a direct DuckDB connection when no daemon runs,
+    # else the compute routed through the running `tj serve` (which holds the DB
+    # write lock). No `hasattr(db, "conn")` sniffing — the seam owns that choice.
+    data = resolve_data_access(ctx)
+    audit, framing = data.quota_audit(since=since, agent_id=agent)
 
     if export_target:
         _export_snippet(audit, framing, target=export_target, agent_id=agent,
@@ -87,43 +80,12 @@ def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
         return
 
     if output_json:
-        payload = _audit_to_dict(audit)
+        payload = audit_to_dict(audit)
         payload["framing"] = framing.to_dict()
         click.echo(json.dumps(payload, default=str))
         return
 
     _render(audit, framing, since=since)
-
-
-def _framing_for(conn, config, audit: OpusQuotaAudit,
-                 agent: str | None) -> Framing:
-    """Plan-tier framing for the audit (window-independent plan, per #177)."""
-    mix = plan_determination_mix(conn, agent)
-    summary = WindowSummary(
-        total_cost_usd=audit.actual_cost_usd,
-        total_tokens=audit.opus_tokens,
-        sessions=audit.opus_sessions,
-        plan_tier_mix=mix,
-    )
-    return compute_framing(config, summary)
-
-
-def _audit_to_dict(audit: OpusQuotaAudit) -> dict[str, Any]:
-    """JSON-serialisable view of the audit for ``--json`` output."""
-    return {
-        "window_days": audit.window_days,
-        "opus_sessions": audit.opus_sessions,
-        "opus_tokens": audit.opus_tokens,
-        "candidate_sessions": audit.candidate_sessions,
-        "candidate_tokens": audit.candidate_tokens,
-        "percent_quota_reclaimable": audit.percent_quota_reclaimable,
-        "percent_sessions": audit.percent_sessions,
-        "suggestions": dict(audit.suggestions),
-        "examples": [asdict(ex) for ex in audit.examples],
-        "actual_cost_usd": audit.actual_cost_usd,
-        "alternative_cost_usd": audit.alternative_cost_usd,
-        "caveat": audit.caveat,
-    }
 
 
 # ───────────────────────────── rendering ──────────────────────────────────
