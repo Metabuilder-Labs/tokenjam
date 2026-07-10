@@ -269,8 +269,9 @@ def run(ctx: AnalyzerContext) -> None:
 # premium-tier sessions only (Fable + Opus, via the shared model_tiers
 # predicate) and reframed as a "quota audit" rather than "cost optimization"
 # (issue #5; research/evidence/feature-downsize.md). The headline is
-# "% of your premium (Opus/Fable) quota reclaimable from Sonnet-shaped
-# sessions" — premium token share, not dollars — because the subscription
+# "% of your premium (Opus/Fable) quota that went to Sonnet-shaped sessions"
+# — a retrospective behaviour mirror in premium token share, not dollars and
+# not "reclaimable" (the tokens are already spent) — because the subscription
 # majority is on flat-rate plans where dollar framing mis-targets them
 # (subscription-vs-cost-framing.md). It complements opusplan / `/model`
 # (forward-looking) by answering the backward-looking question those tools
@@ -420,7 +421,7 @@ def audit_opus_quota(
     candidate_examples.sort(key=lambda pair: pair[0], reverse=True)
     audit.examples = [ex for _tokens, ex in candidate_examples[:OPUS_AUDIT_MAX_EXAMPLES]]
 
-    audit.percent_quota_reclaimable = (
+    audit.percent_quota_misallocated = (
         round(100.0 * audit.candidate_tokens / audit.opus_tokens, 1)
         if audit.opus_tokens > 0 else 0.0
     )

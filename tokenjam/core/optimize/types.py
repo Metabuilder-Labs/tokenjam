@@ -16,7 +16,7 @@ MODEL_DOWNGRADE_CAVEAT = (
 # discipline (CLAUDE.md Rule 14): the audit flags Opus sessions whose STRUCTURE
 # matches Sonnet-shaped work — it is an accountability list to spot-check, never
 # a claim that the cheaper model would have produced the same answer. Surfaced
-# verbatim next to every "% of Opus quota reclaimable" headline.
+# verbatim next to every "% of premium quota misallocated" headline.
 OPUS_QUOTA_AUDIT_CAVEAT = (
     "Candidates to spot-check, not a verdict. Each flagged session merely has "
     "the structural shape (small input/output, few tool calls) of work a "
@@ -126,18 +126,21 @@ class OpusQuotaAudit:
     Reframes the structural downsize heuristic as an *accountability* audit
     scoped to Opus sessions: how much of your Opus quota was spent on sessions
     whose shape matches Sonnet-shaped work. The headline figure is
-    ``percent_quota_reclaimable`` (candidate Opus tokens / total Opus tokens) —
-    quota language, never a dollar "saving" (the subscription majority is on a
-    flat fee; dollar framing mis-targets them). Dollar fields are a best-effort
-    SECONDARY signal for API users only.
+    ``percent_quota_misallocated`` (candidate Opus tokens / total Opus tokens) —
+    retrospective quota is already SPENT, so this is a behaviour mirror (how much
+    premium quota went to Sonnet-shaped sessions), never a claim it can be
+    "reclaimed". Quota language, never a dollar "saving" (the subscription
+    majority is on a flat fee; dollar framing mis-targets them). Dollar fields
+    are a best-effort SECONDARY signal for API users only.
     """
     window_days: float = 0.0
     opus_sessions: int = 0
     opus_tokens: int = 0  # input + output + cache across all Opus sessions
     candidate_sessions: int = 0
     candidate_tokens: int = 0  # input + output + cache, candidates only
-    # The headline: % of Opus quota (tokens) held by Sonnet-shaped sessions.
-    percent_quota_reclaimable: float = 0.0
+    # The headline: % of premium quota (tokens) that went to Sonnet-shaped
+    # sessions — misallocated, not reclaimable (the tokens are already spent).
+    percent_quota_misallocated: float = 0.0
     percent_sessions: float = 0.0
     # model -> cheaper-alternative suggestions observed among the candidates.
     suggestions: dict[str, str] = field(default_factory=dict)
@@ -272,7 +275,13 @@ def audit_to_dict(audit: OpusQuotaAudit) -> dict[str, Any]:
         "opus_tokens": audit.opus_tokens,
         "candidate_sessions": audit.candidate_sessions,
         "candidate_tokens": audit.candidate_tokens,
-        "percent_quota_reclaimable": audit.percent_quota_reclaimable,
+        "percent_quota_misallocated": audit.percent_quota_misallocated,
+        # DEPRECATED alias — kept one release (through 0.6.x) because
+        # ``percent_quota_reclaimable`` shipped publicly in 0.5.4. Consumers
+        # should read ``percent_quota_misallocated``; this mirror will be
+        # removed. Emitted on BOTH the direct and serve paths so the parity
+        # contract (byte-identical audit_to_dict output) still holds.
+        "percent_quota_reclaimable": audit.percent_quota_misallocated,
         "percent_sessions": audit.percent_sessions,
         "suggestions": dict(audit.suggestions),
         "examples": [asdict(ex) for ex in audit.examples],
@@ -309,7 +318,12 @@ def audit_from_dict(data: dict[str, Any]) -> OpusQuotaAudit:
         opus_tokens=int(data.get("opus_tokens", 0) or 0),
         candidate_sessions=int(data.get("candidate_sessions", 0) or 0),
         candidate_tokens=int(data.get("candidate_tokens", 0) or 0),
-        percent_quota_reclaimable=float(data.get("percent_quota_reclaimable", 0.0) or 0.0),
+        # Prefer the new key; fall back to the deprecated alias so a payload
+        # produced by a pre-rename (0.5.4) daemon still reconstructs.
+        percent_quota_misallocated=float(
+            data.get("percent_quota_misallocated",
+                     data.get("percent_quota_reclaimable", 0.0)) or 0.0
+        ),
         percent_sessions=float(data.get("percent_sessions", 0.0) or 0.0),
         suggestions=dict(data.get("suggestions", {}) or {}),
         examples=examples,

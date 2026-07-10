@@ -1,7 +1,7 @@
 """Unit tests for the retroactive Opus quota audit (`tj quota-audit`, issue #5).
 
 Exercises the audit over a SYNTHETIC mix of Opus sessions proving:
-  * "% of Opus quota reclaimable" is computed as candidate-Opus-tokens over
+  * "% of premium quota misallocated" is computed as candidate-Opus-tokens over
     total-Opus-tokens (only Sonnet-shaped Opus sessions count);
   * Opus-shaped Opus sessions (big input/output, many tool calls) are NOT
     flagged, and non-Opus sessions are excluded from the denominator;
@@ -10,6 +10,7 @@ Exercises the audit over a SYNTHETIC mix of Opus sessions proving:
 """
 from __future__ import annotations
 
+import re
 from datetime import timedelta
 
 import pytest
@@ -44,10 +45,18 @@ def _max_config() -> TjConfig:
     )
 
 
+def _api_config() -> TjConfig:
+    """Config declaring an API plan so framing renders the dollar counterfactual."""
+    return TjConfig(
+        version="1",
+        budgets={"anthropic": ProviderBudget(plan="api")},
+    )
+
+
 def _add_session(db, session_id, *, model, input_tokens, output_tokens,
-                 cache_tokens=0, cost_usd=1.0, tool_calls=0):
+                 cache_tokens=0, cost_usd=1.0, tool_calls=0, plan_tier="max_5x"):
     """Seed one session: an LLM span plus N tool spans."""
-    sess = make_session(session_id=session_id, plan_tier="max_5x",
+    sess = make_session(session_id=session_id, plan_tier=plan_tier,
                         duration_seconds=60.0)
     db.upsert_session(sess)
     span = make_llm_span(
@@ -67,34 +76,37 @@ def _add_session(db, session_id, *, model, input_tokens, output_tokens,
         db.insert_span(tool)
 
 
-def _seed_mix(db) -> None:
+def _seed_mix(db, *, plan_tier="max_5x") -> None:
     """A mix of Opus + Sonnet sessions:
 
       * opus-thin-1 / opus-thin-2 — Opus, Sonnet-shaped (small in/out, ≤5 tools)
-        → quota-reclaim candidates.
+        → misallocation candidates.
       * opus-fat — Opus, genuinely Opus-shaped (big in/out, many tools) → NOT a
         candidate, but still in the Opus quota denominator.
       * sonnet-1 — already on Sonnet → excluded from the audit entirely (the
         audit only inspects Opus sessions).
+
+    ``plan_tier`` stamps every seeded session so the framing path resolves the
+    intended pricing mode (max_5x → subscription, api → api).
     """
     # 100k Opus tokens each, Sonnet-shaped → candidates.
     _add_session(db, "opus-thin-1", model="claude-opus-4-7",
                  input_tokens=2_000, output_tokens=300, cache_tokens=97_700,
-                 cost_usd=3.0, tool_calls=2)
+                 cost_usd=3.0, tool_calls=2, plan_tier=plan_tier)
     _add_session(db, "opus-thin-2", model="claude-opus-4-6",
                  input_tokens=1_000, output_tokens=200, cache_tokens=98_800,
-                 cost_usd=3.0, tool_calls=1)
+                 cost_usd=3.0, tool_calls=1, plan_tier=plan_tier)
     # 100k Opus tokens, Opus-shaped → in denominator, NOT a candidate.
     _add_session(db, "opus-fat", model="claude-opus-4-7",
                  input_tokens=40_000, output_tokens=20_000, cache_tokens=40_000,
-                 cost_usd=8.0, tool_calls=30)
+                 cost_usd=8.0, tool_calls=30, plan_tier=plan_tier)
     # Sonnet session → excluded from the audit (not Opus).
     _add_session(db, "sonnet-1", model="claude-sonnet-4-6",
                  input_tokens=2_000, output_tokens=300, cache_tokens=50_000,
-                 cost_usd=0.5, tool_calls=1)
+                 cost_usd=0.5, tool_calls=1, plan_tier=plan_tier)
 
 
-def test_percent_quota_reclaimable_counts_only_sonnet_shaped_opus(db):
+def test_percent_quota_misallocated_counts_only_sonnet_shaped_opus(db):
     _seed_mix(db)
     audit = audit_opus_quota(db.conn, SINCE, UNTIL, agent_id=None, window_days=30.0)
 
@@ -105,7 +117,7 @@ def test_percent_quota_reclaimable_counts_only_sonnet_shaped_opus(db):
     assert audit.candidate_sessions == 2
     assert audit.candidate_tokens == 200_000  # 2 × 100k
     # Headline: candidate Opus tokens / total Opus tokens.
-    assert audit.percent_quota_reclaimable == pytest.approx(66.7, abs=0.1)
+    assert audit.percent_quota_misallocated == pytest.approx(66.7, abs=0.1)
     assert audit.percent_sessions == pytest.approx(66.7, abs=0.1)
 
 
@@ -172,11 +184,12 @@ def test_no_opus_sessions_is_clean_empty_state(db):
     audit = audit_opus_quota(db.conn, SINCE, UNTIL, agent_id=None, window_days=30.0)
     assert not audit.has_opus
     assert audit.opus_sessions == 0
-    assert audit.percent_quota_reclaimable == 0.0
+    assert audit.percent_quota_misallocated == 0.0
 
 
 def test_cli_renders_quota_audit_with_caveat(db, monkeypatch):
-    """End-to-end: the card reports % of Opus quota reclaimable, lists the
+    """End-to-end: the card reports the % of premium quota that WENT to
+    Sonnet-shaped sessions (misallocated, not "reclaimable"), lists the
     spot-check sessions, and surfaces the honesty caveat — in quota (not dollar)
     language for a subscription (Max) plan."""
     _seed_mix(db)
@@ -196,16 +209,56 @@ def test_cli_renders_quota_audit_with_caveat(db, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     out = result.output
-    # Quota framing headline (not dollars) — names both premium tiers.
-    assert "quota is reclaimable" in out
+    # Rich wraps panel text across lines and draws box borders between them;
+    # strip the border glyphs and collapse whitespace before matching multi-word
+    # phrases so a wrap between two words doesn't fail the assertion.
+    flat = " ".join(re.sub(r"[│╭╮╰╯─]", " ", out).split())
+    # Retrospective mirror headline (not dollars) — names both premium tiers and
+    # never says "reclaimable" (the tokens are already spent).
+    assert "went to Sonnet-shaped sessions" in flat
+    assert "reclaimable" not in flat.lower()
     assert "Opus/Fable" in out
     assert "67%" in out or "66" in out
+    # Subscription users get the habit nudge, not dollars.
+    assert "stays available for hard problems next window" in flat
+    assert "/model sonnet" in flat
     # Spot-check sessions listed.
     assert "spot-check" in out.lower()
     assert "opus-thin-1" in out
     # Honesty caveat present (the load-bearing honesty discipline).
     assert "spot-check" in OPUS_QUOTA_AUDIT_CAVEAT.lower()
     assert "Never \"safe to downgrade.\"" in out or "safe to downgrade" in out
+
+
+def test_cli_api_persona_shows_dollar_counterfactual(db, monkeypatch):
+    """API-billed users get the already-billed dollar counterfactual under the
+    measured headline instead of the subscription habit nudge."""
+    _seed_mix(db, plan_tier="api")
+    config = _api_config()
+
+    import tokenjam.cli.main as cli_main
+
+    monkeypatch.setattr(cli_main, "load_config", lambda *a, **k: config)
+    monkeypatch.setattr(cli_main, "open_db", lambda *a, **k: db)
+    monkeypatch.setattr(
+        "tokenjam.core.framing.config_declared_plan", lambda c: "api"
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.cli, ["quota-audit", "--since", "30d"], catch_exceptions=False
+    )
+    assert result.exit_code == 0, result.output
+    out = result.output
+    flat = " ".join(re.sub(r"[│╭╮╰╯─]", " ", out).split())
+    # Same measured mirror headline for everyone.
+    assert "went to Sonnet-shaped sessions" in flat
+    assert "reclaimable" not in flat.lower()
+    # API persona: retrospective, already-billed counterfactual — NOT the
+    # subscription habit nudge.
+    assert "Same work at the suggested tiers" in flat
+    assert "already billed" in flat
+    assert "stays available for hard problems" not in flat
 
 
 def test_cli_json_output_has_quota_fields(db, monkeypatch):
@@ -228,6 +281,8 @@ def test_cli_json_output_has_quota_fields(db, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
+    assert payload["percent_quota_misallocated"] == pytest.approx(66.7, abs=0.1)
+    # DEPRECATED alias still emitted (shipped in 0.5.4) — same value, one release.
     assert payload["percent_quota_reclaimable"] == pytest.approx(66.7, abs=0.1)
     assert payload["candidate_sessions"] == 2
     assert len(payload["examples"]) == 2

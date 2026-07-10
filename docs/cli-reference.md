@@ -129,7 +129,7 @@ Key flags: `--session`, `--last` (default when `--session` is omitted), `--json`
 
 ### `tj quota-audit`
 
-Retroactive audit of your premium (Opus/Fable) quota: which past premium-tier sessions were structurally Sonnet-shaped (small input/output, few tool calls)? Covers Fable (the tier above Opus) as well as Opus. Reports the percent of premium quota reclaimable, example sessions to spot-check, and an optional tuned routing-config export. Quota-share framing, never a dollar "saving" claim. Needs a direct DB connection (can't run against a live `tj serve`).
+Retroactive audit of your premium (Opus/Fable) quota: which past premium-tier sessions were structurally Sonnet-shaped (small input/output, few tool calls)? Covers Fable (the tier above Opus) as well as Opus. Reports the percent of premium quota that went to Sonnet-shaped sessions (a retrospective behaviour mirror — those tokens are already spent, so it is misallocated, not "reclaimable"), example sessions to spot-check, and an optional tuned routing-config export. Subscription users see a habit nudge; API-billed users additionally see the already-billed dollar counterfactual. Quota-share framing, never a dollar "saving" claim. The JSON field is `percent_quota_misallocated` (the pre-0.6 `percent_quota_reclaimable` key is still emitted as a deprecated alias for one release). Needs a direct DB connection (can't run against a live `tj serve`).
 
 ```bash
 tj quota-audit
