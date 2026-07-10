@@ -30,16 +30,16 @@ One command sets up live capture, all six analyzers, Lens (the local dashboard),
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
-`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path; under npx it first offers to make itself a permanent install. For Claude Code and Codex that means backfilling your recent history plus the statusline and hooks; restart and you're live.
-
-Then:
+`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path; under npx it first offers to make itself a permanent install. For Claude Code and Codex that means backfilling your recent history plus the statusline and hooks; restart and you're live. Then run:
 
 ```bash
 tj optimize          # cost-saving candidates from your actual usage
 tj serve             # open the dashboard at http://127.0.0.1:7391/
 ```
 
-Onboarding also wires a **zero-token statusline** into Claude Code; `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface; an MCP would tax every turn). Run bare `tj` any time and it points you to the next best action (`tj status`, `tj tokenmaxx`, `tj optimize`, or `tj serve`).
+The statusline is **zero-token**; `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface; an MCP would tax every turn).
+
+Run bare `tj` any time and it points you to the next best action (`tj status`, `tj tokenmaxx`, `tj optimize`, or `tj serve`).
 
 **Just looking?** `npx tokenjam` prints a 15-second read-only report over the logs you already have: no install, nothing kept.
 
@@ -55,7 +55,7 @@ Building your own agent with the SDK: install *in your project* (`pip install to
 |---|---|---|
 | **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all six analyzers + Lens |
 | **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
-| **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code (below) | Live capture from your own agent process, no CLI-specific backfill |
+| **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
 | **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone`, same flags) | One-time import of your existing traces into the local DB |
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion: no SDK, no patch |
@@ -79,7 +79,7 @@ TokenJam reads telemetry from the major agent runtimes, frameworks, providers, a
 
 ### Downsize
 
-Flags sessions where a cheaper model in the same family is a candidate. Never claims quality equivalence, surfaces examples so you can spot-check.
+Flags sessions where a cheaper model in the same family is a downsize candidate. Never claims quality equivalence, surfaces examples so you can spot-check.
 
 <pre><code>tj optimize downsize</code></pre>
 
