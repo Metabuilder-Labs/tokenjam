@@ -97,21 +97,34 @@ def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
 def _headline_nudge(audit: OpusQuotaAudit, framing: Framing) -> Any:
     """Persona-specific takeaway under the measured misallocation headline.
 
-    Subscription / local users pay a flat fee, so the honest framing is a habit
-    nudge: that quota share is still available for hard problems next window.
-    API-billed users additionally get the retrospective counterfactual in
-    dollars — the same work priced at the suggested cheaper tiers, labelled as
-    already-billed so it never reads as a future "saving".
+    - API-billed with pricing data: the retrospective counterfactual in dollars
+      — the same work priced at the suggested cheaper tiers, labelled as
+      already-billed so it never reads as a future "saving".
+    - API-billed with NO pricing data (every candidate's model is absent from
+      the pricing table, so ``actual_cost_usd == 0``): a neutral routing prompt.
+      API billing has no rolling quota window, so the subscription "next window"
+      language below would be actively wrong for these users.
+    - Subscription / local (and the unknown-plan default): a habit nudge — that
+      quota share is still available for hard problems next window.
     """
     from rich.text import Text
 
-    if framing.pricing_mode == "api" and audit.actual_cost_usd > 0:
+    if framing.pricing_mode == "api":
+        if audit.actual_cost_usd > 0:
+            line = Text("\n→ ", style="dim")
+            line.append(
+                f"Same work at the suggested tiers ≈ "
+                f"{format_cost(audit.alternative_cost_usd)} vs your "
+                f"{format_cost(audit.actual_cost_usd)} actual "
+                "(retrospective — already billed).",
+                style="dim",
+            )
+            return line
+        # API mode but no pricing data — stay neutral, never subscription quota
+        # language (there is no rolling window to hold that share for).
         line = Text("\n→ ", style="dim")
         line.append(
-            f"Same work at the suggested tiers ≈ "
-            f"{format_cost(audit.alternative_cost_usd)} vs your "
-            f"{format_cost(audit.actual_cost_usd)} actual "
-            "(retrospective — already billed).",
+            "Review these sessions before adjusting your routing.",
             style="dim",
         )
         return line
@@ -211,9 +224,7 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
 
         # Persona-gated takeaway. The measured mirror above is shown to everyone;
         # this is the actionable framing for the user's billing reality.
-        nudge = _headline_nudge(audit, framing)
-        if nudge is not None:
-            sections.append(nudge)
+        sections.append(_headline_nudge(audit, framing))
 
         if audit.suggestions:
             pairs = ", ".join(

@@ -474,6 +474,51 @@ def test_cli_api_persona_shows_dollar_counterfactual(db, monkeypatch):
     assert "stays available for hard problems" not in flat
 
 
+def test_api_nudge_without_pricing_data_stays_neutral():
+    """API mode + no pricing data (every candidate model absent from the pricing
+    table → actual_cost_usd == 0) must NOT fall through to the subscription
+    "next window" quota language — API billing has no rolling window. It gets a
+    neutral routing prompt instead of a dollar counterfactual or a habit nudge."""
+    from tokenjam.cli.cmd_quota_audit import _headline_nudge
+    from tokenjam.core.framing import Framing
+    from tokenjam.core.optimize.types import OpusQuotaAudit
+
+    audit = OpusQuotaAudit(
+        opus_sessions=3, opus_tokens=300_000,
+        candidate_sessions=2, candidate_tokens=200_000,
+        percent_quota_misallocated=66.7, percent_sessions=66.7,
+        actual_cost_usd=0.0, alternative_cost_usd=0.0,
+    )
+    framing = Framing(pricing_mode="api", plan_tier="api")
+    nudge = _headline_nudge(audit, framing).plain
+
+    # Neither the subscription quota language nor a fabricated dollar figure.
+    assert "next window" not in nudge
+    assert "stays available for hard problems" not in nudge
+    assert "$" not in nudge
+    assert "Review these sessions" in nudge
+
+
+def test_api_nudge_with_pricing_shows_dollar_counterfactual():
+    """API mode WITH pricing data gets the already-billed dollar counterfactual,
+    never the subscription 'next window' language."""
+    from tokenjam.cli.cmd_quota_audit import _headline_nudge
+    from tokenjam.core.framing import Framing
+    from tokenjam.core.optimize.types import OpusQuotaAudit
+
+    audit = OpusQuotaAudit(
+        opus_sessions=3, opus_tokens=300_000,
+        candidate_sessions=2, candidate_tokens=200_000,
+        percent_quota_misallocated=66.7, percent_sessions=66.7,
+        actual_cost_usd=12.0, alternative_cost_usd=3.0,
+    )
+    framing = Framing(pricing_mode="api", plan_tier="api")
+    nudge = _headline_nudge(audit, framing).plain
+
+    assert "already billed" in nudge
+    assert "next window" not in nudge
+
+
 def test_cli_json_output_has_segment_fields(db, monkeypatch):
     _seed_cli(db)
     config = _max_config()
