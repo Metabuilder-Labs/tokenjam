@@ -381,19 +381,30 @@ class _SessionAgg:
     """Per-session aggregate of the flagged cheap-segment PREMIUM turns, for the
     spot-check example list (largest-quota first)."""
 
-    __slots__ = ("session_id", "model", "provider", "quota", "new_input",
+    __slots__ = ("session_id", "quota_by_model", "quota", "new_input",
                  "output", "reread", "tool_calls", "cost")
 
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
-        self.model = ""
-        self.provider: str | None = None
+        # (provider, model) -> flagged premium quota, so the example reports the
+        # model that actually carried the most misallocated quota in this session
+        # rather than freezing on whichever premium turn happened to appear first
+        # (a mixed-model session could otherwise mislabel the routing suggestion).
+        self.quota_by_model: dict[tuple[str | None, str], float] = {}
         self.quota = 0.0
         self.new_input = 0
         self.output = 0
         self.reread = 0
         self.tool_calls = 0
         self.cost = 0.0
+
+    def dominant_model(self) -> tuple[str | None, str]:
+        """The (provider, model) carrying the most flagged premium quota in this
+        session — the honest label for the spot-check example + routing hint."""
+        provider, model = max(
+            self.quota_by_model.items(), key=lambda kv: kv[1],
+        )[0]
+        return provider, model
 
 
 def audit_opus_quota(
@@ -471,9 +482,10 @@ def audit_opus_quota(
                 agg.reread += t.reread_tokens
                 agg.tool_calls += t.tool_fanout
                 agg.cost += t.cost_usd
-                if not agg.model:
-                    agg.model = t.model
-                    agg.provider = t.provider
+                key = (t.provider, t.model)
+                agg.quota_by_model[key] = (
+                    agg.quota_by_model.get(key, 0.0) + t.quota_weighted_tokens
+                )
                 alt = (
                     lookup_downgrade(t.provider, t.model)
                     if t.provider else None
@@ -485,13 +497,15 @@ def audit_opus_quota(
             audit.candidate_sessions += 1
 
     # Secondary API-only implied-dollar counterfactual, aggregated over the
-    # flagged premium turns (never the headline).
+    # flagged premium turns and priced at each session's dominant premium model's
+    # cheaper alternative (never the headline).
     for agg in aggs.values():
-        alt = lookup_downgrade(agg.provider, agg.model) if agg.provider else None
+        provider, model = agg.dominant_model()
+        alt = lookup_downgrade(provider, model) if provider else None
         if not alt:
             continue
         alt_unit = _alt_unit_cost(
-            agg.provider, agg.model, alt, agg.new_input, agg.output, agg.reread,
+            provider, model, alt, agg.new_input, agg.output, agg.reread,
         )
         if alt_unit is not None:
             actual_cost += agg.cost
@@ -526,21 +540,25 @@ def audit_opus_quota(
     # Largest-quota candidate sessions first — the most worthwhile spot-checks.
     ordered_aggs = sorted(aggs.values(), key=lambda a: a.quota, reverse=True)
     audit.examples = [
-        OpusAuditExample(
-            trace_id="",
-            session_id=agg.session_id,
-            model=agg.model,
-            alt_model=(
-                lookup_downgrade(agg.provider, agg.model)
-                if agg.provider else None
-            ) or "",
-            input_tokens=agg.new_input,
-            output_tokens=agg.output,
-            cache_tokens=agg.reread,
-            tool_calls=agg.tool_calls,
-            duration_seconds=None,
-            cost_usd=round(agg.cost, 6),
-        )
-        for agg in ordered_aggs[:OPUS_AUDIT_MAX_EXAMPLES]
+        _example_for(agg) for agg in ordered_aggs[:OPUS_AUDIT_MAX_EXAMPLES]
     ]
     return audit
+
+
+def _example_for(agg: _SessionAgg) -> OpusAuditExample:
+    """Build a spot-check example labelled with the session's DOMINANT premium
+    model (and its cheaper alternative), not whichever premium turn came first."""
+    provider, model = agg.dominant_model()
+    alt = (lookup_downgrade(provider, model) if provider else None) or ""
+    return OpusAuditExample(
+        trace_id="",
+        session_id=agg.session_id,
+        model=model,
+        alt_model=alt,
+        input_tokens=agg.new_input,
+        output_tokens=agg.output,
+        cache_tokens=agg.reread,
+        tool_calls=agg.tool_calls,
+        duration_seconds=None,
+        cost_usd=round(agg.cost, 6),
+    )

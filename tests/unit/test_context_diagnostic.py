@@ -636,3 +636,45 @@ def test_subagent_accounting_fields_in_json_payload(db):
     assert payload["delegating_sessions"] == 1
     assert payload["unaccounted_subagent_sessions"] == ["sess-blind"]
     assert payload["subagent_accounting_partial"] is True
+
+
+def test_attach_tool_activity_does_not_truncate_on_null_start_time():
+    """A turn with a missing start_time must be treated as earliest (consistent
+    with the sort key), NOT truncate attribution: a later, genuinely-preceding
+    turn still receives the tool span. A `break` on the null turn would drop
+    every real turn after it and mis-attribute the tool to the null turn."""
+    from tokenjam.core.context_diagnostic import (
+        TurnComposition,
+        _attach_tool_activity,
+    )
+    from tokenjam.utils.time_parse import utcnow
+
+    t0 = utcnow()
+
+    def _turn_comp(start_time):
+        return TurnComposition(
+            session_id="s", sub_agent_id=None, model="claude-opus-4-8",
+            reread_tokens=0, new_input_tokens=100, output_tokens=50,
+            cache_write_tokens=0, cost_usd=0.0, start_time=start_time,
+        )
+
+    null_turn = _turn_comp(None)
+    real_turn = _turn_comp(t0)
+
+    class _FakeConn:
+        def execute(self, _sql, _params):
+            # One Read tool span AFTER the real turn (and after any turn).
+            self._rows = [("s", "Read", t0 + timedelta(seconds=5))]
+            return self
+
+        def fetchall(self):
+            return self._rows
+
+    _attach_tool_activity(
+        _FakeConn(), t0 - timedelta(days=1), t0 + timedelta(days=1), None,
+        [null_turn, real_turn],
+    )
+
+    # The tool span attributes to the real preceding turn, not the null turn.
+    assert real_turn.tool_fanout == 1
+    assert null_turn.tool_fanout == 0

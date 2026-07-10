@@ -741,8 +741,13 @@ def _attach_tool_activity(
             continue
         target = sess_turns[0]
         if tstart is not None:
+            # Walk in start_time order and keep the latest turn at or before the
+            # tool span. Compare through _turn_sort_key so a turn with a missing
+            # start_time is treated as earliest (consistent with the sort above)
+            # and does NOT truncate attribution — a `break` on a None-start turn
+            # would drop every later, genuinely-preceding turn on the floor.
             for t in sess_turns:
-                if t.start_time is not None and t.start_time <= tstart:
+                if _turn_sort_key(t.start_time) <= tstart:
                     target = t
                 else:
                     break

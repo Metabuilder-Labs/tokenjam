@@ -119,6 +119,29 @@ def test_mechanical_stretch_inside_hard_session_is_flagged(db):
     assert 8_000 + 500 + 400 + 9_000 > md.SMALL_INPUT_TOKENS
 
 
+def test_multi_model_session_example_labels_dominant_model(db):
+    """A flagged session spanning two premium models must label its spot-check
+    example (and routing hint) with the model carrying the MOST misallocated
+    quota — not whichever premium turn appeared first. The first turn here is a
+    small Fable turn, so the old first-turn-frozen label would mislabel it."""
+    _new_session(db, "multi")
+    _turn(db, "multi", 0, model="claude-fable-5",
+          input_tokens=400, output_tokens=80)                        # ~800 quota
+    _turn(db, "multi", 1, model="claude-opus-4-8",
+          input_tokens=1_500, output_tokens=250)                     # ~2750 quota
+    _turn(db, "multi", 2, model="claude-opus-4-8",
+          input_tokens=1_500, output_tokens=250)                     # ~2750 quota
+
+    audit = _audit(db)
+    assert len(audit.examples) == 1
+    ex = audit.examples[0]
+    # Opus 4.8 carries ~5500 of ~6300 flagged quota → the dominant label.
+    assert ex.model == "claude-opus-4-8"
+    assert ex.alt_model == "claude-haiku-4-5"
+    # Both premium models still appear in the aggregate suggestions.
+    assert set(audit.suggestions) == {"claude-fable-5", "claude-opus-4-8"}
+
+
 # ── (b) per-span attribution: mixed-model session ───────────────────────────
 
 def test_mixed_model_session_attributes_tokens_per_actual_model(db):
