@@ -165,6 +165,32 @@ def test_fable_and_opus_4_8_sessions_are_audited(db):
         assert ex.alt_model
 
 
+def test_context_tagged_and_bedrock_premium_sessions_are_audited(db):
+    """A premium session must be counted + flagged regardless of id SHAPE — a
+    [1m] context tag or a Bedrock region/provider prefix must not make it vanish
+    from the audit (it's still flagged by the subagent analyzer, so dropping it
+    here is a silent inconsistency)."""
+    # 1M-context Fable, Sonnet-shaped → candidate.
+    _add_session(db, "fable-1m", model="claude-fable-5[1m]",
+                 input_tokens=1_500, output_tokens=250, cache_tokens=98_250,
+                 cost_usd=5.0, tool_calls=2)
+    # Bedrock-hosted Opus 4.8, Sonnet-shaped → candidate.
+    _add_session(db, "bedrock-opus", model="us-anthropic-claude-opus-4-8-20260115-v1",
+                 input_tokens=1_000, output_tokens=200, cache_tokens=98_800,
+                 cost_usd=3.0, tool_calls=1)
+
+    audit = audit_opus_quota(db.conn, SINCE, UNTIL, agent_id=None, window_days=30.0)
+
+    # Both counted in the premium denominator (not silently dropped).
+    assert audit.opus_sessions == 2
+    assert audit.opus_tokens == 200_000
+    # Both are reclaim candidates with a concrete suggested model.
+    assert audit.candidate_sessions == 2
+    assert {ex.session_id for ex in audit.examples} == {"fable-1m", "bedrock-opus"}
+    assert audit.suggestions["claude-fable-5[1m]"] == "claude-sonnet-4-6"
+    assert audit.suggestions["us-anthropic-claude-opus-4-8-20260115-v1"] == "claude-haiku-4-5"
+
+
 def test_no_opus_sessions_is_clean_empty_state(db):
     # Only a Sonnet session — nothing for the Opus audit to inspect.
     _add_session(db, "sonnet-only", model="claude-sonnet-4-6",

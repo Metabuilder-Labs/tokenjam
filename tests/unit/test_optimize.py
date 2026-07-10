@@ -248,6 +248,26 @@ def test_cycle_bounds_before_start_day_uses_prior_month():
     assert ce.month == 5 and ce.day == 15
 
 
+def test_lookup_downgrade_normalizes_context_tag_and_bedrock():
+    """`_lookup_downgrade` must resolve the same id shapes `is_premium_tier`
+    accepts — [1m] context tags and Bedrock region/provider prefixes — or the
+    audit silently drops premium sessions the subagent analyzer flags."""
+    from tokenjam.core.optimize.analyzers.model_downgrade import _lookup_downgrade
+
+    # [1m] context tag (1M-context variant) resolves to the base model's alt.
+    assert _lookup_downgrade("anthropic", "claude-fable-5[1m]") == "claude-sonnet-4-6"
+    assert _lookup_downgrade("anthropic", "claude-opus-4-8[1m]") == "claude-haiku-4-5"
+    # Trailing date still works (regression guard).
+    assert _lookup_downgrade("anthropic", "claude-opus-4-8-20260115") == "claude-haiku-4-5"
+    # Bedrock-hosted Claude: region/provider prefix + version suffix, provider
+    # arrives as a bedrock alias — resolves via the base Anthropic model.
+    assert _lookup_downgrade(
+        "aws.bedrock", "us-anthropic-claude-opus-4-8-20260115-v1"
+    ) == "claude-haiku-4-5"
+    # Unrecognised model still returns None (no invented alt).
+    assert _lookup_downgrade("anthropic", "gpt-4o") is None
+
+
 def test_downgrade_candidates_have_pricing_for_alternative():
     # Sanity check: every alternative model is in the pricing table.
     from tokenjam.core.pricing import get_rates
