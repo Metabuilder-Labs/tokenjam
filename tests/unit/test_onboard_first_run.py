@@ -195,30 +195,71 @@ def test_claude_code_restart_banner_precedes_nudge(_isolated_claude_code, tmp_pa
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Next steps" in out
-    assert "Restart" in out
-    assert out.index("Restart") < out.index("Next steps"), out
+    assert "Action required" in out
+    assert out.index("Action required") < out.index("Next steps"), out
     assert out.index("Next steps") < out.index("Connection details"), out
     # No backfill happened here, so no "already loaded" over-claim.
     assert "already loaded" not in out
 
 
-def test_claude_code_restart_banner_says_resume_is_safe(_isolated_claude_code, tmp_path):
-    """'Restart' reads like losing your conversation — the banner must say
-    resuming is safe, or users defer the restart (and their telemetry)."""
+def test_claude_code_restart_panel_is_why_first_and_consolidated(
+    _isolated_claude_code, tmp_path,
+):
+    """One consolidated Action-required panel (2026-07 restructure): the WHY
+    (stale telemetry endpoint) leads, then numbered steps — no more scattering
+    across a panel + a stray "open a new terminal" paragraph + an "after
+    restarting, run" pointer + a duplicate verify line near Connection
+    details."""
+    res = _run_claude_code(tmp_path, "3")
+    assert res.exit_code == 0, res.output
+    out = res.output
+    flat = " ".join(out.split())
+    assert "Action required" in flat
+    assert "restart Claude Code" in flat
+    # Why leads the panel, before the numbered steps.
+    assert flat.index("old endpoint") < flat.index("Quit Claude Code"), flat
+    assert "Quit Claude Code in every terminal" in flat
+    assert "Relaunch in the same folder" in flat
+    # The now-redundant scattered pieces are gone.
+    assert "Open a new terminal" not in out
+    assert "After restarting, run:" not in out
+    assert "tj status --agent" not in out
+    # Folded into one dim footnote instead.
+    assert "own dashboard tile" in flat
+    assert "claude --as <name>" in flat
+
+
+def test_claude_code_restart_panel_states_honest_resume_semantics(
+    _isolated_claude_code, tmp_path,
+):
+    """The old copy claimed `claude --resume` "picks up exactly where you left
+    off" — inaccurate: --resume opens a picker you must choose from, and -c
+    only reopens the CURRENT project's latest conversation. Pin the corrected,
+    honest phrasing (Critical Rule 14: no promised outcomes)."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     flat = " ".join(res.output.split())
+    assert "claude -c" in flat
+    assert "reopen this project's latest conversation" in flat
     assert "claude --resume" in flat
-    assert "conversation survives" in flat
+    assert "pick any earlier one from a list" in flat
+    assert "resuming is optional" in flat
+    # The inaccurate old claims must not resurface.
+    assert "pick up exactly where you left off" not in flat
+    assert "conversation survives" not in flat
 
 
 def test_claude_code_no_pre_restart_verify_prompt(_isolated_claude_code, tmp_path):
     """The interactive 'verify now?' poll can only time out before the restart
-    it depends on — CC gets a verify-after-restarting pointer instead."""
+    it depends on — CC gets the verify pointer as step 3 of the restart panel
+    instead, and only there (no duplicate near Connection details)."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
-    assert "Verify tj is receiving telemetry now?" not in res.output
-    assert "--verify-only" in res.output
+    out = res.output
+    assert "Verify tj is receiving telemetry now?" not in out
+    assert "--verify-only" in out
+    assert out.count("--verify-only") == 1
+    assert "Verify after restarting:" not in out
 
 
 def test_claude_code_asks_project_name_after_agent_questions(
