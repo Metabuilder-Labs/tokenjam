@@ -181,7 +181,6 @@ class TestDaemonSurvivesUvCachePrune:
 
     def test_program_args_falls_back_to_uvx_shim_when_tj_is_archive_cache(self, monkeypatch):
         from tokenjam.cli.cmd_onboard import _daemon_program_args
-        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: None)
         monkeypatch.setattr(
             "tokenjam.cli.cmd_onboard.sys.executable",
             "/Users/x/.cache/uv/archive-v0/abc123/bin/python",
@@ -215,7 +214,6 @@ class TestDaemonSurvivesUvCachePrune:
 
     def test_program_args_none_when_no_durable_entrypoint_exists(self, monkeypatch):
         from tokenjam.cli.cmd_onboard import _daemon_program_args
-        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: None)
         monkeypatch.setattr(
             "tokenjam.cli.cmd_onboard.sys.executable",
             "/Users/x/.cache/uv/archive-v0/abc123/bin/python",
