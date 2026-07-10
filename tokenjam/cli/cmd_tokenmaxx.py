@@ -29,18 +29,11 @@ from dataclasses import dataclass
 
 import click
 
-from tokenjam.core.context_diagnostic import (
-    ContextDiagnostic,
-    compute_context_diagnostic,
-)
-from tokenjam.core.framing import (
-    Framing,
-    WindowSummary,
-    compute_framing,
-    plan_determination_mix,
-)
+from tokenjam.cli.data_access import resolve_data_access
+from tokenjam.core.context_diagnostic import ContextDiagnostic
+from tokenjam.core.framing import Framing
 from tokenjam.utils.formatting import console, format_tokens
-from tokenjam.utils.time_parse import parse_since, utcnow
+from tokenjam.utils.time_parse import parse_since
 
 
 # Efficiency-tier table — keyed on the *overhead* (re-read) share of the
@@ -96,37 +89,23 @@ def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
     if db is None or config is None:
         raise click.ClickException("tokenmaxx requires a database connection.")
 
-    conn = getattr(db, "conn", None)
-    if conn is None:
-        raise click.ClickException(
-            "tj tokenmaxx needs a direct database connection (it reads context "
-            "composition). It can't run against a live `tj serve` — stop the "
-            "daemon (`tj stop`) and re-run, or run from a project without the "
-            "daemon up."
-        )
-
     # --weekly is a recap preset: a 7-day window with recap framing. An explicit
     # --since still wins if the user narrows it themselves.
     if weekly and since == "30d":
         since = "7d"
 
+    # Validate the window up-front so the direct and serve paths give the same
+    # error message.
     try:
-        since_dt = parse_since(since)
+        parse_since(since)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
-    until_dt = utcnow()
 
-    capture = getattr(config, "capture", None)
-    tool_inputs_captured = bool(getattr(capture, "tool_inputs", False))
-
-    diag = compute_context_diagnostic(
-        conn,
-        since_dt,
-        until_dt,
-        agent_id=agent,
-        tool_inputs_captured=tool_inputs_captured,
-    )
-    framing = _framing_for(conn, config, diag, agent)
+    # One seam, two backends: a direct DuckDB connection when no daemon runs,
+    # else the compute routed through the running `tj serve` (which holds the DB
+    # write lock). No `hasattr(db, "conn")` sniffing — the seam owns that choice.
+    data = resolve_data_access(ctx)
+    diag, framing = data.context_diagnostic(since=since, agent_id=agent)
 
     overhead_share = diag.reread_share
     work_share = (
@@ -159,21 +138,6 @@ def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
         overhead_share=overhead_share, work_share=work_share,
         since=since, weekly=weekly,
     )
-
-
-# ───────────────────────────── framing ────────────────────────────────────
-
-def _framing_for(conn, config, diag: ContextDiagnostic,
-                 agent: str | None) -> Framing:
-    """Plan-tier framing for the window (window-independent plan, per #177)."""
-    mix = plan_determination_mix(conn, agent)
-    summary = WindowSummary(
-        total_cost_usd=diag.total_cost_usd,
-        total_tokens=diag.total_tokens,
-        sessions=diag.sessions,
-        plan_tier_mix=mix,
-    )
-    return compute_framing(config, summary)
 
 
 # ───────────────────────────── helpers ────────────────────────────────────

@@ -29,24 +29,18 @@ from typing import Any
 
 import click
 
+from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.core.context_diagnostic import (
     INCLUSION_FILE_READ,
     INCLUSION_PROMPT,
     INCLUSION_SEARCH,
     INCLUSION_TOOL_OUTPUT,
     ContextDiagnostic,
-    compute_context_diagnostic,
-    diagnostic_from_dict,
     diagnostic_to_dict,
 )
-from tokenjam.core.framing import (
-    Framing,
-    WindowSummary,
-    compute_framing,
-    plan_determination_mix,
-)
+from tokenjam.core.framing import Framing
 from tokenjam.utils.formatting import console, format_tokens
-from tokenjam.utils.time_parse import parse_since, utcnow
+from tokenjam.utils.time_parse import parse_since
 
 # Short tags shown before each recurring inclusion so the kind is obvious.
 _INCLUSION_LABELS = {
@@ -73,44 +67,26 @@ def cmd_context(ctx: click.Context, agent: str | None, since: str,
     if db is None or config is None:
         raise click.ClickException("context requires a database connection.")
 
-    # Validate the window up-front so both paths give the same error message.
+    # Validate the window up-front so the direct and serve paths give the same
+    # error message.
     try:
-        since_dt = parse_since(since)
+        parse_since(since)
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
-    until_dt = utcnow()
 
-    conn = getattr(db, "conn", None)
-    if conn is None:
-        # API-shim path: `tj serve` holds the DuckDB write lock. The diagnostic
-        # reads the raw `attributes` column, which the shim can't expose
-        # row-by-row and DuckDB won't let us open read-only alongside the
-        # writer — so the daemon (which owns the connection) computes it and we
-        # render the returned payload, instead of refusing to run on the exact
-        # command the launch drives people to (#63).
-        _render_via_serve(db, since=since, agent=agent, output_json=output_json)
-        return
-
-    capture = getattr(config, "capture", None)
-    tool_inputs_captured = bool(getattr(capture, "tool_inputs", False))
-    prompts_captured = bool(getattr(capture, "prompts", False))
-    tool_outputs_captured = bool(getattr(capture, "tool_outputs", False))
-
-    diag = compute_context_diagnostic(
-        conn,
-        since_dt,
-        until_dt,
-        agent_id=agent,
-        tool_inputs_captured=tool_inputs_captured,
-        prompts_captured=prompts_captured,
-        tool_outputs_captured=tool_outputs_captured,
-    )
-
-    framing = _framing_for(conn, config, diag, agent)
+    # One seam, two backends. The diagnostic needs the raw `attributes` column,
+    # which the read-only shim can't expose row-by-row, and DuckDB won't open a
+    # concurrent read-only connection alongside the `tj serve` writer. So when
+    # the daemon holds the lock the compute is routed through it (it owns the
+    # connection) rather than refusing to run on the exact command the launch
+    # drives people to. No `hasattr(db, "conn")` sniffing here — the seam owns
+    # the direct-vs-serve choice.
+    data = resolve_data_access(ctx)
+    diag, framing = data.context_diagnostic(since=since, agent_id=agent)
 
     # The ACTION half of the measure→act→prove loop: what the `tj hook
-    # cap-output` PostToolUse hook reclaimed (read from the append-only sink,
-    # never the DB). Estimated (char/4).
+    # cap-output` PostToolUse hook reclaimed (read from the append-only local
+    # sink, never the DB — available in both modes). Estimated (char/4).
     from tokenjam.core.savings_log import read_savings, summarize_savings
     reclaimed = summarize_savings(read_savings(config))
 
@@ -122,76 +98,6 @@ def cmd_context(ctx: click.Context, agent: str | None, since: str,
         return
 
     _render(diag, framing, since=since, reclaimed=reclaimed)
-
-
-def _render_via_serve(
-    db, *, since: str, agent: str | None, output_json: bool,
-) -> None:
-    """Render the diagnostic fetched from a running ``tj serve`` (#63).
-
-    The daemon holds the DuckDB write lock, so the CLI can't read the raw
-    ``attributes`` column directly. It fetches the server-computed diagnostic
-    (``diagnostic_to_dict`` + the ``framing`` block) over ``/api/v1/context``,
-    reconstructs the dataclasses, and renders exactly as the direct path does.
-    """
-    from tokenjam.core.api_backend import ApiBackend
-
-    if not isinstance(db, ApiBackend):
-        raise click.ClickException(
-            "tj context needs either a direct DuckDB connection or a running "
-            "tj serve at the configured api.{host,port}."
-        )
-    try:
-        payload = db.fetch_context_diagnostic(since=since, agent_id=agent)
-    except Exception as exc:  # noqa: BLE001 — surface any HTTP/transport error
-        raise click.ClickException(
-            f"Failed to fetch the context diagnostic from tj serve: {exc}"
-        ) from exc
-
-    if output_json:
-        # The server already merged the `framing` block into the payload;
-        # emit it verbatim so `--json` is byte-identical across paths.
-        click.echo(json.dumps(payload, default=str))
-        return
-
-    diag = diagnostic_from_dict(payload)
-    framing = _framing_from_dict(payload.get("framing"))
-    _render(diag, framing, since=since)
-
-
-def _framing_from_dict(data: dict | None) -> Framing:
-    """Reconstruct a :class:`Framing` from a serialized ``framing`` block.
-
-    Mirrors the reconstruction in ``cmd_cost._cost_framing``: ``Framing`` is a
-    flat dataclass, so ``Framing(**data)`` round-trips ``to_dict()``. A missing
-    block or a server-side schema drift degrades to the neutral default (which
-    renders raw token counts) rather than raising.
-    """
-    if not data:
-        return Framing()
-    try:
-        return Framing(**data)
-    except TypeError:
-        return Framing()
-
-
-def _framing_for(
-    conn, config, diag: ContextDiagnostic, agent: str | None,
-) -> Framing:
-    """Plan-tier framing for the diagnostic's window.
-
-    Plan determination is window-INDEPENDENT (per #177) — the user's pricing
-    mode is a property of their plan, not the selected window. Only the totals
-    (tokens / cost) are window-scoped, so "% of cycle tokens" reads truthfully.
-    """
-    mix = plan_determination_mix(conn, agent)
-    summary = WindowSummary(
-        total_cost_usd=diag.total_cost_usd,
-        total_tokens=diag.total_tokens,
-        sessions=diag.sessions,
-        plan_tier_mix=mix,
-    )
-    return compute_framing(config, summary)
 
 
 # ───────────────────────────── rendering ──────────────────────────────────

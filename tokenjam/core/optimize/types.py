@@ -1,7 +1,7 @@
 """Dataclasses used by tj optimize analyzers and the runner."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 
@@ -250,3 +250,70 @@ class AnalyzerContext:
     # Budget-analyzer flow control:
     budget_provider_filter: str | None    = None
     budget_usd_override:    float | None  = None
+
+
+# ---------------------------------------------------------------------------
+# OpusQuotaAudit (de)serialization — the round-trip pair for the daemon path
+# ---------------------------------------------------------------------------
+# `tj quota-audit` reads per-session token/model metadata the API shim can't
+# expose at this grain, so when `tj serve` holds the DuckDB write lock the
+# daemon computes the audit and returns `audit_to_dict(audit)` (mirroring
+# `context_diagnostic.diagnostic_to_dict`). The CLI rebuilds the dataclass with
+# `audit_from_dict` and renders identically. These are a genuine inverse pair —
+# every field `audit_to_dict` emits, `audit_from_dict` reconstructs — so the
+# serve path never silently drops a field the CLI renders.
+
+
+def audit_to_dict(audit: OpusQuotaAudit) -> dict[str, Any]:
+    """JSON-serialisable view of an :class:`OpusQuotaAudit` (round-trips)."""
+    return {
+        "window_days": audit.window_days,
+        "opus_sessions": audit.opus_sessions,
+        "opus_tokens": audit.opus_tokens,
+        "candidate_sessions": audit.candidate_sessions,
+        "candidate_tokens": audit.candidate_tokens,
+        "percent_quota_reclaimable": audit.percent_quota_reclaimable,
+        "percent_sessions": audit.percent_sessions,
+        "suggestions": dict(audit.suggestions),
+        "examples": [asdict(ex) for ex in audit.examples],
+        "actual_cost_usd": audit.actual_cost_usd,
+        "alternative_cost_usd": audit.alternative_cost_usd,
+        "caveat": audit.caveat,
+    }
+
+
+def audit_from_dict(data: dict[str, Any]) -> OpusQuotaAudit:
+    """Reconstruct an :class:`OpusQuotaAudit` from :func:`audit_to_dict`.
+
+    Missing keys fall back to the dataclass defaults so a server-side schema
+    drift degrades gracefully rather than raising.
+    """
+    examples = [
+        OpusAuditExample(
+            trace_id=str(ex.get("trace_id", "")),
+            session_id=ex.get("session_id"),
+            model=str(ex.get("model", "")),
+            alt_model=str(ex.get("alt_model", "")),
+            input_tokens=int(ex.get("input_tokens", 0) or 0),
+            output_tokens=int(ex.get("output_tokens", 0) or 0),
+            cache_tokens=int(ex.get("cache_tokens", 0) or 0),
+            tool_calls=int(ex.get("tool_calls", 0) or 0),
+            duration_seconds=ex.get("duration_seconds"),
+            cost_usd=float(ex.get("cost_usd", 0.0) or 0.0),
+        )
+        for ex in data.get("examples", []) or []
+    ]
+    return OpusQuotaAudit(
+        window_days=float(data.get("window_days", 0.0) or 0.0),
+        opus_sessions=int(data.get("opus_sessions", 0) or 0),
+        opus_tokens=int(data.get("opus_tokens", 0) or 0),
+        candidate_sessions=int(data.get("candidate_sessions", 0) or 0),
+        candidate_tokens=int(data.get("candidate_tokens", 0) or 0),
+        percent_quota_reclaimable=float(data.get("percent_quota_reclaimable", 0.0) or 0.0),
+        percent_sessions=float(data.get("percent_sessions", 0.0) or 0.0),
+        suggestions=dict(data.get("suggestions", {}) or {}),
+        examples=examples,
+        actual_cost_usd=float(data.get("actual_cost_usd", 0.0) or 0.0),
+        alternative_cost_usd=float(data.get("alternative_cost_usd", 0.0) or 0.0),
+        caveat=str(data.get("caveat", OPUS_QUOTA_AUDIT_CAVEAT)),
+    )
