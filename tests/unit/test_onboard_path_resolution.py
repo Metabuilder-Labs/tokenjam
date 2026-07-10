@@ -117,6 +117,17 @@ def test_ensure_on_path_falls_back_when_uv_update_shell_fails(monkeypatch, tmp_p
     assert cmd_onboard._ZSHRC_PATH_START in (tmp_path / ".zshrc").read_text()
 
 
+def test_ensure_on_path_refuses_bare_command_name(monkeypatch, tmp_path):
+    """The bare-"tj" fallback carries no directory: Path("tj").parent is "."
+    and exporting `.:$PATH` would put the shell's CWD first on PATH — a
+    privilege-escalation vector. Nothing may be written to zshrc."""
+    monkeypatch.setattr(cmd_onboard.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(cmd_onboard.shutil, "which", lambda _b: None)
+    status = cmd_onboard._ensure_tj_on_path("tj")
+    assert status == "no-absolute-path"
+    assert not (tmp_path / ".zshrc").exists()
+
+
 def test_ensure_on_path_is_idempotent(monkeypatch, tmp_path):
     monkeypatch.setattr(cmd_onboard.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(cmd_onboard.shutil, "which", lambda _b: None)

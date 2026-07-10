@@ -1234,6 +1234,13 @@ def _ensure_tj_on_path(expected: str) -> str:
     that a new terminal (or ``source ~/.zshrc``) is needed.
     """
     bin_dir = str(Path(expected).parent)
+    if not Path(bin_dir).is_absolute():
+        # A bare command name (the `_current_tj_binary` last-resort fallback)
+        # carries no directory: Path("tj").parent is "." and exporting
+        # `.:$PATH` would put the shell's CWD first on PATH — a classic
+        # privilege-escalation footgun. Nothing safe to write; let the
+        # caller's warning tell the user to fix PATH themselves.
+        return "no-absolute-path"
     if shutil.which("uv"):
         try:
             result = subprocess.run(
@@ -1273,7 +1280,8 @@ def _print_tj_path_warning(
         )
         if fix_status in ("ran-uv-update-shell", "wrote-zshrc-block"):
             console.print(f"[dim]  Fixed for next time — added {expected} to PATH.[/dim]")
-        console.print(f"[dim]  Full path meanwhile:  {expected}[/dim]")
+        if Path(expected).is_absolute():
+            console.print(f"[dim]  Full path meanwhile:  {expected}[/dim]")
     elif status == "shadowed":
         shadow_version = _tj_binary_version(shadow_path) or "an older tj"
         console.print(
