@@ -37,7 +37,7 @@ def print_home() -> None:
     console.print("  [bold]tj status[/bold]      "
                   "[dim]agent overview — what's running, recent cost[/dim]")
     console.print("  [bold]tj tokenmaxx[/bold]   "
-                  "[dim]your shareable spend tier[/dim]")
+                  "[dim]your shareable efficiency tier[/dim]")
     console.print("  [bold]tj optimize[/bold]    "
                   "[dim]cost-saving candidates from your usage[/dim]")
     console.print("  [bold]tj serve[/bold]       "
