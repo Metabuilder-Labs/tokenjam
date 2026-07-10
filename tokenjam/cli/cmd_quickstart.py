@@ -37,9 +37,11 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.backfill_progress import backfill_progress
 from tokenjam.cli.cmd_statusline import REREAD_WARN, format_status_line
 from tokenjam.core.backfill import (
     CLAUDE_CODE_PROJECTS_ROOT,
+    count_claude_code_sessions_in_scope,
     ingest_claude_code,
 )
 from tokenjam.core.context_diagnostic import compute_context_diagnostic
@@ -51,7 +53,7 @@ from tokenjam.core.session_timeline import (
     timeline_to_dict,
 )
 from tokenjam.core.usage import AssistantUsage, iter_cumulative_usage
-from tokenjam.utils.formatting import console, format_cost, format_tokens
+from tokenjam.utils.formatting import console, err_console, format_cost, format_tokens
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 # First-run cap (#13): on a large ~/.claude history a full backfill into the
@@ -105,8 +107,23 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     # Transient in-memory DB — nothing persisted, no config, no daemon.
     max_sessions = None if full else DEFAULT_MAX_SESSIONS
     db = InMemoryBackend()
-    result = ingest_claude_code(db, root=root, since=since_dt,
-                                max_sessions=max_sessions)
+
+    # Ingest is the only silent stretch in the whole command — on a large
+    # history it can run tens of seconds with zero output otherwise. An
+    # honest status line lands within ~1s of launch, then the shared
+    # streaming counter (#443/#444's `backfill_progress`) advances per
+    # session through to render. `--json` must keep stdout byte-for-byte
+    # clean, so both route to the stderr console when JSON is requested —
+    # never suppressed outright, so a human watching a scripted run still
+    # sees it's alive.
+    status_console = err_console if output_json else console
+    total_in_scope = count_claude_code_sessions_in_scope(
+        root=root, since=since_dt, max_sessions=max_sessions,
+    )
+    status_console.print(f"[dim]{_pre_ingest_status(since, max_sessions)}[/dim]")
+    with backfill_progress(total_in_scope, console=status_console) as progress_cb:
+        result = ingest_claude_code(db, root=root, since=since_dt,
+                                    max_sessions=max_sessions, progress=progress_cb)
 
     if result.sessions_ingested == 0:
         _render_no_sessions(result, since, output_json)
@@ -138,6 +155,36 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
 
 
 # ───────────────────────────── rendering ──────────────────────────────────
+
+_SINCE_UNIT_WORDS = {"d": "days", "h": "hours", "m": "minutes"}
+
+
+def _describe_window(since: str) -> str:
+    """Human-readable window phrasing for the pre-ingest status line.
+
+    Special-cases the relative `Nd`/`Nh`/`Nm` shapes `--since` accepts (the
+    default is `30d`) into "last N days"; anything else (a literal date, an
+    ISO datetime) falls back to "history since <value>" rather than guessing.
+    """
+    m = _re.match(r"^(\d+)([mhd])$", since.strip())
+    if m:
+        amount, unit = m.groups()
+        return f"last {amount} {_SINCE_UNIT_WORDS[unit]}"
+    return f"history since {since}"
+
+
+def _pre_ingest_status(since: str, max_sessions: int | None) -> str:
+    """Honest status line printed BEFORE ingest starts.
+
+    Ingest was previously the one silent stretch in the whole command —
+    ~40s of dead cursor on a large history before any output. This line
+    lands within ~1s of launch; `backfill_progress`'s streaming counter
+    takes over immediately after.
+    """
+    window = _describe_window(since)
+    scope = f" (most-recent {max_sessions} sessions)" if max_sessions is not None else ""
+    return f"Reading your {window} of Claude Code history{scope}…"
+
 
 def _pct(value: float) -> str:
     return f"{value * 100:.1f}%"
