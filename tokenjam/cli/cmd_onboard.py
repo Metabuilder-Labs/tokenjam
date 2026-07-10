@@ -704,7 +704,7 @@ def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> N
     runtime restarts, which hasn't happened yet at this point in onboarding —
     saying yes would poll for 60s and always time out. Codex gets a
     verify-after-restarting pointer instead. Claude Code does NOT get one
-    here — it's already step 3 of the consolidated restart panel
+    here; it's already step 3 of the consolidated restart panel
     (``_print_claude_code_restart_panel``), printed earlier in the same
     completion screen; repeating it here near Connection details would just
     duplicate it. An explicit ``--verify`` still polls (the user asked for it,
@@ -1849,7 +1849,7 @@ def _onboard_claude_code(
     # and buried the restart box below the next-steps list; a later pass split
     # the restart guidance across four spots (the panel, a stray paragraph, an
     # "after restarting" pointer, and a "verify after restarting" line near
-    # Connection details) — consolidated back into one panel below.
+    # Connection details); consolidated back into one panel below.
     console.print()
     console.print("[bold green]Claude Code observability configured.[/bold green]")
     _print_statusline_status(statusline_status)
@@ -2509,7 +2509,7 @@ def _print_claude_code_restart_panel() -> None:
 
     Resume semantics are stated precisely rather than promised: ``claude -c``
     only reopens THIS project's latest conversation, and ``claude --resume``
-    opens a picker the user must choose from — neither one "picks up exactly
+    opens a picker the user must choose from; neither one "picks up exactly
     where you left off" automatically, and resuming a conversation in one
     terminal does nothing while other sessions for this project are still
     running (they're still exporting to the stale endpoint too, which is why
@@ -2519,11 +2519,11 @@ def _print_claude_code_restart_panel() -> None:
     from rich.text import Text
 
     body = Text.from_markup(
-        "Running sessions keep sending telemetry to the old endpoint — "
-        "today's activity won't reach TokenJam until they restart.\n\n"
+        "Running sessions keep sending telemetry to the old endpoint. "
+        "Today's activity won't reach TokenJam until they restart.\n\n"
         "1. Quit Claude Code in [bold]every terminal[/bold] open on this "
         "project.\n\n"
-        "2. Relaunch [bold]claude[/bold] in the same folder — your history "
+        "2. Relaunch [bold]claude[/bold] in the same folder. Your history "
         "is safe:\n"
         "     [bold]claude -c[/bold]        → reopen this project's latest "
         "conversation\n"
@@ -2533,7 +2533,7 @@ def _print_claude_code_restart_panel() -> None:
         # wraps continuation text back to the panel margin, not to the
         # sub-list's hanging indent, so a single long parenthetical rendered
         # its second line flush-left under "2." instead of under the paren.
-        "     [dim](a fresh claude works too — resuming is optional;\n"
+        "     [dim](a fresh claude works too; resuming is optional.\n"
         "      tj adds a recap of where you left off when you resume)[/dim]\n\n"
         "3. Confirm data is flowing:  [bold]tj onboard --claude-code "
         "--verify-only[/bold]"
@@ -2541,13 +2541,13 @@ def _print_claude_code_restart_panel() -> None:
     console.print(
         Panel(
             body,
-            title="[bold]Action required — restart Claude Code[/bold]",
+            title="[bold]Action required: restart Claude Code[/bold]",
             border_style="yellow",
             padding=(1, 2),
         )
     )
     console.print(
-        "[dim]Each relaunched terminal shows as its own dashboard tile — "
+        "[dim]Each relaunched terminal shows as its own dashboard tile; "
         "claude --as <name> labels it.[/dim]"
     )
 

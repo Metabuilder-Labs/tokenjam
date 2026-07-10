@@ -206,7 +206,7 @@ def test_claude_code_restart_panel_is_why_first_and_consolidated(
     _isolated_claude_code, tmp_path,
 ):
     """One consolidated Action-required panel (2026-07 restructure): the WHY
-    (stale telemetry endpoint) leads, then numbered steps — no more scattering
+    (stale telemetry endpoint) leads, then numbered steps; no more scattering
     across a panel + a stray "open a new terminal" paragraph + an "after
     restarting, run" pointer + a duplicate verify line near Connection
     details."""
@@ -233,7 +233,7 @@ def test_claude_code_restart_panel_states_honest_resume_semantics(
     _isolated_claude_code, tmp_path,
 ):
     """The old copy claimed `claude --resume` "picks up exactly where you left
-    off" — inaccurate: --resume opens a picker you must choose from, and -c
+    off", which is inaccurate: --resume opens a picker you must pick from; -c
     only reopens the CURRENT project's latest conversation. Pin the corrected,
     honest phrasing (Critical Rule 14: no promised outcomes)."""
     res = _run_claude_code(tmp_path, "3")
@@ -251,7 +251,7 @@ def test_claude_code_restart_panel_states_honest_resume_semantics(
 
 def test_claude_code_no_pre_restart_verify_prompt(_isolated_claude_code, tmp_path):
     """The interactive 'verify now?' poll can only time out before the restart
-    it depends on — CC gets the verify pointer as step 3 of the restart panel
+    it depends on; CC gets the verify pointer as step 3 of the restart panel
     instead, and only there (no duplicate near Connection details)."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
