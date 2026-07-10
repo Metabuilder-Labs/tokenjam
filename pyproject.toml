@@ -72,8 +72,8 @@ mcp       = []
 bloat     = ["llmlingua>=0.2"]
 
 [project.scripts]
-tj = "tokenjam.cli.main:cli"
-tokenjam = "tokenjam.cli.main:cli"
+tj = "tokenjam.cli.entrypoint:main"
+tokenjam = "tokenjam.cli.entrypoint:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests/unit", "tests/synthetic", "tests/agents", "tests/integration"]
@@ -88,8 +88,15 @@ packages = ["tokenjam"]
 # — `incidents/` is outside the `tokenjam/` package, so it is never wheeled on
 # its own. cmd_demo._discover_scenarios() resolves this packaged path first, with
 # a repo-root fallback for the dev tree.
+#
+# `entrypoint.py` is force-included too (even though it already lives inside
+# `tokenjam/`) so it is physically copied into site-packages rather than only
+# resolved through an editable install's `.pth` redirect. That is what lets it
+# still run — and print a repair hint — after the editable source checkout
+# has been deleted; see the module docstring for the full story.
 [tool.hatch.build.targets.wheel.force-include]
 "incidents" = "tokenjam/incidents"
+"tokenjam/cli/entrypoint.py" = "tokenjam/cli/entrypoint.py"
 
 [tool.ruff]
 line-length = 100
