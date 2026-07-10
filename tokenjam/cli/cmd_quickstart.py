@@ -117,6 +117,11 @@ def cmd_quickstart(ctx: click.Context, since: str, root_path: str | None,
     # never suppressed outright, so a human watching a scripted run still
     # sees it's alive.
     status_console = err_console if output_json else console
+    # Best-effort pre-scan: a stat()-only count taken before ingest starts, so
+    # the progress counter's "of N" denominator can drift if files under
+    # `root` change mid-run (a session file appears/disappears between this
+    # count and the actual walk). Cosmetic only — never affects what's
+    # ingested, since `ingest_claude_code` re-walks `root` itself.
     total_in_scope = count_claude_code_sessions_in_scope(
         root=root, since=since_dt, max_sessions=max_sessions,
     )
