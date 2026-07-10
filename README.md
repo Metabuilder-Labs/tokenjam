@@ -32,9 +32,18 @@ npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 
 `tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path; under npx it first offers to make itself a permanent install. For Claude Code and Codex that means backfilling your recent history plus the statusline and hooks; restart and you're live.
 
+Then:
+
+```bash
+tj optimize          # cost-saving candidates from your actual usage
+tj serve             # open the dashboard at http://127.0.0.1:7391/
+```
+
+Onboarding also wires a **zero-token statusline** into Claude Code; `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface; an MCP would tax every turn). Run bare `tj` any time and it points you to the next best action (`tj status`, `tj tokenmaxx`, `tj optimize`, or `tj serve`).
+
 **Just looking?** `npx tokenjam` prints a 15-second read-only report over the logs you already have: no install, nothing kept.
 
-Building your own agent with the SDK? Install *in your project* (`pip install tokenjam` + `tj onboard`); see the table below.
+Building your own agent with the SDK: install *in your project* (`pip install tokenjam` + `tj onboard`); see the table below.
 
 <sub>`npx tokenjam` and `uvx tokenjam` launch the Python CLI via `uvx`/`pipx` under the hood; see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
@@ -55,46 +64,14 @@ Building your own agent with the SDK? Install *in your project* (`pip install to
 
 LlamaIndex and the OpenAI Agents SDK ship their own native OTel support; point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
 
-Prefer a single page walking every path, each ending with a verify step? See
+A single page walks every path, each ending with a verify step: see
 [docs/getting-started.md](docs/getting-started.md).
-
----
-
-## Full setup: Claude Code
-
-```bash
-pipx install tokenjam
-tj onboard --claude-code
-tj optimize          # cost-saving candidates from your actual usage
-tj serve             # open the dashboard at http://127.0.0.1:7391/
-```
-
-Onboarding also wires a **zero-token statusline** into Claude Code; `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface; an MCP would tax every turn).
-
-That's it. Run bare `tj` any time and it points you to the next best action (`tj status`, `tj tokenmaxx`, `tj optimize`, or `tj serve`).
-
-To upgrade later: `pipx upgrade tokenjam` (then `tj stop && tj serve &` to reload the daemon, and `tj --version` to verify). See [docs/installation.md](docs/installation.md#upgrading).
-
-For any Python agent:
-
-```python
-from tokenjam.sdk import watch
-from tokenjam.sdk.integrations.anthropic import patch_anthropic
-
-patch_anthropic()
-
-@watch(agent_id="my-agent")
-def run(task: str) -> str:
-    ...
-```
-
-→ [Python SDK](docs/python-sdk.md) · [TypeScript SDK](docs/typescript-sdk.md) · [Codex onboarding](docs/claude-code-integration.md#codex) · [OTel-compatible agents](docs/framework-support.md)
 
 ---
 
 ## Six analyzers + Lens. One install.
 
-TokenJam reads telemetry from every major agent runtime, framework, provider, and observability tool and surfaces savings across six areas. It then brings them together in a local browser dashboard.
+TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces savings across six areas. It then brings them together in a local browser dashboard.
 
 <table>
 <tr>
@@ -102,7 +79,7 @@ TokenJam reads telemetry from every major agent runtime, framework, provider, an
 
 ### Downsize
 
-Flags sessions where a cheaper model in the same family is worth a look. Never claims quality equivalence, surfaces examples so you can spot-check.
+Flags sessions where a cheaper model in the same family is a candidate. Never claims quality equivalence, surfaces examples so you can spot-check.
 
 <pre><code>tj optimize downsize</code></pre>
 
@@ -186,11 +163,11 @@ Breaks a session's cost down per subagent (Claude Code `Task` calls) and flags o
 
 ## Lens: the local dashboard
 
-`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and health at a glance, with an embedded explorer to slice your usage any way (metric × dimension × chart); plus Status, Traces, Cost, Analytics, Alerts, Drift, Optimize, and Budget screens. Plan-tier-aware, fully offline, no signup.
+`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and current health, with an embedded explorer to slice your usage any way (metric × dimension × chart); plus Status, Traces, Cost, Analytics, Alerts, Drift, Optimize, and Budget screens. Plan-tier-aware, fully offline, no signup.
 
 <table>
 <tr>
-<td width="50%"><img src="docs/screenshots/tj-dashboard.png" alt="Dashboard: recoverable waste, health at a glance, and the embedded pivot explorer" /></td>
+<td width="50%"><img src="docs/screenshots/tj-dashboard.png" alt="Dashboard: recoverable waste, current health, and the embedded pivot explorer" /></td>
 <td width="50%"><img src="docs/screenshots/tj-cost.png" alt="Cost: spend over time + cache savings" /></td>
 </tr>
 <tr>
@@ -227,7 +204,7 @@ TokenJam is also a full observability stack. The six analyzers and Lens ride on 
 
 ## Prove a swap holds: TokenJam Bench
 
-`tj optimize downsize` flags *candidates*: cheaper models worth a look. It never claims the cheaper model would have produced the same answer. **[TokenJam Bench](https://github.com/Metabuilder-Labs/tokenjam-bench)** is the companion that checks. It runs your original and candidate models against real task suites and reports the pass-rate difference with statistics (Wilson CI + McNemar), so you get a hedged verdict ("holds" or "regressed") instead of a guess.
+`tj optimize downsize` flags *candidates*. It never claims the cheaper model would have produced the same answer. **[TokenJam Bench](https://github.com/Metabuilder-Labs/tokenjam-bench)** is the companion that checks. It runs your original and candidate models against real task suites and reports the pass-rate difference with statistics (Wilson CI + McNemar), so you get a hedged verdict ("holds" or "regressed") instead of a guess.
 
 ```bash
 pip install tokenjam-bench
@@ -238,31 +215,13 @@ Bench reports measured pass-rate on a suite, never "certified" or "quality prese
 
 ---
 
-## CLI
-
-```bash
-tj optimize            # every analyzer (the six above, plus budget-projection + cache-recommend)
-tj optimize downsize   # one analyzer (positional args)
-tj tokenmaxx           # shareable spend-tier callout
-tj status              # current cost, tokens, active alerts
-tj cost --since 7d     # spend by agent / model / day / tool
-tj alerts              # everything that fired while you were away
-tj drift               # behavioral drift Z-scores
-tj report --reuse      # HTML + Markdown skeleton export for the Reuse analyzer
-tj backfill claude-code # ingest historical ~/.claude/projects/ sessions
-tj serve               # start Lens + REST API
-```
-
-[Full CLI reference →](docs/cli-reference.md)
-
----
-
 ## Documentation
 
 | Topic | Where |
 |---|---|
 | Getting started: every entry path, by persona | [docs/getting-started.md](docs/getting-started.md) |
 | The first hour: what to do once data flows | [docs/first-hour.md](docs/first-hour.md) |
+| Full CLI reference, every command and flag | [docs/cli-reference.md](docs/cli-reference.md) |
 | Downsize / Cache / Script / Trim deep-dives | [docs/optimize/](docs/optimize/) |
 | Reuse analyzer deep-dive | [docs/optimize/reuse.md](docs/optimize/reuse.md) |
 | Prove a downsize candidate holds (TokenJam Bench) | [tokenjam-bench](https://github.com/Metabuilder-Labs/tokenjam-bench) |
