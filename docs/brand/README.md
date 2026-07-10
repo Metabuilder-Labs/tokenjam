@@ -13,7 +13,7 @@ The TokenJam mark is a **weight matrix in brackets** — `[ W₁₁ W₁₂ / W�
 | Banner (mark + wordmark lockup) | `tokenjam-banner.svg` | `tokenjam-banner.png` |
 | Repo header (logo + tagline + spend visual) | (none) | `tokenjam-repo-header.png` |
 
-The README header uses `tokenjam-banner.png`. The SVGs are the editable sources — prefer them for any new surface and rasterize as needed.
+The README header uses `tokenjam-repo-header.png`. The SVGs are the editable sources — prefer them for any new surface and rasterize as needed.
 
 ## Regenerating the PNGs
 
