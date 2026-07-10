@@ -1277,6 +1277,7 @@ def _onboard_claude_code(
     standalone: bool = True,
     backfill_days: int | None = None,
     backfill_all: bool = False,
+    plan_usd_override: float | None = None,
 ) -> None:
     """Configure Claude Code to send telemetry to tj.
 
@@ -1285,6 +1286,13 @@ def _onboard_claude_code(
     combination path the closing home banner must print exactly once, at the end
     of `_onboard_combination` — so we suppress it here when not standalone. The
     inline Claude Code backfill still runs (it is only ever invoked from here).
+
+    ``plan_usd_override`` is the pre-collected API monthly spend ceiling that
+    pairs with ``plan_override``: when the combination flow hoists the billing
+    questions up front (so every leg's plan is asked before any leg's
+    long-running backfill), it threads the ceiling it already collected in here
+    instead of the leg re-prompting for it. It is only consulted when
+    ``plan_override`` is set, so the standalone flow (no overrides) is unchanged.
     """
     from tokenjam.core.config import (
         AgentConfig, BudgetConfig, ProviderBudget, TjConfig, SecurityConfig,
@@ -1327,7 +1335,9 @@ def _onboard_claude_code(
                 plan = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES, current=existing_plan)
             plan_changed = plan != existing_plan
             # Subscription plans don't get an auto-written budget ceiling.
-            usd: float | None = None
+            # A pre-collected ceiling (combination flow) rides in via
+            # plan_usd_override; standalone leaves it None and prompts below.
+            usd: float | None = plan_usd_override
             if plan == "api" and not plan_override:
                 # API users may want a self-imposed soft ceiling — only prompt
                 # when interactive (no --plan flag).
@@ -1363,7 +1373,7 @@ def _onboard_claude_code(
         else:
             plan = _prompt_plan("Claude", _ANTHROPIC_PLAN_CHOICES)
         plan_changed = False
-        usd: float | None = None  # type: ignore[no-redef]
+        usd: float | None = plan_usd_override  # type: ignore[no-redef]
         if plan == "api" and not plan_override:
             ceiling = click.prompt(
                 "Monthly Anthropic API spend ceiling in USD (0 = no limit)",
@@ -1777,6 +1787,7 @@ def _onboard_codex(
     force: bool,
     reconfigure: bool = False,
     plan_override: str | None = None,
+    plan_usd_override: float | None = None,
     verify: bool = False,
     standalone: bool = True,
 ) -> None:
@@ -1789,6 +1800,12 @@ def _onboard_codex(
     and prints the banner exactly once at the very end. Running the backfill
     here too would double-run it, and printing the banner here would show it up
     to three times.
+
+    ``plan_usd_override`` mirrors the same param on ``_onboard_claude_code``:
+    the combination flow hoists the OpenAI billing questions up front and
+    threads the pre-collected API spend ceiling in here (consulted only when
+    ``plan_override`` is set), so this leg re-asks nothing on the combination
+    path. Standalone (no overrides) is unchanged.
     """
     try:
         import tomllib  # type: ignore[import]
@@ -1838,7 +1855,7 @@ def _onboard_codex(
             else:
                 plan = _prompt_plan("OpenAI / Codex", _OPENAI_PLAN_CHOICES, current=existing_plan)
             plan_changed = plan != existing_plan
-            usd: float | None = None
+            usd: float | None = plan_usd_override
             if plan == "api" and not plan_override:
                 ceiling = click.prompt(
                     "Monthly OpenAI API spend ceiling in USD (0 = no limit)",
@@ -1867,7 +1884,7 @@ def _onboard_codex(
         else:
             plan = _prompt_plan("OpenAI / Codex", _OPENAI_PLAN_CHOICES)
         plan_changed = False
-        usd: float | None = None  # type: ignore[no-redef]
+        usd: float | None = plan_usd_override  # type: ignore[no-redef]
         if plan == "api" and not plan_override:
             ceiling = click.prompt(
                 "Monthly OpenAI API spend ceiling in USD (0 = no limit)",
@@ -2092,6 +2109,61 @@ def _onboard_codex(
         )
 
 
+def _global_provider_plan(provider_key: str) -> str | None:
+    """Return the plan tier already stored for ``provider_key`` (``anthropic`` /
+    ``openai``) in the global tj config, or None when there's no config or no
+    plan for that provider yet.
+
+    The combination flow uses this to decide whether a leg would prompt for its
+    plan at all — a leg with an already-stored plan keeps it without asking. So
+    the flow only hoists the billing question up front when the leg would
+    actually ask it (a fresh config, or an explicit ``--plan``), leaving an
+    existing-config re-run byte-for-byte unchanged.
+    """
+    path = Path.home() / ".config" / "tj" / "config.toml"
+    if not path.exists():
+        return None
+    try:
+        from tokenjam.core.config import load_config as _lc
+        cfg = _lc(str(path))
+        pb = cfg.budgets.get(provider_key)
+        return pb.plan if pb else None
+    except Exception:
+        return None
+
+
+def _collect_combination_billing(
+    provider_label: str,
+    choices: list[tuple[str, str]],
+    ceiling_prompt: str,
+    plan_override: str | None,
+    budget: float | None,
+) -> tuple[str, float | None, float]:
+    """Collect one leg's billing answers up front for the combination flow.
+
+    Returns ``(plan, usd_ceiling, daily_budget)`` — the same three values a leg
+    resolves inline — so a multi-surface run can ask every billing question
+    before any leg's long-running backfill runs, then thread the answers back
+    into the leg (via ``plan_override`` / ``plan_usd_override`` / ``budget``) so
+    the leg re-asks nothing. Mirrors the legs' own logic exactly: ``--plan``
+    short-circuits the tier prompt, and the API spend-ceiling sub-prompt only
+    fires for the interactive ``api`` tier.
+    """
+    if plan_override:
+        plan = plan_override
+    else:
+        plan = _prompt_plan(provider_label, choices)
+    usd: float | None = None
+    if plan == "api" and not plan_override:
+        ceiling = click.prompt(
+            ceiling_prompt, type=float, default=0.0, show_default=False,
+        )
+        if ceiling > 0:
+            usd = ceiling
+    daily_budget = _prompt_daily_budget(budget, plan)
+    return plan, usd, daily_budget
+
+
 def _onboard_combination(
     ctx: click.Context,
     budget: float | None,
@@ -2130,6 +2202,35 @@ def _onboard_combination(
         ctx.exit(1)
         return
 
+    # --- Ask every billing question up front, before any long-running work ---
+    # The old shape ran each leg to completion in turn: the Claude leg asked its
+    # plan, then ran its (slow) backfill, and only THEN did the Codex leg ask
+    # its plan — so a combination run interleaved a question with minutes of
+    # ingest. We hoist each selected leg's billing (plan tier → API ceiling →
+    # daily budget) to the top, Claude first then Codex, then run the legs with
+    # the answers threaded in so neither leg re-prompts. Project name and
+    # backfill scope stay inside the Claude leg — they already run there before
+    # its backfill, which now precedes the (prompt-free) Codex leg, so no
+    # cross-leg interleaving remains: Claude billing → Codex billing → project →
+    # backfill scope → execution. A leg whose plan is already stored (an
+    # existing-config re-run, no --plan) keeps it without asking, exactly as the
+    # single-persona flow does — so we only hoist a leg's billing when the leg
+    # would actually prompt.
+    cc_plan, cc_usd, cc_budget = plan_override, None, budget
+    if uses_cc and (_global_provider_plan("anthropic") is None or plan_override):
+        cc_plan, cc_usd, cc_budget = _collect_combination_billing(
+            "Claude", _ANTHROPIC_PLAN_CHOICES,
+            "Monthly Anthropic API spend ceiling in USD (0 = no limit)",
+            plan_override, budget,
+        )
+    codex_plan, codex_usd, codex_budget = plan_override, None, budget
+    if uses_codex and (_global_provider_plan("openai") is None or plan_override):
+        codex_plan, codex_usd, codex_budget = _collect_combination_billing(
+            "OpenAI / Codex", _OPENAI_PLAN_CHOICES,
+            "Monthly OpenAI API spend ceiling in USD (0 = no limit)",
+            plan_override, budget,
+        )
+
     done: list[str] = []
 
     # --- Claude Code (full flow: config + statusline + auto-backfill) ---
@@ -2137,8 +2238,9 @@ def _onboard_combination(
         console.print()
         console.print("[bold]Setting up Claude Code…[/bold]")
         _onboard_claude_code(
-            ctx, budget, no_daemon, force, reconfigure=False,
-            plan_override=plan_override, project_override=project_override,
+            ctx, cc_budget, no_daemon, force, reconfigure=False,
+            plan_override=cc_plan, plan_usd_override=cc_usd,
+            project_override=project_override,
             verify=False, standalone=False,
             backfill_days=backfill_days, backfill_all=backfill_all,
         )
@@ -2149,8 +2251,9 @@ def _onboard_combination(
         console.print()
         console.print("[bold]Setting up Codex…[/bold]")
         _onboard_codex(
-            ctx, budget, no_daemon, force, reconfigure=False,
-            plan_override=plan_override, verify=False, standalone=False,
+            ctx, codex_budget, no_daemon, force, reconfigure=False,
+            plan_override=codex_plan, plan_usd_override=codex_usd,
+            verify=False, standalone=False,
         )
         # Run the on-disk Codex backfill exactly once here. Passing
         # standalone=False above suppressed the per-path onboarder's own backfill
