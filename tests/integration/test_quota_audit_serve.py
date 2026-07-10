@@ -44,8 +44,9 @@ _STOP_DAEMON_ERROR = "direct database connection"
 def _seed(db) -> None:
     """Opus sessions whose spans are Sonnet-shaped (small in/out, no tools).
 
-    `claude-opus-4-7` has a known cheaper alternative, so `_is_opus` flags these
-    sessions; the small token shape makes them reclaim candidates. This is
+    `claude-opus-4-7` is premium-tier with a known cheaper alternative, so the
+    shared tier predicate flags these sessions; the small token shape makes them
+    reclaim candidates. This is
     exactly the per-session token/model aggregation the shim can't serve — the
     data path the endpoint has to cover.
     """
@@ -148,7 +149,7 @@ def test_quota_audit_cli_renders_through_serve(tmp_path, monkeypatch):
     # The old refuse-to-run error must be gone…
     assert _STOP_DAEMON_ERROR not in result.output
     # …and the audit must actually render.
-    assert "Opus quota audit" in result.output
+    assert "Premium quota audit" in result.output
     db.close()
 
 

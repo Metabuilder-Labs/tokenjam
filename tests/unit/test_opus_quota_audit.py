@@ -133,6 +133,38 @@ def test_example_sessions_surfaced_for_spot_check(db):
     assert "claude-opus-4-6" in audit.suggestions
 
 
+def test_fable_and_opus_4_8_sessions_are_audited(db):
+    """Fable (the tier above Opus) and Opus 4.8 must both be counted in the
+    premium denominator and flagged as reclaim candidates when Sonnet-shaped —
+    the whole point of routing tier membership through the shared predicate."""
+    # Fable, Sonnet-shaped → candidate; suggested alt is a cheaper same-family model.
+    _add_session(db, "fable-thin", model="claude-fable-5",
+                 input_tokens=1_500, output_tokens=250, cache_tokens=98_250,
+                 cost_usd=5.0, tool_calls=2)
+    # Opus 4.8, Sonnet-shaped → candidate (4.8 was missing from the map before).
+    _add_session(db, "opus48-thin", model="claude-opus-4-8",
+                 input_tokens=1_000, output_tokens=200, cache_tokens=98_800,
+                 cost_usd=3.0, tool_calls=1)
+    # Fable, genuinely large-shape → in denominator, NOT a candidate.
+    _add_session(db, "fable-fat", model="claude-fable-5",
+                 input_tokens=40_000, output_tokens=20_000, cache_tokens=40_000,
+                 cost_usd=12.0, tool_calls=30)
+
+    audit = audit_opus_quota(db.conn, SINCE, UNTIL, agent_id=None, window_days=30.0)
+
+    # All three premium sessions counted (Fable is premium, above Opus).
+    assert audit.opus_sessions == 3
+    assert audit.opus_tokens == 300_000
+    # The two Sonnet-shaped premium sessions are reclaim candidates.
+    assert audit.candidate_sessions == 2
+    assert {ex.session_id for ex in audit.examples} == {"fable-thin", "opus48-thin"}
+    # Each flagged premium session names a concrete cheaper routing target.
+    assert audit.suggestions["claude-fable-5"]
+    assert audit.suggestions["claude-opus-4-8"]
+    for ex in audit.examples:
+        assert ex.alt_model
+
+
 def test_no_opus_sessions_is_clean_empty_state(db):
     # Only a Sonnet session — nothing for the Opus audit to inspect.
     _add_session(db, "sonnet-only", model="claude-sonnet-4-6",
@@ -164,8 +196,9 @@ def test_cli_renders_quota_audit_with_caveat(db, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     out = result.output
-    # Quota framing headline (not dollars).
-    assert "Opus quota is reclaimable" in out
+    # Quota framing headline (not dollars) — names both premium tiers.
+    assert "quota is reclaimable" in out
+    assert "Opus/Fable" in out
     assert "67%" in out or "66" in out
     # Spot-check sessions listed.
     assert "spot-check" in out.lower()

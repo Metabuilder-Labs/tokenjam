@@ -151,7 +151,7 @@ class ServeDataAccess:
         def build() -> tuple[OpusQuotaAudit, Framing]:
             payload = self._db.fetch_opus_quota_audit(since=since, agent_id=agent_id)
             return audit_from_dict(payload), _framing_from_payload(payload)
-        return _through_serve("Opus quota audit", build)
+        return _through_serve("premium quota audit", build)
 
 
 _T = TypeVar("_T")

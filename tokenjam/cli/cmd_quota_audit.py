@@ -1,14 +1,15 @@
-"""``tj quota-audit`` — the retroactive Opus quota audit over Claude Code sessions.
+"""``tj quota-audit`` — the retroactive premium-tier quota audit over Claude Code sessions.
 
 The accountability companion to ``opusplan`` / ``/model`` (issue #5). Those are
 forward-looking and say nothing about session history; nothing answers the
-backward-looking question "which of my PAST Opus sessions were Sonnet-shaped?".
-This command does: it runs the structural downsize heuristic
+backward-looking question "which of my PAST premium (Opus/Fable) sessions were
+Sonnet-shaped?". This command does: it runs the structural downsize heuristic
 (:func:`tokenjam.core.optimize.analyzers.model_downgrade.audit_opus_quota`)
-retroactively, scoped to Opus sessions, and reports:
+retroactively, scoped to premium-tier sessions (Fable + Opus), and reports:
 
-  * the headline — **% of your Opus quota reclaimable from Sonnet-shaped
-    sessions** (Opus token share, never a dollar "saving" — the subscription
+  * the headline — **% of your premium (Opus/Fable) quota reclaimable from
+    Sonnet-shaped sessions** (premium token share, never a dollar "saving" — the
+    subscription
     majority is on a flat fee; dollar framing mis-targets them, see
     ``research/evidence/subscription-vs-cost-framing.md``);
   * the specific example sessions to **spot-check**;
@@ -31,6 +32,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.core.framing import Framing
+from tokenjam.core.model_tiers import PREMIUM_TIER_LABEL
 from tokenjam.core.optimize.types import (
     DowngradeFinding,
     OpusQuotaAudit,
@@ -98,22 +100,24 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
 
     if not audit.has_opus:
         console.print(
-            "\n[yellow]No Opus sessions found in this window.[/yellow]\n"
-            "[dim]The quota audit only inspects Opus-family sessions (where "
-            "quota burn is acute). Run [bold]tj onboard --claude-code[/bold] to "
-            "ingest your Claude Code sessions, then re-run "
-            "[bold]tj quota-audit[/bold].[/dim]\n"
+            f"\n[yellow]No premium ({PREMIUM_TIER_LABEL}) sessions found in this "
+            "window.[/yellow]\n"
+            f"[dim]The quota audit only inspects premium-tier ({PREMIUM_TIER_LABEL}) "
+            "sessions (where quota burn is acute). Run "
+            "[bold]tj onboard --claude-code[/bold] to ingest your Claude Code "
+            "sessions, then re-run [bold]tj quota-audit[/bold].[/dim]\n"
         )
         return
 
     sections: list[Any] = []
 
     headline = Text()
-    headline.append("Opus quota audit", style="bold")
+    headline.append("Premium quota audit", style="bold")
     headline.append(
-        f"  ·  {audit.opus_sessions} Opus session"
+        f"  ·  {audit.opus_sessions} premium session"
         f"{'s' if audit.opus_sessions != 1 else ''} "
-        f"({format_tokens(audit.opus_tokens)} Opus tokens, last {since})",
+        f"({format_tokens(audit.opus_tokens)} {PREMIUM_TIER_LABEL} tokens, "
+        f"last {since})",
         style="dim",
     )
     sections.append(headline)
@@ -123,7 +127,7 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
         clean = Text()
         clean.append("0% reclaimable", style="bold green")
         clean.append(
-            " — none of your Opus sessions match the Sonnet-shaped structure "
+            " — none of your premium sessions match the Sonnet-shaped structure "
             "(small input/output, few tool calls).",
             style="",
         )
@@ -132,9 +136,12 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
         # The headline: quota share, never dollars (audit framing).
         big = Text()
         big.append(f"~{audit.percent_quota_reclaimable:.0f}% ", style="bold red")
-        big.append("of your Opus quota is reclaimable", style="bold")
         big.append(
-            f"\nfrom {audit.candidate_sessions} of {audit.opus_sessions} Opus "
+            f"of your premium ({PREMIUM_TIER_LABEL}) quota is reclaimable",
+            style="bold",
+        )
+        big.append(
+            f"\nfrom {audit.candidate_sessions} of {audit.opus_sessions} premium "
             f"session{'s' if audit.opus_sessions != 1 else ''} "
             f"({audit.percent_sessions:.0f}%) that are Sonnet-shaped",
             style="dim",
@@ -142,7 +149,7 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
         sections.append(big)
 
         detail = Text()
-        detail.append("\nReclaimable Opus tokens:  ", style="dim")
+        detail.append("\nReclaimable premium tokens:  ", style="dim")
         detail.append(format_tokens(audit.candidate_tokens), style="bold")
         detail.append(
             f"  of {format_tokens(audit.opus_tokens)} total", style="dim"
@@ -202,7 +209,7 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
     console.print()
     console.print(Panel(
         panel_body,
-        title="[bold]TokenJam Opus Quota Audit[/bold]",
+        title="[bold]TokenJam Premium Quota Audit[/bold]",
         title_align="left",
         border_style="dim",
         padding=(1, 2),

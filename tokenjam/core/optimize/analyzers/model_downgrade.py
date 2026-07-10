@@ -12,6 +12,7 @@ import re as _re
 from datetime import datetime
 from typing import Any
 
+from tokenjam.core.model_tiers import is_premium_tier
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.stats import bootstrap_ci
 from tokenjam.core.optimize.types import (
@@ -30,21 +31,21 @@ SMALL_INPUT_TOKENS = 5_000
 SMALL_OUTPUT_TOKENS = 500
 SMALL_TOOL_CALLS = 5
 
-# Substring that identifies an Opus-family model name (after provider/date
-# normalisation). The quota audit scopes exclusively to Opus sessions — the
-# acute quota-burn class (research/evidence/feature-downsize.md). Matching on
-# the family substring tolerates version + date suffixes
-# (claude-opus-4-7, claude-opus-4-6-20260115, ...).
-OPUS_MODEL_SUBSTR = "opus"
-
 # Cap on the number of spot-check example sessions carried in the audit.
 OPUS_AUDIT_MAX_EXAMPLES = 5
 
 # Premium → cheaper alternative in the same provider family. Pricing for both
 # sides is resolved at runtime from pricing/models.toml; if either is missing
 # the candidate is silently skipped (we won't invent a savings number).
+# Premium-tier ladder: Fable → Sonnet and Opus → Haiku each drop two tiers, the
+# aggressive step justified because the quota audit only proposes these for
+# structurally tiny (Sonnet-shaped) sessions. Keep new premium families in sync
+# with tokenjam.core.model_tiers.PREMIUM_TIERS so every flagged session has a
+# real routing target.
 DOWNGRADE_CANDIDATES: dict[str, dict[str, str]] = {
     "anthropic": {
+        "claude-fable-5":    "claude-sonnet-4-6",
+        "claude-opus-4-8":   "claude-haiku-4-5",
         "claude-opus-4-7":   "claude-haiku-4-5",
         "claude-opus-4-6":   "claude-haiku-4-5",
         "claude-sonnet-4-6": "claude-haiku-4-5",
@@ -262,27 +263,35 @@ def run(ctx: AnalyzerContext) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Opus quota audit (retroactive Downsize, reframed as accountability)
+# Premium-tier quota audit (retroactive Downsize, reframed as accountability)
 # ---------------------------------------------------------------------------
-# This runs the same structural heuristic as `downsize`, but scoped to Opus
-# sessions only and reframed as a "quota audit" rather than "cost optimization"
+# This runs the same structural heuristic as `downsize`, but scoped to
+# premium-tier sessions only (Fable + Opus, via the shared model_tiers
+# predicate) and reframed as a "quota audit" rather than "cost optimization"
 # (issue #5; research/evidence/feature-downsize.md). The headline is
-# "% of your Opus quota reclaimable from Sonnet-shaped sessions" — Opus token
-# share, not dollars — because the subscription majority is on flat-rate plans
-# where dollar framing mis-targets them (subscription-vs-cost-framing.md). It
-# complements opusplan / `/model` (forward-looking) by answering the
-# backward-looking question those tools can't: "which of my PAST Opus sessions
-# were Sonnet-shaped?" Honest framing throughout — candidates to spot-check,
-# never "safe to downgrade".
+# "% of your premium (Opus/Fable) quota reclaimable from Sonnet-shaped
+# sessions" — premium token share, not dollars — because the subscription
+# majority is on flat-rate plans where dollar framing mis-targets them
+# (subscription-vs-cost-framing.md). It complements opusplan / `/model`
+# (forward-looking) by answering the backward-looking question those tools
+# can't: "which of my PAST premium sessions were Sonnet-shaped?" Honest framing
+# throughout — candidates to spot-check, never "safe to downgrade".
+#
+# The `audit_opus_quota` name and the `opus_*` fields on OpusQuotaAudit are kept
+# for API/serialization stability; they now denote the whole premium tier, not
+# Opus alone (the audit counts and flags Fable sessions too).
 
 
-def _is_opus(provider: str, model: str) -> bool:
-    """True when the model is an Opus-family model worth auditing for downsize.
+def _is_premium_downsizable(provider: str, model: str) -> bool:
+    """True when the model is a premium-tier model worth auditing for downsize.
 
-    We only audit Opus sessions that ALSO have a known cheaper alternative in
-    `DOWNGRADE_CANDIDATES` (so the routing suggestion is real, not invented).
+    Premium-tier membership (Fable, Opus, and whatever launches above them next)
+    is resolved through the shared :func:`is_premium_tier` predicate — no
+    per-analyzer substring gate. We only audit premium sessions that ALSO have a
+    known cheaper alternative in `DOWNGRADE_CANDIDATES` (so the routing
+    suggestion is real, not invented).
     """
-    if OPUS_MODEL_SUBSTR not in (model or "").lower():
+    if not is_premium_tier(model):
         return False
     return _lookup_downgrade(provider, model) is not None
 
@@ -294,13 +303,15 @@ def audit_opus_quota(
     agent_id: str | None,
     window_days: float,
 ) -> OpusQuotaAudit:
-    """Retroactive Opus quota audit over Claude Code (and other) sessions.
+    """Retroactive premium-tier quota audit over Claude Code (and other) sessions.
 
-    Walks Opus sessions in the window and flags those whose structural shape
-    (small input, small output, few tool calls) matches a class of work where a
-    cheaper same-family model is worth a spot-check. Quantifies the result as a
-    **share of Opus quota** (candidate Opus tokens / total Opus tokens) — never
-    a dollar figure as the headline.
+    Walks premium-tier sessions (Fable + Opus, via the shared model_tiers
+    predicate) in the window and flags those whose structural shape (small
+    input, small output, few tool calls) matches a class of work where a cheaper
+    same-family model is worth a spot-check. Quantifies the result as a **share
+    of premium quota** (candidate premium tokens / total premium tokens) — never
+    a dollar figure as the headline. Field names retain the historical `opus_*`
+    prefix for serialization stability but count the whole premium tier.
 
     Computes purely from already-backfilled token/model metadata; does NOT
     depend on captured content (#3). Always returns an :class:`OpusQuotaAudit`
@@ -351,7 +362,7 @@ def audit_opus_quota(
             in_tok, out_tok, cache_tok, cost = row
         if not provider or not model:
             continue
-        if not _is_opus(provider, model):
+        if not _is_premium_downsizable(provider, model):
             continue
 
         session_tokens = int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)

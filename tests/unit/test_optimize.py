@@ -117,6 +117,32 @@ def test_downgrade_flags_small_opus_but_not_large(db):
     assert finding.caveat == MODEL_DOWNGRADE_CAVEAT
 
 
+def test_downgrade_proposes_candidates_for_fable_and_opus_4_8(db):
+    """The downsize analyzer must route Fable (tier above Opus) and Opus 4.8 —
+    both previously missing from DOWNGRADE_CANDIDATES — to a cheaper same-family
+    model when the session is structurally small."""
+    start = utcnow() - timedelta(days=2)
+    db.insert_span(make_llm_span(
+        model="claude-fable-5", provider="anthropic",
+        input_tokens=1_000, output_tokens=200, cost_usd=0.10,
+        session_id="fable-s", start_time=start,
+    ))
+    db.insert_span(make_llm_span(
+        model="claude-opus-4-8", provider="anthropic",
+        input_tokens=1_000, output_tokens=200, cost_usd=0.05,
+        session_id="opus48-s", start_time=start,
+    ))
+    since = utcnow() - timedelta(days=30)
+    until = utcnow() + timedelta(hours=1)
+    finding = analyze_model_downgrade(
+        db.conn, since, until, agent_id=None, window_days=30.0,
+    )
+    assert finding is not None
+    assert finding.candidate_sessions == 2
+    assert finding.suggestions.get("claude-fable-5") == "claude-sonnet-4-6"
+    assert finding.suggestions.get("claude-opus-4-8") == "claude-haiku-4-5"
+
+
 def test_downgrade_returns_none_when_no_candidates(db):
     _insert_large_opus_session(db, session_id="b")
     since = utcnow() - timedelta(days=30)
