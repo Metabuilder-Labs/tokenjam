@@ -332,6 +332,34 @@ def test_none_ci_round_trips_as_none(db):
     assert round_tripped.segment_ci_high is None
 
 
+def test_context_tagged_and_bedrock_premium_stretches_are_audited(db):
+    """A premium turn must be counted + flagged regardless of id SHAPE — a [1m]
+    context tag or a Bedrock region/provider prefix must not make it vanish from
+    the audit (it's still recognized by the subagent analyzer, so dropping it
+    here would be a silent inconsistency)."""
+    # 1M-context Fable, Sonnet-shaped → whole-session cheap → candidate.
+    _new_session(db, "fable-1m")
+    _turn(db, "fable-1m", 0, model="claude-fable-5[1m]",
+          input_tokens=1_500, output_tokens=250, cache_tokens=98_250,
+          cost_usd=5.0, tool_calls=2)
+    # Bedrock-hosted Opus 4.8, Sonnet-shaped → candidate.
+    _new_session(db, "bedrock-opus")
+    _turn(db, "bedrock-opus", 0,
+          model="us-anthropic-claude-opus-4-8-20260115-v1",
+          input_tokens=1_000, output_tokens=200, cache_tokens=98_800,
+          cost_usd=3.0, tool_calls=1)
+
+    audit = _audit(db)
+
+    # Both counted in the premium denominator (not silently dropped by shape).
+    assert audit.opus_sessions == 2
+    assert audit.candidate_sessions == 2
+    assert {ex.session_id for ex in audit.examples} == {"fable-1m", "bedrock-opus"}
+    # The id-normalizing downgrade lookup resolves an alt for each shaped id.
+    assert audit.suggestions["claude-fable-5[1m]"] == "claude-sonnet-4-6"
+    assert audit.suggestions["us-anthropic-claude-opus-4-8-20260115-v1"] == "claude-haiku-4-5"
+
+
 # ── empty / honest states ───────────────────────────────────────────────────
 
 def test_no_premium_sessions_is_clean_empty(db):

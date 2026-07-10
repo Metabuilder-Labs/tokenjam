@@ -84,19 +84,68 @@ DOWNGRADE_CANDIDATES: dict[str, dict[str, str]] = {
 }
 
 
+def _model_name_candidates(model: str) -> list[str]:
+    """Ordered DOWNGRADE_CANDIDATES keys to try for a raw model id.
+
+    Tolerates the same id shapes ``is_premium_tier`` accepts so the downgrade
+    lookup never disagrees with tier membership: bracketed context tags
+    (``claude-opus-4-8[1m]``), trailing ``-YYYYMMDD`` dates, and Bedrock
+    region/provider prefixes (``us-anthropic-claude-opus-4-8-20260115-v1`` →
+    ``claude-opus-4-8``). The exact name is tried first; more-aggressive
+    normalisations follow.
+    """
+    seen: list[str] = []
+
+    def _add(name: str | None) -> None:
+        if name and name not in seen:
+            seen.append(name)
+
+    _add(model)
+    # Strip a bracketed context tag ([1m]) and/or a trailing YYYYMMDD date, in
+    # both orders — mirrors pricing's own _lookup_candidates fallback.
+    no_tag = _re.match(r"^(.*?)\[[^\]]*\]$", model)
+    base_no_tag = no_tag.group(1) if (no_tag and no_tag.group(1)) else None
+    _add(base_no_tag)
+    for candidate in (model, base_no_tag):
+        if not candidate:
+            continue
+        dated = _re.match(r"^(.*)-(\d{8})$", candidate)
+        if dated:
+            _add(dated.group(1))
+    # Bedrock-hosted Claude ids embed the base Anthropic name amid a region/
+    # provider prefix and a -YYYYMMDD-vN suffix; pull it out so a Bedrock opus
+    # downgrades via the same base model as its first-party twin.
+    embedded = _re.search(r"(claude-[a-z]+(?:-\d+)+)", model.lower())
+    if embedded:
+        name = embedded.group(1)
+        redated = _re.match(r"^(.*)-(\d{8})$", name)
+        _add(redated.group(1) if redated else name)
+    return seen
+
+
 def lookup_downgrade(provider: str, model: str) -> str | None:
     """The cheaper same-family alternative for ``(provider, model)``, or ``None``.
 
-    Tolerates trailing ``-YYYYMMDD`` date suffixes on the model id. Public (the
-    premium quota audit and its routing export both need it); the underscore
-    alias is kept so existing internal call sites don't churn.
+    Resolves the id shapes ``is_premium_tier`` accepts (bracketed context tags,
+    trailing ``-YYYYMMDD`` dates, Bedrock region/provider prefixes) so the quota
+    audit's premium recognition matches the subagent analyzer's — otherwise a
+    ``claude-fable-5[1m]`` or Bedrock-hosted premium session is flagged by one
+    and silently dropped by the other. Public (the premium quota audit and its
+    routing export both need it); the underscore alias is kept so existing
+    internal call sites don't churn.
     """
-    mapping = DOWNGRADE_CANDIDATES.get(provider, {})
-    if model in mapping:
-        return mapping[model]
-    m = _re.match(r"^(.*)-(\d{8})$", model)
-    if m and m.group(1) in mapping:
-        return mapping[m.group(1)]
+    candidates = _model_name_candidates(model)
+    # The raw provider first; fall back to "anthropic" for Bedrock-hosted Claude
+    # ids whose provider arrives as an aws/bedrock alias but whose downgrade
+    # target is the same first-party Anthropic model.
+    providers = [provider]
+    if provider != "anthropic" and any(c.startswith("claude-") for c in candidates):
+        providers.append("anthropic")
+    for prov in providers:
+        mapping = DOWNGRADE_CANDIDATES.get(prov, {})
+        for name in candidates:
+            if name in mapping:
+                return mapping[name]
     return None
 
 
