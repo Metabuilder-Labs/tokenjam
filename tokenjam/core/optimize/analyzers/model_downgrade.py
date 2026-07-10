@@ -258,7 +258,10 @@ def analyze_model_downgrade(
         candidate_sessions += 1
         actual_cost += float(cost or 0.0)
         alt_cost += alt_unit
-        candidate_tokens += int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
+        candidate_tokens += (
+            int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
+            + int(cache_write_tok or 0)
+        )
         # This session's recoverable saving (clamped at 0 — a cheaper model
         # never costs more in our candidate set, but guard against pricing noise).
         per_session_savings.append(max(float(cost or 0.0) - alt_unit, 0.0))

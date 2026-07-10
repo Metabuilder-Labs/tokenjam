@@ -145,6 +145,36 @@ def test_downgrade_window_total_tokens_includes_cache_write_tokens(db):
     assert finding.window_total_tokens == (1000 + 200) + (2000 + 300 + 9000)
 
 
+def test_downgrade_percent_of_tokens_counts_cache_write_in_numerator(db):
+    """percent_of_tokens = candidate_tokens / window_total_tokens must measure
+    both sides on the same basis. When every session is a downgrade candidate
+    carrying cache-write tokens, the candidate share is ~100% — a numerator that
+    omitted cache-write would understate it against the (now cache-write-inclusive)
+    denominator."""
+    db.insert_span(make_llm_span(
+        model="claude-opus-4-7",
+        provider="anthropic",
+        input_tokens=1000,
+        output_tokens=200,
+        cache_tokens=500,
+        cache_write_tokens=8000,
+        cost_usd=0.030,
+        session_id="candidate-cache-write",
+        start_time=utcnow() - timedelta(days=2),
+    ))
+    since = utcnow() - timedelta(days=30)
+    until = utcnow() + timedelta(hours=1)
+    finding = analyze_model_downgrade(
+        db.conn, since, until, agent_id=None, window_days=30.0,
+    )
+    assert finding is not None
+    assert finding.candidate_sessions == 1
+    expected_tokens = 1000 + 200 + 500 + 8000
+    assert finding.candidate_tokens == expected_tokens
+    assert finding.window_total_tokens == expected_tokens
+    assert finding.percent_of_tokens == 100.0
+
+
 def test_downgrade_flags_small_opus_but_not_large(db):
     _insert_small_opus_session(db, session_id="a")
     _insert_large_opus_session(db, session_id="b")
