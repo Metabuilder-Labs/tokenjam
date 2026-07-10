@@ -598,6 +598,103 @@ def session_record_from_parsed(
 
 # --- Ingest -----------------------------------------------------------------
 
+# Spans accumulated before a columnar bulk-append flush. Batching across sessions
+# amortizes `read_json`'s per-call fixed cost and collapses the existence check
+# into ONE set-based query per flush (vs one per session) — the win on a history
+# of thousands of small sessions. A batch is a few MB of NDJSON, streamed to a
+# temp file, so memory stays flat regardless of total history size.
+_BULK_FLUSH_SPAN_TARGET = 25_000
+
+
+def _record_insert_outcome(
+    result: BackfillResult, parsed: ParsedSession, inserted: int, retagged: int
+) -> None:
+    """Fold one session's insert counts into the running `BackfillResult`."""
+    result.spans_ingested += inserted
+    result.spans_retagged += retagged
+    result.spans_skipped_existing += len(parsed.spans) - inserted - retagged
+    if inserted > 0:
+        result.sessions_ingested += 1
+        result.new_session_ids.add(parsed.session_id)
+
+
+def _apply_session(
+    db, parsed: ParsedSession, plan_tier: str, reingest: bool, result: BackfillResult
+) -> None:
+    """Per-session insert path (reingest, no-conn fallback, and the bulk-flush
+    error fallback). Mirrors the historical per-file behavior including the
+    `files_failed` / `sample_errors` accounting on a DB error."""
+    try:
+        inserted, retagged = _insert_session_idempotent(
+            db, parsed, plan_tier=plan_tier, reingest=reingest
+        )
+    except Exception as exc:
+        result.files_failed += 1
+        if len(result.sample_errors) < 5:
+            result.sample_errors.append(f"{parsed.session_id}: {exc}")
+        return
+    _record_insert_outcome(result, parsed, inserted, retagged)
+
+
+def _bulk_apply_batch(
+    db, batch: list[ParsedSession], plan_tier: str, result: BackfillResult
+) -> None:
+    """Insert an accumulated batch of sessions with ONE set-based existence
+    check and ONE columnar bulk-append, then upsert each session row.
+
+    Idempotency is IDENTICAL to the per-session path: a span already in the DB
+    is skipped (existence check + the bulk-append anti-join), so a re-run inserts
+    nothing. Session upserts stay per-file, in order, so `started_at` is set by
+    the first-processed file exactly as before; `recompute_session_totals_from_spans`
+    (run after the loop) reconciles token/cost totals from the spans regardless.
+    """
+    conn = db.conn
+    # ONE existence check for the whole batch. span_ids are deterministic and
+    # session-scoped so they're unique across distinct sessions, but a session
+    # split across sibling files is yielded as separate ParsedSessions sharing a
+    # session_id — guard intra-batch duplicates defensively so the bulk-append
+    # never carries the same span_id twice.
+    all_ids: list[str] = []
+    seen: set[str] = set()
+    for parsed in batch:
+        for span in parsed.spans:
+            if span.span_id not in seen:
+                seen.add(span.span_id)
+                all_ids.append(span.span_id)
+    existing = _existing_span_ids(conn, all_ids)
+
+    new_spans: list[NormalizedSpan] = []
+    queued: set[str] = set()
+    outcomes: list[tuple[ParsedSession, int]] = []
+    for parsed in batch:
+        inserted = 0
+        for span in parsed.spans:
+            if span.span_id in existing or span.span_id in queued:
+                continue
+            queued.add(span.span_id)
+            new_spans.append(span)
+            inserted += 1
+        outcomes.append((parsed, inserted))
+
+    try:
+        db.bulk_insert_spans(new_spans)
+    except Exception:
+        # The INSERT..SELECT is atomic, so nothing landed — degrade to the
+        # slow-but-safe per-session path (which also records files_failed) rather
+        # than aborting the whole ingest. Re-running per session double-counts
+        # nothing because no batch row was inserted.
+        logger.warning(
+            "bulk span append failed; falling back to per-session", exc_info=True
+        )
+        for parsed in batch:
+            _apply_session(db, parsed, plan_tier, reingest=False, result=result)
+        return
+
+    for parsed, inserted in outcomes:
+        db.upsert_session(session_record_from_parsed(parsed, plan_tier))
+        _record_insert_outcome(result, parsed, inserted, 0)
+
+
 def ingest_claude_code(
     db,
     root: Path | None = None,
@@ -611,7 +708,8 @@ def ingest_claude_code(
     Ingest Claude Code sessions into the storage backend.
 
     `db` is a DuckDBBackend (or compatible). Writes are idempotent: spans whose
-    span_id already exists are skipped via INSERT … ON CONFLICT DO NOTHING.
+    span_id already exists are skipped (a batched existence check plus the
+    columnar bulk-append's anti-join), so a re-run inserts no duplicates.
 
     `config` (a TjConfig) supplies the declared plan tier so backfilled sessions
     carry the same `plan_tier` the live ingest path would set (#176). When None
@@ -641,6 +739,25 @@ def ingest_claude_code(
     # a per-file DELETE scoped to session_id would wipe the sibling files' spans,
     # since they carry the same session_id + source tag (#294/#300).
     keep_by_session: dict[str, set[str]] = {}
+
+    # A fresh full backfill (the ~8min/5.6GB hot path) accumulates spans across
+    # sessions and flushes them through the columnar bulk-append: ONE set-based
+    # existence check + ONE `read_json` vectorized insert per batch instead of a
+    # dedup query + insert per session. `reingest` keeps the per-session path (its
+    # per-span attribute overlay is not a bulk op); a backend without a `conn`
+    # (defensive) also falls back per session.
+    conn = getattr(db, "conn", None)
+    use_bulk = conn is not None and not reingest
+    batch: list[ParsedSession] = []
+    batch_spans = 0
+
+    def _flush_batch() -> None:
+        nonlocal batch, batch_spans
+        if batch:
+            _bulk_apply_batch(db, batch, plan_tier, result)
+            batch = []
+            batch_spans = 0
+
     for parsed in iter_claude_code_sessions(
         root=root, since=since, capture=capture, max_sessions=max_sessions,
     ):
@@ -651,37 +768,32 @@ def ingest_claude_code(
         )
         if parsed.cwd:
             projects_seen.add(parsed.cwd)
-        try:
-            inserted, retagged = _insert_session_idempotent(
-                db, parsed, plan_tier=plan_tier, reingest=reingest
-            )
-        except Exception as exc:
-            result.files_failed += 1
-            if len(result.sample_errors) < 5:
-                result.sample_errors.append(f"{parsed.session_id}: {exc}")
-            continue
 
-        result.spans_ingested += inserted
-        result.spans_retagged += retagged
-        result.spans_skipped_existing += len(parsed.spans) - inserted - retagged
-        if inserted > 0:
-            result.sessions_ingested += 1
-            result.new_session_ids.add(parsed.session_id)
-        # Accumulate cost for every parsed file (not just files with new spans)
-        # so the summary reports the full in-window total, not a new-only figure
-        # that reads as "barely worked" on an idempotent re-run (#238).
+        # Cost + window bounds are per-file totals, independent of whether the
+        # spans are new. Accumulate for every parsed file so the summary reports
+        # the full in-window total, not a new-only figure that reads as "barely
+        # worked" on an idempotent re-run (#238).
         result.total_cost_usd += parsed.total_cost_usd
-
         if result.earliest is None or parsed.started_at < result.earliest:
             result.earliest = parsed.started_at
         if result.latest is None or parsed.ended_at > result.latest:
             result.latest = parsed.ended_at
+
+        if use_bulk:
+            batch.append(parsed)
+            batch_spans += len(parsed.spans)
+            if batch_spans >= _BULK_FLUSH_SPAN_TARGET:
+                _flush_batch()
+        else:
+            _apply_session(db, parsed, plan_tier, reingest, result)
 
         if progress is not None:
             try:
                 progress(parsed, result)
             except Exception:
                 pass
+
+    _flush_batch()
 
     # Self-heal stale-scheme duplicates (#294/#300 cross-version). A DB written
     # by <=v0.5.1 keyed backfill span_ids on the record `uuid`; current code keys
@@ -768,35 +880,6 @@ def _merge_attributes(exists_attributes: dict, parsed_attributes: dict) -> dict:
     return {**exists_attributes, **parsed_attributes}
 
 
-# Column order for the bulk span INSERT — kept in lock-step with the named-column
-# INSERT in `DuckDBBackend.insert_span`. A named-column list (not positional) so a
-# future migration adding a column at the end doesn't silently shift binding order.
-_SPAN_INSERT_SQL = (
-    "INSERT INTO spans ("
-    "span_id, trace_id, parent_span_id, session_id, agent_id, "
-    "name, kind, status_code, status_message, start_time, end_time, "
-    "duration_ms, attributes, provider, model, tool_name, "
-    "input_tokens, output_tokens, cache_tokens, cost_usd, "
-    "request_type, conversation_id, events, billing_account, "
-    "cache_write_tokens, sub_agent_id"
-    ") VALUES "
-    "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)"
-)
-
-
-def _span_insert_params(span: NormalizedSpan) -> list:
-    """Positional bind params for `_SPAN_INSERT_SQL`, in column order."""
-    return [
-        span.span_id, span.trace_id, span.parent_span_id, span.session_id,
-        span.agent_id, span.name, span.kind.value, span.status_code.value,
-        span.status_message, span.start_time, span.end_time, span.duration_ms,
-        json.dumps(span.attributes), span.provider, span.model, span.tool_name,
-        span.input_tokens, span.output_tokens, span.cache_tokens, span.cost_usd,
-        span.request_type, span.conversation_id, json.dumps(span.events),
-        span.billing_account, span.cache_write_tokens, span.sub_agent_id,
-    ]
-
-
 def _existing_span_ids(conn, span_ids: list[str]) -> set[str]:
     """Return the subset of `span_ids` that already exist in `spans`, in ONE
     query (replacing the per-span existence SELECT). Chunked so an enormous
@@ -823,13 +906,15 @@ def _insert_session_idempotent(
     Insert spans + session record; skip spans already present.
     Returns (newly_inserted, retagged).
 
-    Bulk path (#15): instead of one SELECT + one INSERT per span (~2 round-trips
-    × N spans → ~100s over a large history), the whole session is processed in a
-    bounded number of statements regardless of span count — ONE (chunked)
-    `WHERE span_id IN (...)` partitions spans into new-vs-existing, then the new
-    spans are inserted in a single `executemany`. PRIMARY KEY conflicts on
-    (span_id) mean a previous backfill (or live ingest) already covered the span,
-    so it is skipped.
+    Per-session path: ONE (chunked) `WHERE span_id IN (...)` partitions spans
+    into new-vs-existing, then the new spans are appended via the columnar
+    `db.bulk_insert_spans` (newline-delimited JSON + DuckDB `read_json`, ~350×
+    faster than per-row binding). Its anti-join skips any span_id already present
+    (a previous backfill or live ingest already covered it). The full backfill
+    (`reingest=False`) drives the even faster cross-session batch path in
+    `ingest_claude_code`; this per-session routine remains the `reingest=True`
+    path (its per-span attribute overlay is not a bulk op) and the fallback for a
+    backend without a `conn`.
 
     When `reingest` is True, spans that already exist are UPDATEd instead of
     being skipped — this backfills two things onto rows an older/leaner backfill
@@ -868,9 +953,7 @@ def _insert_session_idempotent(
     existing = _existing_span_ids(conn, span_ids)
     new_spans = [s for s in parsed.spans if s.span_id not in existing]
     if new_spans:
-        conn.executemany(
-            _SPAN_INSERT_SQL, [_span_insert_params(s) for s in new_spans]
-        )
+        db.bulk_insert_spans(new_spans)
         inserted = len(new_spans)
 
     if reingest and existing:
