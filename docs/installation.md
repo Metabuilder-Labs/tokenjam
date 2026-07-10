@@ -2,9 +2,11 @@
 
 TokenJam ships as a Python package on PyPI and a TypeScript SDK on npm. Pick the install that matches what you need.
 
-## Zero-install first run (recommended starting point)
+## Zero-install first run (no-commitment preview)
 
-The fastest way to see value — **no install, no config, no daemon**:
+Want to look before you install? This prints a read-only report — **no install, no config, no
+daemon** — over the logs you already have. The recommended way to actually run TokenJam is the base
+install plus `tj onboard` (below):
 
 ```bash
 npx tokenjam                      # or:  uvx tokenjam
@@ -21,7 +23,9 @@ written to disk and no background process starts.
 - `npx tokenjam` runs the [`tokenjam` npm wrapper](https://www.npmjs.com/package/tokenjam) — a thin
   launcher that shells out to the Python CLI via the first available runner
   (`uvx` → `pipx run` → an installed `tj`). All arguments pass straight through,
-  so `npx tokenjam quickstart --since 7d`, `npx tokenjam optimize`, etc. all work.
+  so `npx tokenjam quickstart --since 7d`, `npx tokenjam optimize`, etc. all work,
+  including `npx tokenjam onboard`, which detects the ephemeral runner and offers
+  to convert itself into a permanent install.
 - `uvx tokenjam` runs the Python CLI directly with [uv](https://docs.astral.sh/uv/)'s
   ephemeral runner. (The PyPI package `tokenjam` ships both a `tj` command and a
   `tokenjam` alias, so `uvx tokenjam` and `uvx --from tokenjam tj` are equivalent —
