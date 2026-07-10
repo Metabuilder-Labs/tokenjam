@@ -3174,15 +3174,29 @@ def _install_daemon(config_path: str) -> str | None:
 def _resolve_tj_binary() -> str:
     """Resolve the absolute path to the ``tj`` executable for daemon units.
 
-    Prefer the copy on PATH. When ``tj`` isn't on PATH (e.g. a venv whose bin
-    dir isn't exported), fall back to the sibling ``tj`` next to the running
-    interpreter — derived by path, not string substitution. The old
+    Prefer the sibling ``tj`` next to the running interpreter — derived by
+    path, not string substitution — the same PATH-independent priority
+    ``_current_tj_binary`` uses: it's fixed at process start and reflects the
+    binary onboard is actually running as, so it can't be shadowed by an
+    older/other ``tj`` earlier on PATH at the moment onboard installs the
+    daemon. Without this, a PATH shadow at install time permanently pins the
+    launchd/systemd unit to the wrong binary — surviving even after the
+    shadowing PATH entry is later removed.
+
+    Falls back to ``shutil.which("tj")`` only when no sibling exists (e.g. a
+    venv whose bin dir isn't exported), and as a last resort to the
+    constructed sibling path anyway — NOT a bare ``"tj"`` — so
+    ``_daemon_program_args``'s ephemeral-cache detection (uv/pipx cache
+    paths) still has a real path shape to inspect. The old
     ``sys.executable.replace("/python", "/tj")`` rewrote a ``python3``-named
     interpreter to a nonexistent ``tj3`` (``/python`` matches inside
     ``/python3``), so launchd/systemd pointed at a binary that doesn't exist
     while ``launchctl load`` still returned 0 (#340).
     """
-    return shutil.which("tj") or str(Path(sys.executable).with_name("tj"))
+    sibling = Path(sys.executable).with_name("tj")
+    if sibling.exists():
+        return str(sibling)
+    return shutil.which("tj") or str(sibling)
 
 
 def _daemon_program_args(config_path: str) -> list[str] | None:

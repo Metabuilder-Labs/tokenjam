@@ -45,6 +45,47 @@ def test_current_tj_binary_falls_back_to_bare_when_nothing_resolves(monkeypatch,
     assert cmd_onboard._current_tj_binary() == "tj"
 
 
+# --- _resolve_tj_binary: daemon-install must share the same PATH-shadow ------
+# --- immunity as _current_tj_binary, without going through it directly ------
+#
+# `_resolve_tj_binary` feeds `_install_launchd`/`_install_systemd`, which bake
+# its result into a plist/unit file that persists indefinitely. It used to
+# prefer `shutil.which("tj")` first, so an older/other `tj` shadowing the
+# real one on PATH at the moment `tj onboard` installs the daemon got
+# permanently pinned into the daemon's ProgramArguments — surviving even
+# after the shadowing PATH entry was later removed. It must resolve the same
+# way `_current_tj_binary` does (sibling first), but its last-resort
+# fallback intentionally returns the *constructed* sibling path rather than
+# a bare `"tj"`, so `_daemon_program_args`'s ephemeral uv/pipx-cache
+# detection still has a real path shape to inspect.
+
+
+def test_resolve_tj_binary_prefers_interpreter_sibling_over_a_shadowing_path_tj(monkeypatch, tmp_path):
+    sibling = tmp_path / "tj"
+    sibling.write_text("#!/bin/sh\n")
+    monkeypatch.setattr(cmd_onboard.sys, "executable", str(tmp_path / "python3"))
+    # Even if PATH resolves to a different (shadowing) tj, the sibling wins.
+    monkeypatch.setattr(cmd_onboard.shutil, "which", lambda _b: "/usr/bin/tj")
+    assert cmd_onboard._resolve_tj_binary() == str(sibling)
+
+
+def test_resolve_tj_binary_falls_back_to_which_when_no_sibling(monkeypatch, tmp_path):
+    monkeypatch.setattr(cmd_onboard.sys, "executable", str(tmp_path / "python3"))
+    monkeypatch.setattr(cmd_onboard.shutil, "which", lambda _b: "/usr/bin/tj")
+    assert cmd_onboard._resolve_tj_binary() == "/usr/bin/tj"
+
+
+def test_resolve_tj_binary_falls_back_to_constructed_sibling_when_nothing_resolves(monkeypatch, tmp_path):
+    """Unlike `_current_tj_binary`, the final fallback is the constructed
+    sibling path, NOT a bare `"tj"` — `_daemon_program_args` needs a path
+    shape (e.g. containing `/uv/` or `/pipx/`) to detect an ephemeral cache
+    install and route the daemon through a durable uvx/pipx shim instead."""
+    sibling = tmp_path / "tj"
+    monkeypatch.setattr(cmd_onboard.sys, "executable", str(tmp_path / "python3"))
+    monkeypatch.setattr(cmd_onboard.shutil, "which", lambda _b: None)
+    assert cmd_onboard._resolve_tj_binary() == str(sibling)
+
+
 # --- _probe_tj_path_resolution: the three states -----------------------------
 
 
