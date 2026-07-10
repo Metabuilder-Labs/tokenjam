@@ -207,22 +207,30 @@ def _unwire_claude_resume_brief_hook(settings: dict) -> bool:
 _LOCAL_BIN_DIR = Path.home() / ".local" / "bin"
 
 
-def _is_ephemeral_runner() -> bool:
-    """True when this process is running from a throwaway uvx/pipx-run venv
-    rather than a persistent install.
+def _is_ephemeral_path(path: str) -> bool:
+    """True when `path` sits inside a throwaway uvx/pipx-run cache rather than
+    a stable, named install location.
 
-    Persistent installs resolve `sys.executable` into a stable, named
-    location:
+    Persistent installs resolve into a stable, named location:
       - `uv tool install`  → .../uv/tools/<pkg>/...
       - `pipx install`     → .../pipx/venvs/<pkg>/...  (see `_installed_via_pipx`
         in cmd_uninstall.py — same signature, different concern)
     Ephemeral `uvx` / `pipx run` executions resolve into a cache directory
-    instead (e.g. `~/.cache/uv/archive-v0/...` for uvx).
+    instead (e.g. `~/.cache/uv/archive-v0/...` for uvx). That cache is
+    routinely swept by `uv cache prune` / `uv cache clean` — a path pointing
+    into it is a landmine for anything (like a launchd/systemd unit) that
+    expects to find a binary there indefinitely (#155).
     """
-    exe = sys.executable.replace("\\", "/")
-    if "/uv/tools/" in exe or "/pipx/venvs/" in exe:
+    p = path.replace("\\", "/")
+    if "/uv/tools/" in p or "/pipx/venvs/" in p:
         return False
-    return "/uv/" in exe or "/pipx/" in exe
+    return "/uv/" in p or "/pipx/" in p
+
+
+def _is_ephemeral_runner() -> bool:
+    """True when this process is running from a throwaway uvx/pipx-run venv
+    rather than a persistent install."""
+    return _is_ephemeral_path(sys.executable)
 
 
 def _install_tokenjam_persistently() -> str | None:
@@ -694,16 +702,21 @@ def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> N
     Restart-dependent personas (claude_code / codex) are never OFFERED the
     interactive poll here: their first span can't arrive until the agent
     runtime restarts, which hasn't happened yet at this point in onboarding —
-    saying yes would poll for 60s and always time out. They get a
-    verify-after-restarting pointer instead. An explicit ``--verify`` still
-    polls (the user asked for it, and the poll copy tells them to restart now).
+    saying yes would poll for 60s and always time out. Codex gets a
+    verify-after-restarting pointer instead. Claude Code does NOT get one
+    here; it's already step 3 of the consolidated restart panel
+    (``_print_claude_code_restart_panel``), printed earlier in the same
+    completion screen; repeating it here near Connection details would just
+    duplicate it. An explicit ``--verify`` still polls (the user asked for it,
+    and the poll copy tells them to restart now).
     """
     if not verify:
-        if persona in ("claude_code", "codex"):
-            flag = "--claude-code" if persona == "claude_code" else "--codex"
+        if persona == "claude_code":
+            return
+        if persona == "codex":
             console.print(
-                f"[dim]Verify after restarting:[/dim]  "
-                f"tj onboard {flag} --verify-only"
+                "[dim]Verify after restarting:[/dim]  "
+                "tj onboard --codex --verify-only"
             )
             return
         if not sys.stdin.isatty():
@@ -1140,6 +1153,171 @@ def _print_next_steps_nudge(
         console.print("  [bold]tjb[/bold]            [dim]prove a cheaper model still holds (pip install tokenjam-bench)[/dim]")
         console.print(lens_line)
     console.print()
+    _warn_if_tj_path_unresolved()
+
+
+# --- PATH resolution guard ---------------------------------------------------
+# Onboard installs a persistent `tj` (the ephemeral-runner guard above, or a
+# prior pip/pipx/uv install) and then writes artifacts — this next-steps
+# nudge, the statusline command, the claude() shell wrapper below — that
+# invoke bare `tj` later, in whatever shell the user happens to be in at the
+# time. That shell's PATH is NOT guaranteed to resolve `tj` to the install
+# onboard manages: it may have no `~/.local/bin` on PATH at all (uv tool
+# install's default shim dir), or an older `tj` (a stale pip install, a
+# different venv) earlier on PATH shadowing it — confirmed in the wild in a
+# VS Code integrated terminal whose PATH orders a Python.framework `tj`
+# ahead of the uv-tool shim, while Terminal.app on the same machine resolved
+# the shim fine minutes later. Detect both cases so the summary can fix
+# (PATH missing) or warn (shadowed) instead of silently leaving next-steps
+# commands that fail later.
+
+
+def _current_tj_binary() -> str:
+    """Absolute path to the ``tj`` binary onboard is running as right now.
+
+    Derived from ``sys.executable`` (this process's interpreter), NOT
+    ``shutil.which("tj")`` — the interpreter path is fixed at process start
+    and can't be shadowed by a PATH change in some other, later shell, so
+    it's the authoritative "what tj did onboard actually just set up"
+    answer. Falls back to a PATH lookup, then the bare command, for the rare
+    layout where no sibling ``tj`` sits next to the interpreter.
+    """
+    sibling = Path(sys.executable).with_name("tj")
+    if sibling.exists():
+        return str(sibling)
+    return shutil.which("tj") or "tj"
+
+
+def _probe_tj_path_resolution() -> tuple[str, str, str | None]:
+    """Check whether bare ``tj`` on PATH (as this onboard process's shell
+    sees it) resolves to the binary onboard manages.
+
+    Returns ``(status, expected, shadow_path)``:
+      * ``"ok"``         — bare ``tj`` resolves to *expected*.
+      * ``"unresolved"`` — nothing named ``tj`` is on PATH.
+      * ``"shadowed"``   — bare ``tj`` resolves to *shadow_path*, a
+        different file than *expected*.
+    """
+    expected = _current_tj_binary()
+    on_path = shutil.which("tj")
+    if on_path is None:
+        return "unresolved", expected, None
+    try:
+        same = Path(on_path).resolve() == Path(expected).resolve()
+    except OSError:
+        same = on_path == expected
+    return ("ok", expected, None) if same else ("shadowed", expected, on_path)
+
+
+def _tj_binary_version(path: str) -> str | None:
+    """Best-effort ``<path> --version`` — names the shadowing binary in the
+    PATH warning below. None on any failure (missing file, crash, timeout)."""
+    try:
+        result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    text = (result.stdout or result.stderr or "").strip()
+    return text or None
+
+
+_ZSHRC_PATH_START = "# >>> tokenjam PATH (managed) >>>"
+_ZSHRC_PATH_END = "# <<< tokenjam PATH <<<"
+
+
+def _zshrc_tj_path_block(bin_dir: str) -> str:
+    """Idempotent PATH-export block ensuring *bin_dir* precedes the rest of
+    PATH — the fallback when ``uv tool update-shell`` isn't available or
+    doesn't cover the user's shell."""
+    return (
+        f"{_ZSHRC_PATH_START}\n"
+        f'export PATH="{bin_dir}:$PATH"\n'
+        f"{_ZSHRC_PATH_END}\n"
+    )
+
+
+def _ensure_tj_on_path(expected: str) -> str:
+    """Best-effort fix for "nothing named tj is on PATH at all".
+
+    Tries ``uv tool update-shell`` first — uv's own shell integration, which
+    covers zsh/bash/fish profiles in one shot. Falls back to appending a
+    small marker-delimited PATH export to ~/.zshrc, the same idempotent-block
+    pattern already used for the OTEL export + claude wrapper below. Neither
+    action can change THIS already-running process's PATH — the effect only
+    lands in the next shell the user opens — so callers should still warn
+    that a new terminal (or ``source ~/.zshrc``) is needed.
+    """
+    bin_dir = str(Path(expected).parent)
+    if not Path(bin_dir).is_absolute():
+        # A bare command name (the `_current_tj_binary` last-resort fallback)
+        # carries no directory: Path("tj").parent is "." and exporting
+        # `.:$PATH` would put the shell's CWD first on PATH — a classic
+        # privilege-escalation footgun. Nothing safe to write; let the
+        # caller's warning tell the user to fix PATH themselves.
+        return "no-absolute-path"
+    if shutil.which("uv"):
+        try:
+            result = subprocess.run(
+                ["uv", "tool", "update-shell"], capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                return "ran-uv-update-shell"
+        except Exception:
+            pass
+    zshrc = Path.home() / ".zshrc"
+    zshrc.touch(exist_ok=True)
+    text = zshrc.read_text()
+    # Marker-only check (like every other zshrc block this module writes) —
+    # NOT a raw `bin_dir in text` substring check: the claude() wrapper block
+    # embeds this same absolute path for direct invocation (not a PATH
+    # export), so that heuristic false-positived "already on PATH" and
+    # skipped writing the export block entirely.
+    if _ZSHRC_PATH_START in text:
+        return "already-managed"
+    block = _zshrc_tj_path_block(bin_dir)
+    with zshrc.open("a") as f:
+        f.write(("" if text.endswith("\n") or not text else "\n") + "\n" + block)
+    return "wrote-zshrc-block"
+
+
+def _print_tj_path_warning(
+    status: str, expected: str, shadow_path: str | None, *, fix_status: str | None,
+) -> None:
+    """Surface a PATH-resolution problem in the onboard summary so bare `tj`
+    commands don't silently hit the wrong (or no) binary later."""
+    if status == "unresolved":
+        console.print(
+            "[yellow]Heads up:[/yellow] [bold]tj[/bold] isn't resolvable on "
+            "PATH in a fresh shell yet, so the commands above will fail "
+            "until you open a [bold]new terminal[/bold] (or run "
+            "[bold]source ~/.zshrc[/bold])."
+        )
+        if fix_status in ("ran-uv-update-shell", "wrote-zshrc-block"):
+            console.print(f"[dim]  Fixed for next time — added {expected} to PATH.[/dim]")
+        if Path(expected).is_absolute():
+            console.print(f"[dim]  Full path meanwhile:  {expected}[/dim]")
+    elif status == "shadowed":
+        shadow_version = _tj_binary_version(shadow_path) or "an older tj"
+        console.print(
+            f"[yellow]Heads up:[/yellow] [bold]{shadow_version}[/bold] at "
+            f"[bold]{shadow_path}[/bold] shadows the tj just installed at "
+            f"[bold]{expected}[/bold] — bare [bold]tj[/bold] in this shell "
+            "resolves to the older one."
+        )
+        console.print(
+            f"[dim]  Use the full path, or move {Path(expected).parent} "
+            f"earlier on PATH:  {expected}[/dim]"
+        )
+
+
+def _warn_if_tj_path_unresolved() -> None:
+    """Probe bare `tj` PATH resolution and fix-or-warn before the next-steps
+    commands above rely on it. No-op in the common case (already resolves to
+    the tj onboard manages)."""
+    status, expected, shadow_path = _probe_tj_path_resolution()
+    if status == "ok":
+        return
+    fix_status = _ensure_tj_on_path(expected) if status == "unresolved" else None
+    _print_tj_path_warning(status, expected, shadow_path, fix_status=fix_status)
 
 
 def _tj_statusline_command() -> str:
@@ -1666,9 +1844,12 @@ def _onboard_claude_code(
     )
 
     # ── Completion screen (founder review, 2026-07): what got wired → the one
-    # required action (restart, prominent) → next steps → connection details
-    # (dim footer) → verify pointer. The old screen led with a config dump and
-    # buried the restart box below the next-steps list.
+    # required action (restart, prominent, one why-first panel) → next steps →
+    # connection details (dim footer). The old screen led with a config dump
+    # and buried the restart box below the next-steps list; a later pass split
+    # the restart guidance across four spots (the panel, a stray paragraph, an
+    # "after restarting" pointer, and a "verify after restarting" line near
+    # Connection details); consolidated back into one panel below.
     console.print()
     console.print("[bold green]Claude Code observability configured.[/bold green]")
     _print_statusline_status(statusline_status)
@@ -1704,20 +1885,7 @@ def _onboard_claude_code(
             "quota.[/dim]"
         )
     console.print()
-    _print_restart_banner(
-        "Claude Code",
-        resume_hint=(
-            "Your conversation survives: exit, then relaunch with "
-            '"claude --resume" (or "claude -c") to pick up exactly where you '
-            "left off — tj's resume brief hands the session a recap on resume."
-        ),
-    )
-    console.print(
-        "[dim]Open a new terminal, then launch with[/dim]  claude  "
-        "[dim](each terminal becomes its own dashboard tile;[/dim] "
-        "claude --as <name> [dim]to label it).[/dim]"
-    )
-    console.print(f"[dim]After restarting, run:[/dim]  tj status --agent {agent_id}")
+    _print_claude_code_restart_panel()
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
     _print_next_steps_nudge(
@@ -2291,7 +2459,7 @@ def _onboard_combination(
     _print_setup_complete_home()
 
 
-def _print_restart_banner(app_name: str, *, resume_hint: str | None = None) -> None:
+def _print_restart_banner(app_name: str) -> None:
     """Render a prominent restart-required banner at the end of onboarding.
 
     Coding agents (Claude Code, Codex) read their OTLP exporter env vars once
@@ -2300,9 +2468,10 @@ def _print_restart_banner(app_name: str, *, resume_hint: str | None = None) -> N
     and today's spans silently never reach TokenJam (issue #179). A single dim
     one-liner was too easy to miss, so make this a Rich panel.
 
-    ``resume_hint`` softens the ask for runtimes with session resume: "restart"
-    reads like losing your conversation, which it isn't — say so, or users
-    defer the restart (and their telemetry) to some future cold start.
+    Generic variant used by runtimes without session-resume guidance to fold in
+    (currently: Codex). Claude Code uses the more detailed, why-first
+    ``_print_claude_code_restart_panel`` instead, which also covers resume
+    semantics and the verify step.
     """
     from rich.panel import Panel
     from rich.text import Text
@@ -2311,8 +2480,6 @@ def _print_restart_banner(app_name: str, *, resume_hint: str | None = None) -> N
     body.append("Restart ", style="bold")
     body.append(app_name, style="bold yellow")
     body.append(" now for the new settings to take effect.\n", style="bold")
-    if resume_hint:
-        body.append(resume_hint + "\n")
     body.append(
         f"A {app_name} session already running will keep sending telemetry to "
         "the old endpoint — today's activity won't reach TokenJam until you "
@@ -2326,6 +2493,62 @@ def _print_restart_banner(app_name: str, *, resume_hint: str | None = None) -> N
             border_style="yellow",
             padding=(1, 2),
         )
+    )
+
+
+def _print_claude_code_restart_panel() -> None:
+    """Render the consolidated restart-required panel for the Claude Code path.
+
+    Every restart-adjacent instruction now lives in one why-first, numbered
+    panel instead of being scattered across four spots on the completion
+    screen: a panel, a separate "open a new terminal" paragraph, an
+    "after restarting, run" pointer, and a "verify after restarting" line
+    down near Connection details. The scattering made it easy to restart
+    without ever seeing the verify step, or to read a resume hint and assume a
+    plain restart wasn't needed.
+
+    Resume semantics are stated precisely rather than promised: ``claude -c``
+    only reopens THIS project's latest conversation, and ``claude --resume``
+    opens a picker the user must choose from; neither one "picks up exactly
+    where you left off" automatically, and resuming a conversation in one
+    terminal does nothing while other sessions for this project are still
+    running (they're still exporting to the stale endpoint too, which is why
+    step 1 is "every terminal", not "a terminal").
+    """
+    from rich.panel import Panel
+    from rich.text import Text
+
+    body = Text.from_markup(
+        "Running sessions keep sending telemetry to the old endpoint. "
+        "Today's activity won't reach TokenJam until they restart.\n\n"
+        "1. Quit Claude Code in [bold]every terminal[/bold] open on this "
+        "project.\n\n"
+        "2. Relaunch [bold]claude[/bold] in the same folder. Your history "
+        "is safe:\n"
+        "     [bold]claude -c[/bold]        → reopen this project's latest "
+        "conversation\n"
+        "     [bold]claude --resume[/bold]  → pick any earlier one from a "
+        "list\n"
+        # Two deliberately indented lines (not one auto-wrapped one): Rich
+        # wraps continuation text back to the panel margin, not to the
+        # sub-list's hanging indent, so a single long parenthetical rendered
+        # its second line flush-left under "2." instead of under the paren.
+        "     [dim](a fresh claude works too; resuming is optional.\n"
+        "      tj adds a recap of where you left off when you resume)[/dim]\n\n"
+        "3. Confirm data is flowing:  [bold]tj onboard --claude-code "
+        "--verify-only[/bold]"
+    )
+    console.print(
+        Panel(
+            body,
+            title="[bold]Action required: restart Claude Code[/bold]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
+    console.print(
+        "[dim]Each relaunched terminal shows as its own dashboard tile; "
+        "claude --as <name> labels it.[/dim]"
     )
 
 
@@ -2718,8 +2941,17 @@ def _claude_wrapper_block() -> str:
       interrupted, so the dashboard archives the tile (Claude Code emits no
       close event of its own). Best-effort and idempotent.
 
+    Invokes ``tj`` by absolute path (like ``_tj_statusline_command`` already
+    does), not the bare command: this block runs whenever the user
+    later types ``claude`` in SOME terminal, which may have a different PATH
+    than the one onboard itself ran in (e.g. VS Code's integrated terminal
+    vs. Terminal.app) — an absolute path can't be shadowed by an older `tj`
+    earlier on that terminal's PATH, or fail outright if `tj`'s directory
+    isn't on PATH at all.
+
     Written portably so it works in both zsh and bash.
     """
+    tj_bin = _current_tj_binary()
     return (
         f"{_WRAPPER_MARKER}\n"
         f"# Tags each terminal with a distinct service.instance.id so concurrent\n"
@@ -2744,14 +2976,14 @@ def _claude_wrapper_block() -> str:
         f"    esac\n"
         f"  fi\n"
         f'  [ -z "$_tj_inst" ] && _tj_inst="unknown"\n'
-        f'  export OTEL_RESOURCE_ATTRIBUTES="$(tj otel-resource-attrs),service.instance.id=$_tj_inst"\n'
+        f'  export OTEL_RESOURCE_ATTRIBUTES="$("{tj_bin}" otel-resource-attrs),service.instance.id=$_tj_inst"\n'
         f"  # Report this terminal's session closed on exit/interrupt so the\n"
         f"  # dashboard archives its tile. Idempotent — double-fire is harmless.\n"
-        f"  trap 'tj session-end --instance \"$_tj_inst\" >/dev/null 2>&1 || true' INT TERM HUP\n"
+        f"  trap '\"{tj_bin}\" session-end --instance \"$_tj_inst\" >/dev/null 2>&1 || true' INT TERM HUP\n"
         f'  command claude "${{_tj_args[@]}}"\n'
         f"  local _tj_status=$?\n"
         f"  trap - INT TERM HUP\n"
-        f'  tj session-end --instance "$_tj_inst" >/dev/null 2>&1 || true\n'
+        f'  "{tj_bin}" session-end --instance "$_tj_inst" >/dev/null 2>&1 || true\n'
         f"  return $_tj_status\n"
         f"}}\n"
         f"{_WRAPPER_END_MARKER}\n"
@@ -2932,8 +3164,56 @@ def _resolve_tj_binary() -> str:
     return shutil.which("tj") or str(Path(sys.executable).with_name("tj"))
 
 
-def _install_launchd(config_path: str) -> str | None:
+def _daemon_program_args(config_path: str) -> list[str] | None:
+    """Resolve the argv the daemon unit (launchd/systemd) should launch.
+
+    Prefers a direct path to `tj`. When the only resolvable `tj` sits inside
+    an ephemeral uv/pipx cache (`uvx`/`pipx run` — see `_is_ephemeral_path`),
+    writing that raw path into launchd/systemd is a landmine: `uv cache
+    prune` / `uv cache clean` (routine maintenance, also run by some CI/cleanup
+    tools) deletes it and silently kills the daemon on next load, and the
+    path pins the daemon to whatever version was resolved at onboard time
+    forever, independent of the wrapper's `--refresh` freshness logic (#111,
+    #155). Fall back to invoking through the stable `uvx`/`pipx` shim itself
+    instead, so launchd/systemd re-resolves `tj` through uv/pipx on every
+    start rather than a path that can vanish out from under it. Returns None
+    when no durable entrypoint exists at all — the caller should warn and
+    skip installing rather than silently write a cache path.
+    """
     tj_path = _resolve_tj_binary()
+    if not _is_ephemeral_path(tj_path):
+        return [tj_path, "--config", config_path, "serve"]
+
+    uvx_path = shutil.which("uvx")
+    if uvx_path and not _is_ephemeral_path(uvx_path):
+        return [uvx_path, "--from", "tokenjam", "tj", "--config", config_path, "serve"]
+
+    pipx_path = shutil.which("pipx")
+    if pipx_path and not _is_ephemeral_path(pipx_path):
+        return [pipx_path, "run", "--spec", "tokenjam", "tj", "--config", config_path, "serve"]
+
+    return None
+
+
+def _warn_no_durable_daemon_entrypoint(unit_kind: str) -> None:
+    console.print(
+        f"[yellow]No durable `tj` entrypoint found — skipping {unit_kind} "
+        "install rather than pointing it at a throwaway uvx/pipx cache path "
+        "that `uv cache prune` would silently delete.[/yellow]"
+    )
+    console.print(
+        "[dim]Install tokenjam persistently (`uv tool install tokenjam` or "
+        "`pipx install tokenjam`) and re-run `tj onboard`, or run "
+        "`tj serve` manually.[/dim]"
+    )
+
+
+def _install_launchd(config_path: str) -> str | None:
+    program_args = _daemon_program_args(config_path)
+    if program_args is None:
+        _warn_no_durable_daemon_entrypoint("launchd")
+        return None
+    args_xml = "\n".join(f"        <string>{arg}</string>" for arg in program_args)
     plist_path = Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_content = f"""\
@@ -2946,10 +3226,7 @@ def _install_launchd(config_path: str) -> str | None:
     <string>com.tokenjam.serve</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{tj_path}</string>
-        <string>--config</string>
-        <string>{config_path}</string>
-        <string>serve</string>
+{args_xml}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -2991,7 +3268,11 @@ def _install_launchd(config_path: str) -> str | None:
 
 
 def _install_systemd(config_path: str) -> str | None:
-    tj_path = _resolve_tj_binary()
+    program_args = _daemon_program_args(config_path)
+    if program_args is None:
+        _warn_no_durable_daemon_entrypoint("systemd")
+        return None
+    exec_start = " ".join(program_args)
     service_path = Path.home() / ".config/systemd/user/tokenjam.service"
     service_path.parent.mkdir(parents=True, exist_ok=True)
     service_content = f"""\
@@ -3000,7 +3281,7 @@ Description=TokenJam observability server
 After=network.target
 
 [Service]
-ExecStart={tj_path} --config {config_path} serve
+ExecStart={exec_start}
 Restart=on-failure
 
 [Install]
