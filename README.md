@@ -16,8 +16,6 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 **No cloud · No signup · No vendor lock-in**
 
-<img src="docs/assets/tj-quickstart-hero.png" alt="tj quickstart output: a quota-composition panel showing what share of tokens went to re-reading context vs. net-new work, plus a session timeline with per-session token counts and re-read percentages" width="720">
-
 </div>
 
 ---
@@ -27,10 +25,12 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 **Install TokenJam and wire it into Claude Code** — one command sets up live capture, all six analyzers, Lens (the local dashboard), and the zero-token statusline:
 
 ```bash
-pipx install tokenjam && tj onboard --claude-code
+pipx install tokenjam && tj onboard
 ```
 
-This installs the CLI, backfills your recent history, and wires the statusline and hooks. Restart Claude Code and you're live.
+`tj onboard` asks how you use AI agents — Enter picks Claude Code; Codex and SDK paths are one keypress away. It backfills your recent history and wires the statusline and hooks. Restart Claude Code and you're live.
+
+**No pipx?** `npx tokenjam onboard` runs the same wizard and offers to make itself a permanent install.
 
 **Just looking?** `npx tokenjam` prints a 15-second read-only report over the logs you already have — no install, nothing kept.
 
@@ -50,6 +50,8 @@ Building your own agent with the SDK? Install *in your project* (`pip install to
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
 | **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone` — same flags) | One-time import of your existing traces into the local DB |
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion — no SDK, no patch |
+
+<sub>The `--claude-code` / `--codex` flags just pre-answer the wizard's first question — bare `tj onboard` asks.</sub>
 
 LlamaIndex and the OpenAI Agents SDK ship their own native OTel support — point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
 
