@@ -352,6 +352,7 @@ def test_pricing_file_exists_at_expected_path():
         f"PRICING_FILE should be inside the tokenjam package, got {PRICING_FILE}"
     )
 
+
 def test_window_totals_total_tokens_includes_cache_write():
     # Issue #377: total_tokens previously omitted cache-creation (write)
     # tokens, understating tokens_delta in the cost-comparison view.
@@ -364,3 +365,4 @@ def test_window_totals_total_tokens_includes_cache_write():
         cache_write_tokens=5,
     )
     assert wt.total_tokens == 165
+    
