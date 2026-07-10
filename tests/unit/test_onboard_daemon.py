@@ -97,11 +97,35 @@ class TestTjBinaryResolution:
     matches inside `/python3`). The unit is written pointing at a binary that
     doesn't exist; `launchctl load` still returns 0, so onboarding reports
     success while `tj serve` never launches.
+
+    Also regression for a PATH-shadow bug: `_resolve_tj_binary` used to
+    prefer `shutil.which("tj")` over the interpreter sibling, so an
+    older/other `tj` earlier on PATH at the moment `tj onboard` installs the
+    daemon got permanently baked into the launchd/systemd unit — surviving
+    even after the shadowing PATH entry was later removed. It must now
+    prefer the PATH-independent sibling next to the running interpreter,
+    the same priority `_current_tj_binary` uses.
     """
 
-    def test_prefers_tj_on_path(self, monkeypatch):
+    def test_prefers_interpreter_sibling_over_a_shadowing_path_tj(self, monkeypatch, tmp_path):
+        """A `tj` earlier on PATH must never win over the sibling next to the
+        interpreter that onboard is actually running as — that's the whole
+        PATH-shadow bug this resolves."""
         from tokenjam.cli.cmd_onboard import _resolve_tj_binary
-        monkeypatch.setattr("tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/local/bin/tj")
+        sibling = tmp_path / "tj"
+        sibling.write_text("#!/bin/sh\n")
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.sys.executable", str(tmp_path / "python3"))
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/local/bin/tj",
+        )
+        assert _resolve_tj_binary() == str(sibling)
+
+    def test_falls_back_to_which_when_no_sibling_exists(self, monkeypatch, tmp_path):
+        from tokenjam.cli.cmd_onboard import _resolve_tj_binary
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.sys.executable", str(tmp_path / "python3"))
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard.shutil.which", lambda _: "/usr/local/bin/tj",
+        )
         assert _resolve_tj_binary() == "/usr/local/bin/tj"
 
     def test_fallback_python3_resolves_to_sibling_tj(self, monkeypatch):
@@ -169,8 +193,11 @@ class TestDaemonSurvivesUvCachePrune:
     working (and self-updates) after a prune.
     """
 
-    def test_program_args_prefers_direct_tj_when_not_ephemeral(self, monkeypatch):
+    def test_program_args_prefers_direct_tj_when_not_ephemeral(self, monkeypatch, tmp_path):
         from tokenjam.cli.cmd_onboard import _daemon_program_args
+        # No real sibling `tj` next to this fake interpreter path, so
+        # resolution falls back to the (non-ephemeral) `which` result.
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.sys.executable", str(tmp_path / "python3"))
         monkeypatch.setattr(
             "tokenjam.cli.cmd_onboard.shutil.which",
             lambda b: "/usr/local/bin/tj" if b == "tj" else None,
