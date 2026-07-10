@@ -1,15 +1,17 @@
-"""``tj quota-audit`` — the retroactive Opus quota audit over Claude Code sessions.
+"""``tj quota-audit`` — the retroactive premium-tier quota audit over Claude Code sessions.
 
 The accountability companion to ``opusplan`` / ``/model`` (issue #5). Those are
 forward-looking and say nothing about session history; nothing answers the
-backward-looking question "which of my PAST Opus sessions were Sonnet-shaped?".
-This command does: it runs the structural downsize heuristic
+backward-looking question "which of my PAST premium (Opus/Fable) sessions were
+Sonnet-shaped?". This command does: it runs the structural downsize heuristic
 (:func:`tokenjam.core.optimize.analyzers.model_downgrade.audit_opus_quota`)
-retroactively, scoped to Opus sessions, and reports:
+retroactively, scoped to premium-tier sessions (Fable + Opus), and reports:
 
-  * the headline — **% of your Opus quota reclaimable from Sonnet-shaped
-    sessions** (Opus token share, never a dollar "saving" — the subscription
-    majority is on a flat fee; dollar framing mis-targets them, see
+  * the headline — **% of your premium (Opus/Fable) quota that went to
+    Sonnet-shaped sessions** (a retrospective behaviour mirror in premium token
+    share — the tokens are already spent, so nothing is "reclaimed"; and never a
+    dollar "saving" — the subscription majority is on a flat fee, so dollar
+    framing mis-targets them, see
     ``research/evidence/subscription-vs-cost-framing.md``);
   * the specific example sessions to **spot-check**;
   * an optional tuned routing-config export (``--export-config claude-code``).
@@ -31,6 +33,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.core.framing import Framing
+from tokenjam.core.model_tiers import PREMIUM_TIER_LABEL
 from tokenjam.core.optimize.types import (
     DowngradeFinding,
     OpusQuotaAudit,
@@ -91,6 +94,50 @@ def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
 # ───────────────────────────── rendering ──────────────────────────────────
 
 
+def _headline_nudge(audit: OpusQuotaAudit, framing: Framing) -> Any:
+    """Persona-specific takeaway under the measured misallocation headline.
+
+    - API-billed with pricing data: the retrospective counterfactual in dollars
+      — the same work priced at the suggested cheaper tiers, labelled as
+      already-billed so it never reads as a future "saving".
+    - API-billed with NO pricing data (every candidate's model is absent from
+      the pricing table, so ``actual_cost_usd == 0``): a neutral routing prompt.
+      API billing has no rolling quota window, so the subscription "next window"
+      language below would be actively wrong for these users.
+    - Subscription / local (and the unknown-plan default): a habit nudge — that
+      quota share is still available for hard problems next window.
+    """
+    from rich.text import Text
+
+    if framing.pricing_mode == "api":
+        if audit.actual_cost_usd > 0:
+            line = Text("\n→ ", style="dim")
+            line.append(
+                f"Same work at the suggested tiers ≈ "
+                f"{format_cost(audit.alternative_cost_usd)} vs your "
+                f"{format_cost(audit.actual_cost_usd)} actual "
+                "(retrospective — already billed).",
+                style="dim",
+            )
+            return line
+        # API mode but no pricing data — stay neutral, never subscription quota
+        # language (there is no rolling window to hold that share for).
+        line = Text("\n→ ", style="dim")
+        line.append(
+            "Review these sessions before adjusting your routing.",
+            style="dim",
+        )
+        return line
+    # subscription / local / unknown — no dollars; behaviour-mirror habit nudge.
+    line = Text("\n→ ", style="green")
+    line.append(
+        "That share stays available for hard problems next window. Use "
+        "`/model sonnet` for mechanical work and right-size your subagents.",
+        style="green",
+    )
+    return line
+
+
 def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
     from rich.console import Group
     from rich.panel import Panel
@@ -98,22 +145,24 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
 
     if not audit.has_opus:
         console.print(
-            "\n[yellow]No Opus sessions found in this window.[/yellow]\n"
-            "[dim]The quota audit only inspects Opus-family sessions (where "
-            "quota burn is acute). Run [bold]tj onboard --claude-code[/bold] to "
-            "ingest your Claude Code sessions, then re-run "
-            "[bold]tj quota-audit[/bold].[/dim]\n"
+            f"\n[yellow]No premium ({PREMIUM_TIER_LABEL}) sessions found in this "
+            "window.[/yellow]\n"
+            f"[dim]The quota audit only inspects premium-tier ({PREMIUM_TIER_LABEL}) "
+            "sessions (where quota burn is acute). Run "
+            "[bold]tj onboard --claude-code[/bold] to ingest your Claude Code "
+            "sessions, then re-run [bold]tj quota-audit[/bold].[/dim]\n"
         )
         return
 
     sections: list[Any] = []
 
     headline = Text()
-    headline.append("Opus quota audit", style="bold")
+    headline.append("Premium quota audit", style="bold")
     headline.append(
-        f"  ·  {audit.opus_sessions} Opus session"
+        f"  ·  {audit.opus_sessions} premium session"
         f"{'s' if audit.opus_sessions != 1 else ''} "
-        f"({format_tokens(audit.opus_tokens)} Opus tokens, last {since})",
+        f"({format_tokens(audit.opus_tokens)} {PREMIUM_TIER_LABEL} tokens, "
+        f"last {since})",
         style="dim",
     )
     sections.append(headline)
@@ -121,48 +170,61 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
 
     if audit.candidate_sessions == 0:
         clean = Text()
-        clean.append("0% reclaimable", style="bold green")
+        clean.append("0% misallocated", style="bold green")
         clean.append(
-            " — none of your Opus sessions match the Sonnet-shaped structure "
+            " — none of your premium sessions match the Sonnet-shaped structure "
             "(small input/output, few tool calls).",
             style="",
         )
         sections.append(clean)
     else:
-        # The headline: quota share, never dollars (audit framing).
+        # The headline is a retrospective behaviour mirror: what SHARE of premium
+        # quota already WENT to Sonnet-shaped sessions. It is misallocated, not
+        # "reclaimable" — those tokens are spent. Quota share, never dollars for
+        # the subscription majority (audit framing).
         big = Text()
-        big.append(f"~{audit.percent_quota_reclaimable:.0f}% ", style="bold red")
-        big.append("of your Opus quota is reclaimable", style="bold")
+        big.append(f"~{audit.percent_quota_misallocated:.0f}% ", style="bold red")
         big.append(
-            f"\nfrom {audit.candidate_sessions} of {audit.opus_sessions} Opus "
-            f"session{'s' if audit.opus_sessions != 1 else ''} "
-            f"({audit.percent_sessions:.0f}%) that are Sonnet-shaped",
+            f"of your premium ({PREMIUM_TIER_LABEL}) quota went to "
+            "Sonnet-shaped work",
+            style="bold",
+        )
+        # The number is a single labelled ESTIMATE (founder D1/D3): the "estimate"
+        # tag + a wide bootstrap CI (resampled segments) so it never reads as a
+        # settled figure. Below 2 segments there's no spread to bracket.
+        est = Text("\n", style="dim")
+        est.append(f"{audit.segment_estimate_confidence}", style="italic yellow")
+        if audit.segment_ci_low is not None and audit.segment_ci_high is not None:
+            est.append(
+                f" · 95% CI {audit.segment_ci_low:.0f}–{audit.segment_ci_high:.0f}%",
+                style="dim",
+            )
+        else:
+            est.append(
+                " · single stretch — interval too wide to bracket",
+                style="dim",
+            )
+        est.append(
+            f" · from {audit.segment_count} Sonnet-shaped "
+            f"stretch{'es' if audit.segment_count != 1 else ''} across "
+            f"{audit.candidate_sessions} of {audit.opus_sessions} premium "
+            f"session{'s' if audit.opus_sessions != 1 else ''}",
             style="dim",
         )
+        big.append(est)
         sections.append(big)
 
         detail = Text()
-        detail.append("\nReclaimable Opus tokens:  ", style="dim")
+        detail.append("\nSonnet-shaped premium tokens:  ", style="dim")
         detail.append(format_tokens(audit.candidate_tokens), style="bold")
         detail.append(
             f"  of {format_tokens(audit.opus_tokens)} total", style="dim"
         )
-        # Secondary implied-dollar calibration for API users only — never the
-        # headline. Suppressed for subscription / local / unknown plans.
-        if (
-            framing.pricing_mode == "api"
-            and audit.actual_cost_usd > 0
-        ):
-            detail.append("\nImplied API value:        ", style="dim")
-            detail.append(
-                f"{format_cost(audit.actual_cost_usd)}", style="bold"
-            )
-            detail.append(
-                f" → {format_cost(audit.alternative_cost_usd)} on the smaller "
-                f"model (calibration only)",
-                style="dim",
-            )
         sections.append(detail)
+
+        # Persona-gated takeaway. The measured mirror above is shown to everyone;
+        # this is the actionable framing for the user's billing reality.
+        sections.append(_headline_nudge(audit, framing))
 
         if audit.suggestions:
             pairs = ", ".join(
@@ -202,7 +264,7 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
     console.print()
     console.print(Panel(
         panel_body,
-        title="[bold]TokenJam Opus Quota Audit[/bold]",
+        title="[bold]TokenJam Premium Quota Audit[/bold]",
         title_align="left",
         border_style="dim",
         padding=(1, 2),
@@ -227,7 +289,7 @@ def _export_snippet(audit: OpusQuotaAudit, framing: Framing, *,
 
     Reuses the downsize snippet generator by adapting the audit into a
     ``DowngradeFinding`` shim carrying the observed model→alt suggestions and
-    the reclaimable token figure. No file outside the TokenJam config directory
+    the misallocated token figure. No file outside the TokenJam config directory
     is touched — the user merges the snippet manually.
     """
     from datetime import datetime, timezone
@@ -248,7 +310,7 @@ def _export_snippet(audit: OpusQuotaAudit, framing: Framing, *,
         suggestions=dict(audit.suggestions),
         candidate_tokens=audit.candidate_tokens,
         window_total_tokens=audit.opus_tokens,
-        percent_of_tokens=audit.percent_quota_reclaimable,
+        percent_of_tokens=audit.percent_quota_misallocated,
         monthly_tokens_in_candidates=audit.candidate_tokens,
     )
 
@@ -271,7 +333,9 @@ def _export_snippet(audit: OpusQuotaAudit, framing: Framing, *,
             "path": str(out_path),
             "plan_tier": framing.plan_tier,
             "pricing_mode": framing.pricing_mode,
-            "percent_quota_reclaimable": audit.percent_quota_reclaimable,
+            "percent_quota_misallocated": audit.percent_quota_misallocated,
+            # DEPRECATED alias (see audit_to_dict) — kept one release.
+            "percent_quota_reclaimable": audit.percent_quota_misallocated,
         }, default=str))
         return
 

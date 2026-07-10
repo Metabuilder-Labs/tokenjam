@@ -12,10 +12,11 @@ This analyzer breaks a window's cost down per subagent and flags two structural
 right-sizing candidates (honesty discipline, CLAUDE.md Rule 14 — candidate
 flags only, never a quality judgment):
 
-  * over_powered     — ran on a premium (Opus-tier) model but produced little
-                       output and made few tool calls; a cheaper same-family
-                       model is worth a look (mirrors the downsize heuristic,
-                       scoped to one subagent).
+  * over_powered     — ran on a premium-tier model (Fable or Opus, via the
+                       shared model_tiers predicate) but produced little output
+                       and made few tool calls; a cheaper same-family model is
+                       worth a look (mirrors the downsize heuristic, scoped to
+                       one subagent).
   * over_provisioned — was handed a large context (input + cache reads) yet
                        produced little output; the prompt it was dispatched
                        with is likely larger than the task needed.
@@ -29,11 +30,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from tokenjam.core.model_tiers import is_premium_tier
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
-
-# Model-name substrings that mark the premium tier. Lowercased before matching.
-PREMIUM_MODEL_SUBSTRINGS = ("opus",)
 
 # "Produced little": total output tokens below this look like a small task.
 SMALL_OUTPUT_TOKENS = 2_000
@@ -115,8 +114,7 @@ def _flags_for(
     if cost_usd < MIN_FLAG_COST_USD:
         return []
     flags: list[str] = []
-    model_l = (model or "").lower()
-    is_premium = any(s in model_l for s in PREMIUM_MODEL_SUBSTRINGS)
+    is_premium = is_premium_tier(model)
     if is_premium and output_tokens < SMALL_OUTPUT_TOKENS and tool_calls <= FEW_TOOL_CALLS:
         flags.append("over_powered")
     if (input_tokens + cache_tokens) >= CONTEXT_HEAVY_TOKENS and output_tokens < SMALL_OUTPUT_TOKENS:

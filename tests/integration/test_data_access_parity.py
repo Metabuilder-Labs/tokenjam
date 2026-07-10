@@ -155,9 +155,15 @@ def test_quota_audit_parity(tmp_path, monkeypatch):
     s_audit, s_framing = serve.quota_audit(since="30d", agent_id=None)
 
     # The audit round-trips fully (modulo window_days clock skew).
-    assert _normalize_audit(audit_to_dict(d_audit)) == \
+    d_payload = audit_to_dict(d_audit)
+    assert _normalize_audit(d_payload) == \
         _normalize_audit(audit_to_dict(s_audit))
     assert d_framing.to_dict() == s_framing.to_dict()
     assert d_audit.opus_sessions == 3
     assert d_framing.pricing_mode == "subscription"
+    # The renamed headline key is present on both paths, and the deprecated
+    # 0.5.4 alias mirrors it byte-for-byte (so parity holds while it lives).
+    assert "percent_quota_misallocated" in d_payload
+    assert d_payload["percent_quota_reclaimable"] == \
+        d_payload["percent_quota_misallocated"]
     db.close()

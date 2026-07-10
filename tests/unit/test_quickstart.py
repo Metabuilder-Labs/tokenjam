@@ -250,6 +250,67 @@ def test_quickstart_no_logs_is_graceful(tmp_path):
     assert "No Claude Code logs" in result.output
 
 
+# ── Pre-ingest progress: ingest was previously the ONE silent stretch in the
+# whole command (~40s dead cursor on a large history, nothing printed until
+# after it returned). An honest status line now lands before ingest starts,
+# and the shared streaming counter (`backfill_progress`) advances per session
+# through to render. `--json` must stay byte-for-byte clean on stdout.
+
+def test_quickstart_prints_pre_ingest_status_before_render(tmp_path):
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Reading your last 90 days of Claude Code history" in result.output
+    assert "(most-recent 300 sessions)" in result.output
+    # It's the FIRST thing printed -- ahead of the quota-composition panel,
+    # not tacked on after ingest already finished.
+    assert result.output.index("Reading your last 90 days") < result.output.index(
+        "Where your quota goes"
+    )
+
+
+def test_quickstart_pre_ingest_status_omits_cap_when_full(tmp_path):
+    """`--full` lifts the session cap (#13) -- the status line must not claim
+    a "most-recent N sessions" scope that no longer applies."""
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d", "--full"])
+
+    assert result.exit_code == 0, result.output
+    assert "Reading your last 90 days of Claude Code history…" in result.output
+    assert "most-recent" not in result.output.split("Where your quota goes")[0]
+
+
+def test_quickstart_json_stdout_stays_pure(tmp_path):
+    """`--json` must be pipeable straight into a JSON parser: stdout carries
+    ONLY the JSON payload, never the pre-ingest status line or the streaming
+    progress counter -- those route to stderr instead."""
+    root = _fixture_root(tmp_path)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d", "--json"])
+
+    assert result.exit_code == 0, result.output
+    # stdout parses as JSON on its own -- no leading/trailing progress noise.
+    payload = json.loads(result.stdout.strip())
+    assert "quota_composition" in payload
+    assert payload["backfill"]["sessions_ingested"] == 2
+    # The status line still printed -- just on stderr, never stdout.
+    assert "Reading your last 90 days of Claude Code history" in result.stderr
+    assert "Reading your last 90 days" not in result.stdout
+
+
+def test_quickstart_advancing_counter_on_large_history(tmp_path):
+    """On a large history the shared streaming counter keeps advancing
+    through ingest (not just a single static pre-ingest line) -- non-TTY
+    output (as under CliRunner) degrades to periodic plain prints every 100
+    sessions, mirroring `tj onboard --claude-code`'s backfill counter."""
+    root = _large_fixture_root(tmp_path, n_sessions=250)
+    result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Backfilling 100/250 sessions" in result.output
+    assert "Backfilling 200/250 sessions" in result.output
+
+
 def _large_fixture_root(tmp_path: Path, n_sessions: int) -> Path:
     """A synthetic history with `n_sessions` sessions, two turns each, recent.
 
