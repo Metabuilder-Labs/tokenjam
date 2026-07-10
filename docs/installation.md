@@ -2,9 +2,11 @@
 
 TokenJam ships as a Python package on PyPI and a TypeScript SDK on npm. Pick the install that matches what you need.
 
-## Zero-install first run (recommended starting point)
+## Zero-install first run (no-commitment preview)
 
-The fastest way to see value — **no install, no config, no daemon**:
+Want to look before you install? This prints a read-only report — **no install, no config, no
+daemon** — over the logs you already have. The recommended way to actually run TokenJam is the base
+install plus `tj onboard` (below):
 
 ```bash
 npx tokenjam                      # or:  uvx tokenjam

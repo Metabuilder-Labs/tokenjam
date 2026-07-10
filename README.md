@@ -22,26 +22,19 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 ---
 
-## Quickstart
+## Get started
 
-**See where your Claude Code quota goes — 15 seconds, no install** (reads the session logs you already have):
-
-```bash
-npx tokenjam                          # or: uvx tokenjam
-```
-
-**Keep it** — the full install adds live capture, all 8 analyzers, Lens (the local dashboard), and the zero-token statusline:
+**Install TokenJam and wire it into Claude Code** — one command sets up live capture, all six analyzers, Lens (the local dashboard), and the zero-token statusline:
 
 ```bash
-pipx install tokenjam && tj onboard
+pipx install tokenjam && tj onboard --claude-code
 ```
 
-Building your own agent with the SDK? Install *in your project* (`pip install tokenjam`) — see the table below.
+This installs the CLI, backfills your recent history, and wires the statusline and hooks. Restart Claude Code and you're live.
 
-Zero config, no signup, local-first: `npx tokenjam` reads the Claude Code session transcripts you already have on disk (`~/.claude/projects/*.jsonl`) into a throwaway in-memory database. Nothing is written to disk, no daemon runs, no config is created. It prints:
+**Just looking?** `npx tokenjam` prints a 15-second read-only report over the logs you already have — no install, nothing kept.
 
-- **Quota composition** — what share of your tokens went to *re-reading context* (history, CLAUDE.md, accumulated tool output) versus *net-new work*.
-- **A session timeline** — your most recent sessions, token spend, and re-read share.
+Building your own agent with the SDK? Install *in your project* (`pip install tokenjam` + `tj onboard`) — see the table below.
 
 <sub>`npx tokenjam` and `uvx tokenjam` launch the Python CLI via `uvx`/`pipx` under the hood — see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
@@ -60,7 +53,7 @@ Zero config, no signup, local-first: `npx tokenjam` reads the Claude Code sessio
 
 LlamaIndex and the OpenAI Agents SDK ship their own native OTel support — point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
 
-Prefer a single page stacking all five paths in order, each ending with a verify step? See
+Prefer a single page walking every path, each ending with a verify step? See
 [docs/getting-started.md](docs/getting-started.md).
 
 ---
@@ -266,7 +259,7 @@ tj serve               # start Lens + REST API
 
 | Topic | Where |
 |---|---|
-| 🚦 Getting started — every entry path, least to most commitment | [docs/getting-started.md](docs/getting-started.md) |
+| 🚦 Getting started — every entry path, by persona | [docs/getting-started.md](docs/getting-started.md) |
 | ⏱️ The first hour — what to do once data flows | [docs/first-hour.md](docs/first-hour.md) |
 | 🪶 Downsize / Cache / Script / Trim deep-dives | [docs/optimize/](docs/optimize/) |
 | 🔁 Reuse analyzer deep-dive | [docs/optimize/reuse.md](docs/optimize/reuse.md) |

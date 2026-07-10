@@ -1,28 +1,18 @@
 # Getting started
 
-There's more than one way onto TokenJam, depending on how much you want to commit up front. This
-page stacks every entry path from **least** to **most** commitment — start at the top, and stop as
-soon as you've seen enough to decide the next step is worth it. Each rung ends with a way to verify
-it actually worked before you move on.
+The fastest way onto TokenJam is to install it and run the onboarding wizard for your agent — that
+wires up everything (statusline, backfill, dashboard) in one step. This page walks every entry path
+by persona, most-common first; each rung ends with a way to verify it actually worked before you move
+on.
 
-## 1. Zero-config evaluator — no install commitment
+> **Just looking first?** `npx tokenjam` (or `uvx tokenjam quickstart`) prints a 15-second read-only
+> report over the Claude Code logs you already have on disk (`~/.claude/projects/*.jsonl`) — nothing
+> installed, nothing written to disk, no daemon. You should see a "Where your quota goes" panel with a
+> percentage breakdown (or "No Claude Code logs found," which just means you haven't run Claude Code on
+> this machine yet). See [docs/installation.md](installation.md) for the `uv`/`pipx` runner
+> requirements. When you're ready to keep it, start at rung 1 below.
 
-```bash
-npx tokenjam                          # or: uvx tokenjam quickstart
-```
-
-Reads the Claude Code session logs you already have on disk (`~/.claude/projects/*.jsonl`) into a
-throwaway in-memory database and prints your quota composition (re-read vs. net-new work) and a
-session timeline. Nothing is installed, nothing is written to disk, no daemon runs.
-
-**Verify it worked:** you should see a "Where your quota goes" panel with a percentage breakdown. If
-you instead see "No Claude Code logs found," you haven't run Claude Code on this machine yet — that's
-expected, and there's nothing further to verify at this rung.
-
-See [docs/installation.md](installation.md) for the runner requirements (`uv` or `pipx`) behind
-`npx`/`uvx`.
-
-## 2. Claude Code / Codex onboarding wizards
+## 1. Claude Code / Codex onboarding wizards
 
 ```bash
 pipx install tokenjam
@@ -40,7 +30,7 @@ a persona-specific cause if something's off. You can also run `tj ping` any time
 one labeled test span through the real capture path and tells you where it landed (HTTP daemon or
 local DB), independent of onboarding.
 
-## 3. Framework integrations
+## 2. Framework integrations
 
 If your agent runs on a framework rather than raw API calls, a one-line patch gets you framework-level
 spans with no manual instrumentation:
@@ -63,7 +53,7 @@ the depth.
 run of your agent. `tj doctor` also flags a silent-onboarding case (onboarded but zero spans yet) as
 an info-level check.
 
-## 4. Raw Python SDK
+## 3. Raw Python SDK
 
 For any Python agent that isn't covered by a framework patch above — direct API calls, a custom
 loop, or an in-house framework:
@@ -95,7 +85,7 @@ path your instrumented code uses, without needing a real agent run — it confir
 if the daemon is down. For your real code, `tj status --agent my-agent` after one run should show
 non-zero tokens.
 
-## 5. Already have telemetry somewhere else
+## 4. Already have telemetry somewhere else
 
 If you're already running Langfuse, Helicone, or emitting OTel spans from anything else, you don't
 need to instrument anything new — point TokenJam at what you've already got:
