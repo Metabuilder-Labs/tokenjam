@@ -79,9 +79,9 @@ TokenJam reads telemetry from the major agent runtimes, frameworks, providers, a
 
 ### Downsize
 
-Flags sessions where a cheaper model in the same family is a downsize candidate. Never claims quality equivalence, surfaces examples so you can spot-check.
+`tj optimize downsize`
 
-<pre><code>tj optimize downsize</code></pre>
+Flags sessions where a cheaper same-family model is a downsize candidate. Never claims quality equivalence.
 
 [Details →](docs/optimize/downsize.md)
 
@@ -90,10 +90,9 @@ Flags sessions where a cheaper model in the same family is a downsize candidate.
 
 ### Cache
 
-Shows your current caching ratio per (provider, model) and suggests Anthropic prompt-cache breakpoints from stable prefixes in your real usage. Two related CLI names under one product: `cache` measures the ratio, `cache-recommend` suggests the breakpoints.
+`tj optimize cache`
 
-<pre><code>tj optimize cache
-tj optimize cache-recommend</code></pre>
+Your caching ratio per (provider, model), plus suggested Anthropic prompt-cache breakpoints from your real usage.
 
 [Details →](docs/optimize/cache.md)
 
@@ -104,9 +103,9 @@ tj optimize cache-recommend</code></pre>
 
 ### Script
 
-Finds clusters of deterministic `(tool_name, arg_shape)` sequences that match the shape of work a plain script could replace.
+`tj optimize script`
 
-<pre><code>tj optimize script</code></pre>
+Deterministic `(tool_name, arg_shape)` sequences that match work a plain script could replace.
 
 [Details →](docs/optimize/script.md)
 
@@ -115,9 +114,9 @@ Finds clusters of deterministic `(tool_name, arg_shape)` sequences that match th
 
 ### Trim
 
-Predicts which regions of your prompts the model gives little weight to. Surfaces what's safe to cut.
+`tj optimize trim`
 
-<pre><code>tj optimize trim</code></pre>
+Prompt regions the model gives little weight to. Surfaces what's safe to cut.
 
 [Details →](docs/optimize/trim.md)
 
@@ -128,9 +127,9 @@ Predicts which regions of your prompts the model gives little weight to. Surface
 
 ### Reuse
 
-Detects clusters of sessions where your agent re-plans the same work and exports reviewable skeleton templates you can drop into a slash command or script.
+`tj optimize reuse`
 
-<pre><code>tj optimize reuse</code></pre>
+Sessions where your agent re-plans the same work, exported as reviewable skeleton templates.
 
 [Details →](docs/optimize/reuse.md)
 
@@ -139,9 +138,9 @@ Detects clusters of sessions where your agent re-plans the same work and exports
 
 ### Subagent right-sizing
 
-Breaks a session's cost down per subagent (Claude Code `Task` calls) and flags ones that ran on a premium model or were handed more context than the work needed (sometimes a large share of a session's spend, hidden inside the parent total).
+`tj optimize subagent`
 
-<pre><code>tj optimize subagent</code></pre>
+Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls hidden in the parent total.
 
 [Details →](docs/optimize/subagent.md)
 
@@ -149,15 +148,7 @@ Breaks a session's cost down per subagent (Claude Code `Task` calls) and flags o
 </tr>
 </table>
 
-`tj optimize` (no args) runs every analyzer: the six above, plus `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen) and `cache-recommend` (the Cache card's breakpoint-suggestion half, above). Run a subset with `tj optimize downsize cache reuse`.
-
-### Lens
-
-`tj serve` brings every analyzer's findings, your real spend, and your alerts together in one local browser dashboard. No cloud, no signup, fully offline.
-
-<pre><code>tj serve</code></pre>
-
-[Details →](https://tokenjam.dev/products/lens)
+`tj optimize` (no args) runs every analyzer: the six above, plus `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen) and `cache-recommend` (the Cache card's breakpoint-suggestion half, above). Run a subset with `tj optimize downsize cache reuse`. Lens brings it all together: see the dashboard below.
 
 ---
 
