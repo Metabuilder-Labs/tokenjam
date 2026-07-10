@@ -71,14 +71,42 @@ def read_attribution_cache(
         occurrences = data.get("occurrences")
         if not label or not occurrences:
             return None
+        # A timestamp-less or unparseable entry must EXPIRE, not be trusted
+        # forever: without a usable ``computed_at`` we can't prove it's fresh,
+        # so a stale driver would otherwise show indefinitely. Treat missing /
+        # non-string / unparseable timestamps the same as aged-out.
         computed_at = data.get("computed_at")
-        if isinstance(computed_at, str):
-            age = _age_seconds(computed_at)
-            if age is not None and age > max_age_seconds:
-                return None
+        if not isinstance(computed_at, str):
+            return None
+        age = _age_seconds(computed_at)
+        if age is None or age > max_age_seconds:
+            return None
         return data
     except Exception:  # noqa: BLE001 - fail-safe read for the statusline hook
         return None
+
+
+def format_driver_label(*, path: Path | None = None) -> str | None:
+    """The cached top driver formatted as ``"<label> ×<count>"``, or ``None``.
+
+    The single source of truth for reading + validating + formatting the cache
+    for display — both the statusline (``cli/cmd_statusline``) and the
+    resume-brief (``cli/cmd_resume_brief``) call this, so the cache's JSON
+    schema has ONE reader and the two surfaces can't drift on field names or
+    formatting. Fail-safe: any error or a missing / stale / malformed cache
+    degrades to ``None``, which callers render as no suffix at all.
+    """
+    try:
+        cached = read_attribution_cache(path=path)
+    except Exception:  # noqa: BLE001 - a display helper must never raise
+        return None
+    if not cached:
+        return None
+    label = cached.get("top_label")
+    occurrences = cached.get("occurrences")
+    if not label or not occurrences:
+        return None
+    return f"{label} ×{occurrences}"
 
 
 def _age_seconds(computed_at: str) -> float | None:

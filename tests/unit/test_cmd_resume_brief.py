@@ -79,3 +79,37 @@ def test_no_flags_raises_usage_error(runner, tmp_path):
     result = _invoke(runner, _config(tmp_path), ["resume-brief"], stdin="")
     assert result.exit_code != 0
     assert "Provide --session" in result.output or "Usage" in result.output
+
+
+# --- top-driver hint (neutral informational wording) ------------------------
+
+
+def test_top_driver_hint_neutral_wording(tmp_path, monkeypatch):
+    """The hint reads as neutral context, not a "TOP RE-READ DRIVER" alert.
+
+    The resume-brief hook can't compute the live re-read share, so a low-share
+    user must not see an alarm — only a plain informational line.
+    """
+    from tokenjam.cli.cmd_resume_brief import _top_driver_hint
+    from tokenjam.core.attribution_cache import write_attribution_cache
+
+    cache_path = tmp_path / "attribution_cache.json"
+    monkeypatch.setattr(
+        "tokenjam.core.attribution_cache._cache_path", lambda: cache_path
+    )
+    write_attribution_cache("CLAUDE.md", 14, 3, path=cache_path)
+
+    hint = _top_driver_hint()
+    assert "Most re-read context (last 30d): CLAUDE.md ×14" in hint
+    assert "TOP RE-READ DRIVER" not in hint  # not an alert
+    assert "—" not in hint  # house style: no em dashes in user-facing copy
+
+
+def test_top_driver_hint_empty_when_no_cache(tmp_path, monkeypatch):
+    from tokenjam.cli.cmd_resume_brief import _top_driver_hint
+
+    monkeypatch.setattr(
+        "tokenjam.core.attribution_cache._cache_path",
+        lambda: tmp_path / "missing.json",
+    )
+    assert _top_driver_hint() == ""

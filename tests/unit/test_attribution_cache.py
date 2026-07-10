@@ -13,6 +13,7 @@ from datetime import timedelta
 import pytest
 
 from tokenjam.core.attribution_cache import (
+    format_driver_label,
     read_attribution_cache,
     refresh_attribution_cache,
     write_attribution_cache,
@@ -89,6 +90,26 @@ def test_read_missing_fields_returns_none(tmp_path):
     assert read_attribution_cache(path=path) is None
 
 
+def test_read_missing_computed_at_expires(tmp_path):
+    # A complete entry with NO computed_at can't be proven fresh, so it must
+    # expire (return None) rather than show a stale driver forever.
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({
+        "top_label": "CLAUDE.md", "occurrences": 14, "sessions": 3,
+    }))
+    assert read_attribution_cache(path=path) is None
+
+
+def test_read_unparseable_computed_at_expires(tmp_path):
+    # A non-string / unparseable timestamp is treated the same as aged-out.
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({
+        "top_label": "CLAUDE.md", "occurrences": 14, "sessions": 3,
+        "computed_at": "not-a-timestamp",
+    }))
+    assert read_attribution_cache(path=path) is None
+
+
 def test_read_stale_entry_returns_none(tmp_path):
     path = tmp_path / "cache.json"
     stale = utcnow() - timedelta(days=30)
@@ -156,3 +177,26 @@ def test_refresh_never_raises_on_bad_connection(tmp_path):
         object(), CaptureConfig(tool_inputs=True), path=cache_path
     )
     assert not cache_path.exists()
+
+
+# --- format_driver_label (the single display reader) ------------------------
+
+
+def test_format_driver_label_formats_label_and_count(tmp_path):
+    path = tmp_path / "cache.json"
+    write_attribution_cache("CLAUDE.md", 14, 3, path=path)
+    assert format_driver_label(path=path) == "CLAUDE.md ×14"
+
+
+def test_format_driver_label_none_when_no_cache(tmp_path):
+    assert format_driver_label(path=tmp_path / "missing.json") is None
+
+
+def test_format_driver_label_none_when_stale(tmp_path):
+    path = tmp_path / "cache.json"
+    stale = utcnow() - timedelta(days=30)
+    path.write_text(json.dumps({
+        "top_label": "CLAUDE.md", "occurrences": 5, "sessions": 2,
+        "computed_at": stale.isoformat(),
+    }))
+    assert format_driver_label(path=path) is None

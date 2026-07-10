@@ -130,23 +130,13 @@ def format_status_line(
 def _top_driver_label() -> str | None:
     """The cached top recurring-inclusion driver as a "<label> ×<count>" string.
 
-    Reads the tiny on-disk artifact ``tj backfill`` (and ``tj onboard``, which
-    calls the same ingest path) writes — never a DuckDB query from this
-    zero-token surface. Fail-safe: any error or missing/stale cache degrades
-    to ``None``, which callers render as no suffix at all.
+    Thin wrapper over ``attribution_cache.format_driver_label`` — the single
+    reader of the cache's JSON schema, shared with the resume-brief — so this
+    zero-token surface never issues a DuckDB query. Fail-safe: any error or a
+    missing/stale cache degrades to ``None`` (rendered as no suffix at all).
     """
-    try:
-        from tokenjam.core.attribution_cache import read_attribution_cache
-        cached = read_attribution_cache()
-    except Exception:
-        return None
-    if not cached:
-        return None
-    label = cached.get("top_label")
-    occurrences = cached.get("occurrences")
-    if not label or not occurrences:
-        return None
-    return f"{label} ×{occurrences}"
+    from tokenjam.core.attribution_cache import format_driver_label
+    return format_driver_label()
 
 
 def render_line(data: dict) -> str:

@@ -229,21 +229,20 @@ def cmd_resume_brief(
 
 
 def _top_driver_hint() -> str:
-    """An optional trailing "top re-read driver" line, or "" when none cached.
+    """An optional trailing informational line naming the most re-read source.
 
     Reads the same on-disk artifact the statusline reads (``tj backfill`` /
-    ``tj onboard`` write it) — no DB access from this hook path. Fail-safe:
+    ``tj onboard`` write it), via the shared ``format_driver_label`` reader, so
+    no DB access happens on this hook path. Worded as NEUTRAL context, not a
+    warning: the resume-brief hook can't compute the live re-read share, so it
+    must not read as an alert for a user whose current share is low. Fail-safe:
     any error or missing cache degrades to "".
     """
     try:
-        from tokenjam.core.attribution_cache import read_attribution_cache
-        cached = read_attribution_cache()
+        from tokenjam.core.attribution_cache import format_driver_label
+        label = format_driver_label()
     except Exception:  # noqa: BLE001 - a brief must never break a session
         return ""
-    if not cached:
+    if not label:
         return ""
-    label = cached.get("top_label")
-    occurrences = cached.get("occurrences")
-    if not label or not occurrences:
-        return ""
-    return f"\n\nTOP RE-READ DRIVER\n  {label} re-read ×{occurrences} — see `tj context`."
+    return f"\n\nMost re-read context (last 30d): {label}. See `tj context`."
