@@ -101,6 +101,7 @@ SHIM_KNOWN_GAPS = {
 # implementing one, ``test_unimplemented_methods_have_no_silent_shim`` fails so
 # the new method cannot land without parity coverage or an explicit gap entry.
 SHIM_NOT_IMPLEMENTED = {
+    "bulk_insert_spans",
     "close_session_by_id",
     "close_sessions_by_instance",
     "count_traces",
