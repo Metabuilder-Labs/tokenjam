@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="docs/brand/tokenjam-banner.png" alt="TokenJam" width="440">
-
-### Token Efficiency For AI Agents
+<img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
 
 TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out. It then shows it all in a local browser dashboard. Runs entirely on your machine.
 
@@ -46,6 +44,8 @@ Run bare `tj` any time and it points you to the next best action (`tj status`, `
 Building your own agent with the SDK: install *in your project* (`pip install tokenjam` + `tj onboard`); see the table below.
 
 <sub>`npx tokenjam` and `uvx tokenjam` launch the Python CLI via `uvx`/`pipx` under the hood; see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
+
+<div align="center"><img src="docs/assets/tokenjam-token-flow.png" alt="Token flow: telemetry from Claude Code, Codex, Google, AWS, the Python and TypeScript SDKs, LangChain/CrewAI, and OTLP/Langfuse flows into tokenjam, which decomposes where every token goes: 94% re-reads of history and context, 5.1% tool output, 0.9% net-new work, measured over a 61-session history" width="830"></div>
 
 ---
 
