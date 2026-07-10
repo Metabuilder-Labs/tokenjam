@@ -273,7 +273,11 @@ def _render(diag, timeline, *, since: str,
 
     # ── Statusline live preview (self-contained; omits silently if no
     # candidate session ever crosses the nudge threshold). ──
-    _render_statusline_preview(timeline, root)
+    picked = _render_statusline_preview(timeline, root)
+
+    # ── Session Story teaser: reuses the SAME renderer `tj session-story`
+    # uses, on the ALREADY-selected session (no extra DB/glob work). ──
+    _render_session_story_teaser(picked, root)
 
     # ── Session timeline. ──
     table = Table(box=box.SIMPLE, show_header=True, header_style="bold dim",
@@ -447,18 +451,24 @@ def _select_preview_session(
     return max(candidates, key=lambda c: c.turns)
 
 
-def _render_statusline_preview(timeline: SessionTimeline, root: Path | None) -> None:
+def _render_statusline_preview(
+    timeline: SessionTimeline, root: Path | None,
+) -> _PreviewCandidate | None:
     """"What you'd see live" preview section — self-contained; prints nothing
     when there is no session to preview (no history, no readable transcript,
-    or no session ever crossed the nudge threshold)."""
+    or no session ever crossed the nudge threshold).
+
+    Returns the selected ``_PreviewCandidate`` (or ``None``) so the caller can
+    reuse the already-picked session for the Session Story teaser instead of
+    re-walking transcripts."""
     if root is None or not timeline.sessions:
-        return
+        return None
 
     from rich.text import Text
 
     picked = _select_preview_session(timeline, root)
     if picked is None:
-        return
+        return None
     assert picked.crossing is not None  # invariant: only crossing candidates are ever selected
 
     turn_index, model_raw, usage = picked.crossing
@@ -480,4 +490,46 @@ def _render_statusline_preview(timeline: SessionTimeline, root: Path | None) -> 
     outro.append("tj onboard", style="bold cyan")
     outro.append(" sets it up.", style="dim")
     console.print(outro)
+    console.print()
+    return picked
+
+
+def _render_session_story_teaser(
+    picked: _PreviewCandidate | None, root: Path | None,
+) -> None:
+    """Session Story teaser: a compact preview of HOW the previewed session
+    attempted its work, reusing the exact ``tj session-story`` renderer.
+
+    Silent-degrades (prints nothing) when there is no picked session or root, or
+    when the session's story can't be built. Does NO extra file globbing or DB
+    work beyond building the story for the ALREADY-selected session, so it can't
+    blow quickstart's fast first-run budget."""
+    if picked is None or root is None:
+        return
+
+    from tokenjam.cli.cmd_session_story import render_session_story
+    from tokenjam.core.transcript import build_session_story
+
+    story = build_session_story(
+        picked.session.session_id, projects_root=root, include_subagents=True
+    )
+    if not story:
+        return
+
+    from rich.text import Text
+
+    header = Text()
+    header.append("Session Story", style="bold")
+    header.append("  ·  how that session actually attempted its work", style="dim")
+    console.print(header)
+    console.print()
+    render_session_story(
+        story, session_id=picked.session.session_id, max_moves=3
+    )
+    console.print()
+    pointer = Text()
+    pointer.append("See the full turn-by-turn method with ", style="dim")
+    pointer.append("tj session-story", style="bold cyan")
+    pointer.append(".", style="dim")
+    console.print(pointer)
     console.print()

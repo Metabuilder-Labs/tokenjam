@@ -337,6 +337,54 @@ class ApiBackend:
             params["agent_id"] = agent_id
         return self._get("/api/v1/reuse/clusters", params)
 
+    #: `/sessions` page size for `find_last_substantial_session`. The floor is
+    #: usually 1 tool call, so the newest row almost always qualifies — this
+    #: cap just needs to survive a handful of non-substantial rows at the head
+    #: of the list without pulling a user's entire (possibly thousands-row)
+    #: sessions table over HTTP just to inspect the first few (Greptile, PR #448).
+    _LAST_SESSION_PAGE_SIZE = 25
+
+    def find_last_substantial_session(
+        self, min_tool_calls: int = 1
+    ) -> str | None:
+        """Most-recent session id with at least `min_tool_calls` tool calls.
+
+        Mirrors the direct-DB `--last` resolution in `tj session-story` when the
+        daemon holds the write lock. `/sessions` already returns rows newest
+        first, so the first qualifying row within the fetched page is the
+        answer. Fetches only `_LAST_SESSION_PAGE_SIZE` rows via `/sessions`'
+        `limit` param, not the whole table. Returns None when no session in
+        that page clears the floor (or the list is empty) — a session further
+        back than the page never gets picked as "last", which is the honest
+        trade-off for not transferring a user's entire session history.
+        """
+        data = self._get(
+            "/api/v1/sessions", {"limit": self._LAST_SESSION_PAGE_SIZE}
+        )
+        for s in data.get("sessions", []):
+            if (s.get("tool_call_count") or 0) >= min_tool_calls:
+                sid = s.get("session_id")
+                if sid:
+                    return sid
+        return None
+
+    def fetch_session_story(
+        self, session_id: str, subagents: bool = True
+    ) -> dict:
+        """Fetch a session's reconstructed story from `tj serve`.
+
+        Used by `tj session-story` when the local DuckDB connection is
+        unavailable (daemon holds the write lock). The daemon already did the
+        transcript reconstruction + snapshot fallback, so this returns the raw
+        `{"available": bool, ...}` payload (`available`/`reason`/`from_snapshot`
+        + the story fields) verbatim for the CLI to render. See issue #63 for
+        the same daemon-availability pattern behind `tj context`.
+        """
+        return self._get(
+            f"/api/v1/sessions/{session_id}/story",
+            {"subagents": subagents},
+        )
+
     def fetch_context_diagnostic(
         self,
         *,
@@ -357,6 +405,28 @@ class ApiBackend:
         if agent_id:
             params["agent_id"] = agent_id
         return self._get("/api/v1/context", params)
+
+    def fetch_opus_quota_audit(
+        self,
+        *,
+        since: str = "30d",
+        agent_id: str | None = None,
+    ) -> dict:
+        """
+        Fetch the server-computed Opus quota audit from `tj serve`.
+
+        Used by `tj quota-audit` when the local DuckDB connection is unavailable
+        (the daemon holds the write lock). The audit aggregates per-session
+        token/model metadata the shim can't expose at this grain, so the daemon
+        (which owns the direct connection) computes it and returns
+        `audit_to_dict(audit)` plus the `framing` block. The CLI reconstructs via
+        `audit_from_dict` + `Framing(**framing)`. Mirrors
+        `fetch_context_diagnostic` / `/api/v1/context`.
+        """
+        params: dict[str, Any] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        return self._get("/api/v1/quota-audit", params)
 
     def close(self) -> None:
         self.client.close()

@@ -305,7 +305,7 @@ The `TjConfig` dataclass tree in `tokenjam/core/config.py` defines the full hier
 
 ## MCP server (SDK / API integration)
 
-`tj mcp` is a stdio-based MCP (Model Context Protocol) server that gives an SDK / API integration direct access to TokenJam observability data. It exposes 13 tools. It is **not** wired up for Claude Code or Codex — an in-loop MCP is a per-turn quota tax on subscription users (+36% measured, ticket #59); those agents get tj out-of-band via the statusline + OTel capture instead. Wire it manually only for an SDK / API integration that already sits in the request path: `claude mcp add tj --scope user -- tj mcp`.
+`tj mcp` is a stdio-based MCP (Model Context Protocol) server that gives an SDK / API integration direct access to TokenJam observability data. It exposes 23 tools. It is **not** wired up for Claude Code or Codex — an in-loop MCP is a per-turn quota tax on subscription users (+36% measured, ticket #59); those agents get tj out-of-band via the statusline + OTel capture instead. Wire it manually only for an SDK / API integration that already sits in the request path: `claude mcp add tj --scope user -- tj mcp`.
 
 ### Dual-mode operation
 
