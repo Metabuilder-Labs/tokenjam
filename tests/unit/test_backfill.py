@@ -1448,6 +1448,34 @@ def test_bulk_batch_flush_boundary_matches_single_flush(tmp_path, monkeypatch):
         chunked.close()
 
 
+def test_bulk_progress_counts_increase_monotonically(tmp_path):
+    """Regression: in the bulk path the progress callback must observe
+    `spans_ingested` climbing per session — not sit at flat zero until a single
+    end-of-run flush, which would make a live backfill display (onboard) show 0
+    the whole run then jump. Uses the DEFAULT (large) flush target so every
+    insert is deferred to ONE flush at the end — the exact scenario that exposed
+    the bug — and asserts the callback still saw increasing counts."""
+    _multi_session_tree(tmp_path, n_sessions=6)  # 6 sessions × 2 spans each
+
+    observed: list[int] = []
+
+    def _capture(parsed, result):
+        observed.append(result.spans_ingested)
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path, progress=_capture)
+        # One callback per session; counts advance 2 per session (LLM + tool),
+        # never flat-zero-then-jump.
+        assert observed == [2, 4, 6, 8, 10, 12]
+        assert observed[0] > 0
+        assert all(b > a for a, b in zip(observed, observed[1:]))
+        # And the spans really did land (deferred flush committed at the end).
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 12
+    finally:
+        db.close()
+
+
 def test_bulk_batch_is_idempotent_across_flush_boundary(tmp_path, monkeypatch):
     """Re-running the backfill with a tiny flush target inserts nothing new and
     leaves the spans unchanged — idempotency holds across batch boundaries."""
