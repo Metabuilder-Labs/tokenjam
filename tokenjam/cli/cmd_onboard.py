@@ -2949,7 +2949,19 @@ def _claude_wrapper_block() -> str:
     earlier on that terminal's PATH, or fail outright if `tj`'s directory
     isn't on PATH at all.
 
-    Written portably so it works in both zsh and bash.
+    Every ``tj`` invocation here is stderr-silenced (``2>/dev/null``) and
+    failure-tolerant: a stale/shadowed/half-uninstalled ``tj`` ahead on PATH
+    must never flash a traceback into an interactive ``claude`` launch, and a
+    failed or empty ``otel-resource-attrs`` lookup falls back to just
+    ``service.instance.id=...`` rather than a malformed value with a leading
+    comma.
+
+    Written portably so it works in both zsh and bash. Re-running
+    ``_install_claude_wrapper`` always regenerates this block fresh and
+    replaces the prior one in place (matched by ``_WRAPPER_MARKER`` ..
+    ``_WRAPPER_END_MARKER``, content-agnostic) — so a content-only fix like
+    this one reaches existing users automatically on their next ``tj
+    onboard``, with no marker version bump needed.
     """
     tj_bin = _current_tj_binary()
     return (
@@ -2976,7 +2988,16 @@ def _claude_wrapper_block() -> str:
         f"    esac\n"
         f"  fi\n"
         f'  [ -z "$_tj_inst" ] && _tj_inst="unknown"\n'
-        f'  export OTEL_RESOURCE_ATTRIBUTES="$("{tj_bin}" otel-resource-attrs),service.instance.id=$_tj_inst"\n'
+        f"  # Silence stderr and tolerate failure: a stale/shadowed tj on PATH\n"
+        f"  # must never leak a traceback into every claude launch, and an empty\n"
+        f"  # or failing lookup must not produce a malformed leading-comma value.\n"
+        f'  local _tj_attrs\n'
+        f'  _tj_attrs="$("{tj_bin}" otel-resource-attrs 2>/dev/null)" || _tj_attrs=""\n'
+        f'  if [ -n "$_tj_attrs" ]; then\n'
+        f'    export OTEL_RESOURCE_ATTRIBUTES="$_tj_attrs,service.instance.id=$_tj_inst"\n'
+        f"  else\n"
+        f'    export OTEL_RESOURCE_ATTRIBUTES="service.instance.id=$_tj_inst"\n'
+        f"  fi\n"
         f"  # Report this terminal's session closed on exit/interrupt so the\n"
         f"  # dashboard archives its tile. Idempotent — double-fire is harmless.\n"
         f"  trap '\"{tj_bin}\" session-end --instance \"$_tj_inst\" >/dev/null 2>&1 || true' INT TERM HUP\n"
