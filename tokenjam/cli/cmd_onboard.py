@@ -2528,8 +2528,12 @@ def _print_claude_code_restart_panel() -> None:
         "conversation\n"
         "     [bold]claude --resume[/bold]  → pick any earlier one from a "
         "list\n"
-        "     [dim](a fresh claude works too — resuming is optional; tj "
-        "adds a recap of where you left off when you resume)[/dim]\n\n"
+        # Two deliberately indented lines (not one auto-wrapped one): Rich
+        # wraps continuation text back to the panel margin, not to the
+        # sub-list's hanging indent, so a single long parenthetical rendered
+        # its second line flush-left under "2." instead of under the paren.
+        "     [dim](a fresh claude works too — resuming is optional;\n"
+        "      tj adds a recap of where you left off when you resume)[/dim]\n\n"
         "3. Confirm data is flowing:  [bold]tj onboard --claude-code "
         "--verify-only[/bold]"
     )
