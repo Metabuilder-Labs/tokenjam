@@ -196,6 +196,7 @@ def analyze_model_downgrade(
         f"COALESCE(SUM(input_tokens),0)  AS input_tokens, "
         f"COALESCE(SUM(output_tokens),0) AS output_tokens, "
         f"COALESCE(SUM(cache_tokens),0)  AS cache_tokens, "
+        f"COALESCE(SUM(cache_write_tokens),0) AS cache_write_tokens, "
         f"COALESCE(SUM(cost_usd),0.0)    AS cost_usd "
         f"FROM spans WHERE {where} AND model IS NOT NULL "
         f"GROUP BY session_id",
@@ -229,10 +230,13 @@ def analyze_model_downgrade(
 
     for row in llm_rows:
         session_id, trace_id, _agent, start_time, end_time, provider, model, \
-            in_tok, out_tok, cache_tok, cost = row
+            in_tok, out_tok, cache_tok, cache_write_tok, cost = row
         # Accumulate window-wide token totals (used for subscription-mode
         # token-share rendering even when the row isn't a candidate).
-        window_total_tokens += int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
+        window_total_tokens += (
+            int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
+            + int(cache_write_tok or 0)
+        )
         if not provider or not model:
             continue
         alt = _lookup_downgrade(provider, model)
@@ -254,7 +258,10 @@ def analyze_model_downgrade(
         candidate_sessions += 1
         actual_cost += float(cost or 0.0)
         alt_cost += alt_unit
-        candidate_tokens += int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
+        candidate_tokens += (
+            int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
+            + int(cache_write_tok or 0)
+        )
         # This session's recoverable saving (clamped at 0 — a cheaper model
         # never costs more in our candidate set, but guard against pricing noise).
         per_session_savings.append(max(float(cost or 0.0) - alt_unit, 0.0))
