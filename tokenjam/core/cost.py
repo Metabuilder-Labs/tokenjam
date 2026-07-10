@@ -133,18 +133,21 @@ class CostEngine:
 @dataclass
 class WindowTotals:
     """Aggregate spend + tokens for a single time window."""
-    since:          datetime
-    until:          datetime
-    sessions:       int  = 0
-    input_tokens:   int  = 0
-    output_tokens:  int  = 0
-    cache_tokens:   int  = 0
-    total_cost_usd: float = 0.0
+    since:              datetime
+    until:              datetime
+    sessions:           int  = 0
+    input_tokens:       int  = 0
+    output_tokens:      int  = 0
+    cache_tokens:       int  = 0
+    cache_write_tokens: int  = 0
+    total_cost_usd:     float = 0.0
 
     @property
     def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens + self.cache_tokens
-
+        return (
+            self.input_tokens + self.output_tokens
+            + self.cache_tokens + self.cache_write_tokens
+        )
 
 @dataclass
 class CostDiff:
@@ -268,7 +271,7 @@ def compute_window_totals(
     Reads through the StorageBackend protocol (`get_window_cost_totals`) rather
     than touching `db.conn` directly (issue #309).
     """
-    sessions, in_tok, out_tok, cache_tok, cost = db.get_window_cost_totals(
+    sessions, in_tok, out_tok, cache_tok, cache_write_tok, cost = db.get_window_cost_totals(
         since, until, agent_id,
     )
     return WindowTotals(
@@ -277,6 +280,7 @@ def compute_window_totals(
         input_tokens=in_tok,
         output_tokens=out_tok,
         cache_tokens=cache_tok,
+        cache_write_tokens=cache_write_tok,
         total_cost_usd=cost,
     )
 

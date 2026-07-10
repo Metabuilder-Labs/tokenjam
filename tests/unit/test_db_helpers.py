@@ -101,7 +101,8 @@ def test_get_window_cost_totals_aggregates_and_scopes(db):
         db.upsert_session(make_session(session_id=f"s{i}", agent_id="a1"))
         db.insert_span(make_llm_span(
             session_id=f"s{i}", agent_id="a1",
-            input_tokens=1000, output_tokens=200, cache_tokens=50, cost_usd=0.01,
+            input_tokens=1000, output_tokens=200, cache_tokens=50,
+            cache_write_tokens=25, cost_usd=0.01,
             start_time=base + timedelta(minutes=i),
         ))
     # An out-of-window span must be excluded.
@@ -111,10 +112,10 @@ def test_get_window_cost_totals_aggregates_and_scopes(db):
         start_time=base - timedelta(days=5),
     ))
 
-    sessions, in_tok, out_tok, cache_tok, cost = db.get_window_cost_totals(
+    sessions, in_tok, out_tok, cache_tok, cache_write_tok, cost = db.get_window_cost_totals(
         base - timedelta(hours=1), base + timedelta(hours=1),
     )
-    assert (sessions, in_tok, out_tok, cache_tok) == (2, 2000, 400, 100)
+    assert (sessions, in_tok, out_tok, cache_tok, cache_write_tok) == (2, 2000, 400, 100, 50)
     assert cost == pytest.approx(0.02)
 
 

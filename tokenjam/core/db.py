@@ -91,7 +91,7 @@ class StorageBackend(Protocol):
     def count_unknown_plan_tier_sessions(self) -> int: ...
     def get_window_cost_totals(
         self, since: datetime, until: datetime, agent_id: str | None = None,
-    ) -> tuple[int, int, int, int, float]: ...
+    ) -> tuple[int, int, int, int, int, float]: ...
     def get_cost_delta_by_group(
         self, group_col: str, current_since: datetime, current_until: datetime,
         prev_since: datetime, prev_until: datetime, top_n: int,
@@ -1963,7 +1963,7 @@ class DuckDBBackend:
 
     def get_window_cost_totals(
         self, since: datetime, until: datetime, agent_id: str | None = None,
-    ) -> tuple[int, int, int, int, float]:
+    ) -> tuple[int, int, int, int, int, float]:
         clauses = ["start_time >= $1", "start_time < $2"]
         params: list = [since, until]
         if agent_id:
@@ -1972,20 +1972,20 @@ class DuckDBBackend:
         where = " AND ".join(clauses)
         row = self.conn.execute(
             f"SELECT COUNT(DISTINCT session_id) AS sessions, "
-            f"COALESCE(SUM(input_tokens), 0)   AS in_tok, "
-            f"COALESCE(SUM(output_tokens), 0)  AS out_tok, "
-            f"COALESCE(SUM(cache_tokens), 0)   AS cache_tok, "
-            f"COALESCE(SUM(cost_usd), 0.0)     AS cost "
+            f"COALESCE(SUM(input_tokens), 0)        AS in_tok, "
+            f"COALESCE(SUM(output_tokens), 0)       AS out_tok, "
+            f"COALESCE(SUM(cache_tokens), 0)        AS cache_tok, "
+            f"COALESCE(SUM(cache_write_tokens), 0)  AS cache_write_tok, "
+            f"COALESCE(SUM(cost_usd), 0.0)          AS cost "
             f"FROM spans WHERE {where}",
             params,
         ).fetchone()
         if row is None:  # COALESCE aggregate always returns a row; guard for typing
-            return (0, 0, 0, 0, 0.0)
+            return (0, 0, 0, 0, 0, 0.0)
         return (
             int(row[0] or 0), int(row[1] or 0), int(row[2] or 0),
-            int(row[3] or 0), float(row[4] or 0.0),
+            int(row[3] or 0), int(row[4] or 0), float(row[5] or 0.0),
         )
-
     def get_cost_delta_by_group(
         self, group_col: str, current_since: datetime, current_until: datetime,
         prev_since: datetime, prev_until: datetime, top_n: int,
