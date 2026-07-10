@@ -1,10 +1,11 @@
 """Unit tests for tokenjam.core.cost and tokenjam.core.pricing."""
 from __future__ import annotations
 import logging
+from datetime import datetime, timezone
 
 import pytest
 
-from tokenjam.core.cost import calculate_cost
+from tokenjam.core.cost import calculate_cost, WindowTotals
 from tokenjam.core.pricing import load_pricing_table, get_rates
 
 
@@ -350,3 +351,16 @@ def test_pricing_file_exists_at_expected_path():
     assert "tokenjam" in PRICING_FILE.parts, (
         f"PRICING_FILE should be inside the tokenjam package, got {PRICING_FILE}"
     )
+
+def test_window_totals_total_tokens_includes_cache_write():
+    # Issue #377: total_tokens previously omitted cache-creation (write)
+    # tokens, understating tokens_delta in the cost-comparison view.
+    wt = WindowTotals(
+        since=datetime(2026, 5, 10, tzinfo=timezone.utc),
+        until=datetime(2026, 5, 11, tzinfo=timezone.utc),
+        input_tokens=100,
+        output_tokens=50,
+        cache_tokens=10,
+        cache_write_tokens=5,
+    )
+    assert wt.total_tokens == 165
