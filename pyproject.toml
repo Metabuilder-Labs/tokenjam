@@ -24,7 +24,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "click>=8.1",
+    # >=8.2: CliRunner separately captures stdout/stderr by default from this
+    # version on (result.stdout / result.stderr always populated); tests that
+    # assert stdout stays clean of stderr-routed output rely on this.
+    "click>=8.2",
     "rich>=13.0",
     "tomli>=2.0; python_version < '3.11'",
     "tomli-w>=1.0",

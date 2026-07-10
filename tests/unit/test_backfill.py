@@ -1382,3 +1382,116 @@ def test_reconcile_never_touches_other_sessions_or_sources(tmp_path):
         ).fetchone()[0] == 1
     finally:
         db.close()
+
+
+# --- columnar bulk-append batching: parity across the flush boundary --------- #
+
+def _multi_session_tree(tmp_path, n_sessions: int = 6) -> None:
+    """A handful of small sessions, each with an LLM turn + a tool_use — enough
+    that a small flush target forces several batch flushes."""
+    for i in range(n_sessions):
+        sid = f"batch-sess-{i:02d}"
+        _make_session_file(
+            tmp_path, session_id=sid, cwd="/Users/me/proj",
+            records=[_assistant_record(
+                f"m-{i}", "claude-opus-4-7", 1000 + i, 200 + i,
+                "2026-04-01T10:00:00.000Z", sid, "/Users/me/proj",
+                tool_uses=[(f"tu-{i}", "Read")], cache_read=i, cache_creation=2 * i,
+            )],
+        )
+
+
+def _dump_spans(db) -> list[tuple]:
+    return db.conn.execute(
+        "SELECT span_id, session_id, name, input_tokens, output_tokens, "
+        "cache_tokens, cache_write_tokens, cost_usd, tool_name "
+        "FROM spans ORDER BY span_id"
+    ).fetchall()
+
+
+def _dump_sessions(db) -> list[tuple]:
+    return db.conn.execute(
+        "SELECT session_id, input_tokens, output_tokens, cache_tokens, "
+        "cache_write_tokens, total_cost_usd, tool_call_count "
+        "FROM sessions ORDER BY session_id"
+    ).fetchall()
+
+
+def test_bulk_batch_flush_boundary_matches_single_flush(tmp_path, monkeypatch):
+    """A tiny flush target (multiple batch flushes, sessions split across
+    boundaries) must produce byte-for-byte the same spans + session rows as a
+    single-flush ingest — the whole point of set-based batching is that where the
+    flush boundary lands is invisible in the result."""
+    import tokenjam.core.backfill as bf
+
+    _multi_session_tree(tmp_path, n_sessions=6)
+
+    # Reference: one big batch (target far above the total span count).
+    ref = InMemoryBackend()
+    # Forced multi-flush: target of 1 span flushes essentially per session.
+    chunked = InMemoryBackend()
+    try:
+        monkeypatch.setattr(bf, "_BULK_FLUSH_SPAN_TARGET", 10_000)
+        r_ref = ingest_claude_code(ref, root=tmp_path)
+
+        monkeypatch.setattr(bf, "_BULK_FLUSH_SPAN_TARGET", 1)
+        r_chunked = ingest_claude_code(chunked, root=tmp_path)
+
+        assert _dump_spans(chunked) == _dump_spans(ref)
+        assert _dump_sessions(chunked) == _dump_sessions(ref)
+        # Reported counts agree too (6 sessions × 2 spans each).
+        assert r_chunked.spans_ingested == r_ref.spans_ingested == 12
+        assert r_chunked.sessions_ingested == r_ref.sessions_ingested == 6
+        assert r_chunked.sessions_new == r_ref.sessions_new == 6
+    finally:
+        ref.close()
+        chunked.close()
+
+
+def test_bulk_progress_counts_increase_monotonically(tmp_path):
+    """Regression: in the bulk path the progress callback must observe
+    `spans_ingested` climbing per session — not sit at flat zero until a single
+    end-of-run flush, which would make a live backfill display (onboard) show 0
+    the whole run then jump. Uses the DEFAULT (large) flush target so every
+    insert is deferred to ONE flush at the end — the exact scenario that exposed
+    the bug — and asserts the callback still saw increasing counts."""
+    _multi_session_tree(tmp_path, n_sessions=6)  # 6 sessions × 2 spans each
+
+    observed: list[int] = []
+
+    def _capture(parsed, result):
+        observed.append(result.spans_ingested)
+
+    db = InMemoryBackend()
+    try:
+        ingest_claude_code(db, root=tmp_path, progress=_capture)
+        # One callback per session; counts advance 2 per session (LLM + tool),
+        # never flat-zero-then-jump.
+        assert observed == [2, 4, 6, 8, 10, 12]
+        assert observed[0] > 0
+        assert all(b > a for a, b in zip(observed, observed[1:]))
+        # And the spans really did land (deferred flush committed at the end).
+        assert db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()[0] == 12
+    finally:
+        db.close()
+
+
+def test_bulk_batch_is_idempotent_across_flush_boundary(tmp_path, monkeypatch):
+    """Re-running the backfill with a tiny flush target inserts nothing new and
+    leaves the spans unchanged — idempotency holds across batch boundaries."""
+    import tokenjam.core.backfill as bf
+
+    _multi_session_tree(tmp_path, n_sessions=5)
+    db = InMemoryBackend()
+    try:
+        monkeypatch.setattr(bf, "_BULK_FLUSH_SPAN_TARGET", 3)
+        r1 = ingest_claude_code(db, root=tmp_path)
+        before = _dump_spans(db)
+
+        r2 = ingest_claude_code(db, root=tmp_path)
+        assert r1.spans_ingested == 10          # 5 sessions × 2 spans
+        assert r2.spans_ingested == 0
+        assert r2.spans_skipped_existing == 10
+        assert _dump_spans(db) == before        # untouched
+    finally:
+        db.close()

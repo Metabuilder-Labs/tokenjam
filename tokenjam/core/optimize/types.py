@@ -16,12 +16,28 @@ MODEL_DOWNGRADE_CAVEAT = (
 # discipline (CLAUDE.md Rule 14): the audit flags Opus sessions whose STRUCTURE
 # matches Sonnet-shaped work — it is an accountability list to spot-check, never
 # a claim that the cheaper model would have produced the same answer. Surfaced
-# verbatim next to every "% of Opus quota reclaimable" headline.
+# verbatim next to every "% of premium quota misallocated" headline.
 OPUS_QUOTA_AUDIT_CAVEAT = (
-    "Candidates to spot-check, not a verdict. Each flagged session merely has "
-    "the structural shape (small input/output, few tool calls) of work a "
-    "smaller model often handles — review the example sessions before changing "
-    "your routing. Never \"safe to downgrade.\""
+    "Candidates to spot-check, not a verdict. Each flagged stretch merely has "
+    "the structural shape (small new input/output, low tool fan-out, no "
+    "delegation) of work a smaller model often handles — review the example "
+    "sessions before changing your routing. Segment percentages flag stretches "
+    "whose shape looks mechanical; the surrounding session context is not "
+    "evaluated and may have justified the larger model. Never \"safe to "
+    "downgrade.\""
+)
+
+# Confidence label for the segment-level misallocation estimate. The headline is
+# a per-turn heuristic over contiguous mechanical stretches with no quality
+# validation, so it is surfaced as an explicit "estimate" (with a wide bootstrap
+# interval), never as a settled figure (CLAUDE.md Rule 14).
+SEGMENT_ESTIMATE_CONFIDENCE = "estimate"
+
+# The `estimate_basis` string surfaced behind the "estimate" label (Rule 14).
+SEGMENT_ESTIMATE_BASIS = (
+    "contiguous turn-stretches whose per-turn shape (small new input/output, low "
+    "tool fan-out, no delegation) looks mechanical — surrounding session context "
+    "not evaluated; no quality validation"
 )
 
 # Mandatory caveat string for the Reuse analyzer. Honesty discipline
@@ -126,19 +142,41 @@ class OpusQuotaAudit:
     Reframes the structural downsize heuristic as an *accountability* audit
     scoped to Opus sessions: how much of your Opus quota was spent on sessions
     whose shape matches Sonnet-shaped work. The headline figure is
-    ``percent_quota_reclaimable`` (candidate Opus tokens / total Opus tokens) —
-    quota language, never a dollar "saving" (the subscription majority is on a
-    flat fee; dollar framing mis-targets them). Dollar fields are a best-effort
-    SECONDARY signal for API users only.
+    ``percent_quota_misallocated`` (candidate Opus tokens / total Opus tokens) —
+    retrospective quota is already SPENT, so this is a behaviour mirror (how much
+    premium quota went to Sonnet-shaped sessions), never a claim it can be
+    "reclaimed". Quota language, never a dollar "saving" (the subscription
+    majority is on a flat fee; dollar framing mis-targets them). Dollar fields
+    are a best-effort SECONDARY signal for API users only.
     """
     window_days: float = 0.0
     opus_sessions: int = 0
-    opus_tokens: int = 0  # input + output + cache across all Opus sessions
+    # Quota-weighted premium token-equivalents (cache reads at 0.1x, output at
+    # 5x — the #119 weighting) attributed per-turn to the turn's OWN model, so a
+    # Sonnet turn inside an Opus session never lands in this premium total. This
+    # is the denominator of the headline share.
+    opus_tokens: int = 0
     candidate_sessions: int = 0
-    candidate_tokens: int = 0  # input + output + cache, candidates only
-    # The headline: % of Opus quota (tokens) held by Sonnet-shaped sessions.
-    percent_quota_reclaimable: float = 0.0
+    # Quota-weighted premium token-equivalents inside flagged cheap segments —
+    # the numerator. Segment-inclusive: a mechanical stretch inside an otherwise
+    # hard session counts, which the old whole-session audit structurally missed.
+    candidate_tokens: int = 0
+    # THE headline (founder decision D1): ONE segment-inclusive misallocation
+    # figure — the share of premium quota that went to Sonnet-shaped work,
+    # computed on the corrected per-turn attribution. It is a labelled estimate
+    # (segment_estimate_confidence + the bootstrap CI below), not two numbers.
+    percent_quota_misallocated: float = 0.0
     percent_sessions: float = 0.0
+    # Segment accounting + confidence (design §5.2 / §6, founder D3). The number
+    # is a heuristic estimate, shown with an explicit label + a WIDE bootstrap
+    # interval that resamples SEGMENTS (not sessions), so the band widens honestly
+    # when few segments carry the estimate. ci low/high are None below 2 segments
+    # (a single point has no spread — the estimate is inherently wide).
+    segment_count: int = 0
+    segment_estimate_confidence: str = SEGMENT_ESTIMATE_CONFIDENCE
+    estimate_basis: str = SEGMENT_ESTIMATE_BASIS
+    segment_ci_low: float | None = None
+    segment_ci_high: float | None = None
     # model -> cheaper-alternative suggestions observed among the candidates.
     suggestions: dict[str, str] = field(default_factory=dict)
     examples: list[OpusAuditExample] = field(default_factory=list)
@@ -272,8 +310,22 @@ def audit_to_dict(audit: OpusQuotaAudit) -> dict[str, Any]:
         "opus_tokens": audit.opus_tokens,
         "candidate_sessions": audit.candidate_sessions,
         "candidate_tokens": audit.candidate_tokens,
-        "percent_quota_reclaimable": audit.percent_quota_reclaimable,
+        "percent_quota_misallocated": audit.percent_quota_misallocated,
+        # DEPRECATED alias — kept one release (through 0.6.x) because
+        # ``percent_quota_reclaimable`` shipped publicly in 0.5.4. Consumers
+        # should read ``percent_quota_misallocated``; this mirror will be
+        # removed. Emitted on BOTH the direct and serve paths so the parity
+        # contract (byte-identical audit_to_dict output) still holds.
+        "percent_quota_reclaimable": audit.percent_quota_misallocated,
         "percent_sessions": audit.percent_sessions,
+        # Segment accounting + confidence (design §5.2 / §6). Every key here must
+        # survive the round-trip below, or the data-access parity test fails —
+        # the silent-drift guard for a new DB-computed field.
+        "segment_count": audit.segment_count,
+        "segment_estimate_confidence": audit.segment_estimate_confidence,
+        "estimate_basis": audit.estimate_basis,
+        "segment_ci_low": audit.segment_ci_low,
+        "segment_ci_high": audit.segment_ci_high,
         "suggestions": dict(audit.suggestions),
         "examples": [asdict(ex) for ex in audit.examples],
         "actual_cost_usd": audit.actual_cost_usd,
@@ -309,11 +361,29 @@ def audit_from_dict(data: dict[str, Any]) -> OpusQuotaAudit:
         opus_tokens=int(data.get("opus_tokens", 0) or 0),
         candidate_sessions=int(data.get("candidate_sessions", 0) or 0),
         candidate_tokens=int(data.get("candidate_tokens", 0) or 0),
-        percent_quota_reclaimable=float(data.get("percent_quota_reclaimable", 0.0) or 0.0),
+        # Prefer the new key; fall back to the deprecated alias so a payload
+        # produced by a pre-rename (0.5.4) daemon still reconstructs.
+        percent_quota_misallocated=float(
+            data.get("percent_quota_misallocated",
+                     data.get("percent_quota_reclaimable", 0.0)) or 0.0
+        ),
         percent_sessions=float(data.get("percent_sessions", 0.0) or 0.0),
+        segment_count=int(data.get("segment_count", 0) or 0),
+        segment_estimate_confidence=str(
+            data.get("segment_estimate_confidence", SEGMENT_ESTIMATE_CONFIDENCE)
+        ),
+        estimate_basis=str(data.get("estimate_basis", SEGMENT_ESTIMATE_BASIS)),
+        segment_ci_low=_opt_float(data.get("segment_ci_low")),
+        segment_ci_high=_opt_float(data.get("segment_ci_high")),
         suggestions=dict(data.get("suggestions", {}) or {}),
         examples=examples,
         actual_cost_usd=float(data.get("actual_cost_usd", 0.0) or 0.0),
         alternative_cost_usd=float(data.get("alternative_cost_usd", 0.0) or 0.0),
         caveat=str(data.get("caveat", OPUS_QUOTA_AUDIT_CAVEAT)),
     )
+
+
+def _opt_float(raw: Any) -> float | None:
+    """Coerce a JSON value to ``float`` while preserving ``None`` (the CI bounds
+    are ``None`` below 2 segments — that must round-trip as ``None``, not 0.0)."""
+    return None if raw is None else float(raw)
