@@ -223,6 +223,27 @@ def cmd_resume_brief(
         return
 
     if brief:
-        click.echo(brief)
+        click.echo(brief + _top_driver_hint())
     elif verbose:
         click.echo("resume-brief: nothing to brief (no method captured)", err=True)
+
+
+def _top_driver_hint() -> str:
+    """An optional trailing "top re-read driver" line, or "" when none cached.
+
+    Reads the same on-disk artifact the statusline reads (``tj backfill`` /
+    ``tj onboard`` write it) — no DB access from this hook path. Fail-safe:
+    any error or missing cache degrades to "".
+    """
+    try:
+        from tokenjam.core.attribution_cache import read_attribution_cache
+        cached = read_attribution_cache()
+    except Exception:  # noqa: BLE001 - a brief must never break a session
+        return ""
+    if not cached:
+        return ""
+    label = cached.get("top_label")
+    occurrences = cached.get("occurrences")
+    if not label or not occurrences:
+        return ""
+    return f"\n\nTOP RE-READ DRIVER\n  {label} re-read ×{occurrences} — see `tj context`."

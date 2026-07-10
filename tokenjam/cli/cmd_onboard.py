@@ -583,7 +583,12 @@ ingest_secret = "{ingest_secret}"
 [capture]
 prompts = false
 completions = false
-tool_inputs = false
+# tool_inputs captures Read/Grep/Glob file paths + search queries (not their
+# content) so `tj context` / the statusline can name files or searches you
+# keep re-reading across sessions. prompts/tool_outputs stay off by default
+# since those would persist actual message/tool-output text; turn them on for
+# deeper analysis.
+tool_inputs = true
 tool_outputs = false
 
 [storage]

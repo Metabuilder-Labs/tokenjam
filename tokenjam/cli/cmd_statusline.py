@@ -95,7 +95,10 @@ def _badge_and_nudge(reread_pct: float) -> tuple[str, str | None]:
 
 
 def format_status_line(
-    model_name: str, total: int | None, reread_pct: float | None
+    model_name: str,
+    total: int | None,
+    reread_pct: float | None,
+    top_driver: str | None = None,
 ) -> str:
     """Build the statusline string from already-resolved figures.
 
@@ -105,15 +108,45 @@ def format_status_line(
     IDENTICAL text for identical inputs and the preview can never drift from
     the real product. ``total``/``reread_pct`` of ``None`` degrades to the
     model-only segment (mirrors "no transcript" / "unreadable transcript").
+
+    ``top_driver`` is an optional pre-formatted "<label> ×<count>" suffix
+    (e.g. ``"CLAUDE.md ×14"``) naming the top recurring-inclusion source, not
+    just its raw percentage. Defaults to ``None`` — every existing caller that
+    doesn't pass it renders byte-for-byte unchanged.
     """
     parts = [f"◆ {model_name}"]  # ◆ model
     if total is not None and reread_pct is not None:
         parts.append(f"{format_tokens(total)} tok")
         badge, nudge = _badge_and_nudge(reread_pct)
-        parts.append(f"{badge} re-read {reread_pct:.0f}%")
+        reread_part = f"{badge} re-read {reread_pct:.0f}%"
+        if top_driver:
+            reread_part += f" ({top_driver})"
+        parts.append(reread_part)
         if nudge:
             parts.append(nudge)
     return "  ".join(parts)
+
+
+def _top_driver_label() -> str | None:
+    """The cached top recurring-inclusion driver as a "<label> ×<count>" string.
+
+    Reads the tiny on-disk artifact ``tj backfill`` (and ``tj onboard``, which
+    calls the same ingest path) writes — never a DuckDB query from this
+    zero-token surface. Fail-safe: any error or missing/stale cache degrades
+    to ``None``, which callers render as no suffix at all.
+    """
+    try:
+        from tokenjam.core.attribution_cache import read_attribution_cache
+        cached = read_attribution_cache()
+    except Exception:
+        return None
+    if not cached:
+        return None
+    label = cached.get("top_label")
+    occurrences = cached.get("occurrences")
+    if not label or not occurrences:
+        return None
+    return f"{label} ×{occurrences}"
 
 
 def render_line(data: dict) -> str:
@@ -121,7 +154,9 @@ def render_line(data: dict) -> str:
 
     Always returns at least the model segment; appends token count, the re-read
     badge, and the compaction nudge only when a transcript is found and readable.
-    Never raises — a transcript read failure degrades to the model-only line.
+    Past the WARN threshold, also names the top cached re-read driver (e.g.
+    ``"CLAUDE.md ×14"``) when one is available, so the nudge isn't just a bare
+    percentage. Never raises — any failure degrades to the model-only line.
     """
     model_name = _model_name(data)
     path = find_transcript(data)
@@ -131,7 +166,8 @@ def render_line(data: dict) -> str:
         total, reread_pct = session_shares(path)
     except Exception:
         return format_status_line(model_name, None, None)
-    return format_status_line(model_name, total, reread_pct)
+    top_driver = _top_driver_label() if reread_pct >= REREAD_WARN else None
+    return format_status_line(model_name, total, reread_pct, top_driver)
 
 
 @click.command("statusline")
