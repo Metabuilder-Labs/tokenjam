@@ -4,7 +4,7 @@
 
 ### Token Efficiency For AI Agents
 
-TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out, then shows it all in a local browser dashboard. Runs entirely on your machine.
+TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out. It then shows it all in a local browser dashboard. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -48,7 +48,7 @@ Building your own agent with the SDK? Install *in your project* (`pip install to
 | **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
 | **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code (below) | Live capture from your own agent process, no CLI-specific backfill |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
-| **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone`; same flags) | One-time import of your existing traces into the local DB |
+| **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone`, same flags) | One-time import of your existing traces into the local DB |
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion: no SDK, no patch |
 
 <sub>The `--claude-code` / `--codex` flags just pre-answer the wizard's first question; bare `tj onboard` asks.</sub>
@@ -94,7 +94,7 @@ def run(task: str) -> str:
 
 ## Six analyzers + Lens. One install.
 
-TokenJam reads telemetry from every major agent runtime, framework, provider, and observability tool and surfaces savings across six areas, then brings them together in a local browser dashboard.
+TokenJam reads telemetry from every major agent runtime, framework, provider, and observability tool and surfaces savings across six areas. It then brings them together in a local browser dashboard.
 
 <table>
 <tr>
@@ -102,7 +102,7 @@ TokenJam reads telemetry from every major agent runtime, framework, provider, an
 
 ### Downsize
 
-Flags sessions where a cheaper model in the same family is worth a look. Never claims quality equivalence; surfaces examples so you can spot-check.
+Flags sessions where a cheaper model in the same family is worth a look. Never claims quality equivalence, surfaces examples so you can spot-check.
 
 <pre><code>tj optimize downsize</code></pre>
 
@@ -221,7 +221,7 @@ TokenJam is also a full observability stack. The six analyzers and Lens ride on 
 - **Enforcement-plane proxy (suggest mode)**: `tj proxy` surfaces routing suggestions locally, without rewriting requests
 - **OTel-native**: point any OTLP exporter at `tj serve` and you're done
 - **Statusline**: a zero-token Claude Code status line (`tj statusline`, wired by `tj onboard --claude-code`) showing this session's re-read share + a `/compact` nudge
-- **MCP server**: in-request-path tools for **SDK / API** users (not Claude Code / Codex subscription users: an in-loop MCP is a per-turn quota burden there; they get the out-of-band statusline instead)
+- **MCP server**: in-request-path tools for **SDK / API** users (not Claude Code / Codex subscription users, since an in-loop MCP would be a per-turn quota burden there; they get the out-of-band statusline instead)
 
 ---
 
@@ -304,7 +304,7 @@ Full version-by-version history: [GitHub Releases](https://github.com/Metabuilde
 
 ## Contributing
 
-TokenJam is MIT, and contributions are welcome, from a one-line pricing fix to a whole new framework integration. A few easy on-ramps:
+TokenJam is MIT, and contributions are welcome: from a one-line pricing fix to a whole new framework integration. A few easy on-ramps:
 
 - **[Good first issues →](https://github.com/Metabuilder-Labs/tokenjam/labels/good%20first%20issue)**: scoped, newcomer-friendly tasks, ready to pick up.
 - **Bugs**: notice something off? File a bug.
