@@ -219,7 +219,7 @@ def test_claude_code_restart_panel_is_why_first_and_consolidated(
     # Why leads the panel, before the numbered steps.
     assert flat.index("old endpoint") < flat.index("Quit Claude Code"), flat
     assert "Quit Claude Code in every terminal" in flat
-    assert "Relaunch in the same folder" in flat
+    assert "Relaunch claude in the same folder" in flat
     # The now-redundant scattered pieces are gone.
     assert "Open a new terminal" not in out
     assert "After restarting, run:" not in out
