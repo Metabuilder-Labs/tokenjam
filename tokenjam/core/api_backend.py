@@ -59,15 +59,20 @@ class ApiBackend:
     ) -> dict:
         """GET `path` and return the parsed JSON body.
 
-        `timeout` overrides the client's blanket read timeout for a single
-        request — used by the heavy computed endpoints whose server-side
-        aggregation can outlast the cheap-read ceiling on large histories.
-        Cheap shim reads pass nothing and keep the tight default.
+        `timeout` extends only the READ leg for a single request — used by the
+        heavy computed endpoints whose server-side aggregation can outlast the
+        cheap-read ceiling on large histories. Connect/write/pool keep the
+        tight default (a bare float would widen all four dimensions). Cheap
+        shim reads pass nothing and keep the tight default throughout.
         """
         if timeout is None:
             resp = self.client.get(path, params=params)
         else:
-            resp = self.client.get(path, params=params, timeout=timeout)
+            resp = self.client.get(
+                path,
+                params=params,
+                timeout=httpx.Timeout(self._DEFAULT_TIMEOUT, read=timeout),
+            )
         resp.raise_for_status()
         return resp.json()
 
