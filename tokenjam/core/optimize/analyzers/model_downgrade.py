@@ -12,6 +12,10 @@ import re as _re
 from datetime import datetime
 from typing import Any
 
+from tokenjam.core.context_diagnostic import (
+    TurnComposition,
+    load_turn_compositions,
+)
 from tokenjam.core.model_tiers import is_premium_tier
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.stats import bootstrap_ci
@@ -30,6 +34,25 @@ from tokenjam.core.pricing import get_rates
 SMALL_INPUT_TOKENS = 5_000
 SMALL_OUTPUT_TOKENS = 500
 SMALL_TOOL_CALLS = 5
+
+# Per-TURN cheap-shape thresholds for the segment-level premium quota audit. A
+# turn is a fraction of a session, so these sit well below the session-level
+# constants above. Measured on NEW work (uncached input + output + this turn's
+# tool fan-out), deliberately NOT on re-read/cache tokens: a mechanical turn can
+# still re-read a huge context — that cache-read quota is exactly what a cheaper
+# model would have burned more cheaply, so it belongs in the reclaimable metric,
+# not the shape test. Starting calibration (non-blocking follow-up); left as
+# named constants so a real-DB sweep can retune them in one place.
+TURN_SMALL_INPUT = 2_000
+TURN_SMALL_OUTPUT = 300
+TURN_SMALL_TOOL_CALLS = 2
+
+# A cheap segment is a maximal contiguous run of cheap-shaped turns. A run of at
+# least this many is a flagged stretch; a shorter run is only flagged when it
+# spans the session's ENTIRE set of turns (the whole-session floor — a session
+# that was Sonnet-shaped end to end, which the old audit already flagged). This
+# stops a lone mechanical turn wedged between two hard turns from counting.
+MIN_STRETCH_TURNS = 2
 
 # Cap on the number of spot-check example sessions carried in the audit.
 OPUS_AUDIT_MAX_EXAMPLES = 5
@@ -61,8 +84,13 @@ DOWNGRADE_CANDIDATES: dict[str, dict[str, str]] = {
 }
 
 
-def _lookup_downgrade(provider: str, model: str) -> str | None:
-    """DOWNGRADE_CANDIDATES lookup that tolerates trailing YYYYMMDD suffixes."""
+def lookup_downgrade(provider: str, model: str) -> str | None:
+    """The cheaper same-family alternative for ``(provider, model)``, or ``None``.
+
+    Tolerates trailing ``-YYYYMMDD`` date suffixes on the model id. Public (the
+    premium quota audit and its routing export both need it); the underscore
+    alias is kept so existing internal call sites don't churn.
+    """
     mapping = DOWNGRADE_CANDIDATES.get(provider, {})
     if model in mapping:
         return mapping[model]
@@ -70,6 +98,10 @@ def _lookup_downgrade(provider: str, model: str) -> str | None:
     if m and m.group(1) in mapping:
         return mapping[m.group(1)]
     return None
+
+
+# Backward-compatible private alias — internal call sites predate the promotion.
+_lookup_downgrade = lookup_downgrade
 
 
 def _alt_unit_cost(provider: str, original_model: str, alt_model: str,
@@ -265,36 +297,103 @@ def run(ctx: AnalyzerContext) -> None:
 # ---------------------------------------------------------------------------
 # Premium-tier quota audit (retroactive Downsize, reframed as accountability)
 # ---------------------------------------------------------------------------
-# This runs the same structural heuristic as `downsize`, but scoped to
-# premium-tier sessions only (Fable + Opus, via the shared model_tiers
-# predicate) and reframed as a "quota audit" rather than "cost optimization"
-# (issue #5; research/evidence/feature-downsize.md). The headline is
-# "% of your premium (Opus/Fable) quota that went to Sonnet-shaped sessions"
-# — a retrospective behaviour mirror in premium token share, not dollars and
-# not "reclaimable" (the tokens are already spent) — because the subscription
+# This reframes the structural downsize heuristic as an accountability "quota
+# audit" scoped to premium-tier work (Fable + Opus, via the shared model_tiers
+# predicate; issue #5, research/evidence/feature-downsize.md). The headline is
+# "% of your premium (Opus/Fable) quota that went to Sonnet-shaped work" — a
+# retrospective behaviour mirror in premium token share, not dollars and not
+# "reclaimable" (the tokens are already spent) — because the subscription
 # majority is on flat-rate plans where dollar framing mis-targets them
 # (subscription-vs-cost-framing.md). It complements opusplan / `/model`
 # (forward-looking) by answering the backward-looking question those tools
-# can't: "which of my PAST premium sessions were Sonnet-shaped?" Honest framing
-# throughout — candidates to spot-check, never "safe to downgrade".
+# can't: "which stretches of my PAST premium work were Sonnet-shaped?" Honest
+# framing throughout — candidates to spot-check, never "safe to downgrade".
+#
+# Grain: a PER-TURN walk over the `TurnComposition` rows `tj context` already
+# produces, NOT the old whole-session `MODE(model)` + SUM aggregate. Two
+# structural fixes fall out:
+#   (a) a mechanical STRETCH inside an otherwise-hard session is now detectable
+#       (the whole-session heuristic structurally missed it — the hard part blew
+#       the sums past the thresholds); and
+#   (b) each turn's tokens count under ITS OWN model, so a Sonnet turn inside an
+#       Opus session no longer inflates the premium numerator or denominator.
 #
 # The `audit_opus_quota` name and the `opus_*` fields on OpusQuotaAudit are kept
 # for API/serialization stability; they now denote the whole premium tier, not
-# Opus alone (the audit counts and flags Fable sessions too).
+# Opus alone (the audit counts and flags Fable turns too), and are quota-weighted
+# (the #119 weighting) rather than raw token sums.
 
 
-def _is_premium_downsizable(provider: str, model: str) -> bool:
-    """True when the model is a premium-tier model worth auditing for downsize.
+def _is_cheap_shaped(turn: TurnComposition) -> bool:
+    """True when a turn's *reasoning* footprint is Sonnet-shaped (design §2.1).
 
-    Premium-tier membership (Fable, Opus, and whatever launches above them next)
-    is resolved through the shared :func:`is_premium_tier` predicate — no
-    per-analyzer substring gate. We only audit premium sessions that ALSO have a
-    known cheaper alternative in `DOWNGRADE_CANDIDATES` (so the routing
-    suggestion is real, not invented).
+    Measured on NEW work — uncached input, output, this turn's tool fan-out — and
+    on the absence of a Task delegation. Deliberately NOT gated on re-read /
+    cache-write tokens: a mechanical turn can still re-read a huge context, and
+    that cache-read quota is exactly what a cheaper model would have burned more
+    cheaply — it belongs in the reclaimable metric, not the shape test.
     """
-    if not is_premium_tier(model):
-        return False
-    return _lookup_downgrade(provider, model) is not None
+    return (
+        turn.new_input_tokens < TURN_SMALL_INPUT
+        and turn.output_tokens < TURN_SMALL_OUTPUT
+        and turn.tool_fanout <= TURN_SMALL_TOOL_CALLS
+        and not turn.delegates
+    )
+
+
+def _cheap_segments(
+    session_turns: list[TurnComposition],
+) -> list[list[TurnComposition]]:
+    """Maximal contiguous runs of cheap-shaped turns (design §2.2).
+
+    A non-cheap turn (or a delegation, which makes a turn non-cheap) breaks the
+    run. Turns must already be ordered by ``start_time``.
+    """
+    segments: list[list[TurnComposition]] = []
+    run: list[TurnComposition] = []
+    for turn in session_turns:
+        if _is_cheap_shaped(turn):
+            run.append(turn)
+        elif run:
+            segments.append(run)
+            run = []
+    if run:
+        segments.append(run)
+    return segments
+
+
+def _segment_counts(segment: list[TurnComposition], session_turn_count: int) -> bool:
+    """Whether a cheap segment is flagged (design §2.2 + the whole-session floor).
+
+    A stretch of at least ``MIN_STRETCH_TURNS`` counts; a shorter run counts only
+    when it spans the session's ENTIRE turn set (a session that was Sonnet-shaped
+    end to end — the whole-session floor the old audit already flagged, and the
+    reason a single-turn cheap session is still counted). This is what keeps a
+    lone mechanical turn wedged between two hard turns from being flagged.
+    """
+    return (
+        len(segment) >= MIN_STRETCH_TURNS
+        or len(segment) == session_turn_count
+    )
+
+
+class _SessionAgg:
+    """Per-session aggregate of the flagged cheap-segment PREMIUM turns, for the
+    spot-check example list (largest-quota first)."""
+
+    __slots__ = ("session_id", "model", "provider", "quota", "new_input",
+                 "output", "reread", "tool_calls", "cost")
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        self.model = ""
+        self.provider: str | None = None
+        self.quota = 0.0
+        self.new_input = 0
+        self.output = 0
+        self.reread = 0
+        self.tool_calls = 0
+        self.cost = 0.0
 
 
 def audit_opus_quota(
@@ -304,131 +403,144 @@ def audit_opus_quota(
     agent_id: str | None,
     window_days: float,
 ) -> OpusQuotaAudit:
-    """Retroactive premium-tier quota audit over Claude Code (and other) sessions.
+    """Retroactive segment-level premium-tier quota audit (issue #5).
 
-    Walks premium-tier sessions (Fable + Opus, via the shared model_tiers
-    predicate) in the window and flags those whose structural shape (small
-    input, small output, few tool calls) matches a class of work where a cheaper
-    same-family model is worth a spot-check. Quantifies the result as a **share
-    of premium quota** (candidate premium tokens / total premium tokens) — never
-    a dollar figure as the headline. Field names retain the historical `opus_*`
-    prefix for serialization stability but count the whole premium tier.
+    Walks the window's assistant turns per session in ``start_time`` order and
+    reports ONE honest figure (founder decision D1): the share of premium
+    (Opus/Fable) quota that went to Sonnet-shaped *work* — whole Sonnet-shaped
+    sessions PLUS mechanical stretches inside otherwise-hard sessions — on
+    exact per-turn model attribution (D2). Quota-weighted (the #119 weighting),
+    never a dollar headline; the `opus_*` field names are kept for serialization
+    stability but denote the whole premium tier.
 
-    Computes purely from already-backfilled token/model metadata; does NOT
-    depend on captured content (#3). Always returns an :class:`OpusQuotaAudit`
-    (never ``None``) so the renderer can show an honest empty state.
+    The figure is a labelled ESTIMATE (D3): `segment_estimate_confidence` +
+    `estimate_basis` mark it heuristic, and a WIDE bootstrap CI over resampled
+    SEGMENTS brackets it (`segment_ci_low/high`) so the band widens honestly when
+    few segments carry it.
+
+    Computes purely from already-backfilled token/model metadata — no captured
+    content (#3). Always returns an :class:`OpusQuotaAudit` (never ``None``) so
+    the renderer can show an honest empty state.
     """
-    clauses = ["start_time >= $1", "start_time < $2", "session_id IS NOT NULL"]
-    params: list[Any] = [since, until]
-    if agent_id:
-        clauses.append(f"agent_id = ${len(params) + 1}")
-        params.append(agent_id)
-    where = " AND ".join(clauses)
-
-    # LLM spans grouped by session (one row per session, dominant model).
-    llm_rows = conn.execute(
-        f"SELECT session_id, "
-        f"FIRST(trace_id) AS trace_id, "
-        f"FIRST(agent_id) AS agent_id, "
-        f"MIN(start_time) AS start_time, MAX(end_time) AS end_time, "
-        f"MIN(provider) AS provider, "
-        f"MODE(model) AS model, "
-        f"COALESCE(SUM(input_tokens),0)  AS input_tokens, "
-        f"COALESCE(SUM(output_tokens),0) AS output_tokens, "
-        f"COALESCE(SUM(cache_tokens),0)  AS cache_tokens, "
-        f"COALESCE(SUM(cost_usd),0.0)    AS cost_usd "
-        f"FROM spans WHERE {where} AND model IS NOT NULL "
-        f"GROUP BY session_id",
-        params,
-    ).fetchall()
-
+    turns = load_turn_compositions(
+        conn, since, until, agent_id,
+        ordered=True, with_tool_activity=True,
+    )
     audit = OpusQuotaAudit(window_days=window_days)
-    if not llm_rows:
+    if not turns:
         return audit
 
-    # Tool span counts per session (tool spans have model=NULL).
-    tool_rows = conn.execute(
-        f"SELECT session_id, COUNT(*) FROM spans "
-        f"WHERE {where} AND tool_name IS NOT NULL "
-        f"GROUP BY session_id",
-        params,
-    ).fetchall()
-    tool_counts: dict[str, int] = {r[0]: int(r[1] or 0) for r in tool_rows if r[0]}
+    # Group into sessions, preserving the (already-applied) start_time ordering.
+    by_session: dict[str, list[TurnComposition]] = {}
+    for turn in turns:
+        by_session.setdefault(turn.session_id, []).append(turn)
 
-    candidate_examples: list[tuple[int, OpusAuditExample]] = []
+    premium_quota = 0.0            # denominator: quota-weighted premium turns
+    misallocated_quota = 0.0       # numerator: premium turns in flagged segments
+    segment_values: list[float] = []   # one premium-quota value per flagged segment
     suggestions: dict[str, str] = {}
+    aggs: dict[str, _SessionAgg] = {}
+    actual_cost = 0.0
+    alt_cost = 0.0
 
-    for row in llm_rows:
-        session_id, trace_id, _agent, start_time, end_time, provider, model, \
-            in_tok, out_tok, cache_tok, cost = row
-        if not provider or not model:
+    for session_id, session_turns in by_session.items():
+        premium_turns = [t for t in session_turns if is_premium_tier(t.model)]
+        if not premium_turns:
             continue
-        if not _is_premium_downsizable(provider, model):
-            continue
-
-        session_tokens = int(in_tok or 0) + int(out_tok or 0) + int(cache_tok or 0)
         audit.opus_sessions += 1
-        audit.opus_tokens += session_tokens
+        premium_quota += sum(t.quota_weighted_tokens for t in premium_turns)
 
-        alt = _lookup_downgrade(provider, model)
-        tool_calls = tool_counts.get(session_id, 0)
-        is_candidate = (
-            alt is not None
-            and in_tok < SMALL_INPUT_TOKENS
-            and out_tok < SMALL_OUTPUT_TOKENS
-            and tool_calls <= SMALL_TOOL_CALLS
-        )
-        if not is_candidate:
+        session_flagged = False
+        for segment in _cheap_segments(session_turns):
+            if not _segment_counts(segment, len(session_turns)):
+                continue
+            seg_premium = [t for t in segment if is_premium_tier(t.model)]
+            if not seg_premium:
+                continue
+            seg_quota = sum(t.quota_weighted_tokens for t in seg_premium)
+            misallocated_quota += seg_quota
+            segment_values.append(seg_quota)
+            audit.segment_count += 1
+            session_flagged = True
+
+            agg = aggs.setdefault(session_id, _SessionAgg(session_id))
+            for t in seg_premium:
+                agg.quota += t.quota_weighted_tokens
+                agg.new_input += t.new_input_tokens
+                agg.output += t.output_tokens
+                agg.reread += t.reread_tokens
+                agg.tool_calls += t.tool_fanout
+                agg.cost += t.cost_usd
+                if not agg.model:
+                    agg.model = t.model
+                    agg.provider = t.provider
+                alt = (
+                    lookup_downgrade(t.provider, t.model)
+                    if t.provider else None
+                )
+                if alt:
+                    suggestions[t.model] = alt
+
+        if session_flagged:
+            audit.candidate_sessions += 1
+
+    # Secondary API-only implied-dollar counterfactual, aggregated over the
+    # flagged premium turns (never the headline).
+    for agg in aggs.values():
+        alt = lookup_downgrade(agg.provider, agg.model) if agg.provider else None
+        if not alt:
             continue
+        alt_unit = _alt_unit_cost(
+            agg.provider, agg.model, alt, agg.new_input, agg.output, agg.reread,
+        )
+        if alt_unit is not None:
+            actual_cost += agg.cost
+            alt_cost += alt_unit
 
-        audit.candidate_sessions += 1
-        audit.candidate_tokens += session_tokens
-        if alt:
-            suggestions[str(model)] = alt
-            # Best-effort implied dollar value (secondary signal for API users).
-            alt_unit = _alt_unit_cost(
-                provider, str(model), alt,
-                int(in_tok or 0), int(out_tok or 0), int(cache_tok or 0),
-            )
-            if alt_unit is not None:
-                audit.actual_cost_usd += float(cost or 0.0)
-                audit.alternative_cost_usd += alt_unit
-
-        duration = None
-        try:
-            if start_time and end_time:
-                duration = (end_time - start_time).total_seconds()
-        except Exception:  # noqa: BLE001
-            duration = None
-        candidate_examples.append((
-            session_tokens,
-            OpusAuditExample(
-                trace_id=str(trace_id) if trace_id else "",
-                session_id=str(session_id) if session_id else None,
-                model=str(model),
-                alt_model=str(alt) if alt else "",
-                input_tokens=int(in_tok or 0),
-                output_tokens=int(out_tok or 0),
-                cache_tokens=int(cache_tok or 0),
-                tool_calls=tool_calls,
-                duration_seconds=duration,
-                cost_usd=float(cost or 0.0),
-            ),
-        ))
-
+    audit.opus_tokens = int(round(premium_quota))
+    audit.candidate_tokens = int(round(misallocated_quota))
     audit.suggestions = suggestions
-    # Largest-quota candidates first — those are the most worthwhile spot-checks.
-    candidate_examples.sort(key=lambda pair: pair[0], reverse=True)
-    audit.examples = [ex for _tokens, ex in candidate_examples[:OPUS_AUDIT_MAX_EXAMPLES]]
-
     audit.percent_quota_misallocated = (
-        round(100.0 * audit.candidate_tokens / audit.opus_tokens, 1)
-        if audit.opus_tokens > 0 else 0.0
+        round(100.0 * misallocated_quota / premium_quota, 1)
+        if premium_quota > 0 else 0.0
     )
     audit.percent_sessions = (
         round(100.0 * audit.candidate_sessions / audit.opus_sessions, 1)
         if audit.opus_sessions > 0 else 0.0
     )
-    audit.actual_cost_usd = round(audit.actual_cost_usd, 6)
-    audit.alternative_cost_usd = round(audit.alternative_cost_usd, 6)
+    audit.actual_cost_usd = round(actual_cost, 6)
+    audit.alternative_cost_usd = round(alt_cost, 6)
+
+    # Confidence interval on the HEADLINE PERCENT (design §6, founder D3). Each
+    # flagged segment contributes its premium-quota value; scaling the resampled
+    # SUM by 100/premium_quota turns the bootstrap into an interval on the share.
+    # Resampling segments (not sessions) widens the band honestly when the
+    # estimate rests on few stretches; below 2 segments there is no spread to
+    # bracket, so the bounds stay None (the estimate is inherently wide).
+    if premium_quota > 0 and len(segment_values) >= 2:
+        ci = bootstrap_ci(segment_values, scale=100.0 / premium_quota)
+        if ci is not None:
+            audit.segment_ci_low = round(ci[0], 1)
+            audit.segment_ci_high = round(ci[1], 1)
+
+    # Largest-quota candidate sessions first — the most worthwhile spot-checks.
+    ordered_aggs = sorted(aggs.values(), key=lambda a: a.quota, reverse=True)
+    audit.examples = [
+        OpusAuditExample(
+            trace_id="",
+            session_id=agg.session_id,
+            model=agg.model,
+            alt_model=(
+                lookup_downgrade(agg.provider, agg.model)
+                if agg.provider else None
+            ) or "",
+            input_tokens=agg.new_input,
+            output_tokens=agg.output,
+            cache_tokens=agg.reread,
+            tool_calls=agg.tool_calls,
+            duration_seconds=None,
+            cost_usd=round(agg.cost, 6),
+        )
+        for agg in ordered_aggs[:OPUS_AUDIT_MAX_EXAMPLES]
+    ]
     return audit

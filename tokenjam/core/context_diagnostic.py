@@ -74,7 +74,7 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from tokenjam.otel.semconv import GenAIAttributes
@@ -199,6 +199,17 @@ class TurnComposition:
     output_tokens: int  # work produced
     cache_write_tokens: int  # cache-creation (first-time caching of a prefix)
     cost_usd: float
+    # Ordering + per-turn tool activity — populated by
+    # ``load_turn_compositions(..., ordered=True, with_tool_activity=True)`` for
+    # the segment-level quota audit (contiguity needs start_time; the cheap-shape
+    # test needs a real per-turn tool fan-out and a delegation signal). Default to
+    # inert values so the context-diagnostic path — which never asks for them — is
+    # byte-for-byte unchanged, and so the serialized round-trip (which omits them)
+    # rebuilds cleanly.
+    start_time: datetime | None = None
+    provider: str | None = None
+    tool_fanout: int = 0
+    delegates: bool = False
 
     @property
     def total_tokens(self) -> int:
@@ -553,7 +564,7 @@ def compute_context_diagnostic(
         tool_outputs_captured=tool_outputs_captured,
     )
 
-    turns = _load_turns(conn, since, until, agent_id)
+    turns = load_turn_compositions(conn, since, until, agent_id)
     if not turns:
         return result
 
@@ -599,13 +610,30 @@ def compute_context_diagnostic(
     return result
 
 
-def _load_turns(
+def load_turn_compositions(
     conn: Any,
     since: datetime,
     until: datetime,
     agent_id: str | None,
+    *,
+    ordered: bool = False,
+    with_tool_activity: bool = False,
 ) -> list[TurnComposition]:
-    """One row per assistant LLM turn, with its token composition."""
+    """One :class:`TurnComposition` per assistant LLM turn in the window.
+
+    The single source of the per-turn shape ``tj context`` established, reused by
+    the segment-level quota audit rather than duplicating the SQL. The bare call
+    (both flags off) is exactly the historical ``_load_turns`` — same columns,
+    same order — so the context diagnostic is unchanged.
+
+    ``ordered`` sorts turns by ``(session_id, start_time)`` so a caller can walk a
+    session's turns in wall-clock order (the contiguity key for cheap-stretch
+    detection). ``with_tool_activity`` additionally interleaves the window's tool
+    spans onto the turn timeline, giving each turn a real ``tool_fanout`` and a
+    ``delegates`` flag — attributing each tool span to the nearest preceding turn
+    in its session (the same span data ``tj context`` already reads, keyed
+    finer). Both are opt-in so the diagnostic path pays for neither.
+    """
     clauses = [
         "name = $1",
         "start_time >= $2",
@@ -622,17 +650,20 @@ def _load_turns(
     # accounting reads (and the `heaviest_turns[].sub_agent_id` JSON emits);
     # before this fix the query selected `agent_id` and bound it to that field,
     # so the metric never actually saw which turns were subagent turns.
+    # `start_time` + `provider` are additive columns the audit needs (contiguity
+    # ordering; per-turn downgrade lookup) and the context path simply ignores.
     rows = conn.execute(
         "SELECT session_id, sub_agent_id, model, "
         "COALESCE(input_tokens, 0), COALESCE(output_tokens, 0), "
         "COALESCE(cache_tokens, 0), COALESCE(cache_write_tokens, 0), "
-        "COALESCE(cost_usd, 0.0) "
+        "COALESCE(cost_usd, 0.0), start_time, provider "
         "FROM spans WHERE " + where,
         params,
     ).fetchall()
 
     turns: list[TurnComposition] = []
-    for (sid, said, model, in_tok, out_tok, cache_tok, cache_w_tok, cost) in rows:
+    for (sid, said, model, in_tok, out_tok, cache_tok, cache_w_tok, cost,
+         start_time, provider) in rows:
         turns.append(
             TurnComposition(
                 session_id=str(sid) if sid is not None else "unknown",
@@ -643,9 +674,81 @@ def _load_turns(
                 output_tokens=int(out_tok or 0),
                 cache_write_tokens=int(cache_w_tok or 0),
                 cost_usd=float(cost or 0.0),
+                start_time=start_time,
+                provider=str(provider) if provider is not None else None,
             )
         )
+
+    if with_tool_activity:
+        _attach_tool_activity(conn, since, until, agent_id, turns)
+    if ordered:
+        turns.sort(key=lambda t: (t.session_id, _turn_sort_key(t.start_time)))
     return turns
+
+
+# Sentinel used to order turns whose start_time is somehow missing (real spans
+# always carry one) — keeps the sort total without raising on None.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def _turn_sort_key(start_time: datetime | None) -> datetime:
+    return start_time if start_time is not None else _EPOCH
+
+
+def _attach_tool_activity(
+    conn: Any,
+    since: datetime,
+    until: datetime,
+    agent_id: str | None,
+    turns: list[TurnComposition],
+) -> None:
+    """Interleave tool spans onto the turn timeline (design §2.4 Option B).
+
+    Each tool span is attributed to the nearest preceding LLM turn in the same
+    session (the turn whose ``start_time`` is the latest at or before the tool
+    span's), giving that turn a real per-turn ``tool_fanout`` and — when the tool
+    is a ``Task`` handoff — a ``delegates`` flag. Falls back to the session's
+    first turn for a tool span that precedes every turn.
+    """
+    clauses = [
+        "name = $1",
+        "start_time >= $2",
+        "start_time < $3",
+        "tool_name IS NOT NULL",
+    ]
+    params: list[Any] = [GenAIAttributes.SPAN_TOOL_CALL, since, until]
+    if agent_id:
+        clauses.append("agent_id = $" + str(len(params) + 1))
+        params.append(agent_id)
+    where = " AND ".join(clauses)
+    tool_rows = conn.execute(
+        "SELECT session_id, tool_name, start_time FROM spans WHERE " + where
+        + " ORDER BY start_time",
+        params,
+    ).fetchall()
+    if not tool_rows:
+        return
+
+    by_session: dict[str, list[TurnComposition]] = defaultdict(list)
+    for t in turns:
+        by_session[t.session_id].append(t)
+    for sess_turns in by_session.values():
+        sess_turns.sort(key=lambda t: _turn_sort_key(t.start_time))
+
+    for sid, tool_name, tstart in tool_rows:
+        sess_turns = by_session.get(str(sid) if sid is not None else "unknown")
+        if not sess_turns:
+            continue
+        target = sess_turns[0]
+        if tstart is not None:
+            for t in sess_turns:
+                if t.start_time is not None and t.start_time <= tstart:
+                    target = t
+                else:
+                    break
+        target.tool_fanout += 1
+        if str(tool_name or "").lower() == DELEGATION_TOOL_NAME:
+            target.delegates = True
 
 
 def _delegating_session_ids(
@@ -690,8 +793,9 @@ def _apply_subagent_accounting(
 ) -> None:
     """Populate the subagent-accounting fields + partial-quota note (#60).
 
-    The weighted quota already includes captured subagent turns (``_load_turns``
-    never filters ``sub_agent_id``). This adds the honesty half the ticket asks
+    The weighted quota already includes captured subagent turns
+    (``load_turn_compositions`` never filters ``sub_agent_id``). This adds the
+    honesty half the ticket asks
     for: when a session *delegated* (a ``Task`` tool span in the parent) but no
     subagent turns were captured for it, its weighted quota is a lower bound —
     so we flag it instead of letting the number read as complete (Rule 14).

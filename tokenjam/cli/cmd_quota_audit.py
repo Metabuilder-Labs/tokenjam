@@ -173,15 +173,32 @@ def _render(audit: OpusQuotaAudit, framing: Framing, *, since: str) -> None:
         big.append(f"~{audit.percent_quota_misallocated:.0f}% ", style="bold red")
         big.append(
             f"of your premium ({PREMIUM_TIER_LABEL}) quota went to "
-            "Sonnet-shaped sessions",
+            "Sonnet-shaped work",
             style="bold",
         )
-        big.append(
-            f"\nfrom {audit.candidate_sessions} of {audit.opus_sessions} premium "
-            f"session{'s' if audit.opus_sessions != 1 else ''} "
-            f"({audit.percent_sessions:.0f}%) that are Sonnet-shaped",
+        # The number is a single labelled ESTIMATE (founder D1/D3): the "estimate"
+        # tag + a wide bootstrap CI (resampled segments) so it never reads as a
+        # settled figure. Below 2 segments there's no spread to bracket.
+        est = Text("\n", style="dim")
+        est.append(f"{audit.segment_estimate_confidence}", style="italic yellow")
+        if audit.segment_ci_low is not None and audit.segment_ci_high is not None:
+            est.append(
+                f" · 95% CI {audit.segment_ci_low:.0f}–{audit.segment_ci_high:.0f}%",
+                style="dim",
+            )
+        else:
+            est.append(
+                " · single stretch — interval too wide to bracket",
+                style="dim",
+            )
+        est.append(
+            f" · from {audit.segment_count} Sonnet-shaped "
+            f"stretch{'es' if audit.segment_count != 1 else ''} across "
+            f"{audit.candidate_sessions} of {audit.opus_sessions} premium "
+            f"session{'s' if audit.opus_sessions != 1 else ''}",
             style="dim",
         )
+        big.append(est)
         sections.append(big)
 
         detail = Text()
