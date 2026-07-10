@@ -13,7 +13,10 @@ explicitly since PATH reordering isn't something onboard should do silently.
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
+
+import pytest
 
 from tokenjam.cli import cmd_onboard
 
@@ -212,3 +215,82 @@ def test_wrapper_block_handles_path_with_spaces(monkeypatch):
     monkeypatch.setattr(cmd_onboard, "_current_tj_binary", lambda: "/Users/a b/.local/bin/tj")
     block = cmd_onboard._claude_wrapper_block()
     assert '"/Users/a b/.local/bin/tj"' in block
+
+
+# --- _claude_wrapper_block: stderr silenced, no-leading-comma fallback ------
+#
+# A stale/shadowed/half-uninstalled `tj` must never flash a traceback into
+# every `claude` launch, and a failed or empty `otel-resource-attrs` lookup
+# must never produce a malformed `,service.instance.id=...` value.
+
+
+def test_wrapper_block_silences_otel_attrs_stderr(monkeypatch):
+    monkeypatch.setattr(cmd_onboard, "_current_tj_binary", lambda: "/home/x/.local/bin/tj")
+    block = cmd_onboard._claude_wrapper_block()
+    assert '"/home/x/.local/bin/tj" otel-resource-attrs 2>/dev/null' in block
+    # The capture must be failure-tolerant (never aborts the wrapper / lets a
+    # nonzero tj exit status propagate into the claude launch).
+    assert '_tj_attrs="$("/home/x/.local/bin/tj" otel-resource-attrs 2>/dev/null)" || _tj_attrs=""' in block
+
+
+def test_wrapper_block_falls_back_without_leading_comma(monkeypatch):
+    monkeypatch.setattr(cmd_onboard, "_current_tj_binary", lambda: "/home/x/.local/bin/tj")
+    block = cmd_onboard._claude_wrapper_block()
+    # Old (buggy) shape: a single export directly concatenating the raw
+    # command substitution, which produces a leading comma when it's empty.
+    assert '),service.instance.id=$_tj_inst"' not in block
+    # New shape: branch on whether the lookup produced anything.
+    assert 'export OTEL_RESOURCE_ATTRIBUTES="$_tj_attrs,service.instance.id=$_tj_inst"' in block
+    assert 'export OTEL_RESOURCE_ATTRIBUTES="service.instance.id=$_tj_inst"' in block
+
+
+def test_wrapper_block_survives_broken_tj_end_to_end(tmp_path, monkeypatch):
+    """Empirical: source the generated block in a real zsh with a
+    deliberately broken `tj` first on PATH and confirm `claude` launches
+    with zero extra output and a well-formed OTEL_RESOURCE_ATTRIBUTES."""
+    import os
+    import stat
+
+    zsh = shutil.which("zsh")
+    if zsh is None:
+        pytest.skip("zsh not available")
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    def _make_executable(path, content):
+        path.write_text(content)
+        path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    broken_tj = bin_dir / "tj"
+    _make_executable(
+        broken_tj,
+        "#!/bin/sh\n"
+        "echo 'Traceback (most recent call last):' >&2\n"
+        "echo 'ModuleNotFoundError: no module named tokenjam' >&2\n"
+        "exit 1\n",
+    )
+    fake_claude = bin_dir / "claude"
+    _make_executable(fake_claude, "#!/bin/sh\necho claude-ran\n")
+
+    monkeypatch.setattr(cmd_onboard, "_current_tj_binary", lambda: str(broken_tj))
+    block = cmd_onboard._claude_wrapper_block()
+
+    script = tmp_path / "rc.zsh"
+    script.write_text(block + "\nclaude\necho \"ATTRS=$OTEL_RESOURCE_ATTRIBUTES\"\n")
+
+    env = dict(os.environ)
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+
+    result = subprocess.run(
+        [zsh, str(script)], capture_output=True, text=True, env=env, timeout=10,
+    )
+
+    assert result.stderr == ""  # the broken tj's traceback must never leak
+    assert "Traceback" not in result.stdout
+    assert "claude-ran" in result.stdout
+
+    [attrs_line] = [line for line in result.stdout.splitlines() if line.startswith("ATTRS=")]
+    attrs = attrs_line[len("ATTRS="):]
+    assert not attrs.startswith(",")
+    assert attrs == "service.instance.id=unknown"
