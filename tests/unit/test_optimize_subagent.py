@@ -74,6 +74,30 @@ def test_flags_over_powered_and_over_provisioned_subagents():
         db.close()
 
 
+def test_flags_over_powered_fable_subagent():
+    """A Fable-powered subagent (the tier above Opus) doing trivial work must be
+    flagged over_powered — before the shared predicate, only "opus" matched, so
+    Fable spawns were invisible to right-sizing."""
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=2.0)
+        # Fable subagent: premium model, tiny output, few tools -> over_powered.
+        db.insert_span(make_llm_span(
+            model="claude-fable-5", input_tokens=4_000, output_tokens=150,
+            cost_usd=0.40, session_id="s1", sub_agent_id="fableA", start_time=now,
+        ))
+        run_subagent(ctx)
+        f = ctx.report.findings["subagent"]
+
+        assert len(f.flagged) == 1
+        a = f.flagged[0]
+        assert a.sub_agent_id == "fableA"
+        assert a.model == "claude-fable-5"
+        assert "over_powered" in a.flags
+    finally:
+        db.close()
+
+
 def test_no_finding_when_no_subagents():
     db = InMemoryBackend()
     try:

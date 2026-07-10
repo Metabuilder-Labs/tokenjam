@@ -1131,7 +1131,7 @@ def _print_next_steps_nudge(
         )
     if persona == "claude_code":
         console.print("  [bold]tj context[/bold]     [dim]where your quota goes — re-read vs real work[/dim]")
-        console.print("  [bold]tj quota-audit[/bold] [dim]how much Opus went to Sonnet-shaped sessions[/dim]")
+        console.print("  [bold]tj quota-audit[/bold] [dim]how much Opus/Fable went to Sonnet-shaped sessions[/dim]")
         console.print(lens_line)
         console.print("  [bold]tj tokenmaxx[/bold]   [dim]your shareable efficiency tier[/dim]")
     else:

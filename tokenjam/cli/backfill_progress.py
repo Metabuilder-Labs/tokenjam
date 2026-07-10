@@ -14,10 +14,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Callable, Iterator
 
+from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from tokenjam.core.backfill import BackfillResult, ParsedSession
-from tokenjam.utils.formatting import console
+from tokenjam.utils.formatting import console as _default_console
 from tokenjam.utils.humanize import format_tokens
 
 ProgressCallback = Callable[[ParsedSession, BackfillResult], None]
@@ -32,18 +33,25 @@ def _noop(_parsed: ParsedSession, _result: BackfillResult) -> None:
 
 
 @contextmanager
-def backfill_progress(total: int | None, *, quiet: bool = False) -> Iterator[ProgressCallback]:
+def backfill_progress(
+    total: int | None, *, quiet: bool = False, console: Console | None = None,
+) -> Iterator[ProgressCallback]:
     """Yield a `progress(parsed, result)` callback for `ingest_claude_code`.
 
     `total` is the cheap pre-count of in-scope sessions
     (`count_claude_code_sessions_in_scope`), or `None` when unknown — the
     counter then shows a running count with no "/total". `quiet=True` yields a
     no-op callback (mirrors `tj backfill claude-code --quiet`).
+
+    `console` overrides where the counter renders (default: the shared stdout
+    console) — `tj quickstart --json` passes the stderr console so the
+    counter never contaminates its machine-readable stdout.
     """
     if quiet:
         yield _noop
         return
 
+    target_console = console if console is not None else _default_console
     tokens_seen = 0
 
     def _line(result: BackfillResult) -> str:
@@ -61,11 +69,11 @@ def backfill_progress(total: int | None, *, quiet: bool = False) -> Iterator[Pro
             + parsed.total_cache_tokens
         )
 
-    if console.is_terminal:
+    if target_console.is_terminal:
         with Progress(
             SpinnerColumn(style="cyan"),
             TextColumn("[bold]◆[/bold] {task.description}"),
-            console=console,
+            console=target_console,
             transient=True,
         ) as progress:
             task_id = progress.add_task("Backfilling…", total=None)
@@ -80,7 +88,7 @@ def backfill_progress(total: int | None, *, quiet: bool = False) -> Iterator[Pro
     def _tick_plain(parsed: ParsedSession, result: BackfillResult) -> None:
         _accumulate(parsed)
         if result.sessions_seen % _PLAIN_PRINT_EVERY == 0:
-            console.print(f"  [dim]{_line(result)}[/dim]")
+            target_console.print(f"  [dim]{_line(result)}[/dim]")
 
     yield _tick_plain
 
