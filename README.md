@@ -27,10 +27,10 @@ TokenJam ingests telemetry data about your agents from a multitude of sources an
 One command sets up live capture, all six analyzers, Lens (the local dashboard), and the zero-token statusline:
 
 ```bash
-pipx install tokenjam && tj onboard   # or: npx tokenjam onboard
+npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
-`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path. For Claude Code and Codex that means backfilling your recent history plus the statusline and hooks; restart and you're live.
+`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path; under npx it first offers to make itself a permanent install. For Claude Code and Codex that means backfilling your recent history plus the statusline and hooks; restart and you're live.
 
 **Just looking?** `npx tokenjam` prints a 15-second read-only report over the logs you already have — no install, nothing kept.
 
