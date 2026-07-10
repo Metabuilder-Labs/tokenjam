@@ -207,22 +207,30 @@ def _unwire_claude_resume_brief_hook(settings: dict) -> bool:
 _LOCAL_BIN_DIR = Path.home() / ".local" / "bin"
 
 
-def _is_ephemeral_runner() -> bool:
-    """True when this process is running from a throwaway uvx/pipx-run venv
-    rather than a persistent install.
+def _is_ephemeral_path(path: str) -> bool:
+    """True when `path` sits inside a throwaway uvx/pipx-run cache rather than
+    a stable, named install location.
 
-    Persistent installs resolve `sys.executable` into a stable, named
-    location:
+    Persistent installs resolve into a stable, named location:
       - `uv tool install`  → .../uv/tools/<pkg>/...
       - `pipx install`     → .../pipx/venvs/<pkg>/...  (see `_installed_via_pipx`
         in cmd_uninstall.py — same signature, different concern)
     Ephemeral `uvx` / `pipx run` executions resolve into a cache directory
-    instead (e.g. `~/.cache/uv/archive-v0/...` for uvx).
+    instead (e.g. `~/.cache/uv/archive-v0/...` for uvx). That cache is
+    routinely swept by `uv cache prune` / `uv cache clean` — a path pointing
+    into it is a landmine for anything (like a launchd/systemd unit) that
+    expects to find a binary there indefinitely (#155).
     """
-    exe = sys.executable.replace("\\", "/")
-    if "/uv/tools/" in exe or "/pipx/venvs/" in exe:
+    p = path.replace("\\", "/")
+    if "/uv/tools/" in p or "/pipx/venvs/" in p:
         return False
-    return "/uv/" in exe or "/pipx/" in exe
+    return "/uv/" in p or "/pipx/" in p
+
+
+def _is_ephemeral_runner() -> bool:
+    """True when this process is running from a throwaway uvx/pipx-run venv
+    rather than a persistent install."""
+    return _is_ephemeral_path(sys.executable)
 
 
 def _install_tokenjam_persistently() -> str | None:
@@ -3106,8 +3114,56 @@ def _resolve_tj_binary() -> str:
     return shutil.which("tj") or str(Path(sys.executable).with_name("tj"))
 
 
-def _install_launchd(config_path: str) -> str | None:
+def _daemon_program_args(config_path: str) -> list[str] | None:
+    """Resolve the argv the daemon unit (launchd/systemd) should launch.
+
+    Prefers a direct path to `tj`. When the only resolvable `tj` sits inside
+    an ephemeral uv/pipx cache (`uvx`/`pipx run` — see `_is_ephemeral_path`),
+    writing that raw path into launchd/systemd is a landmine: `uv cache
+    prune` / `uv cache clean` (routine maintenance, also run by some CI/cleanup
+    tools) deletes it and silently kills the daemon on next load, and the
+    path pins the daemon to whatever version was resolved at onboard time
+    forever, independent of the wrapper's `--refresh` freshness logic (#111,
+    #155). Fall back to invoking through the stable `uvx`/`pipx` shim itself
+    instead, so launchd/systemd re-resolves `tj` through uv/pipx on every
+    start rather than a path that can vanish out from under it. Returns None
+    when no durable entrypoint exists at all — the caller should warn and
+    skip installing rather than silently write a cache path.
+    """
     tj_path = _resolve_tj_binary()
+    if not _is_ephemeral_path(tj_path):
+        return [tj_path, "--config", config_path, "serve"]
+
+    uvx_path = shutil.which("uvx")
+    if uvx_path and not _is_ephemeral_path(uvx_path):
+        return [uvx_path, "--from", "tokenjam", "tj", "--config", config_path, "serve"]
+
+    pipx_path = shutil.which("pipx")
+    if pipx_path and not _is_ephemeral_path(pipx_path):
+        return [pipx_path, "run", "--spec", "tokenjam", "tj", "--config", config_path, "serve"]
+
+    return None
+
+
+def _warn_no_durable_daemon_entrypoint(unit_kind: str) -> None:
+    console.print(
+        f"[yellow]No durable `tj` entrypoint found — skipping {unit_kind} "
+        "install rather than pointing it at a throwaway uvx/pipx cache path "
+        "that `uv cache prune` would silently delete.[/yellow]"
+    )
+    console.print(
+        "[dim]Install tokenjam persistently (`uv tool install tokenjam` or "
+        "`pipx install tokenjam`) and re-run `tj onboard`, or run "
+        "`tj serve` manually.[/dim]"
+    )
+
+
+def _install_launchd(config_path: str) -> str | None:
+    program_args = _daemon_program_args(config_path)
+    if program_args is None:
+        _warn_no_durable_daemon_entrypoint("launchd")
+        return None
+    args_xml = "\n".join(f"        <string>{arg}</string>" for arg in program_args)
     plist_path = Path.home() / "Library/LaunchAgents/com.tokenjam.serve.plist"
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     plist_content = f"""\
@@ -3120,10 +3176,7 @@ def _install_launchd(config_path: str) -> str | None:
     <string>com.tokenjam.serve</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{tj_path}</string>
-        <string>--config</string>
-        <string>{config_path}</string>
-        <string>serve</string>
+{args_xml}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -3165,7 +3218,11 @@ def _install_launchd(config_path: str) -> str | None:
 
 
 def _install_systemd(config_path: str) -> str | None:
-    tj_path = _resolve_tj_binary()
+    program_args = _daemon_program_args(config_path)
+    if program_args is None:
+        _warn_no_durable_daemon_entrypoint("systemd")
+        return None
+    exec_start = " ".join(program_args)
     service_path = Path.home() / ".config/systemd/user/tokenjam.service"
     service_path.parent.mkdir(parents=True, exist_ok=True)
     service_content = f"""\
@@ -3174,7 +3231,7 @@ Description=TokenJam observability server
 After=network.target
 
 [Service]
-ExecStart={tj_path} --config {config_path} serve
+ExecStart={exec_start}
 Restart=on-failure
 
 [Install]
