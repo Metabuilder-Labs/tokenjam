@@ -1742,12 +1742,16 @@ def test_onboard_claude_code_installs_claude_wrapper(runner, tmp_path):
     assert "claude() {" in text
     # The wrapper sources project attrs from the new utility command and tags
     # a per-terminal instance id, invoking the real binary without recursion.
-    assert "tj otel-resource-attrs" in text
+    # Invoked by absolute path, not bare `tj` — PATH shadowing or a missing
+    # PATH entry in some other terminal must not break this.
+    from tokenjam.cli.cmd_onboard import _current_tj_binary
+    tj_bin = _current_tj_binary()
+    assert f'"{tj_bin}" otel-resource-attrs' in text
     assert "service.instance.id=" in text
     assert "command claude" in text
     assert "--as" in text
     # Close-signal: reports the session ended on exit and on interrupt.
-    assert "tj session-end --instance" in text
+    assert f'"{tj_bin}" session-end --instance' in text
     assert "trap " in text
 
 
