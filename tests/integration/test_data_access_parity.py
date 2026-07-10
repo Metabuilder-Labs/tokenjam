@@ -75,7 +75,7 @@ def _serve_access(app, monkeypatch) -> ServeDataAccess:
     api = ApiBackend("http://daemon")
     transport = httpx.ASGITransport(app=app)
 
-    def _sync_get(path, params=None):
+    def _sync_get(path, params=None, *, timeout=None):
         async def _call():
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://daemon",
