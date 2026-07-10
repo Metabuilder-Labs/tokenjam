@@ -30,15 +30,49 @@ from tokenjam.utils.time_parse import utcnow
 class ApiBackend:
     """Read-only backend that queries tj serve instead of DuckDB."""
 
+    #: Blanket read timeout for the cheap shim reads (traces/cost/status/…).
+    #: These are near-instant DB lookups the daemon serves in well under a
+    #: second, so a tight ceiling keeps a wedged daemon from hanging the CLI.
+    _DEFAULT_TIMEOUT = 10
+
+    #: Read timeout for the heavy *computed* endpoints (quota-audit, context).
+    #: These re-aggregate a user's whole history server-side, so on a large DB
+    #: they can legitimately take longer than the cheap-read ceiling — e.g. a
+    #: 3,424-session / 150k-turn history computes the Opus quota audit in ~13s.
+    #: Under the blanket 10s ceiling that raised ReadTimeout and the very next
+    #: step onboarding advertises (`tj quota-audit`) failed deterministically
+    #: for exactly the large-history users tj most wants. A generous override
+    #: absorbs that compute while still bounding a genuinely stuck daemon.
+    _HEAVY_ENDPOINT_TIMEOUT = 60
+
     def __init__(self, base_url: str, api_key: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         headers: dict[str, str] = {}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        self.client = httpx.Client(base_url=self.base_url, headers=headers, timeout=10)
+        self.client = httpx.Client(
+            base_url=self.base_url, headers=headers, timeout=self._DEFAULT_TIMEOUT
+        )
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        resp = self.client.get(path, params=params)
+    def _get(
+        self, path: str, params: dict | None = None, *, timeout: float | None = None
+    ) -> dict:
+        """GET `path` and return the parsed JSON body.
+
+        `timeout` extends only the READ leg for a single request — used by the
+        heavy computed endpoints whose server-side aggregation can outlast the
+        cheap-read ceiling on large histories. Connect/write/pool keep the
+        tight default (a bare float would widen all four dimensions). Cheap
+        shim reads pass nothing and keep the tight default throughout.
+        """
+        if timeout is None:
+            resp = self.client.get(path, params=params)
+        else:
+            resp = self.client.get(
+                path,
+                params=params,
+                timeout=httpx.Timeout(self._DEFAULT_TIMEOUT, read=timeout),
+            )
         resp.raise_for_status()
         return resp.json()
 
@@ -284,7 +318,9 @@ class ApiBackend:
         }
         if agent_id:
             params["agent_id"] = agent_id
-        return self._get("/api/v1/cost/compare", params)
+        return self._get(
+            "/api/v1/cost/compare", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
+        )
 
     def fetch_optimize_report(
         self,
@@ -315,7 +351,9 @@ class ApiBackend:
             params["budget_provider"] = budget_provider
         if budget_usd is not None:
             params["budget_usd"] = budget_usd
-        return self._get("/api/v1/optimize", params)
+        return self._get(
+            "/api/v1/optimize", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
+        )
 
     def fetch_reuse_clusters(
         self,
@@ -335,7 +373,9 @@ class ApiBackend:
         params: dict[str, Any] = {"since": since}
         if agent_id:
             params["agent_id"] = agent_id
-        return self._get("/api/v1/reuse/clusters", params)
+        return self._get(
+            "/api/v1/reuse/clusters", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
+        )
 
     #: `/sessions` page size for `find_last_substantial_session`. The floor is
     #: usually 1 tool call, so the newest row almost always qualifies — this
@@ -404,7 +444,9 @@ class ApiBackend:
         params: dict[str, Any] = {"since": since}
         if agent_id:
             params["agent_id"] = agent_id
-        return self._get("/api/v1/context", params)
+        return self._get(
+            "/api/v1/context", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
+        )
 
     def fetch_opus_quota_audit(
         self,
@@ -426,7 +468,9 @@ class ApiBackend:
         params: dict[str, Any] = {"since": since}
         if agent_id:
             params["agent_id"] = agent_id
-        return self._get("/api/v1/quota-audit", params)
+        return self._get(
+            "/api/v1/quota-audit", params, timeout=self._HEAVY_ENDPOINT_TIMEOUT
+        )
 
     def close(self) -> None:
         self.client.close()
