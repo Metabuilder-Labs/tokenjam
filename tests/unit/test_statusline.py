@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from click.testing import CliRunner
 
 from tests.factories import (
@@ -23,6 +24,18 @@ from tokenjam.cli.cmd_statusline import (
     render_line,
     session_shares,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_attribution_cache(tmp_path, monkeypatch):
+    # Every test in this module resolves the attribution cache to an (empty,
+    # unless a test writes to it) tmp path — never the real
+    # ~/.local/share/tj/attribution_cache.json — so results are deterministic
+    # regardless of what's actually been backfilled on the host machine.
+    monkeypatch.setattr(
+        "tokenjam.core.attribution_cache._cache_path",
+        lambda: tmp_path / "attribution_cache.json",
+    )
 
 
 def _run(payload) -> str:
@@ -134,6 +147,45 @@ def test_warn_boundary_is_inclusive(tmp_path):
     # Exactly at the warn threshold should already nudge.
     line = _line_for_reread(tmp_path, REREAD_WARN)
     assert "/compact" in line
+
+
+# --- top re-read driver (cached attribution) ---------------------------------
+
+
+def test_top_driver_shown_past_warn_when_cached(tmp_path):
+    from tokenjam.core.attribution_cache import write_attribution_cache
+
+    cache_path = tmp_path / "attribution_cache.json"
+    write_attribution_cache("CLAUDE.md", 14, 3, path=cache_path)
+    line = _line_for_reread(tmp_path, REREAD_WARN + 1)
+    assert "CLAUDE.md ×14" in line
+
+
+def test_top_driver_absent_below_warn_even_when_cached(tmp_path):
+    from tokenjam.core.attribution_cache import write_attribution_cache
+
+    cache_path = tmp_path / "attribution_cache.json"
+    write_attribution_cache("CLAUDE.md", 14, 3, path=cache_path)
+    line = _line_for_reread(tmp_path, REREAD_WARN - 5)
+    assert "CLAUDE.md" not in line
+
+
+def test_top_driver_absent_when_no_cache_file(tmp_path):
+    line = _line_for_reread(tmp_path, REREAD_CRIT + 1)
+    assert "×" not in line
+
+
+def test_format_status_line_appends_top_driver_when_passed():
+    line = format_status_line("Opus 4.8", 1000, 90.0, "CLAUDE.md ×14")
+    assert "re-read 90% (CLAUDE.md ×14)" in line
+
+
+def test_format_status_line_unchanged_when_top_driver_omitted():
+    # Existing 3-arg callers (quickstart's preview, existing tests) render
+    # byte-for-byte the same with the new parameter defaulted to None.
+    assert format_status_line("Opus 4.8", 1000, 90.0) == format_status_line(
+        "Opus 4.8", 1000, 90.0, None
+    )
 
 
 def test_line_reports_model_and_tokens(tmp_path):

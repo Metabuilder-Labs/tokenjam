@@ -62,7 +62,7 @@ def summarize_window(
     row = conn.execute(
         f"SELECT COUNT(*) AS spans, "
         f"COUNT(DISTINCT session_id) AS sessions, "
-        f"COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0) + COALESCE(cache_tokens,0)), 0) AS tokens, "
+        f"COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0) + COALESCE(cache_tokens,0) + COALESCE(cache_write_tokens,0)), 0) AS tokens, "
         f"COALESCE(SUM(cost_usd), 0.0) AS cost "
         f"FROM spans WHERE {where}",
         params,

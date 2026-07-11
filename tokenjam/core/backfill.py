@@ -835,6 +835,16 @@ def ingest_claude_code(
     # `max_sessions` means there may be older sessions on disk we skipped.
     if max_sessions is not None and result.sessions_seen >= max_sessions:
         result.limit_reached = True
+
+    # Refresh the statusline's cheap top-driver cache — best-effort, never
+    # blocks or fails the ingest. The statusline is DB-free and can't compute
+    # recurring-inclusion attribution itself; this backfill path already holds
+    # the connection + capture flags, so it hands the result off as a small
+    # on-disk artifact the statusline can stat+read.
+    if conn is not None:
+        from tokenjam.core.attribution_cache import refresh_attribution_cache
+        refresh_attribution_cache(conn, capture)
+
     return result
 
 

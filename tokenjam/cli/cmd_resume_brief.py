@@ -223,6 +223,26 @@ def cmd_resume_brief(
         return
 
     if brief:
-        click.echo(brief)
+        click.echo(brief + _top_driver_hint())
     elif verbose:
         click.echo("resume-brief: nothing to brief (no method captured)", err=True)
+
+
+def _top_driver_hint() -> str:
+    """An optional trailing informational line naming the most re-read source.
+
+    Reads the same on-disk artifact the statusline reads (``tj backfill`` /
+    ``tj onboard`` write it), via the shared ``format_driver_label`` reader, so
+    no DB access happens on this hook path. Worded as NEUTRAL context, not a
+    warning: the resume-brief hook can't compute the live re-read share, so it
+    must not read as an alert for a user whose current share is low. Fail-safe:
+    any error or missing cache degrades to "".
+    """
+    try:
+        from tokenjam.core.attribution_cache import format_driver_label
+        label = format_driver_label()
+    except Exception:  # noqa: BLE001 - a brief must never break a session
+        return ""
+    if not label:
+        return ""
+    return f"\n\nMost re-read context (last 30d): {label}. See `tj context`."
