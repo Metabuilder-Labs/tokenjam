@@ -8,6 +8,9 @@ jobs:
   publish-npm:
     if: startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -15,6 +18,9 @@ jobs:
         with:
           node-version: "22"
           registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install dependencies
         working-directory: sdk-ts
@@ -31,8 +37,6 @@ jobs:
       - name: Publish
         working-directory: sdk-ts
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # Publishes the zero-install `npx tokenjam` wrapper (npm-wrapper/, issue #6):
   # the unscoped `tokenjam` package that shells out to the Python CLI. Separate
@@ -41,6 +45,9 @@ jobs:
   publish-npm-wrapper:
     if: startsWith(github.ref_name, 'v')
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +55,9 @@ jobs:
         with:
           node-version: "22"
           registry-url: https://registry.npmjs.org
+
+      - name: Upgrade npm for OIDC trusted publishing
+        run: npm install -g npm@latest
 
       # Cheap guard — the wrapper has no test suite (no Python in the JS lane),
       # so a syntax error would otherwise only surface after publish.
@@ -65,5 +75,3 @@ jobs:
       - name: Publish
         working-directory: npm-wrapper
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
