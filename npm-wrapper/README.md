@@ -11,17 +11,15 @@
 
 </div>
 
-TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for. This package is the zero-install launcher: one command, no pip environment, no config.
+TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for. This package is the zero-install launcher: no pip environment, no manual config.
 
 ```bash
-npx tokenjam
+npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
 ## What you get
 
-Bare `npx tokenjam` reads the session logs you already have (Claude Code today; more sources land in the full CLI) and prints a 15-second, read-only report: quota composition (what share of your tokens went to re-reading history and context vs. net-new work) plus a session timeline. Nothing is installed, nothing is kept.
-
-For the full setup, run `npx tokenjam onboard`: it wires up live capture, all six analyzers, the Lens dashboard, and the zero-token statusline in one command.
+`tj onboard` is guided setup: it writes a config, generates an ingest secret, and asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) to wire the right path. For Claude Code and Codex that means backfilling recent history and installing a statusline and hooks for live capture; restart and you're live. Onboarding unlocks all six analyzers, the Lens dashboard, and the zero-token statusline in one command.
 
 ## Commands
 
@@ -29,20 +27,14 @@ All arguments pass straight through to the Python CLI, so any `tj` subcommand an
 
 | Command | What it does |
 |---|---|
-| `npx tokenjam` | Zero-install first run: quota composition and a session timeline from your existing session logs. |
+| `npx tokenjam onboard` | Guided setup: writes a config, generates an ingest secret, and optionally installs the background daemon for live capture. |
 | `npx tokenjam context` | Where your quota goes: re-read vs. net-new share, recurring inclusions, `/compact` candidates. |
 | `npx tokenjam optimize` | Cost-saving candidates: model downsizing, cache opportunities, prompt trimming, workflow reuse, subagent right-sizing. |
-| `npx tokenjam onboard` | Guided setup: writes a config, generates an ingest secret, and optionally installs the background daemon for live capture. |
+| `npx tokenjam` | Bare run: still works, still zero-install, still a reference passthrough to the Python CLI. |
 
 ## Go deeper
 
-`npx tokenjam` is the no-setup front door. One command sets up live capture, the local Lens dashboard, and the zero-token statusline:
-
-```bash
-npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
-```
-
-`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path. For Claude Code and Codex that means backfilling recent history plus a statusline and hooks; restart and you're live. From there:
+`tj onboard` sets up live capture, the local Lens dashboard, and the zero-token statusline in one command. From there:
 
 ```bash
 tj optimize   # cost-saving candidates from your actual usage
