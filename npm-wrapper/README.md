@@ -1,40 +1,71 @@
-# `tokenjam` — zero-install TokenJam launcher (command: `tj`)
+# tokenjam
+
+<div align="center">
+
+<img src="https://raw.githubusercontent.com/Metabuilder-Labs/tokenjam/main/docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="760">
+
+[![npm](https://img.shields.io/npm/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/tokenjam)
+[![npm downloads](https://img.shields.io/npm/dm/tokenjam?color=3d8eff&labelColor=0d1117&label=downloads)](https://www.npmjs.com/package/tokenjam)
+[![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-3d8eff?labelColor=0d1117)](https://github.com/Metabuilder-Labs/tokenjam/blob/main/LICENSE)
+
+</div>
+
+TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for. This package is the zero-install launcher: one command, no pip environment, no config.
 
 ```bash
 npx tokenjam
 ```
 
-That one command reads your `~/.claude/projects/*.jsonl` session logs
-and shows you **where your
-Claude Code quota actually goes** — quota composition (re-reading context vs.
-net-new work) plus a session timeline. No pip env, no daemon, no onboarding.
+## What you get
 
-This npm package is a **thin launcher** for the real CLI, which is the Python
-package [`tokenjam`](https://pypi.org/project/tokenjam/) (command: `tj`). `npx tokenjam`
-shells out to the first available Python runner:
+Bare `npx tokenjam` reads the session logs you already have (Claude Code today; more sources land in the full CLI) and prints a 15-second, read-only report: quota composition (what share of your tokens went to re-reading history and context vs. net-new work) plus a session timeline. Nothing is installed, nothing is kept.
+
+<div align="center">
+<img src="https://raw.githubusercontent.com/Metabuilder-Labs/tokenjam/main/docs/assets/tj-quickstart-hero.png" alt="Sample npx tokenjam output: quota composition (95.9% re-reading context, 4.1% net-new work) and a session timeline table" width="620">
+</div>
+
+## Commands
+
+All arguments pass straight through to the Python CLI, so any `tj` subcommand and flag works here too.
+
+| Command | What it does |
+|---|---|
+| `npx tokenjam` / `npx tokenjam quickstart` | Zero-install first run: quota composition and a session timeline from your existing session logs. |
+| `npx tokenjam context` | Where your quota goes: re-read vs. net-new share, recurring inclusions, `/compact` candidates. |
+| `npx tokenjam optimize` | Cost-saving candidates: model downsizing, cache opportunities, prompt trimming, workflow reuse, subagent right-sizing. |
+| `npx tokenjam onboard` | Guided setup: writes a config, generates an ingest secret, and optionally installs the background daemon for live capture. |
+
+## Go deeper
+
+`npx tokenjam` is the no-setup front door. For live capture, the local Lens dashboard, and the zero-token statusline, install the full CLI and onboard:
+
+```bash
+pipx install tokenjam
+tj onboard
+# or, without installing anything permanently: npx tokenjam onboard
+```
+
+`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path. For Claude Code and Codex that means backfilling recent history plus a statusline and hooks; restart and you're live. From there:
+
+```bash
+tj optimize   # cost-saving candidates from your actual usage
+tj serve      # open the Lens dashboard at http://127.0.0.1:7391/
+```
+
+- Full feature set, six analyzers, and Lens screenshots: [github.com/Metabuilder-Labs/tokenjam](https://github.com/Metabuilder-Labs/tokenjam)
+- Product site and docs: [tokenjam.dev](https://tokenjam.dev)
+
+## How the launcher works
+
+This npm package is a thin launcher, not the real CLI. `npx tokenjam` shells out to the first available Python runner:
 
 1. `uvx --from tokenjam tj …`
 2. `pipx run --spec tokenjam tj …`
 3. an already-installed `tj` on your `PATH`
 
-All arguments pass straight through, so `npx tokenjam quickstart --since 7d`,
-`npx tokenjam context`, `npx tokenjam optimize`, etc. all work.
-
-## Go deeper
-
-`npx tokenjam` is the no-setup front door. When you want live capture, the local
-dashboard, and the MCP server for Claude Code, install the full CLI and onboard:
-
-```bash
-pipx install tokenjam
-tj onboard
-```
-
-See the [TokenJam README](https://github.com/Metabuilder-Labs/tokenjam) for the
-full feature set.
+The real CLI is the Python package [`tokenjam`](https://pypi.org/project/tokenjam/) (command: `tj`).
 
 ## Requirements
 
-A Python runner — [`uv`](https://docs.astral.sh/uv/) (recommended) or
-[`pipx`](https://pipx.pypa.io/). If neither is present, `npx tokenjam` prints install
-guidance.
+A Python runner: [`uv`](https://docs.astral.sh/uv/) (recommended) or [`pipx`](https://pipx.pypa.io/). If neither is present, `npx tokenjam` prints install guidance instead of failing silently.
