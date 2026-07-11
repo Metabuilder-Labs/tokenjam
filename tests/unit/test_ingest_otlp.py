@@ -10,7 +10,7 @@ import pytest
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest_adapters.otlp import ingest_otlp
 from tokenjam.otel.otlp_parsing import parse_otlp_span
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, OpenInferenceAttributes
 
 
 FIXTURE_PATH = Path(__file__).parent.parent / "fixtures" / "otlp_sample.json"
@@ -83,6 +83,67 @@ def test_parse_otlp_span_extracts_cache_read_and_write_tokens():
         ],
     }
     span = parse_otlp_span(raw, {})
+    assert span.cache_tokens == 1000
+    assert span.cache_write_tokens == 2000
+
+
+def test_parse_otlp_span_extracts_openinference_llm_span():
+    """An OpenInference-instrumented LLM span (llm.* only, no gen_ai.*) is parsed.
+
+    Agents instrumented with OpenInference (Arize's convention — LangChain,
+    LlamaIndex, CrewAI, etc.) emit `llm.*` attributes instead of `gen_ai.*`.
+    The shared OTLP parser must fall back to them so these spans land with
+    model/provider/tokens instead of silently zero-token.
+    """
+    raw = {
+        "name": "ChatOpenAI",
+        "attributes": [
+            {"key": OpenInferenceAttributes.SPAN_KIND, "value": {"stringValue": "LLM"}},
+            {"key": OpenInferenceAttributes.MODEL_NAME, "value": {"stringValue": "gpt-4o"}},
+            {"key": OpenInferenceAttributes.SYSTEM, "value": {"stringValue": "openai"}},
+            {"key": OpenInferenceAttributes.PROMPT_TOKENS, "value": {"intValue": "1200"}},
+            {"key": OpenInferenceAttributes.COMPLETION_TOKENS, "value": {"intValue": "250"}},
+            {"key": OpenInferenceAttributes.CACHE_READ_TOKENS, "value": {"intValue": "800"}},
+            {"key": OpenInferenceAttributes.CACHE_WRITE_TOKENS, "value": {"intValue": "300"}},
+        ],
+    }
+    span = parse_otlp_span(raw, {})
+    assert span.model == "gpt-4o"
+    assert span.provider == "openai"
+    assert span.billing_account == "openai"
+    assert span.input_tokens == 1200
+    assert span.output_tokens == 250
+    assert span.cache_tokens == 800
+    assert span.cache_write_tokens == 300
+
+
+def test_parse_otlp_span_genai_wins_over_openinference():
+    """When BOTH conventions are present on a span, gen_ai.* takes precedence."""
+    raw = {
+        "name": "ChatAnthropic",
+        "attributes": [
+            # gen_ai.* (preferred)
+            {"key": GenAIAttributes.REQUEST_MODEL, "value": {"stringValue": "claude-sonnet-4-6"}},
+            {"key": GenAIAttributes.PROVIDER_NAME, "value": {"stringValue": "anthropic"}},
+            {"key": GenAIAttributes.INPUT_TOKENS, "value": {"intValue": "1500"}},
+            {"key": GenAIAttributes.OUTPUT_TOKENS, "value": {"intValue": "320"}},
+            {"key": GenAIAttributes.CACHE_READ_TOKENS, "value": {"intValue": "1000"}},
+            {"key": GenAIAttributes.CACHE_CREATE_TOKENS, "value": {"intValue": "2000"}},
+            # OpenInference (fallback — must be ignored here)
+            {"key": OpenInferenceAttributes.MODEL_NAME, "value": {"stringValue": "gpt-4o"}},
+            {"key": OpenInferenceAttributes.SYSTEM, "value": {"stringValue": "openai"}},
+            {"key": OpenInferenceAttributes.PROMPT_TOKENS, "value": {"intValue": "1"}},
+            {"key": OpenInferenceAttributes.COMPLETION_TOKENS, "value": {"intValue": "2"}},
+            {"key": OpenInferenceAttributes.CACHE_READ_TOKENS, "value": {"intValue": "3"}},
+            {"key": OpenInferenceAttributes.CACHE_WRITE_TOKENS, "value": {"intValue": "4"}},
+        ],
+    }
+    span = parse_otlp_span(raw, {})
+    assert span.model == "claude-sonnet-4-6"
+    assert span.provider == "anthropic"
+    assert span.billing_account == "anthropic"
+    assert span.input_tokens == 1500
+    assert span.output_tokens == 320
     assert span.cache_tokens == 1000
     assert span.cache_write_tokens == 2000
 
