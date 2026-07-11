@@ -38,12 +38,10 @@ All arguments pass straight through to the Python CLI, so any `tj` subcommand an
 
 ## Go deeper
 
-`npx tokenjam` is the no-setup front door. For live capture, the local Lens dashboard, and the zero-token statusline, install the full CLI and onboard:
+`npx tokenjam` is the no-setup front door. One command sets up live capture, the local Lens dashboard, and the zero-token statusline:
 
 ```bash
-pipx install tokenjam
-tj onboard
-# or, without installing anything permanently: npx tokenjam onboard
+npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
 `tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path. For Claude Code and Codex that means backfilling recent history plus a statusline and hooks; restart and you're live. From there:
