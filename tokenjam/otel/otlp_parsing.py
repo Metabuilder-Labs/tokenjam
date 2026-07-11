@@ -155,9 +155,9 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
     if not tool_name and span_name.startswith("tool."):
         tool_name = span_name[5:]
 
-    model = attrs.get(GenAIAttributes.REQUEST_MODEL) or attrs.get(
-        OpenInferenceAttributes.MODEL_NAME
-    )
+    model = attrs.get(GenAIAttributes.REQUEST_MODEL)
+    if model is None:
+        model = attrs.get(OpenInferenceAttributes.MODEL_NAME)
     input_tokens = safe_int(attrs.get(GenAIAttributes.INPUT_TOKENS))
     if input_tokens is None:
         input_tokens = safe_int(attrs.get(OpenInferenceAttributes.PROMPT_TOKENS))
