@@ -21,9 +21,7 @@ npx tokenjam
 
 Bare `npx tokenjam` reads the session logs you already have (Claude Code today; more sources land in the full CLI) and prints a 15-second, read-only report: quota composition (what share of your tokens went to re-reading history and context vs. net-new work) plus a session timeline. Nothing is installed, nothing is kept.
 
-<div align="center">
-<img src="https://raw.githubusercontent.com/Metabuilder-Labs/tokenjam/main/docs/assets/tj-quickstart-hero.png" alt="Sample npx tokenjam output: quota composition (95.9% re-reading context, 4.1% net-new work) and a session timeline table" width="620">
-</div>
+For the full setup, run `npx tokenjam onboard`: it wires up live capture, all six analyzers, the Lens dashboard, and the zero-token statusline in one command.
 
 ## Commands
 
@@ -31,7 +29,7 @@ All arguments pass straight through to the Python CLI, so any `tj` subcommand an
 
 | Command | What it does |
 |---|---|
-| `npx tokenjam` / `npx tokenjam quickstart` | Zero-install first run: quota composition and a session timeline from your existing session logs. |
+| `npx tokenjam` | Zero-install first run: quota composition and a session timeline from your existing session logs. |
 | `npx tokenjam context` | Where your quota goes: re-read vs. net-new share, recurring inclusions, `/compact` candidates. |
 | `npx tokenjam optimize` | Cost-saving candidates: model downsizing, cache opportunities, prompt trimming, workflow reuse, subagent right-sizing. |
 | `npx tokenjam onboard` | Guided setup: writes a config, generates an ingest secret, and optionally installs the background daemon for live capture. |
