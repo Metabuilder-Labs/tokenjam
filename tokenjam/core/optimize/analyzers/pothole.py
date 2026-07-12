@@ -645,6 +645,13 @@ class PotholeCluster:
     estimated_recoverable_tokens: int = 0
     confidence:                   str = "heuristic"
     novel:                        bool = True
+    # Phase 2 (apply) — best-effort cwd of the cluster's (sole, if project-
+    # scoped) repo, and a suggested rung-1 write target derived from it. Both
+    # are just a DEFAULT for the Review inbox card's scope/target override
+    # (§7's "repo-identity is noisy" — never applied blindly); "" when
+    # unknown (multi-repo / user-global / no cwd could be resolved).
+    repo_cwd:                     str = ""
+    suggested_target:             str = ""
 
 
 @dataclass
@@ -675,9 +682,18 @@ def build_proposals(
     *,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     doc_text: str = "",
+    repo_cwd_map: dict[str, str] | None = None,
 ) -> tuple[list[PotholeCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
-    ``(proposals, dropped_codified_count)``."""
+    ``(proposals, dropped_codified_count)``.
+
+    ``repo_cwd_map`` (repo label -> a representative cwd) is optional,
+    best-effort enrichment used only to pre-fill the Apply stage's suggested
+    target path (Phase 2) — clustering itself needs none of it.
+    """
+    from tokenjam.core.optimize.pothole_apply import default_target_path, slugify
+
+    repo_cwd_map = repo_cwd_map or {}
     proposals: list[PotholeCluster] = []
     dropped = 0
     for cluster in clusters:
@@ -701,6 +717,15 @@ def build_proposals(
             for f in sorted(cluster.failures, key=lambda f: f.ts or "", reverse=True)[:MAX_EXAMPLE_SESSIONS]
         ]
 
+        scope = _scope_for(cluster.repos)
+        repo_cwd = repo_cwd_map.get(repos[0], "") if len(repos) == 1 else ""
+        try:
+            suggested_target = default_target_path(
+                rung, scope, repo_cwd, slugify(cluster.title),
+            )
+        except Exception:
+            suggested_target = ""   # never let a bad path computation sink the proposal
+
         proposals.append(PotholeCluster(
             signature=cluster.signature,
             family_key=cluster.family_key,
@@ -709,11 +734,13 @@ def build_proposals(
             occurrences=occurrences,
             repos=repos,
             rung=rung,
-            scope=_scope_for(cluster.repos),
+            scope=scope,
             proposed_fix=fix,
             examples=examples,
             estimated_recoverable_tokens=occurrences * GROUNDED_TOKENS_PER_OCCURRENCE,
             novel=True,
+            repo_cwd=repo_cwd,
+            suggested_target=suggested_target,
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
@@ -730,6 +757,7 @@ def analyze_potholes(
     distill_enabled: bool = True,
     distill_cache_dir: Path | None = None,
     codified_doc_text: str = "",
+    repo_cwd_map: dict[str, str] | None = None,
 ) -> PotholeFinding:
     """Full pipeline over an explicit session list — the pure core the
     registry entry point and the on-disk cache job both call. Never raises."""
@@ -752,6 +780,7 @@ def analyze_potholes(
 
     proposals, dropped = build_proposals(
         distilled, min_sessions=min_sessions, doc_text=codified_doc_text,
+        repo_cwd_map=repo_cwd_map,
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
 
@@ -785,17 +814,17 @@ def _repo_map_from_db(conn) -> dict[str, str]:
     return out
 
 
-def _repo_cwds_for(sessions: list[tuple[str, str]], projects_root: Path) -> set[str]:
-    """Best-effort cwd per repo label, for the novelty doc search — derived
-    from the encoded project directory name is unreliable, so this reads each
-    session's transcript's first ``cwd`` field directly (cheap: short-circuits
-    after the first hit) for one representative session per repo."""
+def _repo_cwd_map_for(sessions: list[tuple[str, str]], projects_root: Path) -> dict[str, str]:
+    """Best-effort repo-label -> cwd, for the novelty doc search AND (Phase 2)
+    the Apply stage's suggested target path. Derived from the encoded project
+    directory name is unreliable, so this reads each session's transcript's
+    first ``cwd`` field directly (cheap: short-circuits after the first hit)
+    for one representative session per repo."""
     from tokenjam.core.transcript import _locate_transcript, read_records
 
-    seen_repos: set[str] = set()
-    cwds: set[str] = set()
+    out: dict[str, str] = {}
     for session_id, repo in sessions:
-        if repo in seen_repos:
+        if repo in out:
             continue
         path = _locate_transcript(session_id, projects_root)
         if path is None:
@@ -803,10 +832,9 @@ def _repo_cwds_for(sessions: list[tuple[str, str]], projects_root: Path) -> set[
         for record in read_records(path)[:5]:
             cwd = record.get("cwd")
             if isinstance(cwd, str) and cwd:
-                cwds.add(cwd)
-                seen_repos.add(repo)
+                out[repo] = cwd
                 break
-    return cwds
+    return out
 
 
 def compute_pothole_finding(
@@ -848,15 +876,16 @@ def compute_pothole_finding(
         sessions.append((session_id, repo_map.get(session_id, "unknown")))
 
     doc_text = ""
+    repo_cwd_map: dict[str, str] = {}
     try:
-        cwds = _repo_cwds_for(sessions, root)
-        doc_text = _doc_text(_candidate_doc_paths(cwds))
+        repo_cwd_map = _repo_cwd_map_for(sessions, root)
+        doc_text = _doc_text(_candidate_doc_paths(set(repo_cwd_map.values())))
     except Exception:
         doc_text = ""
 
     return analyze_potholes(
         sessions, projects_root=root, codified_doc_text=doc_text,
-        distill_enabled=distill_enabled,
+        distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
     )
 
 

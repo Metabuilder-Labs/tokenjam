@@ -7436,12 +7436,13 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 // §8 reuse map): pending pothole fixes the cross-session pothole aggregator
 // (core/optimize/analyzers/pothole.py, served from a background-refreshed
 // cache at GET /pothole/proposals — see api/routes/pothole.py) land here for
-// a human to review. Phase 1 is READ-ONLY: Approve is stubbed (apply lands in
-// a later phase); Dismiss is a client-side-only hide (persisted in
-// localStorage, never sent to the server — Phase 1 has no dismiss endpoint).
-// The chassis (listhead / listbox / addbar / cur-modal) is forked from
-// Optimize ▸ Summarize's curate → diff → Apply/Reject screen (~6410-7040
-// below), per Phase A's scaffold.
+// a human to review. Phase 2 wires Approve to a real write, routed by rung,
+// through POST /pothole/apply (core.optimize.pothole_apply — git-commit or
+// gzip-backup reversible, disabled-by-default for hook/wrapper/config rungs).
+// Dismiss stays a client-side-only hide (localStorage, never sent to the
+// server). The chassis (listhead / listbox / addbar / cur-modal) is forked
+// from Optimize ▸ Summarize's curate → diff → Apply/Reject screen
+// (~6410-7040 above), per Phase A's scaffold.
 const POTHOLE_DISMISSED_KEY = 'tj_pothole_dismissed_v1';
 
 function loadDismissedPotholes() {
@@ -7462,6 +7463,7 @@ const RUNG_LABELS = {
   4: 'wrapper / script',
   5: 'config / env',
 };
+const ENFORCEMENT_RUNGS = new Set([3, 4, 5]);
 
 function PotholeRow({ cluster, checked, onToggle, onExpand }) {
   const tokens = cluster.estimated_recoverable_tokens || 0;
@@ -7478,21 +7480,61 @@ function PotholeRow({ cluster, checked, onToggle, onExpand }) {
     </tr>`;
 }
 
-function PotholeDetailModal({ cluster, onClose }) {
+// The card's Approve flow: preview -> (optional active-session warning ->
+// "apply anyway") -> write. Scope + target are ALWAYS human-editable before
+// Approve (§7 — repo-identity is noisy; never trust the suggestion blindly).
+function PotholeApplyModal({ cluster, onClose, onApplied }) {
+  const [scope, setScope] = useState('project');
+  const [target, setTarget] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [warning, setWarning] = useState(null);   // active-session 409 text — offers "apply anyway"
+  const [result, setResult] = useState(null);      // the applied record, once written
+
+  useEffect(() => {
+    if (!cluster) return;
+    setScope(cluster.scope || 'project');
+    setTarget(cluster.suggested_target || '');
+    setBusy(false); setError(null); setWarning(null); setResult(null);
+  }, [cluster && cluster.signature]);
+
   if (!cluster) return null;
+
+  const doApprove = async (force) => {
+    if (!target.trim()) { setError('enter a target path first'); return; }
+    setBusy(true); setError(null);
+    try {
+      const body = { ...cluster, scope, target_path: target.trim(), go: true, force: !!force };
+      const r = await apiPostOrDetail('/pothole/apply', body);
+      setWarning(null);
+      setResult(r.record);
+      onApplied && onApplied(r.record);
+    } catch (e) {
+      // The active-session guard refuses via 409 unless force=true — offer
+      // the explicit "apply anyway" the spec calls for, instead of a bare error.
+      if (e.status === 409 && /active session/.test(e.message || '')) {
+        setWarning(e.message);
+      } else {
+        setError(e.message || String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return html`
     <div class="cur-overlay" onClick=${onClose}>
       <div class="cur-modal" onClick=${e => e.stopPropagation()}>
         <div class="cur-modal-head">
           <span class="cur-modal-title">${cluster.title}</span>
-          <span class="rev-state staged" style="margin-left:6px">pending</span>
+          <span class=${'rev-state ' + (result ? 'applied' : 'staged')} style="margin-left:6px">${result ? 'applied' : 'pending'}</span>
           <button class="cur-modal-x" onClick=${onClose} title="Close">✕</button>
         </div>
         <div class="cur-modal-body">
           <div style="font-size:12.5px;margin-bottom:10px">
             <b>${cluster.sessions}</b> distinct sessions · <b>${cluster.occurrences}</b> occurrences ·
             spread across <b>${(cluster.repos || []).length}</b> repo${(cluster.repos || []).length === 1 ? '' : 's'} ·
-            scope: <b>${cluster.scope}</b> · rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
+            rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
           </div>
           <div class="opt-section" style="margin:0 0 14px">
             <div class="opt-title" style="font-size:13px">Proposed fix</div>
@@ -7508,11 +7550,76 @@ function PotholeDetailModal({ cluster, onClose }) {
               </div>`)}
             ${(!cluster.examples || cluster.examples.length === 0) ? html`<div class="dim" style="font-size:12.5px">No example sessions captured.</div>` : null}
           </div>
+
+          ${!result ? html`
+            <div class="opt-section" style="margin:0 0 6px">
+              <div class="opt-title" style="font-size:13px">Where to write it <span class="dim" style="font-weight:400">— repo-identity is noisy; confirm before approving</span></div>
+              <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+                <select class="rename-input" style="width:160px" value=${scope} onChange=${e => setScope(e.target.value)}>
+                  <option value="project">project</option>
+                  <option value="user-global">user-global</option>
+                </select>
+                <input class="rename-input" style="flex:1;min-width:280px" value=${target}
+                  placeholder="/absolute/path/to/target"
+                  onInput=${e => setTarget(e.target.value)} />
+              </div>
+              ${ENFORCEMENT_RUNGS.has(cluster.rung) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">Rung ${cluster.rung} writes a hook, DISABLED by default — it will not run until you separately confirm "Enable enforcement".</div>` : null}
+            </div>
+          ` : html`
+            <div class="opt-section" style="margin:0 0 6px">
+              <div class="opt-title" style="font-size:13px">Written to</div>
+              <div class="sz-note" style="margin-top:4px"><code>${result.target_path}</code>${result.git_commit ? html` · committed <code>${result.git_commit.slice(0, 8)}</code>` : ' · backed up (not a git repo)'}</div>
+            </div>
+          `}
+
+          ${warning ? html`<div class="opt-caveat" style="color:var(--warn)">${warning} <span class="sz-link" onClick=${() => doApprove(true)}>Apply anyway →</span></div>` : null}
+          ${error ? html`<div class="opt-caveat" style="color:var(--error)">${error}</div>` : null}
         </div>
         <div class="cur-modal-foot">
-          <button class="cur-btn primary" disabled=${true} title="Apply lands in the next phase">Approve (coming soon)</button>
+          ${!result ? html`
+            <button class="cur-btn primary" disabled=${busy} onClick=${() => doApprove(false)}>${busy ? 'Applying…' : 'Approve →'}</button>
+          ` : html`<span class="dim" style="font-size:12px">Applied. Manage enforcement/revert from the Applied section below.</span>`}
           <button class="cur-btn" style="margin-left:auto" onClick=${onClose}>Close</button>
         </div>
+      </div>
+    </div>`;
+}
+
+// The Applied section: what Approve already wrote, plus its one-step Revert
+// and (enforcement rungs only) the explicit Enable/Disable toggle.
+function AppliedFixRow({ rec, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const call = async (fn) => {
+    setBusy(true); setError(null);
+    try { await fn(); onChanged && onChanged(); }
+    catch (e) { setError(e.message || String(e)); }
+    finally { setBusy(false); setConfirming(false); }
+  };
+
+  const enforcement = rec.enforcement;
+  const isEnforcement = ENFORCEMENT_RUNGS.has(rec.rung);
+
+  return html`
+    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px;width:100%">
+        <span style="font-weight:500">${rec.title}</span>
+        <span class="dim" style="font-size:11px">rung ${rec.rung} · ${RUNG_LABELS[rec.rung] || rec.kind}</span>
+        <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
+        ${isEnforcement && rec.state === 'applied' ? html`<span class="dim" style="font-size:11px">· enforcement ${enforcement && enforcement.enabled ? 'ENABLED' : 'disabled'}</span>` : null}
+      </div>
+      <div class="dim" style="font-size:12px"><code>${rec.target_path}</code> · applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}${rec.git_commit ? html` · <code>${rec.git_commit.slice(0, 8)}</code>` : ''}</div>
+      ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
+      <div style="display:flex;gap:10px;align-items:center">
+        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
+        ${isEnforcement && rec.state === 'applied' && !(enforcement && enforcement.enabled) ? (
+          confirming
+            ? html`<span style="color:var(--warn);font-size:12px">This intercepts your tool calls on every matching call. <span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/enable`, { confirm: true }))}>Confirm enable →</span> <span class="sz-link" onClick=${() => setConfirming(false)}>cancel</span></span>`
+            : html`<span class="sz-link" onClick=${() => setConfirming(true)}>Enable enforcement…</span>`
+        ) : null}
+        ${isEnforcement && rec.state === 'applied' && enforcement && enforcement.enabled ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/disable`, {}))}>Disable enforcement</span>` : null}
       </div>
     </div>`;
 }
@@ -7523,6 +7630,8 @@ function ReviewInboxView({ params }) {
   const [checked, setChecked] = useState(() => new Set());
   const [modalSig, setModalSig] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [applied, setApplied] = useState([]);
+  const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
 
   const load = useCallback(async () => {
     try {
@@ -7538,13 +7647,20 @@ function ReviewInboxView({ params }) {
     }
   }, []);
 
+  const loadApplied = useCallback(async () => {
+    try {
+      const r = await api('/pothole/applied');
+      setApplied(r.applied || []);
+    } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
+  }, []);
+
   useEffect(() => {
-    load();
+    load(); loadApplied();
     // Light poll while a background pass may be computing (or right after a
     // manual refresh) so the empty/computing state resolves without a reload.
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
     return () => clearInterval(timer);
-  }, [load]);
+  }, [load, loadApplied]);
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -7552,7 +7668,7 @@ function ReviewInboxView({ params }) {
     setTimeout(() => { setRefreshing(false); load(); }, 1500);
   }, [load]);
 
-  const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature));
+  const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
   const potholeCount = visible.length;
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
@@ -7560,11 +7676,16 @@ function ReviewInboxView({ params }) {
     setDismissed(next); saveDismissedPotholes(next);
     setChecked(new Set());
   };
-  const modalCluster = modalSig ? visible.find(c => c.signature === modalSig) : null;
+  const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
+
+  const onApplied = (record) => {
+    setAppliedSigs(s => new Set([...s, record.signature]));
+    loadApplied();
+  };
 
   return html`
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
-    <div class="sz-note">Pothole fixes the self-improve loop's cross-session detector finds land here for review — each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> is not wired yet (apply lands in a later phase); <b>Dismiss</b> hides a row locally (this browser only — it is not sent to the server).</div>
+    <div class="sz-note">Pothole fixes the self-improve loop's cross-session detector finds land here for review — each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung — you confirm the scope + target first; <b>Dismiss</b> hides a row locally (this browser only — it is not sent to the server).</div>
 
     <div class="cur-listhead">
       <span>
@@ -7581,17 +7702,24 @@ function ReviewInboxView({ params }) {
           ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
           ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
           ${!d.error && !d.loading && d.status === 'never_run' ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No scan has run yet — click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</td></tr>` : null}
-          ${!d.error && !d.loading && d.status !== 'never_run' && potholeCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed everything).</td></tr>` : null}
+          ${!d.error && !d.loading && d.status !== 'never_run' && potholeCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</td></tr>` : null}
           ${!d.error && !d.loading ? visible.map(c => html`<${PotholeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
         </tbody>
       </table>
     </div>
     <div class="cur-addbar">
-      <button class="cur-btn primary" disabled=${true} title="Apply lands in the next phase">Approve checked →</button>
       <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
-      <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence and proposed fix.' : 'Nothing to review yet.'}</span>
+      <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
     </div>
-    <${PotholeDetailModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} />
+
+    ${applied.length > 0 ? html`
+      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
+      <div class="cur-listbox" style="margin-top:8px">
+        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${loadApplied} />`)}
+      </div>
+    ` : null}
+
+    <${PotholeApplyModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} onApplied=${onApplied} />
   `;
 }
 
