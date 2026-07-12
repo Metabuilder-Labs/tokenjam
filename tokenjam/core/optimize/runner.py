@@ -464,6 +464,7 @@ def _build_finding_constructors() -> dict:
         cands = [VerbosityCandidate(**c) for c in d.get("candidates") or []]
         return VerbosityFinding(
             candidates=cands,
+            total_candidates=int(d.get("total_candidates", 0)),
             sessions_examined=int(d.get("sessions_examined", 0)),
             cohorts_examined=int(d.get("cohorts_examined", 0)),
             remedy_snippet=d.get("remedy_snippet", ""),

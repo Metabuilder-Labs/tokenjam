@@ -18,6 +18,7 @@ from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import ANALYZER_REGISTRY, build_report
 from tokenjam.core.optimize.analyzers.output_verbosity import (
     HIGH_VERBOSITY_MULTIPLE,
+    MAX_EXAMPLES,
     MIN_COHORT_SESSIONS,
     VERBOSITY_HONESTY_CAVEAT,
     VerbosityFinding,
@@ -237,3 +238,28 @@ def test_cli_renders_candidate_without_error(db):
     # Should not raise for any pricing mode.
     for mode in ("api", "subscription", "local", "unknown"):
         _render_verbosity(finding, pricing_mode=mode, marker="①")
+
+
+def test_truncates_display_candidates_but_reports_true_total(db):
+    """More than MAX_EXAMPLES flagged sessions: `candidates` is capped for
+    display, but `total_candidates` carries the real count so the renderer can
+    say "top 5 of N" instead of silently under-reporting — and it survives the
+    report_to_dict/report_from_dict round-trip (the serve path). (Greptile #479)"""
+    # 10 baseline sessions at 100 output tokens (median stays ~100) …
+    for i in range(10):
+        _seed_session(db, f"low-{i}", output_tokens=100, i=i)
+    # … plus MAX_EXAMPLES + 1 verbose sessions well above 2× the median.
+    n_high = MAX_EXAMPLES + 1
+    for i in range(n_high):
+        _seed_session(db, f"hi-{i}", output_tokens=1000, i=20 + i)
+
+    report = build_report(
+        db=db, config=_config(), since=SINCE, until=UNTIL, findings=["verbosity"],
+    )
+    finding = report.findings["verbosity"]
+    assert len(finding.candidates) == MAX_EXAMPLES      # display cap
+    assert finding.total_candidates == n_high           # true flagged count
+
+    restored = report_from_dict(report_to_dict(report)).findings["verbosity"]
+    assert restored.total_candidates == n_high
+    assert len(restored.candidates) == MAX_EXAMPLES

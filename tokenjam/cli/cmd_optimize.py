@@ -1316,10 +1316,13 @@ def _render_verbosity(
             )
         return
 
+    shown = len(finding.candidates)
+    total = finding.total_candidates or shown
+    more = f" [dim](showing top {shown} of {total})[/dim]" if total > shown else ""
     console.print(
-        f"     • [bold]{len(finding.candidates)}[/bold] high-verbosity "
-        f"candidate{'s' if len(finding.candidates) != 1 else ''} "
-        f"[dim](output well above the per-task-shape median)[/dim]"
+        f"     • [bold]{total}[/bold] high-verbosity "
+        f"candidate{'s' if total != 1 else ''} "
+        f"[dim](output well above the per-task-shape median)[/dim]{more}"
     )
     for c in finding.candidates:
         # Recoverable framing: dollars only for api-billed users; otherwise the

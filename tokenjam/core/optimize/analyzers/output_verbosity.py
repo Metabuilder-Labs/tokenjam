@@ -123,6 +123,10 @@ class VerbosityFinding:
     """
 
     candidates: list[VerbosityCandidate] = field(default_factory=list)
+    # Pre-truncation flagged count. `candidates` is capped at MAX_EXAMPLES for
+    # display, but the recoverable totals accumulate over every flagged session —
+    # so the renderer reports this, not len(candidates), as the headline count.
+    total_candidates: int = 0
     sessions_examined: int = 0
     cohorts_examined: int = 0       # task-shape cohorts with a usable median
     # Surfaced remedy (not applied): a terse system-prompt snippet + a suggested
@@ -280,7 +284,7 @@ def run(ctx: AnalyzerContext) -> None:
         for m in members:
             if m.output_tokens <= threshold:
                 continue
-            over = int(m.output_tokens - median)
+            over = int(round(m.output_tokens - median))
             if over <= 0:
                 continue
             rates = get_rates(m.provider or "", m.model)
@@ -318,6 +322,7 @@ def run(ctx: AnalyzerContext) -> None:
 
     # Largest over-baseline output first — the most worthwhile to review.
     candidates.sort(key=lambda c: c.over_baseline_tokens, reverse=True)
+    finding.total_candidates = len(candidates)
     finding.candidates = candidates[:MAX_EXAMPLES]
     finding.estimated_recoverable_tokens = total_recoverable_tokens
     finding.estimated_recoverable_usd = (
