@@ -7465,6 +7465,57 @@ const RUNG_LABELS = {
 };
 const ENFORCEMENT_RUNGS = new Set([3, 4, 5]);
 
+// Phase 3 (Verify, self-improve-loop SPEC.md §4 step 6 / §10 / §11): the
+// verdict labels the Applied section shows per fix — correlational, never a
+// causal claim (see the ⓘ tooltip's `reason` string from the API).
+const VERDICT_LABELS = {
+  improved: { text: 'Improved', color: 'var(--success)' },
+  no_change: { text: 'No change', color: 'var(--warn)' },
+  regressed: { text: 'Regressed', color: 'var(--error)' },
+  insufficient_data: { text: 'Measuring…', color: 'var(--text-dim)' },
+  enforcement_disabled: { text: 'Not yet enforced', color: 'var(--text-dim)' },
+};
+const VERDICT_NUDGE = new Set(['no_change', 'regressed']);
+
+// One applied fix's recurrence-since-apply line: verdict, normalized
+// recurrence, realized savings (only ever shown for a real "improved"
+// verdict), and — for the `no_change`/`regressed` "codification != prevention"
+// signal — a nudge to escalate (rung 1 notes) or reconsider (any rung).
+function VerifyLine({ verify, rung }) {
+  if (!verify) return null;
+  const verdict = verify.verdict;
+  const label = VERDICT_LABELS[verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
+  const hasRecurrence = verify.recurrence_since_apply != null && verify.post_sessions_since_apply != null;
+  const saved = verify.realized_tokens_saved;
+  const nudge = VERDICT_NUDGE.has(verdict);
+  return html`
+    <div class="dim" style="font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span style=${'color:' + label.color + ';font-weight:500'}>${label.text}</span>
+      ${hasRecurrence ? html`<span>· ${verify.recurrence_since_apply} occurrence(s) in ${verify.post_sessions_since_apply} session(s) since apply</span>` : null}
+      ${saved > 0 ? html`<span style="color:var(--accent)">· ~${fmtTokens(saved)} tok saved <span class="estimated-tag" title="estimated / correlational — see the Compound ledger caveat">est.</span></span>` : null}
+      ${verify.last_checked_at ? html`<span title=${verify.reason || ''} style="cursor:help">ⓘ</span>` : null}
+      ${nudge ? html`<span style="color:var(--warn)">— not taking; consider ${rung === 1 ? 'escalating to a hook or ' : ''}reverting</span>` : null}
+    </div>`;
+}
+
+// The Compound ledger (SPEC §4 step 7): realized savings summed across every
+// VERIFIED fix, at the top of the Applied section — the loop's evidence that
+// it actually made things leaner, not just that it wrote something.
+function CompoundLedgerSummary({ ledger }) {
+  if (!ledger) return null;
+  if (!ledger.verified_count) {
+    return html`<div class="sz-note" style="margin:8px 0 12px">No fixes verified yet — the loop checks back once enough post-apply sessions accumulate.</div>`;
+  }
+  return html`
+    <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
+        <span style="font-size:20px;font-weight:600;color:var(--accent)">~${fmtTokens(ledger.total_realized_tokens_saved)} tok</span>
+        <span class="dim" style="font-size:12px">realized savings across ${ledger.improved_count} verified fix(es) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
+      </div>
+      <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} regressed · ${ledger.enforcement_disabled_count} awaiting enforcement · ${ledger.insufficient_data_count} still measuring</div>
+    </div>`;
+}
+
 function PotholeRow({ cluster, checked, onToggle, onExpand }) {
   const tokens = cluster.estimated_recoverable_tokens || 0;
   return html`
@@ -7611,6 +7662,7 @@ function AppliedFixRow({ rec, onChanged }) {
         ${isEnforcement && rec.state === 'applied' ? html`<span class="dim" style="font-size:11px">· enforcement ${enforcement && enforcement.enabled ? 'ENABLED' : 'disabled'}</span>` : null}
       </div>
       <div class="dim" style="font-size:12px"><code>${rec.target_path}</code> · applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}${rec.git_commit ? html` · <code>${rec.git_commit.slice(0, 8)}</code>` : ''}</div>
+      ${rec.state === 'applied' ? html`<${VerifyLine} verify=${rec.verify} rung=${rec.rung} />` : null}
       ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
       <div style="display:flex;gap:10px;align-items:center">
         ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
@@ -7632,6 +7684,7 @@ function ReviewInboxView({ params }) {
   const [refreshing, setRefreshing] = useState(false);
   const [applied, setApplied] = useState([]);
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
+  const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
 
   const load = useCallback(async () => {
     try {
@@ -7651,6 +7704,7 @@ function ReviewInboxView({ params }) {
     try {
       const r = await api('/pothole/applied');
       setApplied(r.applied || []);
+      setLedger(r.ledger || null);
     } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
   }, []);
 
@@ -7714,6 +7768,7 @@ function ReviewInboxView({ params }) {
 
     ${applied.length > 0 ? html`
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
+      <${CompoundLedgerSummary} ledger=${ledger} />
       <div class="cur-listbox" style="margin-top:8px">
         ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${loadApplied} />`)}
       </div>
