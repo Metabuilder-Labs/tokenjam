@@ -67,6 +67,18 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 @click.option("--export-templates", "export_templates", is_flag=True, default=False,
               help="Reuse only: write per-cluster Markdown skeletons to the "
                    "reports directory without opening the HTML report.")
+@click.option("--validate", "validate_finding", default=None,
+              type=click.Choice(["downsize"]),
+              help="Re-run the finding's candidate vs the recorded baseline on a "
+                   "small sample of your OWN captured calls (your API key) and "
+                   "report the MEASURED token/cost delta + a quality check. "
+                   "Requires [capture] prompts = true. Spends real money — you "
+                   "confirm the cost estimate first.")
+@click.option("--samples", "samples", type=int, default=None,
+              help="Number of recorded calls to re-run under --validate "
+                   "(default 5, max 20).")
+@click.option("--yes", "-y", "assume_yes", is_flag=True, default=False,
+              help="Skip the --validate cost-estimate confirmation prompt.")
 @click.option("--json", "output_json", is_flag=True,
               help="Emit machine-readable JSON.")
 @click.pass_context
@@ -80,6 +92,9 @@ def cmd_optimize(
     compare: str | None,
     export_target: str | None,
     export_templates: bool,
+    validate_finding: str | None,
+    samples: int | None,
+    assume_yes: bool,
     output_json: bool,
 ) -> None:
     """Analyze recent usage for cost-saving candidates and budget exposure."""
@@ -94,6 +109,22 @@ def cmd_optimize(
         raise click.BadParameter(str(exc), param_hint="'--since'") from exc
 
     until_dt = utcnow()
+
+    # --validate branch: turn an estimate into a MEASURED result by re-running
+    # the finding's candidate vs the recorded baseline on a sample of the user's
+    # own captured calls (issue #477). Self-contained early exit — it needs raw
+    # span attributes + a live provider call, so it requires a direct DuckDB
+    # connection (the read-only serve shim can't expose captured prompt content)
+    # and never runs the normal analyzer/report path.
+    if validate_finding:
+        _run_validate(
+            db, config,
+            finding=validate_finding,
+            since_dt=since_dt, until_dt=until_dt,
+            agent_id=agent, samples=samples, assume_yes=assume_yes,
+            output_json=output_json,
+        )
+        return
 
     # If user passed --compare last-7d / last-30d / last-week, override
     # --since so the analysis window matches the comparison period (#71
@@ -384,6 +415,142 @@ def _rank_findings(
 # ---------------------------------------------------------------------------
 # Human-readable renderer
 # ---------------------------------------------------------------------------
+
+def _run_validate(
+    db: Any,
+    config: Any,
+    *,
+    finding: str,
+    since_dt,
+    until_dt,
+    agent_id: str | None,
+    samples: int | None,
+    assume_yes: bool,
+    output_json: bool,
+) -> None:
+    """Empirically validate a finding on a sample of the user's own calls (#477).
+
+    Honesty (Rule 14): every figure is framed "measured on a sample of N calls".
+    We NEVER emit "certified"/"guaranteed" — that vocabulary is reserved for a
+    separate paid layer. Gates: prompt capture must be on; a live provider key
+    must be present; the user confirms the up-front cost estimate before we spend.
+    """
+    import os
+
+    from tokenjam.core.optimize.validate import (
+        ANTHROPIC_KEY_ENV,
+        DEFAULT_SAMPLE_SIZE,
+        MAX_SAMPLE_SIZE,
+        AnthropicProviderClient,
+        collect_downsize_samples,
+        estimate_sample_cost,
+        result_to_dict,
+        run_validation,
+    )
+
+    def _fail(message: str) -> None:
+        if output_json:
+            click.echo(json.dumps({"error": "validate_precondition", "message": message}))
+        else:
+            console.print(f"[red]{_rich_escape(message)}[/red]")
+        raise click.exceptions.Exit(1)
+
+    # --validate needs raw captured attributes + a live call, so it must run
+    # against a direct DuckDB connection (the serve shim can't expose prompt
+    # content). Bail cleanly if the daemon holds the lock.
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        _fail(
+            "tj optimize --validate needs direct database access and can't run "
+            "while tj serve holds the lock. Stop the daemon (tj stop) and retry."
+        )
+
+    # Gate 1: prompt capture must be on — off by default for privacy, so this is
+    # an opt-in power feature. Actionable message + the exact config hint.
+    if not getattr(config.capture, "prompts", False):
+        _fail(
+            "tj optimize --validate re-runs your recorded prompts, which requires "
+            "prompt capture. It is off by default (privacy). Enable it in your "
+            "config under [capture]:\n\n    [capture]\n    prompts = true\n\n"
+            "then let a few captured calls accumulate and try again."
+        )
+
+    # Resolve + bound the sample size.
+    k = DEFAULT_SAMPLE_SIZE if samples is None else samples
+    if k < 1:
+        _fail("--samples must be at least 1.")
+    if k > MAX_SAMPLE_SIZE:
+        _fail(f"--samples is capped at {MAX_SAMPLE_SIZE} (cost-bounded).")
+
+    sampled = collect_downsize_samples(conn, since_dt, until_dt, agent_id, k)
+    if not sampled:
+        _fail(
+            "No captured calls match the downsize candidate shape in this window. "
+            "Either there are no downsize candidates with captured prompts yet, or "
+            "capture was enabled after these calls ran. Widen --since or let more "
+            "captured calls accumulate."
+        )
+
+    # Gate 2: a live provider key. (v1 is Anthropic-only — the downsize candidates
+    # we replay are same-family Claude models.)
+    api_key = os.environ.get(ANTHROPIC_KEY_ENV)
+    if not api_key:
+        _fail(
+            f"tj optimize --validate makes live API calls with your own key. Set "
+            f"{ANTHROPIC_KEY_ENV} in your environment and try again."
+        )
+
+    # Gate 3: up-front cost estimate + confirmation before spending real money.
+    est = estimate_sample_cost(sampled)
+    n = len(sampled)
+    if not output_json and not assume_yes:
+        console.print(
+            f"[bold]Validating '{finding}' on {n} of your recorded calls.[/bold]\n"
+            f"[dim]This re-runs each call twice (baseline + candidate) through the "
+            f"real API with your key. Estimated cost ceiling: "
+            f"[bold]{format_cost(est)}[/bold].[/dim]"
+        )
+        if not click.confirm("Proceed and spend this?", default=False):
+            console.print("[dim]Cancelled — nothing was spent.[/dim]")
+            return
+
+    client = AnthropicProviderClient(api_key)
+    result = run_validation(sampled, client, finding=finding)
+
+    if output_json:
+        click.echo(json.dumps(result_to_dict(result)))
+        return
+
+    _render_validation(result)
+
+
+def _render_validation(result: Any) -> None:
+    """Render a ValidationResult. Honesty (Rule 14): lead with the sample size
+    and the 'measured on a sample' framing; the quality line is the point."""
+    tok_pct = result.tokens_delta_pct
+    cost_pct = result.cost_delta_pct
+    tok_pct_str = f" ({tok_pct:+.0f}%)" if tok_pct is not None else ""
+    cost_pct_str = f" ({cost_pct:+.0f}%)" if cost_pct is not None else ""
+
+    console.print(
+        f"\n[bold]Measured on a sample of {result.sample_size} of your recorded "
+        f"calls[/bold] [dim](finding: {result.finding})[/dim]"
+    )
+    console.print(
+        f"  Tokens:  {format_tokens(result.baseline_tokens)} -> "
+        f"{format_tokens(result.candidate_tokens)}{tok_pct_str}"
+    )
+    console.print(
+        f"  Cost:    {format_cost(result.baseline_cost_usd)} -> "
+        f"{format_cost(result.candidate_cost_usd)}{cost_pct_str}"
+    )
+    console.print(
+        f"  Quality: preserved "
+        f"[bold]{result.quality_preserved}/{result.sample_size}[/bold] "
+        f"[dim](exact-match on output)[/dim]"
+    )
+    console.print(f"\n[dim]{_rich_escape(result.caveat)}[/dim]")
+
 
 def _render_report(
     report: OptimizeReport,
