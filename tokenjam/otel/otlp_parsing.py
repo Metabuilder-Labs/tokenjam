@@ -14,7 +14,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from tokenjam.core.models import NormalizedSpan, SpanKind, SpanStatus
-from tokenjam.otel.semconv import GenAIAttributes, ResourceAttributes, TjAttributes
+from tokenjam.otel.semconv import (
+    GenAIAttributes,
+    OpenInferenceAttributes,
+    ResourceAttributes,
+    TjAttributes,
+)
 from tokenjam.utils.ids import new_span_id
 
 
@@ -140,9 +145,33 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
     if not provider:
         provider = attrs.get("gen_ai.system") or None
 
+    # OpenInference fallback (Arize convention: LangChain, LlamaIndex, CrewAI,
+    # LangGraph, OpenAI Agents SDK, DSPy, ...). gen_ai.* wins when present; fall
+    # back to the `llm.*` attributes for agents instrumented with OpenInference.
+    if not provider:
+        provider = attrs.get(OpenInferenceAttributes.SYSTEM) or None
+
     # Extract tool_name from span names like "tool.Read", "tool.exec".
     if not tool_name and span_name.startswith("tool."):
         tool_name = span_name[5:]
+
+    model = attrs.get(GenAIAttributes.REQUEST_MODEL)
+    if model is None:
+        model = attrs.get(OpenInferenceAttributes.MODEL_NAME)
+    input_tokens = safe_int(attrs.get(GenAIAttributes.INPUT_TOKENS))
+    if input_tokens is None:
+        input_tokens = safe_int(attrs.get(OpenInferenceAttributes.PROMPT_TOKENS))
+    output_tokens = safe_int(attrs.get(GenAIAttributes.OUTPUT_TOKENS))
+    if output_tokens is None:
+        output_tokens = safe_int(attrs.get(OpenInferenceAttributes.COMPLETION_TOKENS))
+    cache_tokens = safe_int(attrs.get(GenAIAttributes.CACHE_READ_TOKENS))
+    if cache_tokens is None:
+        cache_tokens = safe_int(attrs.get(OpenInferenceAttributes.CACHE_READ_TOKENS))
+    cache_write_tokens = safe_int(attrs.get(GenAIAttributes.CACHE_CREATE_TOKENS))
+    if cache_write_tokens is None:
+        cache_write_tokens = safe_int(
+            attrs.get(OpenInferenceAttributes.CACHE_WRITE_TOKENS)
+        )
 
     return NormalizedSpan(
         span_id=raw.get("spanId", new_span_id()),
@@ -169,12 +198,12 @@ def parse_otlp_span(raw: dict, resource_attrs: dict[str, Any]) -> NormalizedSpan
         ],
         agent_id=agent_id,
         provider=provider,
-        model=attrs.get(GenAIAttributes.REQUEST_MODEL),
+        model=model,
         tool_name=tool_name,
-        input_tokens=safe_int(attrs.get(GenAIAttributes.INPUT_TOKENS)),
-        output_tokens=safe_int(attrs.get(GenAIAttributes.OUTPUT_TOKENS)),
-        cache_tokens=safe_int(attrs.get(GenAIAttributes.CACHE_READ_TOKENS)),
-        cache_write_tokens=safe_int(attrs.get(GenAIAttributes.CACHE_CREATE_TOKENS)),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cache_tokens=cache_tokens,
+        cache_write_tokens=cache_write_tokens,
         cost_usd=safe_float(attrs.get(TjAttributes.COST_USD)),
         request_type=attrs.get(GenAIAttributes.REQUEST_TYPE),
         conversation_id=attrs.get(GenAIAttributes.CONVERSATION_ID),

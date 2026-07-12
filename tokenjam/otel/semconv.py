@@ -56,6 +56,32 @@ class GenAIAttributes:
     SPAN_LLM_CALL     = "gen_ai.llm.call"
 
 
+class OpenInferenceAttributes:
+    """OpenInference (Arize) span attribute names.
+
+    Emitted by OpenInference instrumentors (LangChain, LlamaIndex, CrewAI,
+    LangGraph, OpenAI Agents SDK, DSPy, and 25+ frameworks) instead of the OTel
+    GenAI `gen_ai.*` convention. Read by `parse_otlp_span` as a fallback AFTER
+    the `gen_ai.*` reads, so gen_ai wins when both are present.
+    """
+    # Span-kind gate ("LLM" | "TOOL" | ...)
+    SPAN_KIND = "openinference.span.kind"
+
+    # LLM identity
+    MODEL_NAME = "llm.model_name"
+    SYSTEM     = "llm.system"
+
+    # Token usage
+    PROMPT_TOKENS       = "llm.token_count.prompt"
+    COMPLETION_TOKENS   = "llm.token_count.completion"
+    CACHE_READ_TOKENS   = "llm.token_count.prompt_details.cache_read"
+    CACHE_WRITE_TOKENS  = "llm.token_count.prompt_details.cache_write"
+
+    # Span-kind values
+    KIND_LLM  = "LLM"
+    KIND_TOOL = "TOOL"
+
+
 class ClaudeCodeEvents:
     """Event names and attributes from Claude Code's OTel log exporter."""
     # Event names (logRecord body values)
