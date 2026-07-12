@@ -444,12 +444,13 @@ def render_skill_content(cluster: dict, signature: str, slug: str) -> str:
 #                                          suggests re-Read)
 #
 # `PostToolUseFailure` (docs.claude.com/en/hooks): fires only when a tool call
-# already errored, carries the failure's raw `error` text + `tool_name` +
-# `cwd` on stdin (no `tool_response` -- there's no result to replace), and
-# supports `hookSpecificOutput.additionalContext` on stdout to hand Claude
-# recovery context for its NEXT turn. It can never block anything and never
-# fires on a successful call -- exactly the "reactive, not a guard" shape the
-# mandate asks for.
+# already errored, carries the failure's error text + `tool_name` + `cwd` on
+# stdin, and supports `hookSpecificOutput.additionalContext` on stdout to hand
+# Claude recovery context for its NEXT turn. It can never block anything and
+# never fires on a successful call -- exactly the "reactive, not a guard"
+# shape the mandate asks for. The docs don't pin the exact field holding the
+# error, so the generated hook reads it defensively (`tool_error` -> `error`
+# -> `tool_response.error` -> stringified `tool_response`; see `_error_text`).
 
 _GUARD_FAMILIES = {"sleep_chain"}
 
@@ -588,13 +589,39 @@ _NOTE = {note_repr}
 _INCLUDE_CWD_LISTING = {include_listing!r}
 
 
+def _error_text(payload: dict) -> str:
+    """The failure's error string, read defensively across field-name variants.
+
+    The PostToolUseFailure input schema does not pin the exact field carrying
+    the error, so we try, in order: ``tool_error`` -> ``error`` ->
+    ``tool_response.error`` -> a stringified ``tool_response``. The first
+    non-empty string wins; if none yields one, return "" (fail-open -- inject
+    nothing). Never raises."""
+    for key in ("tool_error", "error"):
+        val = payload.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
+    resp = payload.get("tool_response")
+    if isinstance(resp, dict):
+        inner = resp.get("error")
+        if isinstance(inner, str) and inner.strip():
+            return inner
+    if isinstance(resp, str) and resp.strip():
+        return resp
+    if resp is not None and not isinstance(resp, str):
+        text = str(resp)
+        if text.strip():
+            return text
+    return ""
+
+
 def _context(payload: dict) -> str:
     """The `additionalContext` string to inject, or "" (no match -- pass
     through). Never raises -- see main()'s try/except."""
     tool_name = payload.get("tool_name", "")
     if tool_name not in _TOOLS:
         return ""
-    error_text = str(payload.get("error") or "")
+    error_text = _error_text(payload)
     if not error_text or not _PATTERN.search(error_text):
         return ""
     extra = ""
