@@ -14,6 +14,12 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 **No cloud · No signup · No vendor lock-in**
 
+
+<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
+<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
+
+
+
 </div>
 
 ---
@@ -49,14 +55,6 @@ Building your own agent with the SDK: install *in your project* (`pip install to
 
 ---
 
-## Where your tokens go
-
-Six ways an agent quietly overspends — each with the analyzer that finds it in your data.
-
-<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
-
----
-
 ## Which path are you?
 
 | You are | Run this | What you get |
@@ -80,8 +78,6 @@ A single page walks every path, each ending with a verify step: see
 ## Seven analyzers + Lens. One install.
 
 TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces savings across seven areas. It then brings them together in a local browser dashboard.
-
-<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
 
 <table>
 <tr>
