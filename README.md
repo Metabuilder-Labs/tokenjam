@@ -2,7 +2,7 @@
 
 <img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
 
-**See where your coding agent burns tokens — then cut it.**
+**See where your agent burns tokens — then cut it.**
 Measured from your own telemetry. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
@@ -24,7 +24,12 @@ Measured from your own telemetry. Runs entirely on your machine.
 
 ## Where the tokens go
 
-Six ways a coding agent quietly overspends — each with the analyzer that finds it in *your* data:
+Six ways an agent quietly overspends — each with the analyzer that finds it in *your* data:
+
+<img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Wrong model (Opus doing Haiku's job) → downsize; Uncached repeats (the same prompt, paid for 40×) → cache; Bloated prompts (10k tokens of dead context every call) → trim; Verbose output (500-word answers to yes/no) → verbosity; Repeated planning (re-planning the same task daily) → reuse; Not-even-an-LLM (a call that's really a regex) → script." width="830">
+
+<details>
+<summary>Same six levers as a table</summary>
 
 | Lever | What it looks like | Analyzer |
 |---|---|---|
@@ -34,6 +39,8 @@ Six ways a coding agent quietly overspends — each with the analyzer that finds
 | **Verbose output** | 500-word answers to yes/no | `verbosity` <sub>(new)</sub> |
 | **Repeated planning** | re-planning the same task daily | `reuse` |
 | **Not-even-an-LLM** | a call that's really a regex | `script` |
+
+</details>
 
 ---
 
