@@ -368,6 +368,65 @@ def test_cwd_confusion_hook_survives_unreadable_cwd(cfg, tmp_path):
     assert out["hookSpecificOutput"]["additionalContext"]
 
 
+# --- Defensive error-field extraction ----------------------------------------
+# The PostToolUseFailure input schema does not pin the exact field carrying the
+# error, so the generated hook reads it from whichever variant is present
+# (`tool_error` -> `error` -> `tool_response.error` -> stringified
+# `tool_response`). If the harness uses a different field than we assumed, the
+# hook must STILL fire on a real failure rather than silently no-op.
+
+_CWD_ERR = "(eval):cd:1: no such file or directory: orchestrator"
+
+
+@pytest.mark.parametrize("payload_key_path,wrap", [
+    ("tool_error", lambda err: {"tool_error": err}),
+    ("error", lambda err: {"error": err}),
+    ("tool_response.error", lambda err: {"tool_response": {"error": err}}),
+    ("stringified tool_response", lambda err: {"tool_response": {"stderr": err}}),
+])
+def test_reactive_hook_fires_regardless_of_error_field_name(cfg, tmp_path, payload_key_path, wrap):
+    target = _apply_reactive_hook(cfg, tmp_path, "cwd_confusion", "cwd / relative-path confusion")
+    payload = {"tool_name": "Bash", "cwd": str(tmp_path), **wrap(_CWD_ERR)}
+    proc = _run_hook(target, payload)
+    assert proc.returncode == 0
+    out = json.loads(proc.stdout)
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUseFailure"
+    assert "cwd_confusion" in out["hookSpecificOutput"]["additionalContext"], (
+        f"hook failed to extract error from {payload_key_path!r}"
+    )
+
+
+def test_reactive_hook_no_fire_when_error_absent_across_all_fields(cfg, tmp_path):
+    """No error under ANY field variant -> fail-open, inject nothing."""
+    target = _apply_reactive_hook(cfg, tmp_path, "cwd_confusion", "cwd / relative-path confusion")
+    battery = [
+        {"tool_name": "Bash", "cwd": str(tmp_path)},                       # no error field at all
+        {"tool_name": "Bash", "cwd": str(tmp_path), "tool_error": ""},     # empty tool_error
+        {"tool_name": "Bash", "cwd": str(tmp_path), "error": "   "},       # whitespace-only error
+        {"tool_name": "Bash", "cwd": str(tmp_path), "tool_response": {}},  # empty tool_response dict
+        {"tool_name": "Bash", "cwd": str(tmp_path), "tool_response": None},
+        # error present under a variant but UNRELATED to this family -> no fire
+        {"tool_name": "Bash", "cwd": str(tmp_path), "tool_error": "permission denied"},
+        {"tool_name": "Bash", "cwd": str(tmp_path), "tool_response": {"error": "npm ERR! ENOENT"}},
+    ]
+    for payload in battery:
+        proc = _run_hook(target, payload)
+        assert proc.returncode == 0
+        assert proc.stdout == "", f"unexpected fire on {payload!r}: {proc.stdout!r}"
+
+
+def test_reactive_hook_stale_read_fires_via_tool_response_error(cfg, tmp_path):
+    """Cross-family sanity: the defensive extraction is family-agnostic — a
+    stale-read hook also fires when the error arrives under tool_response.error."""
+    target = _apply_reactive_hook(cfg, tmp_path, "stale_read_race", "file modified since read")
+    proc = _run_hook(target, {
+        "tool_name": "Edit", "cwd": str(tmp_path),
+        "tool_response": {"error": "File has been modified since it was last read."},
+    })
+    assert proc.returncode == 0
+    assert proc.stdout.strip()
+
+
 def test_enable_enforcement_requires_confirm(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
