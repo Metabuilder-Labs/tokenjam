@@ -49,11 +49,19 @@ Building your own agent with the SDK: install *in your project* (`pip install to
 
 ---
 
+## Where your tokens go
+
+Six ways an agent quietly overspends — each with the analyzer that finds it in your data.
+
+<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
+
+---
+
 ## Which path are you?
 
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all six analyzers + Lens |
+| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all seven analyzers + Lens |
 | **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
 | **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
@@ -69,9 +77,11 @@ A single page walks every path, each ending with a verify step: see
 
 ---
 
-## Six analyzers + Lens. One install.
+## Seven analyzers + Lens. One install.
 
-TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces savings across six areas. It then brings them together in a local browser dashboard.
+TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces savings across seven areas. It then brings them together in a local browser dashboard.
+
+<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
 
 <table>
 <tr>
@@ -146,9 +156,24 @@ Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls 
 
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+
+### Verbosity
+
+`tj optimize verbosity`
+
+Flags sessions whose output runs long against a per-(tool, task-shape) baseline. Predicted high-verbosity output — review before constraining a response.
+
+[Details →](docs/optimize/verbosity.md)
+
+</td>
+<td width="50%" valign="top">
+</td>
+</tr>
 </table>
 
-`tj optimize` (no args) runs every analyzer: the six above, plus `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen) and `cache-recommend` (the Cache card's breakpoint-suggestion half, above). Run a subset with `tj optimize downsize cache reuse`. Lens brings it all together: see the dashboard below.
+`tj optimize` (no args) runs every analyzer: the seven above, plus `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen) and `cache-recommend` (the Cache card's breakpoint-suggestion half, above). Run a subset with `tj optimize downsize cache reuse`. Lens brings it all together: see the dashboard below.
 
 ---
 
