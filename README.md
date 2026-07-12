@@ -2,7 +2,8 @@
 
 <img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
 
-TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out. It then shows it all in a local browser dashboard. Runs entirely on your machine.
+**See where your coding agent burns tokens — then cut it.**
+Measured from your own telemetry. Runs entirely on your machine.
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -15,6 +16,34 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 **No cloud · No signup · No vendor lock-in**
 
 </div>
+
+<!-- Flow band: the value path, led by the agents a solo dev actually runs. -->
+`Claude Code` · `Codex` · `Cursor`  →  **TokenJam**  →  **See** (Lens) · **Cut** (Optimize) · **Prove** (Bench)  →  <sub>Govern (Cloud)</sub>
+
+---
+
+## Where the tokens go
+
+Six ways a coding agent quietly overspends — each with the analyzer that finds it in *your* data:
+
+| Lever | What it looks like | Analyzer |
+|---|---|---|
+| **Wrong model** | Opus doing Haiku's job | `downsize` |
+| **Uncached repeats** | the same prompt, paid for 40× | `cache` |
+| **Bloated prompts** | 10k tokens of dead context every call | `trim` |
+| **Verbose output** | 500-word answers to yes/no | `verbosity` <sub>(new)</sub> |
+| **Repeated planning** | re-planning the same task daily | `reuse` |
+| **Not-even-an-LLM** | a call that's really a regex | `script` |
+
+---
+
+## See your recoverable spend in one command
+
+```bash
+pipx install tokenjam && tj optimize
+```
+
+_**measured, not modeled.** TokenJam reads the telemetry you already have and reports `$—/mo · your data` — whatever your own runs actually add up to. No blended averages, no "up to X%," nothing "certified."_
 
 ---
 
