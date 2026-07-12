@@ -245,11 +245,20 @@ class AppliedFix:
     state:           str = "applied"        # applied | reverted
     reverted_at:     str | None = None
     revert_commit:   str | None = None
-    # Scaffold for Phase 3 (verify) — baseline counts at apply time so a later
-    # rescan can measure the recurrence delta for this exact signature.
+    # Scaffold for Phase 3 (verify, see core.optimize.pothole_verify) —
+    # baseline counts at apply time so a later rescan can measure the
+    # recurrence delta for this exact signature. `baseline_sessions` is the
+    # cluster's distinct AFFECTED sessions (from the proposal); `baseline_
+    # total_sessions` is the exposure denominator (ALL sessions in scope up
+    # to apply time, counted the same way the post-apply side is) — verify
+    # prefers the latter and falls back to the former only if it's missing.
     verify: dict[str, Any] = field(default_factory=lambda: {
         "baseline_sessions": None, "baseline_occurrences": None,
-        "recurrence_since_apply": None, "last_checked_at": None, "verdict": None,
+        "baseline_total_sessions": None,
+        "recurrence_since_apply": None, "post_sessions_since_apply": None,
+        "baseline_rate": None, "post_rate": None, "realized_tokens_saved": None,
+        "escalate_candidate": False, "reason": None,
+        "last_checked_at": None, "verdict": None,
     })
 
     def to_dict(self) -> dict:
@@ -284,6 +293,15 @@ def get_applied(config: TjConfig, fix_id: str) -> dict | None:
         if rec.get("id") == fix_id:
             return rec
     return None
+
+
+def set_verify(config: TjConfig, fix_id: str, verify: dict[str, Any]) -> dict:
+    """Overwrite an applied fix's ``verify`` sub-dict — the write side of
+    Phase 3 (``core.optimize.pothole_verify``'s rescan). The caller passes
+    the FULL merged verify dict (old fields + new), not a partial patch, so
+    this stays a plain field overwrite like every other ``_update_record``
+    caller."""
+    return _update_record(config, fix_id, verify=verify)
 
 
 def _save_record(config: TjConfig, record: AppliedFix) -> dict:
@@ -873,16 +891,31 @@ def apply_pothole_fix(
 
     from tokenjam.utils.time_parse import utcnow
 
+    applied_at_dt = utcnow()
     record = AppliedFix(
         id=fix_id, signature=plan["signature"], family_key=cluster.get("family_key"),
         title=cluster.get("title", plan["signature"]), rung=rung, kind=plan["kind"],
         scope=scope, target_path=str(target),
         repo_root=str(repo_root) if repo_root else None,
-        applied_at=utcnow().isoformat(), diff=plan["diff"], enforcement=enforcement,
+        applied_at=applied_at_dt.isoformat(), diff=plan["diff"], enforcement=enforcement,
         git_commit=commit_sha,
     )
     record.verify["baseline_sessions"] = cluster.get("sessions")
     record.verify["baseline_occurrences"] = cluster.get("occurrences")
+    # Best-effort exposure denominator (Phase 3 verify) — total sessions in
+    # this fix's scope up to right now, counted the SAME way a later verify
+    # pass counts the post-apply side (core.optimize.pothole_verify.
+    # count_sessions_in_scope), so the two rates are comparable. Never lets a
+    # scan failure sink the apply itself.
+    try:
+        from tokenjam.core.optimize import pothole_verify
+
+        repo_filter = repo_root.name if (scope == "project" and repo_root) else None
+        record.verify["baseline_total_sessions"] = pothole_verify.count_sessions_in_scope(
+            None, conn, repo_filter, before=applied_at_dt,
+        )
+    except Exception:
+        record.verify["baseline_total_sessions"] = None
     return {"dry_run": False, "record": _save_record(config, record)}
 
 

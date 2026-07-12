@@ -14,6 +14,13 @@ Approve stage: writes route through ``core.optimize.pothole_apply`` for every
 rung-routing / backup / git-commit / fail-open guarantee — this route only
 translates HTTP <-> that module's ``PotholeApplyRefused`` (-> 409) contract,
 it never hand-rolls a parallel write path.
+
+Phase 3 (Verify + Compound, ``core.optimize.pothole_verify``) rides the SAME
+``/refresh`` cadence: every background/manual recompute also re-measures each
+applied fix's recurrence and writes its verdict back into the ledger (see
+``pothole_store.recompute_now``). ``GET /applied`` now also returns a
+``ledger`` summary (``pothole_verify.compound_ledger``) — realized token
+savings, estimated/correlational, across every verified fix.
 """
 from __future__ import annotations
 
@@ -23,7 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from tokenjam.api.deps import require_api_key
-from tokenjam.core.optimize import pothole_apply, pothole_store
+from tokenjam.core.optimize import pothole_apply, pothole_store, pothole_verify
 
 router = APIRouter()
 
@@ -78,7 +85,7 @@ def refresh_pothole_proposals(request: Request) -> dict[str, Any]:
     from tokenjam.core.db import DuckDBBackend
 
     started = pothole_store.trigger_background_recompute(
-        lambda: DuckDBBackend(config.storage)
+        lambda: DuckDBBackend(config.storage), config=config,
     )
     return {"status": "started" if started else "already_running"}
 
@@ -134,8 +141,11 @@ def post_pothole_apply(request: Request, body: ApplyPotholeRequest) -> dict[str,
 
 @router.get("/pothole/applied", dependencies=[Depends(require_api_key)])
 def get_pothole_applied(request: Request) -> dict[str, Any]:
-    """Every applied fix (applied + reverted) — the inbox's 'Applied' section."""
-    return {"applied": pothole_apply.list_applied(_config(request))}
+    """Every applied fix (applied + reverted) — the inbox's 'Applied' section,
+    plus the Phase 3 Compound ledger summary (``core.optimize.pothole_verify.
+    compound_ledger``): total realized savings across every VERIFIED fix."""
+    applied = pothole_apply.list_applied(_config(request))
+    return {"applied": applied, "ledger": pothole_verify.compound_ledger(applied)}
 
 
 class EnableEnforcementRequest(BaseModel):

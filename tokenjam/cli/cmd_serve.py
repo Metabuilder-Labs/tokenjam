@@ -59,7 +59,7 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
 
     def _pothole_job() -> None:
         pothole_store.trigger_background_recompute(
-            lambda: _DuckDBBackend(config.storage)
+            lambda: _DuckDBBackend(config.storage), config=config,
         )
 
     # The interval trigger's own first fire is ~6h out; the lifespan below
