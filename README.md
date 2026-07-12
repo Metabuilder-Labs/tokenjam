@@ -202,7 +202,7 @@ Flags sessions whose output runs long against a per-(tool, task-shape) baseline.
 
 ## Beyond optimization
 
-TokenJam is also a full observability stack. The six analyzers and Lens ride on top.
+TokenJam is also a full observability stack. The seven analyzers and Lens ride on top.
 
 - **Real-time cost tracking**: every LLM call priced as it happens
 - **Safety alerts**: 13 alert types, 6 channels (ntfy, Discord, Telegram, webhook, file, stdout)
