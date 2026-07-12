@@ -7433,35 +7433,165 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 // explorer (which reads `since` from the same URL params).
 // ---- Review inbox (Improve lens home) ----
 // The self-improve loop's Approve stage (self-improve-loop SPEC.md §12 /
-// §8 reuse map): pending pothole/strategy fixes land here for a human to
-// approve or dismiss. No detector backend yet (Phase 1+ — see the loop's
-// Detect/Propose stages), so Phase A scaffolds an empty/waitlisted state.
-// The chassis (listhead / listbox / addbar) is modeled on Optimize ▸
-// Summarize's curate → diff → Apply/Reject screen (~6410-7040 below) so a
-// later phase wires real proposal cards into the same shape, not a rewrite.
+// §8 reuse map): pending pothole fixes the cross-session pothole aggregator
+// (core/optimize/analyzers/pothole.py, served from a background-refreshed
+// cache at GET /pothole/proposals — see api/routes/pothole.py) land here for
+// a human to review. Phase 1 is READ-ONLY: Approve is stubbed (apply lands in
+// a later phase); Dismiss is a client-side-only hide (persisted in
+// localStorage, never sent to the server — Phase 1 has no dismiss endpoint).
+// The chassis (listhead / listbox / addbar / cur-modal) is forked from
+// Optimize ▸ Summarize's curate → diff → Apply/Reject screen (~6410-7040
+// below), per Phase A's scaffold.
+const POTHOLE_DISMISSED_KEY = 'tj_pothole_dismissed_v1';
+
+function loadDismissedPotholes() {
+  try {
+    const raw = localStorage.getItem(POTHOLE_DISMISSED_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (e) { return new Set(); }
+}
+
+function saveDismissedPotholes(set) {
+  try { localStorage.setItem(POTHOLE_DISMISSED_KEY, JSON.stringify([...set])); } catch (e) { /* best-effort */ }
+}
+
+const RUNG_LABELS = {
+  1: 'note (CLAUDE.md)',
+  2: 'skill / doc',
+  3: 'hook',
+  4: 'wrapper / script',
+  5: 'config / env',
+};
+
+function PotholeRow({ cluster, checked, onToggle, onExpand }) {
+  const tokens = cluster.estimated_recoverable_tokens || 0;
+  return html`
+    <tr class="cur-row" key=${cluster.signature}>
+      <td><input type="checkbox" checked=${checked} onChange=${onToggle} /></td>
+      <td><span class="sz-link" onClick=${onExpand}>${cluster.title}</span>
+        ${cluster.family_key && cluster.family_key.startsWith('distilled:') ? html` <span class="dim" style="font-size:10.5px">· distilled</span>` : null}
+      </td>
+      <td class="mono">${cluster.sessions}</td>
+      <td><span class="dim" style="font-size:12px">${cluster.rung} · ${RUNG_LABELS[cluster.rung] || ''}</span></td>
+      <td class="mono" style="text-align:right;color:var(--accent)">~${fmtTokens(tokens)} tok <span class="estimated-tag" title="occurrences x a conservative per-turn token cost — review before applying">est.</span></td>
+      <td><span class="rev-state staged">pending</span></td>
+    </tr>`;
+}
+
+function PotholeDetailModal({ cluster, onClose }) {
+  if (!cluster) return null;
+  return html`
+    <div class="cur-overlay" onClick=${onClose}>
+      <div class="cur-modal" onClick=${e => e.stopPropagation()}>
+        <div class="cur-modal-head">
+          <span class="cur-modal-title">${cluster.title}</span>
+          <span class="rev-state staged" style="margin-left:6px">pending</span>
+          <button class="cur-modal-x" onClick=${onClose} title="Close">✕</button>
+        </div>
+        <div class="cur-modal-body">
+          <div style="font-size:12.5px;margin-bottom:10px">
+            <b>${cluster.sessions}</b> distinct sessions · <b>${cluster.occurrences}</b> occurrences ·
+            spread across <b>${(cluster.repos || []).length}</b> repo${(cluster.repos || []).length === 1 ? '' : 's'} ·
+            scope: <b>${cluster.scope}</b> · rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
+          </div>
+          <div class="opt-section" style="margin:0 0 14px">
+            <div class="opt-title" style="font-size:13px">Proposed fix</div>
+            <div class="sz-note" style="margin-top:4px">${cluster.proposed_fix}</div>
+          </div>
+          <div class="opt-section" style="margin:0 0 6px">
+            <div class="opt-title" style="font-size:13px">Evidence — repro sessions</div>
+            ${(cluster.examples || []).map((ex, i) => html`
+              <div class="sz-runrow" key=${i} style="align-items:flex-start">
+                <a class="sz-link" href=${'#/sessions/' + ex.session_id} target="_blank" rel="noopener">${(ex.session_id || '').slice(0, 12)}</a>
+                <span class="dim" style="font-size:12px">${ex.repo}${ex.ts ? ' · ' + ex.ts.slice(0, 16).replace('T', ' ') : ''}</span>
+                <pre class="rev-diff" style="margin:4px 0 0;white-space:pre-wrap;font-size:11.5px;flex-basis:100%">${ex.snippet}</pre>
+              </div>`)}
+            ${(!cluster.examples || cluster.examples.length === 0) ? html`<div class="dim" style="font-size:12.5px">No example sessions captured.</div>` : null}
+          </div>
+        </div>
+        <div class="cur-modal-foot">
+          <button class="cur-btn primary" disabled=${true} title="Apply lands in the next phase">Approve (coming soon)</button>
+          <button class="cur-btn" style="margin-left:auto" onClick=${onClose}>Close</button>
+        </div>
+      </div>
+    </div>`;
+}
+
 function ReviewInboxView({ params }) {
+  const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
+  const [dismissed, setDismissed] = useState(() => loadDismissedPotholes());
+  const [checked, setChecked] = useState(() => new Set());
+  const [modalSig, setModalSig] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api('/pothole/proposals');
+      const f = r.finding || {};
+      setD({
+        loading: false, error: null, status: r.status, computedAt: r.computed_at,
+        clusters: f.clusters || [], sessionsScanned: f.sessions_scanned,
+        failuresExamined: f.failures_examined, estTokens: f.estimated_recoverable_tokens,
+      });
+    } catch (e) {
+      setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+    // Light poll while a background pass may be computing (or right after a
+    // manual refresh) so the empty/computing state resolves without a reload.
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  const doRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try { await apiPost('/pothole/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
+    setTimeout(() => { setRefreshing(false); load(); }, 1500);
+  }, [load]);
+
+  const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature));
+  const potholeCount = visible.length;
+  const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
+  const dismissChecked = () => {
+    const next = new Set([...dismissed, ...checked]);
+    setDismissed(next); saveDismissedPotholes(next);
+    setChecked(new Set());
+  };
+  const modalCluster = modalSig ? visible.find(c => c.signature === modalSig) : null;
+
   return html`
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
-    <div class="sz-note">Pothole and strategy fixes the self-improve loop finds land here for approval — each card will link its evidence (repro sessions), the proposed edit, and its estimated savings. <b>Approve</b> writes the fix (backed up, reversible); <b>Dismiss</b> clears it from the queue.</div>
+    <div class="sz-note">Pothole fixes the self-improve loop's cross-session detector finds land here for review — each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> is not wired yet (apply lands in a later phase); <b>Dismiss</b> hides a row locally (this browser only — it is not sent to the server).</div>
 
     <div class="cur-listhead">
-      <span>0 pending · <b style="color:var(--warn)">0</b> potholes · <b style="color:var(--accent)">0</b> strategies</span>
+      <span>
+        ${potholeCount} pending · <b style="color:var(--warn)">${potholeCount}</b> potholes · <b style="color:var(--accent)">0</b> strategies
+        ${d.computedAt ? html` · <span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
+        ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
+      </span>
+      <span class="sz-link" onClick=${doRefresh}>${refreshing || d.status === 'computing' ? 'scanning…' : 'Rescan now'}</span>
     </div>
     <div class="cur-listbox">
       <table class="cur-table">
-        <thead><tr><th>Signature</th><th>Sessions</th><th>Rung</th><th style="text-align:right">Est. savings</th><th>Status</th></tr></thead>
+        <thead><tr><th style="width:26px"></th><th>Signature</th><th>Sessions</th><th>Rung</th><th style="text-align:right">Est. savings</th><th>Status</th></tr></thead>
         <tbody>
-          <tr><td colspan="5" class="dim" style="padding:32px 16px;text-align:center">
-            No pending fixes yet — the self-improve loop will surface pothole fixes here.
-          </td></tr>
+          ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
+          ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
+          ${!d.error && !d.loading && d.status === 'never_run' ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No scan has run yet — click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</td></tr>` : null}
+          ${!d.error && !d.loading && d.status !== 'never_run' && potholeCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed everything).</td></tr>` : null}
+          ${!d.error && !d.loading ? visible.map(c => html`<${PotholeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
         </tbody>
       </table>
     </div>
     <div class="cur-addbar">
-      <button class="cur-btn primary" disabled=${true}>Approve checked →</button>
-      <button class="cur-btn" disabled=${true}>Dismiss checked</button>
-      <span class="dim" style="font-size:12px">Nothing to review yet.</span>
+      <button class="cur-btn primary" disabled=${true} title="Apply lands in the next phase">Approve checked →</button>
+      <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
+      <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence and proposed fix.' : 'Nothing to review yet.'}</span>
     </div>
+    <${PotholeDetailModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} />
   `;
 }
 

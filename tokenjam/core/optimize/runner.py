@@ -37,6 +37,7 @@ ANALYZER_ORDER: list[str] = [
     "trim",
     "subagent",
     "summarize",
+    "pothole",
 ]
 
 THIN_DATA_DAYS = 7
@@ -338,6 +339,11 @@ def _build_finding_constructors() -> dict:
         SummarizeCandidate,
         SummarizeFinding,
     )
+    from tokenjam.core.optimize.analyzers.pothole import (
+        PotholeCluster,
+        PotholeExample,
+        PotholeFinding,
+    )
     from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
@@ -454,6 +460,24 @@ def _build_finding_constructors() -> dict:
             avg_reduction_pct=d.get("avg_reduction_pct"),
         )
 
+    def _pothole(d: dict) -> PotholeFinding:
+        clusters = []
+        for c in d.get("clusters") or []:
+            cc = dict(c)
+            cc["examples"] = [PotholeExample(**e) for e in cc.get("examples") or []]
+            clusters.append(PotholeCluster(**cc))
+        return PotholeFinding(
+            clusters=clusters,
+            sessions_scanned=int(d.get("sessions_scanned", 0)),
+            failures_examined=int(d.get("failures_examined", 0)),
+            distilled_clusters=int(d.get("distilled_clusters", 0)),
+            dropped_codified=int(d.get("dropped_codified", 0)),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
+            caveat=d.get("caveat", ""),
+        )
+
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
@@ -462,6 +486,7 @@ def _build_finding_constructors() -> dict:
         "trim": _prompt_bloat,
         "subagent": _subagent,
         "summarize": _summarize,
+        "pothole": _pothole,
     }
 
 
