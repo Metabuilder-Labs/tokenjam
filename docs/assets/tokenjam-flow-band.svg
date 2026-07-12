@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 830 140" width="830" height="140" role="img" aria-label="The TokenJam flow: your agents (Claude Code, Codex, Cursor) feed TokenJam, which reads your telemetry; you then See (Lens), Cut (Optimize), and Prove (Bench); Govern (Cloud) is the next layer.">
+  <defs>
+    <style>
+      .t { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+      .m { font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="829" height="139" rx="14" fill="#0d1117" stroke="#3d8eff" stroke-opacity="0.18"/>
+
+  <!-- Box 1: Your agents -->
+  <rect x="24" y="34" width="170" height="72" rx="10" fill="#11161f" stroke="#3d8eff" stroke-opacity="0.20"/>
+  <text x="109" y="66" text-anchor="middle" class="t" font-size="15" font-weight="650" fill="#e6edf3">Your agents</text>
+  <text x="109" y="87" text-anchor="middle" class="m" font-size="10.5" fill="#8b949e">Claude Code · Codex · Cursor</text>
+
+  <!-- arrow 1 -->
+  <text x="211" y="76" text-anchor="middle" class="t" font-size="18" fill="#3d8eff" fill-opacity="0.75">&#8594;</text>
+
+  <!-- Box 2: TokenJam (accent) -->
+  <rect x="228" y="34" width="170" height="72" rx="10" fill="#0e1b2e" stroke="#3d8eff" stroke-opacity="0.55"/>
+  <text x="313" y="66" text-anchor="middle" class="t" font-size="15.5" font-weight="700" fill="#3d8eff">TokenJam</text>
+  <text x="313" y="87" text-anchor="middle" class="t" font-size="10.5" fill="#8b949e">reads your telemetry</text>
+
+  <!-- arrow 2 -->
+  <text x="415" y="76" text-anchor="middle" class="t" font-size="18" fill="#3d8eff" fill-opacity="0.75">&#8594;</text>
+
+  <!-- Box 3: See · Cut · Prove -->
+  <rect x="432" y="34" width="170" height="72" rx="10" fill="#11161f" stroke="#3d8eff" stroke-opacity="0.20"/>
+  <text x="517" y="66" text-anchor="middle" class="t" font-size="15" font-weight="650" fill="#e6edf3">See · Cut · Prove</text>
+  <text x="517" y="87" text-anchor="middle" class="t" font-size="10.5" fill="#8b949e">Lens · Optimize · Bench</text>
+
+  <!-- arrow 3 (dim: the next layer) -->
+  <text x="619" y="76" text-anchor="middle" class="t" font-size="18" fill="#8b949e" fill-opacity="0.5">&#8594;</text>
+
+  <!-- Box 4: Govern (Cloud) — dim/next -->
+  <rect x="636" y="34" width="170" height="72" rx="10" fill="#0d1117" stroke="#6e7681" stroke-opacity="0.35" stroke-dasharray="4 4"/>
+  <text x="721" y="66" text-anchor="middle" class="t" font-size="15" font-weight="650" fill="#8b949e">Govern</text>
+  <text x="721" y="87" text-anchor="middle" class="t" font-size="10.5" fill="#6e7681">Cloud · optional</text>
+</svg>

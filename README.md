@@ -17,8 +17,10 @@ Measured from your own telemetry. Runs entirely on your machine.
 
 </div>
 
-<!-- Flow band: the value path, led by the agents a solo dev actually runs. -->
-`Claude Code` · `Codex` · `Cursor`  →  **TokenJam**  →  **See** (Lens) · **Cut** (Optimize) · **Prove** (Bench)  →  <sub>Govern (Cloud)</sub>
+<!-- Flow band as a visual: your agents -> TokenJam -> See/Cut/Prove -> Govern. -->
+<div align="center">
+<img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code · Codex · Cursor) → TokenJam (reads your telemetry) → See · Cut · Prove (Lens · Optimize · Bench) → Govern (Cloud, optional)." width="830">
+</div>
 
 ---
 
