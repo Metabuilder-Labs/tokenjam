@@ -204,6 +204,170 @@ def test_stub_matcher_for_unknown_family_never_blocks(cfg, tmp_path):
     assert proc.returncode == 0   # no matcher wired for an unknown family — never blocks
 
 
+# --- rung 3: PostToolUseFailure REACTIVE hooks (cwd_confusion, stale_read_race,
+# edit_string_not_found) — never block (PostToolUseFailure fires only after a
+# tool already failed), only inject `additionalContext`. Every test below
+# checks BOTH that the real failure signature fires AND that a battery of
+# normal/valid inputs does NOT fire — the false-positive battery is the part
+# that actually matters (SPEC §10: a false positive on real usage is worse
+# than a no-op). ------------------------------------------------------------
+
+def _apply_reactive_hook(cfg, tmp_path, family_key: str, title: str):
+    cluster = _cluster(signature=family_key, family_key=family_key, title=title, rung=3)
+    target = tmp_path / ".claude" / "hooks" / f"{family_key}.py"
+    pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    return target
+
+
+def _run_hook(target, payload: dict) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(target)], input=json.dumps(payload),
+        text=True, capture_output=True, timeout=10,
+    )
+
+
+def test_reactive_hooks_are_written_disabled_with_posttoolusefailure_wiring(cfg, tmp_path):
+    for family_key in ("cwd_confusion", "stale_read_race", "edit_string_not_found"):
+        target = _apply_reactive_hook(cfg, tmp_path, family_key, family_key)
+        assert target.is_file()
+        patch_path = target.parent / f"{pa.slugify(family_key)}.settings-patch.json"
+        patch = json.loads(patch_path.read_text())
+        assert list(patch["hooks"].keys()) == ["PostToolUseFailure"]
+        assert patch["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"] == str(target)
+        assert not (tmp_path / ".claude" / "settings.json").exists()
+
+
+def test_cwd_confusion_hook_fires_on_real_bash_failure(cfg, tmp_path):
+    target = _apply_reactive_hook(cfg, tmp_path, "cwd_confusion", "cwd / relative-path confusion")
+    proc = _run_hook(target, {
+        "tool_name": "Bash", "cwd": str(tmp_path),
+        "error": "(eval):cd:1: no such file or directory: orchestrator",
+    })
+    assert proc.returncode == 0
+    out = json.loads(proc.stdout)
+    ctx = out["hookSpecificOutput"]["additionalContext"]
+    assert out["hookSpecificOutput"]["hookEventName"] == "PostToolUseFailure"
+    assert str(tmp_path) in ctx        # actual cwd injected
+    assert "cwd_confusion" in ctx
+
+
+def test_cwd_confusion_hook_fires_on_real_read_failure(cfg, tmp_path):
+    target = _apply_reactive_hook(cfg, tmp_path, "cwd_confusion", "cwd / relative-path confusion")
+    proc = _run_hook(target, {
+        "tool_name": "Read", "cwd": str(tmp_path),
+        "error": "File does not exist. Note: your current working directory is /some/other/dir",
+    })
+    assert proc.returncode == 0
+    assert proc.stdout.strip()   # fired
+
+
+def test_cwd_confusion_hook_false_positive_battery(cfg, tmp_path):
+    """None of these NORMAL/VALID PostToolUseFailure payloads should fire."""
+    target = _apply_reactive_hook(cfg, tmp_path, "cwd_confusion", "cwd / relative-path confusion")
+    battery = [
+        # Real failure but on a tool this hook doesn't cover (e.g. Grep
+        # matching the literal phrase in file content it searched).
+        {"tool_name": "Grep", "cwd": str(tmp_path), "error": "no such file or directory"},
+        # Bash failure for an unrelated reason.
+        {"tool_name": "Bash", "cwd": str(tmp_path), "error": "npm ERR! code ENOENT"},
+        {"tool_name": "Bash", "cwd": str(tmp_path), "error": "permission denied"},
+        {"tool_name": "Bash", "cwd": str(tmp_path), "error": "command not found: foo"},
+        # Read failure for an unrelated reason.
+        {"tool_name": "Read", "cwd": str(tmp_path), "error": "offset must be a scalar, not an array"},
+        # No error text at all (shouldn't happen for PostToolUseFailure, but
+        # must never crash / never fire).
+        {"tool_name": "Bash", "cwd": str(tmp_path), "error": ""},
+        {"tool_name": "Bash", "cwd": str(tmp_path)},
+    ]
+    for payload in battery:
+        proc = _run_hook(target, payload)
+        assert proc.returncode == 0
+        assert proc.stdout == "", f"unexpected fire on {payload!r}: {proc.stdout!r}"
+
+
+def test_stale_read_race_hook_fires_on_real_failure(cfg, tmp_path):
+    target = _apply_reactive_hook(cfg, tmp_path, "stale_read_race", "file modified since read")
+    proc = _run_hook(target, {
+        "tool_name": "Edit", "cwd": str(tmp_path),
+        "error": "File has been modified since it was last read.",
+    })
+    assert proc.returncode == 0
+    out = json.loads(proc.stdout)
+    assert "re-Read" in out["hookSpecificOutput"]["additionalContext"] or \
+           "Read it again" in out["hookSpecificOutput"]["additionalContext"]
+
+
+def test_stale_read_race_hook_false_positive_battery(cfg, tmp_path):
+    target = _apply_reactive_hook(cfg, tmp_path, "stale_read_race", "file modified since read")
+    battery = [
+        {"tool_name": "Bash", "cwd": str(tmp_path), "error": "modified since read"},  # wrong tool
+        {"tool_name": "Edit", "cwd": str(tmp_path), "error": "string to replace not found"},
+        {"tool_name": "Write", "cwd": str(tmp_path), "error": "permission denied"},
+        {"tool_name": "MultiEdit", "cwd": str(tmp_path), "error": ""},
+        {"tool_name": "Edit", "cwd": str(tmp_path)},
+    ]
+    for payload in battery:
+        proc = _run_hook(target, payload)
+        assert proc.returncode == 0
+        assert proc.stdout == "", f"unexpected fire on {payload!r}: {proc.stdout!r}"
+
+
+def test_edit_string_not_found_hook_fires_on_real_failure(cfg, tmp_path):
+    target = _apply_reactive_hook(cfg, tmp_path, "edit_string_not_found", "Edit string-not-found")
+    proc = _run_hook(target, {
+        "tool_name": "Edit", "cwd": str(tmp_path),
+        "error": "String to replace not found in file.",
+    })
+    assert proc.returncode == 0
+    assert proc.stdout.strip()
+
+
+def test_edit_string_not_found_hook_false_positive_battery(cfg, tmp_path):
+    target = _apply_reactive_hook(cfg, tmp_path, "edit_string_not_found", "Edit string-not-found")
+    battery = [
+        {"tool_name": "Write", "cwd": str(tmp_path), "error": "string to replace not found"},  # wrong tool
+        {"tool_name": "Edit", "cwd": str(tmp_path), "error": "modified since it was last read"},
+        {"tool_name": "MultiEdit", "cwd": str(tmp_path), "error": "permission denied"},
+        {"tool_name": "Edit", "cwd": str(tmp_path), "error": ""},
+        {"tool_name": "Edit", "cwd": str(tmp_path)},
+    ]
+    for payload in battery:
+        proc = _run_hook(target, payload)
+        assert proc.returncode == 0
+        assert proc.stdout == "", f"unexpected fire on {payload!r}: {proc.stdout!r}"
+
+
+@pytest.mark.parametrize("family_key", ["cwd_confusion", "stale_read_race", "edit_string_not_found"])
+def test_reactive_hook_fails_open_on_garbage_stdin(cfg, tmp_path, family_key):
+    target = _apply_reactive_hook(cfg, tmp_path, family_key, family_key)
+    proc = subprocess.run([sys.executable, str(target)], input="not { valid json",
+                           text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
+@pytest.mark.parametrize("family_key", ["cwd_confusion", "stale_read_race", "edit_string_not_found"])
+def test_reactive_hook_fails_open_on_empty_stdin(cfg, tmp_path, family_key):
+    target = _apply_reactive_hook(cfg, tmp_path, family_key, family_key)
+    proc = subprocess.run([sys.executable, str(target)], input="",
+                           text=True, capture_output=True, timeout=10)
+    assert proc.returncode == 0
+    assert proc.stdout == ""
+
+
+def test_cwd_confusion_hook_survives_unreadable_cwd(cfg, tmp_path):
+    """A `cwd` that doesn't exist on disk must never crash the hook — it just
+    skips the directory listing (fail-soft), still injecting the note."""
+    target = _apply_reactive_hook(cfg, tmp_path, "cwd_confusion", "cwd / relative-path confusion")
+    proc = _run_hook(target, {
+        "tool_name": "Bash", "cwd": "/definitely/does/not/exist/anywhere",
+        "error": "no such file or directory",
+    })
+    assert proc.returncode == 0
+    out = json.loads(proc.stdout)
+    assert out["hookSpecificOutput"]["additionalContext"]
+
+
 def test_enable_enforcement_requires_confirm(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"

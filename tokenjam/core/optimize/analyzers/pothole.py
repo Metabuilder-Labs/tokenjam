@@ -100,8 +100,11 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         ),
         "rung": 3,
         "fix": (
-            "PreToolUse hook: verify (or inject) an absolute cwd before a Bash "
-            "`cd`/relative-path Read so the agent never guesses its working directory."
+            "PostToolUseFailure hook (Bash/Read): react only after a "
+            "'no such file or directory' failure by injecting the real cwd + "
+            "a short directory listing as additionalContext, so the agent "
+            "recovers in one shot instead of a PreToolUse guess-and-block on "
+            "every relative path (which would misfire on normal usage)."
         ),
     },
     {
@@ -109,10 +112,23 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "Edit/Write before Read",
         "tools": {"Edit", "Write", "MultiEdit", "NotebookEdit"},
         "pattern": re.compile(r"has not been read yet", re.IGNORECASE),
-        "rung": 3,
+        # Downgraded from rung 3 (Phase 2.5): the harness already errors
+        # clearly on this ("has not been read yet") and the agent virtually
+        # always self-corrects on the very next turn by reading the file —
+        # there's no failure-recovery gap for a reactive hook to close. A
+        # PreToolUse guard would need to track per-session read-state itself
+        # (which files has THIS session read, reset per session/compaction) —
+        # exactly the kind of fragile, easy-to-get-wrong state the harness
+        # already maintains authoritatively. Duplicating it in a hook risks a
+        # false block on a file the harness knows was read but our own
+        # tracking missed (a session resume, a compaction, a subagent read).
+        # Safer to note the pattern than to guess at its state.
+        "rung": 1,
         "fix": (
-            "PreToolUse hook: auto-Read the target file first when an Edit/Write "
-            "targets a file the session hasn't read yet."
+            "CLAUDE.md/skill note: the harness already blocks an Edit/Write "
+            "before a Read with a clear error ('has not been read yet') and "
+            "agents reliably self-correct by reading next turn — no hook "
+            "needed, this is advisory awareness only."
         ),
     },
     {
@@ -144,8 +160,9 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "pattern": re.compile(r"modified since (it was last read|read)", re.IGNORECASE),
         "rung": 3,
         "fix": (
-            "PostToolUse hook: re-Read a file after a formatter/linter hook rewrites "
-            "it so the next Edit targets the current bytes."
+            "PostToolUseFailure hook (Edit/Write/MultiEdit): react only after "
+            "a 'modified since read' failure by injecting a re-Read reminder "
+            "as additionalContext — never touches a successful edit."
         ),
     },
     {
@@ -157,7 +174,11 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "rung": 3,
-        "fix": "PreToolUse hook: re-Read the target file before a follow-up Edit on it.",
+        "fix": (
+            "PostToolUseFailure hook (Edit/MultiEdit): react only after a "
+            "string-not-found failure by injecting a re-Read reminder as "
+            "additionalContext — never touches a successful edit."
+        ),
     },
     {
         "key": "deferred_tool_cold",
