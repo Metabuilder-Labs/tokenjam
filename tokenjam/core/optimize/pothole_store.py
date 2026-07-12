@@ -17,36 +17,22 @@ import threading
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import Any, Callable
 
 from tokenjam.core.optimize.analyzers.pothole import PotholeFinding, compute_pothole_finding
-
-if TYPE_CHECKING:
-    from tokenjam.core.config import TjConfig
 
 _LOCK = threading.Lock()
 _COMPUTING = threading.Event()
 
 
-def default_cache_path(config: TjConfig | None = None) -> Path:
-    """``<storage-parent>/pothole_cache.json`` when ``config`` is given — this
-    honors ``--config`` / ``storage.path`` (and falls back to a config-scoped
-    TEMP dir, never the real ``~/.tj``, when ``storage.path`` is ``""``/
-    ``":memory:"``; see ``pothole_apply._storage_base_dir``). Without a
-    ``config`` (legacy callers), the old hardcoded ``~/.tj`` default."""
-    if config is not None:
-        from tokenjam.core.optimize.pothole_apply import _storage_base_dir
-
-        return _storage_base_dir(config) / "pothole_cache.json"
+def default_cache_path() -> Path:
     return Path.home() / ".tj" / "pothole_cache.json"
 
 
-def read_cache(
-    path: Path | None = None, *, config: TjConfig | None = None,
-) -> dict[str, Any] | None:
+def read_cache(path: Path | None = None) -> dict[str, Any] | None:
     """The last-written ``{"computed_at", "finding"}`` payload, or ``None`` if
     no recompute has ever completed (fresh install) or the file is corrupt."""
-    p = path or default_cache_path(config)
+    p = path or default_cache_path()
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -54,12 +40,10 @@ def read_cache(
     return raw if isinstance(raw, dict) else None
 
 
-def write_cache(
-    finding: PotholeFinding, path: Path | None = None, *, config: TjConfig | None = None,
-) -> dict[str, Any]:
+def write_cache(finding: PotholeFinding, path: Path | None = None) -> dict[str, Any]:
     """Atomically write the finding (temp file + rename), never a partial file
     a concurrent reader could observe."""
-    p = path or default_cache_path(config)
+    p = path or default_cache_path()
     payload = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "finding": asdict(finding),
@@ -78,61 +62,27 @@ def is_computing() -> bool:
     return _COMPUTING.is_set()
 
 
-def recompute_now(
-    conn: Any | None, *, cache_path: Path | None = None, config: Any | None = None,
-) -> dict[str, Any] | None:
+def recompute_now(conn: Any | None, *, cache_path: Path | None = None) -> dict[str, Any] | None:
     """Synchronous compute + cache write on the CALLING thread/connection.
 
     Returns ``None`` (no-op) if a recompute is already in flight elsewhere —
     never blocks waiting for the other one to finish. Callers that want
     non-blocking HTTP-request behaviour should run this on a background
     thread instead (see ``trigger_background_recompute``).
-
-    Phase 3 (verify, SPEC §4 step 6): "on each rescan" is THIS pass — when
-    ``config`` is supplied, every applied (non-reverted) fix's recurrence is
-    re-measured against the same fresh ``conn`` right after the detector
-    itself recomputes, so Verify always runs on the same cadence as Detect
-    with no separate scheduler entry. ``config=None`` (e.g. an older caller)
-    just skips the verify pass — degrade, never fail the detector recompute.
     """
     if not _LOCK.acquire(blocking=False):
         return None
     _COMPUTING.set()
     try:
-        # `[loop].transcript_path` lets a Claude Agent SDK app point the loop at
-        # its OWN transcript root instead of ~/.claude/projects. None keeps the
-        # historical env/default resolution.
-        projects_root = None
-        if config is not None:
-            try:
-                from tokenjam.core.transcript import loop_transcript_root
-
-                projects_root = loop_transcript_root(config)
-            except Exception:
-                projects_root = None
-        finding = compute_pothole_finding(conn, projects_root=projects_root)
-        # cache_path, when omitted, resolves via `config` (honors --config /
-        # storage.path, and a :memory:/"" storage.path never falls through to
-        # the real ~/.tj — see default_cache_path).
-        result = write_cache(finding, cache_path, config=config)
-        if config is not None:
-            try:
-                from tokenjam.core.optimize import pothole_verify
-
-                pothole_verify.rescan_all(config, conn, projects_root=projects_root)
-            except Exception:
-                pass   # best-effort — a verify failure never sinks the detector's own cache write
-        return result
+        finding = compute_pothole_finding(conn)
+        return write_cache(finding, cache_path)
     finally:
         _COMPUTING.clear()
         _LOCK.release()
 
 
 def trigger_background_recompute(
-    backend_factory: Callable[[], Any],
-    *,
-    cache_path: Path | None = None,
-    config: Any | None = None,
+    backend_factory: Callable[[], Any], *, cache_path: Path | None = None,
 ) -> bool:
     """Fire-and-forget a recompute on a daemon thread.
 
@@ -141,9 +91,6 @@ def trigger_background_recompute(
     request connection, so the scan's DuckDB read never contends with a
     concurrent writer. The backend is closed when the job finishes. Returns
     ``False`` (no-op, nothing started) if a recompute is already running.
-
-    ``config`` (optional): passed straight through to ``recompute_now`` so
-    its Phase 3 verify pass can locate ``applied_fixes.json``.
     """
     if is_computing():
         return False
@@ -153,7 +100,7 @@ def trigger_background_recompute(
         try:
             backend = backend_factory()
             conn = getattr(backend, "conn", None)
-            recompute_now(conn, cache_path=cache_path, config=config)
+            recompute_now(conn, cache_path=cache_path)
         except Exception:
             # Best-effort background job — never crash the scheduler/thread pool.
             pass

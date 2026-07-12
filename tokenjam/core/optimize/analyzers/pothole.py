@@ -100,11 +100,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         ),
         "rung": 3,
         "fix": (
-            "PostToolUseFailure hook (Bash/Read): react only after a "
-            "'no such file or directory' failure by injecting the real cwd + "
-            "a short directory listing as additionalContext, so the agent "
-            "recovers in one shot instead of a PreToolUse guess-and-block on "
-            "every relative path (which would misfire on normal usage)."
+            "PreToolUse hook: verify (or inject) an absolute cwd before a Bash "
+            "`cd`/relative-path Read so the agent never guesses its working directory."
         ),
     },
     {
@@ -112,23 +109,10 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "Edit/Write before Read",
         "tools": {"Edit", "Write", "MultiEdit", "NotebookEdit"},
         "pattern": re.compile(r"has not been read yet", re.IGNORECASE),
-        # Downgraded from rung 3 (Phase 2.5): the harness already errors
-        # clearly on this ("has not been read yet") and the agent virtually
-        # always self-corrects on the very next turn by reading the file —
-        # there's no failure-recovery gap for a reactive hook to close. A
-        # PreToolUse guard would need to track per-session read-state itself
-        # (which files has THIS session read, reset per session/compaction) —
-        # exactly the kind of fragile, easy-to-get-wrong state the harness
-        # already maintains authoritatively. Duplicating it in a hook risks a
-        # false block on a file the harness knows was read but our own
-        # tracking missed (a session resume, a compaction, a subagent read).
-        # Safer to note the pattern than to guess at its state.
-        "rung": 1,
+        "rung": 3,
         "fix": (
-            "CLAUDE.md/skill note: the harness already blocks an Edit/Write "
-            "before a Read with a clear error ('has not been read yet') and "
-            "agents reliably self-correct by reading next turn — no hook "
-            "needed, this is advisory awareness only."
+            "PreToolUse hook: auto-Read the target file first when an Edit/Write "
+            "targets a file the session hasn't read yet."
         ),
     },
     {
@@ -160,9 +144,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "pattern": re.compile(r"modified since (it was last read|read)", re.IGNORECASE),
         "rung": 3,
         "fix": (
-            "PostToolUseFailure hook (Edit/Write/MultiEdit): react only after "
-            "a 'modified since read' failure by injecting a re-Read reminder "
-            "as additionalContext — never touches a successful edit."
+            "PostToolUse hook: re-Read a file after a formatter/linter hook rewrites "
+            "it so the next Edit targets the current bytes."
         ),
     },
     {
@@ -174,33 +157,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "rung": 3,
-        "fix": (
-            "PostToolUseFailure hook (Edit/MultiEdit): react only after a "
-            "string-not-found failure by injecting a re-Read reminder as "
-            "additionalContext — never touches a successful edit."
-        ),
-    },
-    {
-        # MUST stay ordered before "deferred_tool_cold" below: that family's
-        # pattern (`inputvalidationerror`, tools=None -> matches ANY tool)
-        # also fires on the real wording of THIS family's evidence --
-        # "InputValidationError: Read failed due to the following issue:\n
-        # The parameter `offset` type is expected as `number` but provided
-        # as `array`" matches both patterns. classify_known_family is
-        # first-match-wins over declaration order, so the more-specific
-        # family (Read-only, offset-specific) has to be checked first or its
-        # evidence is silently absorbed by the generic one and mislabeled
-        # with the wrong fix. Validated against the real corpus (2026-07-14):
-        # with the old order, 100% of read_offset_malformed's evidence
-        # (~35% of deferred_tool_cold's Read-tool occurrences) was shadowed
-        # this way -- the family never once surfaced a proposal despite
-        # matching real, recurring evidence.
-        "key": "read_offset_malformed",
-        "title": "Read malformed offset (array, not scalar)",
-        "tools": {"Read"},
-        "pattern": re.compile(r"offset.{0,20}(must be|invalid|expected)|invalid.{0,20}offset", re.IGNORECASE),
-        "rung": 1,
-        "fix": "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not arrays.",
+        "fix": "PreToolUse hook: re-Read the target file before a follow-up Edit on it.",
     },
     {
         "key": "deferred_tool_cold",
@@ -217,24 +174,20 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         ),
     },
     {
-        # Downgraded from rung 5 (Phase 2.5, 2026-07-14): rung 5 promises a
-        # "config/env fix", but there is no safe automatic config/env writer
-        # in this codebase -- Apply used to render an inert stub hook for
-        # this family (`_render_stub_hook`, never wired to block/inject
-        # anything), advertising a fix that did nothing. A rung-1 CLAUDE.md
-        # note is honest about what's actually deliverable and still useful.
         "key": "command_not_found",
         "title": "command not found (bashisms under zsh, bare interpreter)",
         "tools": {"Bash"},
         "pattern": re.compile(r"command not found", re.IGNORECASE),
+        "rung": 5,
+        "fix": "Config/env fix: alias or install the missing binary in the harness's shell profile.",
+    },
+    {
+        "key": "read_offset_malformed",
+        "title": "Read malformed offset (array, not scalar)",
+        "tools": {"Read"},
+        "pattern": re.compile(r"offset.{0,20}(must be|invalid|expected)|invalid.{0,20}offset", re.IGNORECASE),
         "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
-            "PATH. Common causes here: using bare `python` instead of `python3`, "
-            "or a bash-only builtin (`mapfile`, `shopt`, `[[ ... ]]` extensions) "
-            "that doesn't exist under this shell (e.g. zsh, sh) or POSIX mode. "
-            "Prefer the portable/explicit form."
-        ),
+        "fix": "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not arrays.",
     },
     {
         "key": "webfetch_domain_blocked",
@@ -510,62 +463,6 @@ def distill_pothole_cluster(
     return {"title": title, "family_key": family_key, "fix": fix}
 
 
-# --- Distill confidence gate (SPEC honesty requirement) ------------------------
-#
-# Validated against the real corpus (2026-07-14): fed only bare/near-empty
-# evidence, the distill model reliably CONFABULATES a specific-sounding but
-# ungrounded fix rather than declining. The single biggest real example: a
-# multi-command `&&` Bash chain whose LAST command exits nonzero with no
-# error text of its own (a trailing `grep`/`find` "no match", commonly) —
-# the captured "error" is either empty, a bare digit/punctuation residue
-# (`0`, `000`, `---`), or literally just leftover STDOUT from an EARLIER,
-# successful command in the chain (an `ls -la` dump) that has nothing to do
-# with why the chain's exit code was nonzero. Distill invented FIVE different
-# titled "fixes" for that one benign phenomenon (bash_stderr_missing,
-# bash_error_reporting, bash_env_setup, bash_output_buffer_limit,
-# bash_output_truncation) — each confident, each wrong, none traceable to any
-# actual quoted error text. A fix can only be grounded in evidence that
-# itself says something; this gate rejects a cluster BEFORE distillation when
-# none of its samples clear that bar, rather than trusting the model to
-# decline on its own.
-
-_EXIT_CODE_PREFIX_RE = re.compile(r"^\s*exit code\s+\d+\s*\n?", re.IGNORECASE)
-#: Body is "noise" if, after stripping a leading exit-code line, nothing but
-#: digits/whitespace/punctuation is left (catches "", "0", "000", "---").
-_ONLY_NOISE_RE = re.compile(r"^[\s\d\W]*$")
-#: A body that's actually just a raw `ls -la`-style directory dump — real
-#: text, but leftover stdout from an earlier chain step, not an error
-#: description of why the LAST command in the chain failed.
-_LS_LISTING_RE = re.compile(r"^\s*total\s+\d+\s*\n\s*[dlpscb\-][rwxst\-]{9}[@+.]?\s", re.IGNORECASE)
-
-
-def _is_substantive_error_text(text: str) -> bool:
-    """False for evidence too thin to ground a specific distilled fix in —
-    see the confidence-gate note above. Never raises."""
-    if not text:
-        return False
-    body = _EXIT_CODE_PREFIX_RE.sub("", text, count=1).strip()
-    if not body:
-        return False
-    if _ONLY_NOISE_RE.match(body):
-        return False
-    if _LS_LISTING_RE.match(body):
-        return False
-    return True
-
-
-def _evidence_too_thin_for_distill(cluster: _RawCluster, *, sample_cap: int = 8) -> bool:
-    """True when NONE of a cluster's (capped) raw samples carry substantive
-    error text — the distill confidence gate. A cluster failing this check is
-    suppressed entirely rather than distilled (see ``apply_distill_to_residual``):
-    showing a human a confident title + fix that traces to nothing but bare
-    exit codes / leftover stdout is worse than surfacing nothing."""
-    samples = [f.error_text for f in cluster.failures if f.error_text][:sample_cap]
-    if not samples:
-        return True
-    return not any(_is_substantive_error_text(s) for s in samples)
-
-
 def _distill_cached(tool_name: str, cluster: _RawCluster, cache_dir: Path) -> dict[str, str]:
     """Cached wrapper (keyed by cluster content hash) — never re-spends on an
     unchanged cluster. Best-effort: any I/O error degrades to a cache miss."""
@@ -617,8 +514,6 @@ def apply_distill_to_residual(
 
     merged: dict[str, _RawCluster] = {}
     for cluster in to_distill:
-        if _evidence_too_thin_for_distill(cluster):
-            continue  # confidence gate: suppressed, not distilled — see note above
         tool_name = cluster.failures[0].tool_name if cluster.failures else "unknown"
         result = _distill_cached(tool_name, cluster, cache_dir)
         if not result:
@@ -750,20 +645,6 @@ class PotholeCluster:
     estimated_recoverable_tokens: int = 0
     confidence:                   str = "heuristic"
     novel:                        bool = True
-    # Phase 2 (apply) — best-effort cwd of the cluster's (sole, if project-
-    # scoped) repo, and a suggested rung-1 write target derived from it. Both
-    # are just a DEFAULT for the Review inbox card's scope/target override
-    # (§7's "repo-identity is noisy" — never applied blindly); "" when
-    # unknown (multi-repo / user-global / no cwd could be resolved).
-    repo_cwd:                     str = ""
-    suggested_target:             str = ""
-    # ADVISE lane (workspace-less agents). True when every contributing repo is
-    # an agent tokenjam has no workspace to write into (an SDK/OTel service, not
-    # a checkout) — so there is no apply path at all: the card carries a
-    # recommendation the user applies themselves, `suggested_target` stays "",
-    # and Verify runs off spans instead of transcripts. See
-    # `core/optimize/pothole_otel.py`.
-    advise_only:                  bool = False
 
 
 @dataclass
@@ -794,24 +675,9 @@ def build_proposals(
     *,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     doc_text: str = "",
-    repo_cwd_map: dict[str, str] | None = None,
-    advise_only_repos: set[str] | None = None,
 ) -> tuple[list[PotholeCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
-    ``(proposals, dropped_codified_count)``.
-
-    ``repo_cwd_map`` (repo label -> a representative cwd) is optional,
-    best-effort enrichment used only to pre-fill the Apply stage's suggested
-    target path (Phase 2) — clustering itself needs none of it.
-
-    ``advise_only_repos`` names the agents tokenjam has NO workspace for (the
-    OTel lane — see ``core/optimize/pothole_otel.py``). A cluster whose repos are
-    all in that set is marked ``advise_only`` and gets NO suggested target: there
-    is nothing to apply into, so the card must not imply an apply path exists.
-    """
-    from tokenjam.core.optimize.pothole_apply import default_target_path, slugify
-
-    repo_cwd_map = repo_cwd_map or {}
+    ``(proposals, dropped_codified_count)``."""
     proposals: list[PotholeCluster] = []
     dropped = 0
     for cluster in clusters:
@@ -835,25 +701,6 @@ def build_proposals(
             for f in sorted(cluster.failures, key=lambda f: f.ts or "", reverse=True)[:MAX_EXAMPLE_SESSIONS]
         ]
 
-        scope = _scope_for(cluster.repos)
-        # Workspace-less (OTel) clusters have nowhere to write: no cwd, no
-        # target, and the card must not offer an apply path it can't honor.
-        advise_only = bool(advise_only_repos) and all(
-            r in advise_only_repos for r in repos
-        )
-        repo_cwd = "" if advise_only else (
-            repo_cwd_map.get(repos[0], "") if len(repos) == 1 else ""
-        )
-        if advise_only:
-            suggested_target = ""
-        else:
-            try:
-                suggested_target = default_target_path(
-                    rung, scope, repo_cwd, slugify(cluster.title),
-                )
-            except Exception:
-                suggested_target = ""   # never let a bad path computation sink the proposal
-
         proposals.append(PotholeCluster(
             signature=cluster.signature,
             family_key=cluster.family_key,
@@ -862,14 +709,11 @@ def build_proposals(
             occurrences=occurrences,
             repos=repos,
             rung=rung,
-            scope=scope,
+            scope=_scope_for(cluster.repos),
             proposed_fix=fix,
             examples=examples,
             estimated_recoverable_tokens=occurrences * GROUNDED_TOKENS_PER_OCCURRENCE,
             novel=True,
-            repo_cwd=repo_cwd,
-            suggested_target=suggested_target,
-            advise_only=advise_only,
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
@@ -886,20 +730,9 @@ def analyze_potholes(
     distill_enabled: bool = True,
     distill_cache_dir: Path | None = None,
     codified_doc_text: str = "",
-    repo_cwd_map: dict[str, str] | None = None,
-    extra_failures: list[FailureEpisode] | None = None,
-    advise_only_repos: set[str] | None = None,
 ) -> PotholeFinding:
     """Full pipeline over an explicit session list — the pure core the
-    registry entry point and the on-disk cache job both call. Never raises.
-
-    ``extra_failures`` are episodes extracted somewhere other than an on-disk
-    transcript — today the OTel lane's failing spans (see
-    ``core/optimize/pothole_otel.py``). They join the SAME clustering pass, so a
-    signature that recurs across both lanes clusters as one pothole.
-    ``advise_only_repos`` is forwarded to ``build_proposals`` to mark the
-    workspace-less clusters.
-    """
+    registry entry point and the on-disk cache job both call. Never raises."""
     all_failures: list[FailureEpisode] = []
     scanned = 0
     for session_id, repo in sessions:
@@ -910,12 +743,6 @@ def analyze_potholes(
         scanned += 1
         all_failures.extend(failures)
 
-    if extra_failures:
-        all_failures.extend(extra_failures)
-        # Span-sourced sessions are real scanned exposure too; counting them
-        # keeps sessions_scanned honest against the recurrence denominator.
-        scanned += len({f.session_id for f in extra_failures})
-
     raw_clusters = cluster_failures(all_failures)
     recurring = _recurring(raw_clusters, min_sessions)
     distilled = apply_distill_to_residual(
@@ -925,7 +752,6 @@ def analyze_potholes(
 
     proposals, dropped = build_proposals(
         distilled, min_sessions=min_sessions, doc_text=codified_doc_text,
-        repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
 
@@ -959,17 +785,17 @@ def _repo_map_from_db(conn) -> dict[str, str]:
     return out
 
 
-def _repo_cwd_map_for(sessions: list[tuple[str, str]], projects_root: Path) -> dict[str, str]:
-    """Best-effort repo-label -> cwd, for the novelty doc search AND (Phase 2)
-    the Apply stage's suggested target path. Derived from the encoded project
-    directory name is unreliable, so this reads each session's transcript's
-    first ``cwd`` field directly (cheap: short-circuits after the first hit)
-    for one representative session per repo."""
+def _repo_cwds_for(sessions: list[tuple[str, str]], projects_root: Path) -> set[str]:
+    """Best-effort cwd per repo label, for the novelty doc search — derived
+    from the encoded project directory name is unreliable, so this reads each
+    session's transcript's first ``cwd`` field directly (cheap: short-circuits
+    after the first hit) for one representative session per repo."""
     from tokenjam.core.transcript import _locate_transcript, read_records
 
-    out: dict[str, str] = {}
+    seen_repos: set[str] = set()
+    cwds: set[str] = set()
     for session_id, repo in sessions:
-        if repo in out:
+        if repo in seen_repos:
             continue
         path = _locate_transcript(session_id, projects_root)
         if path is None:
@@ -977,9 +803,10 @@ def _repo_cwd_map_for(sessions: list[tuple[str, str]], projects_root: Path) -> d
         for record in read_records(path)[:5]:
             cwd = record.get("cwd")
             if isinstance(cwd, str) and cwd:
-                out[repo] = cwd
+                cwds.add(cwd)
+                seen_repos.add(repo)
                 break
-    return out
+    return cwds
 
 
 def compute_pothole_finding(
@@ -1002,32 +829,9 @@ def compute_pothole_finding(
     optionally pre-filtered to ``since`` when the caller wants an incremental
     scan. Heavy (tens of seconds over a full local corpus) — callers that
     serve this over HTTP MUST cache the result, not compute it per-request.
-
-    TWO LANES. On-disk transcripts cover the workspace agents; when ``conn`` is
-    given, failing spans from NON-coding agents are folded into the same
-    clustering pass so SDK/OTel services are no longer invisible to the
-    detector (``core/optimize/pothole_otel.py``). Their clusters come back
-    ``advise_only``: detect and advise, never apply.
     """
     root = resolve_projects_root(projects_root)
     repo_map = _repo_map_from_db(conn) if conn is not None else {}
-
-    # The OTel lane. Best-effort: a failure here must never sink the (already
-    # working) transcript scan.
-    span_failures: list[FailureEpisode] = []
-    advise_only_repos: set[str] = set()
-    if conn is not None:
-        try:
-            from tokenjam.core.optimize.pothole_otel import (
-                extract_span_failures,
-                non_coding_agent_ids,
-            )
-
-            span_failures = extract_span_failures(conn, since)
-            advise_only_repos = non_coding_agent_ids(conn)
-        except Exception:
-            span_failures = []
-            advise_only_repos = set()
 
     paths = sorted(root.rglob("*.jsonl")) if root.exists() else []
     sessions: list[tuple[str, str]] = []
@@ -1044,17 +848,15 @@ def compute_pothole_finding(
         sessions.append((session_id, repo_map.get(session_id, "unknown")))
 
     doc_text = ""
-    repo_cwd_map: dict[str, str] = {}
     try:
-        repo_cwd_map = _repo_cwd_map_for(sessions, root)
-        doc_text = _doc_text(_candidate_doc_paths(set(repo_cwd_map.values())))
+        cwds = _repo_cwds_for(sessions, root)
+        doc_text = _doc_text(_candidate_doc_paths(cwds))
     except Exception:
         doc_text = ""
 
     return analyze_potholes(
         sessions, projects_root=root, codified_doc_text=doc_text,
-        distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
-        extra_failures=span_failures, advise_only_repos=advise_only_repos,
+        distill_enabled=distill_enabled,
     )
 
 

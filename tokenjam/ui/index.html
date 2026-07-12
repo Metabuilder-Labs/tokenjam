@@ -285,6 +285,16 @@ code, .mono {
 }
 .card-row .label { color: var(--text-dim); }
 .card-row .value { color: var(--text); }
+.budget-bar {
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+.budget-bar-fill { height: 100%; border-radius: 2px; background: var(--success); transition: width 0.3s; }
+.budget-bar-fill.warn { background: var(--warn); }
+.budget-bar-fill.over { background: var(--error); }
 
 /* Info tooltip */
 .info-btn {
@@ -327,6 +337,10 @@ code, .mono {
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
+/* Status List (#263): a min-width lets the table exceed a narrow container so
+   .table-wrap's overflow-x actually scrolls, instead of compressing columns and
+   clipping the actions cell (View cost / View traces) off the right edge. */
+.table-wrap table.status-list { min-width: 760px; }
 table {
   width: 100%;
   border-collapse: collapse;
@@ -356,7 +370,7 @@ td.chevron { color: var(--text-dim); font-size: 14px; text-align: center; width:
 tr.clickable:hover td.chevron { color: var(--accent); }
 /* Status-list row actions: unify the two secondary links (View cost / View
    traces) into one inline group with consistent spacing, clearly subordinate
-   to the now-clickable row. */
+   to the now-clickable row. Mirrors the .card-links link treatment. */
 .row-actions { display: inline-flex; gap: 14px; }
 .row-actions a { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; }
 .row-actions a:hover { text-decoration: underline; }
@@ -589,8 +603,20 @@ table.archive-list .a-id { color: var(--text); }
   transition: background 0.1s;
 }
 .wf-row:hover { background: rgba(var(--accent-rgb),0.04); }
+.wf-row:hover .wf-label { color: var(--text); }
 .wf-row:hover .wf-bar { box-shadow: 0 0 8px rgba(61,142,255,0.25); }
 .wf-row.selected { background: rgba(var(--accent-rgb),0.08); border-left: 2px solid var(--accent); }
+.wf-row.selected .wf-label { color: var(--accent); }
+.wf-label {
+  flex-shrink: 0;
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 8px;
+}
 .wf-track { flex: 1; position: relative; height: 18px; }
 .wf-bar-wrap { position: absolute; height: 100%; }
 .wf-tip {
@@ -710,6 +736,33 @@ table.archive-list .a-id { color: var(--text); }
 .detail-grid .dk { color: var(--text-dim); }
 .detail-grid .dv { color: var(--text); word-break: break-all; }
 
+/* Summary row */
+.summary {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.summary-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  min-width: 140px;
+}
+.summary-label {
+  font-family: 'Geist Mono', monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.summary-value {
+  font-family: 'Geist Mono', monospace;
+  font-size: 20px;
+  font-weight: 600;
+}
+
 /* Drift */
 .drift-section {
   background: var(--surface);
@@ -742,6 +795,9 @@ table.archive-list .a-id { color: var(--text); }
 /* Expand toggle */
 .expand-toggle { display: inline-block; width: 16px; font-size: 10px; color: var(--text-dim); transition: transform 0.15s; }
 .expand-toggle.open { transform: rotate(90deg); }
+
+/* Waterfall hint */
+.wf-hint { font-size: 11px; color: var(--text-dim); margin-top: 8px; font-family: 'Geist Mono', monospace; }
 
 /* Alert detail expand */
 .alert-detail {
@@ -865,6 +921,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .tile-grid.compact .rec-tile { padding: 8px 10px; }
 .tile-grid.compact .rec-name { font-size: 12px; }
 .tile-grid.compact .rec-amount { font-size: 15px; }
+.tile-grid.compact .rec-hint { display: none; }
 .tile-grid.compact .health-tile { padding: 8px 10px; }
 .rec-tile {
   display: block; text-decoration: none; color: inherit;
@@ -876,6 +933,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .rec-name { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .rec-amount { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); margin: 8px 0 6px; }
 .rec-amount.dim { color: var(--text-faint); font-size: 14px; font-weight: 500; }
+.rec-hint { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
 .estimated-tag {
   font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
@@ -891,6 +949,9 @@ a.health-tile.attn { border-color: var(--warn); }
 .health-value { font-family: 'Geist Mono', monospace; font-size: 24px; font-weight: 700; }
 .health-label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 .health-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: 'Geist Mono', monospace; }
+.card-links { display: flex; gap: 14px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.card-links a { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; }
+.card-links a:hover { text-decoration: underline; }
 .opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .opt-title { font-family: 'Geist', sans-serif; font-size: 15px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -1472,6 +1533,7 @@ code.md-code {
 .cur-cwd { font-size:12px; color:var(--text-faint); margin:0 2px; line-height:1.5; }
 .cur-cwd code { color:var(--text-dim); }
 .cur-listbox { max-height:380px; overflow-y:auto; border:1px solid var(--border); border-radius:9px; background:var(--surface); }
+.cur-donenote { margin-left:auto; }
 .rev-note { margin:0; }
 .rev-state { margin-left:auto; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; border-radius:4px; padding:3px 9px; border:1px solid var(--border); }
 .rev-state.staged { color:var(--warn); border-color:rgba(245,166,35,.4); }
@@ -1549,12 +1611,6 @@ const html = htm.bind(h);
 // --- API ---
 const apiKeyMeta = document.querySelector('meta[name="tj-api-key"]');
 const API_KEY = apiKeyMeta ? apiKeyMeta.getAttribute('content') : null;
-// Local write token (require_pothole_write_auth, api/deps.py) -- always
-// present (injected regardless of api.auth.enabled), required on every
-// mutating pothole call (apply/enable/disable/revert/refresh). Sent on every
-// POST below; routes that don't check it simply ignore the extra header.
-const writeTokenMeta = document.querySelector('meta[name="tj-write-token"]');
-const WRITE_TOKEN = writeTokenMeta ? writeTokenMeta.getAttribute('content') : null;
 
 async function api(path, params = {}) {
   const qs = new URLSearchParams();
@@ -1572,7 +1628,6 @@ async function api(path, params = {}) {
 async function apiPost(path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
-  if (WRITE_TOKEN) headers['X-TJ-Local-Token'] = WRITE_TOKEN;
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
@@ -1586,7 +1641,6 @@ async function apiPost(path, body) {
 async function apiPostOrDetail(path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
-  if (WRITE_TOKEN) headers['X-TJ-Local-Token'] = WRITE_TOKEN;
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
@@ -2361,7 +2415,7 @@ function SdkServicesPanel({ services, framing }) {
         <div class="svc-metric">$${(s.today_cost || 0).toFixed(2)}<span class="unit">/day</span></div>
         <div class="spark-wrap">
           <div class="spark-col" style="flex:1;min-width:1px">
-            <span class="spark-lab">cost / min · ${fmtCost(s.window_cost)} last 24m</span>
+            <span class="spark-lab">cost / min</span>
             <${Sparkline} values=${s.cost_per_min} color="var(--brand)" width=${220} height=${30} />
           </div>
           <div class="spark-col" style="width:110px">
@@ -6220,42 +6274,6 @@ function OptimizeFinding({ name, opt, framing }) {
   </section>`;
 }
 
-// Recommendation-outcome ledger: did recommendations get acted on, and
-// what did they actually recover? Keeps measured-recovered strictly separate
-// from estimated-recoverable (honesty discipline, Rule 14) — the measured column
-// is an observed post-recommendation span-mix shift (correlation), never a
-// projected figure and never "tokenjam saved you".
-function RecommendationsPanel({ rec }) {
-  const estTok = rec.estimated_recoverable_tokens || 0;
-  const estUsd = rec.estimated_recoverable_usd || 0;
-  const measTok = rec.measured_recovered_tokens || 0;
-  const measUsd = rec.measured_recovered_usd || 0;
-  const rows = (rec.rows || []).slice(0, 12);
-  return html`
-    <section class="opt-section" id="opt-recommendations">
-      <div class="opt-title"><span>Recommendations acted on <span class="dim" style="font-weight:400;font-size:12px">· measured recovery vs estimate</span></span></div>
-      <div class="sz-tiles">
-        <div class="sz-tile"><div class="sz-tile-v" style="color:var(--accent)">~${fmtTokens(estTok)}${estUsd ? ' (~' + fmtCost(estUsd) + ')' : ''}</div><div class="sz-tile-l">estimated recoverable <span class="estimated-tag">estimated</span></div></div>
-        <div class="sz-tile"><div class="sz-tile-v" style="color:var(--success)">${fmtTokens(measTok)}${measUsd ? ' (' + fmtCost(measUsd) + ')' : ''}</div><div class="sz-tile-l">measured recovered</div></div>
-        <div class="sz-tile"><div class="sz-tile-v">${rec.adopted || 0} / ${rec.ignored || 0}</div><div class="sz-tile-l">adopted / ignored</div></div>
-      </div>
-      <table class="opt-table" style="margin-top:12px">
-        <thead><tr><th>When</th><th>What</th><th>Status</th><th style="text-align:right">recovered / est.</th></tr></thead>
-        <tbody>
-          ${rows.map((o, i) => html`<tr key=${i}>
-            <td class="dim" style="font-size:11px">${String(o.ts || '').slice(0, 10)}</td>
-            <td>${String(o.kind || '').replace(/_/g, ' ')}</td>
-            <td class=${o.status === 'adopted' ? '' : 'dim'} style="font-size:12px">${o.status}</td>
-            <td class="mono" style="text-align:right">${o.measured
-              ? (o.recovered_tokens ? html`<span style="color:var(--success)">${fmtTokens(o.recovered_tokens)} measured</span>` : html`<span class="dim">0</span>`)
-              : html`<span style="color:var(--accent)">~${fmtTokens(o.estimated_tokens || 0)} est.</span>`}</td>
-          </tr>`)}
-        </tbody>
-      </table>
-      <div class="sz-note" style="font-size:12px;margin-top:12px">Measured = observed shift in real spans after a recommendation (a correlation, not proof tokenjam caused it). Estimated = projected at recommendation time. <span class="estimated-tag">honest split</span></div>
-    </section>`;
-}
-
 function OptimizeView({ params }) {
   const DEFAULTS = { since: '30d', agent_id: '', compare: '', finding: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
@@ -6264,7 +6282,7 @@ function OptimizeView({ params }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [] });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -6277,10 +6295,7 @@ function OptimizeView({ params }) {
       const comp = await api('/cost/components', { since, agent_id: agentId || undefined }).catch(() => null);
       // Applied summaries (for the Summarize box's applied-vs-outstanding progress).
       const bk = await api('/summarize/backups').then(r => r.backups || []).catch(() => []);
-      // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
-      // Best-effort — must not blank the Optimize screen.
-      const rec = await api('/recommendations').catch(() => null);
-      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec });
+      setSt({ loading: false, error: null, opt, cmp, comp, bk });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
@@ -6404,7 +6419,6 @@ function OptimizeView({ params }) {
           ` : html`<div class="opt-line dim">No summarizable prompt files in this scan. <a class="sz-link" href="#/optimize/summarize">Open Summarize →</a></div>`}
         </section>` : null}
 
-      ${st.rec && st.rec.rows && st.rec.rows.length ? html`<${RecommendationsPanel} rec=${st.rec} />` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}
@@ -7422,13 +7436,12 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 // §8 reuse map): pending pothole fixes the cross-session pothole aggregator
 // (core/optimize/analyzers/pothole.py, served from a background-refreshed
 // cache at GET /pothole/proposals — see api/routes/pothole.py) land here for
-// a human to review. Phase 2 wires Approve to a real write, routed by rung,
-// through POST /pothole/apply (core.optimize.pothole_apply — git-commit or
-// gzip-backup reversible, disabled-by-default for hook/wrapper/config rungs).
-// Dismiss stays a client-side-only hide (localStorage, never sent to the
-// server). The chassis (listhead / listbox / addbar / cur-modal) is forked
-// from Optimize ▸ Summarize's curate → diff → Apply/Reject screen
-// (~6410-7040 above), per Phase A's scaffold.
+// a human to review. Phase 1 is READ-ONLY: Approve is stubbed (apply lands in
+// a later phase); Dismiss is a client-side-only hide (persisted in
+// localStorage, never sent to the server — Phase 1 has no dismiss endpoint).
+// The chassis (listhead / listbox / addbar / cur-modal) is forked from
+// Optimize ▸ Summarize's curate → diff → Apply/Reject screen (~6410-7040
+// below), per Phase A's scaffold.
 const POTHOLE_DISMISSED_KEY = 'tj_pothole_dismissed_v1';
 
 function loadDismissedPotholes() {
@@ -7449,58 +7462,6 @@ const RUNG_LABELS = {
   4: 'wrapper / script',
   5: 'config / env',
 };
-const ENFORCEMENT_RUNGS = new Set([3, 4, 5]);
-
-// Phase 3 (Verify, self-improve-loop SPEC.md §4 step 6 / §10 / §11): the
-// verdict labels the Applied section shows per fix — correlational, never a
-// causal claim (see the ⓘ tooltip's `reason` string from the API).
-const VERDICT_LABELS = {
-  improved: { text: 'Improved', color: 'var(--success)' },
-  no_change: { text: 'No change', color: 'var(--warn)' },
-  regressed: { text: 'Regressed', color: 'var(--error)' },
-  insufficient_data: { text: 'Measuring…', color: 'var(--text-dim)' },
-  enforcement_disabled: { text: 'Not yet enforced', color: 'var(--text-dim)' },
-};
-const VERDICT_NUDGE = new Set(['no_change', 'regressed']);
-
-// One applied fix's recurrence-since-apply line: verdict, normalized
-// recurrence, realized savings (only ever shown for a real "improved"
-// verdict), and — for the `no_change`/`regressed` "codification != prevention"
-// signal — a nudge to escalate (rung 1 notes) or reconsider (any rung).
-function VerifyLine({ verify, rung }) {
-  if (!verify) return null;
-  const verdict = verify.verdict;
-  const label = VERDICT_LABELS[verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
-  const hasRecurrence = verify.recurrence_since_apply != null && verify.post_sessions_since_apply != null;
-  const saved = verify.realized_tokens_saved;
-  const nudge = VERDICT_NUDGE.has(verdict);
-  return html`
-    <div class="dim" style="font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span style=${'color:' + label.color + ';font-weight:500'}>${label.text}</span>
-      ${hasRecurrence ? html`<span>· ${verify.recurrence_since_apply} occurrence(s) in ${verify.post_sessions_since_apply} session(s) since apply</span>` : null}
-      ${saved > 0 ? html`<span style="color:var(--accent)">· ~${fmtTokens(saved)} tok saved <span class="estimated-tag" title="estimated / correlational — see the Compound ledger caveat">est.</span></span>` : null}
-      ${verify.last_checked_at ? html`<span title=${verify.reason || ''} style="cursor:help">ⓘ</span>` : null}
-      ${nudge ? html`<span style="color:var(--warn)">— not taking; consider ${rung === 1 ? 'escalating to a hook or ' : ''}reverting</span>` : null}
-    </div>`;
-}
-
-// The Compound ledger (SPEC §4 step 7): estimated savings summed across every
-// VERIFIED fix, at the top of the Applied section — the loop's evidence that
-// it correlates with fewer recurrences, not just that it wrote something.
-function CompoundLedgerSummary({ ledger }) {
-  if (!ledger) return null;
-  if (!ledger.verified_count) {
-    return html`<div class="sz-note" style="margin:8px 0 12px">No fixes verified yet — the loop checks back once enough post-apply sessions accumulate.</div>`;
-  }
-  return html`
-    <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
-        <span style="font-size:20px;font-weight:600;color:var(--accent)">~${fmtTokens(ledger.total_realized_tokens_saved)} tok</span>
-        <span class="dim" style="font-size:12px">estimated savings across ${ledger.improved_count} verified fix(es) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
-      </div>
-      <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} regressed · ${ledger.enforcement_disabled_count} awaiting enforcement · ${ledger.insufficient_data_count} still measuring</div>
-    </div>`;
-}
 
 function PotholeRow({ cluster, checked, onToggle, onExpand }) {
   const tokens = cluster.estimated_recoverable_tokens || 0;
@@ -7517,61 +7478,21 @@ function PotholeRow({ cluster, checked, onToggle, onExpand }) {
     </tr>`;
 }
 
-// The card's Approve flow: preview -> (optional active-session warning ->
-// "apply anyway") -> write. Scope + target are ALWAYS human-editable before
-// Approve (§7 — repo-identity is noisy; never trust the suggestion blindly).
-function PotholeApplyModal({ cluster, onClose, onApplied }) {
-  const [scope, setScope] = useState('project');
-  const [target, setTarget] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [warning, setWarning] = useState(null);   // active-session 409 text — offers "apply anyway"
-  const [result, setResult] = useState(null);      // the applied record, once written
-
-  useEffect(() => {
-    if (!cluster) return;
-    setScope(cluster.scope || 'project');
-    setTarget(cluster.suggested_target || '');
-    setBusy(false); setError(null); setWarning(null); setResult(null);
-  }, [cluster && cluster.signature]);
-
+function PotholeDetailModal({ cluster, onClose }) {
   if (!cluster) return null;
-
-  const doApprove = async (force) => {
-    if (!target.trim()) { setError('enter a target path first'); return; }
-    setBusy(true); setError(null);
-    try {
-      const body = { ...cluster, scope, target_path: target.trim(), go: true, force: !!force };
-      const r = await apiPostOrDetail('/pothole/apply', body);
-      setWarning(null);
-      setResult(r.record);
-      onApplied && onApplied(r.record);
-    } catch (e) {
-      // The active-session guard refuses via 409 unless force=true — offer
-      // the explicit "apply anyway" the spec calls for, instead of a bare error.
-      if (e.status === 409 && /active session/.test(e.message || '')) {
-        setWarning(e.message);
-      } else {
-        setError(e.message || String(e));
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return html`
     <div class="cur-overlay" onClick=${onClose}>
       <div class="cur-modal" onClick=${e => e.stopPropagation()}>
         <div class="cur-modal-head">
           <span class="cur-modal-title">${cluster.title}</span>
-          <span class=${'rev-state ' + (result ? 'applied' : 'staged')} style="margin-left:6px">${result ? 'applied' : 'pending'}</span>
+          <span class="rev-state staged" style="margin-left:6px">pending</span>
           <button class="cur-modal-x" onClick=${onClose} title="Close">✕</button>
         </div>
         <div class="cur-modal-body">
           <div style="font-size:12.5px;margin-bottom:10px">
             <b>${cluster.sessions}</b> distinct sessions · <b>${cluster.occurrences}</b> occurrences ·
             spread across <b>${(cluster.repos || []).length}</b> repo${(cluster.repos || []).length === 1 ? '' : 's'} ·
-            rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
+            scope: <b>${cluster.scope}</b> · rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
           </div>
           <div class="opt-section" style="margin:0 0 14px">
             <div class="opt-title" style="font-size:13px">Proposed fix</div>
@@ -7587,77 +7508,11 @@ function PotholeApplyModal({ cluster, onClose, onApplied }) {
               </div>`)}
             ${(!cluster.examples || cluster.examples.length === 0) ? html`<div class="dim" style="font-size:12.5px">No example sessions captured.</div>` : null}
           </div>
-
-          ${!result ? html`
-            <div class="opt-section" style="margin:0 0 6px">
-              <div class="opt-title" style="font-size:13px">Where to write it <span class="dim" style="font-weight:400">— repo-identity is noisy; confirm before approving</span></div>
-              <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
-                <select class="rename-input" style="width:160px" value=${scope} onChange=${e => setScope(e.target.value)}>
-                  <option value="project">project</option>
-                  <option value="user-global">user-global</option>
-                </select>
-                <input class="rename-input" style="flex:1;min-width:280px" value=${target}
-                  placeholder="/absolute/path/to/target"
-                  onInput=${e => setTarget(e.target.value)} />
-              </div>
-              ${ENFORCEMENT_RUNGS.has(cluster.rung) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">Rung ${cluster.rung} writes a hook, DISABLED by default — it will not run until you separately confirm "Enable enforcement".</div>` : null}
-            </div>
-          ` : html`
-            <div class="opt-section" style="margin:0 0 6px">
-              <div class="opt-title" style="font-size:13px">Written to</div>
-              <div class="sz-note" style="margin-top:4px"><code>${result.target_path}</code>${result.git_commit ? html` · committed <code>${result.git_commit.slice(0, 8)}</code>` : ' · backed up (not a git repo)'}</div>
-            </div>
-          `}
-
-          ${warning ? html`<div class="opt-caveat" style="color:var(--warn)">${warning} <span class="sz-link" onClick=${() => doApprove(true)}>Apply anyway →</span></div>` : null}
-          ${error ? html`<div class="opt-caveat" style="color:var(--error)">${error}</div>` : null}
         </div>
         <div class="cur-modal-foot">
-          ${!result ? html`
-            <button class="cur-btn primary" disabled=${busy} onClick=${() => doApprove(false)}>${busy ? 'Applying…' : 'Approve →'}</button>
-          ` : html`<span class="dim" style="font-size:12px">Applied. Manage enforcement/revert from the Applied section below.</span>`}
+          <button class="cur-btn primary" disabled=${true} title="Apply lands in the next phase">Approve (coming soon)</button>
           <button class="cur-btn" style="margin-left:auto" onClick=${onClose}>Close</button>
         </div>
-      </div>
-    </div>`;
-}
-
-// The Applied section: what Approve already wrote, plus its one-step Revert
-// and (enforcement rungs only) the explicit Enable/Disable toggle.
-function AppliedFixRow({ rec, onChanged }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const [confirming, setConfirming] = useState(false);
-
-  const call = async (fn) => {
-    setBusy(true); setError(null);
-    try { await fn(); onChanged && onChanged(); }
-    catch (e) { setError(e.message || String(e)); }
-    finally { setBusy(false); setConfirming(false); }
-  };
-
-  const enforcement = rec.enforcement;
-  const isEnforcement = ENFORCEMENT_RUNGS.has(rec.rung);
-
-  return html`
-    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:8px;width:100%">
-        <span style="font-weight:500">${rec.title}</span>
-        <span class="dim" style="font-size:11px">rung ${rec.rung} · ${RUNG_LABELS[rec.rung] || rec.kind}</span>
-        <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
-        ${isEnforcement && rec.state === 'applied' ? html`<span class="dim" style="font-size:11px">· enforcement ${enforcement && enforcement.enabled ? 'ENABLED' : 'disabled'}</span>` : null}
-      </div>
-      <div class="dim" style="font-size:12px"><code>${rec.target_path}</code> · applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}${rec.git_commit ? html` · <code>${rec.git_commit.slice(0, 8)}</code>` : ''}</div>
-      ${rec.state === 'applied' ? html`<${VerifyLine} verify=${rec.verify} rung=${rec.rung} />` : null}
-      ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
-      <div style="display:flex;gap:10px;align-items:center">
-        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
-        ${isEnforcement && rec.state === 'applied' && !(enforcement && enforcement.enabled) ? (
-          confirming
-            ? html`<span style="color:var(--warn);font-size:12px">This intercepts your tool calls on every matching call. <span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/enable`, { confirm: true }))}>Confirm enable →</span> <span class="sz-link" onClick=${() => setConfirming(false)}>cancel</span></span>`
-            : html`<span class="sz-link" onClick=${() => setConfirming(true)}>Enable enforcement…</span>`
-        ) : null}
-        ${isEnforcement && rec.state === 'applied' && enforcement && enforcement.enabled ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/disable`, {}))}>Disable enforcement</span>` : null}
       </div>
     </div>`;
 }
@@ -7668,9 +7523,6 @@ function ReviewInboxView({ params }) {
   const [checked, setChecked] = useState(() => new Set());
   const [modalSig, setModalSig] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
-  const [applied, setApplied] = useState([]);
-  const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
-  const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
 
   const load = useCallback(async () => {
     try {
@@ -7686,21 +7538,13 @@ function ReviewInboxView({ params }) {
     }
   }, []);
 
-  const loadApplied = useCallback(async () => {
-    try {
-      const r = await api('/pothole/applied');
-      setApplied(r.applied || []);
-      setLedger(r.ledger || null);
-    } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
-  }, []);
-
   useEffect(() => {
-    load(); loadApplied();
+    load();
     // Light poll while a background pass may be computing (or right after a
     // manual refresh) so the empty/computing state resolves without a reload.
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
     return () => clearInterval(timer);
-  }, [load, loadApplied]);
+  }, [load]);
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -7708,7 +7552,7 @@ function ReviewInboxView({ params }) {
     setTimeout(() => { setRefreshing(false); load(); }, 1500);
   }, [load]);
 
-  const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
+  const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature));
   const potholeCount = visible.length;
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
@@ -7716,16 +7560,11 @@ function ReviewInboxView({ params }) {
     setDismissed(next); saveDismissedPotholes(next);
     setChecked(new Set());
   };
-  const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
-
-  const onApplied = (record) => {
-    setAppliedSigs(s => new Set([...s, record.signature]));
-    loadApplied();
-  };
+  const modalCluster = modalSig ? visible.find(c => c.signature === modalSig) : null;
 
   return html`
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
-    <div class="sz-note">Pothole fixes the self-improve loop's cross-session detector finds land here for review — each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung — you confirm the scope + target first; <b>Dismiss</b> hides a row locally (this browser only — it is not sent to the server).</div>
+    <div class="sz-note">Pothole fixes the self-improve loop's cross-session detector finds land here for review — each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> is not wired yet (apply lands in a later phase); <b>Dismiss</b> hides a row locally (this browser only — it is not sent to the server).</div>
 
     <div class="cur-listhead">
       <span>
@@ -7742,25 +7581,17 @@ function ReviewInboxView({ params }) {
           ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
           ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
           ${!d.error && !d.loading && d.status === 'never_run' ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No scan has run yet — click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</td></tr>` : null}
-          ${!d.error && !d.loading && d.status !== 'never_run' && potholeCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</td></tr>` : null}
+          ${!d.error && !d.loading && d.status !== 'never_run' && potholeCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed everything).</td></tr>` : null}
           ${!d.error && !d.loading ? visible.map(c => html`<${PotholeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
         </tbody>
       </table>
     </div>
     <div class="cur-addbar">
+      <button class="cur-btn primary" disabled=${true} title="Apply lands in the next phase">Approve checked →</button>
       <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
-      <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
+      <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence and proposed fix.' : 'Nothing to review yet.'}</span>
     </div>
-
-    ${applied.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
-      <${CompoundLedgerSummary} ledger=${ledger} />
-      <div class="cur-listbox" style="margin-top:8px">
-        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${loadApplied} />`)}
-      </div>
-    ` : null}
-
-    <${PotholeApplyModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} onApplied=${onApplied} />
+    <${PotholeDetailModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} />
   `;
 }
 
@@ -7782,7 +7613,7 @@ function DashboardView({ params }) {
       // full cost history — that user upgrading to review past spend must NOT
       // see "No data yet" (the front door was gating purely on active agents and
       // returning before /cost was ever fetched — issue: historical-only empty).
-      const [cost, status, compare, opt, al, drift, traces, pothole] = await Promise.all([
+      const [cost, status, compare, opt, al, drift, traces] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
         api('/status').catch(() => ({ agents: [] })),
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
@@ -7790,7 +7621,6 @@ function DashboardView({ params }) {
         api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
         api('/drift').catch(() => ({ agents: [] })),
         api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
-        api('/pothole/proposals').catch(() => ({ finding: null })),
       ]);
       // "No data yet" only when there is genuinely NO telemetry: no cost history
       // AND no tokens AND no sessions/agents AND no traces. Historical cost or
@@ -7800,8 +7630,7 @@ function DashboardView({ params }) {
       const hasTraces = !!(traces.traces && traces.traces.length);
       const empty = !hasCost && !hasAgents && !hasTraces;
       setD({ loading: false, empty, error: null, cost, compare, opt,
-        alerts: al.alerts || [], drift, traces: traces.traces || [],
-        pendingFixes: ((pothole && pothole.finding && pothole.finding.clusters) || []).length });
+        alerts: al.alerts || [], drift, traces: traces.traces || [] });
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -7860,7 +7689,7 @@ function DashboardView({ params }) {
     </div>
     ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
 
-    ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet. TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and the recurring mistakes, spend, and health show up here.</p></div>`
+    ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet — TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and your spend, waste, and health show up here.</p></div>`
       : html`
         <!-- Triage band: recoverable waste + health. Spend is NOT shown here —
              it lives once, in the explorer's Spend KPI tile + chart below. -->
@@ -7893,8 +7722,8 @@ function DashboardView({ params }) {
               <div class="dash-col">
                 <div class="band-label">Health at a glance</div>
                 <div class="tile-grid compact">
-                  <${HealthTile} label="Pending fixes" value=${d.pendingFixes || 0} attention=${(d.pendingFixes || 0) > 0} href="#/review"
-                    sub="self-improve loop — review inbox" />
+                  <${HealthTile} label="Pending fixes" value="0" attention=${false} href="#/review"
+                    sub="self-improve loop — coming soon" />
                   <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
                     href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
                   <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
