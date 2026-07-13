@@ -87,11 +87,12 @@ def _isolate_real_world_side_effects(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("HOME", str(iso))
 
 
-def _invoke(runner, db, config, args):
-    """Invoke CLI with patched db and config."""
+def _invoke(runner, db, config, args, input=None):
+    """Invoke CLI with patched db and config. ``input`` feeds stdin for
+    commands that prompt (e.g. `tj optimize --validate` cost confirmation)."""
     with patch("tokenjam.cli.main.load_config", return_value=config), \
          patch("tokenjam.cli.main.open_db", return_value=db):
-        return runner.invoke(cli, args)
+        return runner.invoke(cli, args, input=input)
 
 
 def _seed_agent_and_session(db, agent_id="test-agent"):
@@ -1952,3 +1953,149 @@ def test_session_end_requires_an_id(runner):
     with patch("tokenjam.cli.main.load_config", return_value=cfg):
         result = runner.invoke(cli, ["session-end"])
     assert result.exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# tj optimize --validate (issue #477) — empirical validation of a finding.
+# The provider client is mocked; NO real API calls happen in these tests.
+# ---------------------------------------------------------------------------
+
+
+def _capture_on_config():
+    from tokenjam.core.config import CaptureConfig
+    return TjConfig(version="1", capture=CaptureConfig(prompts=True))
+
+
+def _seed_validate_span(db, *, session_id="s-val", model="claude-opus-4-8"):
+    """A downsize-shaped span carrying captured prompt content (capture on)."""
+    from datetime import timedelta
+
+    from tokenjam.otel.semconv import GenAIAttributes
+
+    span = make_llm_span(
+        agent_id="test-agent", model=model, provider="anthropic",
+        input_tokens=1000, output_tokens=100, cost_usd=0.03,
+        session_id=session_id, start_time=utcnow() - timedelta(days=1),
+        extra_attributes={
+            GenAIAttributes.PROMPT_CONTENT: json.dumps(
+                [{"role": "user", "content": "Say hello."}]
+            )
+        },
+    )
+    db.insert_span(span)
+
+
+class _StubProvider:
+    """Stub AnthropicProviderClient — returns identical outputs for both models
+    so quality is preserved and the candidate simply costs less."""
+
+    def __init__(self, api_key):  # noqa: ANN001 — matches the real ctor
+        from tokenjam.core.optimize.validate import Completion
+
+        self._resp = Completion(text="hello", input_tokens=1000, output_tokens=100)
+
+    def complete(self, *, provider, model, messages, max_tokens):  # noqa: ANN001
+        return self._resp
+
+
+def test_validate_capture_off_fails_with_hint(runner, db, config):
+    """Capture is off by default -> actionable failure naming the config toggle,
+    and no provider client is ever constructed."""
+    _seed_validate_span(db)  # capture flag in `config` is off
+    with patch.dict("os.environ", {"TJ_ANTHROPIC_API_KEY": "sk-test"}):
+        result = _invoke(runner, db, config,
+                         ["optimize", "--validate", "downsize"])
+    assert result.exit_code == 1
+    assert "requires prompt" in result.output.lower()
+    assert "prompts = true" in result.output
+
+
+def test_validate_missing_key_fails(runner, db):
+    """Capture on, samples present, but no API key -> clear failure."""
+    cfg = _capture_on_config()
+    _seed_validate_span(db)
+    with patch.dict("os.environ", {}, clear=False):
+        import os
+        os.environ.pop("TJ_ANTHROPIC_API_KEY", None)
+        result = _invoke(runner, db, cfg,
+                         ["optimize", "--validate", "downsize"])
+    assert result.exit_code == 1
+    assert "TJ_ANTHROPIC_API_KEY" in result.output
+
+
+def test_validate_no_samples_fails(runner):
+    """Capture on + key present but no captured downsize candidates -> friendly
+    'no samples' failure, no spend."""
+    db = InMemoryBackend()
+    cfg = _capture_on_config()
+    with patch.dict("os.environ", {"TJ_ANTHROPIC_API_KEY": "sk-test"}):
+        result = _invoke(runner, db, cfg,
+                         ["optimize", "--validate", "downsize"])
+    db.close()
+    assert result.exit_code == 1
+    assert "no captured calls" in result.output.lower()
+
+
+def test_validate_confirmation_declined_spends_nothing(runner, db):
+    """The cost-estimate confirmation defaults to 'no' — declining runs no calls."""
+    cfg = _capture_on_config()
+    _seed_validate_span(db)
+    with patch.dict("os.environ", {"TJ_ANTHROPIC_API_KEY": "sk-test"}), \
+         patch("tokenjam.core.optimize.validate.AnthropicProviderClient",
+               _StubProvider) as _stub:
+        result = _invoke(runner, db, cfg,
+                         ["optimize", "--validate", "downsize"], input="n\n")
+    assert result.exit_code == 0
+    assert "Cancelled" in result.output
+    assert "Estimated cost" in result.output
+
+
+def test_validate_measures_and_reports(runner, db):
+    """Confirmed run reports a MEASURED delta + quality, with honest framing."""
+    cfg = _capture_on_config()
+    _seed_validate_span(db, session_id="s1")
+    _seed_validate_span(db, session_id="s2")
+    with patch.dict("os.environ", {"TJ_ANTHROPIC_API_KEY": "sk-test"}), \
+         patch("tokenjam.core.optimize.validate.AnthropicProviderClient",
+               _StubProvider):
+        result = _invoke(runner, db, cfg,
+                         ["optimize", "--validate", "downsize"], input="y\n")
+    assert result.exit_code == 0, result.output
+    out = result.output.lower()
+    assert "measured on a sample of" in out
+    assert "quality" in out
+    assert "preserved" in out
+    # Honesty (Rule 14): never the reserved paid-layer vocabulary.
+    assert "certified" not in out
+    assert "guaranteed" not in out
+
+
+def test_validate_json_output(runner, db):
+    """--json emits the machine-readable measured result and skips the prompt."""
+    cfg = _capture_on_config()
+    _seed_validate_span(db)
+    with patch.dict("os.environ", {"TJ_ANTHROPIC_API_KEY": "sk-test"}), \
+         patch("tokenjam.core.optimize.validate.AnthropicProviderClient",
+               _StubProvider):
+        result = _invoke(runner, db, cfg,
+                         ["optimize", "--validate", "downsize", "--json"])
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.output)
+    assert data["finding"] == "downsize"
+    assert data["sample_size"] == 1
+    assert data["quality_metric"] == "exact_match"
+    assert "measured on a sample of 1" in data["basis"]
+    blob = json.dumps(data).lower()
+    assert "certified" not in blob and "guaranteed" not in blob
+
+
+def test_validate_daemon_lock_fails_cleanly(runner, config):
+    """Under the serve shim (no direct conn), --validate bails with a clear
+    message rather than crashing."""
+    class _NoConn:
+        conn = None
+    with patch.dict("os.environ", {"TJ_ANTHROPIC_API_KEY": "sk-test"}):
+        result = _invoke(runner, _NoConn(), config,
+                         ["optimize", "--validate", "downsize"])
+    assert result.exit_code == 1
+    assert "tj serve" in result.output
