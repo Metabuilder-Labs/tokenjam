@@ -202,25 +202,23 @@ def _iter_observations(payload: Any) -> Iterable[dict[str, Any]]:
 
 def _load_file(path: Path) -> Any:
     """Load a JSON file. Accepts a bare list, a {data: [...]} envelope, or NDJSON."""
-    text = path.read_text()
-    text = text.strip()
+    text = path.read_text().strip()
     if not text:
         return []
-    # NDJSON heuristic: looks like multiple JSON objects on separate lines.
-    if text[0] == "{" and "\n{" in text and not text.startswith("{\""):
-        # Could be NDJSON or a multi-line object. Try parsing whole-file first.
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    records: list[Any] = []
+    for i, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
         try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        records: list[Any] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
             records.append(json.loads(line))
-        return records
-    return json.loads(text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse NDJSON in {path} at line {i}") from e
+    return records
 
 
 def _fetch_url(url: str, api_key: str | None, since: datetime | None) -> Any:

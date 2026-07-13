@@ -232,3 +232,32 @@ def test_observation_to_span_cache_write_absent_leaves_field_none():
     span = _observation_to_span(obs)
     assert span is not None
     assert span.cache_write_tokens is None
+
+
+def test_ingest_ndjson_input(db, tmp_path):
+    """NDJSON files (whether compact or with double-quote starters) are parsed successfully."""
+    ndjson_content = (
+        '{"id": "obs-1", "traceId": "trace-1", "type": "GENERATION", '
+        '"startTime": "2026-04-01T10:00:00.000Z", "endTime": "2026-04-01T10:00:01.500Z", '
+        '"model": "claude-sonnet-4-6", "usage": {"input": 1000, "output": 200}}\n'
+        '{"id": "obs-2", "traceId": "trace-1", "type": "GENERATION", '
+        '"startTime": "2026-04-01T10:00:02.000Z", "endTime": "2026-04-01T10:00:03.500Z", '
+        '"model": "claude-sonnet-4-6", "usage": {"input": 1000, "output": 200}}\n'
+    )
+    path = tmp_path / "dump.ndjson"
+    path.write_text(ndjson_content)
+    result = ingest_langfuse(db, source_file=str(path))
+    assert result["observations_read"] == 2
+    assert result["spans_written"] == 2
+
+
+def test_ingest_malformed_ndjson_raises_valueerror(db, tmp_path):
+    """A malformed line in an NDJSON file raises a descriptive ValueError."""
+    path = tmp_path / "malformed.ndjson"
+    path.write_text(
+        '{"id": "obs-1", "traceId": "trace-1", "type": "GENERATION", "startTime": "2026-04-01T10:00:00.000Z"}\n{bad json}\n'
+    )
+    with pytest.raises(ValueError) as exc:
+        ingest_langfuse(db, source_file=str(path))
+    assert "Failed to parse NDJSON in" in str(exc.value)
+    assert "at line 2" in str(exc.value)
