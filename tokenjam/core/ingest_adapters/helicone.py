@@ -245,19 +245,17 @@ def _load_file(path: Path) -> Any:
     text = path.read_text().strip()
     if not text:
         return []
-    if text[0] == "{" and "\n{" in text and not text.startswith("{\""):
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            pass
-        records: list[Any] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            records.append(json.loads(line))
-        return records
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    records: list[Any] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(json.loads(line))
+    return records
 
 
 def _fetch_url(url: str, api_key: str | None, since: datetime | None) -> Any:

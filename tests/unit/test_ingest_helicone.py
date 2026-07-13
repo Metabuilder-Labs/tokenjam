@@ -260,3 +260,30 @@ def test_record_to_span_cache_write_absent_leaves_field_none():
     span = _record_to_span(record)
     assert span is not None
     assert span.cache_write_tokens is None
+
+
+def test_ingest_handles_ndjson(db, tmp_path):
+    """NDJSON format (line-by-line JSON objects) is accepted."""
+    record1 = {
+        "request": {
+            "id": "req-ndjson-1",
+            "created_at": "2026-04-01T10:00:00Z",
+            "model": "claude-haiku-4-5",
+            "provider": "ANTHROPIC",
+            "prompt_tokens": 200,
+        },
+    }
+    record2 = {
+        "request": {
+            "id": "req-ndjson-2",
+            "created_at": "2026-04-01T10:00:01Z",
+            "model": "claude-haiku-4-5",
+            "provider": "ANTHROPIC",
+            "prompt_tokens": 300,
+        },
+    }
+    path = tmp_path / "dump.ndjson"
+    path.write_text(json.dumps(record1) + "\n" + json.dumps(record2) + "\n")
+    result = ingest_helicone(db, source_file=str(path))
+    assert result["records_read"] == 2
+    assert result["spans_written"] == 2
