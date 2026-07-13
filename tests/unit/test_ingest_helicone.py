@@ -287,3 +287,13 @@ def test_ingest_handles_ndjson(db, tmp_path):
     result = ingest_helicone(db, source_file=str(path))
     assert result["records_read"] == 2
     assert result["spans_written"] == 2
+
+
+def test_ingest_malformed_ndjson_raises_valueerror(db, tmp_path):
+    """A malformed line in an NDJSON file raises a descriptive ValueError."""
+    path = tmp_path / "malformed.ndjson"
+    path.write_text('{"request": {"id": "1"}}\n{bad json}\n')
+    with pytest.raises(ValueError) as exc:
+        ingest_helicone(db, source_file=str(path))
+    assert "Failed to parse NDJSON in" in str(exc.value)
+    assert "at line 2" in str(exc.value)

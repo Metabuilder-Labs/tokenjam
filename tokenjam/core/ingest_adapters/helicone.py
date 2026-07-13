@@ -250,11 +250,14 @@ def _load_file(path: Path) -> Any:
     except json.JSONDecodeError:
         pass
     records: list[Any] = []
-    for line in text.splitlines():
+    for i, line in enumerate(text.splitlines(), start=1):
         line = line.strip()
         if not line:
             continue
-        records.append(json.loads(line))
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Failed to parse NDJSON in {path} at line {i}") from e
     return records
 
 
