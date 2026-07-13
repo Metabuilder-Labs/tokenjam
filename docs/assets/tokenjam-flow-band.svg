@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 830 212" width="830" height="212" role="img" aria-label="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks down into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench).">
+  <defs>
+    <style>
+      .t { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+      .m { font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="829" height="211" rx="14" fill="#0a0a0a" stroke="#3a3a3a"/>
+
+  <!-- Left: your agents -->
+  <rect x="24" y="69" width="180" height="74" rx="10" fill="#161616" stroke="#3a3a3a"/>
+  <text x="114" y="101" text-anchor="middle" class="t" font-size="15" font-weight="650" fill="#f0f0f0">Your agents</text>
+  <text x="114" y="122" text-anchor="middle" class="m" font-size="10.5" fill="#8a8a8a">Claude Code · Codex · Cursor</text>
+
+  <!-- arrow -->
+  <text x="217" y="112" text-anchor="middle" class="t" font-size="18" fill="#8a8a8a">&#8594;</text>
+
+  <!-- TokenJam wide rectangle -->
+  <rect x="236" y="28" width="570" height="46" rx="10" fill="#1e1e1e" stroke="#6a6a6a"/>
+  <text x="521" y="57" text-anchor="middle" class="t" font-size="16" font-weight="700" fill="#ffffff">TokenJam</text>
+
+  <!-- connectors down to the three stages -->
+  <path d="M326 74 L326 90" stroke="#4a4a4a" stroke-width="1.5"/>
+  <path d="M521 74 L521 90" stroke="#4a4a4a" stroke-width="1.5"/>
+  <path d="M716 74 L716 90" stroke="#4a4a4a" stroke-width="1.5"/>
+
+  <!-- Stage 1: Observe -->
+  <rect x="236" y="90" width="181" height="94" rx="10" fill="#161616" stroke="#3a3a3a"/>
+  <text x="326" y="126" text-anchor="middle" class="t" font-size="15" font-weight="650" fill="#f0f0f0">Observe</text>
+  <text x="326" y="150" text-anchor="middle" class="t" font-size="11.5" fill="#8a8a8a">Lens</text>
+
+  <!-- Stage 2: Optimize -->
+  <rect x="430.5" y="90" width="181" height="94" rx="10" fill="#161616" stroke="#3a3a3a"/>
+  <text x="521" y="122" text-anchor="middle" class="t" font-size="15" font-weight="650" fill="#f0f0f0">Optimize</text>
+  <text x="521" y="145" text-anchor="middle" class="t" font-size="11" fill="#8a8a8a">Downsize · Cache · Trim</text>
+  <text x="521" y="162" text-anchor="middle" class="t" font-size="11" fill="#8a8a8a">Script · Reuse</text>
+
+  <!-- Stage 3: Prove -->
+  <rect x="625" y="90" width="181" height="94" rx="10" fill="#161616" stroke="#3a3a3a"/>
+  <text x="715.5" y="126" text-anchor="middle" class="t" font-size="15" font-weight="650" fill="#f0f0f0">Prove</text>
+  <text x="715.5" y="150" text-anchor="middle" class="t" font-size="11.5" fill="#8a8a8a">Bench</text>
+</svg>
