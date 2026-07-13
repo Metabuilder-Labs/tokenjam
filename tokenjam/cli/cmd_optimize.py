@@ -347,6 +347,7 @@ _MINOR_FINDING_LABELS = {
     "reuse":           "Reuse",
     "trim":            "Prompt bloat",
     "subagent":        "Subagent right-sizing",
+    "verbosity":       "Verbosity",
 }
 
 
@@ -1460,6 +1461,64 @@ def _render_subagent(
     console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
+def _render_verbosity(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the verbosity finding — sessions whose OUTPUT tokens run high vs
+    the per-task-shape median (the like-for-like baseline). The least-grounded
+    analyzer: candidate framing only, recoverable shown as a soft estimate.
+    """
+    console.print(_finding_header(marker, "Verbosity:"))
+    if not finding.candidates:
+        if finding.sessions_examined == 0:
+            console.print("     [dim]No LLM spans in this window.[/dim]")
+        else:
+            console.print(
+                f"     [dim]Examined {finding.sessions_examined} session"
+                f"{'s' if finding.sessions_examined != 1 else ''} across "
+                f"{finding.cohorts_examined} task-shape cohort"
+                f"{'s' if finding.cohorts_examined != 1 else ''}; no session's "
+                f"output ran high enough vs its cohort median to flag.[/dim]"
+            )
+        return
+
+    shown = len(finding.candidates)
+    total = finding.total_candidates or shown
+    more = f" [dim](showing top {shown} of {total})[/dim]" if total > shown else ""
+    console.print(
+        f"     • [bold]{total}[/bold] high-verbosity "
+        f"candidate{'s' if total != 1 else ''} "
+        f"[dim](output well above the per-task-shape median)[/dim]{more}"
+    )
+    for c in finding.candidates:
+        # Recoverable framing: dollars only for api-billed users; otherwise the
+        # over-baseline token figure (the same category discipline as peers).
+        if pricing_mode == "api" and c.recoverable_usd:
+            recov = f"~{format_cost(c.recoverable_usd)} at output rates"
+        else:
+            recov = f"~{format_tokens(c.over_baseline_tokens)} output tokens"
+        ratio = (
+            f", {c.output_input_ratio}× input"
+            if c.output_input_ratio is not None else ""
+        )
+        console.print(
+            f"       [dim]{c.session_id}[/dim]  "
+            f"[bold]{format_tokens(c.output_tokens)}[/bold] out "
+            f"[dim](vs {format_tokens(c.baseline_output_tokens)} median, "
+            f"{c.over_baseline_multiple}×{ratio})[/dim] → {recov} above baseline"
+        )
+    if finding.suggested_max_tokens:
+        console.print(
+            f"     [dim]Remedy to review (not applied): add a terse "
+            f"system-prompt line and/or a max_tokens cap near "
+            f"~{format_tokens(finding.suggested_max_tokens)}, then measure with "
+            f"[bold]tj optimize --validate[/bold].[/dim]"
+        )
+    if finding.caveat:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
@@ -1468,4 +1527,5 @@ _FINDING_RENDERERS = {
     "reuse":        _render_reuse,
     "trim":         _render_prompt_bloat,
     "subagent":     _render_subagent,
+    "verbosity":    _render_verbosity,
 }
