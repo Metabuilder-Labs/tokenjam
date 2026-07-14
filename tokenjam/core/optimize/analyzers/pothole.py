@@ -181,6 +181,28 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         ),
     },
     {
+        # MUST stay ordered before "deferred_tool_cold" below: that family's
+        # pattern (`inputvalidationerror`, tools=None -> matches ANY tool)
+        # also fires on the real wording of THIS family's evidence --
+        # "InputValidationError: Read failed due to the following issue:\n
+        # The parameter `offset` type is expected as `number` but provided
+        # as `array`" matches both patterns. classify_known_family is
+        # first-match-wins over declaration order, so the more-specific
+        # family (Read-only, offset-specific) has to be checked first or its
+        # evidence is silently absorbed by the generic one and mislabeled
+        # with the wrong fix. Validated against the real corpus (2026-07-14):
+        # with the old order, 100% of read_offset_malformed's evidence
+        # (~35% of deferred_tool_cold's Read-tool occurrences) was shadowed
+        # this way -- the family never once surfaced a proposal despite
+        # matching real, recurring evidence.
+        "key": "read_offset_malformed",
+        "title": "Read malformed offset (array, not scalar)",
+        "tools": {"Read"},
+        "pattern": re.compile(r"offset.{0,20}(must be|invalid|expected)|invalid.{0,20}offset", re.IGNORECASE),
+        "rung": 1,
+        "fix": "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not arrays.",
+    },
+    {
         "key": "deferred_tool_cold",
         "title": "deferred tool called cold (no ToolSearch first)",
         "tools": None,
@@ -195,20 +217,24 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         ),
     },
     {
+        # Downgraded from rung 5 (Phase 2.5, 2026-07-14): rung 5 promises a
+        # "config/env fix", but there is no safe automatic config/env writer
+        # in this codebase -- Apply used to render an inert stub hook for
+        # this family (`_render_stub_hook`, never wired to block/inject
+        # anything), advertising a fix that did nothing. A rung-1 CLAUDE.md
+        # note is honest about what's actually deliverable and still useful.
         "key": "command_not_found",
         "title": "command not found (bashisms under zsh, bare interpreter)",
         "tools": {"Bash"},
         "pattern": re.compile(r"command not found", re.IGNORECASE),
-        "rung": 5,
-        "fix": "Config/env fix: alias or install the missing binary in the harness's shell profile.",
-    },
-    {
-        "key": "read_offset_malformed",
-        "title": "Read malformed offset (array, not scalar)",
-        "tools": {"Read"},
-        "pattern": re.compile(r"offset.{0,20}(must be|invalid|expected)|invalid.{0,20}offset", re.IGNORECASE),
         "rung": 1,
-        "fix": "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not arrays.",
+        "fix": (
+            "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
+            "PATH. Common causes here: using bare `python` instead of `python3`, "
+            "or a bash-only builtin (`mapfile`, `shopt`, `[[ ... ]]` extensions) "
+            "that doesn't exist under this shell (e.g. zsh, sh) or POSIX mode. "
+            "Prefer the portable/explicit form."
+        ),
     },
     {
         "key": "webfetch_domain_blocked",
@@ -484,6 +510,62 @@ def distill_pothole_cluster(
     return {"title": title, "family_key": family_key, "fix": fix}
 
 
+# --- Distill confidence gate (SPEC honesty requirement) ------------------------
+#
+# Validated against the real corpus (2026-07-14): fed only bare/near-empty
+# evidence, the distill model reliably CONFABULATES a specific-sounding but
+# ungrounded fix rather than declining. The single biggest real example: a
+# multi-command `&&` Bash chain whose LAST command exits nonzero with no
+# error text of its own (a trailing `grep`/`find` "no match", commonly) —
+# the captured "error" is either empty, a bare digit/punctuation residue
+# (`0`, `000`, `---`), or literally just leftover STDOUT from an EARLIER,
+# successful command in the chain (an `ls -la` dump) that has nothing to do
+# with why the chain's exit code was nonzero. Distill invented FIVE different
+# titled "fixes" for that one benign phenomenon (bash_stderr_missing,
+# bash_error_reporting, bash_env_setup, bash_output_buffer_limit,
+# bash_output_truncation) — each confident, each wrong, none traceable to any
+# actual quoted error text. A fix can only be grounded in evidence that
+# itself says something; this gate rejects a cluster BEFORE distillation when
+# none of its samples clear that bar, rather than trusting the model to
+# decline on its own.
+
+_EXIT_CODE_PREFIX_RE = re.compile(r"^\s*exit code\s+\d+\s*\n?", re.IGNORECASE)
+#: Body is "noise" if, after stripping a leading exit-code line, nothing but
+#: digits/whitespace/punctuation is left (catches "", "0", "000", "---").
+_ONLY_NOISE_RE = re.compile(r"^[\s\d\W]*$")
+#: A body that's actually just a raw `ls -la`-style directory dump — real
+#: text, but leftover stdout from an earlier chain step, not an error
+#: description of why the LAST command in the chain failed.
+_LS_LISTING_RE = re.compile(r"^\s*total\s+\d+\s*\n\s*[dlpscb\-][rwxst\-]{9}[@+.]?\s", re.IGNORECASE)
+
+
+def _is_substantive_error_text(text: str) -> bool:
+    """False for evidence too thin to ground a specific distilled fix in —
+    see the confidence-gate note above. Never raises."""
+    if not text:
+        return False
+    body = _EXIT_CODE_PREFIX_RE.sub("", text, count=1).strip()
+    if not body:
+        return False
+    if _ONLY_NOISE_RE.match(body):
+        return False
+    if _LS_LISTING_RE.match(body):
+        return False
+    return True
+
+
+def _evidence_too_thin_for_distill(cluster: _RawCluster, *, sample_cap: int = 8) -> bool:
+    """True when NONE of a cluster's (capped) raw samples carry substantive
+    error text — the distill confidence gate. A cluster failing this check is
+    suppressed entirely rather than distilled (see ``apply_distill_to_residual``):
+    showing a human a confident title + fix that traces to nothing but bare
+    exit codes / leftover stdout is worse than surfacing nothing."""
+    samples = [f.error_text for f in cluster.failures if f.error_text][:sample_cap]
+    if not samples:
+        return True
+    return not any(_is_substantive_error_text(s) for s in samples)
+
+
 def _distill_cached(tool_name: str, cluster: _RawCluster, cache_dir: Path) -> dict[str, str]:
     """Cached wrapper (keyed by cluster content hash) — never re-spends on an
     unchanged cluster. Best-effort: any I/O error degrades to a cache miss."""
@@ -535,6 +617,8 @@ def apply_distill_to_residual(
 
     merged: dict[str, _RawCluster] = {}
     for cluster in to_distill:
+        if _evidence_too_thin_for_distill(cluster):
+            continue  # confidence gate: suppressed, not distilled — see note above
         tool_name = cluster.failures[0].tool_name if cluster.failures else "unknown"
         result = _distill_cached(tool_name, cluster, cache_dir)
         if not result:

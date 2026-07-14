@@ -103,6 +103,36 @@ def test_apply_note_go_writes_marked_section(cfg, tmp_path):
     assert "# Repo\n" in written        # original content preserved
 
 
+def test_command_not_found_apply_writes_real_note_not_stub(cfg, tmp_path):
+    # Downgraded to rung 1 (SPEC honesty fix): there is no safe automatic
+    # config/env writer, so Apply must write a real CLAUDE.md note with
+    # genuinely useful guidance instead of the inert stub hook rung 5 used to
+    # produce via _render_stub_hook.
+    cluster = _cluster(
+        signature="command_not_found", family_key="command_not_found",
+        title="command not found (bashisms under zsh, bare interpreter)",
+        rung=1,
+        proposed_fix=(
+            "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
+            "PATH. Common causes here: using bare `python` instead of `python3`, "
+            "or a bash-only builtin (`mapfile`, `shopt`, `[[ ... ]]` extensions) "
+            "that doesn't exist under this shell (e.g. zsh, sh) or POSIX mode. "
+            "Prefer the portable/explicit form."
+        ),
+    )
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# Repo\n", encoding="utf-8")
+    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    assert result["record"]["kind"] == "note"
+    written = target.read_text()
+    assert "python3" in written
+    assert "<!-- tokenjam:pothole:command_not_found -->" in written
+    # Must never route through the enforcement/stub-hook path.
+    assert "no automatic matcher" not in written
+    assert "never blocks" not in written
+    assert not (tmp_path / ".claude").exists()
+
+
 def test_apply_note_creates_missing_file(cfg, tmp_path):
     target = tmp_path / "sub" / "CLAUDE.md"
     result = pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
