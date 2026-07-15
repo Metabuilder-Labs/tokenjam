@@ -29,7 +29,7 @@ from tokenjam.core.export.common import (
     rule_evidence_comment,
     select_figure_value,
 )
-from tokenjam.core.optimize.types import DowngradeFinding
+from tokenjam.core.optimize.types import MODEL_DOWNGRADE_CAVEAT, DowngradeFinding
 
 
 def _comment_block(lines: list[str], indent: int) -> str:
@@ -48,11 +48,9 @@ def render_ccr_config(
 ) -> str:
     """Return a JSONC string ready to write to disk for claude-code-router."""
     timestamp = datetime.now(tz=timezone.utc).isoformat()
-    caveat = downgrade.caveat if downgrade is not None else (
-        # No finding yet — still embed the canonical caveat so an empty export
-        # carries the honesty framing.
-        DowngradeFinding.__dataclass_fields__["caveat"].default
-    )
+    # No finding yet — still embed the canonical caveat so an empty export
+    # carries the honesty framing.
+    caveat = downgrade.caveat if downgrade is not None else MODEL_DOWNGRADE_CAVEAT
 
     header = header_lines(
         target="ccr",
