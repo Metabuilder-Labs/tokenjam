@@ -226,6 +226,17 @@ def cmd_optimize(
         plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
         agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
 
+        # Opportunistic adoption detection: with a direct DuckDB connection
+        # in hand (daemon down), resolve any ripe past config exports into
+        # measured adopted/ignored outcomes. Fail-safe — never break optimize.
+        # (When the daemon is up, the /api/v1/recommendations route runs this
+        # server-side instead — both write the same on-disk sink.)
+        try:
+            from tokenjam.core.recommendations import detect_downsize_adoption
+            detect_downsize_adoption(conn, config)
+        except Exception:
+            pass
+
     dominant = dominant_plan(plan_mix)
     pricing_mode = pricing_mode_for(dominant)
     declared_plan = config_declared_plan(config)
@@ -239,6 +250,8 @@ def cmd_optimize(
             report.downgrade, dominant, pricing_mode,
             target=export_target, agent_id=agent,
             output_json=output_json,
+            config=config, since=since_dt, until=until_dt,
+            window_days=(until_dt - since_dt).total_seconds() / 86400.0,
         )
         return
 
@@ -1035,6 +1048,10 @@ def _export_snippet(
     target: str,
     agent_id: str | None,
     output_json: bool,
+    config=None,
+    since=None,
+    until=None,
+    window_days: float = 0.0,
 ) -> None:
     """
     Write a routing-config snippet for the requested target and print a
@@ -1062,6 +1079,30 @@ def _export_snippet(
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     out_path = out_dir / f"{target}-{today}.{ext}"
     out_path.write_text(body)
+
+    # Record the export in the recommendation-outcome ledger, stashing the
+    # downsize baseline so post-hoc adoption detection can later measure whether
+    # the recommended premium models' usage actually dropped. Fail-safe.
+    if config is not None and since is not None and until is not None:
+        try:
+            from tokenjam.core.recommendations import record_config_export
+            provider = None
+            suggestions = getattr(downgrade, "suggestions", None) or {}
+            if suggestions:
+                from tokenjam.core.optimize.analyzers.model_downgrade import (
+                    DOWNGRADE_CANDIDATES,
+                )
+                for prov, mapping in DOWNGRADE_CANDIDATES.items():
+                    if any(m in mapping for m in suggestions):
+                        provider = prov
+                        break
+            record_config_export(
+                config, target=target, export_path=str(out_path),
+                downgrade=downgrade, pricing_mode=pricing_mode, provider=provider,
+                since=since, until=until, window_days=window_days,
+            )
+        except Exception:
+            pass
 
     if output_json:
         click.echo(json.dumps({

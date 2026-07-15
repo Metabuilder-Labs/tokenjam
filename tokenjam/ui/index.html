@@ -6251,6 +6251,42 @@ function OptimizeFinding({ name, opt, framing }) {
   </section>`;
 }
 
+// Recommendation-outcome ledger: did recommendations get acted on, and
+// what did they actually recover? Keeps measured-recovered strictly separate
+// from estimated-recoverable (honesty discipline, Rule 14) — the measured column
+// is an observed post-recommendation span-mix shift (correlation), never a
+// projected figure and never "tokenjam saved you".
+function RecommendationsPanel({ rec }) {
+  const estTok = rec.estimated_recoverable_tokens || 0;
+  const estUsd = rec.estimated_recoverable_usd || 0;
+  const measTok = rec.measured_recovered_tokens || 0;
+  const measUsd = rec.measured_recovered_usd || 0;
+  const rows = (rec.rows || []).slice(0, 12);
+  return html`
+    <section class="opt-section" id="opt-recommendations">
+      <div class="opt-title"><span>Recommendations acted on <span class="dim" style="font-weight:400;font-size:12px">· measured recovery vs estimate</span></span></div>
+      <div class="sz-tiles">
+        <div class="sz-tile"><div class="sz-tile-v" style="color:var(--accent)">~${fmtTokens(estTok)}${estUsd ? ' (~' + fmtCost(estUsd) + ')' : ''}</div><div class="sz-tile-l">estimated recoverable <span class="estimated-tag">estimated</span></div></div>
+        <div class="sz-tile"><div class="sz-tile-v" style="color:var(--success)">${fmtTokens(measTok)}${measUsd ? ' (' + fmtCost(measUsd) + ')' : ''}</div><div class="sz-tile-l">measured recovered</div></div>
+        <div class="sz-tile"><div class="sz-tile-v">${rec.adopted || 0} / ${rec.ignored || 0}</div><div class="sz-tile-l">adopted / ignored</div></div>
+      </div>
+      <table class="opt-table" style="margin-top:12px">
+        <thead><tr><th>When</th><th>What</th><th>Status</th><th style="text-align:right">recovered / est.</th></tr></thead>
+        <tbody>
+          ${rows.map((o, i) => html`<tr key=${i}>
+            <td class="dim" style="font-size:11px">${String(o.ts || '').slice(0, 10)}</td>
+            <td>${String(o.kind || '').replace(/_/g, ' ')}</td>
+            <td class=${o.status === 'adopted' ? '' : 'dim'} style="font-size:12px">${o.status}</td>
+            <td class="mono" style="text-align:right">${o.measured
+              ? (o.recovered_tokens ? html`<span style="color:var(--success)">${fmtTokens(o.recovered_tokens)} measured</span>` : html`<span class="dim">0</span>`)
+              : html`<span style="color:var(--accent)">~${fmtTokens(o.estimated_tokens || 0)} est.</span>`}</td>
+          </tr>`)}
+        </tbody>
+      </table>
+      <div class="sz-note" style="font-size:12px;margin-top:12px">Measured = observed shift in real spans after a recommendation (a correlation, not proof tokenjam caused it). Estimated = projected at recommendation time. <span class="estimated-tag">honest split</span></div>
+    </section>`;
+}
+
 function OptimizeView({ params }) {
   const DEFAULTS = { since: '30d', agent_id: '', compare: '', finding: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
@@ -6259,7 +6295,7 @@ function OptimizeView({ params }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [] });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -6272,7 +6308,10 @@ function OptimizeView({ params }) {
       const comp = await api('/cost/components', { since, agent_id: agentId || undefined }).catch(() => null);
       // Applied summaries (for the Summarize box's applied-vs-outstanding progress).
       const bk = await api('/summarize/backups').then(r => r.backups || []).catch(() => []);
-      setSt({ loading: false, error: null, opt, cmp, comp, bk });
+      // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
+      // Best-effort — must not blank the Optimize screen.
+      const rec = await api('/recommendations').catch(() => null);
+      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
@@ -6396,6 +6435,7 @@ function OptimizeView({ params }) {
           ` : html`<div class="opt-line dim">No summarizable prompt files in this scan. <a class="sz-link" href="#/optimize/summarize">Open Summarize →</a></div>`}
         </section>` : null}
 
+      ${st.rec && st.rec.rows && st.rec.rows.length ? html`<${RecommendationsPanel} rec=${st.rec} />` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}
