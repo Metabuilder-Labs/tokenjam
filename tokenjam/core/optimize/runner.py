@@ -38,6 +38,7 @@ ANALYZER_ORDER: list[str] = [
     "subagent",
     "summarize",
     "pothole",
+    "verbosity",
 ]
 
 THIN_DATA_DAYS = 7
@@ -344,6 +345,11 @@ def _build_finding_constructors() -> dict:
         PotholeExample,
         PotholeFinding,
     )
+    from tokenjam.core.optimize.analyzers.output_verbosity import (
+        VERBOSITY_HONESTY_CAVEAT,
+        VerbosityCandidate,
+        VerbosityFinding,
+    )
     from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
@@ -478,6 +484,23 @@ def _build_finding_constructors() -> dict:
             caveat=d.get("caveat", ""),
         )
 
+    def _verbosity(d: dict) -> VerbosityFinding:
+        cands = [VerbosityCandidate(**c) for c in d.get("candidates") or []]
+        return VerbosityFinding(
+            candidates=cands,
+            total_candidates=int(d.get("total_candidates", 0)),
+            sessions_examined=int(d.get("sessions_examined", 0)),
+            cohorts_examined=int(d.get("cohorts_examined", 0)),
+            remedy_snippet=d.get("remedy_snippet", ""),
+            suggested_max_tokens=d.get("suggested_max_tokens"),
+            confidence=d.get("confidence", "structural"),
+            caveat=d.get("caveat", VERBOSITY_HONESTY_CAVEAT),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
+        )
+
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
@@ -487,6 +510,7 @@ def _build_finding_constructors() -> dict:
         "subagent": _subagent,
         "summarize": _summarize,
         "pothole": _pothole,
+        "verbosity": _verbosity,
     }
 
 

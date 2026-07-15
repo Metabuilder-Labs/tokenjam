@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 830 360" width="830" height="360" role="img" aria-label="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script.">
+  <defs>
+    <style>
+      .t { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; }
+      .m { font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace; }
+    </style>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="829" height="359" rx="14" fill="#0a0a0a" stroke="#3a3a3a"/>
+
+  <text x="28" y="36" class="m" font-size="12" letter-spacing="1.5" fill="#7a7a7a">WHERE YOUR TOKENS GO</text>
+  <text x="802" y="36" class="t" font-size="12.5" font-style="italic" fill="#7a7a7a" text-anchor="end">measured, not modeled</text>
+
+  <!-- row 1 -->
+  <g>
+    <rect x="24"  y="58" width="251" height="132" rx="10" fill="#161616" stroke="#3a3a3a"/>
+    <text x="42"  y="90"  class="t" font-size="15.5" font-weight="650" fill="#f0f0f0">Expensive model</text>
+    <text x="42"  y="113" class="t" font-size="12.5" fill="#8a8a8a">Using Opus for a</text>
+    <text x="42"  y="131" class="t" font-size="12.5" fill="#8a8a8a">Haiku-level task</text>
+    <rect x="40"  y="152" width="82" height="24" rx="6" fill="#242424" stroke="#4a4a4a"/>
+    <text x="52"  y="168" class="m" font-size="11.5" fill="#cfcfcf">downsize</text>
+  </g>
+  <g>
+    <rect x="289" y="58" width="251" height="132" rx="10" fill="#161616" stroke="#3a3a3a"/>
+    <text x="307" y="90"  class="t" font-size="15.5" font-weight="650" fill="#f0f0f0">Uncached repeats</text>
+    <text x="307" y="113" class="t" font-size="12.5" fill="#8a8a8a">Sending the same base</text>
+    <text x="307" y="131" class="t" font-size="12.5" fill="#8a8a8a">prompt 100s of times</text>
+    <rect x="305" y="152" width="58" height="24" rx="6" fill="#242424" stroke="#4a4a4a"/>
+    <text x="317" y="168" class="m" font-size="11.5" fill="#cfcfcf">cache</text>
+  </g>
+  <g>
+    <rect x="554" y="58" width="251" height="132" rx="10" fill="#161616" stroke="#3a3a3a"/>
+    <text x="572" y="90"  class="t" font-size="15.5" font-weight="650" fill="#f0f0f0">Bloated prompts</text>
+    <text x="572" y="113" class="t" font-size="12.5" fill="#8a8a8a">Re-sending the same long</text>
+    <text x="572" y="131" class="t" font-size="12.5" fill="#8a8a8a">context every call</text>
+    <rect x="570" y="152" width="50" height="24" rx="6" fill="#242424" stroke="#4a4a4a"/>
+    <text x="582" y="168" class="m" font-size="11.5" fill="#cfcfcf">trim</text>
+  </g>
+
+  <!-- row 2 -->
+  <g>
+    <rect x="24"  y="204" width="251" height="132" rx="10" fill="#161616" stroke="#3a3a3a"/>
+    <text x="42"  y="236" class="t" font-size="15.5" font-weight="650" fill="#f0f0f0">Verbose output</text>
+    <text x="42"  y="259" class="t" font-size="12.5" fill="#8a8a8a">Getting 500-word answers</text>
+    <text x="42"  y="277" class="t" font-size="12.5" fill="#8a8a8a">to yes/no questions</text>
+    <rect x="40"  y="298" width="82" height="24" rx="6" fill="#242424" stroke="#4a4a4a"/>
+    <text x="52"  y="314" class="m" font-size="11.5" fill="#cfcfcf">verbosity</text>
+  </g>
+  <g>
+    <rect x="289" y="204" width="251" height="132" rx="10" fill="#161616" stroke="#3a3a3a"/>
+    <text x="307" y="236" class="t" font-size="15.5" font-weight="650" fill="#f0f0f0">Repeated planning</text>
+    <text x="307" y="259" class="t" font-size="12.5" fill="#8a8a8a">Re-planning the same</text>
+    <text x="307" y="277" class="t" font-size="12.5" fill="#8a8a8a">task every day</text>
+    <rect x="305" y="298" width="58" height="24" rx="6" fill="#242424" stroke="#4a4a4a"/>
+    <text x="317" y="314" class="m" font-size="11.5" fill="#cfcfcf">reuse</text>
+  </g>
+  <g>
+    <rect x="554" y="204" width="251" height="132" rx="10" fill="#161616" stroke="#3a3a3a"/>
+    <text x="572" y="236" class="t" font-size="15.5" font-weight="650" fill="#f0f0f0">Don&#8217;t need an LLM</text>
+    <text x="572" y="259" class="t" font-size="12.5" fill="#8a8a8a">Paying a model to do</text>
+    <text x="572" y="277" class="t" font-size="12.5" fill="#8a8a8a">what code could</text>
+    <rect x="570" y="298" width="56" height="24" rx="6" fill="#242424" stroke="#4a4a4a"/>
+    <text x="582" y="314" class="m" font-size="11.5" fill="#cfcfcf">script</text>
+  </g>
+</svg>
