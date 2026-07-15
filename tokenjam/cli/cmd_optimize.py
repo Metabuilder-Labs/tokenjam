@@ -1458,6 +1458,20 @@ def _render_subagent(
             )
             console.print(f"           [yellow]→[/yellow] {', '.join(r.flags)}")
 
+    # Quantified estimate (#101): the over_powered model-swap delta — what earns
+    # this finding its ranked slot. Dollars for api-billed users; the token quota
+    # otherwise (same category discipline as the peer analyzers). Honest
+    # "estimated recoverable" framing only; the caveat below still governs.
+    if finding.estimated_recoverable_tokens:
+        if pricing_mode == "api" and finding.estimated_recoverable_usd:
+            recov = format_cost(finding.estimated_recoverable_usd)
+        else:
+            recov = f"{format_tokens(finding.estimated_recoverable_tokens)} tokens"
+        console.print(
+            f"     • [green]~{recov}[/green] estimated recoverable "
+            f"[dim](over_powered subagents at their cheaper same-family model)[/dim]"
+        )
+
     console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
