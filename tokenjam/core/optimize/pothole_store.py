@@ -17,22 +17,36 @@ import threading
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from tokenjam.core.optimize.analyzers.pothole import PotholeFinding, compute_pothole_finding
+
+if TYPE_CHECKING:
+    from tokenjam.core.config import TjConfig
 
 _LOCK = threading.Lock()
 _COMPUTING = threading.Event()
 
 
-def default_cache_path() -> Path:
+def default_cache_path(config: TjConfig | None = None) -> Path:
+    """``<storage-parent>/pothole_cache.json`` when ``config`` is given — this
+    honors ``--config`` / ``storage.path`` (and falls back to a config-scoped
+    TEMP dir, never the real ``~/.tj``, when ``storage.path`` is ``""``/
+    ``":memory:"``; see ``pothole_apply._storage_base_dir``). Without a
+    ``config`` (legacy callers), the old hardcoded ``~/.tj`` default."""
+    if config is not None:
+        from tokenjam.core.optimize.pothole_apply import _storage_base_dir
+
+        return _storage_base_dir(config) / "pothole_cache.json"
     return Path.home() / ".tj" / "pothole_cache.json"
 
 
-def read_cache(path: Path | None = None) -> dict[str, Any] | None:
+def read_cache(
+    path: Path | None = None, *, config: TjConfig | None = None,
+) -> dict[str, Any] | None:
     """The last-written ``{"computed_at", "finding"}`` payload, or ``None`` if
     no recompute has ever completed (fresh install) or the file is corrupt."""
-    p = path or default_cache_path()
+    p = path or default_cache_path(config)
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -40,10 +54,12 @@ def read_cache(path: Path | None = None) -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
-def write_cache(finding: PotholeFinding, path: Path | None = None) -> dict[str, Any]:
+def write_cache(
+    finding: PotholeFinding, path: Path | None = None, *, config: TjConfig | None = None,
+) -> dict[str, Any]:
     """Atomically write the finding (temp file + rename), never a partial file
     a concurrent reader could observe."""
-    p = path or default_cache_path()
+    p = path or default_cache_path(config)
     payload = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "finding": asdict(finding),
@@ -84,7 +100,10 @@ def recompute_now(
     _COMPUTING.set()
     try:
         finding = compute_pothole_finding(conn)
-        result = write_cache(finding, cache_path)
+        # cache_path, when omitted, resolves via `config` (honors --config /
+        # storage.path, and a :memory:/"" storage.path never falls through to
+        # the real ~/.tj — see default_cache_path).
+        result = write_cache(finding, cache_path, config=config)
         if config is not None:
             try:
                 from tokenjam.core.optimize import pothole_verify

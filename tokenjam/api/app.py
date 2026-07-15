@@ -1,6 +1,7 @@
 """FastAPI application factory. Called by `tj serve`."""
 from __future__ import annotations
 
+import secrets
 from html import escape as html_escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncContextManager, Callable
@@ -60,6 +61,11 @@ def create_app(
     app.state.config = config
     app.state.db = db
     app.state.pipeline = ingest_pipeline
+    # A random per-process token the pothole write endpoints always require
+    # (api/deps.py::require_pothole_write_auth), independent of
+    # config.api.auth.enabled -- see that module's docstring. Minted once per
+    # server process; embedded in the served UI HTML below.
+    app.state.pothole_write_token = secrets.token_urlsafe(32)
 
     # Register routers
     from tokenjam.api.routes.spans import router as spans_router
@@ -128,6 +134,14 @@ def create_app(
                 "</head>",
                 f'<meta name="tj-api-key" content="{html_escape(config.api.auth.api_key, quote=True)}">\n</head>',
             )
+        # Local write token (see require_pothole_write_auth) -- ALWAYS injected,
+        # regardless of config.api.auth.enabled, so the same-origin UI can keep
+        # calling the pothole write endpoints even on a default (auth-disabled)
+        # local install.
+        html = html.replace(
+            "</head>",
+            f'<meta name="tj-write-token" content="{html_escape(app.state.pothole_write_token, quote=True)}">\n</head>',
+        )
         return HTMLResponse(html)
 
     # Vendored JS modules (Preact + htm) served as static files so the

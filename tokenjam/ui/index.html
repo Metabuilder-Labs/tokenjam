@@ -1611,6 +1611,12 @@ const html = htm.bind(h);
 // --- API ---
 const apiKeyMeta = document.querySelector('meta[name="tj-api-key"]');
 const API_KEY = apiKeyMeta ? apiKeyMeta.getAttribute('content') : null;
+// Local write token (require_pothole_write_auth, api/deps.py) -- always
+// present (injected regardless of api.auth.enabled), required on every
+// mutating pothole call (apply/enable/disable/revert/refresh). Sent on every
+// POST below; routes that don't check it simply ignore the extra header.
+const writeTokenMeta = document.querySelector('meta[name="tj-write-token"]');
+const WRITE_TOKEN = writeTokenMeta ? writeTokenMeta.getAttribute('content') : null;
 
 async function api(path, params = {}) {
   const qs = new URLSearchParams();
@@ -1628,6 +1634,7 @@ async function api(path, params = {}) {
 async function apiPost(path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
+  if (WRITE_TOKEN) headers['X-TJ-Local-Token'] = WRITE_TOKEN;
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
@@ -1641,6 +1648,7 @@ async function apiPost(path, body) {
 async function apiPostOrDetail(path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
+  if (WRITE_TOKEN) headers['X-TJ-Local-Token'] = WRITE_TOKEN;
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
@@ -7498,9 +7506,9 @@ function VerifyLine({ verify, rung }) {
     </div>`;
 }
 
-// The Compound ledger (SPEC §4 step 7): realized savings summed across every
+// The Compound ledger (SPEC §4 step 7): estimated savings summed across every
 // VERIFIED fix, at the top of the Applied section — the loop's evidence that
-// it actually made things leaner, not just that it wrote something.
+// it correlates with fewer recurrences, not just that it wrote something.
 function CompoundLedgerSummary({ ledger }) {
   if (!ledger) return null;
   if (!ledger.verified_count) {
@@ -7510,7 +7518,7 @@ function CompoundLedgerSummary({ ledger }) {
     <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
         <span style="font-size:20px;font-weight:600;color:var(--accent)">~${fmtTokens(ledger.total_realized_tokens_saved)} tok</span>
-        <span class="dim" style="font-size:12px">realized savings across ${ledger.improved_count} verified fix(es) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
+        <span class="dim" style="font-size:12px">estimated savings across ${ledger.improved_count} verified fix(es) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
       </div>
       <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} regressed · ${ledger.enforcement_disabled_count} awaiting enforcement · ${ledger.insufficient_data_count} still measuring</div>
     </div>`;
@@ -7796,7 +7804,7 @@ function DashboardView({ params }) {
       // full cost history — that user upgrading to review past spend must NOT
       // see "No data yet" (the front door was gating purely on active agents and
       // returning before /cost was ever fetched — issue: historical-only empty).
-      const [cost, status, compare, opt, al, drift, traces] = await Promise.all([
+      const [cost, status, compare, opt, al, drift, traces, pothole] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
         api('/status').catch(() => ({ agents: [] })),
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
@@ -7804,6 +7812,7 @@ function DashboardView({ params }) {
         api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
         api('/drift').catch(() => ({ agents: [] })),
         api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
+        api('/pothole/proposals').catch(() => ({ finding: null })),
       ]);
       // "No data yet" only when there is genuinely NO telemetry: no cost history
       // AND no tokens AND no sessions/agents AND no traces. Historical cost or
@@ -7813,7 +7822,8 @@ function DashboardView({ params }) {
       const hasTraces = !!(traces.traces && traces.traces.length);
       const empty = !hasCost && !hasAgents && !hasTraces;
       setD({ loading: false, empty, error: null, cost, compare, opt,
-        alerts: al.alerts || [], drift, traces: traces.traces || [] });
+        alerts: al.alerts || [], drift, traces: traces.traces || [],
+        pendingFixes: ((pothole && pothole.finding && pothole.finding.clusters) || []).length });
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -7905,8 +7915,8 @@ function DashboardView({ params }) {
               <div class="dash-col">
                 <div class="band-label">Health at a glance</div>
                 <div class="tile-grid compact">
-                  <${HealthTile} label="Pending fixes" value="0" attention=${false} href="#/review"
-                    sub="self-improve loop — coming soon" />
+                  <${HealthTile} label="Pending fixes" value=${d.pendingFixes || 0} attention=${(d.pendingFixes || 0) > 0} href="#/review"
+                    sub="self-improve loop — review inbox" />
                   <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
                     href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
                   <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"

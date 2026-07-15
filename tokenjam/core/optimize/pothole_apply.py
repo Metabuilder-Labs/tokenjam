@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -36,6 +37,7 @@ from typing import Any
 
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize.apply import _atomic_write
+from tokenjam.core.summarize.session import SummarizeRefused
 
 # --- Rungs (SPEC §6) -----------------------------------------------------------
 
@@ -58,13 +60,39 @@ def slugify(text: str) -> str:
 
 # --- Storage roots ---------------------------------------------------------
 
-def pothole_apply_root(config: TjConfig) -> Path:
-    """``<storage-parent>/pothole_apply/`` (default ``~/.tj/pothole_apply/``) —
-    mirrors ``core.summarize.session.summary_root``'s DEC-026 convention so
-    tests can point it at a tmp dir via ``config.storage.path``."""
+def _storage_base_dir(config: TjConfig) -> Path:
+    """The directory every pothole_apply/pothole_store artifact is parented
+    under: ``<storage-parent>`` (mirrors ``core.summarize.session.
+    summary_root``'s DEC-026 convention) when ``storage.path`` names a real
+    file, else a TEMP directory — NEVER the real ``~/.tj`` (must-fix #4: an
+    InMemory-backed / ``:memory:``-configured caller must not leak writes
+    into a real local install).
+
+    The temp dir is minted once and cached ON the config object itself
+    (``config._pothole_memory_tmp_root``), so repeated calls against the SAME
+    config instance agree — apply, then a later revert against that same
+    live config (e.g. within one ``tj serve`` process), must resolve to the
+    same path. A DIFFERENT config object (a different process, a different
+    test) gets its own temp dir; nothing here ever shares state across them,
+    and nothing here ever falls back to ``Path.home()``.
+    """
     sp = config.storage.path
-    base = Path.home() / ".tj" if sp in ("", ":memory:") else Path(sp).expanduser().parent
-    return base / "pothole_apply"
+    if sp not in ("", ":memory:"):
+        return Path(sp).expanduser().parent
+    cached = getattr(config, "_pothole_memory_tmp_root", None)
+    if isinstance(cached, Path):
+        return cached
+    tmp_root = Path(tempfile.mkdtemp(prefix="tokenjam-pothole-mem-"))
+    try:
+        config._pothole_memory_tmp_root = tmp_root   # type: ignore[attr-defined]
+    except Exception:
+        pass   # best-effort caching only — a read-only/duck-typed config just re-mints each call
+    return tmp_root
+
+
+def pothole_apply_root(config: TjConfig) -> Path:
+    """``<storage-parent>/pothole_apply/`` — see ``_storage_base_dir``."""
+    return _storage_base_dir(config) / "pothole_apply"
 
 
 def _backups_dir(config: TjConfig) -> Path:
@@ -72,12 +100,8 @@ def _backups_dir(config: TjConfig) -> Path:
 
 
 def applied_fixes_path(config: TjConfig) -> Path:
-    """The durable ledger Phase 3 (verify) reads. Default ``~/.tj/applied_fixes.json``
-    (the spec's literal suggestion) — parented next to the storage DB like every
-    other ``~/.tj/*`` artifact so tests never touch a real install."""
-    sp = config.storage.path
-    base = Path.home() / ".tj" if sp in ("", ":memory:") else Path(sp).expanduser().parent
-    return base / "applied_fixes.json"
+    """The durable ledger Phase 3 (verify) reads — see ``_storage_base_dir``."""
+    return _storage_base_dir(config) / "applied_fixes.json"
 
 
 # --- Default target-path suggestion (for the card's scope/target override) ----
@@ -201,7 +225,11 @@ def _save_backup(config: TjConfig, fix_id: str, target: str, pre_image: str | No
 
 def _restore_backup(config: TjConfig, fix_id: str) -> dict[str, Any]:
     """Undo one apply: restore the pre-image, or delete the file this apply
-    created. Raises ``PotholeApplyRefused`` if there's no backup record."""
+    created. Raises ``PotholeApplyRefused`` if there's no backup record, or
+    (must-fix #3) if the target has since become a symlink — checked BEFORE
+    branching on ``created``/``is_file`` so a swapped-in symlink can't
+    redirect either a restore-write or a delete through it.
+    """
     orig_f, meta_f = _backup_paths(config, fix_id)
     if not meta_f.is_file():
         raise PotholeApplyRefused(f"no backup found for applied fix {fix_id} — cannot revert.")
@@ -210,6 +238,8 @@ def _restore_backup(config: TjConfig, fix_id: str) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise PotholeApplyRefused(f"backup metadata for {fix_id} is unreadable — cannot revert.") from exc
     target = Path(meta["target_path"]).expanduser()
+    if target.is_symlink():
+        raise PotholeApplyRefused(f"{target} is a symlink — refusing to revert through it.")
     if meta.get("created"):
         if target.is_file():
             target.unlink()
@@ -218,7 +248,10 @@ def _restore_backup(config: TjConfig, fix_id: str) -> dict[str, Any]:
         raise PotholeApplyRefused(f"backup blob for {fix_id} is missing — cannot revert.")
     original = orig_f.read_text(encoding="utf-8")
     if target.is_file():
-        _atomic_write(target, original)
+        try:
+            _atomic_write(target, original)
+        except SummarizeRefused as exc:
+            raise PotholeApplyRefused(str(exc)) from exc
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(original, encoding="utf-8")
@@ -771,12 +804,37 @@ def render_settings_patch(hook_path: Path, event: str = "PreToolUse", matcher: s
 def _write_target(target: Path, content: str) -> None:
     """Write a rung's rendered content — atomically (preserving mode) when the
     target already exists, else a plain create (``_atomic_write`` needs an
-    existing file to stat for its mode)."""
+    existing file to stat for its mode).
+
+    Refuses a symlinked target outright (must-fix #3): checked here (not just
+    inside ``_atomic_write``) because a BROKEN symlink's ``.exists()`` is
+    False, which would otherwise fall through to the plain-create branch and
+    write through the link unchecked.
+    """
+    if target.is_symlink():
+        raise PotholeApplyRefused(f"{target} is a symlink — refusing to write through it.")
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
-        _atomic_write(target, content)
+        try:
+            _atomic_write(target, content)
+        except SummarizeRefused as exc:
+            raise PotholeApplyRefused(str(exc)) from exc
     else:
         target.write_text(content, encoding="utf-8")
+
+
+# --- Rung 1: note target allowlist (must-fix #2) -------------------------------
+
+def _is_allowed_note_target(target: Path, pre_image: str | None) -> bool:
+    """A rung-1 note may only land on: (a) a ``*.md`` file (covers
+    ``CLAUDE.md``, the intended target — any Markdown doc is a reasonable
+    note home), or (b) a file that ALREADY carries a ``tokenjam:pothole:``
+    marker (a prior legitimate apply — the same rung 2/3 re-apply allowance).
+    Anything else (a ``.py``, ``.zshrc``, etc.) is refused outright, closing
+    the "rung=1 + arbitrary target_path corrupts any file" gap."""
+    if target.suffix.lower() == ".md":
+        return True
+    return pre_image is not None and "tokenjam:pothole:" in pre_image
 
 
 # --- Write plan (shared by dry-run preview and the real apply) ----------------
@@ -784,7 +842,8 @@ def _write_target(target: Path, content: str) -> None:
 def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     """Render what WOULD be written for ``cluster`` at ``target_path`` — pure,
     no disk writes. Raises ``PotholeApplyRefused`` if a non-TokenJam file
-    already sits at a create-only target (skill / hook)."""
+    already sits at a create-only target (skill / hook), the target is a
+    symlink, or (rung 1) the target isn't an allowlisted note file."""
     import difflib
 
     signature = cluster["signature"]
@@ -796,9 +855,20 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
 
     slug = slugify(cluster.get("title") or cluster.get("family_key") or signature)
     target = Path(target_path).expanduser()
+    if target.is_symlink():
+        raise PotholeApplyRefused(
+            f"{target} is a symlink — refusing to write through it. Point target_path "
+            f"at the real file."
+        )
     pre_image = _read_pre_image(target)
 
     if rung == RUNG_NOTE:
+        if not _is_allowed_note_target(target, pre_image):
+            raise PotholeApplyRefused(
+                f"{target} is not an allowlisted note target (must be a CLAUDE.md/*.md "
+                f"file, or already carry a tokenjam:pothole marker) — refusing to write "
+                f"a rung-1 note there."
+            )
         new_content = render_note_content(pre_image or "", cluster, signature)
     else:
         if pre_image is not None and "tokenjam:pothole:" not in pre_image:

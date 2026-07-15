@@ -598,3 +598,139 @@ def test_active_session_warning_never_raises_on_bad_conn(tmp_path):
             raise RuntimeError("db is on fire")
 
     assert pa.active_session_warning(_BrokenConn(), str(tmp_path / "CLAUDE.md")) is None
+
+
+# --- must-fix #2: rung-1 note target allowlist ---------------------------------
+
+def test_note_apply_refuses_non_markdown_target(cfg, tmp_path):
+    """rung=1 (note) at an arbitrary non-.md target (e.g. a .py file with no
+    prior tokenjam marker) must be refused outright — otherwise a client-
+    supplied target_path could corrupt any file on disk."""
+    target = tmp_path / "some_script.py"
+    target.write_text("print('do not touch me')\n", encoding="utf-8")
+    with pytest.raises(pa.PotholeApplyRefused, match="not an allowlisted note target"):
+        pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    assert target.read_text() == "print('do not touch me')\n"   # untouched
+
+
+def test_note_apply_refuses_dotfile_target(cfg, tmp_path):
+    target = tmp_path / ".zshrc"
+    target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
+    with pytest.raises(pa.PotholeApplyRefused, match="not an allowlisted note target"):
+        pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    assert target.read_text() == "export PATH=/usr/bin\n"   # untouched
+
+
+def test_note_apply_allows_md_target(cfg, tmp_path):
+    """A *.md target (not just literally CLAUDE.md) is allowed."""
+    target = tmp_path / "AGENTS.md"
+    target.write_text("# Agents\n", encoding="utf-8")
+    result = pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    assert result["dry_run"] is False
+    assert "<!-- tokenjam:pothole:cwd_confusion -->" in target.read_text()
+
+
+def test_note_apply_allows_re_apply_to_already_marked_non_md_file(cfg, tmp_path):
+    """A non-.md file that ALREADY carries a tokenjam:pothole marker (e.g. a
+    prior legitimate apply) may still be re-applied — the allowlist doesn't
+    lock out idempotent re-apply, only a first write to a foreign extension."""
+    target = tmp_path / "notes.txt"
+    target.write_text(
+        "<!-- tokenjam:pothole:cwd_confusion -->\nold\n<!-- /tokenjam:pothole:cwd_confusion -->\n",
+        encoding="utf-8",
+    )
+    result = pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    assert result["dry_run"] is False
+
+
+# --- must-fix #3: symlink guard --------------------------------------------
+
+def test_apply_refuses_symlinked_target(cfg, tmp_path):
+    real = tmp_path / "real_claude.md"
+    real.write_text("# elsewhere\n", encoding="utf-8")
+    link = tmp_path / "CLAUDE.md"
+    link.symlink_to(real)
+    with pytest.raises(pa.PotholeApplyRefused, match="symlink"):
+        pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(link), scope="project", go=True)
+    assert real.read_text() == "# elsewhere\n"   # the real file was never touched through the link
+
+
+def test_apply_refuses_dangling_symlink_target(cfg, tmp_path):
+    """A BROKEN symlink (nothing at the other end) must also be refused, not
+    silently treated as 'file doesn't exist yet, plain-create it' — that
+    plain-create branch is exactly what would write through the link."""
+    link = tmp_path / "CLAUDE.md"
+    link.symlink_to(tmp_path / "does-not-exist.md")
+    with pytest.raises(pa.PotholeApplyRefused, match="symlink"):
+        pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(link), scope="project", go=True)
+    assert not (tmp_path / "does-not-exist.md").exists()
+
+
+def test_revert_refuses_when_target_became_a_symlink(cfg, tmp_path):
+    """Apply normally, then swap the target for a symlink before reverting —
+    revert must refuse rather than restore/delete through the new link."""
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# Repo\n", encoding="utf-8")
+    result = pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    fix_id = result["record"]["id"]
+
+    elsewhere = tmp_path / "elsewhere.md"
+    elsewhere.write_text("do not touch\n", encoding="utf-8")
+    target.unlink()
+    target.symlink_to(elsewhere)
+
+    with pytest.raises(pa.PotholeApplyRefused, match="symlink"):
+        pa.revert_applied_fix(cfg, fix_id)
+    assert elsewhere.read_text() == "do not touch\n"   # untouched
+
+
+# --- must-fix #4: :memory:/"" storage never falls back to the real ~/.tj ------
+
+def test_memory_storage_path_never_resolves_to_real_home(monkeypatch, tmp_path):
+    """A fake, obviously-not-real HOME lets this test prove the resolved base
+    dir is NOT under it -- i.e. pothole_apply_root/applied_fixes_path for a
+    ':memory:'-configured TjConfig must land in a TEMP dir, never ~/.tj."""
+    fake_home = tmp_path / "definitely-not-the-real-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+
+    cfg = TjConfig(version="1", storage=StorageConfig(path=":memory:"))
+    root = pa.pothole_apply_root(cfg)
+    ledger_path = pa.applied_fixes_path(cfg)
+
+    assert not str(root).startswith(str(fake_home))
+    assert not str(ledger_path).startswith(str(fake_home))
+    assert (fake_home / ".tj").exists() is False   # never created either
+
+
+def test_memory_storage_path_stable_across_calls_same_config(tmp_path):
+    """The SAME config object must resolve to the SAME temp root every call —
+    apply-time and revert-time paths must agree within one process/config."""
+    cfg = TjConfig(version="1", storage=StorageConfig(path=":memory:"))
+    first = pa.pothole_apply_root(cfg)
+    second = pa.pothole_apply_root(cfg)
+    assert first == second
+
+
+def test_empty_storage_path_also_never_resolves_to_real_home(monkeypatch, tmp_path):
+    fake_home = tmp_path / "definitely-not-the-real-home-2"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+
+    cfg = TjConfig(version="1", storage=StorageConfig(path=""))
+    root = pa.pothole_apply_root(cfg)
+    assert not str(root).startswith(str(fake_home))
+
+
+def test_memory_storage_apply_and_revert_round_trip_via_temp_root(tmp_path):
+    """End-to-end: with ':memory:' storage, apply then revert must both
+    resolve against the SAME (temp, non-home) ledger/backup root."""
+    cfg = TjConfig(version="1", storage=StorageConfig(path=":memory:"))
+    target = tmp_path / "CLAUDE.md"
+    target.write_text("# Repo\n", encoding="utf-8")
+    result = pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    fix_id = result["record"]["id"]
+    assert pa.get_applied(cfg, fix_id) is not None
+    reverted = pa.revert_applied_fix(cfg, fix_id)
+    assert reverted["state"] == "reverted"
+    assert target.read_text() == "# Repo\n"

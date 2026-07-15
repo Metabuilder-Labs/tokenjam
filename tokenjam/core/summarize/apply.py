@@ -25,7 +25,17 @@ def _owned_by_current_user(p: Path) -> bool:
 
 
 def _atomic_write(p: Path, text: str) -> None:
-    """Write ``text`` to ``p`` atomically (temp in the same dir → ``os.replace``), preserving mode."""
+    """Write ``text`` to ``p`` atomically (temp in the same dir → ``os.replace``), preserving mode.
+
+    Refuses a symlinked ``p`` outright (mirrors ``apply_staged``/``undo``'s own
+    pre-checks below, now enforced at the PRIMITIVE too — every caller of this
+    function gets the guard for free, including ones that forget their own
+    pre-check; see ``core.optimize.pothole_apply``'s ``_write_target``/
+    ``_restore_backup``, which reuse this primitive but previously had no
+    symlink guard of their own).
+    """
+    if p.is_symlink():
+        raise SummarizeRefused(f"{p} is a symlink — refusing to write through it.")
     mode = stat.S_IMODE(p.stat().st_mode)
     fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tj-tmp")
     try:
