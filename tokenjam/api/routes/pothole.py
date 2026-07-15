@@ -24,15 +24,44 @@ savings, estimated/correlational, across every verified fix.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from tokenjam.api.deps import require_api_key
+from tokenjam.api.deps import require_api_key, require_pothole_write_auth
 from tokenjam.core.optimize import pothole_apply, pothole_store, pothole_verify
 
 router = APIRouter()
+
+# Write endpoints (apply/enable/disable/revert/refresh) always require BOTH
+# the optional global api-key check (a no-op unless api.auth.enabled) AND the
+# unconditional local write-token check (require_pothole_write_auth) — see
+# api/deps.py's docstring for why the latter can't be skipped by config.
+_WRITE_AUTH = [Depends(require_api_key), Depends(require_pothole_write_auth)]
+
+
+def _reject_target_outside_home(target_path: str) -> None:
+    """Defense-in-depth (must-fix #1): even with write-auth enforced, refuse
+    to write anywhere outside the user's home directory. Every legitimate
+    target (a project's CLAUDE.md/skill/hook, or a user-global ~/.claude/*
+    file) lives under $HOME — this just makes a bug or a maliciously-crafted
+    ``target_path`` (e.g. ``/etc/...``, ``/root/...``) fail closed rather than
+    relying solely on the overwrite/symlink guards inside pothole_apply.
+    """
+    if not target_path:
+        return   # pothole_apply itself refuses an empty target_path (409)
+    try:
+        resolved = Path(target_path).expanduser().resolve(strict=False)
+        home = Path.home().resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail=f"unresolvable target_path: {exc}") from exc
+    if resolved != home and home not in resolved.parents:
+        raise HTTPException(
+            status_code=403,
+            detail=f"target_path {resolved} is outside the allowed root ({home}) — refusing.",
+        )
 
 
 def _config(request: Request):
@@ -59,7 +88,7 @@ def get_pothole_proposals(request: Request) -> dict[str, Any]:
     ``finding``/``computed_at`` fields (when present) are still the last
     GOOD result, so the UI can keep showing it while a refresh runs.
     """
-    cached = pothole_store.read_cache()
+    cached = pothole_store.read_cache(config=_config(request))
     computing = pothole_store.is_computing()
     if cached is None:
         return {
@@ -74,7 +103,7 @@ def get_pothole_proposals(request: Request) -> dict[str, Any]:
     }
 
 
-@router.post("/pothole/refresh", dependencies=[Depends(require_api_key)])
+@router.post("/pothole/refresh", dependencies=_WRITE_AUTH)
 def refresh_pothole_proposals(request: Request) -> dict[str, Any]:
     """Kick a background recompute. A recompute already in flight is a no-op
     (returns ``already_running``) — never queued twice."""
@@ -118,7 +147,7 @@ class ApplyPotholeRequest(BaseModel):
     force:          bool = False   # bypass the active-session warning
 
 
-@router.post("/pothole/apply", dependencies=[Depends(require_api_key)])
+@router.post("/pothole/apply", dependencies=_WRITE_AUTH)
 def post_pothole_apply(request: Request, body: ApplyPotholeRequest) -> dict[str, Any]:
     """Dry-run (default) or write (``go=true``) an approved fix at its rung.
 
@@ -126,8 +155,10 @@ def post_pothole_apply(request: Request, body: ApplyPotholeRequest) -> dict[str,
     target (skill/hook) that already holds a non-TokenJam file, or — unless
     ``force=true`` — a live session just seen in the target repo (§7: never
     apply mid-session). The UI's re-send-with-force is the explicit
-    "apply anyway" the spec calls for.
+    "apply anyway" the spec calls for. 403s when ``target_path`` resolves
+    outside the user's home directory (defense-in-depth allowlist).
     """
+    _reject_target_outside_home(body.target_path)
     cluster = body.model_dump(exclude={"scope", "target_path", "go", "force"})
     try:
         return pothole_apply.apply_pothole_fix(
@@ -152,7 +183,7 @@ class EnableEnforcementRequest(BaseModel):
     confirm: bool = False
 
 
-@router.post("/pothole/{fix_id}/enable", dependencies=[Depends(require_api_key)])
+@router.post("/pothole/{fix_id}/enable", dependencies=_WRITE_AUTH)
 def post_pothole_enable(request: Request, fix_id: str, body: EnableEnforcementRequest) -> dict[str, Any]:
     """Wire a generated rung 3-5 hook into settings.json. Requires an explicit
     ``confirm: true`` — the UI's "this intercepts your tools" warning."""
@@ -162,7 +193,7 @@ def post_pothole_enable(request: Request, fix_id: str, body: EnableEnforcementRe
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/pothole/{fix_id}/disable", dependencies=[Depends(require_api_key)])
+@router.post("/pothole/{fix_id}/disable", dependencies=_WRITE_AUTH)
 def post_pothole_disable(request: Request, fix_id: str) -> dict[str, Any]:
     """Unwire a hook from settings.json (the hook file itself stays on disk)."""
     try:
@@ -171,7 +202,7 @@ def post_pothole_disable(request: Request, fix_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/pothole/{fix_id}/revert", dependencies=[Depends(require_api_key)])
+@router.post("/pothole/{fix_id}/revert", dependencies=_WRITE_AUTH)
 def post_pothole_revert(request: Request, fix_id: str) -> dict[str, Any]:
     """One-step revert: disables enforcement first if live, restores the
     pre-image (or deletes a freshly-created file), commits the revert when
