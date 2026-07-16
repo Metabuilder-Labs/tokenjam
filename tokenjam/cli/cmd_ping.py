@@ -24,6 +24,8 @@ in-line), so a clean flush already means the span landed in the DB.
 from __future__ import annotations
 
 import json as _json
+from datetime import datetime
+from typing import cast
 
 import click
 
@@ -80,7 +82,7 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
     config = ctx.obj["config"]
 
     from opentelemetry import trace as trace_api
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
 
     from tokenjam.sdk import bootstrap
     from tokenjam.sdk.agent import AgentSession, record_llm_call
@@ -95,7 +97,7 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
     provider = trace_api.get_tracer_provider()
     proof_attached = False
     if hasattr(provider, "add_span_processor"):
-        provider.add_span_processor(SimpleSpanProcessor(proof))
+        provider.add_span_processor(SimpleSpanProcessor(cast(SpanExporter, proof)))
         proof_attached = True
 
     # Captured before emission so the confirmation poll below only matches
@@ -182,7 +184,7 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
 
 
 def _confirm_delivery(
-    config: object, agent_id: str, since: object
+    config: object, agent_id: str, since: datetime | None
 ) -> tuple[bool, str | None]:
     """Poll the daemon's read API for the just-emitted ping span.
 
@@ -191,7 +193,11 @@ def _confirm_delivery(
     locked/unavailable) — a clean "didn't arrive within the timeout" is
     ``(False, None)``.
     """
-    from tokenjam.core.onboard_verify import open_read_backend, poll_for_first_span
+    from tokenjam.core.onboard_verify import (
+        _ReadBackend,
+        open_read_backend,
+        poll_for_first_span,
+    )
 
     backend, _mode, error = open_read_backend(config)
     if backend is None:
@@ -199,7 +205,7 @@ def _confirm_delivery(
 
     try:
         result = poll_for_first_span(
-            backend,
+            cast(_ReadBackend, backend),
             since,
             agent_id=agent_id,
             timeout_s=PING_CONFIRM_TIMEOUT_S,

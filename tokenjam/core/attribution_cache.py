@@ -34,9 +34,23 @@ def _cache_path() -> Path:
 
 
 def write_attribution_cache(
-    label: str, occurrences: int, sessions: int, *, path: Path | None = None
+    label: str,
+    occurrences: int,
+    sessions: int,
+    inclusion_type: str | None = None,
+    *,
+    path: Path | None = None,
 ) -> None:
-    """Persist the top recurring-inclusion driver. Best-effort; never raises."""
+    """Persist the top recurring-inclusion driver. Best-effort; never raises.
+
+    ``inclusion_type`` is the driver's classified kind (``file_read`` / ``search``
+    / ``prompt`` / ``tool_output``, from ``core.context_diagnostic``). It's the
+    piece the statusline consumer needs to make its remedy driver-conditional —
+    ``/compact`` shrinks conversation history only, so it can't reduce statically
+    re-injected content (CLAUDE.md, ``@file`` reads, re-run searches). Optional /
+    nullable so a pre-upgrade cache (or a caller that doesn't classify) still
+    round-trips; the consumer degrades to a driver-agnostic remedy then.
+    """
     from tokenjam.utils.time_parse import utcnow
 
     target = path or _cache_path()
@@ -46,6 +60,7 @@ def write_attribution_cache(
             "top_label": label,
             "occurrences": occurrences,
             "sessions": sessions,
+            "inclusion_type": inclusion_type,
             "computed_at": utcnow().isoformat(),
         }))
     except Exception:  # noqa: BLE001 - a cache write must never break ingest
@@ -86,27 +101,43 @@ def read_attribution_cache(
         return None
 
 
-def format_driver_label(*, path: Path | None = None) -> str | None:
-    """The cached top driver formatted as ``"<label> ×<count>"``, or ``None``.
+def format_driver(*, path: Path | None = None) -> tuple[str | None, str | None]:
+    """``(display_label, inclusion_type)`` for the cached top driver.
 
-    The single source of truth for reading + validating + formatting the cache
-    for display — both the statusline (``cli/cmd_statusline``) and the
-    resume-brief (``cli/cmd_resume_brief``) call this, so the cache's JSON
-    schema has ONE reader and the two surfaces can't drift on field names or
-    formatting. Fail-safe: any error or a missing / stale / malformed cache
-    degrades to ``None``, which callers render as no suffix at all.
+    The single source of truth for reading + validating the cache for display:
+    ``display_label`` is the same ``"<label> ×<count>"`` string
+    :func:`format_driver_label` returns (label rendering stays as shipped), and
+    ``inclusion_type`` is the driver's classified kind (``file_read`` / ``search``
+    / ``prompt`` / ``tool_output``) or ``None`` for a pre-upgrade cache that
+    didn't record it. One reader so a consumer needing BOTH (the statusline, to
+    condition its remedy) makes a single file read. Fail-safe: any error or a
+    missing / stale / malformed cache degrades to ``(None, None)``.
     """
     try:
         cached = read_attribution_cache(path=path)
     except Exception:  # noqa: BLE001 - a display helper must never raise
-        return None
+        return None, None
     if not cached:
-        return None
+        return None, None
     label = cached.get("top_label")
     occurrences = cached.get("occurrences")
     if not label or not occurrences:
-        return None
-    return f"{label} ×{occurrences}"
+        return None, None
+    itype = cached.get("inclusion_type")
+    itype = itype if isinstance(itype, str) and itype else None
+    return f"{label} ×{occurrences}", itype
+
+
+def format_driver_label(*, path: Path | None = None) -> str | None:
+    """The cached top driver formatted as ``"<label> ×<count>"``, or ``None``.
+
+    Thin wrapper over :func:`format_driver` returning just the display label,
+    kept for the resume-brief (``cli/cmd_resume_brief``) which needs only the
+    label. The statusline calls :func:`format_driver` for the type too. Both
+    still route through the ONE cache reader so the two surfaces can't drift on
+    field names or formatting.
+    """
+    return format_driver(path=path)[0]
 
 
 def _age_seconds(computed_at: str) -> float | None:
@@ -157,7 +188,8 @@ def refresh_attribution_cache(
             return
         top = diag.recurring[0]
         write_attribution_cache(
-            _short_label(top), top.occurrences, top.sessions, path=path
+            _short_label(top), top.occurrences, top.sessions,
+            top.inclusion_type, path=path,
         )
     except Exception:  # noqa: BLE001 - must never break the ingest it follows
         pass

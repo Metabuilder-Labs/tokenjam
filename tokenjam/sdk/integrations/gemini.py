@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Any
 
 from opentelemetry import trace
 
@@ -36,8 +37,8 @@ class GeminiIntegration:
     installed = False
 
     def __init__(self) -> None:
-        self._original_generate = None
-        self._original_generate_async = None
+        self._original_generate: Any = None
+        self._original_generate_async: Any = None
         self._tracer = None
 
     def install(self, tracer) -> None:

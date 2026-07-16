@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextvars
 import functools
 import logging
+from typing import Any
 
 from opentelemetry import trace
 
@@ -179,8 +180,8 @@ class LiteLLMIntegration:
     installed = False
 
     def __init__(self) -> None:
-        self._original_completion = None
-        self._original_acompletion = None
+        self._original_completion: Any = None
+        self._original_acompletion: Any = None
         self._tracer = None
 
     def install(self, tracer) -> None:

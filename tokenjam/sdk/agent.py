@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from contextlib import AbstractContextManager
 from typing import Callable, TYPE_CHECKING
 
 from opentelemetry import trace
@@ -87,7 +88,7 @@ class AgentSession:
         self.agent_version = agent_version
         self.conversation_id = conversation_id or new_uuid()
         self._span: trace.Span | None = None
-        self._ctx = None
+        self._ctx: AbstractContextManager[trace.Span] | None = None
 
     def __enter__(self) -> AgentSession:
         self._span = _tracer.start_span(GenAIAttributes.SPAN_INVOKE_AGENT)
