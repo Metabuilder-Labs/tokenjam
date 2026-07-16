@@ -907,12 +907,13 @@ def _prompt_usage_path() -> str:
 def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
     """Best-effort Codex backfill, called defensively (#448).
 
-    The Codex on-disk backfill adapter (`tj backfill codex`) is being added by
-    another workstream and may not have landed yet. This resolves it at runtime
-    via a guarded import so the combination / --codex flows work whether or not
-    that adapter exists. When it's unavailable, returns forward-only framing so
-    the caller can say "wired — data flows as you use Codex" instead of claiming
-    a backfill that didn't happen (honesty discipline, Rule 14).
+    The Codex on-disk backfill adapter (`tj backfill codex`,
+    `core/ingest_adapters/codex.py`) parses `~/.codex/sessions/**/rollout-*.jsonl`.
+    It's resolved at runtime via a guarded import so the combination / --codex
+    flows degrade gracefully on any older tree where that adapter is absent. When
+    it's unavailable, returns forward-only framing so the caller can say "wired —
+    data flows as you use Codex" instead of claiming a backfill that didn't
+    happen (honesty discipline, Rule 14).
 
     Returns ``(message, has_data, sessions_total)``:
       * ``message`` — a human summary line, or None if nothing to report.
