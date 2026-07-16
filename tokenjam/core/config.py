@@ -220,27 +220,30 @@ class ProviderBudget:
 class CapOutputConfig:
     """`[hooks.output_cap]` — the PostToolUse output-trim hook (`tj hook cap-output`).
 
-    A PostToolUse hook that shrinks bloated tool outputs *before they enter the
-    model's context*, so a 12k-token test log is not re-read as cache on every
-    subsequent turn (the compounding mechanism behind the measured re-read tax).
-    The tool itself runs unchanged — only the *presentation* the model sees is
-    trimmed, and every trim carries a visible marker (nothing silent).
+    ⚠ MEASURED NEGATIVE — DO NOT ENABLE. This hook is dormant, kept only for
+    provenance. Flipping ``enabled = true`` buys ~+5.6% cost for zero benefit — a
+    latent footgun, not a real option. Two independent measurements killed it:
 
-    DEFAULT-OFF opt-in (like `ProxyConfig`). The mechanism is safe (fail-open,
-    fully transparent, conservative budget, 58 tests) but the REQUIRED A/B gate
-    FAILED, so it does not ship as a default. Root finding: Claude Code already
-    truncates Bash tool output to ~30 KB *before* the PostToolUse hook ever sees
-    it, so the addressable bloat per call is tiny (~1,206 tok reclaimed ≈ 0.06%
-    of a ~2M-token cache-read footprint) and agents self-mitigate (`| tail`,
-    `grep`, `Read` — which the hook excludes). Across 5 trials/arm (sonnet)
-    treatment cost was +5.6% (median $0.833 vs $0.789) and cache-read +2.3% —
-    run-to-run noise, no quota win. See
-    `.specs/2026-07-02-tj-output-trim-hook-AB-result.md`. Users who still want
-    aggressive trimming opt in with one line (`enabled = true`), then re-run
-    `tj onboard` to install the hook; flip `killswitch = true` to pass
-    everything through while leaving an installed hook wired.
+      1. The REQUIRED A/B gate FAILED. Across 5 trials/arm (sonnet) treatment cost
+         was +5.6% (median $0.833 vs $0.789) and cache-read +2.3% — run-to-run
+         noise, no quota win. Root cause: Claude Code already truncates Bash tool
+         output to ~30 KB *before* the PostToolUse hook ever sees it, so the
+         addressable bloat per call is tiny (~1,206 tok reclaimed ≈ 0.06% of a
+         ~2M-token cache-read footprint) and agents self-mitigate (`| tail`,
+         `grep`, `Read` — which the hook excludes).
+      2. Confirmed live 2026-07-03: Claude Code *natively offloads* a large tool
+         output before it enters model context (a 980 KB Bash output → CC's own
+         `tool-results/` file + a ~2 KB preview), so the hook has nothing left to
+         trim. The thesis is conclusively dead.
 
-    Fields:
+    See `.specs/2026-07-02-tj-output-trim-hook-AB-result.md`.
+
+    Mechanically the hook is still safe (fail-open, fully transparent, conservative
+    budget, 58 tests) and remains DEFAULT-OFF opt-in (like `ProxyConfig`) — but
+    "opt-in" here means opting into a measured-negative lever, so leave it off.
+    `tj onboard` does NOT install it on a fresh (disabled) config.
+
+    Fields (retained for the dormant mechanism; inert while disabled):
       - ``budget_tokens``  — outputs estimated under this (char/4) pass through
         untouched. Default 4k tok (≈ 16 KB), chosen to sit BELOW Claude Code's
         own ~30 KB Bash-tool-output cap (measured empirically, CC 2.1.198): a
@@ -256,7 +259,7 @@ class CapOutputConfig:
       - ``tools`` — the tool names eligible for trimming (opt a tool in/out).
       - ``killswitch`` — pass everything through, hook stays installed.
     """
-    enabled:           bool      = False  # opt-in: A/B gate failed (see docstring)
+    enabled:           bool      = False  # MEASURED NEGATIVE — do not enable (see docstring)
     budget_tokens:     int       = 4000   # below CC's ~30 KB Bash-output cap
     head_lines:        int       = 80
     tail_lines:        int       = 80
@@ -541,8 +544,9 @@ def _parse(raw: dict) -> TjConfig:
         tool_outputs=capture_raw.get("tool_outputs", False),
     )
 
-    # [hooks.output_cap] — the PostToolUse output-trim hook. DEFAULT-ON (see
-    # CapOutputConfig): a missing section yields an enabled, conservative cap.
+    # [hooks.output_cap] — the dormant PostToolUse output-trim hook. DEFAULT-OFF
+    # and MEASURED NEGATIVE (see CapOutputConfig): a missing section yields a
+    # DISABLED cap, and it should stay disabled — do not enable.
     hooks_raw = raw.get("hooks", {})
     cap_raw = hooks_raw.get("output_cap", {})
     cap_output = CapOutputConfig(
@@ -624,7 +628,7 @@ def _parse(raw: dict) -> TjConfig:
 def _serialise(config: TjConfig) -> dict:
     """Convert TjConfig back to a plain dict suitable for tomli_w."""
     def _dc_to_dict(obj: object) -> dict:
-        result = {}
+        result: dict = {}
         for f in fields(obj):  # type: ignore[arg-type]
             val = getattr(obj, f.name)
             if isinstance(val, dict):

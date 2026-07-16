@@ -511,7 +511,10 @@ def test_quickstart_preview_shows_most_recent_substantial_crossing_session(
     total = usage.total
     reread_pct = 100.0 * usage.cache_read_tokens / total
     expected_line = format_status_line("Sonnet 4.5", total, reread_pct)
-    assert expected_line in result.output
+    # Flatten Rich's line-wrapping (as the assertions above do) — the preview
+    # reuses the same formatter, but the longer driver-conditional nudge can wrap
+    # at the console width; the point is byte-identical *content*, not layout.
+    assert _flat(expected_line) in _flat(result.output)
 
 
 def test_quickstart_preview_stops_walking_after_first_substantial_candidate(

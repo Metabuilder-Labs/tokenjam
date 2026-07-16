@@ -1,6 +1,12 @@
+from typing import TYPE_CHECKING
+
 import click
 from tokenjam.core.config import load_config
 from tokenjam.core.db import open_db
+
+if TYPE_CHECKING:
+    from tokenjam.core.api_backend import ApiBackend
+    from tokenjam.core.db import DuckDBBackend
 
 
 @click.group(
@@ -69,7 +75,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
             reconfigure(no_color=True)
         return
 
-    db = None
+    db: "DuckDBBackend | ApiBackend | None" = None
     try:
         db = open_db(config.storage)
     except Exception as e:

@@ -11,7 +11,7 @@ import tempfile
 import threading
 from datetime import date, datetime
 from pathlib import Path
-from typing import Protocol, Sequence, runtime_checkable
+from typing import Any, Protocol, Sequence, cast, runtime_checkable
 
 import duckdb
 
@@ -987,7 +987,9 @@ def sdk_service_series(
 def _int_or_none(val: object) -> int | None:
     if val is None:
         return None
-    return int(val)
+    # DuckDB row cells arrive typed as ``object``; the columns this helper reads
+    # are numeric, so the runtime value is always int-convertible.
+    return int(cast(Any, val))
 
 
 # ---------------------------------------------------------------------------

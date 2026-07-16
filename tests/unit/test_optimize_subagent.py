@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize.analyzers.subagent_rightsizing import run as run_subagent
 from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
@@ -94,6 +96,93 @@ def test_flags_over_powered_fable_subagent():
         assert a.sub_agent_id == "fableA"
         assert a.model == "claude-fable-5"
         assert "over_powered" in a.flags
+    finally:
+        db.close()
+
+
+def test_over_powered_subagent_carries_quantified_estimate():
+    """An over_powered subagent must fill estimated_recoverable_* with the
+    model-swap delta (premium cost − cheaper same-family cost over the same
+    tokens), so it can compete for a ranked slot (#101)."""
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=1.0)
+        # Opus subagent, big context, tiny output -> over_powered (+over_provisioned).
+        db.insert_span(make_llm_span(
+            model="claude-opus-4-8", provider="anthropic",
+            input_tokens=80_000, output_tokens=100,
+            cost_usd=0.60, session_id="s1", sub_agent_id="agentA", start_time=now,
+        ))
+        run_subagent(ctx)
+        f = ctx.report.findings["subagent"]
+
+        # Cheaper same-family model for opus is haiku. Priced over the SAME tokens:
+        #   input  80_000 @ $1.00/Mtok  = 0.08
+        #   output    100 @ $5.00/Mtok  = 0.0005
+        # alt_cost = 0.0805; delta = 0.60 − 0.0805 = 0.5195.
+        assert f.estimated_recoverable_usd == pytest.approx(0.5195, abs=1e-6)
+        # Recoverable tokens = the quota sitting in the priced over_powered rows.
+        assert f.estimated_recoverable_tokens == 80_100
+        assert f.estimate_confidence == "heuristic"
+        assert "review" in f.estimate_basis.lower()
+    finally:
+        db.close()
+
+
+def test_over_provisioned_only_subagent_has_no_estimate():
+    """A subagent flagged only over_provisioned (a NON-premium model handed a
+    large context) contributes nothing to the estimate — its recoverable is a
+    prompt-size cut we don't size — so the finding stays unranked (estimate
+    None), honestly, rather than inventing a number (#101)."""
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=1.0)
+        # Sonnet (not premium): big context, tiny output -> over_provisioned only.
+        db.insert_span(make_llm_span(
+            model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=80_000, output_tokens=100,
+            cost_usd=0.30, session_id="s1", sub_agent_id="agentS", start_time=now,
+        ))
+        run_subagent(ctx)
+        f = ctx.report.findings["subagent"]
+
+        assert f.flagged[0].flags == ["over_provisioned"]
+        assert f.estimated_recoverable_usd is None
+        assert f.estimated_recoverable_tokens is None
+    finally:
+        db.close()
+
+
+def test_over_powered_estimate_ranks_in_numbered_slot():
+    """A CC-heavy window with significant over_powered subagent spend must earn a
+    numbered (major) slot in the ranked report, not fall to the unranked tail —
+    the exact regression #101 fixes."""
+    from tokenjam.cli.cmd_optimize import (
+        DE_MINIMIS_SHARE,
+        _rank_findings,
+        _reclaimable_share,
+    )
+
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=2.0)
+        # The window's token total (drives the reclaimable-share ranking).
+        ctx.report.window.total_tokens = 200_000
+        db.insert_span(make_llm_span(
+            model="claude-opus-4-8", provider="anthropic",
+            input_tokens=80_000, output_tokens=100,
+            cost_usd=0.60, session_id="s1", sub_agent_id="agentA", start_time=now,
+        ))
+        run_subagent(ctx)
+        f = ctx.report.findings["subagent"]
+
+        share = _reclaimable_share(f, ctx.report.window.total_tokens)
+        assert share is not None                      # now quantified, not unranked
+        assert share >= DE_MINIMIS_SHARE              # 80_100 / 200_000 = 0.40 -> major
+
+        ranked = _rank_findings(ctx.report, requested=None)
+        major = [name for name, s in ranked if s is not None and s >= DE_MINIMIS_SHARE]
+        assert "subagent" in major
     finally:
         db.close()
 

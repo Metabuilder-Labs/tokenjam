@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import click
 from rich.markup import escape
@@ -739,6 +740,7 @@ def _run_onboard_verification(
     """Open a read-only path to spans and poll for the first one after now,
     reporting confirmed / not-confirmed with the per-persona likely cause."""
     from tokenjam.core.onboard_verify import (
+        _ReadBackend,
         not_confirmed_cause,
         open_read_backend,
         poll_for_first_span,
@@ -766,7 +768,9 @@ def _run_onboard_verification(
                 "haven't yet, [bold]restart[/bold] the agent runtime now."
             )
         console.print(f"[dim]Polling for up to {int(timeout_s)}s\u2026[/dim]")
-        result = poll_for_first_span(backend, since, timeout_s=timeout_s)
+        result = poll_for_first_span(
+            cast(_ReadBackend, backend), since, timeout_s=timeout_s
+        )
     finally:
         close = getattr(backend, "close", None)
         if callable(close):
@@ -1302,6 +1306,8 @@ def _print_tj_path_warning(
         if Path(expected).is_absolute():
             console.print(f"[dim]  Full path meanwhile:  {expected}[/dim]")
     elif status == "shadowed":
+        # A "shadowed" status always carries the shadowing binary's path.
+        assert shadow_path is not None
         shadow_version = _tj_binary_version(shadow_path) or "an older tj"
         console.print(
             f"[yellow]Heads up:[/yellow] [bold]{shadow_version}[/bold] at "
@@ -1734,16 +1740,15 @@ def _onboard_claude_code(
     # `tj uninstall`.
     resume_brief_status = _wire_claude_resume_brief_hook(global_settings)
 
-    # Install the output-trim PostToolUse hook (zero in-loop token cost). Rides
-    # this same read-merge-write. DEFAULT-OFF opt-in (config gate): the A/B gate
-    # failed — Claude Code already truncates Bash output to ~30 KB before the
-    # PostToolUse hook sees it, so the addressable bloat is tiny and treatment
-    # cost was +5.6% (noise). See the `[hooks.output_cap]` docstring in
-    # core/config.py. So onboarding does NOT auto-install it: a fresh config has
-    # enabled=False → we take the else branch and remove any previously-installed
-    # tj entry, keeping config the source of truth. Users opt in by setting
-    # `[hooks.output_cap].enabled = true` and re-running onboard. Idempotent +
-    # non-destructive (foreign hooks preserved).
+    # (Un)install the output-trim PostToolUse hook. Rides this same
+    # read-merge-write. DEFAULT-OFF and MEASURED NEGATIVE: the A/B gate failed and
+    # Claude Code now natively offloads large tool output before it enters context
+    # (confirmed live 2026-07-03), so the hook buys ~+5.6% cost for zero benefit —
+    # do NOT enable it. See the `[hooks.output_cap]` docstring in core/config.py.
+    # Onboarding does NOT auto-install it: a fresh config has enabled=False → we
+    # take the else branch and remove any previously-installed tj entry, keeping
+    # config the source of truth. Idempotent + non-destructive (foreign hooks
+    # preserved).
     cap_cfg = getattr(getattr(config, "hooks", None), "output_cap", None)
     cap_enabled = bool(getattr(cap_cfg, "enabled", False)) and not bool(
         getattr(cap_cfg, "killswitch", False)

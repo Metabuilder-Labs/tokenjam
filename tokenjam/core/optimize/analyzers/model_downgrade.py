@@ -560,6 +560,8 @@ def audit_opus_quota(
         alt = lookup_downgrade(provider, model) if provider else None
         if not alt:
             continue
+        # ``alt`` is only set when ``provider`` was truthy above.
+        assert provider is not None
         alt_unit = _alt_unit_cost(
             provider, model, alt, agg.new_input, agg.output, agg.reread,
         )

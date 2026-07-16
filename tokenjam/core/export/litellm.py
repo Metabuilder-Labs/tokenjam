@@ -27,7 +27,7 @@ from tokenjam.core.export.common import (
     rule_evidence_comment,
     select_figure_value,
 )
-from tokenjam.core.optimize.types import DowngradeFinding
+from tokenjam.core.optimize.types import MODEL_DOWNGRADE_CAVEAT, DowngradeFinding
 
 
 def _comment_block(lines: list[str], indent: int = 0) -> str:
@@ -56,9 +56,7 @@ def render_litellm_config(
 ) -> str:
     """Return a YAML string ready to write to disk for the LiteLLM router."""
     timestamp = datetime.now(tz=timezone.utc).isoformat()
-    caveat = downgrade.caveat if downgrade is not None else (
-        DowngradeFinding.__dataclass_fields__["caveat"].default
-    )
+    caveat = downgrade.caveat if downgrade is not None else MODEL_DOWNGRADE_CAVEAT
 
     header = header_lines(
         target="litellm",
