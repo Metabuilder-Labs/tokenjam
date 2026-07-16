@@ -1462,8 +1462,8 @@ def _render_subagent(
     # this finding its ranked slot. Dollars for api-billed users; the token quota
     # otherwise (same category discipline as the peer analyzers). Honest
     # "estimated recoverable" framing only; the caveat below still governs.
-    if finding.estimated_recoverable_tokens:
-        if pricing_mode == "api" and finding.estimated_recoverable_usd:
+    if finding.estimated_recoverable_tokens is not None:
+        if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
             recov = format_cost(finding.estimated_recoverable_usd)
         else:
             recov = f"{format_tokens(finding.estimated_recoverable_tokens)} tokens"
