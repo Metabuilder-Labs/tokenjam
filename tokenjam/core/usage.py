@@ -154,6 +154,35 @@ def iter_cumulative_usage(
         yield turn_index, model, running
 
 
+def last_turn_context_tokens(lines: Iterable[str]) -> int:
+    """Context-window occupancy at the most recent assistant turn.
+
+    The prompt sent on a turn is all the prior context re-materialized: uncached
+    new input + the cached prefix re-read + anything newly written to cache this
+    turn (``input + cache_read + cache_write``). Output is NOT part of the window
+    that was sent, so it's excluded. This is the size of the LIVE context window
+    right now — a distinct signal from the session-total re-read *share*: it's how
+    close the window is to a forced auto-compact, which is exactly when a
+    user-chosen ``/compact`` is the right call regardless of what's driving the
+    re-reads.
+
+    Deduped last-wins by message key like :func:`session_usage` (streaming/resume
+    appends several growing records per message; the final one is authoritative),
+    then the final distinct turn's occupancy is returned. ``0`` when there are no
+    billable turns — the caller treats that as "unknown / can't tell".
+    """
+    latest: dict[str, AssistantUsage] = {}
+    order: list[str] = []
+    for key, usage in iter_assistant_usage(lines):
+        if key not in latest:
+            order.append(key)
+        latest[key] = usage
+    if not order:
+        return 0
+    final = latest[order[-1]]
+    return final.input_tokens + final.cache_read_tokens + final.cache_write_tokens
+
+
 def session_usage(lines: Iterable[str]) -> AssistantUsage:
     """Total assistant usage over a session, deduped LAST-WINS by message key.
 
