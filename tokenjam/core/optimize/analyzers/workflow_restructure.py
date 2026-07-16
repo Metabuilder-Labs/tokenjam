@@ -189,7 +189,7 @@ def run(ctx: AnalyzerContext) -> None:
             f"COALESCE(AVG(total_cost_usd), 0.0), "
             f"COALESCE(AVG(EXTRACT(EPOCH FROM (ended_at - started_at))), 0.0), "
             f"COALESCE(SUM(total_cost_usd), 0.0), "
-            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens), 0), "
+            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0), "
             f"COALESCE(AVG(input_tokens + output_tokens), 0) "
             f"FROM sessions WHERE session_id IN ({placeholders})",
             members,

@@ -13,6 +13,7 @@ from datetime import timedelta
 import pytest
 
 from tokenjam.core.attribution_cache import (
+    format_driver,
     format_driver_label,
     read_attribution_cache,
     refresh_attribution_cache,
@@ -146,6 +147,9 @@ def test_refresh_writes_top_driver_when_capture_on(db, tmp_path):
     assert cached["top_label"] == "CLAUDE.md"
     assert cached["occurrences"] == 3
     assert cached["sessions"] == 3
+    # The classified inclusion type is carried through so the statusline can
+    # condition its remedy — a recurring Read is a static (file_read) driver.
+    assert cached["inclusion_type"] == "file_read"
 
 
 def test_refresh_no_op_when_capture_off(db, tmp_path):
@@ -200,3 +204,27 @@ def test_format_driver_label_none_when_stale(tmp_path):
         "computed_at": stale.isoformat(),
     }))
     assert format_driver_label(path=path) is None
+
+
+# --- format_driver (label + inclusion type for the statusline consumer) ------
+
+
+def test_format_driver_returns_label_and_type(tmp_path):
+    path = tmp_path / "cache.json"
+    write_attribution_cache("CLAUDE.md", 14, 3, "file_read", path=path)
+    assert format_driver(path=path) == ("CLAUDE.md ×14", "file_read")
+
+
+def test_format_driver_type_none_for_pre_upgrade_cache(tmp_path):
+    # A cache written before inclusion_type existed still yields its label; the
+    # type degrades to None so the consumer falls back to a driver-agnostic remedy.
+    path = tmp_path / "cache.json"
+    path.write_text(json.dumps({
+        "top_label": "CLAUDE.md", "occurrences": 14, "sessions": 3,
+        "computed_at": utcnow().isoformat(),
+    }))
+    assert format_driver(path=path) == ("CLAUDE.md ×14", None)
+
+
+def test_format_driver_none_when_no_cache(tmp_path):
+    assert format_driver(path=tmp_path / "missing.json") == (None, None)

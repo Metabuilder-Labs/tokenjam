@@ -7,6 +7,22 @@ on:
     branches: [main]
 
 jobs:
+  version-lockstep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check pyproject.toml and sdk-ts/package.json versions match
+        run: |
+          PY_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          TS_VERSION=$(jq -r '.version' sdk-ts/package.json)
+          echo "pyproject.toml:       $PY_VERSION"
+          echo "sdk-ts/package.json:  $TS_VERSION"
+          if [ "$PY_VERSION" != "$TS_VERSION" ]; then
+            echo "::error::Version mismatch — pyproject.toml ($PY_VERSION) and sdk-ts/package.json ($TS_VERSION) must match before cutting a release, or npm publish will fail at release time. Run: ./scripts/release.sh <version>"
+            exit 1
+          fi
+
   test:
     runs-on: ubuntu-latest
     strategy:

@@ -2062,3 +2062,18 @@ def test_summarize_reduction_pct_is_server_computed(html):
     assert "c.reduction_pct != null ? c.reduction_pct : 0" in html
     assert "sfRedPct" not in html      # old per-file chars/4 helper gone
     assert "sfSrcTok" not in html      # old source-token derivation gone
+
+
+# --- recommendation-outcome panel (measured vs estimated) --------------- #
+def test_recommendations_panel_present_and_fetches_endpoint(html):
+    # The Optimize view surfaces the recommendation-outcome ledger, fetching the
+    # /recommendations endpoint (best-effort) and rendering measured-recovered
+    # strictly separate from estimated-recoverable (honesty discipline, Rule 14).
+    assert "function RecommendationsPanel" in html
+    assert "api('/recommendations')" in html
+    assert "measured recovered" in html
+    assert "estimated recoverable" in html
+    # The panel must never re-derive analysis in JS — it renders server-computed
+    # measured vs estimated fields straight from the endpoint payload.
+    assert "measured_recovered_tokens" in html
+    assert "estimated_recoverable_tokens" in html

@@ -15,6 +15,7 @@ from tokenjam.core.usage import (
     iter_assistant_turns,
     iter_assistant_usage,
     iter_cumulative_usage,
+    last_turn_context_tokens,
     parse_usage,
     session_usage,
 )
@@ -99,6 +100,32 @@ def test_session_usage_no_id_records_counted_separately():
         _line(uuid="b", input_tokens=100),
     ]
     assert session_usage(lines).total == 200
+
+
+# --- last_turn_context_tokens (live window occupancy) -----------------------
+
+
+def test_last_turn_context_tokens_uses_final_turn_non_output():
+    # Window occupancy = the last turn's input + cache_read + cache_write
+    # (output isn't part of the prompt that was sent). The last DISTINCT turn.
+    lines = [
+        _line(message_id="m1", input_tokens=100, cache_read_input_tokens=50),
+        _line(message_id="m2", input_tokens=10, cache_read_input_tokens=180_000,
+              cache_creation_input_tokens=2_000, output_tokens=9_999),
+    ]
+    assert last_turn_context_tokens(lines) == 10 + 180_000 + 2_000
+
+
+def test_last_turn_context_tokens_last_wins_on_growing_snapshots():
+    lines = [
+        _line(message_id="m1", input_tokens=100, cache_read_input_tokens=10),
+        _line(message_id="m1", input_tokens=100, cache_read_input_tokens=500),  # final
+    ]
+    assert last_turn_context_tokens(lines) == 600
+
+
+def test_last_turn_context_tokens_zero_when_no_turns():
+    assert last_turn_context_tokens(["not json", '{"type": "user"}']) == 0
 
 
 # --- iter_assistant_turns (model + usage per record) ------------------------
