@@ -6,7 +6,7 @@ queries through the REST API.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -94,7 +94,10 @@ class ApiBackend:
                 trace_id=t["trace_id"],
                 agent_id=t["agent_id"],
                 name=t["name"],
-                start_time=datetime.fromisoformat(t["start_time"]) if t.get("start_time") else None,
+                start_time=cast(
+                    datetime,
+                    datetime.fromisoformat(t["start_time"]) if t.get("start_time") else None,
+                ),
                 duration_ms=t.get("duration_ms"),
                 cost_usd=t.get("cost_usd"),
                 status_code=t.get("status_code", "ok"),
@@ -483,7 +486,10 @@ def _dict_to_span(d: dict) -> NormalizedSpan:
         name=d["name"],
         kind=SpanKind(d.get("kind", "internal")),
         status_code=SpanStatus(d.get("status_code", "ok")),
-        start_time=datetime.fromisoformat(d["start_time"]) if d.get("start_time") else None,
+        start_time=cast(
+            datetime,
+            datetime.fromisoformat(d["start_time"]) if d.get("start_time") else None,
+        ),
         parent_span_id=d.get("parent_span_id"),
         session_id=d.get("session_id"),
         agent_id=d.get("agent_id"),

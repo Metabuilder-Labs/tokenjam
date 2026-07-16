@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Any
 
 from opentelemetry import trace
 
@@ -30,7 +31,7 @@ class OpenAIIntegration:
     installed = False
 
     def __init__(self, provider_name: str = "openai") -> None:
-        self._original_create = None
+        self._original_create: Any = None
         self._tracer = None
         self._provider_name = provider_name
 

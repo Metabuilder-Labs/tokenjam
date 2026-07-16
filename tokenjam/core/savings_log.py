@@ -142,4 +142,6 @@ def summarize_savings(events: list[dict]) -> dict:
 
 
 def _as_dict(obj) -> dict:
-    return asdict(obj) if is_dataclass(obj) else dict(obj)
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return asdict(obj)
+    return dict(obj)
