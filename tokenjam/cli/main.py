@@ -22,7 +22,7 @@ from tokenjam.core.db import open_db
 def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         no_color: bool, db_path: str | None, agent: str | None,
         verbose: bool) -> None:
-    """tj - local-first observability for AI agents."""
+    """tj - the self-improvement loop for AI agents."""
     ctx.ensure_object(dict)
 
     # Bare `tj` (no subcommand) → branded home screen (#240): banner +
