@@ -786,7 +786,7 @@ def test_sdk_services_panel_renders_window_cost(html):
     # window as cost_per_min) is computed server-side; pin it next to the
     # cost/min sparkline it summarizes so it doesn't silently go unrendered.
     panel_start = html.index("function SdkServicesPanel({ services, framing })")
-    panel_end = html.index("function ", panel_start + 1)
+    panel_end = html.index("function useScrollMemory", panel_start)
     panel = html[panel_start:panel_end]
     assert "s.window_cost" in panel
 
