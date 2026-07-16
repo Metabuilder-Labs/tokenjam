@@ -58,14 +58,24 @@ def _discover_scenarios() -> dict[str, ModuleType]:
 @click.command("demo")
 @click.argument("scenario", required=False, default=None)
 @click.option("--json", "output_json", is_flag=True, help="Output JSON instead of Rich panels")
+@click.option(
+    "--live",
+    "live",
+    is_flag=True,
+    help="Replay the scenario through the real ingest path into a running "
+    "`tj serve`, so the live dashboard's SDK-services zone renders it.",
+)
 @click.pass_context
-def cmd_demo(ctx: click.Context, scenario: str | None, output_json: bool) -> None:
+def cmd_demo(
+    ctx: click.Context, scenario: str | None, output_json: bool, live: bool
+) -> None:
     """Run a reproducible AI agent incident scenario.
 
     \b
     tj demo                     List available scenarios
     tj demo retry-loop          Run a specific scenario
     tj demo retry-loop --json   Machine-readable output
+    tj demo retry-loop --live   Also replay into a running `tj serve`
     """
     scenarios = _discover_scenarios()
 
@@ -80,7 +90,76 @@ def cmd_demo(ctx: click.Context, scenario: str | None, output_json: bool) -> Non
         )
         raise SystemExit(1)
 
+    live_sink = _prepare_live(ctx) if live else None
+
     scenarios[scenario].run()
+
+    if live_sink is not None:
+        _finish_live(live_sink, output_json)
+
+
+def _prepare_live(ctx: click.Context):
+    """Resolve + health-check the live sink before running the scenario.
+
+    Fails fast (exit 1) with an actionable message when no `tj serve` is
+    reachable, so we never render a scenario that claims a live replay that
+    didn't happen. On success the sink is stashed on ``ctx.obj`` where each
+    scenario's ``DemoEnvironment`` picks it up transparently.
+    """
+    from tokenjam.demo import live as live_mod
+
+    config = ctx.obj.get("config") if ctx.obj else None
+    if config is None:
+        click.echo(
+            "tj demo --live needs a loaded tj config; run it inside a tj workspace.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    if not live_mod.check_serve_alive(config):
+        base = live_mod.serve_base_url(config)
+        click.echo(
+            f"tj demo --live needs a running `tj serve` at {base}, but none is "
+            "reachable.\nStart it in another terminal with `tj serve` "
+            "(or `tj serve &`) and re-run.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    sink = live_mod.build_sink(config)
+    ctx.obj["demo_live_sink"] = sink
+    return sink
+
+
+def _finish_live(sink, output_json: bool) -> None:
+    """Flush the buffered scenario spans to tj serve and report the outcome."""
+    from tokenjam.demo.live import LiveReplayError
+
+    try:
+        result = sink.flush()
+    except LiveReplayError as exc:
+        click.echo(f"Live replay failed: {exc}", err=True)
+        raise SystemExit(1)
+
+    if result.sent and not result.ingested:
+        click.echo(
+            f"Live replay reached tj serve at {result.endpoint} but it ingested "
+            f"0 of {result.sent} span(s) ({result.rejected} rejected).",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    msg = (
+        f"Replayed {result.ingested} span(s) into tj serve at {result.endpoint}"
+        + (f" ({result.rejected} rejected)" if result.rejected else "")
+        + ". Open the dashboard — the SDK-services zone now shows this scenario."
+    )
+    # In --json mode stdout must stay a single clean JSON object, so route the
+    # human-readable replay summary to stderr.
+    if output_json:
+        click.echo(msg, err=True)
+    else:
+        console.print(f"\n[green]✓[/green] {msg}")
 
 
 def _list_scenarios(scenarios: dict[str, ModuleType]) -> None:
