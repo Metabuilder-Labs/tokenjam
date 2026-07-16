@@ -2395,7 +2395,7 @@ function SdkServicesPanel({ services, framing }) {
         <div class="svc-metric">$${(s.today_cost || 0).toFixed(2)}<span class="unit">/day</span></div>
         <div class="spark-wrap">
           <div class="spark-col" style="flex:1;min-width:1px">
-            <span class="spark-lab">cost / min</span>
+            <span class="spark-lab">cost / min · ${fmtCost(s.window_cost)} last 24m</span>
             <${Sparkline} values=${s.cost_per_min} color="var(--brand)" width=${220} height=${30} />
           </div>
           <div class="spark-col" style="width:110px">
