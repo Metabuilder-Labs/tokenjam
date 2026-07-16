@@ -781,6 +781,16 @@ def test_status_sdk_services_panel_exists(html):
     assert "<${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />" in html
 
 
+def test_sdk_services_panel_renders_window_cost(html):
+    # sdk_services[].window_cost (the cost summed over the same 24m sparkline
+    # window as cost_per_min) is computed server-side; pin it next to the
+    # cost/min sparkline it summarizes so it doesn't silently go unrendered.
+    panel_start = html.index("function SdkServicesPanel({ services, framing })")
+    panel_end = html.index("function ", panel_start + 1)
+    panel = html[panel_start:panel_end]
+    assert "s.window_cost" in panel
+
+
 def test_sdk_panel_reuses_sparkline_and_splits_by_state(html):
     # cost/min + err% sparklines come from the per-minute series; services are
     # partitioned live vs went_quiet/long_dormant.
