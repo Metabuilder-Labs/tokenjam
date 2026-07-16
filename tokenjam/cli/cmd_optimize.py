@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, NoReturn
 
 import click
 from rich.markup import escape as _rich_escape
@@ -462,7 +462,7 @@ def _run_validate(
         run_validation,
     )
 
-    def _fail(message: str) -> None:
+    def _fail(message: str) -> NoReturn:
         if output_json:
             click.echo(json.dumps({"error": "validate_precondition", "message": message}))
         else:

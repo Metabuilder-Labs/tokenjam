@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Any
 
 from opentelemetry import trace
 
@@ -21,8 +22,8 @@ class LangGraphIntegration:
     installed = False
 
     def __init__(self) -> None:
-        self._original_invoke = None
-        self._original_astream = None
+        self._original_invoke: Any = None
+        self._original_astream: Any = None
         self._tracer = None
 
     def install(self, tracer) -> None:

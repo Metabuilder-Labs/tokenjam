@@ -14,7 +14,7 @@ pip install -e ".[dev]"
 
 # Linting and type checking
 ruff check tokenjam/                  # line-length=100, target py310
-mypy tokenjam/                        # partial config (not --strict; see [tool.mypy] in pyproject.toml)
+mypy tokenjam/                        # only attr-defined + no-any-return disabled (with justification); see [tool.mypy] in pyproject.toml
 
 # Tests (CI runs all except e2e)
 pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/

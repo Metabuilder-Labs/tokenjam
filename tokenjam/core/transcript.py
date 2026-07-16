@@ -924,10 +924,10 @@ def _attach_subagents(
         # single turn are represented by attaching each onto a list.
         attached: list[dict[str, Any]] = []
         for tool_use_id, fallback in spawns:
-            child_id = id_map.get(tool_use_id)
-            if child_id is None:
+            resolved_id = id_map.get(tool_use_id)
+            if resolved_id is None:
                 continue
-            sub = _build_subagent(child_id, fallback, subagents_dir, budget, depth, seen)
+            sub = _build_subagent(resolved_id, fallback, subagents_dir, budget, depth, seen)
             if sub is not None:
                 attached.append(sub)
         if len(attached) == 1:

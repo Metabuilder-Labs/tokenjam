@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import cast
 
 import click
 from rich.markup import escape
@@ -739,6 +740,7 @@ def _run_onboard_verification(
     """Open a read-only path to spans and poll for the first one after now,
     reporting confirmed / not-confirmed with the per-persona likely cause."""
     from tokenjam.core.onboard_verify import (
+        _ReadBackend,
         not_confirmed_cause,
         open_read_backend,
         poll_for_first_span,
@@ -766,7 +768,9 @@ def _run_onboard_verification(
                 "haven't yet, [bold]restart[/bold] the agent runtime now."
             )
         console.print(f"[dim]Polling for up to {int(timeout_s)}s\u2026[/dim]")
-        result = poll_for_first_span(backend, since, timeout_s=timeout_s)
+        result = poll_for_first_span(
+            cast(_ReadBackend, backend), since, timeout_s=timeout_s
+        )
     finally:
         close = getattr(backend, "close", None)
         if callable(close):
@@ -1301,6 +1305,8 @@ def _print_tj_path_warning(
         if Path(expected).is_absolute():
             console.print(f"[dim]  Full path meanwhile:  {expected}[/dim]")
     elif status == "shadowed":
+        # A "shadowed" status always carries the shadowing binary's path.
+        assert shadow_path is not None
         shadow_version = _tj_binary_version(shadow_path) or "an older tj"
         console.print(
             f"[yellow]Heads up:[/yellow] [bold]{shadow_version}[/bold] at "
