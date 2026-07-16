@@ -21,6 +21,7 @@ Hard requirements (a statusline is on the user's terminal, every turn):
 from __future__ import annotations
 
 import glob
+import itertools
 import json
 import os
 
@@ -93,8 +94,9 @@ def find_transcript(data: dict) -> str | None:
 def _session_figures(path: str) -> tuple[int, float, int]:
     """Return ``(total_tokens, reread_pct, window_tokens)`` in ONE transcript read.
 
-    A single ``read().splitlines()`` feeds both ``core.usage`` computations so
-    the statusline keeps its "one linear pass over the transcript" contract:
+    A single file open, split into two lazy streams via ``itertools.tee``, feeds
+    both ``core.usage`` computations so the statusline keeps its "one linear pass
+    over the transcript" contract without loading the whole file into memory:
     ``session_usage`` for the session-total re-read %, and
     ``last_turn_context_tokens`` for the live window occupancy that case (c) of
     the nudge needs. Both delegate the four-bucket parse + last-wins dedup to the
@@ -102,11 +104,11 @@ def _session_figures(path: str) -> tuple[int, float, int]:
     the numbers can't drift from the Cost tab for the same session.
     """
     with open(path, encoding="utf-8", errors="replace") as fh:
-        lines = fh.read().splitlines()
-    usage = session_usage(lines)
-    total = usage.total
-    reread_pct = (100.0 * usage.cache_read_tokens / total) if total else 0.0
-    window_tokens = last_turn_context_tokens(lines)
+        lines_a, lines_b = itertools.tee(fh)
+        usage = session_usage(lines_a)
+        total = usage.total
+        reread_pct = (100.0 * usage.cache_read_tokens / total) if total else 0.0
+        window_tokens = last_turn_context_tokens(lines_b)
     return total, reread_pct, window_tokens
 
 
@@ -164,14 +166,16 @@ def _badge_and_nudge(
     """Map re-read %, the top driver's inclusion type, and window fullness to a
     (badge, nudge) pair.
 
-    The BADGE stays purely threshold-based (severity, unchanged). The NUDGE is
+    The BADGE stays purely threshold-based (severity), except that a genuinely
+    near-full window always earns at least a WARN badge — a session about to be
+    force-auto-compacted is urgent regardless of its re-read share. The NUDGE is
     driver-conditional (see :func:`_nudge_for`) so the statusline never suggests
-    ``/compact`` for a re-read class compaction can't touch. Below WARN there's
-    no nudge at all.
+    ``/compact`` for a re-read class compaction can't touch. Below WARN, with the
+    window not near its limit, there's no nudge at all.
     """
     if reread_pct >= REREAD_CRIT:
         return _BADGE_CRIT, _nudge_for(driver_type, near_limit)
-    if reread_pct >= REREAD_WARN:
+    if reread_pct >= REREAD_WARN or near_limit:
         return _BADGE_WARN, _nudge_for(driver_type, near_limit)
     return _BADGE_OK, None
 
@@ -233,9 +237,11 @@ def _context_limit(model_name: str) -> int:
 
     Claude Code stamps ``[1m]`` onto the display name of a 1M-context session;
     everything else is the default 200K window. Detecting it avoids falsely
-    flagging a 1M session as near-full at 200K-scale occupancy.
+    flagging a 1M session as near-full at 200K-scale occupancy. Anchored to the
+    bracketed ``[1m]`` form (not a bare "1m" substring match) so a future model
+    name containing e.g. "3.1m" can't falsely match.
     """
-    return CONTEXT_LIMIT_1M if "1m" in model_name.lower() else CONTEXT_LIMIT_DEFAULT
+    return CONTEXT_LIMIT_1M if "[1m]" in model_name.lower() else CONTEXT_LIMIT_DEFAULT
 
 
 def _window_near_limit(window_tokens: int, model_name: str) -> bool:
