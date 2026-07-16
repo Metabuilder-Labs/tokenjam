@@ -61,13 +61,13 @@ def cmd_pricing_list(ctx: click.Context, model: str | None,
                    "CACHE READ", "CACHE WRITE", "SOURCE")
     for row in rows:
         t.add_row(
-            row["provider"],
-            row["model"],
+            str(row["provider"]),
+            str(row["model"]),
             f"{row['input_per_mtok']:.2f}",
             f"{row['output_per_mtok']:.2f}",
             f"{row['cache_read_per_mtok']:.2f}",
             f"{row['cache_write_per_mtok']:.2f}",
-            row["source"],
+            str(row["source"]),
         )
     console.print(t)
     console.print("[dim]Rates are USD per million tokens (MTok).[/dim]")

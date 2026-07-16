@@ -628,7 +628,7 @@ def _parse(raw: dict) -> TjConfig:
 def _serialise(config: TjConfig) -> dict:
     """Convert TjConfig back to a plain dict suitable for tomli_w."""
     def _dc_to_dict(obj: object) -> dict:
-        result = {}
+        result: dict = {}
         for f in fields(obj):  # type: ignore[arg-type]
             val = getattr(obj, f.name)
             if isinstance(val, dict):

@@ -131,16 +131,23 @@ def test_healthy_session_has_check_badge_and_no_nudge(tmp_path):
     assert "/compact" not in line
 
 
-def test_warn_threshold_adds_consider_compact(tmp_path):
+def test_warn_threshold_adds_nudge(tmp_path):
+    # Past WARN with no cached driver (driver unknown): the ⚠ badge plus the
+    # memory-preserving default remedy — a fresh session first, /compact offered
+    # as a secondary, never as the sole "just /compact" it used to be.
     line = _line_for_reread(tmp_path, REREAD_WARN + 1)  # just past warn
     assert "⚠" in line
-    assert "consider /compact" in line
+    assert "resume-brief" in line
+    assert "/compact" in line
 
 
-def test_crit_threshold_adds_reclaim_quota_nudge(tmp_path):
+def test_crit_threshold_adds_nudge(tmp_path):
     line = _line_for_reread(tmp_path, REREAD_CRIT + 1)  # just past crit
     assert "re-read" in line
-    assert "/compact to reclaim quota" in line
+    # Even at CRIT, with the driver unknown we don't blindly command /compact —
+    # we lead with the memory-preserving option.
+    assert "resume-brief" in line
+    assert "/compact" in line
 
 
 def test_warn_boundary_is_inclusive(tmp_path):
@@ -186,6 +193,117 @@ def test_format_status_line_unchanged_when_top_driver_omitted():
     assert format_status_line("Opus 4.8", 1000, 90.0) == format_status_line(
         "Opus 4.8", 1000, 90.0, None
     )
+
+
+# --- driver-conditional nudge (the /compact-is-wrong-for-static fix) ---------
+
+
+def _cache(tmp_path, label: str, inclusion_type: str) -> None:
+    """Seed the (isolated) attribution cache with a top driver of a given kind."""
+    from tokenjam.core.attribution_cache import write_attribution_cache
+
+    write_attribution_cache(
+        label, 14, 3, inclusion_type, path=tmp_path / "attribution_cache.json"
+    )
+
+
+def _line_with_window(tmp_path, reread_pct: float, window_tokens: int,
+                      model="Opus 4.8") -> str:
+    """A single-turn transcript whose re-read % and last-turn window are set.
+
+    The last turn's ``input + cache_read + cache_write`` IS the live window
+    occupancy, so a big cache-read here drives both a high re-read % and a
+    near-full window — exactly the case (c) escalation.
+    """
+    reread = int(round(window_tokens * reread_pct / 100.0))
+    work = window_tokens - reread
+    path = write_claude_transcript(tmp_path / "s.jsonl", [
+        make_claude_transcript_assistant_line(
+            message_id="m1", input_tokens=work, output_tokens=0,
+            cache_read_input_tokens=reread, cache_creation_input_tokens=0,
+        ),
+    ])
+    return render_line({"model": model, "transcript_path": path})
+
+
+def test_static_driver_never_suggests_compact(tmp_path):
+    # The core bug: a CLAUDE.md (file_read) driver past CRIT must NOT be told to
+    # /compact — compaction can't touch statically re-injected content.
+    _cache(tmp_path, "CLAUDE.md", "file_read")
+    line = _line_for_reread(tmp_path, REREAD_CRIT + 1)
+    assert "CLAUDE.md ×14" in line
+    assert "/compact" not in line
+    assert "tj context" in line
+
+
+def test_search_driver_is_structural_not_compact(tmp_path):
+    _cache(tmp_path, "grep foo", "search")
+    line = _line_for_reread(tmp_path, REREAD_WARN + 1)
+    assert "/compact" not in line
+    assert "tj context" in line
+
+
+def test_tool_output_driver_leads_with_fresh_session(tmp_path):
+    # History-bloat driver: fresh session (memory-preserving) leads, /compact
+    # remains as the blunt second option.
+    _cache(tmp_path, "Bash → …", "tool_output")
+    line = _line_for_reread(tmp_path, REREAD_CRIT + 1)
+    assert "resume-brief" in line
+    assert "/compact" in line
+
+
+def test_prompt_driver_leads_with_fresh_session(tmp_path):
+    _cache(tmp_path, "the same prompt…", "prompt")
+    line = _line_for_reread(tmp_path, REREAD_WARN + 1)
+    assert "resume-brief" in line
+    assert "/compact" in line
+
+
+def test_unknown_driver_falls_back_to_memory_preserving_default(tmp_path):
+    # No cached driver at all (no backfill yet) — still never a bare /compact.
+    line = _line_for_reread(tmp_path, REREAD_CRIT + 1)
+    assert "resume-brief" in line
+    assert "/compact" in line
+
+
+def test_pre_upgrade_cache_without_type_is_driver_agnostic(tmp_path):
+    # A cache written before this change carries no inclusion_type: label still
+    # renders, and the nudge degrades to the driver-agnostic default.
+    from tokenjam.core.attribution_cache import write_attribution_cache
+
+    write_attribution_cache(
+        "CLAUDE.md", 14, 3, path=tmp_path / "attribution_cache.json"
+    )
+    line = _line_for_reread(tmp_path, REREAD_CRIT + 1)
+    assert "CLAUDE.md ×14" in line
+    assert "resume-brief" in line
+
+
+def test_near_limit_window_overrides_static_driver_to_compact(tmp_path):
+    # Case (c): when the window is genuinely near full, a user-chosen /compact
+    # beats a forced auto-compact — even for a static driver.
+    _cache(tmp_path, "CLAUDE.md", "file_read")
+    line = _line_with_window(tmp_path, REREAD_CRIT + 1, window_tokens=190_000)
+    assert "/compact now" in line
+    assert "window near full" in line
+
+
+def test_window_below_limit_keeps_structural_remedy(tmp_path):
+    # Same static driver but a modest window: no near-limit escalation.
+    _cache(tmp_path, "CLAUDE.md", "file_read")
+    line = _line_with_window(tmp_path, REREAD_CRIT + 1, window_tokens=20_000)
+    assert "/compact" not in line
+
+
+def test_one_million_context_not_flagged_near_limit_at_200k_scale(tmp_path):
+    # A 1M-context session ("[1m]" in the model name) at 200K-scale occupancy is
+    # nowhere near full — it must not be pushed to /compact.
+    _cache(tmp_path, "CLAUDE.md", "file_read")
+    line = _line_with_window(
+        tmp_path, REREAD_CRIT + 1, window_tokens=190_000, model="Opus 4.8 [1m]"
+    )
+    assert "/compact now" not in line
+    assert "tj context" in line
 
 
 def test_line_reports_model_and_tokens(tmp_path):
@@ -300,6 +418,9 @@ def test_real_session_end_to_end_line(tmp_path):
     ])
     out = _run({"model": {"display_name": "Opus 4.8"}, "transcript_path": path})
     # 200+100+9500+200 = 10000 total, 9500 re-read = 95% -> crit badge + nudge.
+    # No cached driver and a small window (9.9k occupancy, far from the limit),
+    # so the nudge is the memory-preserving default, not a bare /compact command.
     assert "◆ Opus 4.8" in out
     assert "re-read 95%" in out
-    assert "/compact to reclaim quota" in out
+    assert "🕳️" in out
+    assert "resume-brief" in out
