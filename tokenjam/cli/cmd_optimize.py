@@ -226,14 +226,26 @@ def cmd_optimize(
         plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
         agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
 
-        # Opportunistic adoption detection: with a direct DuckDB connection
-        # in hand (daemon down), resolve any ripe past config exports into
-        # measured adopted/ignored outcomes. Fail-safe — never break optimize.
-        # (When the daemon is up, the /api/v1/recommendations route runs this
-        # server-side instead — both write the same on-disk sink.)
+        # Opportunistic adoption detection: with a direct DuckDB connection in
+        # hand, resolve any ripe past config exports into measured
+        # adopted/ignored outcomes — but only when the daemon is actually
+        # down. Holding a direct `conn` here means our own `open_db()` won a
+        # lock-free open; it does NOT guarantee `tj serve` isn't concurrently
+        # running (e.g. a narrow startup/shutdown window), and a daemon that
+        # *is* up already runs this same detection server-side on every
+        # /api/v1/recommendations read. Without an explicit check, both sides
+        # could race to resolve the same ripe export and each append a
+        # `downsize_adoption` record for it. Probe the daemon's HTTP API
+        # (same reachability check `main.py` uses on a DB-lock failure) and
+        # skip when it answers, so only one side ever runs detection for a
+        # given invocation. Fail-safe — never break optimize.
         try:
+            from tokenjam.core.api_backend import probe_api
             from tokenjam.core.recommendations import detect_downsize_adoption
-            detect_downsize_adoption(conn, config)
+            api_key = config.api.auth.api_key if config.api.auth.enabled else None
+            daemon_up = probe_api(config.api.host, config.api.port, api_key) is not None
+            if not daemon_up:
+                detect_downsize_adoption(conn, config)
         except Exception:
             pass
 
