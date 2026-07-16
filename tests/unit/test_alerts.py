@@ -4,9 +4,30 @@ from __future__ import annotations
 from datetime import timedelta
 from unittest.mock import patch
 
-from tokenjam.core.alerts import CooldownTracker
+import pytest
+
+from tokenjam.core.alerts import CooldownTracker, is_interactive_coding_agent
 from tokenjam.core.models import AlertType
 from tokenjam.utils.time_parse import utcnow
+
+
+# --------------------------------------------------------------------------- #
+# is_interactive_coding_agent — single source of truth for coding-vs-SDK
+# classification, margin cases pinned so alerts.py and framing.py
+# cannot silently drift apart again.
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("agent_id,expected", [
+    ("claude-code", True),               # bare id, no trailing slug — margin case
+    ("claude-code-my-project", True),
+    ("codex", True),                     # bare codex id — margin case
+    ("codex-cli-session", True),
+    ("sdk-agent-x", False),
+    ("some-other-agent", False),
+    (None, False),
+    ("", False),
+])
+def test_is_interactive_coding_agent_margin_cases(agent_id, expected):
+    assert is_interactive_coding_agent(agent_id) is expected
 
 
 def test_cooldown_allows_first_alert():
