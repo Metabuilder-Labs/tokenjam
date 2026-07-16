@@ -89,9 +89,11 @@ def test_bare_onboard_routes_to_selected_path(_routing_stubs, answer, key):
     assert set(_routing_stubs) == {key}
 
 
-def test_bare_onboard_sdk_choice_falls_through_to_generic(_routing_stubs, monkeypatch):
+def test_bare_onboard_sdk_choice_falls_through_to_generic(_routing_stubs, monkeypatch, tmp_path):
     """Choice 3 (SDK) falls through to the historical generic path, not a
     per-path onboarder."""
+    from pathlib import Path
+
     # The generic path writes a real config; keep it from touching the daemon /
     # DB apply. It will still write .tj/config.toml in the isolated fs.
     monkeypatch.setattr(
@@ -103,8 +105,22 @@ def test_bare_onboard_sdk_choice_falls_through_to_generic(_routing_stubs, monkey
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._try_apply_declared_plans", lambda *a, **k: None,
     )
+    # Isolate the config search paths to a tmp dir so the config lookup doesn't find
+    # the developer's real ~/.config/tj/config.toml. This makes the test independent
+    # from the host's home directory state. SEARCH_PATHS is evaluated at module import
+    # time, so we monkeypatch the global list directly.
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(
+        "tokenjam.core.config.SEARCH_PATHS",
+        [
+            Path("tokenjam.toml"),
+            Path(".tj/config.toml"),
+            home / ".config" / "tj" / "config.toml",
+        ],
+    )
     runner = CliRunner()
-    with runner.isolated_filesystem():
+    with runner.isolated_filesystem(temp_dir=tmp_path):
         # path=3(sdk) → plan prompt(1=api) → api ceiling(0) → daily budget(0)
         res = runner.invoke(
             cmd_onboard, ["--no-daemon"], input="3\n1\n0\n", obj={},

@@ -37,7 +37,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext, ReuseCluster, ReuseFinding
@@ -195,7 +195,9 @@ def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a ReuseFinding to ctx.report.findings."""
     capture = getattr(ctx.config, "capture", None)
     prompts_captured = bool(capture and getattr(capture, "prompts", False))
-    capture_mode = "with_prompt_prefix" if prompts_captured else "tool_sequence_only"
+    capture_mode: Literal["tool_sequence_only", "with_prompt_prefix"] = (
+        "with_prompt_prefix" if prompts_captured else "tool_sequence_only"
+    )
 
     # Single windowed query; all per-session walking happens in Python. No N+1.
     # Values are bound via DuckDB positional placeholders ($1, $2, ...). The
