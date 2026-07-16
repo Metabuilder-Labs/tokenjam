@@ -167,9 +167,12 @@ class LiveSink:
         # Only attach the Bearer header when a secret is actually configured —
         # sending "Authorization: Bearer " (empty/whitespace secret) is an
         # illegal header value that httpx rejects before the request goes out
-        # (same guard as TjHttpExporter, #431).
-        if (ingest_secret or "").strip():
-            self._headers["Authorization"] = f"Bearer {ingest_secret}"
+        # (same guard as TjHttpExporter, #431). Strip once and reuse the
+        # stripped value so a whitespace-padded config value doesn't leak
+        # into the header and get rejected by the server as a mismatch.
+        stripped_secret = (ingest_secret or "").strip()
+        if stripped_secret:
+            self._headers["Authorization"] = f"Bearer {stripped_secret}"
         self._buffer: list[dict] = []
 
     def record(self, span: NormalizedSpan) -> None:
@@ -197,7 +200,7 @@ class LiveSink:
                 self.endpoint, json=payload, headers=self._headers,
                 timeout=_REPLAY_TIMEOUT_S,
             )
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        except httpx.RequestError as exc:
             raise LiveReplayError(
                 f"could not reach tj serve at {self.endpoint}: {exc}"
             ) from exc
@@ -238,7 +241,7 @@ def check_serve_alive(config: "TjConfig") -> bool:
         resp = httpx.get(
             f"{serve_base_url(config)}/api/v1/status", timeout=_HEALTH_TIMEOUT_S
         )
-    except (httpx.ConnectError, httpx.TimeoutException):
+    except httpx.RequestError:
         return False
     return resp.status_code in (200, 401)
 
