@@ -593,7 +593,8 @@ def agent_persona_mix(
     rows = conn.execute(sql, params).fetchall()
     mix = {"claude_code": 0, "other": 0}
     for (aid,) in rows:
-        if is_interactive_coding_agent(aid):
+        aid_str = aid if isinstance(aid, str) else (str(aid) if aid is not None else None)
+        if is_interactive_coding_agent(aid_str):
             mix["claude_code"] += 1
         else:
             mix["other"] += 1
