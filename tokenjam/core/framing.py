@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from tokenjam.core.alerts import is_interactive_coding_agent
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import format_tokens
 
@@ -545,10 +546,16 @@ def plan_determination_mix(conn: Any, agent_id: str | None = None) -> dict[str, 
 
 # `tj onboard --claude-code` / `tj backfill claude-code` stamp every ingested
 # session's agent_id as `claude-code-<slug>` (see backfill.py
-# _agent_id_from_cwd, session_timeline.py SessionSummary.project_label) — the
-# one existing convention that distinguishes a Claude Code session from any
-# other runtime (SDK, other CLIs).
-CLAUDE_CODE_AGENT_PREFIX = "claude-code-"
+# _agent_id_from_cwd, session_timeline.py SessionSummary.project_label), and
+# codex runs stamp a `codex`-prefixed agent_id. Classification of both as
+# "interactive coding" (vs. a true SDK/API caller) is centralized in
+# :func:`tokenjam.core.alerts.is_interactive_coding_agent` — the single source
+# of truth shared with the alert engine, drift detector, and /status route.
+# This module used to keep its own hyphenated-only, codex-less prefix
+# check, which disagreed with alerts.py at the margins (a bare "claude-code"
+# id, or any codex id) — e.g. a pure-codex window fell through to the
+# SDK-facing `tokenjam-bench` CTA below even though alerts.py already treats
+# codex as an interactive coding agent.
 
 # A window is "claude-code" or "sdk" dominated at this threshold; between the
 # two, both audiences are meaningfully represented and the CTA should label
@@ -562,10 +569,12 @@ def agent_persona_mix(
     until: Any = None,
     agent_id: str | None = None,
 ) -> dict[str, int]:
-    """Count sessions by whether their agent_id looks like Claude Code.
+    """Count sessions by whether their agent_id is an interactive coding agent.
 
     Mirrors :func:`plan_tier_mix`'s query shape (same optional since/until/
-    agent_id window, same ``sessions`` table). Returns
+    agent_id window, same ``sessions`` table). Classification uses
+    :func:`tokenjam.core.alerts.is_interactive_coding_agent` (Claude Code or
+    Codex), not a Claude-Code-only prefix check. Returns
     ``{"claude_code": N, "other": M}``.
     """
     clauses: list[str] = []
@@ -584,7 +593,7 @@ def agent_persona_mix(
     rows = conn.execute(sql, params).fetchall()
     mix = {"claude_code": 0, "other": 0}
     for (aid,) in rows:
-        if aid and str(aid).startswith(CLAUDE_CODE_AGENT_PREFIX):
+        if is_interactive_coding_agent(aid):
             mix["claude_code"] += 1
         else:
             mix["other"] += 1
@@ -598,8 +607,9 @@ def dominant_persona(
 
     Returns one of ``"claude-code"``, ``"sdk"``, ``"mixed"``, ``"unknown"``.
 
-    Primary signal is the ``agent_id`` prefix (:data:`CLAUDE_CODE_AGENT_PREFIX`).
-    Falls back to the declared plan tier only when no session in the window
+    Primary signal is :func:`tokenjam.core.alerts.is_interactive_coding_agent`
+    via :func:`agent_persona_mix` (Claude Code or Codex agent id). Falls back
+    to the declared plan tier only when no session in the window
     carries an identifiable agent_id (e.g. raw OTLP ingestion that never ran
     ``tj onboard``) — a declared Claude Code subscription tier (pro / max_5x /
     max_20x) still implies a Claude Code user even before agent-id attribution
