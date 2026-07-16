@@ -7559,7 +7559,7 @@ function DashboardView({ params }) {
     </div>
     ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
 
-    ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet — TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and your spend, waste, and health show up here.</p></div>`
+    ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet. TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and the recurring mistakes, spend, and health show up here.</p></div>`
       : html`
         <!-- Triage band: recoverable waste + health. Spend is NOT shown here —
              it lives once, in the explorer's Spend KPI tile + chart below. -->
