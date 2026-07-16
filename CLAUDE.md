@@ -36,6 +36,7 @@ pytest tests/e2e/
 cd sdk-ts && npm install && npm test
 ```
 
+**Test isolation from the real `~/.tj` / `~/.config/tj`:** `tests/conftest.py` installs two session-wide, autouse fixtures — `_tj_isolated_home` repoints `HOME` (and `tokenjam.core.config.SEARCH_PATHS`, which bakes `Path.home()` into a module-level constant at import time, so re-pointing `HOME` alone can't fix it retroactively) at a throwaway tmp dir for the whole run, and `_tj_guard_real_home_db` wraps `DuckDBBackend.__init__` to raise loudly if any test still resolves a db path under the developer's real `~/.tj` or `~/.config/tj`. This is a backstop, not a replacement for a test's own explicit `tmp_path` fixtures — but it means the suite can never again take the DuckDB lock on a real store and contend with a concurrently running `tj serve` / CLI (or vice versa), even from a test that forgets to isolate itself.
 
 ## Working with concurrent agents
 
