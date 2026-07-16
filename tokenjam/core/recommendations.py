@@ -47,10 +47,13 @@ KIND_DOWNSIZE_ADOPTION = "downsize_adoption"
 # MIN_OBSERVATION_DAYS of post-export telemetry exist, and the comparison window
 # caps at OBSERVATION_DAYS. The recommended premium models' measured spend rate
 # must fall by at least ADOPTION_MIN_REL_DROP (relative) for the export to count
-# as adopted; anything less is recorded as ignored (measured, delta 0).
+# as adopted; anything less is recorded as ignored (measured, delta 0). A
+# pre-export baseline shorter than MIN_PRE_WINDOW_DAYS isn't resolved at all —
+# a rate estimate over less than a day is too noisy to trust.
 OBSERVATION_DAYS = 14
 MIN_OBSERVATION_DAYS = 7
 ADOPTION_MIN_REL_DROP = 0.25
+MIN_PRE_WINDOW_DAYS = 1.0
 
 # The honest basis string on every measured adoption record. It is a correlation
 # (the user may have changed routing for unrelated reasons), never a causal claim.
@@ -290,7 +293,13 @@ def detect_downsize_adoption(
             continue
         pre_days = float(detail.get("window_days") or 0.0)
         if pre_days <= 0:
-            pre_days = max((until_pre - since_pre).total_seconds() / 86400.0, 0.01)
+            pre_days = (until_pre - since_pre).total_seconds() / 86400.0
+        if pre_days < MIN_PRE_WINDOW_DAYS:
+            # Sub-day baseline (missing window_days + a same-day export) makes
+            # pre_rate_usd/tok unreliable — dividing by a near-zero window
+            # inflates the rate and can spuriously flip the adoption verdict.
+            # Leave it pending rather than resolving off a meaningless rate.
+            continue
 
         pre_usd, pre_tok = _premium_usage(conn, premium_norm, since_pre, until_pre)
         post_usd, post_tok = _premium_usage(conn, premium_norm, export_ts, post_end)
@@ -354,7 +363,28 @@ def summarize_outcomes(outcomes: list[dict]) -> dict:
     Dollar totals are summed only over ``api`` pricing-mode records (subscription
     / local / unknown $ figures mislead — Rule 14 framing); token totals sum over
     all records. ``rows`` carries each outcome for a detail table.
+
+    Deduped by ``outcome_id`` (first occurrence wins) before accumulating: the
+    sink can carry more than one record for the same logical event — e.g. a
+    user running ``tj optimize --export-config`` twice inside the same
+    analysis window produces two ``config_export`` rows with an identical
+    ``outcome_id`` (keyed on the window's ``until``), and a racing daemon +
+    CLI can both append an adoption record for the same export (see
+    :func:`detect_downsize_adoption`). Without this, either duplicate inflates
+    its column by counting the same export/adoption more than once. A record
+    with no ``outcome_id`` is never deduped (nothing to key it on).
     """
+    seen_ids: set[str] = set()
+    deduped: list[dict] = []
+    for o in outcomes:
+        oid = o.get("outcome_id")
+        if oid:
+            if oid in seen_ids:
+                continue
+            seen_ids.add(oid)
+        deduped.append(o)
+    outcomes = deduped
+
     est_usd = est_tok = meas_usd = meas_tok = 0.0
     est_count = adopted = ignored = 0
     rows: list[dict] = []
