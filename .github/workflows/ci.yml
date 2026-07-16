@@ -15,7 +15,7 @@ jobs:
       - name: Check pyproject.toml and sdk-ts/package.json versions match
         run: |
           PY_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
-          TS_VERSION=$(node -p "require('./sdk-ts/package.json').version")
+          TS_VERSION=$(jq -r '.version' sdk-ts/package.json)
           echo "pyproject.toml:       $PY_VERSION"
           echo "sdk-ts/package.json:  $TS_VERSION"
           if [ "$PY_VERSION" != "$TS_VERSION" ]; then

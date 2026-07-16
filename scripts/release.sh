@@ -51,8 +51,9 @@ import re, sys
 path = 'pyproject.toml'
 with open(path) as f:
     content = f.read()
+pattern = r'^version = \"' + re.escape('$OLD_VERSION') + r'\"$'
 new_content, count = re.subn(
-    r'^version = \"$OLD_VERSION\"$',
+    pattern,
     'version = \"$NEW_VERSION\"',
     content,
     count=1,
