@@ -325,6 +325,22 @@ def test_agent_persona_mix_classifies_by_claude_code_prefix():
     assert params == ["agent-x"]
 
 
+def test_agent_persona_mix_margin_cases_match_is_interactive_coding_agent():
+    """agent_persona_mix must agree with alerts.is_interactive_coding_agent
+    at the margins: a bare "claude-code" id, and codex ids (previously "other"
+    here, sending a pure-codex window to the SDK-facing bench CTA)."""
+    from unittest.mock import MagicMock
+
+    from tokenjam.core.framing import agent_persona_mix
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [
+        ("claude-code",), ("codex",), ("codex-cli-session",), ("sdk-agent-x",),
+    ]
+    result = agent_persona_mix(conn)
+    assert result == {"claude_code": 3, "other": 1}
+
+
 def test_agent_persona_mix_empty_when_no_sessions():
     from unittest.mock import MagicMock
 

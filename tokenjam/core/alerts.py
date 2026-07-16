@@ -48,23 +48,30 @@ _SESSION_DURATION_DEFAULT = 3600  # seconds
 
 # Agent-id prefixes for *interactive coding* runtimes (Claude Code / Codex): a
 # heterogeneous, arg-less, human-driven workload with no stable, repeatable
-# baseline. Two uses: (1) the alert engine + drift detector gate off checks that
-# assume a stable baseline — drift and the default session-duration ceiling
-# produce noise, not signal — while staying fully active for SDK / production
-# agents (retry_loop self-gates on an argument signature, so it needs no prefix
-# gate); and (2) the /status dashboard splits coding sessions from long-lived
-# SDK services.
+# baseline. This is the single source of truth for coding-vs-SDK
+# classification — alerts.py and framing.py used to keep independent
+# prefix lists that disagreed at the margins, e.g. a bare "claude-code" id or
+# any codex id. Three uses: (1) the alert engine + drift detector gate off
+# checks that assume a stable baseline — drift and the default
+# session-duration ceiling produce noise, not signal — while staying fully
+# active for SDK / production agents (retry_loop self-gates on an argument
+# signature, so it needs no prefix gate); (2) the /status dashboard splits
+# coding sessions from long-lived SDK services; and (3) framing.py's
+# agent_persona_mix uses it to pick the `tj optimize` downsize CTA that
+# matches the user's actual levers (#97).
 _INTERACTIVE_AGENT_PREFIXES = ("claude-code", "codex")
 
 
 def is_interactive_coding_agent(agent_id: str | None) -> bool:
     """True for Claude Code / Codex agents (interactive, heterogeneous, no args).
 
-    Two callers: the alert engine + drift detector skip checks that assume a
-    stable, instrumented, repeatable workload; and the /status route classifies
-    an agent as a coding session vs an SDK service, keyed on the agent id rather
-    than session-id presence (unreliable — ingest mints session_ids for SDK
-    spans too).
+    Single source of truth for coding-vs-SDK classification. Callers:
+    the alert engine + drift detector skip checks that assume a stable,
+    instrumented, repeatable workload; the /status route classifies an agent
+    as a coding session vs an SDK service, keyed on the agent id rather than
+    session-id presence (unreliable — ingest mints session_ids for SDK spans
+    too); and framing.py's agent_persona_mix classifies the dominant persona
+    for the `tj optimize` CTA.
     """
     if not agent_id:
         return False

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Any
 
 from opentelemetry import trace
 
@@ -21,10 +22,10 @@ class LangChainIntegration:
     installed = False
 
     def __init__(self) -> None:
-        self._original_generate = None
-        self._original_agenerate = None
-        self._original_tool_run = None
-        self._original_tool_arun = None
+        self._original_generate: Any = None
+        self._original_agenerate: Any = None
+        self._original_tool_run: Any = None
+        self._original_tool_arun: Any = None
         self._tracer = None
 
     def install(self, tracer) -> None:
