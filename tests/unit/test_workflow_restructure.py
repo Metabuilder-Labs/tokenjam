@@ -242,3 +242,51 @@ def test_no_tool_spans_in_window(db):
     finding = report.findings["script"]
     assert finding.clusters == []
     assert finding.sessions_examined == 0
+
+
+def test_cache_write_tokens_included_in_recoverable_total(db):
+    """Regression: cache_write_tokens must be included in estimated_recoverable_tokens.
+
+    This verifies the fix for ticket #169 where cache_write_tokens was omitted
+    from the per-cluster token sum, causing cache-write-heavy workloads to
+    underreport their recoverable savings.
+    """
+    base = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    # 20 sessions, each with cache writes
+    # Session tokens: input=1000, output=200, cache_read=500, cache_write=300
+    # Expected per-session total: 2000 tokens
+    for i in range(MIN_CLUSTER_INSTANCES):
+        sid = f"cache-write-{i}"
+        sess = make_session(
+            session_id=sid,
+            plan_tier="api",
+            duration_seconds=30.0,
+            input_tokens=1000,
+            output_tokens=200,
+            cache_tokens=500,  # cache_read
+            cache_write_tokens=300,  # cache_write
+        )
+        db.upsert_session(sess)
+        span = make_tool_span(tool_name="bash")
+        span.session_id = sid
+        span.start_time = base + timedelta(minutes=i)
+        span.attributes = {GenAIAttributes.TOOL_INPUT: {"command": "git pull"}}
+        db.insert_span(span)
+
+    config = _config(tool_inputs=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["script"])
+    finding = report.findings["script"]
+
+    assert len(finding.clusters) == 1
+    c = finding.clusters[0]
+    assert c.instances == MIN_CLUSTER_INSTANCES
+
+    # Total recoverable tokens = (1000 + 200 + 500 + 300) * 20 = 2000 * 20 = 40000
+    # Before the fix, this would be (1000 + 200 + 500) * 20 = 1700 * 20 = 34000
+    assert finding.estimated_recoverable_tokens == 40000
+    # avg_tokens should be input+output only (per-instance UI framing),
+    # not affected by the bug fix
+    assert c.avg_tokens == 1200

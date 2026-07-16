@@ -83,6 +83,17 @@ def apply_staged(config: TjConfig, path: str | None = None, *, go: bool = False)
                         est_tokens_saved=int(e.get("est_tokens_saved", 0) or 0))
             _atomic_write(p, e["restored"])
             clear(config, sp)
+            # Record the applied rewrite in the recommendation-outcome ledger so
+            # `tj savings` / Lens can prove which recommendations got acted on.
+            # Fail-safe: an outcome-log hiccup must never fail the apply itself.
+            try:
+                from tokenjam.core.recommendations import record_summarize_apply
+                record_summarize_apply(
+                    config, path=sp,
+                    est_tokens_saved=int(e.get("est_tokens_saved", 0) or 0),
+                )
+            except Exception:
+                pass
         applied.append({"path": sp, "est_tokens_saved": e["est_tokens_saved"], "diff": e["diff"]})
     return {"applied": applied, "skipped": skipped, "dry_run": not go}
 

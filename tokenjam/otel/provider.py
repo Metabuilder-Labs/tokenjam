@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Sequence, cast
 
 from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter, SpanExportResult
@@ -75,22 +75,24 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
     """
     attrs = dict(otel_span.attributes or {})
 
-    # Extract indexed fields from attributes
-    provider = attrs.pop(GenAIAttributes.PROVIDER_NAME, None)
-    model = attrs.pop(GenAIAttributes.REQUEST_MODEL, None)
-    tool_name = attrs.pop(GenAIAttributes.TOOL_NAME, None)
+    # Extract indexed fields from attributes. OTel attribute values are typed as
+    # AttributeValue (int | float | Sequence[...] | None); the fields below are
+    # string-valued at runtime, so coerce to str while preserving None.
+    provider = _attr_str(attrs.pop(GenAIAttributes.PROVIDER_NAME, None))
+    model = _attr_str(attrs.pop(GenAIAttributes.REQUEST_MODEL, None))
+    tool_name = _attr_str(attrs.pop(GenAIAttributes.TOOL_NAME, None))
     input_tokens = attrs.pop(GenAIAttributes.INPUT_TOKENS, None)
     output_tokens = attrs.pop(GenAIAttributes.OUTPUT_TOKENS, None)
     cache_tokens = attrs.pop(GenAIAttributes.CACHE_READ_TOKENS, None)
     cache_write_tokens = attrs.pop(GenAIAttributes.CACHE_CREATE_TOKENS, None)
-    conversation_id = attrs.pop(GenAIAttributes.CONVERSATION_ID, None)
-    request_type = attrs.pop(GenAIAttributes.REQUEST_TYPE, None)
-    agent_id = attrs.pop(GenAIAttributes.AGENT_ID, None)
+    conversation_id = _attr_str(attrs.pop(GenAIAttributes.CONVERSATION_ID, None))
+    request_type = _attr_str(attrs.pop(GenAIAttributes.REQUEST_TYPE, None))
+    agent_id = _attr_str(attrs.pop(GenAIAttributes.AGENT_ID, None))
     cost_usd = attrs.pop(TjAttributes.COST_USD, None)
-    session_id = attrs.pop(TjAttributes.SESSION_ID, None)
+    session_id = _attr_str(attrs.pop(TjAttributes.SESSION_ID, None))
     # billing_account: explicit attribute wins, otherwise derived from provider.
     # Map gen_ai.provider.name values to billing_account (provider-only).
-    billing_account = attrs.pop(TjAttributes.BILLING_ACCOUNT, None) or _provider_to_billing_account(provider)
+    billing_account = _attr_str(attrs.pop(TjAttributes.BILLING_ACCOUNT, None)) or _provider_to_billing_account(provider)
 
     # service.namespace is a resource attribute (set on the TracerProvider /
     # OTEL_RESOURCE_ATTRIBUTES), not a span attribute.
@@ -104,21 +106,25 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
     run_id = resource_attrs.get(TjAttributes.RUN_ID)
     parent_session_id = resource_attrs.get(TjAttributes.PARENT_SESSION_ID)
 
-    # Convert int tokens to int (OTel may store as strings)
+    # Convert int tokens to int (OTel may store as strings). These attributes are
+    # scalar numeric/string at runtime; cast narrows away the Sequence members of
+    # the AttributeValue union that int()/float() cannot accept.
     if input_tokens is not None:
-        input_tokens = int(input_tokens)
+        input_tokens = int(cast("int | float | str", input_tokens))
     if output_tokens is not None:
-        output_tokens = int(output_tokens)
+        output_tokens = int(cast("int | float | str", output_tokens))
     if cache_tokens is not None:
-        cache_tokens = int(cache_tokens)
+        cache_tokens = int(cast("int | float | str", cache_tokens))
     if cache_write_tokens is not None:
-        cache_write_tokens = int(cache_write_tokens)
+        cache_write_tokens = int(cast("int | float | str", cache_write_tokens))
     if cost_usd is not None:
-        cost_usd = float(cost_usd)
+        cost_usd = float(cast("int | float | str", cost_usd))
 
     # Convert timestamps (OTel uses nanoseconds since epoch)
     start_time = _ns_to_datetime(otel_span.start_time) if otel_span.start_time else None
     end_time = _ns_to_datetime(otel_span.end_time) if otel_span.end_time else None
+    # Exported ReadableSpans always carry a start_time; NormalizedSpan requires it.
+    assert start_time is not None, "exported span is missing a start_time"
 
     duration_ms = None
     if start_time and end_time:
@@ -181,6 +187,16 @@ def convert_otel_span(otel_span: ReadableSpan) -> NormalizedSpan:
         run_id=run_id,
         parent_session_id=parent_session_id,
     )
+
+
+def _attr_str(value: object | None) -> str | None:
+    """Coerce an OTel attribute value to str, preserving None.
+
+    OTel attribute values are typed AttributeValue (int | float | Sequence[...]);
+    tj's indexed string fields are string-valued at runtime, so a plain str()
+    reflects the real type without changing behaviour.
+    """
+    return None if value is None else str(value)
 
 
 def _provider_to_billing_account(provider: str | None) -> str | None:
@@ -252,7 +268,7 @@ def _build_otlp_exporter(config: TjConfig) -> SpanExporter:
             insecure=otlp.insecure,
         )
     else:
-        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter  # type: ignore[assignment]  # grpc/http exporters are interchangeable at runtime (both SpanExporter)
         return OTLPSpanExporter(
             endpoint=f"{otlp.endpoint}/v1/traces",
             headers=otlp.headers or {},
