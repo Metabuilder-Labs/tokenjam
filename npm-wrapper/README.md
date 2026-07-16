@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Metabuilder-Labs/tokenjam/main/docs/brand/tokenjam-repo-header.png" alt="TokenJam cuts what your AI agents cost by ending the mistakes they keep repeating: it finds the failures your agent re-hits, fixes them, and verifies the waste stopped. Runs 100% local." width="760">
+<img src="https://raw.githubusercontent.com/Metabuilder-Labs/tokenjam/main/docs/brand/tokenjam-repo-header.png" alt="TokenJam: the self-improvement loop for AI agents. Finds the mistakes your agent keeps repeating, fixes them, and proves they stopped. Runs 100% local." width="760">
 
 [![npm](https://img.shields.io/npm/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/tokenjam)
 [![npm downloads](https://img.shields.io/npm/dm/tokenjam?color=3d8eff&labelColor=0d1117&label=downloads)](https://www.npmjs.com/package/tokenjam)
@@ -11,7 +11,7 @@
 
 </div>
 
-TokenJam cuts what your AI agents cost by ending their repeated mistakes: it finds the failures your agent keeps re-hitting, fixes them at the harness level, and verifies the waste stopped. It ingests agent telemetry from a multitude of sources (Claude Code sessions, Claude Agent SDK apps, any OTel source) into a local DuckDB, so you get the most out of the tokens you pay for. This package is the zero-install launcher: no pip environment, no manual config.
+TokenJam is the self-improvement loop for AI agents: it finds the mistakes your agent keeps repeating, fixes them, and proves they stopped. It ingests agent telemetry from many sources (Claude Code sessions, any OTel source) into a local DuckDB. This package is the zero-install launcher: no pip environment, no manual config.
 
 ```bash
 npx tokenjam        # a read-only report of your agent's recurring mistakes, no install, nothing kept
