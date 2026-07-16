@@ -911,12 +911,13 @@ def _prompt_usage_path() -> str:
 def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
     """Best-effort Codex backfill, called defensively (#448).
 
-    The Codex on-disk backfill adapter (`tj backfill codex`) is being added by
-    another workstream and may not have landed yet. This resolves it at runtime
-    via a guarded import so the combination / --codex flows work whether or not
-    that adapter exists. When it's unavailable, returns forward-only framing so
-    the caller can say "wired — data flows as you use Codex" instead of claiming
-    a backfill that didn't happen (honesty discipline, Rule 14).
+    The Codex on-disk backfill adapter (`tj backfill codex`,
+    `core/ingest_adapters/codex.py`) parses `~/.codex/sessions/**/rollout-*.jsonl`.
+    It's resolved at runtime via a guarded import so the combination / --codex
+    flows degrade gracefully on any older tree where that adapter is absent. When
+    it's unavailable, returns forward-only framing so the caller can say "wired —
+    data flows as you use Codex" instead of claiming a backfill that didn't
+    happen (honesty discipline, Rule 14).
 
     Returns ``(message, has_data, sessions_total)``:
       * ``message`` — a human summary line, or None if nothing to report.
@@ -1739,16 +1740,15 @@ def _onboard_claude_code(
     # `tj uninstall`.
     resume_brief_status = _wire_claude_resume_brief_hook(global_settings)
 
-    # Install the output-trim PostToolUse hook (zero in-loop token cost). Rides
-    # this same read-merge-write. DEFAULT-OFF opt-in (config gate): the A/B gate
-    # failed — Claude Code already truncates Bash output to ~30 KB before the
-    # PostToolUse hook sees it, so the addressable bloat is tiny and treatment
-    # cost was +5.6% (noise). See the `[hooks.output_cap]` docstring in
-    # core/config.py. So onboarding does NOT auto-install it: a fresh config has
-    # enabled=False → we take the else branch and remove any previously-installed
-    # tj entry, keeping config the source of truth. Users opt in by setting
-    # `[hooks.output_cap].enabled = true` and re-running onboard. Idempotent +
-    # non-destructive (foreign hooks preserved).
+    # (Un)install the output-trim PostToolUse hook. Rides this same
+    # read-merge-write. DEFAULT-OFF and MEASURED NEGATIVE: the A/B gate failed and
+    # Claude Code now natively offloads large tool output before it enters context
+    # (confirmed live 2026-07-03), so the hook buys ~+5.6% cost for zero benefit —
+    # do NOT enable it. See the `[hooks.output_cap]` docstring in core/config.py.
+    # Onboarding does NOT auto-install it: a fresh config has enabled=False → we
+    # take the else branch and remove any previously-installed tj entry, keeping
+    # config the source of truth. Idempotent + non-destructive (foreign hooks
+    # preserved).
     cap_cfg = getattr(getattr(config, "hooks", None), "output_cap", None)
     cap_enabled = bool(getattr(cap_cfg, "enabled", False)) and not bool(
         getattr(cap_cfg, "killswitch", False)

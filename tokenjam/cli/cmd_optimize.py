@@ -226,6 +226,29 @@ def cmd_optimize(
         plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
         agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
 
+        # Opportunistic adoption detection: with a direct DuckDB connection in
+        # hand, resolve any ripe past config exports into measured
+        # adopted/ignored outcomes — but only when the daemon is actually
+        # down. Holding a direct `conn` here means our own `open_db()` won a
+        # lock-free open; it does NOT guarantee `tj serve` isn't concurrently
+        # running (e.g. a narrow startup/shutdown window), and a daemon that
+        # *is* up already runs this same detection server-side on every
+        # /api/v1/recommendations read. Without an explicit check, both sides
+        # could race to resolve the same ripe export and each append a
+        # `downsize_adoption` record for it. Probe the daemon's HTTP API
+        # (same reachability check `main.py` uses on a DB-lock failure) and
+        # skip when it answers, so only one side ever runs detection for a
+        # given invocation. Fail-safe — never break optimize.
+        try:
+            from tokenjam.core.api_backend import probe_api
+            from tokenjam.core.recommendations import detect_downsize_adoption
+            api_key = config.api.auth.api_key if config.api.auth.enabled else None
+            daemon_up = probe_api(config.api.host, config.api.port, api_key) is not None
+            if not daemon_up:
+                detect_downsize_adoption(conn, config)
+        except Exception:
+            pass
+
     dominant = dominant_plan(plan_mix)
     pricing_mode = pricing_mode_for(dominant)
     declared_plan = config_declared_plan(config)
@@ -239,6 +262,8 @@ def cmd_optimize(
             report.downgrade, dominant, pricing_mode,
             target=export_target, agent_id=agent,
             output_json=output_json,
+            config=config, since=since_dt, until=until_dt,
+            window_days=(until_dt - since_dt).total_seconds() / 86400.0,
         )
         return
 
@@ -1035,6 +1060,10 @@ def _export_snippet(
     target: str,
     agent_id: str | None,
     output_json: bool,
+    config=None,
+    since=None,
+    until=None,
+    window_days: float = 0.0,
 ) -> None:
     """
     Write a routing-config snippet for the requested target and print a
@@ -1062,6 +1091,30 @@ def _export_snippet(
     today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     out_path = out_dir / f"{target}-{today}.{ext}"
     out_path.write_text(body)
+
+    # Record the export in the recommendation-outcome ledger, stashing the
+    # downsize baseline so post-hoc adoption detection can later measure whether
+    # the recommended premium models' usage actually dropped. Fail-safe.
+    if config is not None and since is not None and until is not None:
+        try:
+            from tokenjam.core.recommendations import record_config_export
+            provider = None
+            suggestions = getattr(downgrade, "suggestions", None) or {}
+            if suggestions:
+                from tokenjam.core.optimize.analyzers.model_downgrade import (
+                    DOWNGRADE_CANDIDATES,
+                )
+                for prov, mapping in DOWNGRADE_CANDIDATES.items():
+                    if any(m in mapping for m in suggestions):
+                        provider = prov
+                        break
+            record_config_export(
+                config, target=target, export_path=str(out_path),
+                downgrade=downgrade, pricing_mode=pricing_mode, provider=provider,
+                since=since, until=until, window_days=window_days,
+            )
+        except Exception:
+            pass
 
     if output_json:
         click.echo(json.dumps({
@@ -1457,6 +1510,20 @@ def _render_subagent(
                 f"[dim]· {r.tool_calls} tools[/dim]{cost_str}"
             )
             console.print(f"           [yellow]→[/yellow] {', '.join(r.flags)}")
+
+    # Quantified estimate (#101): the over_powered model-swap delta — what earns
+    # this finding its ranked slot. Dollars for api-billed users; the token quota
+    # otherwise (same category discipline as the peer analyzers). Honest
+    # "estimated recoverable" framing only; the caveat below still governs.
+    if finding.estimated_recoverable_tokens is not None:
+        if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+            recov = format_cost(finding.estimated_recoverable_usd)
+        else:
+            recov = f"{format_tokens(finding.estimated_recoverable_tokens)} tokens"
+        console.print(
+            f"     • [green]~{recov}[/green] estimated recoverable "
+            f"[dim](over_powered subagents at their cheaper same-family model)[/dim]"
+        )
 
     console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
