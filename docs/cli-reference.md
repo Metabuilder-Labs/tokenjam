@@ -47,20 +47,6 @@ tj ping --json
 
 Exit codes: 0 = intercepted and delivered, 1 = interception or delivery failed.
 
-### `tj quickstart`
-
-Zero-install, zero-config first run. Reads the same `~/.claude/projects/*.jsonl` files ccusage does — no pip env, no config, no daemon, no on-disk DB (a transient in-memory backend). Shows quota composition (re-read vs. net-new work) and a session timeline, then points at `tj onboard` to go deeper.
-
-```bash
-tj quickstart
-tj quickstart --since 7d
-tj quickstart --full          # lift the first-run cap (default: most-recent 300 sessions)
-tj quickstart --root <path>   # override the Claude Code projects root
-tj quickstart --json
-```
-
-Key flags: `--since`, `--root`, `--full`, `--json`.
-
 ### `tj doctor`
 
 Health check — validates config, database connectivity, ingest secret, and alert channel reachability.

@@ -1,3 +1,5 @@
+import os
+
 import click
 from tokenjam.core.config import load_config
 from tokenjam.core.db import open_db
@@ -26,14 +28,25 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     ctx.ensure_object(dict)
 
     # Bare `tj` (no subcommand) → branded home screen (#240): banner +
-    # next-best-action. Reads only config presence, never opens the DB. The
-    # zero-install first run (`tj quickstart`, #6) is what `npx tokenjam` routes
-    # to via the npm wrapper — bare local `tj` (an installed CLI) keeps the home
-    # screen.
+    # next-best-action. Reads only config presence, never opens the DB.
+    #
+    # Bare `npx tokenjam` is a separate path: the npm wrapper
+    # (npm-wrapper/bin/tj.js) sets TJ_NPX_ZERO_INSTALL_REPORT=1 when it invokes
+    # `tj` with no args, since a brand-new npx user has no config yet and the
+    # home screen would dead-end them ("you're set up", suggesting commands
+    # they don't have). That env var routes here to the same zero-install
+    # report `cmd_quickstart` renders, invoked directly via `ctx.invoke` — it
+    # has no public/typeable subcommand name (#6 retired the `quickstart`
+    # command; the report itself lives on, reached only from this branch).
     if ctx.invoked_subcommand is None:
         if no_color:
             from rich import reconfigure
             reconfigure(no_color=True)
+        if os.environ.get("TJ_NPX_ZERO_INSTALL_REPORT"):
+            from tokenjam.cli.cmd_quickstart import cmd_quickstart
+            ctx.invoke(cmd_quickstart, since="30d", root_path=None,
+                       full=False, output_json=output_json)
+            return
         from tokenjam.cli.home import print_home
         print_home()
         return
@@ -47,7 +60,6 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         "stop", "uninstall", "onboard", "mcp", "demo", "policy",
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
         "statusline",
-        "quickstart",
         # `ping` emits a test span through the SDK (which resolves its own
         # HTTP-vs-direct path); it must not take the CLI's DuckDB lock (#80).
         "ping",
@@ -121,7 +133,6 @@ from tokenjam.cli.cmd_proxy import cmd_proxy  # noqa: E402
 from tokenjam.cli.cmd_context import cmd_context  # noqa: E402
 from tokenjam.cli.cmd_session_story import cmd_session_story  # noqa: E402
 from tokenjam.cli.cmd_quota_audit import cmd_quota_audit  # noqa: E402
-from tokenjam.cli.cmd_quickstart import cmd_quickstart  # noqa: E402
 from tokenjam.cli.cmd_otel import cmd_otel_resource_attrs  # noqa: E402
 from tokenjam.cli.cmd_session_end import cmd_session_end  # noqa: E402
 from tokenjam.cli.cmd_statusline import cmd_statusline  # noqa: E402
@@ -154,7 +165,6 @@ cli.add_command(cmd_proxy, name="proxy")
 cli.add_command(cmd_context, name="context")
 cli.add_command(cmd_session_story, name="session-story")
 cli.add_command(cmd_quota_audit, name="quota-audit")
-cli.add_command(cmd_quickstart, name="quickstart")
 cli.add_command(cmd_otel_resource_attrs, name="otel-resource-attrs")
 cli.add_command(cmd_session_end, name="session-end")
 cli.add_command(cmd_statusline, name="statusline")

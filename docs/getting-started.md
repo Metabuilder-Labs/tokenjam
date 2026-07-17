@@ -5,12 +5,12 @@ wires up everything (statusline, backfill, dashboard) in one step. This page wal
 by persona, most-common first; each rung ends with a way to verify it actually worked before you move
 on.
 
-> **Just looking first?** `npx tokenjam` (or `uvx tokenjam quickstart`) prints a 15-second read-only
-> report over the Claude Code logs you already have on disk (`~/.claude/projects/*.jsonl`) — nothing
-> installed, nothing written to disk, no daemon. You should see a "Where your quota goes" panel with a
-> percentage breakdown (or "No Claude Code logs found," which just means you haven't run Claude Code on
-> this machine yet). See [docs/installation.md](installation.md) for the `uv`/`pipx` runner
-> requirements. When you're ready to keep it, start at rung 1 below.
+> **Just looking first?** `npx tokenjam` prints a 15-second read-only report over the Claude Code logs
+> you already have on disk (`~/.claude/projects/*.jsonl`) — nothing installed, nothing written to disk,
+> no daemon. You should see a "Where your quota goes" panel with a percentage breakdown (or "No Claude
+> Code logs found," which just means you haven't run Claude Code on this machine yet). See
+> [docs/installation.md](installation.md) for the `uv`/`pipx` runner requirements. When you're ready to
+> keep it, start at rung 1 below.
 
 ## 1. Claude Code / Codex onboarding wizards
 

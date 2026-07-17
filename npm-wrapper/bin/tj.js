@@ -112,13 +112,19 @@ function markRefreshed() {
 }
 
 function main() {
-  // Bare `npx tokenjam` IS the zero-install first run — route it to
-  // `tj quickstart` (the quota report the docs promise). The branded home
-  // screen that bare LOCAL `tj` prints assumes an installed CLI and would
-  // dead-end an npx user ("You're set up", suggesting commands they don't
-  // have). Any explicit args pass through untouched.
+  // Bare `npx tokenjam` IS the zero-install first run — the quota report the
+  // docs promise. The branded home screen that bare LOCAL `tj` prints assumes
+  // an installed CLI and would dead-end an npx user ("You're set up",
+  // suggesting commands they don't have). Any explicit args pass through
+  // untouched; a bare invocation stays bare (no synthetic subcommand — there
+  // is no public/typeable command for this) and instead sets an env var that
+  // the Python CLI's own no-subcommand branch reads to pick the report over
+  // the home screen.
   const argv = process.argv.slice(2);
-  const passthrough = argv.length ? argv : ["quickstart"];
+  const passthrough = argv;
+  const childEnv = argv.length
+    ? process.env
+    : { ...process.env, TJ_NPX_ZERO_INSTALL_REPORT: "1" };
 
   for (const { bin, prefix } of runners()) {
     if (!has(bin)) continue;
@@ -127,6 +133,7 @@ function main() {
     const args = doRefresh ? ["--refresh", ...prefix] : prefix;
     const result = spawnSync(bin, [...args, ...passthrough], {
       stdio: "inherit",
+      env: childEnv,
     });
     if (result.error) continue; // try the next runner on spawn failure
     if (doRefresh && result.status === 0) markRefreshed();
