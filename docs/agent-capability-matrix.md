@@ -14,7 +14,7 @@ exporter at `tj serve`'s `/api/v1/spans`, see [framework-support.md](framework-s
 | Capability | Claude Code | Codex CLI | Python SDK | Generic OTLP |
 |---|---|---|---|---|
 | **Live ingest** | Yes — OTLP log events converted to spans by `api/routes/logs.py` | Yes — same converter, dedicated Codex event parsers (`api_request`, `sse_event`, `user_prompt`, `tool_decision`, `tool_result`) | Yes — in-process `@watch()` + `patch_*()` spans via `TjSpanExporter` | Yes — `POST /api/v1/spans`, any OTel GenAI-semconv-shaped payload |
-| **Historical backfill** | Yes — `tj backfill claude-code` (auto-run by `tj onboard --claude-code`) parses `~/.claude/projects/*.jsonl` | No — no `tj backfill codex` adapter exists yet; see investigation below | N/A — SDK telemetry is live-only, there's no local session log to backfill from | Partial — `tj backfill otlp --source-file <dump>` replays an OTLP JSON dump if you have one; nothing to backfill for a live-only exporter |
+| **Historical backfill** | Yes — `tj backfill claude-code` (auto-run by `tj onboard --claude-code`) parses `~/.claude/projects/*.jsonl` | Yes — `tj backfill codex` (offered by `tj onboard --codex`) parses `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; deterministic span ids make re-runs idempotent, cost recomputed from `pricing/models.toml` | N/A — SDK telemetry is live-only, there's no local session log to backfill from | Partial — `tj backfill otlp --source-file <dump>` replays an OTLP JSON dump if you have one; nothing to backfill for a live-only exporter |
 | **Statusline (zero-token in-loop nudge)** | Yes — `tj onboard --claude-code` wires `tj statusline` into `~/.claude/settings.json` non-destructively | No — Codex's TUI has its own built-in `[tui].status_line` (fixed items: model, tokens, cost, git-branch, etc.) but no custom-command hook, so tj cannot inject a line into it | N/A — no TUI, the SDK is a library | N/A — depends entirely on the host agent's own UI, tj has nothing to wire |
 | **Hooks (SessionStart resume-brief / PostToolUse output-cap)** | Yes — resume-brief hook installed by default; output-cap hook is opt-in | No — Codex CLI has no hook system tj integrates with | N/A — no hook concept; equivalent is manual instrumentation via `record_llm_call()` / `record_tool_call()` | N/A |
 | **Per-terminal / per-instance identity** | Yes — the installed `claude` shell wrapper sets a distinct `service.instance.id` per terminal so concurrent sessions render as separate dashboard tiles | No — Codex hardcodes `service.name="codex_exec"` in the binary regardless of `[otel.resource]`, so **all** Codex activity across every terminal collapses into one agent tile | N/A — caller sets `agent_id` explicitly per `@watch()` call, so this is under direct code control | Partial — possible if the agent sets distinct resource attributes itself; tj does not automate this for a tool it doesn't control |
@@ -27,14 +27,16 @@ exporter at `tj serve`'s `/api/v1/spans`, see [framework-support.md](framework-s
 Filed as part of ticket #81 to decide whether the two Codex gaps above (backfill, statusline) are
 worth a follow-up or are structurally blocked.
 
-**Backfill — feasible, follow-up recommended.** Codex CLI writes local session transcripts to
+**Backfill — feasible, and now shipped.** Codex CLI writes local session transcripts to
 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` (confirmed via Codex CLI docs and third-party parsers —
 e.g. `codex-trace`, "Agent Sessions" — that already read this format for session viewing/resuming).
 This is structurally the same situation as `core/backfill.py`'s existing Claude Code adapter: an
-undocumented-but-stable-enough, reverse-engineerable per-session JSONL format. A `tj backfill codex`
-adapter mirroring `ingest_claude_code()` looks buildable without any missing capability on Codex's
-side — it just hasn't been written yet. **Not implemented in this PR** (out of scope — this ticket
-only requires the decision, not the adapter); worth filing as its own ticket if wanted.
+undocumented-but-stable-enough, reverse-engineerable per-session JSONL format. The parity follow-up
+landed as `tj backfill codex` (`core/ingest_adapters/codex.py`), mirroring `ingest_claude_code()`: a
+rollout-JSONL parser → `NormalizedSpan` adapter with deterministic idempotent span ids, cost
+recomputed from `pricing/models.toml`, plan tier stamped from config, and the `attributes.source =
+"backfill.codex"` tag convention. `tj onboard --codex` offers it once Codex logs are present, so
+historical Codex sessions are now visible in the dashboard and analyzers just like live ones.
 
 **Statusline — infeasible today, revisit later.** Codex CLI does have a built-in TUI status line
 (`[tui].status_line` in `~/.codex/config.toml`, configurable via `/statusline` or the config file,

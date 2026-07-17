@@ -31,8 +31,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from tokenjam.core.model_tiers import is_premium_tier
+from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.pricing import get_rates
 
 # "Produced little": total output tokens below this look like a small task.
 SMALL_OUTPUT_TOKENS = 2_000
@@ -58,12 +60,18 @@ SUBAGENT_HONESTY_CAVEAT = (
     "subagents before changing how you dispatch them or which model they use."
 )
 
-# estimate_basis for the savings contract (#111). Candidate-only in v1 — we
-# surface the spend concentrated in flagged subagents, not a guaranteed saving.
+# estimate_basis for the savings contract (#111). The quantified estimate is
+# the token-cost delta of routing each over_powered subagent (premium model,
+# little output) to its cheaper same-family model over the SAME tokens — a
+# model-swap counterfactual with no token-count change and no quality claim.
+# over_provisioned is deliberately excluded: its recoverable is a prompt-size
+# reduction we can't size honestly, so it never inflates this number.
 SUBAGENT_ESTIMATE_BASIS = (
-    "spend concentrated in structurally-flagged subagents (premium model with "
-    "little output, or large context with little output); review before "
-    "re-dispatching — no guaranteed saving"
+    "over_powered subagents priced at their cheaper same-family model over the "
+    "same tokens — a model-swap delta, structural fit only, no quality "
+    "validation; review before re-dispatching. over_provisioned spend is "
+    "flagged but not counted here (its recoverable prompt-size cut isn't "
+    "quantifiable). No guaranteed saving."
 )
 
 
@@ -80,6 +88,9 @@ class SubagentRow:
     cache_tokens:       int
     cache_write_tokens: int
     cost_usd:           float
+    # Provider is captured so the over_powered estimate can price the cheaper
+    # same-family alternative; defaulted for round-trip of pre-provider payloads.
+    provider:           str = "unknown"
     flags:              list[str] = field(default_factory=list)
 
 
@@ -136,6 +147,7 @@ def _compute_rows(conn, since, until, agent_id: str | None) -> list[SubagentRow]
     rows = conn.execute(
         f"SELECT session_id, sub_agent_id, "
         f"arg_max(model, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS model, "
+        f"arg_max(provider, COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)) AS provider, "
         f"COUNT(*) FILTER (WHERE name = 'gen_ai.llm.call') AS llm_calls, "
         f"COUNT(*) FILTER (WHERE tool_name IS NOT NULL) AS tool_calls, "
         f"COALESCE(SUM(input_tokens), 0) AS in_tok, "
@@ -150,7 +162,7 @@ def _compute_rows(conn, since, until, agent_id: str | None) -> list[SubagentRow]
     ).fetchall()
 
     result: list[SubagentRow] = []
-    for (sid, said, model, llm_calls, tool_calls,
+    for (sid, said, model, provider, llm_calls, tool_calls,
          in_tok, out_tok, cache_tok, cache_w_tok, cost) in rows:
         in_tok = int(in_tok or 0)
         out_tok = int(out_tok or 0)
@@ -158,6 +170,7 @@ def _compute_rows(conn, since, until, agent_id: str | None) -> list[SubagentRow]
         cache_w_tok = int(cache_w_tok or 0)
         cost = float(cost or 0.0)
         model = str(model or "unknown")
+        provider = str(provider or "unknown")
         flags = _flags_for(
             model=model, output_tokens=out_tok, tool_calls=int(tool_calls or 0),
             input_tokens=in_tok, cache_tokens=cache_tok, cost_usd=cost,
@@ -173,9 +186,66 @@ def _compute_rows(conn, since, until, agent_id: str | None) -> list[SubagentRow]
             cache_tokens=cache_tok,
             cache_write_tokens=cache_w_tok,
             cost_usd=round(cost, 8),
+            provider=provider,
             flags=flags,
         ))
     return result
+
+
+def _alt_cost_for_row(r: SubagentRow, alt_model: str) -> float | None:
+    """Cost of ``r``'s exact token mix priced at ``alt_model``, or ``None`` when
+    the alternative has no pricing data. Prices EVERY token class the original
+    was billed for (input + output + cache read + cache write) so the delta
+    reflects only the rate difference — never an artificial saving from dropping
+    a token class the cheaper model would still be charged for."""
+    rates = get_rates(r.provider, alt_model)
+    if rates is None:
+        return None
+    return (
+        r.input_tokens / 1_000_000 * rates.input_per_mtok
+        + r.output_tokens / 1_000_000 * rates.output_per_mtok
+        + r.cache_tokens / 1_000_000 * rates.cache_read_per_mtok
+        + r.cache_write_tokens / 1_000_000 * rates.cache_write_per_mtok
+    )
+
+
+def _over_powered_recoverable(rows: list[SubagentRow]) -> tuple[float, int]:
+    """Conservative recoverable estimate over the over_powered subagents.
+
+    For each subagent flagged ``over_powered`` (a premium-tier model that did
+    little work), price its same-family cheaper alternative over the identical
+    token mix and take the POSITIVE cost delta — a pure model-swap
+    counterfactual, no token-count change and no quality claim. A subagent with
+    no cheaper alternative or no pricing data contributes nothing (we refuse to
+    invent a number). ``over_provisioned`` is intentionally excluded: reducing an
+    over-large prompt is a real saving but not one we can size honestly here.
+
+    Returns ``(recoverable_usd, recoverable_tokens)`` where the token figure is
+    the quota (input + output + cache) sitting in the priced over_powered
+    subagents — the share that routing to a cheaper model frees against a plan
+    cap, mirroring the model-downgrade analyzer's token framing so the Overview
+    tiles and the ranked-report share stay comparable.
+    """
+    recoverable_usd = 0.0
+    recoverable_tokens = 0
+    for r in rows:
+        if "over_powered" not in r.flags:
+            continue
+        alt = lookup_downgrade(r.provider, r.model)
+        if not alt:
+            continue
+        alt_cost = _alt_cost_for_row(r, alt)
+        if alt_cost is None:
+            continue
+        delta = r.cost_usd - alt_cost
+        if delta <= 0:
+            continue
+        recoverable_usd += delta
+        recoverable_tokens += (
+            r.input_tokens + r.output_tokens
+            + r.cache_tokens + r.cache_write_tokens
+        )
+    return recoverable_usd, recoverable_tokens
 
 
 @register("subagent")
@@ -195,6 +265,16 @@ def run(ctx: AnalyzerContext) -> None:
         (r for r in rows if r.flags), key=lambda r: r.cost_usd, reverse=True
     )
 
+    # Quantified recoverable estimate (#101 / savings contract #111): the
+    # model-swap delta over the over_powered subagents. Computed over ALL flagged
+    # rows (not just the TOP_N rendered) so the ranked-report share reflects the
+    # full window. None when nothing over_powered had a priced cheaper
+    # alternative — the finding then renders unranked (honest empty estimate),
+    # exactly like it did before it could quantify anything.
+    recoverable_usd, recoverable_tokens = _over_powered_recoverable(flagged)
+    est_usd = round(recoverable_usd, 8) if recoverable_tokens > 0 else None
+    est_tokens = recoverable_tokens if recoverable_tokens > 0 else None
+
     ctx.report.findings["subagent"] = SubagentRightsizingFinding(
         sessions_with_subagents=len({r.session_id for r in rows}),
         total_subagents=len(rows),
@@ -205,4 +285,6 @@ def run(ctx: AnalyzerContext) -> None:
         flagged_cost_usd=round(sum(r.cost_usd for r in flagged), 8),
         rows=rows[:TOP_N],
         flagged=flagged[:TOP_N],
+        estimated_recoverable_usd=est_usd,
+        estimated_recoverable_tokens=est_tokens,
     )

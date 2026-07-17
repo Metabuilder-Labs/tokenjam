@@ -11,6 +11,11 @@ the zero-token statusline (`tj statusline`) plus OTel telemetry ingest wired by
 """
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from tokenjam.core.db import DuckDBBackend
+
 try:
     from fastmcp import FastMCP
 except ImportError as _import_err:  # pragma: no cover - defensive
@@ -31,7 +36,7 @@ mcp = FastMCP("tj")
 # Module-level state initialised by init() or cmd_mcp.py
 _ro_conn = None       # duckdb read-only connection
 _config = None        # TjConfig
-_ro_db = None         # _ReadOnlyDB or _HttpDB
+_ro_db: _ReadOnlyDB | _HttpDB | None = None  # _ReadOnlyDB or _HttpDB
 _serve_url: str | None = None  # base URL for tj serve HTTP API when DuckDB is locked
 
 
@@ -247,49 +252,56 @@ class _HttpDB:
 
 
 class _ReadOnlyDB:
-    """Wraps a read-only duckdb connection to satisfy StorageBackend protocol methods."""
+    """Wraps a read-only duckdb connection to satisfy StorageBackend protocol methods.
+
+    The read methods reuse ``DuckDBBackend``'s implementations by calling them
+    unbound with this instance as ``self``. That works because those methods only
+    touch ``self.conn`` (a plain attribute here), so ``cast`` at each call site is
+    the honest way to tell the type checker we're supplying a ``.conn``-bearing,
+    DuckDBBackend-compatible object without inheriting its writer machinery.
+    """
     def __init__(self, conn):
         self.conn = conn
 
     def get_cost_summary(self, filters):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_cost_summary(self, filters)
+        return DuckDBBackend.get_cost_summary(cast("DuckDBBackend", self), filters)
 
     def get_alerts(self, filters):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_alerts(self, filters)
+        return DuckDBBackend.get_alerts(cast("DuckDBBackend", self), filters)
 
     def get_traces(self, filters):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_traces(self, filters)
+        return DuckDBBackend.get_traces(cast("DuckDBBackend", self), filters)
 
     def get_trace_spans(self, trace_id):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_trace_spans(self, trace_id)
+        return DuckDBBackend.get_trace_spans(cast("DuckDBBackend", self), trace_id)
 
     def get_tool_calls(self, agent_id, since, tool_name):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_tool_calls(self, agent_id, since, tool_name)
+        return DuckDBBackend.get_tool_calls(cast("DuckDBBackend", self), agent_id, since, tool_name)
 
     def get_baseline(self, agent_id):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_baseline(self, agent_id)
+        return DuckDBBackend.get_baseline(cast("DuckDBBackend", self), agent_id)
 
     def get_completed_sessions(self, agent_id, limit):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_completed_sessions(self, agent_id, limit)
+        return DuckDBBackend.get_completed_sessions(cast("DuckDBBackend", self), agent_id, limit)
 
     def _decision_where(self, filters):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend._decision_where(self, filters)
+        return DuckDBBackend._decision_where(cast("DuckDBBackend", self), filters)
 
     def get_policy_decisions(self, filters):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_policy_decisions(self, filters)
+        return DuckDBBackend.get_policy_decisions(cast("DuckDBBackend", self), filters)
 
     def get_savings_entries(self, filters):
         from tokenjam.core.db import DuckDBBackend
-        return DuckDBBackend.get_savings_entries(self, filters)
+        return DuckDBBackend.get_savings_entries(cast("DuckDBBackend", self), filters)
 
 
 # ---------------------------------------------------------------------------

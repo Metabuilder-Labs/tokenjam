@@ -300,7 +300,7 @@ def list_candidates(
 
     # 2) Project scope.
     explicit = path is not None
-    target = Path(path).expanduser() if explicit else Path.cwd()
+    target = Path(path).expanduser() if path is not None else Path.cwd()
 
     if explicit and not target.exists():
         # A typo'd / missing PATH shouldn't silently show only globals. This MUST be

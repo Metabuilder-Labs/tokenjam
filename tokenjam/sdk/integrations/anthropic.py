@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Any
 
 from opentelemetry import trace
 
@@ -27,8 +28,8 @@ class AnthropicIntegration:
     installed = False
 
     def __init__(self) -> None:
-        self._original_create = None
-        self._original_stream = None
+        self._original_create: Any = None
+        self._original_stream: Any = None
         self._tracer = None
 
     def install(self, tracer) -> None:

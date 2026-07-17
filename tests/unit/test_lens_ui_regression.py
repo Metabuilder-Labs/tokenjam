@@ -789,6 +789,16 @@ def test_status_sdk_services_panel_exists(html):
     assert "<${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />" in html
 
 
+def test_sdk_services_panel_renders_window_cost(html):
+    # sdk_services[].window_cost (the cost summed over the same 24m sparkline
+    # window as cost_per_min) is computed server-side; pin it next to the
+    # cost/min sparkline it summarizes so it doesn't silently go unrendered.
+    panel_start = html.index("function SdkServicesPanel({ services, framing })")
+    panel_end = html.index("function useScrollMemory", panel_start)
+    panel = html[panel_start:panel_end]
+    assert "s.window_cost" in panel
+
+
 def test_sdk_panel_reuses_sparkline_and_splits_by_state(html):
     # cost/min + err% sparklines come from the per-minute series; services are
     # partitioned live vs went_quiet/long_dormant.
@@ -2066,3 +2076,18 @@ def test_summarize_reduction_pct_is_server_computed(html):
     assert "c.reduction_pct != null ? c.reduction_pct : 0" in html
     assert "sfRedPct" not in html      # old per-file chars/4 helper gone
     assert "sfSrcTok" not in html      # old source-token derivation gone
+
+
+# --- recommendation-outcome panel (measured vs estimated) --------------- #
+def test_recommendations_panel_present_and_fetches_endpoint(html):
+    # The Optimize view surfaces the recommendation-outcome ledger, fetching the
+    # /recommendations endpoint (best-effort) and rendering measured-recovered
+    # strictly separate from estimated-recoverable (honesty discipline, Rule 14).
+    assert "function RecommendationsPanel" in html
+    assert "api('/recommendations')" in html
+    assert "measured recovered" in html
+    assert "estimated recoverable" in html
+    # The panel must never re-derive analysis in JS — it renders server-computed
+    # measured vs estimated fields straight from the endpoint payload.
+    assert "measured_recovered_tokens" in html
+    assert "estimated_recoverable_tokens" in html

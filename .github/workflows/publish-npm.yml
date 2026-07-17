@@ -19,6 +19,19 @@ jobs:
           node-version: "22"
           registry-url: https://registry.npmjs.org
 
+      # sdk-ts/package.json is published as-is with no CI auto-sync (unlike the
+      # wrapper job below), so a left-behind version here would otherwise only
+      # surface as a mid-publish "version already exists" failure. Fail fast,
+      # before installing/building/publishing anything.
+      - name: Check version matches release tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION=$(node -p "require('./sdk-ts/package.json').version")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::sdk-ts/package.json version ($PKG_VERSION) does not match release tag ($TAG_VERSION). Bump sdk-ts/package.json (e.g. via ./scripts/release.sh $TAG_VERSION) before cutting this release."
+            exit 1
+          fi
+
       - name: Upgrade npm for OIDC trusted publishing
         run: npm install -g npm@latest
 

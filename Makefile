@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-e2e lint typecheck all
+.PHONY: test test-unit test-e2e lint typecheck all release
 
 test:
 	pytest tests/unit/ tests/synthetic/ tests/agents/ tests/integration/
@@ -16,3 +16,7 @@ typecheck:
 	mypy tokenjam/
 
 all: lint typecheck test
+
+release:
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make release VERSION=x.y.z" >&2; exit 1; fi
+	./scripts/release.sh $(VERSION)

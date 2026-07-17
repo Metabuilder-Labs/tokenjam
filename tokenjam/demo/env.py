@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from tokenjam.core.config import AgentConfig
     from tokenjam.core.models import NormalizedSpan
+    from tokenjam.demo.live import LiveSink
 
 
 @dataclass
@@ -32,6 +33,8 @@ class DemoEnvironment:
     def __init__(
         self,
         agent_configs: "dict[str, AgentConfig] | None" = None,
+        *,
+        live_sink: "LiveSink | None" = None,
     ) -> None:
         from tokenjam.core.alerts import AlertEngine
         from tokenjam.core.config import AlertsConfig, TjConfig, SecurityConfig
@@ -63,7 +66,21 @@ class DemoEnvironment:
             drift_detector=drift_detector,
         )
 
+        # When `tj demo --live` is active it stashes a LiveSink on the click
+        # context; scenarios build a bare DemoEnvironment, so auto-resolve it
+        # here rather than threading a flag through every scenario. None outside
+        # a live invocation (the default throwaway-backend path is unchanged).
+        if live_sink is None:
+            from tokenjam.demo.live import sink_from_context
+            live_sink = sink_from_context()
+        self._live_sink = live_sink
+
     def process(self, span: "NormalizedSpan") -> None:
+        # Snapshot to the live sink BEFORE local processing: IngestPipeline may
+        # strip captured content (e.g. gen_ai.tool.input) in place, and the
+        # server needs the pristine span to reproduce the same detection.
+        if self._live_sink is not None:
+            self._live_sink.record(span)
         self.pipeline.process(span)
 
     def get_alerts(self) -> list:

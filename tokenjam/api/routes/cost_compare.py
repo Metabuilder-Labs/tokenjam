@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
@@ -18,6 +19,19 @@ from tokenjam.core.framing import WindowSummary, compute_framing, plan_tier_mix
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
+
+
+def _upstream_detail(exc: httpx.HTTPStatusError) -> str:
+    """Best-effort extraction of the primary daemon's own error detail so a
+    forwarded 4xx (e.g. an invalid ``--compare``) reads the same as a direct
+    hit rather than a generic proxy failure."""
+    try:
+        body = exc.response.json()
+    except Exception:
+        return str(exc)
+    if isinstance(body, dict) and body.get("detail"):
+        return str(body["detail"])
+    return str(exc)
 
 
 @router.get("/cost/compare", dependencies=[Depends(require_api_key)])
@@ -35,6 +49,33 @@ def get_cost_compare(
     db = request.app.state.db
     if db is None:
         raise HTTPException(status_code=503, detail="Server db not initialised.")
+
+    # A second `tj serve` that lost the DuckDB write-lock race runs as a thin
+    # proxy: its `state.db` is an ApiBackend pointing at the primary daemon, and
+    # ApiBackend has no `get_window_cost_totals` / `get_cost_delta_by_group` (the
+    # DuckDBBackend methods compute_cost_diff calls). Computing here would raise
+    # AttributeError → a 500. Instead forward the whole comparison to the primary
+    # daemon, which owns the direct connection and whose /cost/compare returns
+    # this exact schema — the same fetch_cost_compare path the CLI uses when the
+    # daemon holds the lock (#68 §12). Degrade to a clean status on an upstream
+    # failure rather than surfacing a raw proxy error.
+    from tokenjam.core.api_backend import ApiBackend
+
+    if isinstance(db, ApiBackend):
+        try:
+            return db.fetch_cost_compare(
+                since=since, compare=compare, agent_id=agent_id, top_n=top_n,
+            )
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(
+                status_code=exc.response.status_code,
+                detail=_upstream_detail(exc),
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Upstream tj serve unavailable for /cost/compare: {exc}",
+            ) from exc
 
     try:
         since_dt = parse_since(since)

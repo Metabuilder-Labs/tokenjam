@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import functools
 import logging
+from typing import Any
 
 from opentelemetry import trace
 
@@ -21,8 +22,8 @@ class AutoGenIntegration:
     installed = False
 
     def __init__(self) -> None:
-        self._original_generate_reply = None
-        self._original_initiate_chat = None
+        self._original_generate_reply: Any = None
+        self._original_initiate_chat: Any = None
         self._tracer = None
 
     def install(self, tracer) -> None:

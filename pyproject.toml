@@ -109,4 +109,16 @@ warn_unused_configs = true
 check_untyped_defs = true
 disallow_any_generics = false
 ignore_missing_imports = true
-disable_error_code = ["attr-defined", "misc", "method-assign", "call-overload", "arg-type", "assignment", "no-any-return"]
+# Only these two error codes stay globally disabled, deliberately, each with a
+# tracked burn-down. Everything else (misc, arg-type, assignment, call-overload,
+# method-assign) is ON — those catch real bugs (e.g. unpacking a `tuple | None`
+# without narrowing surfaces as `misc`; passing the wrong argument type as
+# `arg-type`), and were silently suppressing them repo-wide until this list was
+# trimmed. When re-enabling a code here, prefer real fixes; use a targeted
+# per-line `# type: ignore[code]  # reason` or a per-module `[[tool.mypy.overrides]]`
+# only where an untyped third-party dep forces it.
+#   - "attr-defined": ~50 violations, mostly attribute access on untyped
+#     third-party / dynamically-shaped objects. Burn down per-module, then drop.
+#   - "no-any-return": ~30 violations from returning `Any` out of typed helpers
+#     that wrap untyped deps. Annotate/cast the boundaries, then drop.
+disable_error_code = ["attr-defined", "no-any-return"]

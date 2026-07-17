@@ -752,7 +752,7 @@ def _main_agent_summary(
             if session.total_cost_usd is not None else None
         )
         name = story.get("name") or session.agent_id
-        agent_id = session.agent_id
+        agent_id: str | None = session.agent_id
     else:
         status, tokens, cost = None, None, None
         name = story.get("name")
