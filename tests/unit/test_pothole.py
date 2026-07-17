@@ -501,3 +501,112 @@ def test_confidence_gate_suppresses_confabulations_even_with_a_warm_cache(tmp_pa
         assert f"distilled:{family}" not in result_family_keys
     # Nothing survives at all — every seeded cluster here was thin evidence.
     assert result == []
+
+
+# --- CLI text-view rendering regression -------------------------------------
+# `pothole` was registered in ANALYZER_REGISTRY/ANALYZER_ORDER but never wired
+# into cmd_optimize's `_FINDING_RENDERERS` dispatch table, so `_rank_findings`
+# silently dropped it and `tj optimize pothole` (text view) fell through to
+# the generic "No candidates flagged in this window" empty state — even with
+# real clusters sitting in `--json`.
+
+def test_pothole_in_click_choices_and_renderer():
+    """pothole appears in the positional Click choices (auto-derived from the
+    registry) and has a human-readable renderer wired into the dispatch
+    table — mirrors the same regression guard used for `verbosity`."""
+    from tokenjam.cli.cmd_optimize import _FINDING_RENDERERS, cmd_optimize
+
+    findings_param = next(
+        p for p in cmd_optimize.params if getattr(p, "name", None) == "findings"
+    )
+    assert "pothole" in findings_param.type.choices
+    assert "pothole" in _FINDING_RENDERERS
+
+
+def test_render_pothole_shows_clusters_without_error(tmp_path, capsys):
+    """The finding renders through the CLI dispatch path and surfaces the
+    cluster signature + occurrences + rung — not a generic empty state."""
+    from tokenjam.cli.cmd_optimize import _render_pothole
+
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-render{i}", f"render-{i}")
+    sessions = [(f"render-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
+    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    assert finding.clusters  # sanity: the analyzer actually found the cluster
+
+    for mode in ("api", "subscription", "local", "unknown"):
+        _render_pothole(finding, pricing_mode=mode, marker="①")
+    out = capsys.readouterr().out
+    assert "cwd_confusion" in out
+    assert f"{finding.clusters[0].occurrences}" in out
+    assert "rung 3" in out
+    assert "No candidates flagged" not in out
+
+
+def test_render_report_surfaces_pothole_clusters_instead_of_no_candidates(tmp_path, capsys):
+    """End-to-end regression: a report whose only finding is a
+    populated `pothole` cluster set must NOT fall through to the
+    cost-optimizer's generic "No candidates flagged" empty state."""
+    from tokenjam.cli.cmd_optimize import _render_report
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+    from tokenjam.utils.time_parse import utcnow
+
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-e2e{i}", f"e2e-{i}")
+    sessions = [(f"e2e-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
+    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    assert finding.clusters
+
+    now = utcnow()
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=now, until=now, days=365, sessions=len(sessions), spans=0,
+            total_tokens=100_000, total_cost_usd=0.0, thin_data=False,
+        ),
+        downgrade=None,
+        findings={"pothole": finding},
+    )
+    _render_report(report, agent=None, requested=["pothole"], pricing_mode="local")
+    out = capsys.readouterr().out
+    assert "No candidates flagged" not in out
+    assert "cwd_confusion" in out
+
+
+def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, capsys):
+    """Collapse variant: a pothole finding must surface its clusters in
+    full even when the window's total tokens are enormous (a heavy
+    `tj optimize pothole --since 365d` run). Potholes are recurring-failure
+    clusters, not a token-reclamation finding, so a huge window denominator
+    must NOT push them below DE_MINIMIS_SHARE and collapse them into the
+    "Minor findings — ~0.0% of window tokens" pointer — that hides the headline
+    self-improve signal exactly as the "No candidates flagged" empty state did.
+    """
+    from tokenjam.cli.cmd_optimize import _render_report
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+    from tokenjam.utils.time_parse import utcnow
+
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-huge{i}", f"huge-{i}")
+    sessions = [(f"huge-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
+    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    assert finding.clusters
+    assert finding.estimated_recoverable_tokens  # a positive, rank-able estimate
+
+    now = utcnow()
+    report = OptimizeReport(
+        window=WindowSummary(
+            # 2B tokens — the cluster's occurrence×heuristic estimate is a ~0%
+            # share of this window, the exact condition that collapsed it.
+            since=now, until=now, days=365, sessions=len(sessions), spans=0,
+            total_tokens=2_000_000_000, total_cost_usd=0.0, thin_data=False,
+        ),
+        downgrade=None,
+        findings={"pothole": finding},
+    )
+    _render_report(report, agent=None, requested=["pothole"], pricing_mode="local")
+    out = capsys.readouterr().out
+    assert "cwd_confusion" in out                 # clusters surfaced in full
+    assert f"{finding.clusters[0].occurrences}" in out
+    assert "Minor findings" not in out            # NOT collapsed to the pointer
+    assert "of window tokens" not in out          # no de-minimis token framing
+    assert "No candidates flagged" not in out
