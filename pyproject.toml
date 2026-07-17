@@ -52,9 +52,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://opencla.watch"
-Repository = "https://github.com/Metabuilder-Labs/openclawwatch"
-Issues = "https://github.com/Metabuilder-Labs/openclawwatch/issues"
+Homepage = "https://tokenjam.dev"
+Repository = "https://github.com/Metabuilder-Labs/tokenjam"
+Issues = "https://github.com/Metabuilder-Labs/tokenjam/issues"
 
 [project.optional-dependencies]
 langchain = ["langchain>=0.2"]
