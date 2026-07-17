@@ -362,6 +362,17 @@ def cmd_optimize(
 # list instead of a numbered slot.
 DE_MINIMIS_SHARE = 0.01
 
+# Findings that must NEVER be collapsed into the "Minor findings" pointer by
+# token share. `pothole` is a recurring-failure-cluster finding, not a
+# token-reclamation one — its `estimated_recoverable_tokens` is a soft
+# occurrence×heuristic estimate for the Lens inbox, not a real fraction of the
+# window. Ranking it by that share let a heavy `--since 365d` window (huge
+# denominator) push real clusters below DE_MINIMIS_SHARE and hide them behind a
+# "~0.0% of window tokens" pointer — the same "nothing found" failure as the
+# empty-state bug. These findings always render in full (the `unranked`
+# bucket): their own detail when populated, their own empty-state when not.
+_ALWAYS_FULL_FINDINGS = {"pothole"}
+
 # Display labels for the "Minor findings" collapsed pointer list — must match
 # the header text each renderer prints in its numbered form.
 _MINOR_FINDING_LABELS = {
@@ -372,6 +383,7 @@ _MINOR_FINDING_LABELS = {
     "reuse":           "Reuse",
     "trim":            "Prompt bloat",
     "subagent":        "Subagent right-sizing",
+    "pothole":         "Pothole",
     "verbosity":       "Verbosity",
 }
 
@@ -428,7 +440,14 @@ def _rank_findings(
     for name, finding in (report.findings or {}).items():
         if name not in _FINDING_RENDERERS:
             continue
-        items.append((name, _reclaimable_share(finding, window_tokens)))
+        # A non-token finding (e.g. pothole) is forced into the unranked bucket
+        # so its clusters always render in full — a large window denominator
+        # must not collapse them into the de-minimis pointer list.
+        share = (
+            None if name in _ALWAYS_FULL_FINDINGS
+            else _reclaimable_share(finding, window_tokens)
+        )
+        items.append((name, share))
 
     items.sort(key=lambda item: (
         item[1] is None,
@@ -1528,6 +1547,49 @@ def _render_subagent(
     console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
+def _render_pothole(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the pothole finding — recurring failure clusters the self-improve
+    loop tracks (blockers an agent silently re-hits across sessions). Was
+    missing from _FINDING_RENDERERS entirely: the text view fell
+    through to the generic "No candidates flagged" empty state even when
+    --json carried dozens of clusters, because _rank_findings drops any
+    finding name not present in this dispatch table.
+    """
+    console.print(_finding_header(marker, "Pothole:"))
+    if not finding.clusters:
+        console.print(
+            f"     [dim]Scanned {finding.sessions_scanned} session"
+            f"{'s' if finding.sessions_scanned != 1 else ''}; "
+            f"no recurring failure clusters above threshold "
+            f"(≥3 sessions sharing a signature).[/dim]"
+        )
+        return
+
+    console.print(
+        f"     • [bold]{len(finding.clusters)}[/bold] pothole "
+        f"cluster{'s' if len(finding.clusters) != 1 else ''} found — "
+        f"recurring blockers this agent silently re-hits"
+    )
+    for c in finding.clusters[:10]:
+        console.print(
+            f"       [bold]{c.signature}[/bold]  "
+            f"{c.occurrences} occurrence{'s' if c.occurrences != 1 else ''} / "
+            f"{c.sessions} session{'s' if c.sessions != 1 else ''}  "
+            f"[dim](rung {c.rung})[/dim]"
+        )
+    if len(finding.clusters) > 10:
+        console.print(f"       [dim]… and {len(finding.clusters) - 10} more.[/dim]")
+    console.print(
+        "     [dim]Review + apply fixes in the Lens Review inbox, or see "
+        "full detail with [bold]tj optimize pothole --json[/bold].[/dim]"
+    )
+    if finding.caveat:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
 def _render_verbosity(
     finding, *, pricing_mode: str = "api", marker: str = "",
 ) -> None:
@@ -1594,5 +1656,6 @@ _FINDING_RENDERERS = {
     "reuse":        _render_reuse,
     "trim":         _render_prompt_bloat,
     "subagent":     _render_subagent,
+    "pothole":      _render_pothole,
     "verbosity":    _render_verbosity,
 }
