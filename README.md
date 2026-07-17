@@ -99,7 +99,7 @@ apply, and watch verification), and `tj optimize pothole` prints the current pot
   This is the surface that _applies_ fixes.
 - **SDK and production agents, over OpenTelemetry, the surface the loop scales to.** Today TokenJam
   **observes** these: traces, real-time cost, drift baselines, sensitive-action alerts, budgets, and
-  the seven optimize analyzers, all read-only. It never touches your production request stream. The
+  the six optimize analyzers, all read-only. It never touches your production request stream. The
   Observe suite is where the improvement loop extends next.
 
 Point any OTLP exporter at `tj serve` and production agents flow in with zero code. The self-improve
@@ -111,7 +111,7 @@ loop reads Claude Code transcripts; the SDK / OTel path is observe-only for now.
 
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Backfills your last 30 days, wires a zero-token statusline, runs the self-improve loop plus all seven analyzers + Lens |
+| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Backfills your last 30 days, wires a zero-token statusline, runs the self-improve loop plus all six analyzers + Lens |
 | **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
 | **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, observed over the Observe suite |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
@@ -134,13 +134,13 @@ Run bare `tj` any time and it points you to the next best action.
 
 ---
 
-## Seven analyzers + Lens. One install.
+## Six analyzers + Lens. One install.
 
 The self-improve loop is the headline. Underneath it, TokenJam reads telemetry from the major agent
-runtimes, frameworks, providers, and observability tools and surfaces savings candidates across seven
+runtimes, frameworks, providers, and observability tools and surfaces savings candidates across six
 areas, then brings them together in a local browser dashboard.
 
-<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
+<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Oversized subagents (a Task call running premium-model or over-contexted) → subagent; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
 
 <table>
 <tr>
@@ -215,24 +215,9 @@ Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls 
 
 </td>
 </tr>
-<tr>
-<td width="50%" valign="top">
-
-### Verbosity
-
-`tj optimize verbosity`
-
-Flags sessions whose output runs long against a per-(tool, task-shape) baseline. Predicted high-verbosity output, review before constraining a response.
-
-[Details →](docs/optimize/verbosity.md)
-
-</td>
-<td width="50%" valign="top">
-</td>
-</tr>
 </table>
 
-`tj optimize` (no args) runs every analyzer: the seven above, plus `pothole` (the self-improve loop's
+`tj optimize` (no args) runs every analyzer: the six above, plus `pothole` (the self-improve loop's
 detector), `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]`
 ceiling), and `cache-recommend` (the Cache card's breakpoint-suggestion half). Run a subset with
 `tj optimize downsize cache reuse`.
