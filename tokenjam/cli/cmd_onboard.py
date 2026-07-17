@@ -33,20 +33,13 @@ DEFAULT_BACKFILL_DAYS = 30
 # very active last-30-days window doesn't look like a hang either.
 _BACKFILL_HEADSUP_THRESHOLD = 300
 
-# --- output-trim (`tj hook cap-output`) PostToolUse hook wiring --------------
-# Installed into ~/.claude/settings.json out-of-band (zero in-loop token cost).
-# Idempotent + non-destructive: a tj-managed entry is detected by the
-# "hook cap-output" substring in its command, so re-onboard updates OUR entry in
-# place and NEVER clobbers a user's own PostToolUse hooks.
+# --- output-trim (`tj hook cap-output`) legacy hook cleanup ------------------
+# The output-trim hook itself was removed (measured negative: +5.6% whole-
+# session cost on Claude Code, see CLAUDE.md). This matcher/unwire pair stays
+# ONLY so onboard/uninstall can strip an already-installed entry from a prior
+# release's ~/.claude/settings.json — never re-installed, never re-offered.
 
-_CAP_OUTPUT_MATCHER = "Bash|Grep|Glob|WebFetch"
 _CAP_OUTPUT_MARKER = "hook cap-output"  # tj-managed marker (substring of command)
-
-
-def _tj_cap_output_command() -> str:
-    """Absolute `tj hook cap-output` command, falling back to bare `tj`."""
-    exe = shutil.which("tj")
-    return f"{exe} hook cap-output" if exe else "tj hook cap-output"
 
 
 def _is_tj_cap_output_entry(entry: object) -> bool:
@@ -58,38 +51,9 @@ def _is_tj_cap_output_entry(entry: object) -> bool:
     return False
 
 
-def _wire_claude_output_cap_hook(settings: dict) -> str:
-    """Install/refresh the PostToolUse cap-output hook in a settings dict.
-
-    Mutates ``settings`` in place; returns one of ``written`` / ``updated`` /
-    ``kept`` / ``skipped`` (foreign structure left untouched).
-    """
-    desired = {
-        "matcher": _CAP_OUTPUT_MATCHER,
-        "hooks": [{"type": "command", "command": _tj_cap_output_command()}],
-    }
-    hooks = settings.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        return "skipped"
-    post = hooks.get("PostToolUse")
-    if post is None:
-        hooks["PostToolUse"] = [desired]
-        return "written"
-    if not isinstance(post, list):
-        return "skipped"
-    for i, entry in enumerate(post):
-        if _is_tj_cap_output_entry(entry):
-            if entry == desired:
-                return "kept"
-            post[i] = desired
-            return "updated"
-    post.append(desired)          # preserve any foreign PostToolUse hooks
-    return "written"
-
-
 def _unwire_claude_output_cap_hook(settings: dict) -> bool:
     """Remove any tj-managed cap-output PostToolUse entry. Returns True if one
-    was removed (used by `tj uninstall`)."""
+    was removed (used by `tj onboard` and `tj uninstall`)."""
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return False
@@ -1902,39 +1866,17 @@ def _onboard_claude_code(
     # `tj uninstall`.
     resume_brief_status = _wire_claude_resume_brief_hook(global_settings)
 
-    # Install the output-trim PostToolUse hook (zero in-loop token cost). Rides
-    # this same read-merge-write. DEFAULT-OFF opt-in (config gate): the A/B gate
-    # failed — Claude Code already truncates Bash output to ~30 KB before the
-    # PostToolUse hook sees it, so the addressable bloat is tiny and treatment
-    # cost was +5.6% (noise). See the `[hooks.output_cap]` docstring in
-    # core/config.py. So onboarding does NOT auto-install it: a fresh config has
-    # enabled=False → we take the else branch and remove any previously-installed
-    # tj entry, keeping config the source of truth. Users opt in by setting
-    # `[hooks.output_cap].enabled = true` and re-running onboard. Idempotent +
-    # non-destructive (foreign hooks preserved).
-    cap_cfg = getattr(getattr(config, "hooks", None), "output_cap", None)
-    cap_enabled = bool(getattr(cap_cfg, "enabled", False)) and not bool(
-        getattr(cap_cfg, "killswitch", False)
-    )
-    if cap_enabled:
-        cap_status = _wire_claude_output_cap_hook(global_settings)
-    else:
-        removed = _unwire_claude_output_cap_hook(global_settings)
-        cap_status = "removed" if removed else "disabled"
+    # The output-trim PostToolUse hook was removed (measured negative: +5.6%
+    # whole-session cost on Claude Code, see CLAUDE.md). Best-effort cleanup
+    # only, for users who opted into a prior release's hook — never installs.
+    cap_removed = _unwire_claude_output_cap_hook(global_settings)
 
     global_settings_path.write_text(json_mod.dumps(global_settings, indent=2) + "\n")
-    _CAP_STATUS_MSG = {
-        "written": "installed (Bash/Grep/Glob/WebFetch)",
-        "updated": "updated to current path",
-        "kept": "already installed",
-        "skipped": "left alone (custom PostToolUse hooks present)",
-        "removed": "removed (opt-in; disabled in config)",
-        "disabled": "off (opt-in — set [hooks.output_cap].enabled = true)",
-    }
-    console.print(
-        f"[green]✓[/green] Output-trim hook (tj hook cap-output): "
-        f"{_CAP_STATUS_MSG.get(cap_status, cap_status)}"
-    )
+    if cap_removed:
+        console.print(
+            "[green]✓[/green] Removed the legacy output-trim hook "
+            "(tj hook cap-output) — this feature was removed."
+        )
     _RESUME_BRIEF_STATUS_MSG = {
         "written": "installed (SessionStart: resume|compact)",
         "updated": "updated to current path",

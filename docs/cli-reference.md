@@ -140,18 +140,6 @@ tj quota-audit --json
 
 Key flags: `--since`, `--agent`, `--export-config`, `--json`.
 
-### `tj savings`
-
-Show tokens reclaimed by the `tj hook cap-output` output-trim hook (estimated, char/4 — the "prove" half of tj's measure → act → prove loop; `tj context` is the "measure" half). Reads the append-only JSONL sink, never the DB.
-
-```bash
-tj savings
-tj savings --session <session_id>
-tj savings --json
-```
-
-Key flags: `--session`, `--json`.
-
 ### `tj alerts`
 
 Alert history with severity and type filtering.
@@ -358,7 +346,7 @@ Key flag: `--off` on `killswitch` releases pass-through mode.
 
 ## Integration entrypoints
 
-These are wired by `tj onboard --claude-code` (except `tj hook cap-output`, which is opt-in) and invoked by Claude Code itself (via hooks / the statusline / the shell wrapper), not typically run by hand — documented here for completeness and troubleshooting.
+These are wired by `tj onboard --claude-code` and invoked by Claude Code itself (via hooks / the statusline / the shell wrapper), not typically run by hand — documented here for completeness and troubleshooting.
 
 ### `tj statusline`
 
@@ -380,14 +368,6 @@ tj resume-brief --last            # manual: most recently active session by mtim
 ```
 
 Key flags: `--from-hook`, `--session`, `--transcript`, `--last` (exactly one is expected).
-
-### `tj hook`
-
-Claude Code hook entrypoints installed out-of-band by `tj onboard`. Currently one subcommand, `cap-output`: a `PostToolUse` hook that trims a bloated tool output before it enters context (fail-open — any error leaves the original output untouched). Default-off; opt in via `[hooks.output_cap].enabled = true` then re-run `tj onboard --claude-code`.
-
-```bash
-tj hook cap-output   # reads the PostToolUse event JSON on stdin
-```
 
 ### `tj otel-resource-attrs`
 

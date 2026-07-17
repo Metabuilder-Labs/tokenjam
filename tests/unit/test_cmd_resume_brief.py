@@ -3,7 +3,7 @@
 The SessionStart-hook path reads stdin JSON (session_id / transcript_path per
 Claude Code's contract) instead of the global mtime scan, so a concurrent
 session in a different project can't cross-leak its brief. Uses Click's
-CliRunner (canonical pattern from test_cmd_hook.py).
+CliRunner to invoke the command directly.
 """
 from __future__ import annotations
 
