@@ -7,6 +7,7 @@ from typing import Any, NoReturn
 import click
 from rich.markup import escape as _rich_escape
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
     Framing,
@@ -116,8 +117,7 @@ def _resolve_analyzer_names(requested: list[str] | None) -> list[str] | None:
                    "(default 5, max 20).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, default=False,
               help="Skip the --validate cost-estimate confirmation prompt.")
-@click.option("--json", "output_json", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_optimize(
     ctx: click.Context,
@@ -132,9 +132,10 @@ def cmd_optimize(
     validate_finding: str | None,
     samples: int | None,
     assume_yes: bool,
-    output_json: bool,
+    output_json_flag: bool,
 ) -> None:
     """Analyze recent usage for cost-saving candidates and budget exposure."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     if db is None or config is None:
@@ -1788,7 +1789,44 @@ def _render_prompt_bloat(
             f"[bold]{p.bloat_chars}[/bold] bloat / {p.prompt_chars} chars  "
             f"[dim]~{p.estimated_token_reduction} tokens trimmable[/dim]"
         )
-        console.print(f"           [dim italic]{sample}[/dim italic]")
+        console.print(f"           [dim italic]{_rich_escape(sample)}[/dim italic]")
+        # Provenance (read-only, see prompt_bloat.py's module docstring): most
+        # prompts end unattributed — that's the conservative, expected outcome,
+        # not a gap — so this block only prints when a catalog file actually
+        # cleared the verbatim-containment bar. `trim` never edits the file; the
+        # pointer below is a navigation hint into `summarize`, which owns editing.
+        #
+        # This gate is also the deliberate persona split, not an accident of
+        # the provenance check: source_path is only ever set when the prompt
+        # verbatim-contains a catalog file (CLAUDE.md, AGENTS.md, ...), which
+        # by definition means a harness-shaped workspace `summarize` can act
+        # on. A pure-SDK caller (no catalog file in play) never gets a
+        # source_path and so never sees this pointer — the flagged-text
+        # section below is that caller's whole, complete answer: there's
+        # nothing degraded about it, it's the only thing to point at since
+        # they construct the prompt themselves rather than editing a file.
+        if p.source_path:
+            console.print(
+                f"           [dim]Attributed to [bold]{_rich_escape(p.source_path)}[/bold] "
+                f"({_rich_escape(p.source_basis)})[/dim]"
+            )
+            console.print(
+                f"           [dim]Review it: [bold]tj summarize list "
+                f"{_rich_escape(p.source_path)}[/bold][/dim]"
+            )
+        # The flagged text itself, not just the bloat percentage — a user
+        # can't act on "38% low-signal" alone; they need to see what to cut.
+        regions = p.regions[:3]
+        if regions:
+            console.print("           [dim]Flagged text:[/dim]")
+            for r in regions:
+                text = _rich_escape(r.sample_chars.replace("\n", " ").strip())
+                console.print(f"             [dim]·[/dim] [italic]{text}…[/italic] "
+                              f"[dim]({r.char_length} chars)[/dim]")
+            if len(p.regions) > 3:
+                console.print(
+                    f"             [dim]… and {len(p.regions) - 3} more region(s).[/dim]"
+                )
     console.print(
         "     [dim]For per-prompt highlights run: "
         "[bold]tj report --trim[/bold][/dim]"

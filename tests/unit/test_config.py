@@ -6,7 +6,7 @@ import pytest
 from tokenjam.core.config import (
     find_config_file, load_config, _parse, _serialise, TjConfig, AgentConfig,
     BudgetConfig, DefaultsConfig, SensitiveAction, SecurityConfig, CaptureConfig,
-    StorageConfig, resolve_effective_budget, validate_budget_value,
+    OptimizeConfig, StorageConfig, resolve_effective_budget, validate_budget_value,
 )
 
 
@@ -106,6 +106,9 @@ class TestParse:
         assert config.capture.completions is False
         assert config.capture.tool_inputs is True
         assert config.capture.tool_outputs is False
+        # An unset [optimize] section reproduces every analyzer's historical
+        # module-constant threshold exactly (config-thread contract).
+        assert config.optimize == OptimizeConfig()
 
     def test_agents_parsed(self):
         raw = {
@@ -141,6 +144,39 @@ class TestParse:
         assert config.capture.prompts is True
         assert config.capture.completions is False
         assert config.capture.tool_outputs is True
+
+    def test_optimize_parsed(self):
+        raw = {
+            "optimize": {
+                "min_cluster_instances": 5,
+                "cache_efficacy_threshold": 0.1,
+                "min_flag_cost_usd": 0.01,
+            }
+        }
+        config = _parse(raw)
+        assert config.optimize.min_cluster_instances == 5
+        assert config.optimize.cache_efficacy_threshold == 0.1
+        assert config.optimize.min_flag_cost_usd == 0.01
+        # Every field this test doesn't set falls back to the OptimizeConfig
+        # default (not a hardcoded literal in _parse) — same discipline as
+        # test_capture_parsed's untouched fields above.
+        assert config.optimize.min_sessions_deadweight == OptimizeConfig.min_sessions_deadweight
+        assert config.optimize.min_cache_input_tokens == OptimizeConfig.min_cache_input_tokens
+        assert config.optimize.min_calls_for_root_cause == OptimizeConfig.min_calls_for_root_cause
+        assert config.optimize.min_cohort_sessions == OptimizeConfig.min_cohort_sessions
+        assert config.optimize.min_prefix_occurrences == OptimizeConfig.min_prefix_occurrences
+        assert config.optimize.trim_significance_threshold == OptimizeConfig.trim_significance_threshold
+        assert config.optimize.min_reuse_repetitions == OptimizeConfig.min_reuse_repetitions
+        assert config.optimize.min_stretch_turns == OptimizeConfig.min_stretch_turns
+        assert config.optimize.min_recurring_sessions == OptimizeConfig.min_recurring_sessions
+        assert config.optimize.min_sessions_for_cadence == OptimizeConfig.min_sessions_for_cadence
+        assert config.optimize.min_group_cost_usd == OptimizeConfig.min_group_cost_usd
+
+    def test_optimize_missing_section_uses_all_defaults(self):
+        """A config predating [optimize] entirely (or one that omits it) picks
+        up every current default rather than being frozen at some literal."""
+        config = _parse({"version": "1"})
+        assert config.optimize == OptimizeConfig()
 
     def test_alerts_channels_parsed(self):
         raw = {
@@ -218,6 +254,20 @@ class TestSerialise:
         assert restored.proxy.mode == "suggest"
         # Defaults when [proxy] is absent.
         assert _parse({"version": "1"}).proxy.enabled is False
+
+    def test_optimize_roundtrip(self):
+        """[optimize] analyzer-threshold overrides round-trip through
+        serialise/parse, and an absent section still parses to defaults."""
+        config = TjConfig(version="1")
+        config.optimize.min_cluster_instances = 5
+        config.optimize.cache_efficacy_threshold = 0.1
+        restored = _parse(_serialise(config))
+        assert restored.optimize.min_cluster_instances == 5
+        assert restored.optimize.cache_efficacy_threshold == 0.1
+        # Untouched fields still round-trip at their defaults.
+        assert restored.optimize.min_sessions_deadweight == OptimizeConfig.min_sessions_deadweight
+        # Defaults when [optimize] is absent.
+        assert _parse({"version": "1"}).optimize == OptimizeConfig()
 
     def test_policies_roundtrip(self):
         """[[policies]] enforcement-plane policies round-trip (#220)."""
