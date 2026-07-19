@@ -1,4 +1,4 @@
-"""``tj quickstart`` — the zero-install, zero-config first run (issue #6).
+"""The zero-install, zero-config first run (issue #6).
 
 The 15-second time-to-first-value path that lets a brand-new user — reached via
 ``npx tokenjam`` / ``uvx tj`` with **no** pip env, **no** daemon, **no** onboarding —
@@ -21,9 +21,10 @@ Design (what makes it "zero-setup"):
     then ends on the opt-in "go deeper" pointer to ``tj onboard`` (daemon /
     statusline / live capture).
 
-Because it manages its own transient DB, ``quickstart`` is registered in
-``no_db_commands`` so the CLI never opens the on-disk DB or trips the daemon's
-write lock for it.
+This has no public/typeable command name — ``cli/main.py``'s no-subcommand
+branch invokes ``cmd_quickstart`` directly (via ``ctx.invoke``) when the npm
+wrapper's ``TJ_NPX_ZERO_INSTALL_REPORT`` env var is set, so it never opens the
+on-disk DB or trips the daemon's write lock either way.
 
 Honesty discipline (CLAUDE.md Rule 14): every figure here is a *measured* token
 share re-derived from the JSONL, never a projected saving.
@@ -201,9 +202,10 @@ def _render_no_logs(root, output_json: bool) -> None:
         return
     console.print(
         f"\n[yellow]No Claude Code logs found at {root}.[/yellow]\n"
-        "[dim]tj quickstart reads your ~/.claude/projects/*.jsonl session logs. "
-        "This is normal if Claude Code hasn't run on this machine "
-        "yet — use it for a session, then re-run [bold]tj quickstart[/bold].[/dim]\n"
+        "[dim]This reads your ~/.claude/projects/*.jsonl session logs. This is "
+        "normal if Claude Code hasn't run on this machine yet — use it for a "
+        "session, then run [bold]npx tokenjam[/bold] again. Ready to go "
+        "deeper now? [bold]npx tokenjam onboard[/bold].[/dim]\n"
     )
 
 
@@ -213,7 +215,9 @@ def _render_no_sessions(result, since: str, output_json: bool) -> None:
         return
     console.print(
         f"\n[yellow]No Claude Code sessions in the last {since}.[/yellow]\n"
-        "[dim]Try a wider window, e.g. [bold]tj quickstart --since 90d[/bold].[/dim]\n"
+        "[dim]Run [bold]npx tokenjam onboard[/bold] to go deeper — it wires "
+        "up live capture so [bold]tj context[/bold] can show a wider "
+        "window.[/dim]\n"
     )
 
 
@@ -244,10 +248,10 @@ def _render(diag, timeline, *, since: str,
         note.append("Showing your most-recent ", style="yellow")
         note.append(f"{max_sessions} sessions", style="bold yellow")
         note.append(" for a fast first run — run ", style="yellow")
-        note.append("tj quickstart --full", style="bold")
-        note.append(" (or ", style="yellow")
+        note.append("npx tokenjam onboard", style="bold")
+        note.append(", then ", style="yellow")
         note.append("tj context", style="bold")
-        note.append(") for your full history.", style="yellow")
+        note.append(" for your full history.", style="yellow")
         console.print(note)
 
     # ── Quota composition (reuses the issue-#4 diagnostic engine). ──

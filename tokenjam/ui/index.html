@@ -7662,138 +7662,6 @@ function AppliedFixRow({ rec, onChanged }) {
     </div>`;
 }
 
-// ---- Cost proposals (the same inbox, a distinct `kind`) ----
-// The downsize/cache/trim analyzers' findings adapted into advise-only
-// proposals (core/optimize/cost_proposals.py), served at
-// GET /pothole/cost-proposals. They carry NO apply path — the fix lives in the
-// user's own application code — so "Mark applied" only drops a marker the
-// delta-verify pass (core/optimize/cost_verify.py) measures a realized dollar
-// delta against, shown back here as a receipt.
-const COST_ANALYZER_LABELS = { downsize: 'downsize', cache: 'cache', trim: 'trim', subagent: 'subagent' };
-
-function fmtUsd(v) {
-  const n = Number(v || 0);
-  return '$' + (Math.abs(n) < 1 ? n.toFixed(4) : n.toFixed(2));
-}
-
-// One applied cost proposal's realized-delta receipt: verdict + the measured
-// dollar/token delta (shown only for a real "improved" verdict), reusing the
-// same VERDICT_LABELS the pothole lane uses. Correlational, never causal.
-function CostVerifyLine({ verify }) {
-  if (!verify) return null;
-  const label = VERDICT_LABELS[verify.verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
-  const usd = verify.realized_usd_delta;
-  const toks = verify.realized_tokens_delta;
-  return html`
-    <div class="dim" style="font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span style=${'color:' + label.color + ';font-weight:500'}>${label.text}</span>
-      ${usd > 0 ? html`<span style="color:var(--accent)">· ${fmtUsd(usd)} lower${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title="estimated / correlational with your change; not proof the advice caused it">est.</span></span>` : null}
-      ${verify.reason ? html`<span title=${verify.reason} style="cursor:help">ⓘ</span>` : null}
-    </div>`;
-}
-
-// The cost ledger: realized dollars summed across every VERIFIED, improved cost
-// fix — the dollar sibling of CompoundLedgerSummary.
-function CostLedgerSummary({ ledger }) {
-  if (!ledger || !ledger.verified_count) return null;
-  return html`
-    <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
-        <span style="font-size:20px;font-weight:600;color:var(--accent)">${fmtUsd(ledger.total_realized_usd)}</span>
-        <span class="dim" style="font-size:12px">realized across ${ledger.improved_count} verified change(s) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
-      </div>
-      <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.regressed_count} no movement · ${ledger.insufficient_data_count} still measuring</div>
-    </div>`;
-}
-
-// One pending cost proposal card. Advise-only: an evidence line, the
-// recommendation, an optional copyable suggestion, and a labeled estimate — but
-// only a "Mark applied" marker button, never an apply-to-code write.
-function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
-  const usd = prop.estimated_recoverable_usd;
-  const toks = prop.estimated_recoverable_tokens;
-  // Workspace-apply state (subagent, CC-origin only): a target path + a dry-run
-  // diff before the real, reversible write — routed through the same
-  // human-gated pothole apply path.
-  const [target, setTarget] = useState('');
-  const [wbusy, setWbusy] = useState(false);
-  const [werr, setWerr] = useState(null);
-  const [preview, setPreview] = useState(null);
-
-  const applyWorkspace = async (go) => {
-    if (!target.trim()) { setWerr('enter a CLAUDE.md path to write the note into'); return; }
-    setWbusy(true); setWerr(null);
-    try {
-      const r = await apiPostOrDetail('/pothole/cost-proposals/apply-workspace',
-        { ...prop, target_path: target.trim(), go });
-      if (go) { onChanged && onChanged(); }
-      else { setPreview((r.applied && r.applied.diff) || '(no changes)'); }
-    } catch (e) { setWerr(e.message || String(e)); }
-    finally { setWbusy(false); }
-  };
-
-  return html`
-    <div class="opt-section" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[prop.analyzer] || prop.analyzer}</span>
-        <span style="font-weight:500">${prop.title}</span>
-        <span class="dim" style="font-size:11px">${prop.apply_capable ? 'workspace fix · rung 1' : 'advise-only'}</span>
-        ${(usd != null || toks != null) ? html`<span class="mono" style="margin-left:auto;color:var(--accent);font-size:12.5px">${usd != null ? '~' + fmtUsd(usd) : ''}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>` : null}
-      </div>
-      <div class="sz-note" style="margin-top:8px">${prop.evidence}</div>
-      <div class="opt-title" style="font-size:12.5px;margin-top:10px">Recommendation</div>
-      <div class="sz-note" style="margin-top:2px">${prop.advise_text}</div>
-      ${prop.suggestion ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${prop.suggestion}</pre>` : null}
-      <div class="opt-caveat" style="font-size:11.5px;margin-top:8px">${prop.caveat}</div>
-
-      ${prop.apply_capable ? html`
-        <div class="opt-section" style="margin:10px 0 0">
-          <div class="opt-title" style="font-size:12.5px">Apply the sizing note <span class="dim" style="font-weight:400">· writes a reversible rung-1 note; confirm the target first</span></div>
-          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
-            <input class="rename-input" style="flex:1;min-width:280px" value=${target}
-              placeholder="/absolute/path/to/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
-            <button class="cur-btn" disabled=${wbusy} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
-            <button class="cur-btn primary" disabled=${wbusy} onClick=${() => applyWorkspace(true)}>Apply note →</button>
-          </div>
-          ${preview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${preview}</pre>` : null}
-          ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
-          <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized fan-out cost delta after it.</div>
-        </div>
-      ` : html`
-        <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-          <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied →'}</button>
-          <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
-          <span class="dim" style="font-size:11.5px">Marking records a checkpoint; the loop then measures the realized delta over your later calls.</span>
-        </div>
-      `}
-      ${prop.apply_capable ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
-    </div>`;
-}
-
-// One applied cost proposal, with its realized-delta receipt + one-step Revert.
-function CostAppliedRow({ rec, onChanged }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const revert = async () => {
-    setBusy(true); setError(null);
-    try { await apiPostOrDetail(`/pothole/cost-applied/${rec.id}/revert`, {}); onChanged && onChanged(); }
-    catch (e) { setError(e.message || String(e)); }
-    finally { setBusy(false); }
-  };
-  return html`
-    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:8px;width:100%">
-        <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[rec.analyzer] || rec.analyzer}</span>
-        <span style="font-weight:500">${rec.title}</span>
-        <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
-      </div>
-      <div class="dim" style="font-size:12px">marked applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}</div>
-      ${rec.state === 'applied' ? html`<${CostVerifyLine} verify=${rec.verify} />` : null}
-      ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
-      ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${revert}>${busy ? 'working…' : 'Revert'}</span>` : null}
-    </div>`;
-}
-
 function ReviewInboxView({ params }) {
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
   const [dismissed, setDismissed] = useState(() => loadDismissedPotholes());
@@ -7803,10 +7671,6 @@ function ReviewInboxView({ params }) {
   const [applied, setApplied] = useState([]);
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
   const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
-  const [costProps, setCostProps] = useState([]);         // advise-only cost proposals (downsize/cache/trim)
-  const [costApplied, setCostApplied] = useState([]);     // marked-applied cost proposals + their realized deltas
-  const [costLedger, setCostLedger] = useState(null);     // realized dollars across verified cost changes
-  const [marking, setMarking] = useState(null);           // signature currently being marked applied
 
   const load = useCallback(async () => {
     try {
@@ -7830,42 +7694,19 @@ function ReviewInboxView({ params }) {
     } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
   }, []);
 
-  const loadCost = useCallback(async () => {
-    try {
-      const r = await api('/pothole/cost-proposals');
-      setCostProps(r.proposals || []);
-    } catch (e) { /* the pothole list is load-bearing; degrade quietly */ }
-    try {
-      const r = await api('/pothole/cost-applied');
-      setCostApplied(r.applied || []);
-      setCostLedger(r.ledger || null);
-    } catch (e) { /* degrade quietly */ }
-  }, []);
-
   useEffect(() => {
-    load(); loadApplied(); loadCost();
+    load(); loadApplied();
     // Light poll while a background pass may be computing (or right after a
     // manual refresh) so the empty/computing state resolves without a reload.
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
     return () => clearInterval(timer);
-  }, [load, loadApplied, loadCost]);
+  }, [load, loadApplied]);
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
     try { await apiPost('/pothole/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
-    // The cost proposals + their realized deltas recompute on the same cadence.
-    try { await apiPost('/pothole/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
-    setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
-  }, [load, loadCost]);
-
-  const markCostApplied = useCallback(async (prop) => {
-    setMarking(prop.signature);
-    try {
-      await apiPostOrDetail('/pothole/cost-proposals/apply', prop);
-      await loadCost();
-    } catch (e) { /* surfaced on next refresh; keep the card in place */ }
-    finally { setMarking(null); }
-  }, [loadCost]);
+    setTimeout(() => { setRefreshing(false); load(); }, 1500);
+  }, [load]);
 
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
   const potholeCount = visible.length;
@@ -7876,17 +7717,10 @@ function ReviewInboxView({ params }) {
     setChecked(new Set());
   };
   const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
-  const costAppliedSigs = new Set((costApplied || []).filter(r => r.state !== 'reverted').map(r => r.signature));
-  const visibleCost = (costProps || []).filter(p => !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
 
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
     loadApplied();
-  };
-
-  const dismissCost = (sig) => {
-    const next = new Set([...dismissed, sig]);
-    setDismissed(next); saveDismissedPotholes(next);
   };
 
   return html`
@@ -7917,21 +7751,6 @@ function ReviewInboxView({ params }) {
       <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
       <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
     </div>
-
-    ${visibleCost.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize / cache / trim analyzers — advise-only, with verified receipts once you mark one applied</span></div>
-      <div style="margin-top:8px">
-        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
-      </div>
-    ` : null}
-
-    ${costApplied.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories <span class="dim" style="font-weight:400;font-size:12px">· the realized delta the loop measured after you marked each one</span></div>
-      <${CostLedgerSummary} ledger=${costLedger} />
-      <div class="cur-listbox" style="margin-top:8px">
-        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} onChanged=${loadCost} />`)}
-      </div>
-    ` : null}
 
     ${applied.length > 0 ? html`
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>

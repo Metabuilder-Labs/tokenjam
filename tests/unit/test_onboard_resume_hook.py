@@ -63,7 +63,7 @@ def test_wire_preserves_other_settings_keys():
 
 def test_wire_coexists_with_other_hook_events():
     s = {"hooks": {"PostToolUse": [{"matcher": "Bash", "hooks": [
-        {"type": "command", "command": "tj hook cap-output"}]}]}}
+        {"type": "command", "command": "some-other-tool hook"}]}]}}
     _wire_claude_resume_brief_hook(s)
     assert "PostToolUse" in s["hooks"]  # untouched
     assert "SessionStart" in s["hooks"]

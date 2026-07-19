@@ -123,20 +123,19 @@ def test_timeline_empty_db_has_no_data():
 # ── CLI: the zero-setup first run, with NO on-disk DB ────────────────────────
 
 def _invoke_quickstart(args):
-    """Run `tj quickstart` with `open_db` patched to blow up if ever called.
+    """Run the zero-install report command directly.
 
-    The whole point of quickstart is that it never opens the on-disk DB or
-    contacts the daemon — it manages its own transient in-memory backend.
+    It has no public/typeable name on the `cli` group — `cli/main.py`'s
+    no-subcommand branch invokes it via `ctx.invoke` only when the npm
+    wrapper's `TJ_NPX_ZERO_INSTALL_REPORT` env var is set — so tests invoke
+    the underlying `click.Command` object directly rather than through
+    `cli`'s subcommand dispatch. The whole point of the command is that it
+    never opens the on-disk DB or contacts the daemon — it manages its own
+    transient in-memory backend.
     """
-    import unittest.mock as mock
+    from tokenjam.cli.cmd_quickstart import cmd_quickstart
 
-    from tokenjam.cli.main import cli
-
-    with mock.patch(
-        "tokenjam.cli.main.open_db",
-        side_effect=AssertionError("quickstart must NOT open the on-disk DB"),
-    ):
-        return CliRunner().invoke(cli, ["quickstart", *args])
+    return CliRunner().invoke(cmd_quickstart, args)
 
 
 def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
@@ -406,7 +405,7 @@ def test_quickstart_cli_discloses_truncation(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     # The disclosure names the cap and both escape hatches.
     assert "most-recent" in result.output
-    assert "--full" in result.output
+    assert "npx tokenjam onboard" in result.output
     assert "tj context" in result.output
 
 
