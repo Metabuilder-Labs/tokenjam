@@ -34,20 +34,13 @@ DEFAULT_BACKFILL_DAYS = 30
 # very active last-30-days window doesn't look like a hang either.
 _BACKFILL_HEADSUP_THRESHOLD = 300
 
-# --- output-trim (`tj hook cap-output`) PostToolUse hook wiring --------------
-# Installed into ~/.claude/settings.json out-of-band (zero in-loop token cost).
-# Idempotent + non-destructive: a tj-managed entry is detected by the
-# "hook cap-output" substring in its command, so re-onboard updates OUR entry in
-# place and NEVER clobbers a user's own PostToolUse hooks.
+# --- output-trim (`tj hook cap-output`) legacy hook cleanup ------------------
+# The output-trim hook itself was removed (measured negative: +5.6% whole-
+# session cost on Claude Code, see CLAUDE.md). This matcher/unwire pair stays
+# ONLY so onboard/uninstall can strip an already-installed entry from a prior
+# release's ~/.claude/settings.json — never re-installed, never re-offered.
 
-_CAP_OUTPUT_MATCHER = "Bash|Grep|Glob|WebFetch"
 _CAP_OUTPUT_MARKER = "hook cap-output"  # tj-managed marker (substring of command)
-
-
-def _tj_cap_output_command() -> str:
-    """Absolute `tj hook cap-output` command, falling back to bare `tj`."""
-    exe = shutil.which("tj")
-    return f"{exe} hook cap-output" if exe else "tj hook cap-output"
 
 
 def _is_tj_cap_output_entry(entry: object) -> bool:
@@ -59,38 +52,9 @@ def _is_tj_cap_output_entry(entry: object) -> bool:
     return False
 
 
-def _wire_claude_output_cap_hook(settings: dict) -> str:
-    """Install/refresh the PostToolUse cap-output hook in a settings dict.
-
-    Mutates ``settings`` in place; returns one of ``written`` / ``updated`` /
-    ``kept`` / ``skipped`` (foreign structure left untouched).
-    """
-    desired = {
-        "matcher": _CAP_OUTPUT_MATCHER,
-        "hooks": [{"type": "command", "command": _tj_cap_output_command()}],
-    }
-    hooks = settings.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        return "skipped"
-    post = hooks.get("PostToolUse")
-    if post is None:
-        hooks["PostToolUse"] = [desired]
-        return "written"
-    if not isinstance(post, list):
-        return "skipped"
-    for i, entry in enumerate(post):
-        if _is_tj_cap_output_entry(entry):
-            if entry == desired:
-                return "kept"
-            post[i] = desired
-            return "updated"
-    post.append(desired)          # preserve any foreign PostToolUse hooks
-    return "written"
-
-
 def _unwire_claude_output_cap_hook(settings: dict) -> bool:
     """Remove any tj-managed cap-output PostToolUse entry. Returns True if one
-    was removed (used by `tj uninstall`)."""
+    was removed (used by `tj onboard` and `tj uninstall`)."""
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return False
@@ -971,6 +935,175 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
     return msg, True, total
 
 
+def _lens_review_url(port: int, *, want_daemon: bool) -> str:
+    """One-click-revert pointer for the pothole activation tail below — the
+    Lens Review inbox (`#/review`, the Improve lens's home) already renders a
+    single-click Revert next to every applied fix, so onboarding never needs
+    its own revert UI. When the daemon isn't running yet (``--no-daemon``),
+    say so instead of printing a URL that won't answer."""
+    if want_daemon:
+        return f"http://127.0.0.1:{port}/#/review"
+    return f"run `tj serve`, then open http://127.0.0.1:{port}/#/review"
+
+
+def _run_pothole_first_fix(config: object, *, port: int, want_daemon: bool) -> None:
+    """Onboarding tail (#179): the backfill's payoff is a fix, not just a
+    chart. Scans the freshly-backfilled Claude Code history for recurring
+    potholes (``core.optimize.analyzers.pothole``) and, for a high-confidence
+    hook-quality finding, drives the user through approve+enable of their
+    first fix — human-gated at every step, never auto-armed.
+
+    Thin history (the detector found no recurring cluster — it needs
+    ``MIN_RECURRING_SESSIONS`` repeats of the same failure before it will
+    ever propose anything) gets a "still watching" note instead of a fix CTA.
+    Non-interactive runs (CI, a piped ``tj onboard``) only ever print the
+    summary — the enable ask requires a human at a terminal to confirm.
+
+    Never raises: any failure here is best-effort and must not sink the rest
+    of onboarding, which has already written config/statusline/daemon state
+    by the time this runs.
+    """
+    from dataclasses import asdict
+
+    from tokenjam.core.backfill import CLAUDE_CODE_PROJECTS_ROOT
+    from tokenjam.core.optimize import pothole_apply
+    from tokenjam.core.optimize.analyzers.pothole import compute_pothole_finding
+
+    console.print()
+    console.print("[dim]Scanning your history for recurring mistakes…[/dim]")
+    try:
+        # projects_root=CLAUDE_CODE_PROJECTS_ROOT: scan the exact directory
+        # the backfill above just read, not `compute_pothole_finding`'s own
+        # default (a module-level constant baked in at import time from
+        # ``Path.home()`` — it won't follow a test's ``Path.home`` patch the
+        # way this already-monkeypatchable module attribute does).
+        #
+        # distill_enabled=False: onboarding stays fast and dependency-free —
+        # the LLM-distill pass shells out to a real `claude` CLI per residual
+        # cluster (slow, and not guaranteed to be configured yet at this
+        # point in setup). Every distilled cluster is hardcoded to rung 1
+        # anyway (never enforcement-eligible), so it can never be the day-1
+        # candidate below — the daemon's periodic background recompute
+        # (`tj serve`'s pothole job) already runs the full distill-enabled
+        # scan and will surface those in the Lens Review inbox on its own
+        # schedule.
+        finding = compute_pothole_finding(
+            projects_root=CLAUDE_CODE_PROJECTS_ROOT, distill_enabled=False,
+        )
+    except Exception:
+        return
+
+    if not finding.clusters:
+        console.print(
+            "[bold]Recurring mistakes:[/bold] still watching — check back "
+            "after a few more sessions."
+        )
+        return
+
+    console.print()
+    console.print(
+        f"[bold]The mistakes your agent keeps making[/bold]  "
+        f"[dim]({finding.sessions_scanned} sessions scanned)[/dim]"
+    )
+    for cluster in finding.clusters[:5]:
+        distilled = (
+            " [dim](distilled — needs a closer look)[/dim]"
+            if (cluster.family_key or "").startswith("distilled:") else ""
+        )
+        console.print(
+            f"  [yellow]{cluster.occurrences:>4}x[/yellow]  {cluster.title}"
+            f"{distilled}  [dim]· {cluster.sessions} sessions · "
+            f"rung {cluster.rung}[/dim]"
+        )
+    total_tokens = finding.estimated_recoverable_tokens or 0
+    if total_tokens:
+        console.print(
+            f"  [dim]~{total_tokens:,} estimated recoverable tokens across "
+            f"{len(finding.clusters)} pattern"
+            f"{'s' if len(finding.clusters) != 1 else ''} — {finding.caveat}[/dim]"
+        )
+    lens_hint = _lens_review_url(port, want_daemon=want_daemon)
+
+    # High-confidence, hook-quality only (Hard constraint #2): rung 3-5 is the
+    # intervention ladder's enforcement tier (ENFORCEMENT_RUNGS), and every
+    # distilled (LLM-guessed) cluster is hardcoded to rung 1 by the detector
+    # itself — so filtering on rung already excludes distilled clusters. The
+    # explicit family_key check stays as defense-in-depth against a future
+    # detector change quietly handing a distilled cluster a higher rung. A
+    # cluster with no resolved write target can't be applied non-interactively
+    # (it would need a human to pick one), so it's excluded too.
+    candidate = next(
+        (
+            c for c in finding.clusters
+            if c.rung in pothole_apply.ENFORCEMENT_RUNGS
+            and not (c.family_key or "").startswith("distilled:")
+            and c.suggested_target
+        ),
+        None,
+    )
+    if candidate is None:
+        console.print()
+        console.print(
+            f"[dim]No day-1 hook-quality fix yet — review the rest anytime "
+            f"in the Lens Review inbox ({lens_hint}).[/dim]"
+        )
+        return
+
+    if not _is_interactive():
+        console.print()
+        console.print(
+            f"[dim]Re-run `tj onboard --claude-code` from a terminal, or "
+            f"open the Lens Review inbox ({lens_hint}), to approve + enable "
+            f"your first fix.[/dim]"
+        )
+        return
+
+    console.print()
+    console.print(f"[bold]Your #1 fix:[/bold] {candidate.title}")
+    console.print(
+        f"  [dim]Evidence — {candidate.occurrences} occurrences across "
+        f"{candidate.sessions} sessions:[/dim]"
+    )
+    for ex in candidate.examples[:3]:
+        console.print(f"    [dim]· session {ex.session_id} ({ex.repo}): {ex.snippet}[/dim]")
+    console.print(f"  Proposed fix: {candidate.proposed_fix}")
+    console.print(
+        "  [dim]What enabling does: Claude Code calls tj automatically right "
+        "after a matching tool failure. It never blocks or edits your code — "
+        "it only injects a short recovery note into context. The hook ships "
+        "disabled and stays that way unless you confirm below; you can "
+        "disable or revert it at any time.[/dim]"
+    )
+    if not click.confirm("  Enable this fix now?", default=False):
+        console.print(
+            f"[dim]  Skipped — enable anytime from the Lens Review inbox "
+            f"({lens_hint}) or by re-running tj onboard.[/dim]"
+        )
+        return
+
+    try:
+        result = pothole_apply.apply_pothole_fix(
+            config, asdict(candidate),
+            target_path=candidate.suggested_target, scope=candidate.scope,
+            go=True, force=False,
+        )
+        fix_id = result["record"]["id"]
+        pothole_apply.enable_enforcement(config, fix_id, confirm=True)
+    except pothole_apply.PotholeApplyRefused as exc:
+        console.print(f"[yellow]  Could not enable yet: {exc}[/yellow]")
+        console.print(f"[dim]  Retry from the Lens Review inbox ({lens_hint}).[/dim]")
+        return
+
+    console.print(
+        f"[green]✓[/green] Enabled: {candidate.title} "
+        f"[dim](wired at {candidate.suggested_target})[/dim]"
+    )
+    console.print(
+        f"  [dim]One-click revert any time: open {lens_hint} and click "
+        f"Revert next to this fix (fix id {fix_id}).[/dim]"
+    )
+
+
 def _print_setup_complete_home(
     *, sessions_backfilled: int = 0, has_data: bool = False,
     days: int | None = None,
@@ -1740,38 +1873,17 @@ def _onboard_claude_code(
     # `tj uninstall`.
     resume_brief_status = _wire_claude_resume_brief_hook(global_settings)
 
-    # (Un)install the output-trim PostToolUse hook. Rides this same
-    # read-merge-write. DEFAULT-OFF and MEASURED NEGATIVE: the A/B gate failed and
-    # Claude Code now natively offloads large tool output before it enters context
-    # (confirmed live 2026-07-03), so the hook buys ~+5.6% cost for zero benefit —
-    # do NOT enable it. See the `[hooks.output_cap]` docstring in core/config.py.
-    # Onboarding does NOT auto-install it: a fresh config has enabled=False → we
-    # take the else branch and remove any previously-installed tj entry, keeping
-    # config the source of truth. Idempotent + non-destructive (foreign hooks
-    # preserved).
-    cap_cfg = getattr(getattr(config, "hooks", None), "output_cap", None)
-    cap_enabled = bool(getattr(cap_cfg, "enabled", False)) and not bool(
-        getattr(cap_cfg, "killswitch", False)
-    )
-    if cap_enabled:
-        cap_status = _wire_claude_output_cap_hook(global_settings)
-    else:
-        removed = _unwire_claude_output_cap_hook(global_settings)
-        cap_status = "removed" if removed else "disabled"
+    # The output-trim PostToolUse hook was removed (measured negative: +5.6%
+    # whole-session cost on Claude Code, see CLAUDE.md). Best-effort cleanup
+    # only, for users who opted into a prior release's hook — never installs.
+    cap_removed = _unwire_claude_output_cap_hook(global_settings)
 
     global_settings_path.write_text(json_mod.dumps(global_settings, indent=2) + "\n")
-    _CAP_STATUS_MSG = {
-        "written": "installed (Bash/Grep/Glob/WebFetch)",
-        "updated": "updated to current path",
-        "kept": "already installed",
-        "skipped": "left alone (custom PostToolUse hooks present)",
-        "removed": "removed (opt-in; disabled in config)",
-        "disabled": "off (opt-in — set [hooks.output_cap].enabled = true)",
-    }
-    console.print(
-        f"[green]✓[/green] Output-trim hook (tj hook cap-output): "
-        f"{_CAP_STATUS_MSG.get(cap_status, cap_status)}"
-    )
+    if cap_removed:
+        console.print(
+            "[green]✓[/green] Removed the legacy output-trim hook "
+            "(tj hook cap-output) — this feature was removed."
+        )
     _RESUME_BRIEF_STATUS_MSG = {
         "written": "installed (SessionStart: resume|compact)",
         "updated": "updated to current path",
@@ -1952,6 +2064,8 @@ def _onboard_claude_code(
     # already ran above. On the combination path this is deferred to
     # `_onboard_combination` so the banner prints exactly once (#432).
     if standalone:
+        if backfill_has_data:
+            _run_pothole_first_fix(config, port=port, want_daemon=want_daemon)
         _print_setup_complete_home(
             sessions_backfilled=backfill_sessions_total,
             has_data=backfill_has_data,

@@ -1,6 +1,6 @@
 """Tests for #117: `tj uninstall` must remove the `claude()` shell wrapper
-that `tj onboard --claude-code` installs (and unwire the opt-in output-cap
-PostToolUse hook alongside it).
+that `tj onboard --claude-code` installs (and clean up any legacy output-cap
+PostToolUse hook entry left by a prior release alongside it).
 
 Two layers:
   - `_unwire_claude_wrapper()` in cmd_onboard.py — the counterpart to
@@ -26,7 +26,6 @@ from tokenjam.cli.cmd_onboard import (
     _WRAPPER_MARKER,
     _install_claude_wrapper,
     _unwire_claude_wrapper,
-    _wire_claude_output_cap_hook,
 )
 from tokenjam.cli.cmd_uninstall import cmd_uninstall
 
@@ -137,12 +136,20 @@ def test_uninstall_cli_removes_wrapper_and_cap_hook(tmp_path, monkeypatch):
     (home / ".zshrc").write_text(_OTEL_ZSHRC_BLOCK)
     _install_claude_wrapper()
 
-    # Simulate the opt-in output-cap PostToolUse hook also being wired.
+    # Simulate a legacy output-cap PostToolUse hook entry from a prior release
+    # (the hook itself is removed — this only exercises `tj uninstall`'s
+    # best-effort cleanup of an already-installed entry it might find).
     claude_dir = home / ".claude"
     claude_dir.mkdir(parents=True, exist_ok=True)
     settings_path = claude_dir / "settings.json"
-    settings: dict = {}
-    _wire_claude_output_cap_hook(settings)
+    settings: dict = {
+        "hooks": {
+            "PostToolUse": [{
+                "matcher": "Bash|Grep|Glob|WebFetch",
+                "hooks": [{"type": "command", "command": "tj hook cap-output"}],
+            }],
+        },
+    }
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
 
     zshrc_before = (home / ".zshrc").read_text()

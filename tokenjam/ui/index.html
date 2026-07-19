@@ -148,6 +148,17 @@ code, .mono {
 .sidebar a:hover { background: rgba(var(--accent-rgb),0.04); color: var(--text); }
 .sidebar a.active { color: var(--accent); background: rgba(var(--accent-rgb),0.08); }
 .sidebar a .icon { width: 16px; text-align: center; font-size: 14px; }
+/* Two-lens nav (self-improve-loop SPEC.md §12): Improve (CC power-user home,
+   default) vs Observe (SDK/observability suite). The pill switches which
+   nav-link group is visible; App()'s route effect keeps it in sync with the
+   current route so a direct link/back-nav into an Observe view flips the
+   pill without a click. */
+.lens-switch { display: flex; gap: 2px; margin: 4px 12px 10px; padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+.lens-btn { flex: 1; background: none; border: none; border-radius: 6px; padding: 6px 0; font-family: 'Geist Mono', monospace; font-size: 11.5px; font-weight: 500; color: var(--text-dim); cursor: pointer; transition: background .15s, color .15s; }
+.lens-btn:hover { color: var(--text); }
+.lens-btn.active { background: rgba(var(--accent-rgb),0.16); color: var(--accent); }
+.sidebar[data-lens="improve"] a.nav-link[data-lens="observe"] { display: none; }
+.sidebar[data-lens="observe"] a.nav-link[data-lens="improve"] { display: none; }
 .sidebar-footer {
   margin-top: auto;
   border-top: 1px solid var(--border);
@@ -274,16 +285,6 @@ code, .mono {
 }
 .card-row .label { color: var(--text-dim); }
 .card-row .value { color: var(--text); }
-.budget-bar {
-  height: 4px;
-  background: var(--border);
-  border-radius: 2px;
-  margin-top: 6px;
-  overflow: hidden;
-}
-.budget-bar-fill { height: 100%; border-radius: 2px; background: var(--success); transition: width 0.3s; }
-.budget-bar-fill.warn { background: var(--warn); }
-.budget-bar-fill.over { background: var(--error); }
 
 /* Info tooltip */
 .info-btn {
@@ -326,10 +327,6 @@ code, .mono {
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
-/* Status List (#263): a min-width lets the table exceed a narrow container so
-   .table-wrap's overflow-x actually scrolls, instead of compressing columns and
-   clipping the actions cell (View cost / View traces) off the right edge. */
-.table-wrap table.status-list { min-width: 760px; }
 table {
   width: 100%;
   border-collapse: collapse;
@@ -359,7 +356,7 @@ td.chevron { color: var(--text-dim); font-size: 14px; text-align: center; width:
 tr.clickable:hover td.chevron { color: var(--accent); }
 /* Status-list row actions: unify the two secondary links (View cost / View
    traces) into one inline group with consistent spacing, clearly subordinate
-   to the now-clickable row. Mirrors the .card-links link treatment. */
+   to the now-clickable row. */
 .row-actions { display: inline-flex; gap: 14px; }
 .row-actions a { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; }
 .row-actions a:hover { text-decoration: underline; }
@@ -577,6 +574,9 @@ table.archive-list .a-id { color: var(--text); }
   border-bottom-color: var(--accent);
   font-weight: 600;
 }
+/* Divider before the demoted Map/Approach/Timeline tabs — evidence you can
+   drill into, no longer front-and-center (self-improve-loop SPEC.md §12). */
+.tab-sep { display: flex; align-items: center; padding: 0 8px 0 10px; margin-left: 4px; font-size: 9.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-faint); border-left: 1px solid var(--border); }
 
 /* Waterfall */
 .waterfall { margin: 16px 0; }
@@ -589,20 +589,8 @@ table.archive-list .a-id { color: var(--text); }
   transition: background 0.1s;
 }
 .wf-row:hover { background: rgba(var(--accent-rgb),0.04); }
-.wf-row:hover .wf-label { color: var(--text); }
 .wf-row:hover .wf-bar { box-shadow: 0 0 8px rgba(61,142,255,0.25); }
 .wf-row.selected { background: rgba(var(--accent-rgb),0.08); border-left: 2px solid var(--accent); }
-.wf-row.selected .wf-label { color: var(--accent); }
-.wf-label {
-  flex-shrink: 0;
-  font-family: 'Geist Mono', monospace;
-  font-size: 12px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding-right: 8px;
-}
 .wf-track { flex: 1; position: relative; height: 18px; }
 .wf-bar-wrap { position: absolute; height: 100%; }
 .wf-tip {
@@ -722,33 +710,6 @@ table.archive-list .a-id { color: var(--text); }
 .detail-grid .dk { color: var(--text-dim); }
 .detail-grid .dv { color: var(--text); word-break: break-all; }
 
-/* Summary row */
-.summary {
-  display: flex;
-  gap: 24px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-.summary-item {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  min-width: 140px;
-}
-.summary-label {
-  font-family: 'Geist Mono', monospace;
-  font-size: 11px;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  margin-bottom: 4px;
-}
-.summary-value {
-  font-family: 'Geist Mono', monospace;
-  font-size: 20px;
-  font-weight: 600;
-}
-
 /* Drift */
 .drift-section {
   background: var(--surface);
@@ -781,9 +742,6 @@ table.archive-list .a-id { color: var(--text); }
 /* Expand toggle */
 .expand-toggle { display: inline-block; width: 16px; font-size: 10px; color: var(--text-dim); transition: transform 0.15s; }
 .expand-toggle.open { transform: rotate(90deg); }
-
-/* Waterfall hint */
-.wf-hint { font-size: 11px; color: var(--text-dim); margin-top: 8px; font-family: 'Geist Mono', monospace; }
 
 /* Alert detail expand */
 .alert-detail {
@@ -907,7 +865,6 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .tile-grid.compact .rec-tile { padding: 8px 10px; }
 .tile-grid.compact .rec-name { font-size: 12px; }
 .tile-grid.compact .rec-amount { font-size: 15px; }
-.tile-grid.compact .rec-hint { display: none; }
 .tile-grid.compact .health-tile { padding: 8px 10px; }
 .rec-tile {
   display: block; text-decoration: none; color: inherit;
@@ -919,7 +876,6 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .rec-name { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .rec-amount { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); margin: 8px 0 6px; }
 .rec-amount.dim { color: var(--text-faint); font-size: 14px; font-weight: 500; }
-.rec-hint { font-size: 12px; color: var(--text-dim); line-height: 1.4; }
 .estimated-tag {
   font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
@@ -935,9 +891,6 @@ a.health-tile.attn { border-color: var(--warn); }
 .health-value { font-family: 'Geist Mono', monospace; font-size: 24px; font-weight: 700; }
 .health-label { font-size: 12px; color: var(--text-dim); margin-top: 2px; }
 .health-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: 'Geist Mono', monospace; }
-.card-links { display: flex; gap: 14px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
-.card-links a { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--brand); text-decoration: none; }
-.card-links a:hover { text-decoration: underline; }
 .opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .opt-title { font-family: 'Geist', sans-serif; font-size: 15px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -1519,7 +1472,6 @@ code.md-code {
 .cur-cwd { font-size:12px; color:var(--text-faint); margin:0 2px; line-height:1.5; }
 .cur-cwd code { color:var(--text-dim); }
 .cur-listbox { max-height:380px; overflow-y:auto; border:1px solid var(--border); border-radius:9px; background:var(--surface); }
-.cur-donenote { margin-left:auto; }
 .rev-note { margin:0; }
 .rev-state { margin-left:auto; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; border-radius:4px; padding:3px 9px; border:1px solid var(--border); }
 .rev-state.staged { color:var(--warn); border-color:rgba(245,166,35,.4); }
@@ -1556,18 +1508,23 @@ code.md-code {
 </head>
 <body>
 
-<nav class="sidebar">
+<nav class="sidebar" data-lens="improve">
   <div class="sidebar-brand"><svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="26" height="26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="TokenJam"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/><g fill="currentColor" stroke="none" fill-rule="evenodd"><path transform="translate(85.68,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(106.83,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M4.74,-7.50 L4.74,-8.75 L7.24,-8.75 L7.24,-0.00 L5.86,-0.00 L5.86,-7.50 L4.74,-7.50 Z"/><path transform="translate(123.97,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(145.12,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M5.68,-1.86 Q6.83,-2.86 7.49,-3.50 Q8.16,-4.14 8.60,-4.84 Q9.05,-5.53 9.05,-6.23 Q9.05,-6.95 8.71,-7.36 Q8.36,-7.76 7.63,-7.76 Q6.92,-7.76 6.53,-7.31 Q6.14,-6.86 6.12,-6.11 L4.80,-6.11 Q4.84,-7.48 5.62,-8.20 Q6.41,-8.93 7.62,-8.93 Q8.93,-8.93 9.67,-8.21 Q10.40,-7.49 10.40,-6.29 Q10.40,-5.42 9.97,-4.63 Q9.53,-3.83 8.92,-3.20 Q8.32,-2.57 7.38,-1.74 L6.84,-1.26 L10.64,-1.26 L10.64,-0.12 L4.81,-0.12 L4.81,-1.12 L5.68,-1.86 Z"/><path transform="translate(84.35,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(105.44,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M7.46,-7.50 L7.46,-8.75 L9.96,-8.75 L9.96,-0.00 L8.58,-0.00 L8.58,-7.50 L7.46,-7.50 Z"/><path transform="translate(122.64,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(143.73,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M8.40,-1.86 Q9.55,-2.86 10.22,-3.50 Q10.88,-4.14 11.33,-4.84 Q11.77,-5.53 11.77,-6.23 Q11.77,-6.95 11.43,-7.36 Q11.09,-7.76 10.36,-7.76 Q9.65,-7.76 9.26,-7.31 Q8.87,-6.86 8.84,-6.11 L7.52,-6.11 Q7.56,-7.48 8.35,-8.20 Q9.13,-8.93 10.34,-8.93 Q11.65,-8.93 12.39,-8.21 Q13.13,-7.49 13.13,-6.29 Q13.13,-5.42 12.69,-4.63 Q12.25,-3.83 11.65,-3.20 Q11.04,-2.57 10.10,-1.74 L9.56,-1.26 L13.37,-1.26 L13.37,-0.12 L7.54,-0.12 L7.54,-1.12 L8.40,-1.86 Z"/></g></svg><span>TokenJam Lens</span></div>
-  <a href="#/dashboard" class="nav-link" data-view="dashboard"><span class="icon">&#9678;</span> Dashboard</a>
-  <a href="#/status" class="nav-link" data-view="status"><span class="icon">&bull;</span> Status</a>
-  <a href="#/traces" class="nav-link" data-view="traces"><span class="icon">&diamond;</span> Traces</a>
-  <a href="#/cost" class="nav-link" data-view="cost"><span class="icon">$</span> Cost</a>
-  <a href="#/analytics" class="nav-link" data-view="analytics"><span class="icon">&#9636;</span> Analytics</a>
-  <a href="#/alerts" class="nav-link" data-view="alerts"><span class="icon">!</span> Alerts</a>
-  <a href="#/drift" class="nav-link" data-view="drift"><span class="icon">~</span> Drift</a>
-  <a href="#/optimize" class="nav-link" data-view="optimize"><span class="icon">&#9889;</span> Optimize</a>
-  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
-  <a href="#/budget" class="nav-link" data-view="budget"><span class="icon">$</span> Budget</a>
+  <div class="lens-switch" role="tablist" aria-label="Lens">
+    <button type="button" class="lens-btn active" data-lens="improve">Improve</button>
+    <button type="button" class="lens-btn" data-lens="observe">Observe</button>
+  </div>
+  <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review inbox</a>
+  <a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="improve"><span class="icon">&#9678;</span> Dashboard</a>
+  <a href="#/status" class="nav-link" data-view="status" data-lens="improve"><span class="icon">&bull;</span> Status</a>
+  <a href="#/traces" class="nav-link" data-view="traces" data-lens="observe"><span class="icon">&diamond;</span> Traces</a>
+  <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Cost</a>
+  <a href="#/analytics" class="nav-link" data-view="analytics" data-lens="observe"><span class="icon">&#9636;</span> Analytics</a>
+  <a href="#/alerts" class="nav-link" data-view="alerts" data-lens="observe"><span class="icon">!</span> Alerts</a>
+  <a href="#/drift" class="nav-link" data-view="drift" data-lens="observe"><span class="icon">~</span> Drift</a>
+  <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="observe"><span class="icon">&#9889;</span> Optimize</a>
+  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="observe"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
+  <a href="#/budget" class="nav-link" data-view="budget" data-lens="observe"><span class="icon">$</span> Budget</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
     <a href="https://github.com/Metabuilder-Labs/tokenjam" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
@@ -1592,6 +1549,12 @@ const html = htm.bind(h);
 // --- API ---
 const apiKeyMeta = document.querySelector('meta[name="tj-api-key"]');
 const API_KEY = apiKeyMeta ? apiKeyMeta.getAttribute('content') : null;
+// Local write token (require_pothole_write_auth, api/deps.py) -- always
+// present (injected regardless of api.auth.enabled), required on every
+// mutating pothole call (apply/enable/disable/revert/refresh). Sent on every
+// POST below; routes that don't check it simply ignore the extra header.
+const writeTokenMeta = document.querySelector('meta[name="tj-write-token"]');
+const WRITE_TOKEN = writeTokenMeta ? writeTokenMeta.getAttribute('content') : null;
 
 async function api(path, params = {}) {
   const qs = new URLSearchParams();
@@ -1609,6 +1572,7 @@ async function api(path, params = {}) {
 async function apiPost(path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
+  if (WRITE_TOKEN) headers['X-TJ-Local-Token'] = WRITE_TOKEN;
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
@@ -1622,6 +1586,7 @@ async function apiPost(path, body) {
 async function apiPostOrDetail(path, body) {
   const headers = { 'Content-Type': 'application/json' };
   if (API_KEY) headers['Authorization'] = 'Bearer ' + API_KEY;
+  if (WRITE_TOKEN) headers['X-TJ-Local-Token'] = WRITE_TOKEN;
   const resp = await fetch('/api/v1' + path, {
     method: 'POST', headers, body: JSON.stringify(body),
   });
@@ -1792,13 +1757,14 @@ function friendlyAlertType(type) {
 function getRoute() {
   const raw = location.hash.replace(/^#\/?/, '');
   const qIdx = raw.indexOf('?');
-  // Empty hash → Dashboard, the default landing route (#132). getRoute is the
-  // single source of the default so the first render and the URL agree — no
-  // render-time location.hash redirect (which raced the first render).
-  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'dashboard';
+  // Empty hash → Review inbox, the Improve lens's home (self-improve-loop
+  // SPEC.md §12 — Improve is the default lens, review inbox is its home).
+  // getRoute is the single source of the default so the first render and the
+  // URL agree — no render-time location.hash redirect (which raced the first render).
+  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'review';
   const query = qIdx >= 0 ? raw.slice(qIdx + 1) : '';
   const parts = path.split('/');
-  return { view: parts[0] || 'dashboard', param: parts[1] || null, params: new URLSearchParams(query) };
+  return { view: parts[0] || 'review', param: parts[1] || null, params: new URLSearchParams(query) };
 }
 
 // CLI-matching time-window vocabulary, plus explicit YYYY-MM-DD:YYYY-MM-DD ranges.
@@ -4450,7 +4416,9 @@ function MapBoardSection({ sessionId }) {
 function SessionDetailView({ sessionId }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
-  const [tab, setTab] = useState('map');
+  // Map/Approach/Timeline are drill-in evidence, not the landing tab
+  // (self-improve-loop SPEC.md §12 — demoted from primary session tabs).
+  const [tab, setTab] = useState('models');
 
   const load = useCallback(async () => {
     try {
@@ -4523,14 +4491,15 @@ function SessionDetailView({ sessionId }) {
     </div>
 
     <div class="tab-bar" role="tablist">
-      <button class="tab ${tab === 'map' ? 'active' : ''}" role="tab" aria-selected=${tab === 'map'} onClick=${() => setTab('map')}>Map</button>
-      <button class="tab ${tab === 'approach' ? 'active' : ''}" role="tab" aria-selected=${tab === 'approach'} onClick=${() => setTab('approach')}>Approach</button>
-      <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Timeline</button>
       <button class="tab ${tab === 'models' ? 'active' : ''}" role="tab" aria-selected=${tab === 'models'} onClick=${() => setTab('models')}>Models & context</button>
       ${subagents.total > 0 ? html`<button class="tab ${tab === 'subagents' ? 'active' : ''}" role="tab" aria-selected=${tab === 'subagents'} onClick=${() => setTab('subagents')}>Subagents${subagents.flagged ? ' (' + subagents.flagged + ')' : ''}</button>` : null}
       <button class="tab ${tab === 'alerts' ? 'active' : ''}" role="tab" aria-selected=${tab === 'alerts'} onClick=${() => setTab('alerts')}>Alerts</button>
       <button class="tab ${tab === 'traces' ? 'active' : ''}" role="tab" aria-selected=${tab === 'traces'} onClick=${() => setTab('traces')}>Traces</button>
       <button class="tab ${tab === 'loop' ? 'active' : ''}" role="tab" aria-selected=${tab === 'loop'} onClick=${() => setTab('loop')}>Loop</button>
+      <span class="tab-sep">Evidence</span>
+      <button class="tab ${tab === 'map' ? 'active' : ''}" role="tab" aria-selected=${tab === 'map'} onClick=${() => setTab('map')}>Map</button>
+      <button class="tab ${tab === 'approach' ? 'active' : ''}" role="tab" aria-selected=${tab === 'approach'} onClick=${() => setTab('approach')}>Approach</button>
+      <button class="tab ${tab === 'story' ? 'active' : ''}" role="tab" aria-selected=${tab === 'story'} onClick=${() => setTab('story')}>Timeline</button>
     </div>
 
     ${tab === 'map' ? html`<${MapBoardSection} sessionId=${sessionId} />` : null}
@@ -7448,6 +7417,353 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 // NOT touch the standalone Overview/Analytics screens or the default landing.
 // One window selector (header) drives BOTH the triage fetch and the embedded
 // explorer (which reads `since` from the same URL params).
+// ---- Review inbox (Improve lens home) ----
+// The self-improve loop's Approve stage (self-improve-loop SPEC.md §12 /
+// §8 reuse map): pending pothole fixes the cross-session pothole aggregator
+// (core/optimize/analyzers/pothole.py, served from a background-refreshed
+// cache at GET /pothole/proposals — see api/routes/pothole.py) land here for
+// a human to review. Phase 2 wires Approve to a real write, routed by rung,
+// through POST /pothole/apply (core.optimize.pothole_apply — git-commit or
+// gzip-backup reversible, disabled-by-default for hook/wrapper/config rungs).
+// Dismiss stays a client-side-only hide (localStorage, never sent to the
+// server). The chassis (listhead / listbox / addbar / cur-modal) is forked
+// from Optimize ▸ Summarize's curate → diff → Apply/Reject screen
+// (~6410-7040 above), per Phase A's scaffold.
+const POTHOLE_DISMISSED_KEY = 'tj_pothole_dismissed_v1';
+
+function loadDismissedPotholes() {
+  try {
+    const raw = localStorage.getItem(POTHOLE_DISMISSED_KEY);
+    return raw ? new Set(JSON.parse(raw)) : new Set();
+  } catch (e) { return new Set(); }
+}
+
+function saveDismissedPotholes(set) {
+  try { localStorage.setItem(POTHOLE_DISMISSED_KEY, JSON.stringify([...set])); } catch (e) { /* best-effort */ }
+}
+
+const RUNG_LABELS = {
+  1: 'note (CLAUDE.md)',
+  2: 'skill / doc',
+  3: 'hook',
+  4: 'wrapper / script',
+  5: 'config / env',
+};
+const ENFORCEMENT_RUNGS = new Set([3, 4, 5]);
+
+// Phase 3 (Verify, self-improve-loop SPEC.md §4 step 6 / §10 / §11): the
+// verdict labels the Applied section shows per fix — correlational, never a
+// causal claim (see the ⓘ tooltip's `reason` string from the API).
+const VERDICT_LABELS = {
+  improved: { text: 'Improved', color: 'var(--success)' },
+  no_change: { text: 'No change', color: 'var(--warn)' },
+  regressed: { text: 'Regressed', color: 'var(--error)' },
+  insufficient_data: { text: 'Measuring…', color: 'var(--text-dim)' },
+  enforcement_disabled: { text: 'Not yet enforced', color: 'var(--text-dim)' },
+};
+const VERDICT_NUDGE = new Set(['no_change', 'regressed']);
+
+// One applied fix's recurrence-since-apply line: verdict, normalized
+// recurrence, realized savings (only ever shown for a real "improved"
+// verdict), and — for the `no_change`/`regressed` "codification != prevention"
+// signal — a nudge to escalate (rung 1 notes) or reconsider (any rung).
+function VerifyLine({ verify, rung }) {
+  if (!verify) return null;
+  const verdict = verify.verdict;
+  const label = VERDICT_LABELS[verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
+  const hasRecurrence = verify.recurrence_since_apply != null && verify.post_sessions_since_apply != null;
+  const saved = verify.realized_tokens_saved;
+  const nudge = VERDICT_NUDGE.has(verdict);
+  return html`
+    <div class="dim" style="font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span style=${'color:' + label.color + ';font-weight:500'}>${label.text}</span>
+      ${hasRecurrence ? html`<span>· ${verify.recurrence_since_apply} occurrence(s) in ${verify.post_sessions_since_apply} session(s) since apply</span>` : null}
+      ${saved > 0 ? html`<span style="color:var(--accent)">· ~${fmtTokens(saved)} tok saved <span class="estimated-tag" title="estimated / correlational — see the Compound ledger caveat">est.</span></span>` : null}
+      ${verify.last_checked_at ? html`<span title=${verify.reason || ''} style="cursor:help">ⓘ</span>` : null}
+      ${nudge ? html`<span style="color:var(--warn)">— not taking; consider ${rung === 1 ? 'escalating to a hook or ' : ''}reverting</span>` : null}
+    </div>`;
+}
+
+// The Compound ledger (SPEC §4 step 7): estimated savings summed across every
+// VERIFIED fix, at the top of the Applied section — the loop's evidence that
+// it correlates with fewer recurrences, not just that it wrote something.
+function CompoundLedgerSummary({ ledger }) {
+  if (!ledger) return null;
+  if (!ledger.verified_count) {
+    return html`<div class="sz-note" style="margin:8px 0 12px">No fixes verified yet — the loop checks back once enough post-apply sessions accumulate.</div>`;
+  }
+  return html`
+    <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
+      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
+        <span style="font-size:20px;font-weight:600;color:var(--accent)">~${fmtTokens(ledger.total_realized_tokens_saved)} tok</span>
+        <span class="dim" style="font-size:12px">estimated savings across ${ledger.improved_count} verified fix(es) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
+      </div>
+      <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} regressed · ${ledger.enforcement_disabled_count} awaiting enforcement · ${ledger.insufficient_data_count} still measuring</div>
+    </div>`;
+}
+
+function PotholeRow({ cluster, checked, onToggle, onExpand }) {
+  const tokens = cluster.estimated_recoverable_tokens || 0;
+  return html`
+    <tr class="cur-row" key=${cluster.signature}>
+      <td><input type="checkbox" checked=${checked} onChange=${onToggle} /></td>
+      <td><span class="sz-link" onClick=${onExpand}>${cluster.title}</span>
+        ${cluster.family_key && cluster.family_key.startsWith('distilled:') ? html` <span class="dim" style="font-size:10.5px">· distilled</span>` : null}
+      </td>
+      <td class="mono">${cluster.sessions}</td>
+      <td><span class="dim" style="font-size:12px">${cluster.rung} · ${RUNG_LABELS[cluster.rung] || ''}</span></td>
+      <td class="mono" style="text-align:right;color:var(--accent)">~${fmtTokens(tokens)} tok <span class="estimated-tag" title="occurrences x a conservative per-turn token cost — review before applying">est.</span></td>
+      <td><span class="rev-state staged">pending</span></td>
+    </tr>`;
+}
+
+// The card's Approve flow: preview -> (optional active-session warning ->
+// "apply anyway") -> write. Scope + target are ALWAYS human-editable before
+// Approve (§7 — repo-identity is noisy; never trust the suggestion blindly).
+function PotholeApplyModal({ cluster, onClose, onApplied }) {
+  const [scope, setScope] = useState('project');
+  const [target, setTarget] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [warning, setWarning] = useState(null);   // active-session 409 text — offers "apply anyway"
+  const [result, setResult] = useState(null);      // the applied record, once written
+
+  useEffect(() => {
+    if (!cluster) return;
+    setScope(cluster.scope || 'project');
+    setTarget(cluster.suggested_target || '');
+    setBusy(false); setError(null); setWarning(null); setResult(null);
+  }, [cluster && cluster.signature]);
+
+  if (!cluster) return null;
+
+  const doApprove = async (force) => {
+    if (!target.trim()) { setError('enter a target path first'); return; }
+    setBusy(true); setError(null);
+    try {
+      const body = { ...cluster, scope, target_path: target.trim(), go: true, force: !!force };
+      const r = await apiPostOrDetail('/pothole/apply', body);
+      setWarning(null);
+      setResult(r.record);
+      onApplied && onApplied(r.record);
+    } catch (e) {
+      // The active-session guard refuses via 409 unless force=true — offer
+      // the explicit "apply anyway" the spec calls for, instead of a bare error.
+      if (e.status === 409 && /active session/.test(e.message || '')) {
+        setWarning(e.message);
+      } else {
+        setError(e.message || String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return html`
+    <div class="cur-overlay" onClick=${onClose}>
+      <div class="cur-modal" onClick=${e => e.stopPropagation()}>
+        <div class="cur-modal-head">
+          <span class="cur-modal-title">${cluster.title}</span>
+          <span class=${'rev-state ' + (result ? 'applied' : 'staged')} style="margin-left:6px">${result ? 'applied' : 'pending'}</span>
+          <button class="cur-modal-x" onClick=${onClose} title="Close">✕</button>
+        </div>
+        <div class="cur-modal-body">
+          <div style="font-size:12.5px;margin-bottom:10px">
+            <b>${cluster.sessions}</b> distinct sessions · <b>${cluster.occurrences}</b> occurrences ·
+            spread across <b>${(cluster.repos || []).length}</b> repo${(cluster.repos || []).length === 1 ? '' : 's'} ·
+            rung ${cluster.rung} (${RUNG_LABELS[cluster.rung] || ''})
+          </div>
+          <div class="opt-section" style="margin:0 0 14px">
+            <div class="opt-title" style="font-size:13px">Proposed fix</div>
+            <div class="sz-note" style="margin-top:4px">${cluster.proposed_fix}</div>
+          </div>
+          <div class="opt-section" style="margin:0 0 6px">
+            <div class="opt-title" style="font-size:13px">Evidence — repro sessions</div>
+            ${(cluster.examples || []).map((ex, i) => html`
+              <div class="sz-runrow" key=${i} style="align-items:flex-start">
+                <a class="sz-link" href=${'#/sessions/' + ex.session_id} target="_blank" rel="noopener">${(ex.session_id || '').slice(0, 12)}</a>
+                <span class="dim" style="font-size:12px">${ex.repo}${ex.ts ? ' · ' + ex.ts.slice(0, 16).replace('T', ' ') : ''}</span>
+                <pre class="rev-diff" style="margin:4px 0 0;white-space:pre-wrap;font-size:11.5px;flex-basis:100%">${ex.snippet}</pre>
+              </div>`)}
+            ${(!cluster.examples || cluster.examples.length === 0) ? html`<div class="dim" style="font-size:12.5px">No example sessions captured.</div>` : null}
+          </div>
+
+          ${!result ? html`
+            <div class="opt-section" style="margin:0 0 6px">
+              <div class="opt-title" style="font-size:13px">Where to write it <span class="dim" style="font-weight:400">— repo-identity is noisy; confirm before approving</span></div>
+              <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+                <select class="rename-input" style="width:160px" value=${scope} onChange=${e => setScope(e.target.value)}>
+                  <option value="project">project</option>
+                  <option value="user-global">user-global</option>
+                </select>
+                <input class="rename-input" style="flex:1;min-width:280px" value=${target}
+                  placeholder="/absolute/path/to/target"
+                  onInput=${e => setTarget(e.target.value)} />
+              </div>
+              ${ENFORCEMENT_RUNGS.has(cluster.rung) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">Rung ${cluster.rung} writes a hook, DISABLED by default — it will not run until you separately confirm "Enable enforcement".</div>` : null}
+            </div>
+          ` : html`
+            <div class="opt-section" style="margin:0 0 6px">
+              <div class="opt-title" style="font-size:13px">Written to</div>
+              <div class="sz-note" style="margin-top:4px"><code>${result.target_path}</code>${result.git_commit ? html` · committed <code>${result.git_commit.slice(0, 8)}</code>` : ' · backed up (not a git repo)'}</div>
+            </div>
+          `}
+
+          ${warning ? html`<div class="opt-caveat" style="color:var(--warn)">${warning} <span class="sz-link" onClick=${() => doApprove(true)}>Apply anyway →</span></div>` : null}
+          ${error ? html`<div class="opt-caveat" style="color:var(--error)">${error}</div>` : null}
+        </div>
+        <div class="cur-modal-foot">
+          ${!result ? html`
+            <button class="cur-btn primary" disabled=${busy} onClick=${() => doApprove(false)}>${busy ? 'Applying…' : 'Approve →'}</button>
+          ` : html`<span class="dim" style="font-size:12px">Applied. Manage enforcement/revert from the Applied section below.</span>`}
+          <button class="cur-btn" style="margin-left:auto" onClick=${onClose}>Close</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+// The Applied section: what Approve already wrote, plus its one-step Revert
+// and (enforcement rungs only) the explicit Enable/Disable toggle.
+function AppliedFixRow({ rec, onChanged }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [confirming, setConfirming] = useState(false);
+
+  const call = async (fn) => {
+    setBusy(true); setError(null);
+    try { await fn(); onChanged && onChanged(); }
+    catch (e) { setError(e.message || String(e)); }
+    finally { setBusy(false); setConfirming(false); }
+  };
+
+  const enforcement = rec.enforcement;
+  const isEnforcement = ENFORCEMENT_RUNGS.has(rec.rung);
+
+  return html`
+    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:8px;width:100%">
+        <span style="font-weight:500">${rec.title}</span>
+        <span class="dim" style="font-size:11px">rung ${rec.rung} · ${RUNG_LABELS[rec.rung] || rec.kind}</span>
+        <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
+        ${isEnforcement && rec.state === 'applied' ? html`<span class="dim" style="font-size:11px">· enforcement ${enforcement && enforcement.enabled ? 'ENABLED' : 'disabled'}</span>` : null}
+      </div>
+      <div class="dim" style="font-size:12px"><code>${rec.target_path}</code> · applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}${rec.git_commit ? html` · <code>${rec.git_commit.slice(0, 8)}</code>` : ''}</div>
+      ${rec.state === 'applied' ? html`<${VerifyLine} verify=${rec.verify} rung=${rec.rung} />` : null}
+      ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
+      <div style="display:flex;gap:10px;align-items:center">
+        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
+        ${isEnforcement && rec.state === 'applied' && !(enforcement && enforcement.enabled) ? (
+          confirming
+            ? html`<span style="color:var(--warn);font-size:12px">This intercepts your tool calls on every matching call. <span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/enable`, { confirm: true }))}>Confirm enable →</span> <span class="sz-link" onClick=${() => setConfirming(false)}>cancel</span></span>`
+            : html`<span class="sz-link" onClick=${() => setConfirming(true)}>Enable enforcement…</span>`
+        ) : null}
+        ${isEnforcement && rec.state === 'applied' && enforcement && enforcement.enabled ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/disable`, {}))}>Disable enforcement</span>` : null}
+      </div>
+    </div>`;
+}
+
+function ReviewInboxView({ params }) {
+  const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
+  const [dismissed, setDismissed] = useState(() => loadDismissedPotholes());
+  const [checked, setChecked] = useState(() => new Set());
+  const [modalSig, setModalSig] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [applied, setApplied] = useState([]);
+  const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
+  const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api('/pothole/proposals');
+      const f = r.finding || {};
+      setD({
+        loading: false, error: null, status: r.status, computedAt: r.computed_at,
+        clusters: f.clusters || [], sessionsScanned: f.sessions_scanned,
+        failuresExamined: f.failures_examined, estTokens: f.estimated_recoverable_tokens,
+      });
+    } catch (e) {
+      setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
+    }
+  }, []);
+
+  const loadApplied = useCallback(async () => {
+    try {
+      const r = await api('/pothole/applied');
+      setApplied(r.applied || []);
+      setLedger(r.ledger || null);
+    } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
+  }, []);
+
+  useEffect(() => {
+    load(); loadApplied();
+    // Light poll while a background pass may be computing (or right after a
+    // manual refresh) so the empty/computing state resolves without a reload.
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
+    return () => clearInterval(timer);
+  }, [load, loadApplied]);
+
+  const doRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try { await apiPost('/pothole/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
+    setTimeout(() => { setRefreshing(false); load(); }, 1500);
+  }, [load]);
+
+  const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
+  const potholeCount = visible.length;
+  const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
+  const dismissChecked = () => {
+    const next = new Set([...dismissed, ...checked]);
+    setDismissed(next); saveDismissedPotholes(next);
+    setChecked(new Set());
+  };
+  const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
+
+  const onApplied = (record) => {
+    setAppliedSigs(s => new Set([...s, record.signature]));
+    loadApplied();
+  };
+
+  return html`
+    <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
+    <div class="sz-note">Pothole fixes the self-improve loop's cross-session detector finds land here for review — each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung — you confirm the scope + target first; <b>Dismiss</b> hides a row locally (this browser only — it is not sent to the server).</div>
+
+    <div class="cur-listhead">
+      <span>
+        ${potholeCount} pending · <b style="color:var(--warn)">${potholeCount}</b> potholes · <b style="color:var(--accent)">0</b> strategies
+        ${d.computedAt ? html` · <span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
+        ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
+      </span>
+      <span class="sz-link" onClick=${doRefresh}>${refreshing || d.status === 'computing' ? 'scanning…' : 'Rescan now'}</span>
+    </div>
+    <div class="cur-listbox">
+      <table class="cur-table">
+        <thead><tr><th style="width:26px"></th><th>Signature</th><th>Sessions</th><th>Rung</th><th style="text-align:right">Est. savings</th><th>Status</th></tr></thead>
+        <tbody>
+          ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
+          ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
+          ${!d.error && !d.loading && d.status === 'never_run' ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No scan has run yet — click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</td></tr>` : null}
+          ${!d.error && !d.loading && d.status !== 'never_run' && potholeCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</td></tr>` : null}
+          ${!d.error && !d.loading ? visible.map(c => html`<${PotholeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
+        </tbody>
+      </table>
+    </div>
+    <div class="cur-addbar">
+      <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
+      <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
+    </div>
+
+    ${applied.length > 0 ? html`
+      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
+      <${CompoundLedgerSummary} ledger=${ledger} />
+      <div class="cur-listbox" style="margin-top:8px">
+        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${loadApplied} />`)}
+      </div>
+    ` : null}
+
+    <${PotholeApplyModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} onApplied=${onApplied} />
+  `;
+}
+
 function DashboardView({ params }) {
   const since = readParam(params, 'since', '30d', validSince);
   // Preserve the explorer's params (metric/group_by/stack/chart/filters) when
@@ -7466,7 +7782,7 @@ function DashboardView({ params }) {
       // full cost history — that user upgrading to review past spend must NOT
       // see "No data yet" (the front door was gating purely on active agents and
       // returning before /cost was ever fetched — issue: historical-only empty).
-      const [cost, status, compare, opt, al, drift, traces] = await Promise.all([
+      const [cost, status, compare, opt, al, drift, traces, pothole] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
         api('/status').catch(() => ({ agents: [] })),
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
@@ -7474,6 +7790,7 @@ function DashboardView({ params }) {
         api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
         api('/drift').catch(() => ({ agents: [] })),
         api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
+        api('/pothole/proposals').catch(() => ({ finding: null })),
       ]);
       // "No data yet" only when there is genuinely NO telemetry: no cost history
       // AND no tokens AND no sessions/agents AND no traces. Historical cost or
@@ -7483,7 +7800,8 @@ function DashboardView({ params }) {
       const hasTraces = !!(traces.traces && traces.traces.length);
       const empty = !hasCost && !hasAgents && !hasTraces;
       setD({ loading: false, empty, error: null, cost, compare, opt,
-        alerts: al.alerts || [], drift, traces: traces.traces || [] });
+        alerts: al.alerts || [], drift, traces: traces.traces || [],
+        pendingFixes: ((pothole && pothole.finding && pothole.finding.clusters) || []).length });
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -7542,7 +7860,7 @@ function DashboardView({ params }) {
     </div>
     ${framing && framing.qualifier_text ? html`<div class="qualifier">${framing.qualifier_text}</div>` : null}
 
-    ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet — TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and your spend, waste, and health show up here.</p></div>`
+    ${d.empty ? html`<div class="card" style="max-width:560px"><div class="card-header">No data yet. TokenJam is listening.</div><p style="color:var(--text-dim);font-size:13px;margin:8px 0 0">Run an agent (or <code>tj demo retry-loop</code>) and the recurring mistakes, spend, and health show up here.</p></div>`
       : html`
         <!-- Triage band: recoverable waste + health. Spend is NOT shown here —
              it lives once, in the explorer's Spend KPI tile + chart below. -->
@@ -7575,6 +7893,8 @@ function DashboardView({ params }) {
               <div class="dash-col">
                 <div class="band-label">Health at a glance</div>
                 <div class="tile-grid compact">
+                  <${HealthTile} label="Pending fixes" value=${d.pendingFixes || 0} attention=${(d.pendingFixes || 0) > 0} href="#/review"
+                    sub="self-improve loop — review inbox" />
                   <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
                     href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
                   <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
@@ -7594,6 +7914,16 @@ function DashboardView({ params }) {
   `;
 }
 
+// Two lenses, one router (self-improve-loop SPEC.md §12): Improve is the
+// Claude-Code wedge (review inbox, dashboard, session monitoring), Observe is
+// the SDK/observability suite. Views not listed default to 'improve' — every
+// existing view still renders, this only decides which nav group frames it.
+const VIEW_LENS = {
+  review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
+  traces: 'observe', cost: 'observe', analytics: 'observe', alerts: 'observe', drift: 'observe',
+  optimize: 'observe', budget: 'observe',
+};
+
 // ============================
 // App Router
 // ============================
@@ -7607,18 +7937,26 @@ function App() {
   }, []);
 
   // Reflect the default route in the URL bar without a render-time redirect.
-  // getRoute() already defaults to 'dashboard', so the first render shows the
-  // Dashboard; this just makes the address bar say so (replaceState = no extra
-  // history entry, no hashchange race that left the view blank — #132).
+  // getRoute() already defaults to 'review' (Improve lens home), so the first
+  // render shows the Review inbox; this just makes the address bar say so
+  // (replaceState = no extra history entry, no hashchange race that left the
+  // view blank — #132).
   useEffect(() => {
     if (!location.hash || location.hash === '#/') {
-      history.replaceState(null, '', '#/dashboard');
+      history.replaceState(null, '', '#/review');
     }
   }, []);
 
-  // Update active nav link + reveal nested children of the active section.
+  // Update active nav link + reveal nested children of the active section +
+  // keep the Improve/Observe lens pill in sync with the current route (self-
+  // improve-loop SPEC.md §12 — two lenses, one router; a direct link or
+  // back-nav into the other lens's view must flip the pill, not just the page).
   useEffect(() => {
     const view = route.view, param = route.param || '';
+    const lens = VIEW_LENS[view] || 'improve';
+    const sidebar = document.querySelector('.sidebar');
+    if (sidebar) sidebar.dataset.lens = lens;
+    document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
     document.querySelectorAll('.nav-link').forEach(el => {
       const v = el.dataset.view || '';
       if (el.classList.contains('nav-child')) {
@@ -7636,6 +7974,8 @@ function App() {
 
   const p = route.params;
   switch (route.view) {
+    // Improve lens home — the self-improve loop's Approve stage (SPEC.md §12).
+    case 'review': return html`<${ReviewInboxView} params=${p} />`;
     // Overview retired — the Dashboard's triage band subsumes it. Lingering
     // #/overview bookmarks/links fall through to the Dashboard.
     case 'overview':
@@ -7698,6 +8038,23 @@ fetch('/api/v1/version')
       apply(pref);
     });
     mql.addEventListener('change', function () { if (pref === 'system') apply(pref); });
+  })();
+</script>
+<script>
+  // Lens pill: clicking switches the sidebar to that lens's default route.
+  // App()'s route effect (module script above) is the source of truth for
+  // which lens is actually shown — it re-syncs the pill + nav-link visibility
+  // on every hashchange, so this handler only needs to navigate.
+  (function () {
+    var LENS_HOME = { improve: '#/review', observe: '#/traces' };
+    document.querySelectorAll('.lens-btn').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var lens = btn.dataset.lens;
+        var sidebar = document.querySelector('.sidebar');
+        if (sidebar && sidebar.dataset.lens === lens) return;
+        location.hash = LENS_HOME[lens] || '#/review';
+      });
+    });
   })();
 </script>
 </body>

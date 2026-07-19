@@ -135,33 +135,18 @@ def _extract_titles(result: str, valid_ns: set[int]) -> dict[int, str]:
     return titles
 
 
-def distill_titles(
-    asks: list[dict],
-    *,
-    model: str = "haiku",
-    timeout: int = DEFAULT_TIMEOUT,
-) -> dict[int, str]:
-    """Distill a crisp title for each ask outcome via the local ``claude`` CLI.
+def _invoke_claude(prompt: str, *, model: str, timeout: int) -> str | None:
+    """Shell out to the local ``claude`` CLI with ``prompt`` on stdin; return its
+    ``result`` string, or ``None`` on any failure (missing CLI, non-zero exit,
+    timeout, unparseable envelope). Never raises.
 
-    Args:
-        asks: ``[{"n": int, "outcome": str}, ...]`` — only work asks with
-            non-empty outcomes; the caller is responsible for that filtering.
-        model: ``claude`` model alias to use (default ``"haiku"`` — cheapest).
-        timeout: wall-clock budget in seconds for the CLI call.
-
-    Returns:
-        ``{n: title}`` (int keys). Returns ``{}`` on any failure — ``claude`` not
-        found, non-zero exit, timeout, or unparseable output. Never raises.
+    Shared by every distill entry point (title distillation, pothole-cluster
+    naming, …) so the pinned invocation recipe — cheapest model path, neutral
+    cwd, stdin-not-argv prompt — lives in exactly one place.
     """
-    if not asks:
-        return {}
-
     claude_bin = _resolve_claude()
     if claude_bin is None:
-        return {}
-
-    prompt = _build_prompt(asks)
-    valid_ns = {int(ask["n"]) for ask in asks}
+        return None
 
     argv = [
         claude_bin,
@@ -186,18 +171,46 @@ def distill_titles(
             cwd=tempfile.gettempdir(),
         )
     except (subprocess.TimeoutExpired, OSError):
-        return {}
+        return None
 
     if proc.returncode != 0 or not proc.stdout:
-        return {}
+        return None
 
     try:
         envelope = json.loads(proc.stdout)
     except (json.JSONDecodeError, ValueError):
-        return {}
+        return None
 
     result = envelope.get("result") if isinstance(envelope, dict) else None
-    if not isinstance(result, str):
+    return result if isinstance(result, str) else None
+
+
+def distill_titles(
+    asks: list[dict],
+    *,
+    model: str = "haiku",
+    timeout: int = DEFAULT_TIMEOUT,
+) -> dict[int, str]:
+    """Distill a crisp title for each ask outcome via the local ``claude`` CLI.
+
+    Args:
+        asks: ``[{"n": int, "outcome": str}, ...]`` — only work asks with
+            non-empty outcomes; the caller is responsible for that filtering.
+        model: ``claude`` model alias to use (default ``"haiku"`` — cheapest).
+        timeout: wall-clock budget in seconds for the CLI call.
+
+    Returns:
+        ``{n: title}`` (int keys). Returns ``{}`` on any failure — ``claude`` not
+        found, non-zero exit, timeout, or unparseable output. Never raises.
+    """
+    if not asks:
+        return {}
+
+    prompt = _build_prompt(asks)
+    valid_ns = {int(ask["n"]) for ask in asks}
+
+    result = _invoke_claude(prompt, model=model, timeout=timeout)
+    if result is None:
         return {}
 
     return _extract_titles(result, valid_ns)
