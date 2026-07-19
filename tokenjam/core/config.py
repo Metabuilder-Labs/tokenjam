@@ -235,6 +235,32 @@ class SummarizeConfig:
 
 
 @dataclass
+class LoopConfig:
+    """`[loop]` — the self-improve loop's workspace binding.
+
+    `transcript_path` points the loop at a session-transcript root other than
+    Claude Code's `~/.claude/projects`. A Claude Agent SDK app writes its own
+    transcripts wherever the app puts them, so without this the loop simply
+    can't see it: the detector globs the projects root and finds nothing.
+
+    Setting it also decides which lane an agent lands in, and that seam is
+    load-bearing for honesty:
+
+      * a transcript root + a repo cwd = a WORKSPACE agent. The loop can write a
+        fix into that repo's own `.claude/` (note / skill / hook, human-gated and
+        reversible), so it gets the full detect -> propose -> approve -> apply ->
+        verify path.
+      * no workspace (a plain OTel service) = the ADVISE lane. Detect + advise +
+        verify only, off stored spans; no auto-apply path exists at all. See
+        `core/optimize/pothole_otel.py`.
+
+    `None` (the default) keeps the historical behaviour: `resolve_projects_root`
+    falls back to `TJ_CLAUDE_PROJECTS_ROOT` and then `~/.claude/projects`.
+    """
+    transcript_path: str | None = None
+
+
+@dataclass
 class TjConfig:
     version:  str
     defaults: DefaultsConfig          = field(default_factory=DefaultsConfig)
@@ -247,6 +273,7 @@ class TjConfig:
     proxy:    ProxyConfig             = field(default_factory=ProxyConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
     summarize: SummarizeConfig        = field(default_factory=SummarizeConfig)
+    loop:     LoopConfig              = field(default_factory=LoopConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     policies: list[PolicyConfig]      = field(default_factory=list)
     # Manual session_id -> human label overrides ([session_labels] in TOML).
@@ -482,6 +509,13 @@ def _parse(raw: dict) -> TjConfig:
         tool_outputs=capture_raw.get("tool_outputs", False),
     )
 
+    # [loop] — optional transcript root for non-Claude-Code workspace agents
+    # (a Claude Agent SDK app). Absent/None keeps the env + ~/.claude default.
+    loop_raw = raw.get("loop", {})
+    loop_cfg = LoopConfig(
+        transcript_path=loop_raw.get("transcript_path") or None,
+    )
+
     summarize = SummarizeConfig(
         api_model=raw.get("summarize", {}).get("api_model"),
         allow_outbound_run=bool(raw.get("summarize", {}).get("allow_outbound_run", False)),
@@ -534,6 +568,7 @@ def _parse(raw: dict) -> TjConfig:
         proxy=proxy,
         capture=capture,
         summarize=summarize,
+        loop=loop_cfg,
         budgets=budgets,
         policies=policies,
         session_labels=dict(raw.get("session_labels", {})),

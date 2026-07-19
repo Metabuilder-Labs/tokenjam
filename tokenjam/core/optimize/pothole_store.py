@@ -99,7 +99,18 @@ def recompute_now(
         return None
     _COMPUTING.set()
     try:
-        finding = compute_pothole_finding(conn)
+        # `[loop].transcript_path` lets a Claude Agent SDK app point the loop at
+        # its OWN transcript root instead of ~/.claude/projects. None keeps the
+        # historical env/default resolution.
+        projects_root = None
+        if config is not None:
+            try:
+                from tokenjam.core.transcript import loop_transcript_root
+
+                projects_root = loop_transcript_root(config)
+            except Exception:
+                projects_root = None
+        finding = compute_pothole_finding(conn, projects_root=projects_root)
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to
         # the real ~/.tj — see default_cache_path).
@@ -108,7 +119,7 @@ def recompute_now(
             try:
                 from tokenjam.core.optimize import pothole_verify
 
-                pothole_verify.rescan_all(config, conn)
+                pothole_verify.rescan_all(config, conn, projects_root=projects_root)
             except Exception:
                 pass   # best-effort — a verify failure never sinks the detector's own cache write
         return result
