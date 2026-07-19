@@ -7,8 +7,9 @@
  * `npx <tool>` first. `npx tokenjam` here resolves a Python launcher with NO pip env,
  * NO daemon, NO onboarding — it shells out to the Python CLI via the first
  * available runner and hands every argument straight through. Bare `npx tokenjam`
- * (no subcommand) routes to `tj quickstart`: where your Claude Code quota goes,
- * from the same ~/.claude/projects/*.jsonl files ccusage reads, in one command.
+ * (no subcommand) prints the zero-install report: where your Claude Code quota
+ * goes, from the same ~/.claude/projects/*.jsonl files ccusage reads, in one
+ * command.
  *
  * Runner preference (first that exists wins):
  *   1. `uvx --from tokenjam tj …`  — fully ephemeral, downloads nothing global
