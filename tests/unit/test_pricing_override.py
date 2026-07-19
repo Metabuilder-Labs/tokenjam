@@ -21,6 +21,7 @@ def _isolate_pricing(monkeypatch, tmp_path):
     empty dir so a project-local tj.toml/.tj/config.toml [pricing] section
     can't leak in either (config discovery walks the cwd)."""
     monkeypatch.delenv(pricing.USER_PRICING_ENV, raising=False)
+    monkeypatch.delenv("TJ_CONFIG", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))          # POSIX
     monkeypatch.setenv("USERPROFILE", str(tmp_path))   # Windows Path.home()
     monkeypatch.chdir(tmp_path)
@@ -284,6 +285,59 @@ def test_config_pricing_merges_with_user_file_and_wins(tmp_path, monkeypatch):
     # Each source's unique entries survive the merge.
     assert pricing.get_rates("unknown", "file-only-model").input_per_mtok == 2.0
     assert pricing.get_rates("unknown", "config-only-model").input_per_mtok == 3.0
+
+
+def test_config_pricing_section_tj_config_env(tmp_path, monkeypatch):
+    """TJ_CONFIG points at a config whose [pricing] overrides must take effect
+    (#345). Without env-aware discovery, the pricing loader walks only the
+    default search paths and silently drops the user's rate overrides."""
+    custom = tmp_path / "custom.toml"
+    _write(
+        custom,
+        'version = "1"\n'
+        "[pricing.models]\n"
+        '"claude-haiku-4-5" = { input_per_mtok = 0.11, output_per_mtok = 0.12 }\n',
+    )
+    monkeypatch.setenv("TJ_CONFIG", str(custom))
+    pricing.clear_pricing_cache()
+
+    rates = pricing.get_rates("unknown", "claude-haiku-4-5")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.11
+    assert rates.output_per_mtok == 0.12
+
+
+def test_config_pricing_section_tj_config_wins_over_search_path(tmp_path, monkeypatch):
+    """TJ_CONFIG takes precedence over the default search paths, matching
+    load_config() resolution order (#345)."""
+    _write_main_config(
+        tmp_path,
+        '[pricing.models]\n"claude-haiku-4-5" = { input_per_mtok = 0.05, output_per_mtok = 0.06 }\n',
+    )
+    custom = tmp_path / "elsewhere.toml"
+    _write(
+        custom,
+        'version = "1"\n'
+        "[pricing.models]\n"
+        '"claude-haiku-4-5" = { input_per_mtok = 0.21, output_per_mtok = 0.22 }\n',
+    )
+    monkeypatch.setenv("TJ_CONFIG", str(custom))
+    pricing.clear_pricing_cache()
+
+    rates = pricing.get_rates("unknown", "claude-haiku-4-5")
+    assert rates is not None
+    assert rates.input_per_mtok == 0.21
+
+
+def test_config_pricing_section_tj_config_missing_degrades(tmp_path, monkeypatch):
+    """A TJ_CONFIG pointing at a nonexistent file degrades to packaged rates
+    instead of raising (#345)."""
+    monkeypatch.setenv("TJ_CONFIG", str(tmp_path / "nope.toml"))
+    pricing.clear_pricing_cache()
+
+    rates = pricing.get_rates("anthropic", "claude-haiku-4-5")
+    assert rates is not None
+    assert rates.input_per_mtok == 1.00
 
 
 # --- Packaged current-Anthropic-model coverage (issue #8) -------------------
