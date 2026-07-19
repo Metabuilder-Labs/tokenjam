@@ -757,6 +757,13 @@ class PotholeCluster:
     # unknown (multi-repo / user-global / no cwd could be resolved).
     repo_cwd:                     str = ""
     suggested_target:             str = ""
+    # ADVISE lane (workspace-less agents). True when every contributing repo is
+    # an agent tokenjam has no workspace to write into (an SDK/OTel service, not
+    # a checkout) — so there is no apply path at all: the card carries a
+    # recommendation the user applies themselves, `suggested_target` stays "",
+    # and Verify runs off spans instead of transcripts. See
+    # `core/optimize/pothole_otel.py`.
+    advise_only:                  bool = False
 
 
 @dataclass
@@ -788,6 +795,7 @@ def build_proposals(
     min_sessions: int = MIN_RECURRING_SESSIONS,
     doc_text: str = "",
     repo_cwd_map: dict[str, str] | None = None,
+    advise_only_repos: set[str] | None = None,
 ) -> tuple[list[PotholeCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
     ``(proposals, dropped_codified_count)``.
@@ -795,6 +803,11 @@ def build_proposals(
     ``repo_cwd_map`` (repo label -> a representative cwd) is optional,
     best-effort enrichment used only to pre-fill the Apply stage's suggested
     target path (Phase 2) — clustering itself needs none of it.
+
+    ``advise_only_repos`` names the agents tokenjam has NO workspace for (the
+    OTel lane — see ``core/optimize/pothole_otel.py``). A cluster whose repos are
+    all in that set is marked ``advise_only`` and gets NO suggested target: there
+    is nothing to apply into, so the card must not imply an apply path exists.
     """
     from tokenjam.core.optimize.pothole_apply import default_target_path, slugify
 
@@ -823,13 +836,23 @@ def build_proposals(
         ]
 
         scope = _scope_for(cluster.repos)
-        repo_cwd = repo_cwd_map.get(repos[0], "") if len(repos) == 1 else ""
-        try:
-            suggested_target = default_target_path(
-                rung, scope, repo_cwd, slugify(cluster.title),
-            )
-        except Exception:
-            suggested_target = ""   # never let a bad path computation sink the proposal
+        # Workspace-less (OTel) clusters have nowhere to write: no cwd, no
+        # target, and the card must not offer an apply path it can't honor.
+        advise_only = bool(advise_only_repos) and all(
+            r in advise_only_repos for r in repos
+        )
+        repo_cwd = "" if advise_only else (
+            repo_cwd_map.get(repos[0], "") if len(repos) == 1 else ""
+        )
+        if advise_only:
+            suggested_target = ""
+        else:
+            try:
+                suggested_target = default_target_path(
+                    rung, scope, repo_cwd, slugify(cluster.title),
+                )
+            except Exception:
+                suggested_target = ""   # never let a bad path computation sink the proposal
 
         proposals.append(PotholeCluster(
             signature=cluster.signature,
@@ -846,6 +869,7 @@ def build_proposals(
             novel=True,
             repo_cwd=repo_cwd,
             suggested_target=suggested_target,
+            advise_only=advise_only,
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
@@ -863,9 +887,19 @@ def analyze_potholes(
     distill_cache_dir: Path | None = None,
     codified_doc_text: str = "",
     repo_cwd_map: dict[str, str] | None = None,
+    extra_failures: list[FailureEpisode] | None = None,
+    advise_only_repos: set[str] | None = None,
 ) -> PotholeFinding:
     """Full pipeline over an explicit session list — the pure core the
-    registry entry point and the on-disk cache job both call. Never raises."""
+    registry entry point and the on-disk cache job both call. Never raises.
+
+    ``extra_failures`` are episodes extracted somewhere other than an on-disk
+    transcript — today the OTel lane's failing spans (see
+    ``core/optimize/pothole_otel.py``). They join the SAME clustering pass, so a
+    signature that recurs across both lanes clusters as one pothole.
+    ``advise_only_repos`` is forwarded to ``build_proposals`` to mark the
+    workspace-less clusters.
+    """
     all_failures: list[FailureEpisode] = []
     scanned = 0
     for session_id, repo in sessions:
@@ -876,6 +910,12 @@ def analyze_potholes(
         scanned += 1
         all_failures.extend(failures)
 
+    if extra_failures:
+        all_failures.extend(extra_failures)
+        # Span-sourced sessions are real scanned exposure too; counting them
+        # keeps sessions_scanned honest against the recurrence denominator.
+        scanned += len({f.session_id for f in extra_failures})
+
     raw_clusters = cluster_failures(all_failures)
     recurring = _recurring(raw_clusters, min_sessions)
     distilled = apply_distill_to_residual(
@@ -885,7 +925,7 @@ def analyze_potholes(
 
     proposals, dropped = build_proposals(
         distilled, min_sessions=min_sessions, doc_text=codified_doc_text,
-        repo_cwd_map=repo_cwd_map,
+        repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
 
@@ -962,9 +1002,32 @@ def compute_pothole_finding(
     optionally pre-filtered to ``since`` when the caller wants an incremental
     scan. Heavy (tens of seconds over a full local corpus) — callers that
     serve this over HTTP MUST cache the result, not compute it per-request.
+
+    TWO LANES. On-disk transcripts cover the workspace agents; when ``conn`` is
+    given, failing spans from NON-coding agents are folded into the same
+    clustering pass so SDK/OTel services are no longer invisible to the
+    detector (``core/optimize/pothole_otel.py``). Their clusters come back
+    ``advise_only``: detect and advise, never apply.
     """
     root = resolve_projects_root(projects_root)
     repo_map = _repo_map_from_db(conn) if conn is not None else {}
+
+    # The OTel lane. Best-effort: a failure here must never sink the (already
+    # working) transcript scan.
+    span_failures: list[FailureEpisode] = []
+    advise_only_repos: set[str] = set()
+    if conn is not None:
+        try:
+            from tokenjam.core.optimize.pothole_otel import (
+                extract_span_failures,
+                non_coding_agent_ids,
+            )
+
+            span_failures = extract_span_failures(conn, since)
+            advise_only_repos = non_coding_agent_ids(conn)
+        except Exception:
+            span_failures = []
+            advise_only_repos = set()
 
     paths = sorted(root.rglob("*.jsonl")) if root.exists() else []
     sessions: list[tuple[str, str]] = []
@@ -991,6 +1054,7 @@ def compute_pothole_finding(
     return analyze_potholes(
         sessions, projects_root=root, codified_doc_text=doc_text,
         distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
+        extra_failures=span_failures, advise_only_repos=advise_only_repos,
     )
 
 
