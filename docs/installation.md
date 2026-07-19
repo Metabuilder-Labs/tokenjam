@@ -9,28 +9,23 @@ daemon** — over the logs you already have. The recommended way to actually run
 install plus `tj onboard` (below):
 
 ```bash
-npx tokenjam                      # or:  uvx tokenjam
+npx tokenjam
 ```
 
-This runs `tj quickstart`: it reads your existing Claude Code sessions from
+Bare `npx tokenjam` reads your existing Claude Code sessions from
 `~/.claude/projects/*.jsonl` (the same files [ccusage](https://github.com/ryoppippi/ccusage)
 reads) into a throwaway in-memory database and prints your quota composition
 (re-reading context vs. net-new work) plus a session timeline. Nothing is
 written to disk and no background process starts.
 
-**How the launchers resolve:**
-
-- `npx tokenjam` runs the [`tokenjam` npm wrapper](https://www.npmjs.com/package/tokenjam) — a thin
-  launcher that shells out to the Python CLI via the first available runner
-  (`uvx` → `pipx run` → an installed `tj`). All arguments pass straight through,
-  so `npx tokenjam quickstart --since 7d`, `npx tokenjam optimize`, etc. all work,
-  including `npx tokenjam onboard`, which detects the ephemeral runner and offers
-  to convert itself into a permanent install.
-- `uvx tokenjam` runs the Python CLI directly with [uv](https://docs.astral.sh/uv/)'s
-  ephemeral runner. (The PyPI package `tokenjam` ships both a `tj` command and a
-  `tokenjam` alias, so `uvx tokenjam` and `uvx --from tokenjam tj` are equivalent —
-  use the longer `--from` form if you're on an older tokenjam release without the
-  alias.)
+**How the launcher resolves:** `npx tokenjam` runs the
+[`tokenjam` npm wrapper](https://www.npmjs.com/package/tokenjam) — a thin launcher
+that shells out to the Python CLI via the first available runner (`uvx` → `pipx run` →
+an installed `tj`). Any explicit args pass straight through, so `npx tokenjam optimize`,
+`npx tokenjam onboard`, etc. all work — `npx tokenjam onboard` detects the ephemeral
+runner and offers to convert itself into a permanent install. (The PyPI package
+`tokenjam` also ships a `tj` command directly, so once installed you can run
+`uvx --from tokenjam tj <command>` or an installed `tj <command>` the same way.)
 
 **Requirements:** a Python runner — `uv` (recommended) or `pipx`. `npx tokenjam` prints
 install guidance if neither is present.
