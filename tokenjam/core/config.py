@@ -217,67 +217,6 @@ class ProviderBudget:
 
 
 @dataclass
-class CapOutputConfig:
-    """`[hooks.output_cap]` — the PostToolUse output-trim hook (`tj hook cap-output`).
-
-    ⚠ MEASURED NEGATIVE — DO NOT ENABLE. This hook is dormant, kept only for
-    provenance. Flipping ``enabled = true`` buys ~+5.6% cost for zero benefit — a
-    latent footgun, not a real option. Two independent measurements killed it:
-
-      1. The REQUIRED A/B gate FAILED. Across 5 trials/arm (sonnet) treatment cost
-         was +5.6% (median $0.833 vs $0.789) and cache-read +2.3% — run-to-run
-         noise, no quota win. Root cause: Claude Code already truncates Bash tool
-         output to ~30 KB *before* the PostToolUse hook ever sees it, so the
-         addressable bloat per call is tiny (~1,206 tok reclaimed ≈ 0.06% of a
-         ~2M-token cache-read footprint) and agents self-mitigate (`| tail`,
-         `grep`, `Read` — which the hook excludes).
-      2. Confirmed live 2026-07-03: Claude Code *natively offloads* a large tool
-         output before it enters model context (a 980 KB Bash output → CC's own
-         `tool-results/` file + a ~2 KB preview), so the hook has nothing left to
-         trim. The thesis is conclusively dead.
-
-    See `.specs/2026-07-02-tj-output-trim-hook-AB-result.md`.
-
-    Mechanically the hook is still safe (fail-open, fully transparent, conservative
-    budget, 58 tests) and remains DEFAULT-OFF opt-in (like `ProxyConfig`) — but
-    "opt-in" here means opting into a measured-negative lever, so leave it off.
-    `tj onboard` does NOT install it on a fresh (disabled) config.
-
-    Fields (retained for the dormant mechanism; inert while disabled):
-      - ``budget_tokens``  — outputs estimated under this (char/4) pass through
-        untouched. Default 4k tok (≈ 16 KB), chosen to sit BELOW Claude Code's
-        own ~30 KB Bash-tool-output cap (measured empirically, CC 2.1.198): a
-        budget above that cap would never fire, since CC head/tail-truncates
-        Bash output before the PostToolUse hook ever sees it. This budget trims
-        CC's already-capped outputs further so the saving compounds across the
-        turns that re-read them as cache.
-      - ``head_lines`` / ``tail_lines`` — lines kept from each end of an
-        over-budget output, with a middle marker between them.
-      - ``smart_errors`` — for test/build commands, prefer keeping error/fail
-        lines so the *signal* survives, not the noise.
-      - ``min_saving_tokens`` — never trim unless it saves at least this much.
-      - ``tools`` — the tool names eligible for trimming (opt a tool in/out).
-      - ``killswitch`` — pass everything through, hook stays installed.
-    """
-    enabled:           bool      = False  # MEASURED NEGATIVE — do not enable (see docstring)
-    budget_tokens:     int       = 4000   # below CC's ~30 KB Bash-output cap
-    head_lines:        int       = 80
-    tail_lines:        int       = 80
-    smart_errors:      bool      = True
-    min_saving_tokens: int       = 500
-    tools:             list[str] = field(
-        default_factory=lambda: ["Bash", "Grep", "Glob", "WebFetch"]
-    )
-    killswitch:        bool      = False
-
-
-@dataclass
-class HooksConfig:
-    """`[hooks.*]` — Claude Code hook integrations tj installs out-of-band."""
-    output_cap: CapOutputConfig = field(default_factory=CapOutputConfig)
-
-
-@dataclass
 class SummarizeConfig:
     """`[summarize]` — config for structure-aware prompt summarization.
 
@@ -296,6 +235,32 @@ class SummarizeConfig:
 
 
 @dataclass
+class LoopConfig:
+    """`[loop]` — the self-improve loop's workspace binding.
+
+    `transcript_path` points the loop at a session-transcript root other than
+    Claude Code's `~/.claude/projects`. A Claude Agent SDK app writes its own
+    transcripts wherever the app puts them, so without this the loop simply
+    can't see it: the detector globs the projects root and finds nothing.
+
+    Setting it also decides which lane an agent lands in, and that seam is
+    load-bearing for honesty:
+
+      * a transcript root + a repo cwd = a WORKSPACE agent. The loop can write a
+        fix into that repo's own `.claude/` (note / skill / hook, human-gated and
+        reversible), so it gets the full detect -> propose -> approve -> apply ->
+        verify path.
+      * no workspace (a plain OTel service) = the ADVISE lane. Detect + advise +
+        verify only, off stored spans; no auto-apply path exists at all. See
+        `core/optimize/pothole_otel.py`.
+
+    `None` (the default) keeps the historical behaviour: `resolve_projects_root`
+    falls back to `TJ_CLAUDE_PROJECTS_ROOT` and then `~/.claude/projects`.
+    """
+    transcript_path: str | None = None
+
+
+@dataclass
 class TjConfig:
     version:  str
     defaults: DefaultsConfig          = field(default_factory=DefaultsConfig)
@@ -307,8 +272,8 @@ class TjConfig:
     api:      ApiConfig               = field(default_factory=ApiConfig)
     proxy:    ProxyConfig             = field(default_factory=ProxyConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
-    hooks:    HooksConfig             = field(default_factory=HooksConfig)
     summarize: SummarizeConfig        = field(default_factory=SummarizeConfig)
+    loop:     LoopConfig              = field(default_factory=LoopConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     policies: list[PolicyConfig]      = field(default_factory=list)
     # Manual session_id -> human label overrides ([session_labels] in TOML).
@@ -544,24 +509,12 @@ def _parse(raw: dict) -> TjConfig:
         tool_outputs=capture_raw.get("tool_outputs", False),
     )
 
-    # [hooks.output_cap] — the dormant PostToolUse output-trim hook. DEFAULT-OFF
-    # and MEASURED NEGATIVE (see CapOutputConfig): a missing section yields a
-    # DISABLED cap, and it should stay disabled — do not enable.
-    hooks_raw = raw.get("hooks", {})
-    cap_raw = hooks_raw.get("output_cap", {})
-    cap_output = CapOutputConfig(
-        enabled=cap_raw.get("enabled", CapOutputConfig.enabled),
-        budget_tokens=int(cap_raw.get("budget_tokens", CapOutputConfig.budget_tokens)),
-        head_lines=int(cap_raw.get("head_lines", CapOutputConfig.head_lines)),
-        tail_lines=int(cap_raw.get("tail_lines", CapOutputConfig.tail_lines)),
-        smart_errors=bool(cap_raw.get("smart_errors", CapOutputConfig.smart_errors)),
-        min_saving_tokens=int(
-            cap_raw.get("min_saving_tokens", CapOutputConfig.min_saving_tokens)
-        ),
-        tools=list(cap_raw.get("tools", ["Bash", "Grep", "Glob", "WebFetch"])),
-        killswitch=bool(cap_raw.get("killswitch", CapOutputConfig.killswitch)),
+    # [loop] — optional transcript root for non-Claude-Code workspace agents
+    # (a Claude Agent SDK app). Absent/None keeps the env + ~/.claude default.
+    loop_raw = raw.get("loop", {})
+    loop_cfg = LoopConfig(
+        transcript_path=loop_raw.get("transcript_path") or None,
     )
-    hooks = HooksConfig(output_cap=cap_output)
 
     summarize = SummarizeConfig(
         api_model=raw.get("summarize", {}).get("api_model"),
@@ -614,8 +567,8 @@ def _parse(raw: dict) -> TjConfig:
         api=api,
         proxy=proxy,
         capture=capture,
-        hooks=hooks,
         summarize=summarize,
+        loop=loop_cfg,
         budgets=budgets,
         policies=policies,
         session_labels=dict(raw.get("session_labels", {})),

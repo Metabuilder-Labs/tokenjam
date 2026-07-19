@@ -1065,12 +1065,35 @@ def resolve_projects_root(override: Path | str | None = None) -> Path:
     return DEFAULT_PROJECTS_ROOT
 
 
+def loop_transcript_root(config: object | None = None) -> Path:
+    """The transcript root the self-improve loop should scan.
+
+    Prefers `[loop].transcript_path` so a Claude Agent SDK app can point the
+    loop at wherever IT writes session transcripts; falls back to
+    ``resolve_projects_root`` (env, then ``~/.claude/projects``) when unset.
+
+    An agent with a transcript root here is a WORKSPACE agent: the loop can
+    propose and apply a fix into its repo. Agents that reach tokenjam only as
+    OTel spans have no root and take the advise-only lane instead (see
+    ``core/optimize/pothole_otel.py``). Never raises — a malformed config
+    degrades to the default root.
+    """
+    try:
+        configured = getattr(getattr(config, "loop", None), "transcript_path", None)
+    except Exception:
+        configured = None
+    if configured:
+        return Path(configured).expanduser()
+    return resolve_projects_root()
+
+
 __all__ = [
     "session_transcript_path",
     "session_transcript_mtime",
     "build_session_story",
     "build_session_asks",
     "resolve_projects_root",
+    "loop_transcript_root",
     "DEFAULT_PROJECTS_ROOT",
     "MAX_STORY_STEPS",
     "MAX_STEP_TEXT_CHARS",
