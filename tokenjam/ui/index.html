@@ -7919,7 +7919,7 @@ function ReviewInboxView({ params }) {
     </div>
 
     ${visibleCost.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize / cache / trim analyzers — advise-only, with verified receipts once you mark one applied</span></div>
+      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers, with verified receipts once you apply one</span></div>
       <div style="margin-top:8px">
         ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
       </div>
