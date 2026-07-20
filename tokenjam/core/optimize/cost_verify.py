@@ -481,10 +481,19 @@ def rescan_all(
 def cost_compound_ledger(records: list[dict[str, Any]]) -> dict[str, Any]:
     """The Applied section's cost summary: total realized dollars across every
     VERIFIED, improved (non-reverted) cost fix, plus a verdict breakdown. The
-    dollar-denominated sibling of ``relearn_verify.compound_ledger``."""
+    dollar-denominated sibling of ``relearn_verify.compound_ledger``.
+
+    The named buckets (``improved`` + ``no_change`` + ``regressed`` +
+    ``insufficient_data``) must always sum to ``verified_count`` — every
+    verdict ``measure_cost_delta`` can produce needs a bucket here, or
+    ``verified_count`` silently outgrows its own breakdown (the deadweight
+    analyzer's ``no_change`` verdict was the first one this ledger hadn't
+    seen before; this bucket closes that gap for it and any future analyzer
+    reusing the same verdict).
+    """
     total_usd = 0.0
     total_tokens = 0
-    verified = improved = regressed = insufficient = 0
+    verified = improved = no_change = regressed = insufficient = 0
     for rec in records:
         if rec.get("state") == "reverted":
             continue
@@ -497,6 +506,8 @@ def cost_compound_ledger(records: list[dict[str, Any]]) -> dict[str, Any]:
             improved += 1
             total_usd += verify.get("realized_usd_delta") or 0.0
             total_tokens += verify.get("realized_tokens_delta") or 0
+        elif verdict == VERDICT_NO_CHANGE:
+            no_change += 1
         elif verdict == VERDICT_REGRESSED:
             regressed += 1
         elif verdict == VERDICT_INSUFFICIENT_DATA:
@@ -506,6 +517,7 @@ def cost_compound_ledger(records: list[dict[str, Any]]) -> dict[str, Any]:
         "total_realized_tokens": total_tokens,
         "verified_count": verified,
         "improved_count": improved,
+        "no_change_count": no_change,
         "regressed_count": regressed,
         "insufficient_data_count": insufficient,
         "estimate_basis": ESTIMATE_BASIS_COST_VERIFY,
