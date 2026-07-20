@@ -236,6 +236,76 @@ def test_insufficient_data_below_exposure_gate(db):
     assert v["realized_usd_delta"] is None
 
 
+# --- Delta-verify: deadweight (C1's "measured" receipt) -----------------------
+
+def _deadweight_target(tmp_path, *, still_present):
+    """A real on-disk config file the verify branch re-reads. ``still_present``
+    controls whether the ORIGINAL detected server entry is still there —
+    the exact still-configured re-check ``server_still_configured`` performs."""
+    import json
+    config_path = tmp_path / ".mcp.json"
+    servers = {"apollo": {}} if still_present else {}
+    config_path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+    return {"server": "apollo", "scope": "project", "source": str(config_path)}
+
+
+def test_deadweight_delta_no_change_when_still_configured(db, tmp_path):
+    # Even with a real drop in the spans, a still-configured server must
+    # read as no_change -- the user hasn't actually removed it yet.
+    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
+          when=MARKER - timedelta(hours=40))
+    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
+          when=MARKER + timedelta(hours=1))
+    target = _deadweight_target(tmp_path, still_present=True)
+    rec = _record("deadweight", target, agent_id="svc-a")
+    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
+    assert v["verdict"] == "no_change"
+    assert v["realized_usd_delta"] is None
+    assert v["realized_tokens_delta"] is None
+    assert "still appears in its configured set" in v["reason"]
+
+
+def test_deadweight_delta_measured_drop_when_removed(db, tmp_path):
+    # pre: 10k input tok/session; post (server removed): 2k input tok/session.
+    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
+          when=MARKER - timedelta(hours=40))
+    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
+          when=MARKER + timedelta(hours=1))
+    target = _deadweight_target(tmp_path, still_present=False)
+    rec = _record("deadweight", target, agent_id="svc-a")
+    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
+    assert v["verdict"] == "improved"
+    assert v["realized_tokens_delta"] > 0
+    assert v["realized_usd_delta"] > 0
+
+
+def test_deadweight_delta_regressed_when_removed_but_no_drop(db, tmp_path):
+    # Removed from config, but per-session input tokens didn't actually
+    # fall -- must surface as regressed, never silently kept as a win.
+    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=8_000,
+          when=MARKER - timedelta(hours=40))
+    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=8_000,
+          when=MARKER + timedelta(hours=1))
+    target = _deadweight_target(tmp_path, still_present=False)
+    rec = _record("deadweight", target, agent_id="svc-a")
+    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
+    assert v["verdict"] == "regressed"
+
+
+def test_deadweight_delta_insufficient_when_removed_but_thin_exposure(db, tmp_path):
+    # Removed from config, but too few post-marker calls for a confident verdict.
+    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
+          when=MARKER - timedelta(hours=40))
+    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
+          when=MARKER + timedelta(hours=1), count=3)
+    target = _deadweight_target(tmp_path, still_present=False)
+    rec = _record("deadweight", target, agent_id="svc-a")
+    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
+    assert v["verdict"] == "insufficient_data"
+    assert v["realized_usd_delta"] is None
+    assert v["realized_tokens_delta"] is None
+
+
 def test_verify_record_writes_ledger_and_outcome(db, cfg):
     from tokenjam.core.loop import create_expectation, list_expectation_runs
 
