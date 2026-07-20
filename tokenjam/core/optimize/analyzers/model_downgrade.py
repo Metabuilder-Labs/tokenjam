@@ -17,6 +17,11 @@ from tokenjam.core.context_diagnostic import (
     load_turn_compositions,
 )
 from tokenjam.core.model_tiers import is_premium_tier
+from tokenjam.core.optimize.analyzers.batch_placement import analyze_batch_placement
+from tokenjam.core.optimize.analyzers.downsize_agents import (
+    thinking_tokens_by_session,
+    build_agent_price_rows,
+)
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.stats import bootstrap_ci
 from tokenjam.core.optimize.types import (
@@ -223,13 +228,18 @@ def analyze_model_downgrade(
     window_total_tokens = 0
     examples: list[DowngradeExample] = []
     suggestions: dict[str, str] = {}
+    # Per-candidate-session rows for the per-agent price arithmetic on the card
+    # (exact per-type tokens at both models' rates). Collected in this same pass
+    # so the card's agent breakdown and the finding's headline always describe
+    # the identical set of sessions.
+    price_candidates: list[dict[str, Any]] = []
     swaps: list[tuple[str, str, str]] = []
     # Per-candidate-session window savings, for the sampling-confidence interval
     # (#308). One value per candidate session = (actual cost − cheaper-model cost).
     per_session_savings: list[float] = []
 
     for row in llm_rows:
-        session_id, trace_id, _agent, start_time, end_time, provider, model, \
+        session_id, trace_id, agent, start_time, end_time, provider, model, \
             in_tok, out_tok, cache_tok, cache_write_tok, cost = row
         # Accumulate window-wide token totals (used for subscription-mode
         # token-share rendering even when the row isn't a candidate).
@@ -265,6 +275,17 @@ def analyze_model_downgrade(
         # This session's recoverable saving (clamped at 0 — a cheaper model
         # never costs more in our candidate set, but guard against pricing noise).
         per_session_savings.append(max(float(cost or 0.0) - alt_unit, 0.0))
+        price_candidates.append({
+            "session_id": str(session_id) if session_id else "",
+            "agent_id": str(agent) if agent else "unknown",
+            "provider": str(provider),
+            "model": str(model),
+            "alt_model": alt,
+            "input_tokens": int(in_tok or 0),
+            "output_tokens": int(out_tok or 0),
+            "cache_tokens": int(cache_tok or 0),
+            "cache_write_tokens": int(cache_write_tok or 0),
+        })
         suggestions[model] = alt
         if (provider, model, alt) not in swaps:
             swaps.append((provider, model, alt))
@@ -308,6 +329,15 @@ def analyze_model_downgrade(
         int(candidate_tokens / window_days * 30.0) if window_days > 0 else 0
     )
 
+    # Per-agent price arithmetic (one row per agent/model group). The thinking
+    # lookup is a separate, best-effort query: most runtimes never report a
+    # thinking token count, and a row without one omits the share rather than
+    # printing a zero.
+    per_agent = build_agent_price_rows(
+        price_candidates, window_days,
+        thinking_tokens_by_session(conn, since, until, agent_id),
+    )
+
     commands = [f"tjb run --original {p}:{orig} --candidate {p}:{alt}" for p, orig, alt in swaps]
     bench_command = "\n".join(commands) if commands else None
 
@@ -339,15 +369,29 @@ def analyze_model_downgrade(
         n_sessions=candidate_sessions,
         ci_low=ci_low,
         ci_high=ci_high,
+        per_agent=per_agent,
     )
 
 
 @register("downsize")
 def run(ctx: AnalyzerContext) -> None:
-    """Registry entry point. Mutates ctx.report.downgrade."""
+    """Registry entry point. Mutates ctx.report.downgrade.
+
+    Also runs the batch-placement check, a sibling module in this same lane
+    (both answer "is this work on the right lane for its price?"), and attaches
+    it under ``findings['placement']``. It stays a check rather than its own
+    registered analyzer so the placement card ships without a new analyzer name
+    on the CLI.
+    """
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
     )
+    placement = analyze_batch_placement(
+        ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        ctx.summary.total_cost_usd or 0.0,
+    )
+    if placement is not None:
+        ctx.report.findings["placement"] = placement
 
 
 # ---------------------------------------------------------------------------

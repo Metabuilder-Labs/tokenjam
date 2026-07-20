@@ -152,6 +152,20 @@ def _downsize_metric(rows: list[tuple], models: set[str]) -> dict[str, Any]:
             "oversized_usd": oversized_usd}
 
 
+def _placement_metric(rows: list[tuple]) -> dict[str, Any]:
+    """Per-session dollars on the flagged workload group.
+
+    Usage records carry no batch/service-tier marker today, so the receipt is a
+    spend drop on the same workload after the user marks the change applied,
+    with no claim about what caused it.
+    """
+    sessions = {str(r[0] or "") for r in rows}
+    n_sessions = len(sessions)
+    total_usd = _priced_usd(rows)
+    return {"value": (total_usd / n_sessions) if n_sessions else 0.0,
+            "sessions": n_sessions, "calls": len(rows), "total_usd": total_usd}
+
+
 def _cache_metric(rows: list[tuple]) -> dict[str, Any]:
     """Cache-read efficacy = cache_tokens / (input + cache) for the flagged
     (provider, model), plus the input-vs-cache priced value of the gap."""
@@ -332,6 +346,18 @@ def measure_cost_delta(
             _rows_for(conn, pre_start, pre_end, agent_id, subagent_only=True), models)
         post_rows = _rows_for(conn, post_start, post_end, agent_id, subagent_only=True)
         post = _downsize_metric(post_rows, models)
+        realized_usd = max(0.0, pre["value"] - post["value"]) * post["sessions"]
+        post_calls = post["calls"]
+
+    elif analyzer == "placement":
+        # Spend on the flagged workload group, per session, before versus after
+        # the marker. Scoped by agent where the card names a single workload;
+        # a multi-workload card measures the whole set it listed.
+        agents = [str(a) for a in (target.get("agents") or []) if a]
+        scope_agent = agent_id or (agents[0] if len(agents) == 1 else None)
+        pre = _placement_metric(_rows_for(conn, pre_start, pre_end, scope_agent))
+        post_rows = _rows_for(conn, post_start, post_end, scope_agent)
+        post = _placement_metric(post_rows)
         realized_usd = max(0.0, pre["value"] - post["value"]) * post["sessions"]
         post_calls = post["calls"]
 
