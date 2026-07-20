@@ -29,11 +29,11 @@ tj onboard --verify         # poll for the first span after setup and report con
 tj onboard --verify-only    # skip setup; just re-poll an existing install (post-restart re-check)
 ```
 
-Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` (plus `--project` for `--claude-code`) skip every prompt — use these to run onboarding unattended (CI, Docker, a script). `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
+Key flags for non-interactive setup: `--plan`, `--budget`, `--no-daemon` (plus `--project` for `--claude-code`) skip every prompt; use these to run onboarding unattended (CI, Docker, a script). `--verify` is separate: it opts *into* the post-setup telemetry poll instead of the interactive "verify now?" confirm.
 
-**`--verify-only`** is the lightweight post-restart re-check: it skips the whole wizard (no config rewrite, no summary, no restart banner) and only polls an already-configured install for its first *live* span. Use it after you've restarted Claude Code / Codex — `tj onboard --claude-code --verify-only` (or `--codex`, or bare for an SDK install) reads that persona's existing config and reports confirmed / not-confirmed. Backfilled history doesn't count here; the poll waits for a new live span.
+**`--verify-only`** is the lightweight post-restart re-check: it skips the whole wizard (no config rewrite, no summary, no restart banner) and only polls an already-configured install for its first *live* span. Use it after you've restarted Claude Code / Codex; `tj onboard --claude-code --verify-only` (or `--codex`, or bare for an SDK install) reads that persona's existing config and reports confirmed / not-confirmed. Backfilled history doesn't count here; the poll waits for a new live span.
 
-**`--verify` and `--no-daemon`:** verification polls for the first span through whichever read path is available. With the daemon running it reads over HTTP; with `--no-daemon`, the poller opens the DuckDB file directly — the same file the SDK would need to write to. If nothing else is writing yet (the pre-first-run case) this works; if something else holds the write lock, verification reports "start `tj serve`" rather than confirming, even though onboarding itself succeeded. Run `tj ping` instead to prove interception without touching the DB lock at all, or start `tj serve` temporarily to get a live confirmation.
+**`--verify` and `--no-daemon`:** verification polls for the first span through whichever read path is available. With the daemon running it reads over HTTP; with `--no-daemon`, the poller opens the DuckDB file directly; the same file the SDK would need to write to. If nothing else is writing yet (the pre-first-run case) this works; if something else holds the write lock, verification reports "start `tj serve`" rather than confirming, even though onboarding itself succeeded. Run `tj ping` instead to prove interception without touching the DB lock at all, or start `tj serve` temporarily to get a live confirmation.
 
 ### `tj ping`
 
@@ -49,7 +49,7 @@ Exit codes: 0 = intercepted and delivered, 1 = interception or delivery failed.
 
 ### `tj doctor`
 
-Health check — validates config, database connectivity, ingest secret, and alert channel reachability.
+Health check; validates config, database connectivity, ingest secret, and alert channel reachability.
 
 ```bash
 tj doctor
@@ -103,7 +103,7 @@ Key flags: `--since`, `--agent`, `--json`.
 
 ### `tj session-story`
 
-Turn-by-turn reconstruction of *how* a Claude Code session attempted its task — its ordered moves (`delegate` / `dead_end` / `verify` / `act`), and for every subagent delegation, that subagent's mandate plus a factual tool-category tally (reads/edits/searches/commands) and its own recursively-rendered method spine. With no `--session`, auto-selects the most recent session with real activity. Reads the on-disk transcript, falling back to a persisted snapshot when the transcript was pruned; needs a direct DB connection or a running `tj serve` (the daemon does the reconstruction+fallback server-side when it holds the write lock).
+Turn-by-turn reconstruction of *how* a Claude Code session attempted its task; its ordered moves (`delegate` / `dead_end` / `verify` / `act`), and for every subagent delegation, that subagent's mandate plus a factual tool-category tally (reads/edits/searches/commands) and its own recursively-rendered method spine. With no `--session`, auto-selects the most recent session with real activity. Reads the on-disk transcript, falling back to a persisted snapshot when the transcript was pruned; needs a direct DB connection or a running `tj serve` (the daemon does the reconstruction+fallback server-side when it holds the write lock).
 
 ```bash
 tj session-story
@@ -115,7 +115,7 @@ Key flags: `--session`, `--last` (default when `--session` is omitted), `--json`
 
 ### `tj quota-audit`
 
-Retroactive audit of your premium (Opus/Fable) quota: which past premium-tier sessions were structurally Sonnet-shaped (small input/output, few tool calls)? Covers Fable (the tier above Opus) as well as Opus. Reports the percent of premium quota that went to Sonnet-shaped sessions (a retrospective behaviour mirror — those tokens are already spent, so it is misallocated, not "reclaimable"), example sessions to spot-check, and an optional tuned routing-config export. Subscription users see a habit nudge; API-billed users additionally see the already-billed dollar counterfactual. Quota-share framing, never a dollar "saving" claim. The JSON field is `percent_quota_misallocated` (the pre-0.6 `percent_quota_reclaimable` key is still emitted as a deprecated alias for one release). Needs a direct DB connection (can't run against a live `tj serve`).
+Retroactive audit of your premium (Opus/Fable) quota: which past premium-tier sessions were structurally Sonnet-shaped (small input/output, few tool calls)? Covers Fable (the tier above Opus) as well as Opus. Reports the percent of premium quota that went to Sonnet-shaped sessions (a retrospective behaviour mirror; those tokens are already spent, so it is misallocated, not "reclaimable"), example sessions to spot-check, and an optional tuned routing-config export. Subscription users see a habit nudge; API-billed users additionally see the already-billed dollar counterfactual. Quota-share framing, never a dollar "saving" claim. The JSON field is `percent_quota_misallocated` (the pre-0.6 `percent_quota_reclaimable` key is still emitted as a deprecated alias for one release). Needs a direct DB connection (can't run against a live `tj serve`).
 
 ```bash
 tj quota-audit
@@ -162,7 +162,7 @@ Exit code 1 if any agent has drifted (useful for CI gating).
 ### `tj loop`
 
 Close the loop on a run: annotate it, promote it into an expectation, and track
-whether later runs pass or regress. Local-first — pass/regress is your recorded
+whether later runs pass or regress. Local-first; pass/regress is your recorded
 verdict, not an automated score. Also available as the Lens "Loop" tab on a
 session's detail page.
 
@@ -240,7 +240,7 @@ Key flags: `--since`, `--json`.
 
 ### `tj pricing`
 
-Read-only inspection of the resolved model pricing table — one row per `(provider, model)` with input/output/cache-read/cache-write rates in USD per million tokens, plus a `source` column (`override` vs. `packaged`).
+Read-only inspection of the resolved model pricing table; one row per `(provider, model)` with input/output/cache-read/cache-write rates in USD per million tokens, plus a `source` column (`override` vs. `packaged`).
 
 ```bash
 tj pricing list
@@ -281,7 +281,7 @@ Key flags: `--trim [agent_id]`, `--reuse [agent_id]`, `--since`, `--no-open`.
 
 ### `tj summarize`
 
-Structure-aware prompt summarization (advisory). `list` scans for prompt files worth summarizing and estimates the per-call token saving (read-only). `prep` wraps a prompt's structure behind verbatim markers and emits it for a model to rewrite — `--via claude-p` or `--via api` runs the rewrite for you in one shot. `check` verifies a rewrite preserved every structure block (a hard gate) and stages it. `apply` writes a staged rewrite back to the file (default dry-run; `--go` writes, with a backup); `undo` restores from that backup.
+Structure-aware prompt summarization (advisory). `list` scans for prompt files worth summarizing and estimates the per-call token saving (read-only). `prep` wraps a prompt's structure behind verbatim markers and emits it for a model to rewrite; `--via claude-p` or `--via api` runs the rewrite for you in one shot. `check` verifies a rewrite preserved every structure block (a hard gate) and stages it. `apply` writes a staged rewrite back to the file (default dry-run; `--go` writes, with a backup); `undo` restores from that backup.
 
 ```bash
 tj summarize list
@@ -296,7 +296,7 @@ tj summarize undo path/to/prompt.md --go
 
 Subcommands: `list`, `prep`, `check`, `apply`, `undo`.
 
-Key flags: `list` — `--recursive`, `--repo`, `--no-global`, `--ext`, `--min-prose`, `--json`; `prep` — `--via claude-p|api`, `--ratio`, `--json`; `check` — `--summary`, `--prepped-hash`, `--json`; `apply`/`undo` — `--go`, `--dry-run`, `--json`.
+Key flags: `list`: `--recursive`, `--repo`, `--no-global`, `--ext`, `--min-prose`, `--json`; `prep`: `--via claude-p|api`, `--ratio`, `--json`; `check`: `--summary`, `--prepped-hash`, `--json`; `apply`/`undo`: `--go`, `--dry-run`, `--json`.
 
 ### `tj policy`
 
@@ -332,11 +332,11 @@ Key flag: `--off` on `killswitch` releases pass-through mode.
 
 ## Integration entrypoints
 
-These are wired by `tj onboard --claude-code` and invoked by Claude Code itself (via hooks / the statusline / the shell wrapper), not typically run by hand — documented here for completeness and troubleshooting.
+These are wired by `tj onboard --claude-code` and invoked by Claude Code itself (via hooks / the statusline / the shell wrapper), not typically run by hand; documented here for completeness and troubleshooting.
 
 ### `tj statusline`
 
-Zero-model-token status line for Claude Code. Reads the session payload JSON Claude Code pipes on stdin and prints one line: model, session token total, and the re-read share (cache-read ÷ total tokens), with a `/compact` nudge once re-reading dominates. Runs out-of-band after each turn — never enters the model's context, so it costs no quota. Wired into `~/.claude/settings.json`'s `statusLine` by `tj onboard --claude-code`.
+Zero-model-token status line for Claude Code. Reads the session payload JSON Claude Code pipes on stdin and prints one line: model, session token total, and the re-read share (cache-read ÷ total tokens), with a `/compact` nudge once re-reading dominates. Runs out-of-band after each turn; never enters the model's context, so it costs no quota. Wired into `~/.claude/settings.json`'s `statusLine` by `tj onboard --claude-code`.
 
 ```bash
 tj statusline   # reads payload JSON on stdin; not meant to be typed interactively
@@ -344,7 +344,7 @@ tj statusline   # reads payload JSON on stdin; not meant to be typed interactive
 
 ### `tj resume-brief`
 
-Hands a resuming (or post-compaction) session a compact brief of its prior method — task, progress, dead ends, working files — instead of re-investigating. Deterministic, no LLM, zero in-loop token cost. `tj onboard --claude-code` wires `--from-hook` into a `SessionStart` hook automatically.
+Hands a resuming (or post-compaction) session a compact brief of its prior method (task, progress, dead ends, working files) instead of re-investigating. Deterministic, no LLM, zero in-loop token cost. `tj onboard --claude-code` wires `--from-hook` into a `SessionStart` hook automatically.
 
 ```bash
 tj resume-brief --from-hook       # SessionStart-hook mode: reads session_id/transcript_path from stdin
@@ -365,7 +365,7 @@ tj otel-resource-attrs
 
 ### `tj session-end`
 
-Reports a terminal's Claude Code session(s) as closed, so the dashboard archives that tile immediately (Claude Code emits no close event of its own). Called best-effort by the `claude` shell wrapper on exit/interrupt; talks to the running daemon over HTTP and never touches the DB directly. Always exits 0 — a failure here must never break the user's shell.
+Reports a terminal's Claude Code session(s) as closed, so the dashboard archives that tile immediately (Claude Code emits no close event of its own). Called best-effort by the `claude` shell wrapper on exit/interrupt; talks to the running daemon over HTTP and never touches the DB directly. Always exits 0; a failure here must never break the user's shell.
 
 ```bash
 tj session-end --instance <terminal-id>
@@ -389,7 +389,7 @@ Key flag: `--json`.
 
 ### `tj mcp`
 
-Start the MCP server (stdio transport, for SDK / API integrations). `tj onboard --claude-code` / `--codex` do **not** register it — an in-loop MCP is a per-turn quota tax on subscription users (ticket #59); wire it manually with `claude mcp add tj --scope user -- tj mcp` only if you're building an SDK / API integration.
+Start the MCP server (stdio transport, for SDK / API integrations). `tj onboard --claude-code` / `--codex` do **not** register it; an in-loop MCP is a per-turn quota tax on subscription users (ticket #59); wire it manually with `claude mcp add tj --scope user -- tj mcp` only if you're building an SDK / API integration.
 
 ```bash
 tj mcp
@@ -421,7 +421,7 @@ tj stop
 
 ### `tj uninstall`
 
-Full removal: all TokenJam data, config, daemon, MCP registration, and env vars — AND the `tokenjam`
+Full removal: all TokenJam data, config, daemon, MCP registration, and env vars; AND the `tokenjam`
 package itself (pipx/uv-tool installs are removed automatically; a plain pip/venv install gets the
 exact `pip uninstall` command printed instead of a guess). The symmetric counterpart to `tj onboard`.
 
@@ -432,7 +432,7 @@ tj uninstall --yes    # skip confirmation
 
 ### `tj reset`
 
-Config-only teardown — the same wiring/config cleanup as `tj uninstall` above, but leaves the
+Config-only teardown; the same wiring/config cleanup as `tj uninstall` above, but leaves the
 `tokenjam` package installed so `tj onboard` works again without reinstalling. Use this to reconfigure
 or pause TokenJam.
 
