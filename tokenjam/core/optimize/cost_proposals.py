@@ -30,7 +30,9 @@ proposals. It never touches the DB, the store, or the network.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # House-style label strings. Kept verbatim on every cost proposal so no channel
@@ -108,6 +110,23 @@ class CostProposal:
     rung:                 int  = 0
     scope:                str  = ""
     proposed_fix:         str  = ""
+    # Model-routing apply kinds (``core.optimize.model_apply``). Set only where
+    # the edit is a deterministic rewrite of a value already written down: an
+    # agent file's ``model:`` key, or one exact model-id string in a repo the
+    # user registered. Empty everywhere else, which leaves the card advise-only
+    # with its one-paste artifact.
+    apply_kind:           str  = ""
+    agent_name:           str  = ""
+    current_model:        str  = ""
+    proposed_model:       str  = ""
+    source_path:          str  = ""
+    target_path:          str  = ""
+    # Why the direct apply is not on offer, when it is not. Rendered on the card
+    # next to the one-paste fix so a fallback is never silent.
+    apply_blocked_reason: str  = ""
+    # The exact fix, with this agent's own measured values already substituted
+    # in. Every advise-only card carries one.
+    one_paste_fix:        str  = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -115,16 +134,26 @@ class CostProposal:
 # proposals. All tolerate a None/empty finding (returns []).
 # --------------------------------------------------------------------------- #
 
-def _downsize_to_proposal(finding: Any) -> list[CostProposal]:
-    """One proposal covering the model-over-sizing finding.
+def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal]:
+    """The model-over-sizing card(s).
 
-    ``DowngradeFinding.suggestions`` maps each oversized model to its cheaper
-    same-family alternative. The delta-verify pass later measures the model-mix
-    cost delta across ALL flagged models, so a single proposal (listing them)
-    keeps the estimate — which is a finding-level aggregate — coherent.
+    When the finding carries per-agent price rows, each agent gets its own card
+    with its own arithmetic (and, where the preconditions hold, the gated model-
+    id swap). Those rows partition the same candidate sessions, so the window-
+    wide card is NOT emitted alongside them: one source of over-sized spend,
+    one card.
+
+    Without those rows (no pricing data for a model on either side) the finding
+    falls back to the single window-wide card. ``DowngradeFinding.suggestions``
+    maps each oversized model to its cheaper same-family alternative, and the
+    delta-verify pass measures the model-mix cost delta across ALL flagged
+    models, so one proposal listing them keeps that aggregate estimate coherent.
     """
     if finding is None or getattr(finding, "candidate_sessions", 0) <= 0:
         return []
+    per_agent = _downsize_agent_proposals(finding, config)
+    if per_agent:
+        return per_agent
     suggestions: dict[str, str] = dict(getattr(finding, "suggestions", {}) or {})
     if not suggestions:
         return []
@@ -159,9 +188,225 @@ def _downsize_to_proposal(finding: Any) -> list[CostProposal]:
         },
         advise_text=advise,
         suggestion=suggestion,
+        one_paste_fix=suggestion,
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+    )]
+
+
+def _money(value: float) -> str:
+    """A dollar figure with enough precision to stay honest at small values.
+
+    Never rendered bare: every call site pairs it with an estimated/measured tag
+    and the construction footnote.
+    """
+    if abs(value) >= 1.0:
+        return f"${value:,.2f}"
+    return f"${value:.4f}"
+
+
+def _agent_arithmetic_line(row: Any) -> str:
+    """The card's arithmetic, spelled out with both sides of the comparison."""
+    window = (
+        f"{row.sessions} session(s) over {row.window_days:.0f} day(s): "
+        f"{row.input_tokens:,} input, {row.output_tokens:,} output, "
+        f"{row.cache_tokens:,} cache read and {row.cache_write_tokens:,} cache "
+        f"write tokens. At {row.model} rates that is "
+        f"{_money(row.current_cost_usd)}; the same tokens at {row.alt_model} "
+        f"rates are {_money(row.alternative_cost_usd)}. Difference: "
+        f"{_money(row.delta_usd)} over the window, up to "
+        f"{_money(row.projected_30d_delta_usd)} per 30 days at this rate "
+        f"(estimated)."
+    )
+    if row.thinking_share_of_output is not None:
+        window += (
+            f" Thinking tokens were {row.thinking_share_of_output * 100:.0f}% of "
+            f"this agent's output tokens over the same sessions "
+            f"({row.thinking_tokens:,} of {row.output_tokens:,}, measured); "
+            f"they bill as output on both models."
+        )
+    return window
+
+
+def _model_swap_plumbing(row: Any, config: Any) -> dict[str, Any]:
+    """Whether this agent's swap can be written directly, and where.
+
+    The direct write is offered only when the user registered a local source
+    path for the agent and every precondition in
+    ``model_apply.model_swap_precheck`` holds. Otherwise the card keeps its
+    one-paste artifact and states the reason.
+    """
+    from tokenjam.core.optimize.model_apply import (
+        APPLY_KIND_MODEL_SWAP,
+        model_swap_precheck,
+    )
+
+    agents = getattr(config, "agents", None) or {}
+    agent_cfg = agents.get(row.agent_id) if hasattr(agents, "get") else None
+    source_path = str(getattr(agent_cfg, "source_path", "") or "")
+    check = model_swap_precheck(source_path, row.model)
+    if not check["ok"]:
+        return {"apply_capable": False, "apply_blocked_reason": check["reason"]}
+    return {
+        "apply_capable": True,
+        "apply_kind": APPLY_KIND_MODEL_SWAP,
+        "source_path": source_path,
+        "target_path": check["target_path"],
+        "current_model": row.model,
+        "proposed_model": row.alt_model,
+        "apply_blocked_reason": "",
+    }
+
+
+def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
+    """One card per agent, carrying that agent's own price arithmetic.
+
+    Replaces the window-wide card when per-agent rows exist, so one source of
+    over-sized spend produces exactly one card rather than an aggregate plus its
+    own parts.
+    """
+    proposals: list[CostProposal] = []
+    for row in getattr(finding, "per_agent", []) or []:
+        plumbing = _model_swap_plumbing(row, config) if config is not None else {
+            "apply_capable": False,
+            "apply_blocked_reason": (
+                "no tj config was available to look up a registered source path."
+            ),
+        }
+        one_paste = (
+            f"{row.model} -> {row.alt_model}\n"
+            f"# Set this agent's model id to {row.alt_model} where it is "
+            f"configured, then redeploy or restart the agent."
+        )
+        advise = (
+            f"Route {row.agent_id}'s flagged structural-shaped work from "
+            f"{row.model} to {row.alt_model}. The price difference above is "
+            f"arithmetic on this agent's measured tokens, given the switch; "
+            f"whether the cheaper model answers as well is not measured here, "
+            f"so review the example sessions first."
+        )
+        if plumbing.get("apply_capable"):
+            advise += (
+                f" tokenjam can make this exact substitution in "
+                f"{plumbing['target_path']}, with the change committed and "
+                f"revertable in one call. After it is applied you must redeploy "
+                f"or restart the agent: measurement starts at the first call "
+                f"that runs on {row.alt_model}, not at the moment of the write."
+            )
+        elif plumbing.get("apply_blocked_reason"):
+            advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="downsize",
+            signature=f"cost:downsize:{row.agent_id}",
+            title=f"Model over-sizing in {row.agent_id} ({row.model} to {row.alt_model})",
+            target_key={
+                "agent_id": row.agent_id,
+                "models": [row.model],
+                "suggestions": {row.model: row.alt_model},
+            },
+            evidence=_agent_arithmetic_line(row),
+            baseline={
+                "agent_id": row.agent_id,
+                "provider": row.provider,
+                "model": row.model,
+                "alt_model": row.alt_model,
+                "sessions": row.sessions,
+                "input_tokens": row.input_tokens,
+                "output_tokens": row.output_tokens,
+                "cache_tokens": row.cache_tokens,
+                "cache_write_tokens": row.cache_write_tokens,
+                "current_cost_usd": row.current_cost_usd,
+                "alternative_cost_usd": row.alternative_cost_usd,
+                "delta_usd": row.delta_usd,
+                "projected_30d_delta_usd": row.projected_30d_delta_usd,
+                "thinking_tokens": row.thinking_tokens,
+                "thinking_share_of_output": row.thinking_share_of_output,
+            },
+            advise_text=advise,
+            suggestion=one_paste,
+            one_paste_fix=one_paste,
+            estimated_recoverable_usd=row.delta_usd,
+            estimated_recoverable_tokens=row.total_tokens,
+            estimate_basis=row.estimate_basis,
+            agent_id=row.agent_id if row.agent_id != "unknown" else "",
+            advise_only=not plumbing.get("apply_capable", False),
+            apply_capable=bool(plumbing.get("apply_capable")),
+            apply_kind=str(plumbing.get("apply_kind", "")),
+            source_path=str(plumbing.get("source_path", "")),
+            target_path=str(plumbing.get("target_path", "")),
+            current_model=str(plumbing.get("current_model", "")),
+            proposed_model=str(plumbing.get("proposed_model", "")),
+            apply_blocked_reason=str(plumbing.get("apply_blocked_reason", "")),
+        ))
+    return proposals
+
+
+def _placement_to_proposals(finding: Any) -> list[CostProposal]:
+    """One card for the batch-placement candidates (advise-only).
+
+    Advise-only is not a formality here: moving a workload to the batch lane is
+    an architectural change in the user's own application, and the card says so
+    beside the number.
+    """
+    if finding is None:
+        return []
+    candidates = list(getattr(finding, "candidates", []) or [])
+    if not candidates:
+        return []
+    agents = ", ".join(c.agent_id for c in candidates[:5])
+    total = float(getattr(finding, "candidate_cost_usd", 0.0) or 0.0)
+    saving = float(getattr(finding, "estimated_recoverable_usd", 0.0) or 0.0)
+    percent = float(getattr(finding, "percent_of_window_cost", 0.0) or 0.0)
+    cadence = ", ".join(
+        f"{c.agent_id} every {c.median_gap_seconds / 3600:.1f}h across "
+        f"{c.sessions} runs"
+        for c in candidates[:5]
+    )
+    evidence = (
+        f"{len(candidates)} workload(s) ran on a regular cadence with no human "
+        f"turn after the first model call ({cadence}). They are "
+        f"{percent:.0f}% of the window's spend, {_money(total)} (measured)."
+    )
+    advise = (
+        f"The Batch API bills a flat 50% of standard prices, so the same work "
+        f"on the batch lane is {_money(saving)} less over this window "
+        f"(estimated). {getattr(finding, 'friction', '')} Nothing here is "
+        f"applied for you; the change lives in your own application code."
+    )
+    return [CostProposal(
+        kind="cost",
+        analyzer="placement",
+        signature="cost:placement:batch",
+        title="Batch API candidates (unattended, cadence-regular workloads)",
+        target_key={"agents": [c.agent_id for c in candidates], "placement": "batch"},
+        evidence=evidence,
+        baseline={
+            "candidates": [
+                {
+                    "agent_id": c.agent_id, "sessions": c.sessions,
+                    "median_gap_seconds": c.median_gap_seconds, "gap_cv": c.gap_cv,
+                    "cost_usd": c.cost_usd, "tokens": c.tokens,
+                    "estimated_batch_saving_usd": c.estimated_batch_saving_usd,
+                }
+                for c in candidates
+            ],
+            "candidate_cost_usd": total,
+            "window_cost_usd": float(getattr(finding, "window_cost_usd", 0.0) or 0.0),
+            "percent_of_window_cost": percent,
+        },
+        advise_text=advise,
+        suggestion=agents,
+        one_paste_fix=(
+            "# Submit these workloads through the Batch API instead of the "
+            "synchronous endpoint:\n"
+            + "\n".join(f"#   {c.agent_id}" for c in candidates)
+        ),
+        estimated_recoverable_usd=saving,
+        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        agent_id=candidates[0].agent_id if len(candidates) == 1 else "",
     )]
 
 
@@ -271,7 +516,80 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
     return proposals
 
 
-def _subagent_to_proposals(finding: Any) -> list[CostProposal]:
+#: A ``sub_agent_id`` only names an agent definition when it is a plain slug.
+#: Claude Code stamps a UUID for inline Task dispatches, and there is no file to
+#: edit for those: that is the guidance-block fallback case, not a lookup to
+#: guess at.
+_AGENT_NAME_RE = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
+
+#: Cap on transcripts read to locate the repos a finding's sessions ran in.
+_MAX_SCOPE_SESSIONS = 20
+
+
+def _session_cwds(session_ids: list[str], config: Any) -> dict[str, str]:
+    """``session_id -> repo cwd``, read from the sessions' own transcripts.
+
+    Reuses the relearn detector's resolver rather than re-deriving a cwd from
+    the encoded project directory name, which is unreliable. Best-effort: an
+    unreadable transcript simply contributes no cwd.
+    """
+    from tokenjam.core.optimize.analyzers.relearn import _repo_cwd_map_for
+    from tokenjam.core.transcript import resolve_projects_root
+
+    override = getattr(getattr(config, "loop", None), "transcript_path", None)
+    root = resolve_projects_root(override)
+    pairs = [(sid, sid) for sid in session_ids[:_MAX_SCOPE_SESSIONS]]
+    return _repo_cwd_map_for(pairs, root)
+
+
+def _agent_model_plumbing(over_powered: list[Any], config: Any) -> dict[str, Any]:
+    """Whether a flagged subagent has a definition file whose model can be set.
+
+    Scope routing is relearn's: sessions concentrated in one repo write into
+    that repo's ``.claude/agents/``, sessions spanning repos write into the
+    user-global one. The flagged rows are cost-ordered, so the first subagent
+    with a real definition file is the most expensive one that can be fixed
+    outright. No file means the guidance block stays the fix, which is the
+    inline Task-tool case.
+    """
+    from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
+    from tokenjam.core.optimize.analyzers.relearn import _scope_for
+    from tokenjam.core.optimize.model_apply import (
+        APPLY_KIND_AGENT_MODEL,
+        default_agent_file_path,
+    )
+
+    named = [
+        r for r in over_powered
+        if _AGENT_NAME_RE.match(str(getattr(r, "sub_agent_id", "") or ""))
+    ]
+    if not named or config is None:
+        return {}
+    cwds = _session_cwds([str(r.session_id) for r in over_powered], config)
+    repos = {Path(cwd).name for cwd in cwds.values() if cwd}
+    scope = _scope_for(repos)
+    repo_cwd = next(iter(cwds.values()), "") if len(repos) == 1 else ""
+
+    for row in named:
+        proposed = lookup_downgrade(str(row.provider), str(row.model))
+        if not proposed:
+            continue
+        name = str(row.sub_agent_id)
+        path = default_agent_file_path(scope, repo_cwd, name)
+        if not path or not Path(path).is_file():
+            continue
+        return {
+            "apply_kind": APPLY_KIND_AGENT_MODEL,
+            "agent_name": name,
+            "target_path": path,
+            "scope": scope,
+            "current_model": str(row.model),
+            "proposed_model": proposed,
+        }
+    return {}
+
+
+def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposal]:
     """One proposal covering the subagent right-sizing finding.
 
     Unlike the three advise-only analyzers, this one is workspace-appliable for
@@ -311,6 +629,64 @@ def _subagent_to_proposals(finding: Any) -> list[CostProposal]:
     # Apply-capable when we have a concrete model to name in the rubric; else
     # degrade to advise-only (no clean workspace surface to write).
     apply_capable = bool(models)
+    # The stronger surface, when the flagged subagent has a definition file: set
+    # its `model:` key outright instead of writing a rubric the orchestrator has
+    # to read and honor. Falls back to that rubric when there is no file.
+    try:
+        agent_apply = _agent_model_plumbing(over_powered, config)
+    except Exception:
+        agent_apply = {}
+    if agent_apply:
+        advise_extra = (
+            f" {agent_apply['agent_name']} has its own definition file, so "
+            f"tokenjam can set its model key to "
+            f"{agent_apply['proposed_model']} directly. The change is committed "
+            f"where the file is in a repo and reverts in one call. Its next "
+            f"dispatch runs on the new model, which is where measurement starts."
+        )
+        return [CostProposal(
+            kind="cost",
+            analyzer="subagent",
+            signature=f"cost:subagent:{agent_apply['agent_name']}",
+            title=(
+                f"Over-powered subagent {agent_apply['agent_name']} "
+                f"({agent_apply['current_model']} to {agent_apply['proposed_model']})"
+            ),
+            target_key={
+                "models": models, "subagent": True,
+                "agent_name": agent_apply["agent_name"],
+            },
+            evidence=evidence,
+            baseline={
+                "flagged_subagents": subagents,
+                "flagged_cost_usd": float(getattr(finding, "flagged_cost_usd", 0.0) or 0.0),
+                "subagent_cost_usd": float(getattr(finding, "subagent_cost_usd", 0.0) or 0.0),
+                "percent_of_cost": float(getattr(finding, "percent_of_cost", 0.0) or 0.0),
+                "agent_name": agent_apply["agent_name"],
+                "current_model": agent_apply["current_model"],
+                "proposed_model": agent_apply["proposed_model"],
+            },
+            advise_text=(
+                "Lower the model tier for the flagged Task dispatches. "
+                + str(getattr(finding, "caveat", "") or "") + advise_extra
+            ).strip(),
+            suggestion=f"model: {agent_apply['proposed_model']}",
+            one_paste_fix=(
+                f"# In {agent_apply['target_path']}, frontmatter:\n"
+                f"model: {agent_apply['proposed_model']}"
+            ),
+            estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
+            estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+            estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+            advise_only=False,
+            apply_capable=True,
+            scope=agent_apply["scope"],
+            apply_kind=agent_apply["apply_kind"],
+            agent_name=agent_apply["agent_name"],
+            target_path=agent_apply["target_path"],
+            current_model=agent_apply["current_model"],
+            proposed_model=agent_apply["proposed_model"],
+        )]
     return [CostProposal(
         kind="cost",
         analyzer="subagent",
@@ -375,7 +751,7 @@ def recompute_cost_proposals(
             db, config, since, until, agent_id=agent_id,
             findings=list(COST_ANALYZERS),
         )
-        proposals = cost_proposals_from_report(report)
+        proposals = cost_proposals_from_report(report, config=config)
     except Exception:
         return []
 
@@ -386,22 +762,28 @@ def recompute_cost_proposals(
     return proposals
 
 
-def cost_proposals_from_report(report: Any) -> list[CostProposal]:
+def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
-    the ``cache`` / ``trim`` / ``subagent`` findings off ``report.findings``.
-    Missing findings (analyzer not run, no candidates) contribute nothing. Never
-    raises — a malformed finding is skipped so one bad analyzer can't sink the
-    inbox.
+    the ``cache`` / ``trim`` / ``subagent`` / ``placement`` findings off
+    ``report.findings``. Missing findings (analyzer not run, no candidates)
+    contribute nothing. Never raises — a malformed finding is skipped so one bad
+    analyzer can't sink the inbox.
+
+    ``config`` is optional and used for one thing: looking up the local source
+    path a user registered for an agent, which decides whether the downsize card
+    can offer the gated model-id swap or falls back to its one-paste artifact.
+    Without it every card is advise-only.
     """
     findings = getattr(report, "findings", {}) or {}
     proposals: list[CostProposal] = []
     adapters = (
-        (_downsize_to_proposal, getattr(report, "downgrade", None)),
+        (lambda f: _downsize_to_proposal(f, config), getattr(report, "downgrade", None)),
         (_cache_to_proposals, findings.get("cache")),
         (_trim_to_proposals, findings.get("trim")),
-        (_subagent_to_proposals, findings.get("subagent")),
+        (lambda f: _subagent_to_proposals(f, config), findings.get("subagent")),
+        (_placement_to_proposals, findings.get("placement")),
     )
     for adapter, finding in adapters:
         try:

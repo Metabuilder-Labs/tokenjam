@@ -68,7 +68,7 @@ SUBAGENT_HONESTY_CAVEAT = (
 # reduction we can't size honestly, so it never inflates this number.
 SUBAGENT_ESTIMATE_BASIS = (
     "over_powered subagents priced at their cheaper same-family model over the "
-    "same tokens — a model-swap delta, structural fit only, no quality "
+    "same tokens: a model-swap delta, structural fit only, no quality "
     "validation; review before re-dispatching. over_provisioned spend is "
     "flagged but not counted here (its recoverable prompt-size cut isn't "
     "quantifiable). No guaranteed saving."

@@ -46,6 +46,13 @@ class AgentConfig:
     # project without restarting the agent — the mapping is applied by tj, so
     # no service.namespace needs to arrive on the wire.
     project:          str | None           = None
+    # Local checkout this agent's code lives in, registered BY THE USER
+    # ([agents.<id>] source_path). Opt-in and never inferred: tokenjam does not
+    # scan the filesystem looking for an agent's source. Its only consumer is
+    # the gated model-id swap in `core.optimize.relearn_apply` (a deterministic
+    # string substitution in a clean git repo); with no source_path a downsize
+    # card stays advise-only and just prints the one-paste fix.
+    source_path:      str | None           = None
 
 
 @dataclass
@@ -432,6 +439,7 @@ def _parse(raw: dict) -> TjConfig:
             output_schema=agent_raw.get("output_schema"),
             drift=drift,
             project=agent_raw.get("project"),
+            source_path=agent_raw.get("source_path"),
         )
 
     storage_raw = raw.get("storage", {})
