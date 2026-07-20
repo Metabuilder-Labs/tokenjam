@@ -18,8 +18,12 @@ from tokenjam.core.optimize.analyzers.cache_efficacy import (
     LookbackMissCandidate,
     ThrashAgentCandidate,
     UncachedAgentCandidate,
+    _compute_root_cause_candidates,
 )
-from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+from tokenjam.core.optimize.cost_proposals import (
+    _cache_thrash_to_proposals,
+    cost_proposals_from_report,
+)
 from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
 from tests.factories import make_llm_span
 
@@ -115,6 +119,40 @@ def test_thrash_adapter_ttl_not_worth_it_card_says_so_verbatim():
     ])
     props = [p for p in cost_proposals_from_report(report) if p.analyzer == "cache_thrash"]
     assert len(props) == 1
+    assert "caching not worth it at this cadence" in props[0].advise_text
+
+
+def test_thrash_adapter_not_worth_it_excludes_recoverable_usd_end_to_end(db):
+    """Rollup contract (Component E's `estimated_recoverable_rollup` sums
+    ``CostProposal.estimated_recoverable_usd`` with no analyzer allowlist):
+    when the TTL variant's honest break-even is negative, the real analyzer ->
+    adapter pipeline must not hand the rollup a positive figure to sum."""
+    # Sparse per-burst reuse: one write per session, second call never reads
+    # back -> negative TTL break-even (see test_cache_root_cause.py's
+    # equivalent analyzer-level case for the arithmetic).
+    for i in range(15):
+        sid = f"thrash-{i}"
+        t0 = MARKER + timedelta(hours=i)
+        db.insert_span(make_llm_span(
+            agent_id="svc-thrash-negative", provider="anthropic", model="claude-sonnet-5",
+            input_tokens=3000, cache_tokens=0, cache_write_tokens=5000,
+            session_id=sid, start_time=t0,
+        ))
+        db.insert_span(make_llm_span(
+            agent_id="svc-thrash-negative", provider="anthropic", model="claude-sonnet-5",
+            input_tokens=3000, cache_tokens=0, cache_write_tokens=0,
+            session_id=sid, start_time=t0 + timedelta(minutes=10),
+        ))
+    since, until = MARKER - timedelta(hours=1), MARKER + timedelta(hours=20)
+    _, thrash, _ = _compute_root_cause_candidates(db.conn, since, until, None)
+    assert len(thrash) == 1
+    assert thrash[0].cause == "ttl"
+    assert thrash[0].ttl_worth_it is False
+
+    finding = CacheEfficacyFinding(thrash_agents=thrash)
+    props = _cache_thrash_to_proposals(finding)
+    assert len(props) == 1
+    assert props[0].estimated_recoverable_usd is None
     assert "caching not worth it at this cadence" in props[0].advise_text
 
 

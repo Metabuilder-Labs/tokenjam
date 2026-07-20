@@ -38,6 +38,11 @@ MIN_INPUT_TOKENS = 100_000
 # the model is still leaving substantial caching savings on the table.
 EFFICACY_THRESHOLD = 0.30
 
+# A1 root-cause minimum call volume (moved up from the A1/A2/A3 block below so
+# CacheEfficacyFinding's default can reference it) — minimum call volume before
+# the absolute waste is worth a card.
+MIN_CALLS_FOR_ROOT_CAUSE = 20
+
 # Per-provider support level. Used by the renderer to qualify the finding.
 PROVIDER_SUPPORT: dict[str, str] = {
     "anthropic":     "full",
@@ -88,6 +93,13 @@ class CacheEfficacyFinding:
     uncached_agents:      list["UncachedAgentCandidate"] = field(default_factory=list)
     thrash_agents:        list["ThrashAgentCandidate"]   = field(default_factory=list)
     lookback_miss_agents: list["LookbackMissCandidate"]  = field(default_factory=list)
+    # Effective thresholds this run applied (config-overridable, see
+    # core.config.OptimizeConfig) — carried on the finding so a renderer's
+    # flagged-state message never hardcodes a number that could be stale
+    # against the user's own config.
+    min_input_tokens:        int   = MIN_INPUT_TOKENS
+    efficacy_threshold:      float = EFFICACY_THRESHOLD
+    min_calls_for_root_cause: int  = MIN_CALLS_FOR_ROOT_CAUSE
 
 
 def estimate_cache_recoverable(
@@ -128,7 +140,11 @@ def estimate_cache_recoverable(
     return round(total_usd, 6), total_tokens
 
 
-def _compute_rows(conn, since, until, agent_id: str | None) -> list[CacheEfficacyRow]:
+def _compute_rows(
+    conn, since, until, agent_id: str | None,
+    *, min_input_tokens: int = MIN_INPUT_TOKENS,
+    efficacy_threshold: float = EFFICACY_THRESHOLD,
+) -> list[CacheEfficacyRow]:
     """Aggregate input_tokens and cache_tokens per (provider, model) in window."""
     clauses = [
         "start_time >= $1", "start_time < $2",
@@ -161,8 +177,8 @@ def _compute_rows(conn, since, until, agent_id: str | None) -> list[CacheEfficac
         support = PROVIDER_SUPPORT.get(str(provider).lower(), "unsupported")
         flagged = (
             support in {"full", "best_effort"}
-            and in_tok >= MIN_INPUT_TOKENS
-            and efficacy < EFFICACY_THRESHOLD
+            and in_tok >= min_input_tokens
+            and efficacy < efficacy_threshold
         )
         result.append(CacheEfficacyRow(
             provider=str(provider),
@@ -183,10 +199,10 @@ def _compute_rows(conn, since, until, agent_id: str | None) -> list[CacheEfficac
 # never produces two cards (uncached beats thrash beats lookback).
 # --------------------------------------------------------------------------- #
 
-# A1 — minimum call volume before the absolute waste is worth a card, and the
-# minimum median per-call input size below which even a perfectly cached
-# prefix wouldn't save much.
-MIN_CALLS_FOR_ROOT_CAUSE = 20
+# A1 — minimum median per-call input size below which even a perfectly cached
+# prefix wouldn't save much. (MIN_CALLS_FOR_ROOT_CAUSE, the other A1 gate,
+# moved up near MIN_INPUT_TOKENS/EFFICACY_THRESHOLD so CacheEfficacyFinding's
+# default can reference it.)
 MIN_UNCACHED_MEDIAN_INPUT_TOKENS = 2048
 
 # A2 — below this read:write ratio, more was spent WRITING the prefix than was
@@ -426,10 +442,13 @@ def _lookback_snippet(model: str) -> str:
     )
 
 
-def _classify_a1(agent_id: str, calls: list[_AgentCallRow]) -> UncachedAgentCandidate | None:
-    """Uncached agent: >=20 calls, never caches, and the prefix is large
-    enough that caching it would actually matter."""
-    if len(calls) < MIN_CALLS_FOR_ROOT_CAUSE:
+def _classify_a1(
+    agent_id: str, calls: list[_AgentCallRow],
+    *, min_calls: int = MIN_CALLS_FOR_ROOT_CAUSE,
+) -> UncachedAgentCandidate | None:
+    """Uncached agent: >=min_calls calls, never caches, and the prefix is
+    large enough that caching it would actually matter."""
+    if len(calls) < min_calls:
         return None
     if any(c.cache_tokens > 0 or c.cache_write_tokens > 0 for c in calls):
         return None
@@ -525,6 +544,17 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
     else:
         snippet = SILENT_INVALIDATOR_CHECKLIST
 
+    # Rollup contract: `estimated_recoverable_usd` feeds a generic cross-card
+    # dollar rollup, so it must only ever be populated when THIS card's own
+    # recommended fix actually recovers it. The "instability" checklist and
+    # the ttl_worth_it==True variant both recommend a fix that closes the
+    # wasted-spend gap, so `wasted_usd` stands as the headline. When the TTL
+    # break-even comes out negative, the card explicitly says "not worth it"
+    # — recommending against the only fix on offer — so the headline must NOT
+    # carry a positive number nobody should act on; excluded (None), not zero
+    # coerced to a false-looking "no waste" claim.
+    recoverable_usd = None if (cause == "ttl" and ttl_worth_it is False) else wasted_usd
+
     return ThrashAgentCandidate(
         agent_id=agent_id, provider=provider, model=model, calls=len(calls),
         cache_write_tokens=total_write, cache_read_tokens=total_read,
@@ -532,13 +562,13 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
         inter_call_gap_p50_minutes=round(gap_p50, 2),
         ttl_worth_it=ttl_worth_it, ttl_breakeven_usd=ttl_breakeven_usd,
         cache_control_snippet=snippet,
-        estimated_recoverable_usd=wasted_usd,
+        estimated_recoverable_usd=recoverable_usd,
         estimate_basis=(
             "wasted = cache-write tokens x (write rate - cache-read rate); "
             "what was paid to write the prefix versus what the same tokens "
-            "would have cost read from a stable cache. The TTL variant's "
-            "break-even (ttl_breakeven_usd) is a separate, honest projection "
-            "that can come out negative — see cause=='ttl' ? ttl_worth_it."
+            "would have cost read from a stable cache. Excluded (None) when "
+            "the TTL variant's break-even is negative, since the card's own "
+            "recommended fix (switching TTL) would not recover it."
         ),
     )
 
@@ -603,6 +633,7 @@ def _classify_a3(
 
 def _compute_root_cause_candidates(
     conn, since, until, agent_id: str | None,
+    *, min_calls: int = MIN_CALLS_FOR_ROOT_CAUSE,
 ) -> tuple[
     list[UncachedAgentCandidate], list[ThrashAgentCandidate], list[LookbackMissCandidate],
 ]:
@@ -616,7 +647,7 @@ def _compute_root_cause_candidates(
     thrash: list[ThrashAgentCandidate] = []
     lookback: list[LookbackMissCandidate] = []
     for aid, calls in by_agent.items():
-        a1 = _classify_a1(aid, calls)
+        a1 = _classify_a1(aid, calls, min_calls=min_calls)
         if a1 is not None:
             uncached.append(a1)
             continue
@@ -633,9 +664,17 @@ def _compute_root_cause_candidates(
 @register("cache")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches the finding to ctx.report.findings."""
-    rows = _compute_rows(ctx.conn, ctx.since, ctx.until, ctx.agent_id)
-    uncached, thrash, lookback = _compute_root_cause_candidates(
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_input_tokens = getattr(optimize_cfg, "min_cache_input_tokens", MIN_INPUT_TOKENS)
+    efficacy_threshold = getattr(optimize_cfg, "cache_efficacy_threshold", EFFICACY_THRESHOLD)
+    min_calls = getattr(optimize_cfg, "min_calls_for_root_cause", MIN_CALLS_FOR_ROOT_CAUSE)
+
+    rows = _compute_rows(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        min_input_tokens=min_input_tokens, efficacy_threshold=efficacy_threshold,
+    )
+    uncached, thrash, lookback = _compute_root_cause_candidates(
+        ctx.conn, ctx.since, ctx.until, ctx.agent_id, min_calls=min_calls,
     )
     if not rows and not uncached and not thrash and not lookback:
         return
@@ -645,6 +684,9 @@ def run(ctx: AnalyzerContext) -> None:
         flagged=[r for r in rows if r.flagged],
         estimated_recoverable_usd=rec_usd,
         estimated_recoverable_tokens=rec_tokens,
+        min_input_tokens=min_input_tokens,
+        efficacy_threshold=efficacy_threshold,
+        min_calls_for_root_cause=min_calls,
         estimate_basis=(
             "gap between current cache-read efficacy and 80% ceiling at the "
             "input-vs-cache rate delta"

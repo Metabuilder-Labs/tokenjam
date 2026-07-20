@@ -153,6 +153,41 @@ def test_a2_instability_cause_when_gap_under_five_minutes(db):
     assert c.cause == "instability"
     assert c.ttl_worth_it is None
     assert "timestamp" in c.cache_control_snippet or "invalidator" in c.cache_control_snippet.lower()
+    # The instability checklist IS an actionable fix (fix your prompt-assembly
+    # code), so the wasted-spend headline stays populated for this variant.
+    assert c.estimated_recoverable_usd is not None
+
+
+def _seed_thrash_chain(db, *, agent="agent-a2-chain", n_sessions=3, calls_per_session=6,
+                        gap_minutes=10.0):
+    """n_sessions sessions, each with calls_per_session consecutive cache-write
+    calls (no reads), spaced gap_minutes apart — many write-repeats per burst,
+    the shape where switching to a 1-hour TTL actually pays off."""
+    for i in range(n_sessions):
+        sid = f"chain-{i}"
+        t0 = BASE + timedelta(hours=i)
+        for j in range(calls_per_session):
+            db.insert_span(make_llm_span(
+                agent_id=agent, provider="anthropic", model="claude-sonnet-5",
+                input_tokens=3000, cache_tokens=0, cache_write_tokens=5000,
+                session_id=sid, start_time=t0 + timedelta(minutes=gap_minutes * j),
+            ))
+
+
+def test_a2_ttl_worth_it_carries_positive_recoverable_usd(db):
+    _seed_thrash_chain(db)
+    since, until = _window()
+    _, thrash, _ = _compute_root_cause_candidates(db.conn, since, until, None)
+    assert len(thrash) == 1
+    c = thrash[0]
+    assert c.cause == "ttl"
+    assert c.ttl_breakeven_usd is not None
+    assert c.ttl_breakeven_usd > 0
+    assert c.ttl_worth_it is True
+    # Rollup contract: when the recommended fix DOES recover money, the
+    # headline figure is populated (and positive) so it counts.
+    assert c.estimated_recoverable_usd is not None
+    assert c.estimated_recoverable_usd > 0
 
 
 def test_a2_ttl_breakeven_can_be_negative(db):
@@ -168,6 +203,11 @@ def test_a2_ttl_breakeven_can_be_negative(db):
     assert c.ttl_breakeven_usd is not None
     assert c.ttl_breakeven_usd < 0
     assert c.ttl_worth_it is False
+    # Rollup contract: the "not worth it" variant must not carry a positive
+    # headline figure — its own recommended fix (TTL switch) doesn't recover
+    # anything, so estimated_recoverable_usd is excluded (None), never a
+    # positive number a downstream rollup would sum.
+    assert c.estimated_recoverable_usd is None
 
 
 def test_a2_not_flagged_when_ratio_at_or_above_threshold(db):
