@@ -184,11 +184,15 @@ def _git_commit(repo_root: Path, rel_paths: list[str], message: str) -> str | No
     return (sha.stdout or "").strip() or None
 
 
-def _commit_message(action: str, title: str, signature: str, rung: int) -> str:
+def _commit_message(
+    action: str, title: str, signature: str, rung: int, kind: str | None = None,
+) -> str:
     # Neutral, tool-attributed, no internal ticket IDs — this lands in ANY
-    # target repo (including public ones), not just tokenjam's own.
+    # target repo (including public ones), not just tokenjam's own. `kind` is
+    # passed for the apply kinds that sit outside the rung ladder (the model
+    # edits), so the message names what was actually written.
     return (
-        f"tokenjam: {action} fix (rung {rung} · {RUNG_KIND.get(rung, '?')})\n\n"
+        f"tokenjam: {action} fix (rung {rung} · {kind or RUNG_KIND.get(rung, '?')})\n\n"
         f"{title}\n\n"
         f"Applied by TokenJam's loop (signature: {signature}).\n"
         f"Revert from the Review inbox, or via the applied_fixes ledger."
@@ -821,10 +825,15 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     symlink, or (rung 1) the target isn't an allowlisted note file."""
     import difflib
 
+    from tokenjam.core.optimize.model_apply import APPLY_KINDS, build_model_plan
+
     signature = cluster["signature"]
+    apply_kind = str(cluster.get("apply_kind") or "")
     rung = int(cluster["rung"])
-    if rung not in RUNG_KIND:
+    if not apply_kind and rung not in RUNG_KIND:
         raise RelearnApplyRefused(f"unknown rung {rung}.")
+    if apply_kind and apply_kind not in APPLY_KINDS:
+        raise RelearnApplyRefused(f"unknown apply kind {apply_kind!r}.")
     if not target_path:
         raise RelearnApplyRefused("no target path given — pick one before approving.")
 
@@ -837,7 +846,14 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
         )
     pre_image = _read_pre_image(target)
 
-    if rung == RUNG_NOTE:
+    if apply_kind:
+        # The two model-routing kinds (an agent file's `model:` key, a
+        # registered repo's model-id string). Both are edits of an existing
+        # value, so they skip the rung ladder entirely and only rewrite bytes
+        # that were already there; everything downstream (backup, git commit,
+        # ledger, revert) is the shared machinery.
+        new_content = build_model_plan(cluster, target, pre_image)
+    elif rung == RUNG_NOTE:
         if not _is_allowed_note_target(target, pre_image):
             raise RelearnApplyRefused(
                 f"{target} is not an allowlisted note target (must be a CLAUDE.md/*.md "
@@ -863,7 +879,7 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     return {
         "signature": signature, "rung": rung, "slug": slug, "target_path": str(target),
         "pre_image": pre_image, "new_content": new_content, "diff": diff,
-        "kind": RUNG_KIND[rung],
+        "kind": apply_kind or RUNG_KIND[rung],
     }
 
 
@@ -901,7 +917,7 @@ def apply_relearn_fix(
     _write_target(target, plan["new_content"])
 
     enforcement: dict[str, Any] | None = None
-    if rung in ENFORCEMENT_RUNGS:
+    if rung in ENFORCEMENT_RUNGS and not cluster.get("apply_kind"):
         target.chmod(0o755)
         settings_path = target.parent.parent / "settings.json"
         patch_path = target.parent / f"{plan['slug']}.settings-patch.json"
@@ -924,7 +940,10 @@ def apply_relearn_fix(
             rel_paths.append(str(Path(enforcement["patch_path"]).relative_to(repo_root)))
         commit_sha = _git_commit(
             repo_root, rel_paths,
-            _commit_message("apply", cluster.get("title", plan["signature"]), plan["signature"], rung),
+            _commit_message(
+                "apply", cluster.get("title", plan["signature"]), plan["signature"],
+                rung, plan["kind"],
+            ),
         )
 
     from tokenjam.utils.time_parse import utcnow
@@ -1100,7 +1119,10 @@ def revert_applied_fix(config: TjConfig, fix_id: str) -> dict:
         if add is not None and add.returncode == 0:
             commit = _run_git(
                 ["commit", "--no-verify", "-m",
-                 _commit_message("revert", rec["title"], rec["signature"], rec["rung"]),
+                 _commit_message(
+                     "revert", rec["title"], rec["signature"], rec["rung"],
+                     rec.get("kind"),
+                 ),
                  "--", rel],
                 repo_root,
             )

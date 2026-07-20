@@ -118,6 +118,13 @@ class DowngradeFinding:
     n_sessions:                   int          = 0
     ci_low:                       float | None = None
     ci_high:                      float | None = None
+    # Per-agent price arithmetic for the proposed swap (one
+    # `analyzers.downsize_agents.AgentPriceRow` per agent/model group over the
+    # candidate sessions): exact per-type tokens at the current model's rates
+    # versus the proposed model's, over the window and projected to 30 days.
+    # Typed loosely to keep `types` free of an analyzer import; empty when no
+    # candidate group had pricing data for both sides.
+    per_agent:                    list[Any]    = field(default_factory=list)
 
 
 @dataclass

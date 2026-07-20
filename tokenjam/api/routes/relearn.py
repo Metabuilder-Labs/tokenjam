@@ -155,6 +155,16 @@ class ApplyRelearnRequest(BaseModel):
     target_path:    str
     go:             bool = False
     force:          bool = False   # bypass the active-session warning
+    # Model-routing apply kinds (``core.optimize.model_apply``): setting an
+    # agent file's `model:` key, or swapping one exact model id in a repo the
+    # user registered. Empty on every rung-ladder fix, which is every other
+    # proposal. The model ids travel with the request for the same reason the
+    # cluster does: the human approved THESE values on the card.
+    apply_kind:     str = ""
+    agent_name:     str = ""
+    current_model:  str = ""
+    proposed_model: str = ""
+    source_path:    str = ""
 
 
 @router.post("/relearn/apply", dependencies=_WRITE_AUTH)

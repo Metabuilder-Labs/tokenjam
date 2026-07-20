@@ -1,7 +1,7 @@
 """Delta-verify for applied cost proposals — the receipts.
 
 A cost proposal is advise-only, so there is no transcript recurrence to
-re-count (that is ``pothole_verify``'s job). What we CAN measure is whether the
+re-count (that is ``relearn_verify``'s job). What we CAN measure is whether the
 cost signal the analyzer flagged actually moved after the user marked their
 change: fewer dollars on the oversized model, a higher cache hit ratio, fewer
 input tokens per call on the bloated step.
@@ -15,7 +15,7 @@ the SAME ``core.cost.calculate_cost`` the rest of tokenjam uses (per-model,
 per-token-type, BOTH ``cache_tokens`` and ``cache_write_tokens`` included — the
 recurring omission this workspace guards against).
 
-Honesty (identical discipline to ``pothole_verify``):
+Honesty (identical discipline to ``relearn_verify``):
 
   * **Correlational, never causal.** The user's change is one of many things
     that shifted at the marker. This measures co-occurrence and says so.
@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tokenjam.core.cost import calculate_cost
-from tokenjam.core.optimize.pothole_verify import (
+from tokenjam.core.optimize.relearn_verify import (
     VERDICT_IMPROVED,
     VERDICT_INSUFFICIENT_DATA,
     VERDICT_REGRESSED,
@@ -89,12 +89,17 @@ def _window_bounds(marker: datetime, now: datetime) -> tuple[datetime, datetime,
 def _rows_for(
     conn: Any, since: datetime, until: datetime, agent_id: str | None,
     *, model: str | None = None, provider: str | None = None,
+    subagent_only: bool = False,
 ) -> list[tuple]:
     """LLM spans in ``[since, until)`` with optional agent/model/provider
     filters. Returns (session_id, provider, model, input, output, cache,
-    cache_write). Never raises — a bad query yields ``[]``."""
+    cache_write). ``subagent_only`` scopes to Task-dispatched subagent spans
+    (``sub_agent_id IS NOT NULL``) — the fan-out the subagent analyzer flags.
+    Never raises — a bad query yields ``[]``."""
     clauses = ["start_time >= $1", "start_time < $2", "model IS NOT NULL"]
     params: list[Any] = [since, until]
+    if subagent_only:
+        clauses.append("sub_agent_id IS NOT NULL")
     if agent_id:
         params.append(agent_id)
         clauses.append(f"agent_id = ${len(params)}")
@@ -147,6 +152,20 @@ def _downsize_metric(rows: list[tuple], models: set[str]) -> dict[str, Any]:
             "oversized_usd": oversized_usd}
 
 
+def _placement_metric(rows: list[tuple]) -> dict[str, Any]:
+    """Per-session dollars on the flagged workload group.
+
+    Usage records carry no batch/service-tier marker today, so the receipt is a
+    spend drop on the same workload after the user marks the change applied,
+    with no claim about what caused it.
+    """
+    sessions = {str(r[0] or "") for r in rows}
+    n_sessions = len(sessions)
+    total_usd = _priced_usd(rows)
+    return {"value": (total_usd / n_sessions) if n_sessions else 0.0,
+            "sessions": n_sessions, "calls": len(rows), "total_usd": total_usd}
+
+
 def _cache_metric(rows: list[tuple]) -> dict[str, Any]:
     """Cache-read efficacy = cache_tokens / (input + cache) for the flagged
     (provider, model), plus the input-vs-cache priced value of the gap."""
@@ -156,25 +175,6 @@ def _cache_metric(rows: list[tuple]) -> dict[str, Any]:
     efficacy = (cache_tok / total) if total else 0.0
     return {"value": efficacy, "sessions": len({str(r[0] or "") for r in rows}),
             "calls": len(rows), "input_tokens": input_tok, "cache_tokens": cache_tok}
-
-
-def _cache_thrash_metric(rows: list[tuple], rates: Any) -> dict[str, Any]:
-    """Read:write ratio for a flagged agent's cache-thrash pattern (A2), plus
-    the priced 'wasted' value: what was paid to write the prefix versus what
-    the same tokens would have cost read from a stable cache. Mirrors
-    ``analyzers.cache_efficacy._classify_a2``'s arithmetic so the pre/post
-    delta is directly comparable to the card's own estimate."""
-    write_tok = sum(int(r[6] or 0) for r in rows)
-    read_tok = sum(int(r[5] or 0) for r in rows)
-    ratio = (read_tok / write_tok) if write_tok else 0.0
-    wasted_usd = 0.0
-    if rates is not None and write_tok:
-        wasted_usd = (write_tok / 1_000_000) * max(
-            0.0, rates.cache_write_per_mtok - rates.cache_read_per_mtok,
-        )
-    return {"value": ratio, "sessions": len({str(r[0] or "") for r in rows}),
-            "calls": len(rows), "write_tokens": write_tok, "read_tokens": read_tok,
-            "wasted_usd": wasted_usd}
 
 
 def _trim_metric(rows: list[tuple]) -> dict[str, Any]:
@@ -287,21 +287,6 @@ def measure_cost_delta(
         realized_usd = (shifted / 1_000_000) * rate_delta
         post_calls = post["calls"]
 
-    elif analyzer == "cache_thrash":
-        # A2's write:read thrash receipt: less wasted spend after the marker,
-        # for the flagged agent's dominant (provider, model).
-        provider = str(target.get("provider") or "") or None
-        model = str(target.get("model") or "") or None
-        rates = get_rates(provider or "unknown", model or "")
-        pre = _cache_thrash_metric(
-            _rows_for(conn, pre_start, pre_end, agent_id, model=model, provider=provider),
-            rates,
-        )
-        post_rows = _rows_for(conn, post_start, post_end, agent_id, model=model, provider=provider)
-        post = _cache_thrash_metric(post_rows, rates)
-        realized_usd = max(0.0, pre["wasted_usd"] - post["wasted_usd"])
-        post_calls = post["calls"]
-
     elif analyzer == "trim":
         pre = _trim_metric(_rows_for(conn, pre_start, pre_end, agent_id))
         post_rows = _rows_for(conn, post_start, post_end, agent_id)
@@ -315,6 +300,31 @@ def measure_cost_delta(
         rates = get_rates(prov, model)
         input_rate = rates.input_per_mtok if rates is not None else 0.0
         realized_usd = (saved_tokens / 1_000_000) * input_rate
+        post_calls = post["calls"]
+
+    elif analyzer == "subagent":
+        # Fan-out model-mix cost delta: per-session dollars spent on the
+        # oversized model(s) across SUBAGENT spans only (sub_agent_id NOT NULL),
+        # before vs after the marker. Same shape as downsize, scoped to the
+        # Task-dispatched fan-out the subagent analyzer flags.
+        models = {str(m) for m in (target.get("models") or [])}
+        pre = _downsize_metric(
+            _rows_for(conn, pre_start, pre_end, agent_id, subagent_only=True), models)
+        post_rows = _rows_for(conn, post_start, post_end, agent_id, subagent_only=True)
+        post = _downsize_metric(post_rows, models)
+        realized_usd = max(0.0, pre["value"] - post["value"]) * post["sessions"]
+        post_calls = post["calls"]
+
+    elif analyzer == "placement":
+        # Spend on the flagged workload group, per session, before versus after
+        # the marker. Scoped by agent where the card names a single workload;
+        # a multi-workload card measures the whole set it listed.
+        agents = [str(a) for a in (target.get("agents") or []) if a]
+        scope_agent = agent_id or (agents[0] if len(agents) == 1 else None)
+        pre = _placement_metric(_rows_for(conn, pre_start, pre_end, scope_agent))
+        post_rows = _rows_for(conn, post_start, post_end, scope_agent)
+        post = _placement_metric(post_rows)
+        realized_usd = max(0.0, pre["value"] - post["value"]) * post["sessions"]
         post_calls = post["calls"]
 
     else:
@@ -406,7 +416,7 @@ def rescan_all(
 def cost_compound_ledger(records: list[dict[str, Any]]) -> dict[str, Any]:
     """The Applied section's cost summary: total realized dollars across every
     VERIFIED, improved (non-reverted) cost fix, plus a verdict breakdown. The
-    dollar-denominated sibling of ``pothole_verify.compound_ledger``."""
+    dollar-denominated sibling of ``relearn_verify.compound_ledger``."""
     total_usd = 0.0
     total_tokens = 0
     verified = improved = regressed = insufficient = 0
