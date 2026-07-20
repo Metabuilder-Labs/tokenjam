@@ -317,6 +317,9 @@ def _build_finding_constructors() -> dict:
     from tokenjam.core.optimize.analyzers.cache_efficacy import (
         CacheEfficacyFinding,
         CacheEfficacyRow,
+        LookbackMissCandidate,
+        ThrashAgentCandidate,
+        UncachedAgentCandidate,
     )
     from tokenjam.core.optimize.analyzers.cache_recommend import (
         CachePrefixCandidate,
@@ -355,6 +358,9 @@ def _build_finding_constructors() -> dict:
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
         rows = [CacheEfficacyRow(**r) for r in d.get("rows") or []]
         flagged = [CacheEfficacyRow(**r) for r in d.get("flagged") or []]
+        uncached = [UncachedAgentCandidate(**c) for c in d.get("uncached_agents") or []]
+        thrash = [ThrashAgentCandidate(**c) for c in d.get("thrash_agents") or []]
+        lookback = [LookbackMissCandidate(**c) for c in d.get("lookback_miss_agents") or []]
         return CacheEfficacyFinding(
             rows=rows, flagged=flagged,
             confidence=d.get("confidence", "structural"),
@@ -363,6 +369,8 @@ def _build_finding_constructors() -> dict:
             estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
+            uncached_agents=uncached, thrash_agents=thrash,
+            lookback_miss_agents=lookback,
         )
 
     def _cache_recommend(d: dict) -> CacheRecommendFinding:

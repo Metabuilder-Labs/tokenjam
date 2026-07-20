@@ -163,6 +163,25 @@ def _cache_metric(rows: list[tuple]) -> dict[str, Any]:
             "calls": len(rows), "input_tokens": input_tok, "cache_tokens": cache_tok}
 
 
+def _cache_thrash_metric(rows: list[tuple], rates: Any) -> dict[str, Any]:
+    """Read:write ratio for a flagged agent's cache-thrash pattern (A2), plus
+    the priced 'wasted' value: what was paid to write the prefix versus what
+    the same tokens would have cost read from a stable cache. Mirrors
+    ``analyzers.cache_efficacy._classify_a2``'s arithmetic so the pre/post
+    delta is directly comparable to the card's own estimate."""
+    write_tok = sum(int(r[6] or 0) for r in rows)
+    read_tok = sum(int(r[5] or 0) for r in rows)
+    ratio = (read_tok / write_tok) if write_tok else 0.0
+    wasted_usd = 0.0
+    if rates is not None and write_tok:
+        wasted_usd = (write_tok / 1_000_000) * max(
+            0.0, rates.cache_write_per_mtok - rates.cache_read_per_mtok,
+        )
+    return {"value": ratio, "sessions": len({str(r[0] or "") for r in rows}),
+            "calls": len(rows), "write_tokens": write_tok, "read_tokens": read_tok,
+            "wasted_usd": wasted_usd}
+
+
 def _trim_metric(rows: list[tuple]) -> dict[str, Any]:
     """Average input tokens per call on the flagged step."""
     input_tok = sum(int(r[3] or 0) for r in rows)
@@ -271,6 +290,21 @@ def measure_cost_delta(
         if rates is not None:
             rate_delta = max(0.0, rates.input_per_mtok - rates.cache_read_per_mtok)
         realized_usd = (shifted / 1_000_000) * rate_delta
+        post_calls = post["calls"]
+
+    elif analyzer == "cache_thrash":
+        # A2's write:read thrash receipt: less wasted spend after the marker,
+        # for the flagged agent's dominant (provider, model).
+        provider = str(target.get("provider") or "") or None
+        model = str(target.get("model") or "") or None
+        rates = get_rates(provider or "unknown", model or "")
+        pre = _cache_thrash_metric(
+            _rows_for(conn, pre_start, pre_end, agent_id, model=model, provider=provider),
+            rates,
+        )
+        post_rows = _rows_for(conn, post_start, post_end, agent_id, model=model, provider=provider)
+        post = _cache_thrash_metric(post_rows, rates)
+        realized_usd = max(0.0, pre["wasted_usd"] - post["wasted_usd"])
         post_calls = post["calls"]
 
     elif analyzer == "trim":
