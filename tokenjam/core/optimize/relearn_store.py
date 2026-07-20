@@ -75,7 +75,11 @@ def write_cache(
 
     p = path or default_cache_path(config)
     existing = read_cache(p, config=config) or {}
-    payload = {
+    # Explicit annotation: without it mypy infers the dict-literal's value
+    # type from the two initial values (str, dict[str, Any]) and joins them
+    # down to `Collection[str]`, rejecting the `cost_computed_at` assignment
+    # below even though the payload is really `dict[str, Any]`.
+    payload: dict[str, Any] = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "finding": stamp_proposal_ids(asdict(finding)),
     }
@@ -124,7 +128,15 @@ def write_cost_proposals(
 
     p = path or default_cache_path(config)
     existing = read_cache(p, config=config) or {}
-    serialised = [asdict(pr) if is_dataclass(pr) else dict(pr) for pr in proposals]
+    # `is_dataclass()` alone narrows to `DataclassInstance | type[DataclassInstance]`
+    # (it also accepts a dataclass *class*), but `asdict()` only accepts an
+    # instance. Excluding `type` narrows to the instance case for mypy and
+    # matches what we actually want here — `proposals` holds instances, never
+    # classes.
+    serialised = [
+        asdict(pr) if is_dataclass(pr) and not isinstance(pr, type) else dict(pr)
+        for pr in proposals
+    ]
     payload = dict(existing)
     payload["cost_proposals"] = serialised
     payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()

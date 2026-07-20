@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 import click
 from rich.markup import escape
@@ -17,6 +17,9 @@ from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
 from tokenjam.core.config import find_config_file
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
+
+if TYPE_CHECKING:
+    from tokenjam.core.config import TjConfig
 
 # --- Claude Code backfill scope (#443) ---------------------------------------
 # `tj onboard --claude-code` used to backfill the ENTIRE on-disk history with
@@ -985,7 +988,7 @@ def _lens_review_url(port: int, *, want_daemon: bool) -> str:
     return f"run `tj serve`, then open http://127.0.0.1:{port}/#/review"
 
 
-def _run_relearn_first_fix(config: object, *, port: int, want_daemon: bool) -> None:
+def _run_relearn_first_fix(config: TjConfig, *, port: int, want_daemon: bool) -> None:
     """Onboarding tail (#179): the backfill's payoff is a fix, not just a
     chart. Scans the freshly-backfilled Claude Code history for recurring
     relearns (``core.optimize.analyzers.relearn``) and, for a high-confidence
