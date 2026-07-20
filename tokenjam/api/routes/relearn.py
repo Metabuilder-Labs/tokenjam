@@ -156,22 +156,15 @@ class ApplyRelearnRequest(BaseModel):
     target_path:    str
     go:             bool = False
     force:          bool = False   # bypass the active-session warning
-    # Model-routing apply kinds (``core.optimize.model_apply``): setting an
-    # agent file's `model:` key, or swapping one exact model id in a repo the
-    # user registered. Empty on every rung-ladder fix, which is every other
-    # proposal. The model ids travel with the request for the same reason the
-    # cluster does: the human approved THESE values on the card.
-    apply_kind:     str = ""
-    agent_name:     str = ""
-    current_model:  str = ""
-    proposed_model: str = ""
-    source_path:    str = ""
-    # Which cost analyzer's card this write came from, so the same apply also
-    # opens a cost-verify exposure window and the realized delta lands in the
-    # ledger the receipts surface reads dollars from. Empty for rung-ladder
-    # fixes, whose receipts are recurrence-based rather than priced.
-    analyzer:       str = ""
-    agent_id:       str = ""
+
+    # Nothing else. The model-routing values (apply_kind / agent_name /
+    # current_model / proposed_model / source_path) and the cost-verify routing
+    # (analyzer / agent_id) all come off the stored proposal, because the card
+    # the human approved was rendered FROM that stored proposal. Reading them
+    # back out of the request would be trusting the caller to echo faithfully
+    # something the server already knows — and would let any holder of a valid
+    # proposal_id aim source_path at an unregistered repo, which is the exact
+    # precondition the model_swap safety case rests on.
 
 
 @router.post("/relearn/apply", dependencies=_WRITE_AUTH)
@@ -200,19 +193,15 @@ def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str,
                    f"and apply one the detector actually produced.",
         )
     cluster = relearn_proposals.cluster_for_apply(stored)
-    if body.apply_kind:
-        # The two model-routing kinds are the one exception to "content comes
-        # from the store": a relearn cluster has no model-routing fields at
-        # all, and the model ids are what the human approved on the card (see
-        # ApplyRelearnRequest). They are overlaid, never a substitute for the
-        # looked-up cluster.
-        cluster.update({
-            "apply_kind": body.apply_kind,
-            "agent_name": body.agent_name,
-            "current_model": body.current_model,
-            "proposed_model": body.proposed_model,
-            "source_path": body.source_path,
-        })
+    missing = relearn_proposals.missing_apply_fields(cluster)
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"stored proposal {body.proposal_id} is missing "
+                   f"{', '.join(missing)}, which its "
+                   f"{cluster.get('apply_kind')} apply cannot be built without. "
+                   f"Recompute the proposals and retry.",
+        )
     try:
         result = relearn_apply.apply_relearn_fix(
             _config(request), cluster,
@@ -221,13 +210,13 @@ def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str,
         )
     except relearn_apply.RelearnApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if body.go and body.apply_kind and body.analyzer:
-        result["cost_marker"] = _open_cost_verify_window(request, body, cluster)
+    if body.go and cluster.get("apply_kind") and stored.get("analyzer"):
+        result["cost_marker"] = _open_cost_verify_window(request, stored, cluster)
     return result
 
 
 def _open_cost_verify_window(
-    request: Request, body: ApplyRelearnRequest, cluster: dict[str, Any],
+    request: Request, stored: dict[str, Any], cluster: dict[str, Any],
 ) -> dict[str, Any] | None:
     """Start the priced exposure window for a model-routing write.
 
@@ -237,24 +226,26 @@ def _open_cost_verify_window(
     that wrote the file also opens the window. Best-effort: a marker that cannot
     be created must never fail an apply that already succeeded on disk.
 
-    The card's identity (signature/title/fix text) comes from the STORED
-    cluster, not the request body, for the same reason the write itself does:
-    the ledger must record what the detector produced and the human reviewed.
+    Every value here comes from the STORED proposal, never the request body,
+    for the same reason the write itself does: the ledger must record what the
+    detector produced and the human reviewed, not what a caller asserts.
     """
     from tokenjam.core.optimize import cost_apply
 
+    analyzer = str(stored.get("analyzer") or "")
+    current_model = str(cluster.get("current_model") or "")
     proposal = {
         "signature": str(cluster.get("signature", "")),
-        "analyzer": body.analyzer,
+        "analyzer": analyzer,
         "title": str(cluster.get("title", "")),
-        "agent_id": body.agent_id,
+        "agent_id": str(stored.get("agent_id") or ""),
         "advise_text": str(cluster.get("proposed_fix", "")),
         "target_key": {
-            "models": [body.current_model] if body.current_model else [],
-            "subagent": body.analyzer == "subagent",
-            "agent_name": body.agent_name,
+            "models": [current_model] if current_model else [],
+            "subagent": analyzer == "subagent",
+            "agent_name": str(cluster.get("agent_name") or ""),
         },
-        "baseline": {"proposed_model": body.proposed_model},
+        "baseline": {"proposed_model": str(cluster.get("proposed_model") or "")},
         "estimated_recoverable_usd": None,
         "estimated_recoverable_tokens": None,
         "estimate_basis": "",
@@ -334,7 +325,11 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     change what's actually still outstanding)."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
-    proposals = list(block.get("cost_proposals") or []) if block is not None else []
+    # Listed WITH their proposal_ids: a model-routing card's Approve names an
+    # ID and nothing else, so the ID has to travel with the card it belongs to.
+    proposals: list[dict[str, Any]] = (
+        relearn_proposals.list_cost_proposals(config) if block is not None else []
+    )
     applied_sigs = {
         rec.get("signature") for rec in cost_apply.list_applied(config)
         if rec.get("state") != "reverted"

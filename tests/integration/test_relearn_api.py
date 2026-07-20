@@ -215,21 +215,33 @@ Body.
 """
 
 
+def _store_cost_proposal(config, **overrides) -> str:
+    """Persist a model-routing cost proposal the way an optimize pass does, and
+    hand back the ID the write endpoints will accept."""
+    from tokenjam.core.optimize import relearn_proposals, relearn_store
+    from tokenjam.core.optimize.cost_proposals import CostProposal
+
+    fields = {
+        "kind": "cost", "analyzer": "subagent",
+        "signature": "cost:subagent:explore",
+        "title": "Over-powered subagent explore",
+        "target_key": {}, "evidence": "", "baseline": {},
+        "advise_text": "Route explore to the cheaper same-family model.",
+        "proposed_fix": "Route explore to the cheaper same-family model.",
+        "rung": 0, "scope": "project", "apply_capable": True,
+        "apply_kind": "agent_model", "agent_name": "explore",
+        "current_model": "claude-opus-4-8", "proposed_model": "claude-haiku-4-5",
+    }
+    fields.update(overrides)
+    relearn_store.write_cost_proposals([CostProposal(**fields)], config=config)
+    return relearn_proposals.list_cost_proposals(config)[0]["proposal_id"]
+
+
 @pytest.fixture
 def stored_cost_proposal(config) -> str:
-    """A stored proposal whose card is a cost finding, so the model-routing
-    apply below names a proposal the detector actually produced."""
-    from tokenjam.core.optimize import relearn_proposals, relearn_store
-    from tokenjam.core.optimize.analyzers.relearn import RelearnCluster, RelearnFinding
-
-    cluster = RelearnCluster(
-        signature="cost:subagent:explore", family_key="cost:subagent:explore",
-        title="Over-powered subagent explore", sessions=4, occurrences=4,
-        repos=["demo"], rung=1, scope="project",
-        proposed_fix="Route explore to the cheaper same-family model.",
-    )
-    relearn_store.write_cache(RelearnFinding(clusters=[cluster]), config=config)
-    return relearn_proposals.list_proposals(config)[0]["proposal_id"]
+    """A stored model-routing cost proposal, so the apply below names a card
+    the detector actually produced."""
+    return _store_cost_proposal(config)
 
 
 async def test_agent_model_apply_opens_a_cost_verify_window(
@@ -249,15 +261,10 @@ async def test_agent_model_apply_opens_a_cost_verify_window(
     target.parent.mkdir(parents=True)
     target.write_text(_AGENT_FILE, encoding="utf-8")
 
-    body = {
-        "proposal_id": stored_cost_proposal,
-        "scope": "project", "target_path": str(target), "go": True,
-        "apply_kind": "agent_model", "agent_name": "explore",
-        "current_model": "claude-opus-4-8", "proposed_model": "claude-haiku-4-5",
-        "analyzer": "subagent",
-    }
     r = await client.post(
-        "/api/v1/relearn/apply", json=body, headers={"X-TJ-Local-Token": token},
+        "/api/v1/relearn/apply",
+        json=_apply_body(str(target), proposal_id=stored_cost_proposal),
+        headers={"X-TJ-Local-Token": token},
     )
 
     assert r.status_code == 200
@@ -272,6 +279,101 @@ async def test_agent_model_apply_opens_a_cost_verify_window(
     assert [rec["signature"] for rec in cost_apply.list_applied(config)] == [
         "cost:subagent:explore",
     ]
+
+
+# --- F2 for the model-routing kinds: the values come from the STORE ----------
+
+async def test_apply_refuses_a_caller_supplied_model(
+    app, client, monkeypatch, tmp_path, stored_cost_proposal,
+):
+    """A valid proposal_id does not buy the right to name the model. The card
+    was rendered from the stored proposal, so the stored proposal is what the
+    human approved; echoing a different value back is refused outright."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "workspace" / ".claude" / "agents" / "explore.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_AGENT_FILE, encoding="utf-8")
+
+    body = _apply_body(str(target), proposal_id=stored_cost_proposal)
+    body["proposed_model"] = "claude-opus-4-8"      # keep the expensive model
+    r = await client.post(
+        "/api/v1/relearn/apply", json=body,
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 422
+    assert target.read_text() == _AGENT_FILE        # nothing written at all
+
+
+async def test_apply_refuses_a_caller_supplied_source_path(
+    app, client, monkeypatch, tmp_path, config,
+):
+    """The model_swap safety case rests on source_path having been REGISTERED
+    in the user's own config. A caller-supplied path would aim the write at any
+    repo on disk, so the request carrying one is refused before anything runs."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    victim = fake_home / "someone-elses-repo" / "config.py"
+    victim.parent.mkdir(parents=True)
+    victim.write_text('MODEL = "claude-opus-4-8"\n', encoding="utf-8")
+
+    proposal_id = _store_cost_proposal(
+        config, apply_kind="model_swap", source_path=str(fake_home / "registered"),
+    )
+    body = _apply_body(str(victim), proposal_id=proposal_id)
+    body["source_path"] = str(victim.parent)
+    r = await client.post(
+        "/api/v1/relearn/apply", json=body,
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 422
+    assert victim.read_text() == 'MODEL = "claude-opus-4-8"\n'
+
+
+async def test_apply_writes_the_stored_model_not_a_requested_one(
+    app, client, monkeypatch, tmp_path, stored_cost_proposal,
+):
+    """The positive half of the same guarantee: with only an ID on the wire,
+    the model that lands in the file is the one the detector proposed."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "workspace" / ".claude" / "agents" / "explore.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_AGENT_FILE, encoding="utf-8")
+
+    r = await client.post(
+        "/api/v1/relearn/apply",
+        json=_apply_body(str(target), proposal_id=stored_cost_proposal),
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 200
+    assert "model: claude-haiku-4-5" in target.read_text()
+
+
+async def test_apply_refuses_a_stored_proposal_missing_a_required_field(
+    app, client, monkeypatch, tmp_path, config,
+):
+    """An incomplete stored proposal is refused by name rather than falling
+    back to anything the caller sent — there is no longer a fallback."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "workspace" / ".claude" / "agents" / "explore.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_AGENT_FILE, encoding="utf-8")
+
+    proposal_id = _store_cost_proposal(config, proposed_model="")
+    r = await client.post(
+        "/api/v1/relearn/apply",
+        json=_apply_body(str(target), proposal_id=proposal_id),
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 409
+    assert "proposed_model" in r.json()["detail"]
+    assert target.read_text() == _AGENT_FILE
 
 
 async def test_rung_ladder_apply_opens_no_cost_window(
