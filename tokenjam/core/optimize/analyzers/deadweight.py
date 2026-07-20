@@ -59,6 +59,10 @@ from tokenjam.core.transcript import _SYSTEM_REMINDER_RE, read_records, resolve_
 #: dead weight (spec: "start N=10").
 MIN_SESSIONS_DEADWEIGHT = 10
 
+#: How many example session ids a dead server's card carries as evidence
+#: (mirrors relearn.py's MAX_EXAMPLE_SESSIONS convention).
+MAX_EXAMPLE_SESSIONS = 3
+
 #: Full MCP-connector schema-injection tax, per server, when its tool schemas
 #: are loaded (not deferred) — a documented community/founder-research figure
 #: (~25K tokens/call for an attached MCP connector's injected tool
@@ -237,14 +241,18 @@ class _SessionSignal:
     mcp_invocations: dict[str, int] = field(default_factory=dict)
     deferred_servers: set[str] = field(default_factory=set)
     reminder_chars_by_source: dict[str, int] = field(default_factory=dict)
+    #: assistant-turn model -> turn count, for pricing the token tax at a
+    #: representative model's input rate (see ``_dominant_model``).
+    models: dict[str, int] = field(default_factory=dict)
 
 
 def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
     """One pass over a session's raw records: MCP invocation counts, which
-    servers appeared in a deferred-tools listing, and the C2 tax-table
-    source buckets (measured off the FIRST system-reminder blob only —
-    Claude Code injects it once at session start; later turns don't repeat
-    it, so summing across turns would overcount)."""
+    servers appeared in a deferred-tools listing, the C2 tax-table source
+    buckets (measured off the FIRST system-reminder blob only — Claude Code
+    injects it once at session start; later turns don't repeat it, so
+    summing across turns would overcount), and the assistant model(s) used
+    (for pricing the token tax)."""
     signal = _SessionSignal()
     reminder_measured = False
 
@@ -272,6 +280,11 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
                     signal.reminder_chars_by_source = _split_reminder_sources(reminder_blobs[0])
                     reminder_measured = True
 
+        if role == "assistant":
+            model = message.get("model")
+            if isinstance(model, str) and model:
+                signal.models[model] = signal.models.get(model, 0) + 1
+
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 server = _mcp_server_from_tool_name(str(block.get("name") or ""))
@@ -281,26 +294,56 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
     return signal
 
 
-def _tax_construction_note(non_deferred: int, deferred_sessions: int, sessions_present: int) -> str:
+def _dominant_model(model_counts: dict[str, int]) -> str:
+    """The most-frequent assistant model across the counted turns, or "" when
+    none were observed. Ties broken by first-seen (dict insertion order)."""
+    if not model_counts:
+        return ""
+    return max(model_counts.items(), key=lambda kv: kv[1])[0]
+
+
+def _tax_construction_note(
+    non_deferred: int, deferred_sessions: int, sessions_present: int,
+    *, model: str = "", input_per_mtok: float | None = None,
+    usd_per_session: float | None = None,
+) -> str:
     if sessions_present == 0:
         return ""
     if deferred_sessions == 0:
-        return (
+        note = (
             f"{FULL_SCHEMA_TAX_TOKENS:,} tok/session (full schema injection), "
             f"cited estimate, not a live per-call measurement."
         )
-    if non_deferred == 0:
-        return (
+    elif non_deferred == 0:
+        note = (
             f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session; ToolSearch deferred "
             f"this server's schemas in every observed session (name and "
             f"description line only, never the full schema tax)."
         )
+    else:
+        note = (
+            f"{FULL_SCHEMA_TAX_TOKENS:,} tok/session when fully loaded "
+            f"({non_deferred} of {sessions_present} sessions) blended with "
+            f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session when ToolSearch defers "
+            f"this server's schemas ({deferred_sessions} of {sessions_present} "
+            f"sessions); never claims the full tax for a deferred session."
+        )
+    return note + " " + _pricing_note(model, input_per_mtok, usd_per_session)
+
+
+def _pricing_note(model: str, input_per_mtok: float | None, usd_per_session: float | None) -> str:
+    """The dollar-conversion clause appended to a server's construction
+    footnote. Never fabricates a rate: when no priced model was observed
+    across the server's sessions, states that plainly and stays tokens-only.
+    """
+    if not model or input_per_mtok is None or usd_per_session is None:
+        return (
+            "No dollar estimate: no priced model observed across these "
+            "sessions (core/pricing.py has no rate for it); tokens only."
+        )
     return (
-        f"{FULL_SCHEMA_TAX_TOKENS:,} tok/session when fully loaded "
-        f"({non_deferred} of {sessions_present} sessions) blended with "
-        f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session when ToolSearch defers "
-        f"this server's schemas ({deferred_sessions} of {sessions_present} "
-        f"sessions); never claims the full tax for a deferred session."
+        f"Priced at {model}'s input rate (${input_per_mtok:.2f}/MTok via "
+        f"core/pricing.py) -> ${usd_per_session:,.4f}/session estimated."
     )
 
 
@@ -320,6 +363,13 @@ class ServerDeadweight:
     estimated_tax_tokens_90d:         int
     tax_construction:                 str
     fix:                              str
+    example_sessions:                 list[str] = field(default_factory=list)
+    #: Dollar conversion of the token tax, priced through core/pricing.py at
+    #: the dominant model observed across this server's present sessions.
+    #: ``None`` when no priced model was observed (never a fabricated rate).
+    priced_model:                     str = ""
+    estimated_tax_usd_per_session:    float | None = None
+    estimated_tax_usd_90d:            float | None = None
 
 
 @dataclass
@@ -341,6 +391,7 @@ class DeadweightFinding:
     dead_servers:                 list[ServerDeadweight] = field(default_factory=list)
     tax_table:                    list[ContextTaxRow] = field(default_factory=list)
     estimated_recoverable_tokens: int | None = None
+    estimated_recoverable_usd:    float | None = None
     estimate_basis:                str = ""
     estimate_confidence:            str = "estimated"
     caveat:                          str = DEADWEIGHT_HONESTY_CAVEAT
@@ -400,6 +451,8 @@ def compute_deadweight_finding(
     )
     projection_factor = 90.0 / days
 
+    from tokenjam.core.pricing import get_rates, provider_for_model
+
     tax_rows: list[ContextTaxRow] = []
     reminder_bucket_totals: dict[str, list[int]] = {}
 
@@ -407,6 +460,8 @@ def compute_deadweight_finding(
         sessions_present = 0
         invocations = 0
         deferred_sessions = 0
+        example_sessions: list[str] = []
+        model_counts: dict[str, int] = {}
         for session_id, signal in per_session.items():
             deferred_here = server.name in signal.deferred_servers
             present = deferred_here or server.scope == "user" or (
@@ -418,6 +473,10 @@ def compute_deadweight_finding(
             invocations += signal.mcp_invocations.get(server.name, 0)
             if deferred_here:
                 deferred_sessions += 1
+            if len(example_sessions) < MAX_EXAMPLE_SESSIONS:
+                example_sessions.append(session_id)
+            for model, count in signal.models.items():
+                model_counts[model] = model_counts.get(model, 0) + count
 
         dead = sessions_present >= MIN_SESSIONS_DEADWEIGHT and invocations == 0
         non_deferred = max(sessions_present - deferred_sessions, 0)
@@ -430,6 +489,23 @@ def compute_deadweight_finding(
         )
         tax_90d = round(tax_per_session * sessions_present * projection_factor)
 
+        # Price the token tax through core/pricing.py at the dominant model
+        # observed across this server's present sessions -- never a
+        # hardcoded rate. usd stays None when no priced model was seen.
+        priced_model = _dominant_model(model_counts)
+        input_per_mtok: float | None = None
+        usd_per_session: float | None = None
+        usd_90d: float | None = None
+        if priced_model:
+            provider = provider_for_model(priced_model) or "unknown"
+            rates = get_rates(provider, priced_model)
+            if rates is not None and rates.input_per_mtok > 0:
+                input_per_mtok = rates.input_per_mtok
+                usd_per_session = round(tax_per_session / 1_000_000 * input_per_mtok, 6)
+                usd_90d = round(tax_90d / 1_000_000 * input_per_mtok, 6)
+            else:
+                priced_model = ""  # no rate available -- don't claim a model we can't price
+
         row = ServerDeadweight(
             name=server.name,
             scope=server.scope,
@@ -440,12 +516,20 @@ def compute_deadweight_finding(
             dead=dead,
             estimated_tax_tokens_per_session=tax_per_session,
             estimated_tax_tokens_90d=tax_90d,
-            tax_construction=_tax_construction_note(non_deferred, deferred_sessions, sessions_present),
+            tax_construction=_tax_construction_note(
+                non_deferred, deferred_sessions, sessions_present,
+                model=priced_model, input_per_mtok=input_per_mtok,
+                usd_per_session=usd_per_session,
+            ),
             fix=(
                 f"Remove or project-scope the `{server.name}` MCP server "
                 f"({server.source}); zero tool calls across {sessions_present} "
                 f"session(s) in this window."
             ),
+            example_sessions=example_sessions,
+            priced_model=priced_model,
+            estimated_tax_usd_per_session=usd_per_session,
+            estimated_tax_usd_90d=usd_90d,
         )
         finding.servers.append(row)
         if sessions_present > 0:
@@ -499,13 +583,32 @@ def compute_deadweight_finding(
         finding.estimated_recoverable_tokens = sum(
             s.estimated_tax_tokens_90d for s in finding.dead_servers
         )
-        finding.estimate_basis = (
+        priced = [
+            s.estimated_tax_usd_90d for s in finding.dead_servers
+            if s.estimated_tax_usd_90d is not None
+        ]
+        basis = (
             f"sum of each dead server's projected 90-day schema-injection tax "
             f"({FULL_SCHEMA_TAX_TOKENS:,} tok/session full, "
             f"{DEFERRED_SCHEMA_TAX_TOKENS:,} tok/session when deferred); the "
             f"tax table's own MCP-schema rows are informational only and "
             f"never double-count into this total."
         )
+        if priced:
+            finding.estimated_recoverable_usd = round(sum(priced), 6)
+            basis += (
+                " Dollar figure priced per server through core/pricing.py "
+                "at the dominant model observed in that server's sessions "
+                "(never a hardcoded rate)."
+            )
+            if len(priced) < len(finding.dead_servers):
+                basis += (
+                    f" {len(finding.dead_servers) - len(priced)} of "
+                    f"{len(finding.dead_servers)} dead server(s) had no "
+                    f"priced model observed and are excluded from the "
+                    f"dollar sum (token figure still includes them)."
+                )
+        finding.estimate_basis = basis
     elif configured:
         finding.notes.append(
             f"No configured MCP server cleared the dead-weight bar "

@@ -178,6 +178,53 @@ def test_detects_dead_server_at_threshold(tmp_path):
     assert finding.estimated_recoverable_tokens > 0
 
 
+def test_dead_server_prices_tax_in_usd_via_pricing_table(tmp_path):
+    """The token tax is priced through core/pricing.py at the dominant model
+    observed across the server's sessions (every fixture session here runs
+    on claude-opus-4-8) -- never a hardcoded rate baked into this module."""
+    from tokenjam.core.pricing import get_rates
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = finding.dead_servers[0]
+
+    rates = get_rates("anthropic", "claude-opus-4-8")
+    assert dead.priced_model == "claude-opus-4-8"
+    assert dead.estimated_tax_usd_per_session == round(
+        dead.estimated_tax_tokens_per_session / 1_000_000 * rates.input_per_mtok, 6,
+    )
+    assert dead.estimated_tax_usd_90d > 0
+    assert finding.estimated_recoverable_usd == dead.estimated_tax_usd_90d
+    assert "Priced at claude-opus-4-8's input rate" in dead.tax_construction
+
+
+def test_no_priced_model_leaves_usd_none(tmp_path):
+    """A session with no assistant model recorded at all must never get a
+    fabricated dollar figure -- tokens-only, explicitly noted."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _write_transcript(root, "-repo-a", f"s{i}", [
+            _user_prompt("say hi", cwd=str(project_dir)),
+            # No assistant turn at all -> no model signal for this session.
+        ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = finding.dead_servers[0]
+
+    assert dead.priced_model == ""
+    assert dead.estimated_tax_usd_per_session is None
+    assert dead.estimated_tax_usd_90d is None
+    assert finding.estimated_recoverable_usd is None
+    assert "No dollar estimate" in dead.tax_construction
+
+
 def test_below_threshold_is_not_flagged_dead(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"

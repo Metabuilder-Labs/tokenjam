@@ -1,21 +1,21 @@
 """Adapt cost-analyzer findings into Review-inbox proposals ("advisories with
 receipts").
 
-The self-improve loop's pothole detector already produces
-``PotholeCluster`` proposals that the Lens Improve inbox renders and that a
+The self-improve loop's relearn detector already produces
+``RelearnCluster`` proposals that the Lens Improve inbox renders and that a
 user can mark, apply, and verify. Three *cost* analyzers — ``downsize``
 (model over-sizing), ``cache`` (cache efficacy), ``trim`` (prompt bloat) —
 produce findings of a different shape. This module adapts each finding into a
-``CostProposal`` so the inbox can list them BESIDE the pothole proposals, typed
+``CostProposal`` so the inbox can list them BESIDE the relearn proposals, typed
 by a distinct ``kind`` field.
 
-Two structural facts carry over from the pothole ``advise_only`` lane and are
+Two structural facts carry over from the relearn ``advise_only`` lane and are
 NOT optional here:
 
   * **Advise-only everywhere.** A cost fix lives in the user's own application
     code (a model-routing decision, a cache-prefix change, a prompt edit), not
     a workspace tokenjam may write into. So a cost proposal has NO apply path —
-    exactly like an ``advise_only`` ``PotholeCluster`` (empty
+    exactly like an ``advise_only`` ``RelearnCluster`` (empty
     ``suggested_target``). The card carries a recommendation and, where
     sensible, a copyable config/code suggestion; the user applies it themselves.
   * **Estimated / correlational, never causal.** Every saving figure a cost
@@ -42,8 +42,8 @@ COST_CORRELATIONAL_CAVEAT = (
     "before changing anything."
 )
 
-#: The three analyzers this wiring covers, by registration name.
-COST_ANALYZERS = ("downsize", "cache", "trim", "subagent")
+#: The analyzers this wiring covers, by registration name.
+COST_ANALYZERS = ("downsize", "cache", "trim", "subagent", "deadweight")
 
 # The rung-1 sizing-rubric note a CC-origin subagent proposal writes into the
 # workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
@@ -61,7 +61,7 @@ SUBAGENT_RUBRIC_INTRO = (
 class CostProposal:
     """One cost analyzer's finding, shaped for the Review inbox.
 
-    Mirrors the fields the inbox already reads off a ``PotholeCluster`` (title,
+    Mirrors the fields the inbox already reads off a ``RelearnCluster`` (title,
     evidence, an estimate with its basis, ``advise_only``) plus the cost-
     specific ``target_key`` the delta-verify pass re-measures against.
     """
@@ -100,7 +100,7 @@ class CostProposal:
     # advise-only analyzers, a CC-origin subagent finding HAS a writable surface
     # — a rung-1 sizing rubric note in the workspace's CLAUDE.md — so its card
     # can route an actual, reversible, human-gated write through the existing
-    # pothole apply path (``pothole_apply.apply_pothole_fix``). The adapter (not
+    # relearn apply path (``relearn_apply.apply_relearn_fix``). The adapter (not
     # the analyzer) supplies these; ``apply_capable`` gates the apply action, and
     # a proposal with no clean workspace surface degrades to advise-only like the
     # other three (``apply_capable=False``, ``advise_only=True``).
@@ -341,6 +341,72 @@ def _subagent_to_proposals(finding: Any) -> list[CostProposal]:
     )]
 
 
+def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per dead-weight MCP server (Component C1).
+
+    Reads ONLY ``DeadweightFinding.dead_servers`` — the C2 tax table (which
+    lists every configured server, dead or alive, purely for ranked
+    visibility) never feeds a proposal here, so a server's schema-injection
+    tax is never counted both in the tax table AND a proposal (the same
+    dedup guarantee ``compute_deadweight_finding`` itself enforces on
+    ``estimated_recoverable_tokens`` / ``estimated_recoverable_usd``).
+
+    ``estimated_recoverable_usd`` is carried straight off the analyzer's own
+    ``ServerDeadweight.estimated_tax_usd_90d`` — the analyzer already prices
+    the token tax through ``core/pricing.py`` at the dominant model observed
+    in that server's sessions (never a hardcoded rate; see
+    ``deadweight._pricing_note``). Stays ``None`` when no priced model was
+    observed for that server — this adapter never invents a rate itself.
+    """
+    if finding is None:
+        return []
+    proposals: list[CostProposal] = []
+    for server in getattr(finding, "dead_servers", []) or []:
+        evidence = (
+            f"`{server.name}` MCP server ({server.scope} scope, configured at "
+            f"{server.source}) made 0 tool calls across {server.sessions_present} "
+            f"session(s) in the window."
+        )
+        if server.deferred_sessions:
+            evidence += (
+                f" ToolSearch deferred its schema in {server.deferred_sessions} "
+                f"of those session(s)."
+            )
+        scope_flag = "user" if server.scope == "user" else "project"
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="deadweight",
+            signature=f"cost:deadweight:{server.name}",
+            title=f"Unused MCP server: {server.name}",
+            target_key={
+                "server": server.name, "scope": server.scope, "source": server.source,
+            },
+            evidence=evidence,
+            baseline={
+                "sessions_present": server.sessions_present,
+                "invocations": server.invocations,
+                "deferred_sessions": server.deferred_sessions,
+                "scope": server.scope,
+                "source": server.source,
+                "example_sessions": list(server.example_sessions),
+                "priced_model": server.priced_model,
+            },
+            advise_text=(
+                server.fix + " Removing (or project-scoping) it is reversible "
+                "and loses no data; it only stops the standing schema-injection "
+                "tax on future sessions."
+            ),
+            suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
+            estimated_recoverable_tokens=server.estimated_tax_tokens_90d or None,
+            estimated_recoverable_usd=server.estimated_tax_usd_90d,
+            estimate_basis=(
+                server.tax_construction
+                + " Projected over a 90-day window from the sessions observed."
+            ),
+        ))
+    return proposals
+
+
 #: Default look-back for the daemon/CLI cost-proposal recompute. Matches the
 #: monthly framing the cost analyzers project against.
 DEFAULT_COST_WINDOW_DAYS = 30
@@ -364,7 +430,7 @@ def recompute_cost_proposals(
     """
     from datetime import timedelta
 
-    from tokenjam.core.optimize import pothole_store
+    from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
 
@@ -380,7 +446,7 @@ def recompute_cost_proposals(
         return []
 
     try:
-        pothole_store.write_cost_proposals(proposals, config=config)
+        relearn_store.write_cost_proposals(proposals, config=config)
     except Exception:
         pass
     return proposals
@@ -390,10 +456,10 @@ def cost_proposals_from_report(report: Any) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
-    the ``cache`` / ``trim`` / ``subagent`` findings off ``report.findings``.
-    Missing findings (analyzer not run, no candidates) contribute nothing. Never
-    raises — a malformed finding is skipped so one bad analyzer can't sink the
-    inbox.
+    the ``cache`` / ``trim`` / ``subagent`` / ``deadweight`` findings off
+    ``report.findings``. Missing findings (analyzer not run, no candidates)
+    contribute nothing. Never raises — a malformed finding is skipped so one
+    bad analyzer can't sink the inbox.
     """
     findings = getattr(report, "findings", {}) or {}
     proposals: list[CostProposal] = []
@@ -402,6 +468,7 @@ def cost_proposals_from_report(report: Any) -> list[CostProposal]:
         (_cache_to_proposals, findings.get("cache")),
         (_trim_to_proposals, findings.get("trim")),
         (_subagent_to_proposals, findings.get("subagent")),
+        (_deadweight_to_proposals, findings.get("deadweight")),
     )
     for adapter, finding in adapters:
         try:
