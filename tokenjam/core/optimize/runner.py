@@ -519,6 +519,7 @@ def _build_finding_constructors() -> dict:
             dead_servers=dead_servers,
             tax_table=tax_table,
             estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "estimated"),
             caveat=d.get("caveat", DEADWEIGHT_HONESTY_CAVEAT),

@@ -349,14 +349,14 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     visibility) never feeds a proposal here, so a server's schema-injection
     tax is never counted both in the tax table AND a proposal (the same
     dedup guarantee ``compute_deadweight_finding`` itself enforces on
-    ``estimated_recoverable_tokens``).
+    ``estimated_recoverable_tokens`` / ``estimated_recoverable_usd``).
 
-    Dollar figures are deliberately left ``None``: the tax is a token
-    estimate (a cited per-server constant, not priced against any one
-    session's actual model), and stacking an unknown model rate onto an
-    already-``estimated`` token figure would compound uncertainty rather
-    than inform it — so this card is tokens-only, like the analyzer's own
-    finding.
+    ``estimated_recoverable_usd`` is carried straight off the analyzer's own
+    ``ServerDeadweight.estimated_tax_usd_90d`` — the analyzer already prices
+    the token tax through ``core/pricing.py`` at the dominant model observed
+    in that server's sessions (never a hardcoded rate; see
+    ``deadweight._pricing_note``). Stays ``None`` when no priced model was
+    observed for that server — this adapter never invents a rate itself.
     """
     if finding is None:
         return []
@@ -389,6 +389,7 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 "scope": server.scope,
                 "source": server.source,
                 "example_sessions": list(server.example_sessions),
+                "priced_model": server.priced_model,
             },
             advise_text=(
                 server.fix + " Removing (or project-scoping) it is reversible "
@@ -397,6 +398,7 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             ),
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
             estimated_recoverable_tokens=server.estimated_tax_tokens_90d or None,
+            estimated_recoverable_usd=server.estimated_tax_usd_90d,
             estimate_basis=(
                 server.tax_construction
                 + " Projected over a 90-day window from the sessions observed."

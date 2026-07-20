@@ -393,8 +393,25 @@ def test_deadweight_proposal_shape_and_fields():
     assert p.target_key == {"server": "apollo", "scope": "project", "source": "/repo/.mcp.json"}
     assert p.baseline["example_sessions"] == ["s0", "s1", "s2"]
     assert p.estimated_recoverable_tokens == 225_000
-    assert p.estimated_recoverable_usd is None  # tokens-only, never a stacked $ guess
+    # The base fixture's server carries no priced model -- the adapter must
+    # never invent a rate, so the card stays tokens-only for this server.
+    assert p.estimated_recoverable_usd is None
     assert "claude mcp remove apollo --scope project" in p.suggestion
+
+
+def test_deadweight_proposal_carries_priced_usd_from_server():
+    """When the analyzer priced the tax (a model was observed across the
+    server's sessions), the adapter must carry that $ figure straight
+    through -- never recompute or invent a rate of its own."""
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    server = _dead_server(
+        priced_model="claude-opus-4-8",
+        estimated_tax_usd_per_session=0.125,
+        estimated_tax_usd_90d=1.40625,
+    )
+    p = _deadweight_to_proposals(_deadweight_finding(dead_servers=[server]))[0]
+    assert p.estimated_recoverable_usd == 1.40625
+    assert p.baseline["priced_model"] == "claude-opus-4-8"
 
 
 def test_deadweight_proposal_notes_deferred_sessions_in_evidence():
