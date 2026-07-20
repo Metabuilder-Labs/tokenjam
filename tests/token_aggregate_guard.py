@@ -20,6 +20,22 @@ Rule enforced: any single ``SUM(...)`` expression that adds up TWO OR MORE
 token columns must contain all four. A deliberate single-bucket sum
 (``SUM(cache_tokens)`` for a cache-read ratio, say) is untouched, because it
 isn't summing token types together in the first place.
+
+**What that rule does NOT cover:** it reads SQL text, so an aggregate that
+selects raw per-row columns and adds them up in Python is invisible to it. The
+same bug is just as available there (``row[3] + row[4] + row[5]``, cache-write
+forgotten). For that shape use the value-level probe instead, which needs no
+access to the code that computes the total::
+
+    from tests.token_aggregate_guard import four_type_probe_row, missing_token_types
+
+    def test_my_total_counts_every_token_type():
+        total = my_aggregate([four_type_probe_row()])
+        assert not missing_token_types(total)
+
+The probe gives each bucket a distinct power of two, so a total is a bitmask
+of the buckets that reached it and ``missing_token_types`` names the dropped
+ones outright rather than just failing.
 """
 from __future__ import annotations
 
@@ -81,6 +97,55 @@ def assert_sql_token_sums_are_complete(sql: str, *, context: str = "sql") -> Non
         + "; ".join(
             f"SUM({expr}) omits {', '.join(sorted(missing))}" for expr, missing in offenders
         )
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Value-level probe, for aggregates computed in Python rather than in SQL
+# --------------------------------------------------------------------------- #
+
+#: One distinct power of two per bucket, so any total built from a probe row is
+#: a bitmask naming exactly which buckets were counted.
+_PROBE_WEIGHTS: dict[str, int] = {
+    "input_tokens": 1, "output_tokens": 2, "cache_tokens": 4, "cache_write_tokens": 8,
+}
+
+#: The total a correct all-four-types aggregate returns for one probe row.
+PROBE_ROW_TOTAL = sum(_PROBE_WEIGHTS.values())
+
+
+def four_type_probe_row(**overrides: int) -> dict[str, int]:
+    """A single row whose four token buckets are distinct powers of two.
+
+    Feed it to any aggregate that returns a token total; the total then names
+    which buckets it counted. ``overrides`` sets other columns the aggregate
+    needs (model, session_id and so on).
+    """
+    return {**_PROBE_WEIGHTS, **overrides}
+
+
+def missing_token_types(total: int, *, rows: int = 1) -> set[str]:
+    """The buckets a probe-row total left out. Empty set means all four landed.
+
+    ``rows`` is the number of probe rows that went in, so an aggregate over
+    several rows can be checked with the same call.
+    """
+    if rows <= 0:
+        return set()
+    per_row, remainder = divmod(int(total), rows)
+    if remainder:
+        return set(TOKEN_COLUMNS)   # not a clean multiple: nothing to decode
+    return {column for column, weight in _PROBE_WEIGHTS.items() if not per_row & weight}
+
+
+def assert_total_counts_all_token_types(
+    total: int, *, rows: int = 1, context: str = "aggregate",
+) -> None:
+    """Fail when a probe-row total dropped a bucket, naming the dropped ones."""
+    missing = missing_token_types(total, rows=rows)
+    assert not missing, (
+        f"{context}: token total {total} over {rows} probe row(s) omits "
+        f"{', '.join(sorted(missing))} (expected {PROBE_ROW_TOTAL * rows})"
     )
 
 

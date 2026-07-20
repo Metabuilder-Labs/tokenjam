@@ -41,7 +41,10 @@ from tests.token_aggregate_guard import (
     TOKEN_COLUMNS,
     assert_module_token_sums_are_complete,
     assert_sql_token_sums_are_complete,
+    assert_total_counts_all_token_types,
     find_incomplete_token_sums,
+    four_type_probe_row,
+    missing_token_types,
 )
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
@@ -239,6 +242,25 @@ def test_the_guard_catches_the_bug_shape_that_shipped_three_times():
         "SELECT SUM(input_tokens + output_tokens + cache_tokens) FROM spans"
     )
     assert offenders and offenders[0][1] == {"cache_write_tokens"}
+
+
+def test_the_probe_decodes_a_python_side_aggregate_that_drops_a_bucket():
+    """The SQL guard reads query text, so an aggregate that adds columns up in
+    Python is out of its reach. The probe catches that shape and names the
+    bucket that went missing."""
+    row = four_type_probe_row(model="claude-sonnet-5")
+    dropped_cache_write = row["input_tokens"] + row["output_tokens"] + row["cache_tokens"]
+
+    assert missing_token_types(dropped_cache_write) == {"cache_write_tokens"}
+    with pytest.raises(AssertionError, match="cache_write_tokens"):
+        assert_total_counts_all_token_types(dropped_cache_write)
+
+
+def test_the_probe_passes_a_complete_python_side_aggregate():
+    rows = [four_type_probe_row(), four_type_probe_row()]
+    total = sum(accounting.four_type_token_total(r) for r in rows)
+    assert missing_token_types(total, rows=len(rows)) == set()
+    assert_total_counts_all_token_types(total, rows=len(rows))
 
 
 def test_the_guard_allows_a_deliberate_single_bucket_sum():
