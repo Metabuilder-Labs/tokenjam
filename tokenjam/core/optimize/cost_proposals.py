@@ -268,6 +268,11 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
     """
     proposals: list[CostProposal] = []
     for row in getattr(finding, "per_agent", []) or []:
+        if row.delta_usd <= 0:
+            # The proposed model is not actually cheaper for this agent's token
+            # mix. There is nothing to recover, so there is no card: a rollup
+            # that summed this would be summing a loss.
+            continue
         plumbing = _model_swap_plumbing(row, config) if config is not None else {
             "apply_capable": False,
             "apply_blocked_reason": (

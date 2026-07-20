@@ -182,3 +182,80 @@ async def test_apply_note_route_refuses_non_markdown_target(app, client, monkeyp
     assert r.status_code == 409
     assert "not an allowlisted note target" in r.json()["detail"]
     assert target.read_text() == "print('do not touch me')\n"
+
+
+# --- model-routing apply kinds: the write also opens a priced verify window ---
+
+_AGENT_FILE = """---
+name: explore
+model: claude-opus-4-8
+---
+
+Body.
+"""
+
+
+async def test_agent_model_apply_opens_a_cost_verify_window(
+    app, client, config, monkeypatch, tmp_path,
+):
+    """A subagent model write is a cost fix with a file to edit, so the same
+    approval that rewrites the frontmatter must also start the exposure window
+    the priced receipt is measured over."""
+    from tokenjam.core.optimize import cost_apply
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    token = app.state.relearn_write_token
+
+    target = fake_home / "workspace" / ".claude" / "agents" / "explore.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_AGENT_FILE, encoding="utf-8")
+
+    body = {
+        "signature": "cost:subagent:explore",
+        "title": "Over-powered subagent explore",
+        "rung": 0, "scope": "project", "target_path": str(target), "go": True,
+        "apply_kind": "agent_model", "agent_name": "explore",
+        "current_model": "claude-opus-4-8", "proposed_model": "claude-haiku-4-5",
+        "analyzer": "subagent",
+    }
+    r = await client.post(
+        "/api/v1/relearn/apply", json=body, headers={"X-TJ-Local-Token": token},
+    )
+
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["dry_run"] is False
+    assert "model: claude-haiku-4-5" in target.read_text()
+    # The cost ledger carries the marker the dollar delta is measured from.
+    marker = payload["cost_marker"]
+    assert marker["analyzer"] == "subagent"
+    assert marker["target_key"]["models"] == ["claude-opus-4-8"]
+    assert marker["applied_at"]
+    assert [rec["signature"] for rec in cost_apply.list_applied(config)] == [
+        "cost:subagent:explore",
+    ]
+
+
+async def test_rung_ladder_apply_opens_no_cost_window(
+    app, client, config, monkeypatch, tmp_path,
+):
+    """A plain note fix has no priced metric, so it must not create a cost
+    marker whose delta nothing can measure."""
+    from tokenjam.core.optimize import cost_apply
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    token = app.state.relearn_write_token
+
+    inside = fake_home / "CLAUDE.md"
+    inside.write_text("# Repo\n", encoding="utf-8")
+    r = await client.post(
+        "/api/v1/relearn/apply", json=_apply_body(str(inside)),
+        headers={"X-TJ-Local-Token": token},
+    )
+    assert r.status_code == 200
+    assert "cost_marker" not in r.json()
+    assert cost_apply.list_applied(config) == []

@@ -162,6 +162,12 @@ class ApplyRelearnRequest(BaseModel):
     current_model:  str = ""
     proposed_model: str = ""
     source_path:    str = ""
+    # Which cost analyzer's card this write came from, so the same apply also
+    # opens a cost-verify exposure window and the realized delta lands in the
+    # ledger the receipts surface reads dollars from. Empty for rung-ladder
+    # fixes, whose receipts are recurrence-based rather than priced.
+    analyzer:       str = ""
+    agent_id:       str = ""
 
 
 @router.post("/relearn/apply", dependencies=_WRITE_AUTH)
@@ -176,15 +182,53 @@ def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str,
     outside the user's home directory (defense-in-depth allowlist).
     """
     _reject_target_outside_home(body.target_path)
-    cluster = body.model_dump(exclude={"scope", "target_path", "go", "force"})
+    cluster = body.model_dump(
+        exclude={"scope", "target_path", "go", "force", "analyzer", "agent_id"},
+    )
     try:
-        return relearn_apply.apply_relearn_fix(
+        result = relearn_apply.apply_relearn_fix(
             _config(request), cluster,
             target_path=body.target_path, scope=body.scope,
             go=body.go, conn=_conn(request), force=body.force,
         )
     except relearn_apply.RelearnApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if body.go and body.apply_kind and body.analyzer:
+        result["cost_marker"] = _open_cost_verify_window(request, body)
+    return result
+
+
+def _open_cost_verify_window(request: Request, body: ApplyRelearnRequest) -> dict[str, Any] | None:
+    """Start the priced exposure window for a model-routing write.
+
+    A model swap is a cost fix that happens to have a file to edit, so its
+    receipt has to be a measured dollar delta on spans, not a recurrence count.
+    That measurement hangs off the cost-applied ledger, so the same approval
+    that wrote the file also opens the window. Best-effort: a marker that cannot
+    be created must never fail an apply that already succeeded on disk.
+    """
+    from tokenjam.core.optimize import cost_apply
+
+    proposal = {
+        "signature": body.signature,
+        "analyzer": body.analyzer,
+        "title": body.title,
+        "agent_id": body.agent_id,
+        "advise_text": body.proposed_fix,
+        "target_key": {
+            "models": [body.current_model] if body.current_model else [],
+            "subagent": body.analyzer == "subagent",
+            "agent_name": body.agent_name,
+        },
+        "baseline": {"proposed_model": body.proposed_model},
+        "estimated_recoverable_usd": None,
+        "estimated_recoverable_tokens": None,
+        "estimate_basis": "",
+    }
+    try:
+        return cost_apply.mark_applied(_conn(request), _config(request), proposal)
+    except Exception:
+        return None
 
 
 @router.get("/relearn/applied", dependencies=[Depends(require_api_key)])
