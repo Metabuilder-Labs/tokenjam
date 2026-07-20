@@ -1,7 +1,7 @@
 """Delta-verify for applied cost proposals — the receipts.
 
 A cost proposal is advise-only, so there is no transcript recurrence to
-re-count (that is ``relearn_verify``'s job). What we CAN measure is whether the
+re-count (that is ``pothole_verify``'s job). What we CAN measure is whether the
 cost signal the analyzer flagged actually moved after the user marked their
 change: fewer dollars on the oversized model, a higher cache hit ratio, fewer
 input tokens per call on the bloated step.
@@ -15,7 +15,7 @@ the SAME ``core.cost.calculate_cost`` the rest of tokenjam uses (per-model,
 per-token-type, BOTH ``cache_tokens`` and ``cache_write_tokens`` included — the
 recurring omission this workspace guards against).
 
-Honesty (identical discipline to ``relearn_verify``):
+Honesty (identical discipline to ``pothole_verify``):
 
   * **Correlational, never causal.** The user's change is one of many things
     that shifted at the marker. This measures co-occurrence and says so.
@@ -34,8 +34,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tokenjam.core.cost import calculate_cost
-from tokenjam.core.optimize import accounting
-from tokenjam.core.optimize.relearn_verify import (
+from tokenjam.core.optimize.pothole_verify import (
     VERDICT_IMPROVED,
     VERDICT_INSUFFICIENT_DATA,
     VERDICT_REGRESSED,
@@ -96,14 +95,7 @@ def _rows_for(
     filters. Returns (session_id, provider, model, input, output, cache,
     cache_write). ``subagent_only`` scopes to Task-dispatched subagent spans
     (``sub_agent_id IS NOT NULL``) — the fan-out the subagent analyzer flags.
-    Never raises — a bad query yields ``[]``.
-
-    Rows are collapsed by CALL identity before they are returned
-    (``core.optimize.accounting``), so a call observed by more than one ingest
-    path is priced once rather than once per row. Every dollar figure in this
-    module is computed from these rows, which is what makes the receipts
-    immune to a duplicated ingest.
-    """
+    Never raises — a bad query yields ``[]``."""
     clauses = ["start_time >= $1", "start_time < $2", "model IS NOT NULL"]
     params: list[Any] = [since, until]
     if subagent_only:
@@ -119,8 +111,8 @@ def _rows_for(
         clauses.append(f"provider = ${len(params)}")
     where = " AND ".join(clauses)
     try:
-        raw = conn.execute(
-            "SELECT span_id, attributes, session_id, provider, model, "
+        return conn.execute(
+            "SELECT session_id, provider, model, "
             "COALESCE(input_tokens,0), COALESCE(output_tokens,0), "
             "COALESCE(cache_tokens,0), COALESCE(cache_write_tokens,0) "
             f"FROM spans WHERE {where}",
@@ -128,11 +120,6 @@ def _rows_for(
         ).fetchall()
     except Exception:
         return []
-    keyed = [
-        (accounting.call_identity(r[0], r[2], r[1]), *r[2:])
-        for r in raw
-    ]
-    return [tuple(row[1:]) for row in accounting.dedupe_by_call_identity(keyed)]
 
 
 def _priced_usd(rows: list[tuple]) -> float:
@@ -403,7 +390,7 @@ def rescan_all(
 def cost_compound_ledger(records: list[dict[str, Any]]) -> dict[str, Any]:
     """The Applied section's cost summary: total realized dollars across every
     VERIFIED, improved (non-reverted) cost fix, plus a verdict breakdown. The
-    dollar-denominated sibling of ``relearn_verify.compound_ledger``."""
+    dollar-denominated sibling of ``pothole_verify.compound_ledger``."""
     total_usd = 0.0
     total_tokens = 0
     verified = improved = regressed = insufficient = 0

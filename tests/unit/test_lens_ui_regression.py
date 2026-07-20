@@ -701,12 +701,20 @@ def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
     assert "return '#/' + route + (s ? '?' + s : '');" in html
 
 
-def test_dashboard_is_default_landing(html):
-    # Empty hash → dashboard, set via the PARSED default (no render-time
-    # location.hash redirect — #132 discipline).
-    assert "|| 'dashboard'" in html
+def test_review_inbox_is_default_landing(html):
+    # Two-lens IA (self-improve-loop SPEC.md §12): empty hash → the Review
+    # inbox, the Improve lens's home — set via the PARSED default (no
+    # render-time location.hash redirect — #132 discipline still applies).
+    # Dashboard remains a fully-reachable Improve-lens view, just no longer
+    # the landing route.
+    assert "|| 'review'" in html
+    assert "|| 'dashboard'" not in html
     assert "|| 'overview'" not in html
     assert "location.hash = '#/dashboard'" not in html  # no hash-assign redirect
+    assert "history.replaceState(null, '', '#/review')" in html
+    assert "function ReviewInboxView" in html
+    assert "case 'review': return html`<${ReviewInboxView}" in html
+    assert 'href="#/review"' in html
     assert "function DashboardView" in html
     assert "case 'dashboard': return html`<${DashboardView}" in html
     assert 'href="#/dashboard"' in html
@@ -1080,16 +1088,22 @@ def test_status_card_right_click_rename_wiring(html):
 
 
 # --- Work map: graphical "what did my agent do" tab ------------------------ #
-def test_work_map_tab_present_and_default(html):
-    # Map is the default session tab and renders before Timeline.
+def test_work_map_tab_present_and_demoted(html):
+    # Map/Approach/Timeline are drill-in evidence, not the landing session tab
+    # (self-improve-loop SPEC.md §12 — demoted from primary tabs). Map still
+    # renders before Timeline within that demoted group, and both still render
+    # after the primary tabs (Models & context leads, Map/Approach/Timeline
+    # trail behind the "Evidence" divider).
     assert "function WorkMapSection" in html
     assert "function WorkMapNode" in html
-    assert "useState('map')" in html
+    assert "useState('models')" in html
     assert "/sessions/' + sessionId + '/workmap'" in html
-    # Tab order: the Map button must appear before the Timeline button.
+    models_btn = html.index("setTab('models')")
     map_btn = html.index("setTab('map')")
     story_btn = html.index("setTab('story')")
+    assert models_btn < map_btn, "Models & context must lead the primary tabs"
     assert map_btn < story_btn, "Map tab must render before Timeline"
+    assert '<span class="tab-sep">Evidence</span>' in html
 
 
 def test_work_map_is_descriptive_not_evaluative(html):
@@ -2077,3 +2091,32 @@ def test_recommendations_panel_present_and_fetches_endpoint(html):
     # measured vs estimated fields straight from the endpoint payload.
     assert "measured_recovered_tokens" in html
     assert "estimated_recoverable_tokens" in html
+
+
+# --- cost proposals in the Review inbox (advise-only, with receipts) ----- #
+def test_cost_proposals_wired_into_review_inbox(html):
+    # The downsize/cache/trim analyzers surface as advise-only cost proposals in
+    # the same Review inbox, fetched from the cost endpoints and rendered with a
+    # distinct `kind` badge, an estimate, and (after Mark applied) the realized
+    # delta receipt. Keep the fetch + render wiring present.
+    assert "function CostProposalCard" in html
+    assert "function CostAppliedRow" in html
+    assert "function CostVerifyLine" in html
+    assert "api('/pothole/cost-proposals')" in html
+    assert "api('/pothole/cost-applied')" in html
+    assert "'/pothole/cost-proposals/apply'" in html
+    # The card is advise-only: a marker button, never an apply-to-code write.
+    assert "Mark applied" in html
+    assert "Cost advisories" in html
+    # Honesty discipline (Rule 14): the realized delta is estimated / correlational.
+    assert "realized_usd_delta" in html
+
+
+def test_subagent_cost_card_has_workspace_apply_flow(html):
+    # The subagent (4th) analyzer is apply-capable: its CC-origin card routes a
+    # reversible rung-1 note through the apply-workspace endpoint (dry-run diff
+    # then write), unlike the three advise-only analyzers.
+    assert "'/pothole/cost-proposals/apply-workspace'" in html
+    assert "apply_capable" in html
+    assert "Apply note" in html
+    assert "subagent: 'subagent'" in html
