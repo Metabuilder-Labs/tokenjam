@@ -1,6 +1,6 @@
-"""The self-improve loop's OTel lane: potholes mined from stored spans.
+"""The self-improve loop's OTel lane: relearns mined from stored spans.
 
-The transcript detector (``analyzers.pothole``) can only see agents that leave a
+The transcript detector (``analyzers.relearn``) can only see agents that leave a
 session transcript on disk, which in practice means the workspace agents (Claude
 Code, and Claude Agent SDK apps pointed at a transcript path). Every other agent
 reaches tokenjam as OpenTelemetry spans in DuckDB, and until now the detector
@@ -39,10 +39,10 @@ from datetime import datetime
 from typing import Any
 
 from tokenjam.core.alerts import is_interactive_coding_agent
-from tokenjam.core.optimize.analyzers.pothole import (
+from tokenjam.core.optimize.analyzers.relearn import (
     FailureEpisode,
     HONESTY_CAVEAT,
-    PotholeCluster,
+    RelearnCluster,
     is_user_decline,
 )
 
@@ -148,7 +148,7 @@ def extract_span_failures(
 
 # --- Eval-case artifact (the advise lane's hand-off) -------------------------
 
-def to_eval_case(cluster: PotholeCluster) -> dict:
+def to_eval_case(cluster: RelearnCluster) -> dict:
     """A JSON-serializable eval case for one clustered failure.
 
     The advise lane's deliverable for a workspace-less agent: tokenjam cannot

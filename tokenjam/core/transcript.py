@@ -1116,7 +1116,7 @@ def loop_transcript_root(config: object | None = None) -> Path:
     An agent with a transcript root here is a WORKSPACE agent: the loop can
     propose and apply a fix into its repo. Agents that reach tokenjam only as
     OTel spans have no root and take the advise-only lane instead (see
-    ``core/optimize/pothole_otel.py``). Never raises — a malformed config
+    ``core/optimize/relearn_otel.py``). Never raises — a malformed config
     degrades to the default root.
     """
     try:

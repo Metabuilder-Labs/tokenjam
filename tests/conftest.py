@@ -69,7 +69,7 @@ def _tj_isolated_home(tmp_path_factory):
         # with teeth: `transcript.DEFAULT_PROJECTS_ROOT` bakes the REAL
         # `Path.home()` at import, so re-pointing HOME cannot move it
         # afterwards. Left unpatched, anything that resolves the projects root
-        # (the self-improve loop's pothole detector, reached from the API
+        # (the self-improve loop's relearn detector, reached from the API
         # routes) walks the developer's live ~/.claude/projects — thousands of
         # transcripts parsed into Stories, and potentially a `claude` CLI
         # distill shell-out — which stalls the suite for minutes instead of

@@ -25,15 +25,15 @@ def require_api_key(
 #
 # `require_api_key` above is a NO-OP by default (`api.auth.enabled` defaults to
 # False) -- fine for read-only telemetry routes, but the self-improve loop's
-# mutating pothole endpoints (apply/enable/disable/revert/refresh) write files
+# mutating relearn endpoints (apply/enable/disable/revert/refresh) write files
 # and `git commit` on the caller's behalf. On a default local install that
 # would otherwise leave them wide open to any local process, or a browser CSRF
 # POST to `http://127.0.0.1:<port>/...` from an unrelated page the user has
-# open. `require_pothole_write_auth` is a SEPARATE dependency those routes add
+# open. `require_relearn_write_auth` is a SEPARATE dependency those routes add
 # in addition to `require_api_key` -- it never consults `api.auth.enabled` and
 # is always enforced.
 #
-# Mechanism: a random per-process token (`app.state.pothole_write_token`,
+# Mechanism: a random per-process token (`app.state.relearn_write_token`,
 # minted once in `create_app`) is embedded ONLY in the same-origin-served UI
 # HTML (`<meta name="tj-write-token">`, see `api/app.py::_serve_ui`) and sent
 # back by the UI's JS as the `X-TJ-Local-Token` header on every write call. A
@@ -64,17 +64,17 @@ def _same_origin(origin_header: str, request: Request) -> bool:
     return host_ok and parsed.port == request.url.port
 
 
-def require_pothole_write_auth(request: Request) -> None:
-    """Always-on guard for the pothole write endpoints — independent of
+def require_relearn_write_auth(request: Request) -> None:
+    """Always-on guard for the relearn write endpoints — independent of
     ``config.api.auth.enabled``. Raises 403 on a cross-origin ``Origin``, then
     401 unless ``X-TJ-Local-Token`` matches this server process's
-    ``app.state.pothole_write_token``. A request with neither header is
+    ``app.state.relearn_write_token``. A request with neither header is
     refused too — there is no bypass-by-omission."""
     origin = request.headers.get("origin")
     if origin and not _same_origin(origin, request):
         raise HTTPException(status_code=403, detail="cross-origin request refused")
 
-    token = getattr(request.app.state, "pothole_write_token", None)
+    token = getattr(request.app.state, "relearn_write_token", None)
     supplied = request.headers.get("x-tj-local-token")
     if not token or not supplied or not secrets.compare_digest(supplied, token):
         raise HTTPException(status_code=401, detail="missing or invalid local write token")

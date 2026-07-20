@@ -65,23 +65,12 @@ def write_cache(
     detector job vs the optimize path). To keep this "the same proposal store"
     without one producer clobbering the other, an existing ``cost_proposals``
     block is read back and preserved here rather than dropped.
-
-    Detection time is also when each cluster gets its stable ``proposal_id``
-    (``relearn_proposals.stamp_proposal_ids``): the apply paths accept a stored
-    proposal ID and nothing else, so the IDs have to exist on the record the
-    detector itself wrote.
     """
-    from tokenjam.core.optimize.relearn_proposals import stamp_proposal_ids
-
     p = path or default_cache_path(config)
     existing = read_cache(p, config=config) or {}
-    # Explicit annotation: without it mypy infers the dict-literal's value
-    # type from the two initial values (str, dict[str, Any]) and joins them
-    # down to `Collection[str]`, rejecting the `cost_computed_at` assignment
-    # below even though the payload is really `dict[str, Any]`.
-    payload: dict[str, Any] = {
+    payload = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
-        "finding": stamp_proposal_ids(asdict(finding)),
+        "finding": asdict(finding),
     }
     if "cost_proposals" in existing:
         payload["cost_proposals"] = existing["cost_proposals"]
@@ -128,15 +117,7 @@ def write_cost_proposals(
 
     p = path or default_cache_path(config)
     existing = read_cache(p, config=config) or {}
-    # `is_dataclass()` alone narrows to `DataclassInstance | type[DataclassInstance]`
-    # (it also accepts a dataclass *class*), but `asdict()` only accepts an
-    # instance. Excluding `type` narrows to the instance case for mypy and
-    # matches what we actually want here — `proposals` holds instances, never
-    # classes.
-    serialised = [
-        asdict(pr) if is_dataclass(pr) and not isinstance(pr, type) else dict(pr)
-        for pr in proposals
-    ]
+    serialised = [asdict(pr) if is_dataclass(pr) else dict(pr) for pr in proposals]
     payload = dict(existing)
     payload["cost_proposals"] = serialised
     payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()
@@ -157,6 +138,13 @@ def recompute_now(
     never blocks waiting for the other one to finish. Callers that want
     non-blocking HTTP-request behaviour should run this on a background
     thread instead (see ``trigger_background_recompute``).
+
+    Phase 3 (verify, SPEC §4 step 6): "on each rescan" is THIS pass — when
+    ``config`` is supplied, every applied (non-reverted) fix's recurrence is
+    re-measured against the same fresh ``conn`` right after the detector
+    itself recomputes, so Verify always runs on the same cadence as Detect
+    with no separate scheduler entry. ``config=None`` (e.g. an older caller)
+    just skips the verify pass — degrade, never fail the detector recompute.
     """
     if not _LOCK.acquire(blocking=False):
         return None
@@ -173,25 +161,18 @@ def recompute_now(
                 projects_root = loop_transcript_root(config)
             except Exception:
                 projects_root = None
-        # The persistent per-file parse cache (core.transcript_cache): this
-        # background job re-scans the FULL corpus on every scheduled tick, so
-        # warming/reusing the cache here is where the recurring cost actually
-        # gets paid down across ticks, not just within one `tj optimize` run.
-        transcript_cache_dir = None
-        if config is not None:
-            try:
-                from tokenjam.core.transcript_cache import default_cache_dir
-
-                transcript_cache_dir = default_cache_dir(config)
-            except Exception:
-                transcript_cache_dir = None
-        finding = compute_relearn_finding(
-            conn, projects_root=projects_root, transcript_cache_dir=transcript_cache_dir,
-        )
+        finding = compute_relearn_finding(conn, projects_root=projects_root)
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to
         # the real ~/.tj — see default_cache_path).
         result = write_cache(finding, cache_path, config=config)
+        if config is not None:
+            try:
+                from tokenjam.core.optimize import relearn_verify
+
+                relearn_verify.rescan_all(config, conn, projects_root=projects_root)
+            except Exception:
+                pass   # best-effort — a verify failure never sinks the detector's own cache write
         return result
     finally:
         _COMPUTING.clear()

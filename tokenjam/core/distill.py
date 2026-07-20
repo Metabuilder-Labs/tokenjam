@@ -140,7 +140,7 @@ def _invoke_claude(prompt: str, *, model: str, timeout: int) -> str | None:
     ``result`` string, or ``None`` on any failure (missing CLI, non-zero exit,
     timeout, unparseable envelope). Never raises.
 
-    Shared by every distill entry point (title distillation, pothole-cluster
+    Shared by every distill entry point (title distillation, relearn-cluster
     naming, …) so the pinned invocation recipe — cheapest model path, neutral
     cwd, stdin-not-argv prompt — lives in exactly one place.
     """

@@ -1,4 +1,4 @@
-"""Unit tests for the self-improve loop's Apply stage (core.optimize.pothole_apply).
+"""Unit tests for the self-improve loop's Apply stage (core.optimize.relearn_apply).
 
 Everything is routed at a tmp storage dir (``cfg.storage.path``) AND every
 write TARGET is under ``tmp_path`` too — nothing here ever touches a real
@@ -13,7 +13,7 @@ import sys
 import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
-from tokenjam.core.optimize import pothole_apply as pa
+from tokenjam.core.optimize import relearn_apply as pa
 
 # --- Fixtures ----------------------------------------------------------------
 
@@ -84,7 +84,7 @@ def test_default_target_path_project_finds_nearest_claude_md(tmp_path):
 def test_apply_note_dry_run_writes_nothing(cfg, tmp_path):
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    result = pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project", go=False)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=False)
     assert result["dry_run"] is True
     assert target.read_text() == "# Repo\n"
     assert not pa.list_applied(cfg)
@@ -93,13 +93,13 @@ def test_apply_note_dry_run_writes_nothing(cfg, tmp_path):
 def test_apply_note_go_writes_marked_section(cfg, tmp_path):
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    result = pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     assert result["dry_run"] is False
     rec = result["record"]
     assert rec["kind"] == "note" and rec["state"] == "applied"
     written = target.read_text()
     assert pa.NOTE_SECTION_HEADER in written
-    assert "<!-- tokenjam:pothole:cwd_confusion -->" in written
+    assert "<!-- tokenjam:relearn:cwd_confusion -->" in written
     assert "# Repo\n" in written        # original content preserved
 
 
@@ -122,11 +122,11 @@ def test_command_not_found_apply_writes_real_note_not_stub(cfg, tmp_path):
     )
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     assert result["record"]["kind"] == "note"
     written = target.read_text()
     assert "python3" in written
-    assert "<!-- tokenjam:pothole:command_not_found -->" in written
+    assert "<!-- tokenjam:relearn:command_not_found -->" in written
     # Must never route through the enforcement/stub-hook path.
     assert "no automatic matcher" not in written
     assert "never blocks" not in written
@@ -135,7 +135,7 @@ def test_command_not_found_apply_writes_real_note_not_stub(cfg, tmp_path):
 
 def test_apply_note_creates_missing_file(cfg, tmp_path):
     target = tmp_path / "sub" / "CLAUDE.md"
-    result = pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     assert target.is_file()
     rec = result["record"]
     reverted = pa.revert_applied_fix(cfg, rec["id"])
@@ -146,11 +146,11 @@ def test_apply_note_creates_missing_file(cfg, tmp_path):
 def test_reapply_same_signature_is_idempotent_not_duplicated(cfg, tmp_path):
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
-    pa.apply_pothole_fix(cfg, _cluster(proposed_fix="updated fix text"),
+    pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
+    pa.apply_relearn_fix(cfg, _cluster(proposed_fix="updated fix text"),
                           target_path=str(target), scope="project", go=True)
     written = target.read_text()
-    assert written.count("<!-- tokenjam:pothole:cwd_confusion -->") == 1
+    assert written.count("<!-- tokenjam:relearn:cwd_confusion -->") == 1
     assert "updated fix text" in written
 
 
@@ -160,11 +160,11 @@ def test_apply_skill_writes_frontmatter(cfg, tmp_path):
     cluster = _cluster(signature="deferred_tool_cold", family_key="deferred_tool_cold",
                         title="deferred tool cold", rung=2)
     target = tmp_path / ".claude" / "skills" / "deferred-tool-cold" / "SKILL.md"
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     assert result["record"]["kind"] == "skill"
     content = target.read_text()
     assert content.startswith("---\nname: deferred-tool-cold")
-    assert "tokenjam:pothole:deferred_tool_cold" in content
+    assert "tokenjam:relearn:deferred_tool_cold" in content
 
 
 def test_apply_skill_refuses_to_clobber_foreign_file(cfg, tmp_path):
@@ -172,8 +172,8 @@ def test_apply_skill_refuses_to_clobber_foreign_file(cfg, tmp_path):
     target = tmp_path / ".claude" / "skills" / "x" / "SKILL.md"
     target.parent.mkdir(parents=True)
     target.write_text("hand-authored skill, not ours\n", encoding="utf-8")
-    with pytest.raises(pa.PotholeApplyRefused, match="wasn't written by TokenJam"):
-        pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    with pytest.raises(pa.RelearnApplyRefused, match="wasn't written by TokenJam"):
+        pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     assert target.read_text() == "hand-authored skill, not ours\n"   # untouched
 
 
@@ -183,7 +183,7 @@ def test_apply_hook_is_written_disabled(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain",
                         title="blocked sleep-chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     rec = result["record"]
     assert rec["enforcement"]["enabled"] is False
     assert target.is_file()
@@ -196,7 +196,7 @@ def test_apply_hook_is_written_disabled(cfg, tmp_path):
 def test_hook_fails_open_on_garbage_stdin(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
-    pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     proc = subprocess.run([sys.executable, str(target)], input="not { valid json",
                            text=True, capture_output=True, timeout=10)
     assert proc.returncode == 0   # fail-open: never blocks on a bug/bad input
@@ -205,7 +205,7 @@ def test_hook_fails_open_on_garbage_stdin(cfg, tmp_path):
 def test_hook_blocks_real_sleep_chain(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
-    pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "sleep 5 && ls"}})
     proc = subprocess.run([sys.executable, str(target)], input=payload,
                            text=True, capture_output=True, timeout=10)
@@ -216,7 +216,7 @@ def test_hook_blocks_real_sleep_chain(cfg, tmp_path):
 def test_hook_allows_unrelated_command(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
-    pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls -la"}})
     proc = subprocess.run([sys.executable, str(target)], input=payload,
                            text=True, capture_output=True, timeout=10)
@@ -225,9 +225,9 @@ def test_hook_allows_unrelated_command(cfg, tmp_path):
 
 def test_stub_matcher_for_unknown_family_never_blocks(cfg, tmp_path):
     cluster = _cluster(signature="mystery", family_key="mystery_family",
-                        title="some novel pothole", rung=3)
+                        title="some novel relearn", rung=3)
     target = tmp_path / ".claude" / "hooks" / "mystery.py"
-    pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "sleep 5 && ls"}})
     proc = subprocess.run([sys.executable, str(target)], input=payload,
                            text=True, capture_output=True, timeout=10)
@@ -245,7 +245,7 @@ def test_stub_matcher_for_unknown_family_never_blocks(cfg, tmp_path):
 def _apply_reactive_hook(cfg, tmp_path, family_key: str, title: str):
     cluster = _cluster(signature=family_key, family_key=family_key, title=title, rung=3)
     target = tmp_path / ".claude" / "hooks" / f"{family_key}.py"
-    pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     return target
 
 
@@ -460,9 +460,9 @@ def test_reactive_hook_stale_read_fires_via_tool_response_error(cfg, tmp_path):
 def test_enable_enforcement_requires_confirm(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
-    with pytest.raises(pa.PotholeApplyRefused, match="explicit"):
+    with pytest.raises(pa.RelearnApplyRefused, match="explicit"):
         pa.enable_enforcement(cfg, fix_id, confirm=False)
     assert not (tmp_path / ".claude" / "settings.json").exists()
 
@@ -470,7 +470,7 @@ def test_enable_enforcement_requires_confirm(cfg, tmp_path):
 def test_enable_then_disable_enforcement(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
 
     enabled = pa.enable_enforcement(cfg, fix_id, confirm=True)
@@ -488,7 +488,7 @@ def test_enable_then_disable_enforcement(cfg, tmp_path):
 def test_revert_disables_enforcement_and_deletes_hook(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
     pa.enable_enforcement(cfg, fix_id, confirm=True)
 
@@ -509,7 +509,7 @@ def test_apply_and_revert_commit_in_a_git_repo(tmp_path):
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-q", "-m", "add claude.md"], cwd=repo, check=True)
 
-    result = pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     rec = result["record"]
     assert rec["git_commit"] is not None
     assert rec["repo_root"] == str(repo)
@@ -528,7 +528,7 @@ def test_apply_and_revert_commit_in_a_git_repo(tmp_path):
 def test_revert_is_idempotent(cfg, tmp_path):
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    result = pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
     first = pa.revert_applied_fix(cfg, fix_id)
     second = pa.revert_applied_fix(cfg, fix_id)
@@ -536,19 +536,19 @@ def test_revert_is_idempotent(cfg, tmp_path):
 
 
 def test_revert_unknown_fix_id_refuses(cfg):
-    with pytest.raises(pa.PotholeApplyRefused, match="no applied fix"):
+    with pytest.raises(pa.RelearnApplyRefused, match="no applied fix"):
         pa.revert_applied_fix(cfg, "does-not-exist")
 
 
 def test_unknown_rung_refuses(cfg, tmp_path):
     target = tmp_path / "CLAUDE.md"
-    with pytest.raises(pa.PotholeApplyRefused, match="unknown rung"):
-        pa.apply_pothole_fix(cfg, _cluster(rung=99), target_path=str(target), scope="project", go=True)
+    with pytest.raises(pa.RelearnApplyRefused, match="unknown rung"):
+        pa.apply_relearn_fix(cfg, _cluster(rung=99), target_path=str(target), scope="project", go=True)
 
 
 def test_empty_target_path_refuses(cfg):
-    with pytest.raises(pa.PotholeApplyRefused, match="no target path"):
-        pa.apply_pothole_fix(cfg, _cluster(), target_path="", scope="project", go=True)
+    with pytest.raises(pa.RelearnApplyRefused, match="no target path"):
+        pa.apply_relearn_fix(cfg, _cluster(), target_path="", scope="project", go=True)
 
 
 # --- active-session guard ------------------------------------------------------
@@ -578,12 +578,12 @@ def test_active_session_warning_blocks_unless_forced(cfg, tmp_path):
     now = utcnow()
     conn = _FakeConn([(f"claude-code-{repo.name}", "active", now - timedelta(minutes=1), None)])
 
-    with pytest.raises(pa.PotholeApplyRefused, match="active session"):
-        pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project",
+    with pytest.raises(pa.RelearnApplyRefused, match="active session"):
+        pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project",
                               go=True, conn=conn, force=False)
     assert not pa.list_applied(cfg)   # refused before any write/record happened
 
-    result = pa.apply_pothole_fix(cfg, _cluster(), target_path=str(target), scope="project",
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project",
                                    go=True, conn=conn, force=True)
     assert result["dry_run"] is False   # force bypasses the warning
 
@@ -608,16 +608,16 @@ def test_note_apply_refuses_non_markdown_target(cfg, tmp_path):
     supplied target_path could corrupt any file on disk."""
     target = tmp_path / "some_script.py"
     target.write_text("print('do not touch me')\n", encoding="utf-8")
-    with pytest.raises(pa.PotholeApplyRefused, match="not an allowlisted note target"):
-        pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    with pytest.raises(pa.RelearnApplyRefused, match="not an allowlisted note target"):
+        pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
     assert target.read_text() == "print('do not touch me')\n"   # untouched
 
 
 def test_note_apply_refuses_dotfile_target(cfg, tmp_path):
     target = tmp_path / ".zshrc"
     target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
-    with pytest.raises(pa.PotholeApplyRefused, match="not an allowlisted note target"):
-        pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    with pytest.raises(pa.RelearnApplyRefused, match="not an allowlisted note target"):
+        pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
     assert target.read_text() == "export PATH=/usr/bin\n"   # untouched
 
 
@@ -625,21 +625,21 @@ def test_note_apply_allows_md_target(cfg, tmp_path):
     """A *.md target (not just literally CLAUDE.md) is allowed."""
     target = tmp_path / "AGENTS.md"
     target.write_text("# Agents\n", encoding="utf-8")
-    result = pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
     assert result["dry_run"] is False
-    assert "<!-- tokenjam:pothole:cwd_confusion -->" in target.read_text()
+    assert "<!-- tokenjam:relearn:cwd_confusion -->" in target.read_text()
 
 
 def test_note_apply_allows_re_apply_to_already_marked_non_md_file(cfg, tmp_path):
-    """A non-.md file that ALREADY carries a tokenjam:pothole marker (e.g. a
+    """A non-.md file that ALREADY carries a tokenjam:relearn marker (e.g. a
     prior legitimate apply) may still be re-applied — the allowlist doesn't
     lock out idempotent re-apply, only a first write to a foreign extension."""
     target = tmp_path / "notes.txt"
     target.write_text(
-        "<!-- tokenjam:pothole:cwd_confusion -->\nold\n<!-- /tokenjam:pothole:cwd_confusion -->\n",
+        "<!-- tokenjam:relearn:cwd_confusion -->\nold\n<!-- /tokenjam:relearn:cwd_confusion -->\n",
         encoding="utf-8",
     )
-    result = pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
     assert result["dry_run"] is False
 
 
@@ -650,8 +650,8 @@ def test_apply_refuses_symlinked_target(cfg, tmp_path):
     real.write_text("# elsewhere\n", encoding="utf-8")
     link = tmp_path / "CLAUDE.md"
     link.symlink_to(real)
-    with pytest.raises(pa.PotholeApplyRefused, match="symlink"):
-        pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(link), scope="project", go=True)
+    with pytest.raises(pa.RelearnApplyRefused, match="symlink"):
+        pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(link), scope="project", go=True)
     assert real.read_text() == "# elsewhere\n"   # the real file was never touched through the link
 
 
@@ -661,8 +661,8 @@ def test_apply_refuses_dangling_symlink_target(cfg, tmp_path):
     plain-create branch is exactly what would write through the link."""
     link = tmp_path / "CLAUDE.md"
     link.symlink_to(tmp_path / "does-not-exist.md")
-    with pytest.raises(pa.PotholeApplyRefused, match="symlink"):
-        pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(link), scope="project", go=True)
+    with pytest.raises(pa.RelearnApplyRefused, match="symlink"):
+        pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(link), scope="project", go=True)
     assert not (tmp_path / "does-not-exist.md").exists()
 
 
@@ -671,7 +671,7 @@ def test_revert_refuses_when_target_became_a_symlink(cfg, tmp_path):
     revert must refuse rather than restore/delete through the new link."""
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    result = pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
 
     elsewhere = tmp_path / "elsewhere.md"
@@ -679,7 +679,7 @@ def test_revert_refuses_when_target_became_a_symlink(cfg, tmp_path):
     target.unlink()
     target.symlink_to(elsewhere)
 
-    with pytest.raises(pa.PotholeApplyRefused, match="symlink"):
+    with pytest.raises(pa.RelearnApplyRefused, match="symlink"):
         pa.revert_applied_fix(cfg, fix_id)
     assert elsewhere.read_text() == "do not touch\n"   # untouched
 
@@ -688,14 +688,14 @@ def test_revert_refuses_when_target_became_a_symlink(cfg, tmp_path):
 
 def test_memory_storage_path_never_resolves_to_real_home(monkeypatch, tmp_path):
     """A fake, obviously-not-real HOME lets this test prove the resolved base
-    dir is NOT under it -- i.e. pothole_apply_root/applied_fixes_path for a
+    dir is NOT under it -- i.e. relearn_apply_root/applied_fixes_path for a
     ':memory:'-configured TjConfig must land in a TEMP dir, never ~/.tj."""
     fake_home = tmp_path / "definitely-not-the-real-home"
     fake_home.mkdir()
     monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
 
     cfg = TjConfig(version="1", storage=StorageConfig(path=":memory:"))
-    root = pa.pothole_apply_root(cfg)
+    root = pa.relearn_apply_root(cfg)
     ledger_path = pa.applied_fixes_path(cfg)
 
     assert not str(root).startswith(str(fake_home))
@@ -707,8 +707,8 @@ def test_memory_storage_path_stable_across_calls_same_config(tmp_path):
     """The SAME config object must resolve to the SAME temp root every call —
     apply-time and revert-time paths must agree within one process/config."""
     cfg = TjConfig(version="1", storage=StorageConfig(path=":memory:"))
-    first = pa.pothole_apply_root(cfg)
-    second = pa.pothole_apply_root(cfg)
+    first = pa.relearn_apply_root(cfg)
+    second = pa.relearn_apply_root(cfg)
     assert first == second
 
 
@@ -718,7 +718,7 @@ def test_empty_storage_path_also_never_resolves_to_real_home(monkeypatch, tmp_pa
     monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
 
     cfg = TjConfig(version="1", storage=StorageConfig(path=""))
-    root = pa.pothole_apply_root(cfg)
+    root = pa.relearn_apply_root(cfg)
     assert not str(root).startswith(str(fake_home))
 
 
@@ -728,7 +728,7 @@ def test_memory_storage_apply_and_revert_round_trip_via_temp_root(tmp_path):
     cfg = TjConfig(version="1", storage=StorageConfig(path=":memory:"))
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    result = pa.apply_pothole_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
     assert pa.get_applied(cfg, fix_id) is not None
     reverted = pa.revert_applied_fix(cfg, fix_id)

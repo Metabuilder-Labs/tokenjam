@@ -975,7 +975,7 @@ def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
 
 
 def _lens_review_url(port: int, *, want_daemon: bool) -> str:
-    """One-click-revert pointer for the pothole activation tail below — the
+    """One-click-revert pointer for the relearn activation tail below — the
     Lens Review inbox (`#/review`, the Improve lens's home) already renders a
     single-click Revert next to every applied fix, so onboarding never needs
     its own revert UI. When the daemon isn't running yet (``--no-daemon``),
@@ -985,10 +985,10 @@ def _lens_review_url(port: int, *, want_daemon: bool) -> str:
     return f"run `tj serve`, then open http://127.0.0.1:{port}/#/review"
 
 
-def _run_pothole_first_fix(config: object, *, port: int, want_daemon: bool) -> None:
+def _run_relearn_first_fix(config: object, *, port: int, want_daemon: bool) -> None:
     """Onboarding tail (#179): the backfill's payoff is a fix, not just a
     chart. Scans the freshly-backfilled Claude Code history for recurring
-    potholes (``core.optimize.analyzers.pothole``) and, for a high-confidence
+    relearns (``core.optimize.analyzers.relearn``) and, for a high-confidence
     hook-quality finding, drives the user through approve+enable of their
     first fix — human-gated at every step, never auto-armed.
 
@@ -1005,14 +1005,14 @@ def _run_pothole_first_fix(config: object, *, port: int, want_daemon: bool) -> N
     from dataclasses import asdict
 
     from tokenjam.core.backfill import CLAUDE_CODE_PROJECTS_ROOT
-    from tokenjam.core.optimize import pothole_apply
-    from tokenjam.core.optimize.analyzers.pothole import compute_pothole_finding
+    from tokenjam.core.optimize import relearn_apply
+    from tokenjam.core.optimize.analyzers.relearn import compute_relearn_finding
 
     console.print()
     console.print("[dim]Scanning your history for recurring mistakes…[/dim]")
     try:
         # projects_root=CLAUDE_CODE_PROJECTS_ROOT: scan the exact directory
-        # the backfill above just read, not `compute_pothole_finding`'s own
+        # the backfill above just read, not `compute_relearn_finding`'s own
         # default (a module-level constant baked in at import time from
         # ``Path.home()`` — it won't follow a test's ``Path.home`` patch the
         # way this already-monkeypatchable module attribute does).
@@ -1023,10 +1023,10 @@ def _run_pothole_first_fix(config: object, *, port: int, want_daemon: bool) -> N
         # point in setup). Every distilled cluster is hardcoded to rung 1
         # anyway (never enforcement-eligible), so it can never be the day-1
         # candidate below — the daemon's periodic background recompute
-        # (`tj serve`'s pothole job) already runs the full distill-enabled
+        # (`tj serve`'s relearn job) already runs the full distill-enabled
         # scan and will surface those in the Lens Review inbox on its own
         # schedule.
-        finding = compute_pothole_finding(
+        finding = compute_relearn_finding(
             projects_root=CLAUDE_CODE_PROJECTS_ROOT, distill_enabled=False,
         )
     except Exception:
@@ -1074,7 +1074,7 @@ def _run_pothole_first_fix(config: object, *, port: int, want_daemon: bool) -> N
     candidate = next(
         (
             c for c in finding.clusters
-            if c.rung in pothole_apply.ENFORCEMENT_RUNGS
+            if c.rung in relearn_apply.ENFORCEMENT_RUNGS
             and not (c.family_key or "").startswith("distilled:")
             and c.suggested_target
         ),
@@ -1121,14 +1121,14 @@ def _run_pothole_first_fix(config: object, *, port: int, want_daemon: bool) -> N
         return
 
     try:
-        result = pothole_apply.apply_pothole_fix(
+        result = relearn_apply.apply_relearn_fix(
             config, asdict(candidate),
             target_path=candidate.suggested_target, scope=candidate.scope,
             go=True, force=False,
         )
         fix_id = result["record"]["id"]
-        pothole_apply.enable_enforcement(config, fix_id, confirm=True)
-    except pothole_apply.PotholeApplyRefused as exc:
+        relearn_apply.enable_enforcement(config, fix_id, confirm=True)
+    except relearn_apply.RelearnApplyRefused as exc:
         console.print(f"[yellow]  Could not enable yet: {exc}[/yellow]")
         console.print(f"[dim]  Retry from the Lens Review inbox ({lens_hint}).[/dim]")
         return
@@ -2116,7 +2116,7 @@ def _onboard_claude_code(
     # `_onboard_combination` so the banner prints exactly once (#432).
     if standalone:
         if backfill_has_data:
-            _run_pothole_first_fix(config, port=port, want_daemon=want_daemon)
+            _run_relearn_first_fix(config, port=port, want_daemon=want_daemon)
         _print_setup_complete_home(
             sessions_backfilled=backfill_sessions_total,
             has_data=backfill_has_data,

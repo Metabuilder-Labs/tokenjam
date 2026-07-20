@@ -1,9 +1,9 @@
 """Verify, OTel lane: did a failure signature actually recur less after a fix?
 
-The transcript verify (``pothole_verify``) measures recurrence by walking on-disk
+The transcript verify (``relearn_verify``) measures recurrence by walking on-disk
 sessions newer than an applied fix's ``applied_at``. That works because tokenjam
 itself applied the fix and recorded when. For a workspace-less agent there IS no
-apply step (see ``pothole_otel``), so there is no ``applied_at`` to key on: the
+apply step (see ``relearn_otel``), so there is no ``applied_at`` to key on: the
 user deployed their own fix, on their own schedule.
 
 The fix marker therefore comes from the loop primitive that already exists for
@@ -13,7 +13,7 @@ from ``core/loop.py``, promoted off the failure cluster. Its ``created_at`` IS
 ``record_expectation_run``, so an OTel fix accumulates the same pass/regress
 history a Claude Code fix does, in the same tables.
 
-Honesty carries over unchanged from ``pothole_verify``:
+Honesty carries over unchanged from ``relearn_verify``:
 
   * **Normalize by exposure.** Rates are occurrences-per-session on both sides of
     T, never raw counts, so a long post-window can't manufacture a regression.
@@ -31,12 +31,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from tokenjam.core.optimize.analyzers.pothole import (
+from tokenjam.core.optimize.analyzers.relearn import (
     FailureEpisode,
     GROUNDED_TOKENS_PER_OCCURRENCE,
 )
-from tokenjam.core.optimize.pothole_otel import ERROR_STATUS, _repo_label
-from tokenjam.core.optimize.pothole_verify import (
+from tokenjam.core.optimize.relearn_otel import ERROR_STATUS, _repo_label
+from tokenjam.core.optimize.relearn_verify import (
     VERDICT_IMPROVED,
     VERDICT_REGRESSED,
     _matcher_for,

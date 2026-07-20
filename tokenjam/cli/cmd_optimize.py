@@ -363,7 +363,7 @@ def cmd_optimize(
 DE_MINIMIS_SHARE = 0.01
 
 # Findings that must NEVER be collapsed into the "Minor findings" pointer by
-# token share. `pothole` is a recurring-failure-cluster finding, not a
+# token share. `relearn` is a recurring-failure-cluster finding, not a
 # token-reclamation one — its `estimated_recoverable_tokens` is a soft
 # occurrence×heuristic estimate for the Lens inbox, not a real fraction of the
 # window. Ranking it by that share let a heavy `--since 365d` window (huge
@@ -371,7 +371,7 @@ DE_MINIMIS_SHARE = 0.01
 # "~0.0% of window tokens" pointer — the same "nothing found" failure as the
 # empty-state bug. These findings always render in full (the `unranked`
 # bucket): their own detail when populated, their own empty-state when not.
-_ALWAYS_FULL_FINDINGS = {"pothole"}
+_ALWAYS_FULL_FINDINGS = {"relearn"}
 
 # Display labels for the "Minor findings" collapsed pointer list — must match
 # the header text each renderer prints in its numbered form.
@@ -383,7 +383,7 @@ _MINOR_FINDING_LABELS = {
     "reuse":           "Reuse",
     "trim":            "Prompt bloat",
     "subagent":        "Subagent right-sizing",
-    "pothole":         "Pothole",
+    "relearn":         "Relearn",
     "verbosity":       "Verbosity",
 }
 
@@ -440,7 +440,7 @@ def _rank_findings(
     for name, finding in (report.findings or {}).items():
         if name not in _FINDING_RENDERERS:
             continue
-        # A non-token finding (e.g. pothole) is forced into the unranked bucket
+        # A non-token finding (e.g. relearn) is forced into the unranked bucket
         # so its clusters always render in full — a large window denominator
         # must not collapse them into the de-minimis pointer list.
         share = (
@@ -1547,18 +1547,18 @@ def _render_subagent(
     console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
-def _render_pothole(
+def _render_relearn(
     finding, *, pricing_mode: str = "api", marker: str = "",
 ) -> None:
     """
-    Render the pothole finding — recurring failure clusters the self-improve
+    Render the relearn finding — recurring failure clusters the self-improve
     loop tracks (blockers an agent silently re-hits across sessions). Was
     missing from _FINDING_RENDERERS entirely: the text view fell
     through to the generic "No candidates flagged" empty state even when
     --json carried dozens of clusters, because _rank_findings drops any
     finding name not present in this dispatch table.
     """
-    console.print(_finding_header(marker, "Pothole:"))
+    console.print(_finding_header(marker, "Relearn:"))
     if not finding.clusters:
         console.print(
             f"     [dim]Scanned {finding.sessions_scanned} session"
@@ -1569,7 +1569,7 @@ def _render_pothole(
         return
 
     console.print(
-        f"     • [bold]{len(finding.clusters)}[/bold] pothole "
+        f"     • [bold]{len(finding.clusters)}[/bold] relearn "
         f"cluster{'s' if len(finding.clusters) != 1 else ''} found — "
         f"recurring blockers this agent silently re-hits"
     )
@@ -1584,7 +1584,7 @@ def _render_pothole(
         console.print(f"       [dim]… and {len(finding.clusters) - 10} more.[/dim]")
     console.print(
         "     [dim]Review + apply fixes in the Lens Review inbox, or see "
-        "full detail with [bold]tj optimize pothole --json[/bold].[/dim]"
+        "full detail with [bold]tj optimize relearn --json[/bold].[/dim]"
     )
     if finding.caveat:
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
@@ -1656,6 +1656,6 @@ _FINDING_RENDERERS = {
     "reuse":        _render_reuse,
     "trim":         _render_prompt_bloat,
     "subagent":     _render_subagent,
-    "pothole":      _render_pothole,
+    "relearn":      _render_relearn,
     "verbosity":    _render_verbosity,
 }

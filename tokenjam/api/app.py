@@ -61,11 +61,11 @@ def create_app(
     app.state.config = config
     app.state.db = db
     app.state.pipeline = ingest_pipeline
-    # A random per-process token the pothole write endpoints always require
-    # (api/deps.py::require_pothole_write_auth), independent of
+    # A random per-process token the relearn write endpoints always require
+    # (api/deps.py::require_relearn_write_auth), independent of
     # config.api.auth.enabled -- see that module's docstring. Minted once per
     # server process; embedded in the served UI HTML below.
-    app.state.pothole_write_token = secrets.token_urlsafe(32)
+    app.state.relearn_write_token = secrets.token_urlsafe(32)
 
     # Register routers
     from tokenjam.api.routes.spans import router as spans_router
@@ -92,7 +92,8 @@ def create_app(
     from tokenjam.api.routes.loop import router as loop_router
     from tokenjam.api.routes.summarize import router as summarize_router
     from tokenjam.api.routes.summarize_run import router as summarize_run_router
-    from tokenjam.api.routes.pothole import router as pothole_router
+    from tokenjam.api.routes.relearn import router as relearn_router
+    from tokenjam.api.routes.recommendations import router as recommendations_router
 
     app.include_router(spans_router, prefix="/api/v1")
     app.include_router(traces_router, prefix="/api/v1")
@@ -116,7 +117,8 @@ def create_app(
     app.include_router(loop_router, prefix="/api/v1")  # /annotations, /expectations (#53)
     app.include_router(summarize_router, prefix="/api/v1")  # /summarize/* reads + apply/undo (Track B)
     app.include_router(summarize_run_router, prefix="/api/v1")  # /summarize/{run,prep,check} OUTBOUND (Track B, design-gated)
-    app.include_router(pothole_router, prefix="/api/v1")  # /pothole/{proposals,refresh} — self-improve loop Review inbox
+    app.include_router(relearn_router, prefix="/api/v1")  # /relearn/{proposals,refresh} — self-improve loop Review inbox
+    app.include_router(recommendations_router, prefix="/api/v1")  # /recommendations outcome ledger
     app.include_router(health_router)  # /health — no prefix, for uptime probes
     app.include_router(metrics_router)  # /metrics — no prefix
     app.include_router(otlp_router)  # /v1/traces, /v1/metrics, /v1/logs — no prefix
@@ -134,13 +136,13 @@ def create_app(
                 "</head>",
                 f'<meta name="tj-api-key" content="{html_escape(config.api.auth.api_key, quote=True)}">\n</head>',
             )
-        # Local write token (see require_pothole_write_auth) -- ALWAYS injected,
+        # Local write token (see require_relearn_write_auth) -- ALWAYS injected,
         # regardless of config.api.auth.enabled, so the same-origin UI can keep
-        # calling the pothole write endpoints even on a default (auth-disabled)
+        # calling the relearn write endpoints even on a default (auth-disabled)
         # local install.
         html = html.replace(
             "</head>",
-            f'<meta name="tj-write-token" content="{html_escape(app.state.pothole_write_token, quote=True)}">\n</head>',
+            f'<meta name="tj-write-token" content="{html_escape(app.state.relearn_write_token, quote=True)}">\n</head>',
         )
         return HTMLResponse(html)
 

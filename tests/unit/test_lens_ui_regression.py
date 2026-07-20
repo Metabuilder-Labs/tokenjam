@@ -2102,9 +2102,9 @@ def test_cost_proposals_wired_into_review_inbox(html):
     assert "function CostProposalCard" in html
     assert "function CostAppliedRow" in html
     assert "function CostVerifyLine" in html
-    assert "api('/pothole/cost-proposals')" in html
-    assert "api('/pothole/cost-applied')" in html
-    assert "'/pothole/cost-proposals/apply'" in html
+    assert "api('/relearn/cost-proposals')" in html
+    assert "api('/relearn/cost-applied')" in html
+    assert "'/relearn/cost-proposals/apply'" in html
     # The card is advise-only: a marker button, never an apply-to-code write.
     assert "Mark applied" in html
     assert "Cost advisories" in html
@@ -2116,7 +2116,7 @@ def test_subagent_cost_card_has_workspace_apply_flow(html):
     # The subagent (4th) analyzer is apply-capable: its CC-origin card routes a
     # reversible rung-1 note through the apply-workspace endpoint (dry-run diff
     # then write), unlike the three advise-only analyzers.
-    assert "'/pothole/cost-proposals/apply-workspace'" in html
+    assert "'/relearn/cost-proposals/apply-workspace'" in html
     assert "apply_capable" in html
     assert "Apply note" in html
     assert "subagent: 'subagent'" in html

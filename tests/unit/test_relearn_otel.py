@@ -1,4 +1,4 @@
-"""The self-improve loop's OTel lane: potholes mined from stored spans.
+"""The self-improve loop's OTel lane: relearns mined from stored spans.
 
 Covers the second extraction path (failing spans -> FailureEpisode), the
 no-double-count rule against coding agents, that span failures join the SAME
@@ -15,13 +15,13 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.optimize.analyzers.pothole import (
+from tokenjam.core.optimize.analyzers.relearn import (
     FailureEpisode,
-    analyze_potholes,
+    analyze_relearns,
     build_proposals,
     cluster_failures,
 )
-from tokenjam.core.optimize.pothole_otel import (
+from tokenjam.core.optimize.relearn_otel import (
     extract_span_failures,
     non_coding_agent_ids,
     to_eval_case,
@@ -144,7 +144,7 @@ def test_recurring_span_failures_become_a_proposal(db):
         _seed_failure(db, agent_id="billing-svc", session_id=sid, i=i,
                       message="ConnectionResetError: peer closed")
 
-    finding = analyze_potholes(
+    finding = analyze_relearns(
         [], extra_failures=extract_span_failures(db.conn),
         advise_only_repos=non_coding_agent_ids(db.conn), distill_enabled=False,
     )
@@ -160,7 +160,7 @@ def test_below_recurrence_threshold_does_not_surface(db):
         _seed_failure(db, agent_id="billing-svc", session_id=sid, i=i,
                       message="ConnectionResetError: peer closed")
 
-    finding = analyze_potholes(
+    finding = analyze_relearns(
         [], extra_failures=extract_span_failures(db.conn), distill_enabled=False,
     )
 

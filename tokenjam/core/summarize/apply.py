@@ -9,10 +9,9 @@ refusing on post-apply drift. No flag bypasses a guard (DEC-027 agent-safety).
 from __future__ import annotations
 
 import os
-import stat
-import tempfile
 from pathlib import Path
 
+from tokenjam.core.atomic_write import AtomicWriteRefused, atomic_write
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize import backup
 from tokenjam.core.summarize.session import SummarizeRefused, clear, list_staged, read_staged, sha256
@@ -24,31 +23,17 @@ def _owned_by_current_user(p: Path) -> bool:
     return p.stat().st_uid == os.getuid()
 
 
-def _atomic_write(p: Path, text: str) -> None:
-    """Write ``text`` to ``p`` atomically (temp in the same dir → ``os.replace``), preserving mode.
+def _write(p: Path, text: str) -> None:
+    """``atomic_write``, translated to the house ``SummarizeRefused`` on refusal.
 
-    Refuses a symlinked ``p`` outright (mirrors ``apply_staged``/``undo``'s own
-    pre-checks below, now enforced at the PRIMITIVE too — every caller of this
-    function gets the guard for free, including ones that forget their own
-    pre-check; see ``core.optimize.pothole_apply``'s ``_write_target``/
-    ``_restore_backup``, which reuse this primitive but previously had no
-    symlink guard of their own).
+    ``apply_staged``/``undo`` already symlink-check ``p`` before calling this, so the
+    primitive's own guard is a TOCTOU backstop in practice — but callers of this module
+    still see ``SummarizeRefused``, never the primitive's own exception type.
     """
-    if p.is_symlink():
-        raise SummarizeRefused(f"{p} is a symlink — refusing to write through it.")
-    mode = stat.S_IMODE(p.stat().st_mode)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tj-tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.chmod(tmp, mode)
-        os.replace(tmp, p)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except FileNotFoundError:
-            pass
-        raise
+        atomic_write(p, text)
+    except AtomicWriteRefused as exc:
+        raise SummarizeRefused(str(exc)) from exc
 
 
 def apply_staged(config: TjConfig, path: str | None = None, *, go: bool = False) -> dict:
@@ -91,7 +76,7 @@ def apply_staged(config: TjConfig, path: str | None = None, *, go: bool = False)
         if go:
             backup.save(config, sp, original=current, output=e["restored"],
                         est_tokens_saved=int(e.get("est_tokens_saved", 0) or 0))
-            _atomic_write(p, e["restored"])
+            _write(p, e["restored"])
             clear(config, sp)
             # Record the applied rewrite in the recommendation-outcome ledger so
             # `tj savings` / Lens can prove which recommendations got acted on.
@@ -122,7 +107,7 @@ def undo(config: TjConfig, path: str, *, go: bool = False) -> dict:
     original = backup.load_original(config, str(p), current)   # raises on drift / missing backup
     if go:
         if p.exists():
-            _atomic_write(p, original)
+            _write(p, original)
         else:
             p.write_text(original, encoding="utf-8")           # file was deleted — recreate it
     return {"path": str(p), "restored": go, "dry_run": not go}

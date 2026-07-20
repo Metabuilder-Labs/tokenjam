@@ -1,7 +1,7 @@
 """
-Cross-session pothole aggregator (self-improve loop, Phase 1: detect + surface).
+Cross-session relearn aggregator (self-improve loop, Phase 1: detect + surface).
 
-A "pothole" is a blocker a Claude Code agent silently re-hits across many
+A "relearn" is a blocker a Claude Code agent silently re-hits across many
 unwatched sessions — a wrong-cwd Read, an Edit before a Read, a blocked
 sleep-chain, a stale-read race, a domain-blocked WebFetch, and so on. shiploop
 only codifies what a human noticed; this module catches what nobody watched.
@@ -50,6 +50,7 @@ from typing import Any, Iterable
 
 from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
+from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
@@ -60,7 +61,7 @@ from tokenjam.core.transcript import build_session_story, resolve_projects_root
 MIN_RECURRING_SESSIONS = 3
 #: How many example sessions to carry per cluster (repro links).
 MAX_EXAMPLE_SESSIONS = 3
-#: Conservative per-occurrence token cost. A pothole occurrence costs roughly
+#: Conservative per-occurrence token cost. A relearn occurrence costs roughly
 #: one extra assistant turn's overhead (re-issue the tool call, re-parse the
 #: harness context, re-narrate) — NOT the inflated whole-afflicted-session
 #: footprint the spec explicitly warns against. This is a heuristic magnitude
@@ -83,7 +84,7 @@ HONESTY_CAVEAT = (
     "Review the example sessions and the proposed fix before applying it."
 )
 
-# --- Known, validated pothole families ----------------------------------------
+# --- Known, validated relearn families ----------------------------------------
 # Each entry: (family key, human title, tool-name filter (None = any),
 # regex over the raw error text, default rung, default proposed fix).
 # Rungs follow the intervention ladder (SPEC §6): 1 CLAUDE.md note,
@@ -136,7 +137,7 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "blocked sleep-chain",
         "tools": {"Bash"},
         # The block usually reads generically ("blocked"/"disallowed"/timed out)
-        # with nothing pothole-specific in the wording — the ONE reliable tell is
+        # with nothing relearn-specific in the wording — the ONE reliable tell is
         # the command itself leading with `sleep`. So this family also matches on
         # the tool's LABEL (its Bash command), not just the error text; see
         # `classify_known_family`.
@@ -262,20 +263,24 @@ _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 _HEX_ID_RE = re.compile(r"\b[0-9a-fA-F]{12,}\b")
 _NUMBER_RE = re.compile(r"\b\d+\b")
 _TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?")
-_WS_RE = re.compile(r"\s+")
+
+#: Ordered substitutions for the generic-signature normalizer. Order matters:
+#: timestamps and uuids are masked before bare hex/number runs so their internal
+#: digits aren't partially replaced first (see mask_variables).
+_GENERIC_SUBS = [
+    (_TIMESTAMP_RE, "<TS>"),
+    (_UUID_RE, "<UUID>"),
+    (_PATH_RE, "<PATH>"),
+    (_HEX_ID_RE, "<ID>"),
+    (_NUMBER_RE, "<N>"),
+]
 
 
 def _normalize_generic(text: str) -> str:
     """Strip paths/uuids/hex-ids/numbers/timestamps so unrelated values collapse
     into the same signature. Deterministic, no LLM — the fast path before the
     distill pass on whatever this misses."""
-    out = _TIMESTAMP_RE.sub("<TS>", text)
-    out = _UUID_RE.sub("<UUID>", out)
-    out = _PATH_RE.sub("<PATH>", out)
-    out = _HEX_ID_RE.sub("<ID>", out)
-    out = _NUMBER_RE.sub("<N>", out)
-    out = _WS_RE.sub(" ", out).strip().lower()
-    return out
+    return mask_variables(text, _GENERIC_SUBS, collapse_ws=True, lowercase=True)
 
 
 def _generic_signature(tool_name: str, error_text: str) -> str:
@@ -283,7 +288,7 @@ def _generic_signature(tool_name: str, error_text: str) -> str:
     return f"{tool_name}:{normalized}"
 
 
-#: Not potholes: the tool_result carries ``is_error`` because a HUMAN declined
+#: Not relearns: the tool_result carries ``is_error`` because a HUMAN declined
 #: the action (a permission prompt, an AskUserQuestion decline, "Exit plan
 #: mode?" answered no) — expected interactive UI, not a blocker an agent
 #: silently re-hits. Validated against the local corpus (2026-07-12): these
@@ -299,7 +304,7 @@ _USER_DECLINE_RE = re.compile(
 
 def is_user_decline(error_text: str) -> bool:
     """True if this 'failure' is really a human declining an action, not a
-    pothole — see ``_USER_DECLINE_RE``."""
+    relearn — see ``_USER_DECLINE_RE``."""
     return bool(error_text) and bool(_USER_DECLINE_RE.search(error_text.strip()))
 
 
@@ -309,7 +314,7 @@ def classify_known_family(tool_name: str, error_text: str, label: str = "") -> s
 
     Most families match on the raw error text alone. A few (e.g. the blocked
     sleep-chain, whose block message is often generic — "timed out"/"blocked"
-    with nothing pothole-specific in the wording) additionally require the
+    with nothing relearn-specific in the wording) additionally require the
     tool's ``label`` (its command/arg) to match a ``label_pattern`` — the
     reliable tell is the command itself, not the error text.
     """
@@ -392,7 +397,7 @@ def extract_failures_for_session(
                 continue
             error_text = tool.get("error") or ""
             if is_user_decline(error_text):
-                continue  # a human's own choice, not a pothole — see is_user_decline
+                continue  # a human's own choice, not a relearn — see is_user_decline
             failures.append(FailureEpisode(
                 session_id=session_id,
                 repo=repo,
@@ -425,33 +430,47 @@ class _RawCluster:
         return {f.repo for f in self.failures}
 
 
+def _failure_signature(failure: FailureEpisode) -> tuple[str, str | None, str]:
+    """``(signature, family_key, title)`` for one failure: a known family (sig ==
+    family_key) or a generic normalized signature. The single classify point
+    ``cluster_failures`` keys on."""
+    family_key = classify_known_family(failure.tool_name, failure.error_text, failure.label)
+    if family_key is not None:
+        return family_key, family_key, _FAMILY_BY_KEY[family_key]["title"]
+    sig = _generic_signature(failure.tool_name, failure.error_text)
+    return sig, None, f"{failure.tool_name}: {failure.error_text[:60] or failure.label}"
+
+
 def cluster_failures(failures: list[FailureEpisode]) -> dict[str, _RawCluster]:
-    """Bucket failures by known family first, else a generic normalized signature."""
+    """Bucket failures by known family first, else a generic normalized signature.
+
+    Groups via the shared ``group_by_key`` (order-preserving), then builds one
+    ``_RawCluster`` per group with its title/family taken from the group's FIRST
+    failure — the same failure that used to create the bucket inline, so titles
+    stay byte-identical."""
+    buckets = group_by_key(failures, lambda f: _failure_signature(f)[0])
     clusters: dict[str, _RawCluster] = {}
-    for failure in failures:
-        family_key = classify_known_family(failure.tool_name, failure.error_text, failure.label)
-        if family_key is not None:
-            sig = family_key
-            title = _FAMILY_BY_KEY[family_key]["title"]
-        else:
-            sig = _generic_signature(failure.tool_name, failure.error_text)
-            title = f"{failure.tool_name}: {failure.error_text[:60] or failure.label}"
-        bucket = clusters.get(sig)
-        if bucket is None:
-            bucket = _RawCluster(signature=sig, family_key=family_key, title=title)
-            clusters[sig] = bucket
-        bucket.failures.append(failure)
+    for sig, group in buckets.items():
+        _, family_key, title = _failure_signature(group[0])
+        clusters[sig] = _RawCluster(
+            signature=sig, family_key=family_key, title=title, failures=group,
+        )
     return clusters
 
 
 def _recurring(clusters: dict[str, _RawCluster], min_sessions: int) -> list[_RawCluster]:
-    return [c for c in clusters.values() if len(c.session_ids) >= min_sessions]
+    """Clusters seen across at least ``min_sessions`` DISTINCT sessions — the
+    recurrence gate, on distinct-session count (not raw occurrences)."""
+    kept = recurring(
+        clusters, min_members=min_sessions, size_fn=lambda c: len(c.session_ids),
+    )
+    return list(kept.values())
 
 
 # --- Distill pass over the residual (non-family) bucket -----------------------
 
 def _distill_cache_dir() -> Path:
-    return Path.home() / ".tj" / "distill_cache" / "pothole"
+    return Path.home() / ".tj" / "distill_cache" / "relearn"
 
 
 def _cluster_hash(cluster: _RawCluster) -> str:
@@ -461,7 +480,7 @@ def _cluster_hash(cluster: _RawCluster) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
-def distill_pothole_cluster(
+def distill_relearn_cluster(
     tool_name: str, samples: list[str], *, model: str = DISTILL_MODEL, timeout: int = 60,
 ) -> dict[str, str]:
     """Ask the local ``claude`` CLI to name a residual failure cluster.
@@ -580,7 +599,7 @@ def _distill_cached(tool_name: str, cluster: _RawCluster, cache_dir: Path) -> di
         pass
 
     samples = [f.error_text for f in cluster.failures if f.error_text][:8]
-    result = distill_pothole_cluster(tool_name, samples)
+    result = distill_relearn_cluster(tool_name, samples)
     if not result:
         return {}
     try:
@@ -683,13 +702,13 @@ def _doc_text(paths: list[Path], max_chars: int = 200_000) -> str:
 #: novelty heuristic (NOT an LLM call): "already codified" iff every keyword
 #: co-occurs somewhere in the reachable docs. Deliberately conservative (few,
 #: specific terms) so a coincidental single-word match doesn't wrongly drop a
-#: real, still-uncodified pothole.
+#: real, still-uncodified relearn.
 #: One DISTINCTIVE multi-word phrase per known family — deliberately full
 #: phrases (not independent short words ANDed together). Validated the hard
 #: way (2026-07-12): an earlier version used tuples like ("read", "before
 #: editing") ANDed independently, and "read" alone is common enough that it
 #: co-occurred with unrelated text in reachable docs, silently dropping the
-#: single BIGGEST validated pothole (edit-before-read, 178 sessions) as
+#: single BIGGEST validated relearn (edit-before-read, 178 sessions) as
 #: "already codified" when it demonstrably wasn't. A short generic word is
 #: not a novelty signal; a verbatim-ish multi-word phrase close to the
 #: harness's actual wording is.
@@ -728,7 +747,7 @@ def is_already_codified(cluster: _RawCluster, doc_text: str) -> bool:
 # --- Proposal building -----------------------------------------------------
 
 @dataclass
-class PotholeExample:
+class RelearnExample:
     session_id: str
     repo:       str
     ts:         str | None
@@ -736,7 +755,7 @@ class PotholeExample:
 
 
 @dataclass
-class PotholeCluster:
+class RelearnCluster:
     signature:                 str
     family_key:                str | None
     title:                     str
@@ -746,7 +765,7 @@ class PotholeCluster:
     rung:                       int             # 1-5, SPEC §6 intervention ladder
     scope:                      str              # "project" | "user-global"
     proposed_fix:                str
-    examples:                    list[PotholeExample] = field(default_factory=list)
+    examples:                    list[RelearnExample] = field(default_factory=list)
     estimated_recoverable_tokens: int = 0
     confidence:                   str = "heuristic"
     novel:                        bool = True
@@ -762,13 +781,13 @@ class PotholeCluster:
     # a checkout) — so there is no apply path at all: the card carries a
     # recommendation the user applies themselves, `suggested_target` stays "",
     # and Verify runs off spans instead of transcripts. See
-    # `core/optimize/pothole_otel.py`.
+    # `core/optimize/relearn_otel.py`.
     advise_only:                  bool = False
 
 
 @dataclass
-class PotholeFinding:
-    clusters:            list[PotholeCluster] = field(default_factory=list)
+class RelearnFinding:
+    clusters:            list[RelearnCluster] = field(default_factory=list)
     sessions_scanned:     int = 0
     failures_examined:    int = 0
     distilled_clusters:   int = 0
@@ -796,7 +815,7 @@ def build_proposals(
     doc_text: str = "",
     repo_cwd_map: dict[str, str] | None = None,
     advise_only_repos: set[str] | None = None,
-) -> tuple[list[PotholeCluster], int]:
+) -> tuple[list[RelearnCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
     ``(proposals, dropped_codified_count)``.
 
@@ -805,14 +824,14 @@ def build_proposals(
     target path (Phase 2) — clustering itself needs none of it.
 
     ``advise_only_repos`` names the agents tokenjam has NO workspace for (the
-    OTel lane — see ``core/optimize/pothole_otel.py``). A cluster whose repos are
+    OTel lane — see ``core/optimize/relearn_otel.py``). A cluster whose repos are
     all in that set is marked ``advise_only`` and gets NO suggested target: there
     is nothing to apply into, so the card must not imply an apply path exists.
     """
-    from tokenjam.core.optimize.pothole_apply import default_target_path, slugify
+    from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
 
     repo_cwd_map = repo_cwd_map or {}
-    proposals: list[PotholeCluster] = []
+    proposals: list[RelearnCluster] = []
     dropped = 0
     for cluster in clusters:
         sessions = cluster.session_ids
@@ -829,7 +848,7 @@ def build_proposals(
         repos = sorted(cluster.repos)
         occurrences = len(cluster.failures)
         examples = [
-            PotholeExample(
+            RelearnExample(
                 session_id=f.session_id, repo=f.repo, ts=f.ts, snippet=_snippet(f),
             )
             for f in sorted(cluster.failures, key=lambda f: f.ts or "", reverse=True)[:MAX_EXAMPLE_SESSIONS]
@@ -854,7 +873,7 @@ def build_proposals(
             except Exception:
                 suggested_target = ""   # never let a bad path computation sink the proposal
 
-        proposals.append(PotholeCluster(
+        proposals.append(RelearnCluster(
             signature=cluster.signature,
             family_key=cluster.family_key,
             title=cluster.title,
@@ -878,7 +897,7 @@ def build_proposals(
 
 # --- Orchestration (pure, no ctx dependency — testable directly) --------------
 
-def analyze_potholes(
+def analyze_relearns(
     sessions: list[tuple[str, str]],     # [(session_id, repo), ...]
     *,
     projects_root: Path | str | None = None,
@@ -889,14 +908,14 @@ def analyze_potholes(
     repo_cwd_map: dict[str, str] | None = None,
     extra_failures: list[FailureEpisode] | None = None,
     advise_only_repos: set[str] | None = None,
-) -> PotholeFinding:
+) -> RelearnFinding:
     """Full pipeline over an explicit session list — the pure core the
     registry entry point and the on-disk cache job both call. Never raises.
 
     ``extra_failures`` are episodes extracted somewhere other than an on-disk
     transcript — today the OTel lane's failing spans (see
-    ``core/optimize/pothole_otel.py``). They join the SAME clustering pass, so a
-    signature that recurs across both lanes clusters as one pothole.
+    ``core/optimize/relearn_otel.py``). They join the SAME clustering pass, so a
+    signature that recurs across both lanes clusters as one relearn.
     ``advise_only_repos`` is forwarded to ``build_proposals`` to mark the
     workspace-less clusters.
     """
@@ -929,7 +948,7 @@ def analyze_potholes(
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
 
-    return PotholeFinding(
+    return RelearnFinding(
         clusters=proposals,
         sessions_scanned=scanned,
         failures_examined=len(all_failures),
@@ -982,22 +1001,22 @@ def _repo_cwd_map_for(sessions: list[tuple[str, str]], projects_root: Path) -> d
     return out
 
 
-def compute_pothole_finding(
+def compute_relearn_finding(
     conn: Any | None = None,
     since: Any | None = None,
     *,
     projects_root: Path | str | None = None,
     distill_enabled: bool = True,
-) -> PotholeFinding:
+) -> RelearnFinding:
     """Standalone entry point that doesn't need a full ``AnalyzerContext`` —
-    used by the serve-time background cache job (``api/routes/pothole.py``)
+    used by the serve-time background cache job (``api/routes/relearn.py``)
     and by tests. ``conn`` is an OPTIONAL DuckDB connection used only for
     repo-name enrichment (``sessions.agent_id``); pass ``None`` and every
     session falls back to a ``"unknown"`` repo label — clustering itself needs
     no DB at all, it's a pure filesystem scan.
 
     Full-corpus by design: enumerates every on-disk Claude Code transcript
-    (not window-scoped like the other analyzers — a pothole recurring across
+    (not window-scoped like the other analyzers — a relearn recurring across
     months of history is exactly the signal this detector exists to find),
     optionally pre-filtered to ``since`` when the caller wants an incremental
     scan. Heavy (tens of seconds over a full local corpus) — callers that
@@ -1006,7 +1025,7 @@ def compute_pothole_finding(
     TWO LANES. On-disk transcripts cover the workspace agents; when ``conn`` is
     given, failing spans from NON-coding agents are folded into the same
     clustering pass so SDK/OTel services are no longer invisible to the
-    detector (``core/optimize/pothole_otel.py``). Their clusters come back
+    detector (``core/optimize/relearn_otel.py``). Their clusters come back
     ``advise_only``: detect and advise, never apply.
     """
     root = resolve_projects_root(projects_root)
@@ -1018,7 +1037,7 @@ def compute_pothole_finding(
     advise_only_repos: set[str] = set()
     if conn is not None:
         try:
-            from tokenjam.core.optimize.pothole_otel import (
+            from tokenjam.core.optimize.relearn_otel import (
                 extract_span_failures,
                 non_coding_agent_ids,
             )
@@ -1051,17 +1070,17 @@ def compute_pothole_finding(
     except Exception:
         doc_text = ""
 
-    return analyze_potholes(
+    return analyze_relearns(
         sessions, projects_root=root, codified_doc_text=doc_text,
         distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
         extra_failures=span_failures, advise_only_repos=advise_only_repos,
     )
 
 
-@register("pothole")
+@register("relearn")
 def run(ctx: AnalyzerContext) -> None:
-    """Registry entry point. Attaches a ``PotholeFinding`` to
-    ``ctx.report.findings["pothole"]`` — see ``compute_pothole_finding`` for
+    """Registry entry point. Attaches a ``RelearnFinding`` to
+    ``ctx.report.findings["relearn"]`` — see ``compute_relearn_finding`` for
     the full-corpus behaviour and performance note.
     """
-    ctx.report.findings["pothole"] = compute_pothole_finding(ctx.conn, ctx.since)
+    ctx.report.findings["relearn"] = compute_relearn_finding(ctx.conn, ctx.since)

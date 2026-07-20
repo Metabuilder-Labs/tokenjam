@@ -10,8 +10,8 @@ intervention-ladder rung (SPEC §6):
       ``enable_enforcement`` explicitly before it ever runs
 
 Reversibility (SPEC §10 — "reversible"): every write here is preceded by a
-pre-image snapshot (reusing ``core.atomic_write``'s atomic-write primitive),
-and git-committed when the target lives inside a git repo. A
+pre-image snapshot (reusing ``core.summarize.apply``'s atomic-write
+primitive), and git-committed when the target lives inside a git repo. A
 matching ``revert_applied_fix`` restores the pre-image (or deletes a
 freshly-created file) in one call and commits that too. Every apply /
 enable / disable / revert is recorded to a durable, DB-independent ledger
@@ -35,8 +35,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tokenjam.core.atomic_write import AtomicWriteRefused, atomic_write
 from tokenjam.core.config import TjConfig
+from tokenjam.core.summarize.apply import _atomic_write
+from tokenjam.core.summarize.session import SummarizeRefused
 
 # --- Rungs (SPEC §6) -----------------------------------------------------------
 
@@ -183,22 +184,18 @@ def _git_commit(repo_root: Path, rel_paths: list[str], message: str) -> str | No
     return (sha.stdout or "").strip() or None
 
 
-def _commit_message(
-    action: str, title: str, signature: str, rung: int, kind: str | None = None,
-) -> str:
+def _commit_message(action: str, title: str, signature: str, rung: int) -> str:
     # Neutral, tool-attributed, no internal ticket IDs — this lands in ANY
-    # target repo (including public ones), not just tokenjam's own. `kind` is
-    # passed for the apply kinds that sit outside the rung ladder (the model
-    # edits), so the message names what was actually written.
+    # target repo (including public ones), not just tokenjam's own.
     return (
-        f"tokenjam: {action} fix (rung {rung} · {kind or RUNG_KIND.get(rung, '?')})\n\n"
+        f"tokenjam: {action} self-improve fix (rung {rung} · {RUNG_KIND.get(rung, '?')})\n\n"
         f"{title}\n\n"
-        f"Applied by TokenJam's loop (signature: {signature}).\n"
+        f"Applied by TokenJam's self-improve loop (signature: {signature}).\n"
         f"Revert from the Review inbox, or via the applied_fixes ledger."
     )
 
 
-# --- Backup (pre-image) store — reuses `atomic_write`, own namespace so it
+# --- Backup (pre-image) store — reuses `_atomic_write`, own namespace so it
 # never collides with core.summarize's own backups keyed by resolved path ------
 
 def _backup_paths(config: TjConfig, fix_id: str) -> tuple[Path, Path]:
@@ -252,8 +249,8 @@ def _restore_backup(config: TjConfig, fix_id: str) -> dict[str, Any]:
     original = orig_f.read_text(encoding="utf-8")
     if target.is_file():
         try:
-            atomic_write(target, original)
-        except AtomicWriteRefused as exc:
+            _atomic_write(target, original)
+        except SummarizeRefused as exc:
             raise RelearnApplyRefused(str(exc)) from exc
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -281,12 +278,13 @@ class AppliedFix:
     state:           str = "applied"        # applied | reverted
     reverted_at:     str | None = None
     revert_commit:   str | None = None
-    # Historical scaffold from the (removed) verify pass: baseline counts
-    # captured at apply time. `baseline_sessions` is the cluster's distinct
-    # AFFECTED sessions (from the proposal); `baseline_total_sessions` is the
-    # exposure denominator (ALL sessions in scope up to apply time). Nothing
-    # recomputes these fields anymore; kept so an existing ``applied_fixes.
-    # json`` on disk still deserializes.
+    # Scaffold for Phase 3 (verify, see core.optimize.relearn_verify) —
+    # baseline counts at apply time so a later rescan can measure the
+    # recurrence delta for this exact signature. `baseline_sessions` is the
+    # cluster's distinct AFFECTED sessions (from the proposal); `baseline_
+    # total_sessions` is the exposure denominator (ALL sessions in scope up
+    # to apply time, counted the same way the post-apply side is) — verify
+    # prefers the latter and falls back to the former only if it's missing.
     verify: dict[str, Any] = field(default_factory=lambda: {
         "baseline_sessions": None, "baseline_occurrences": None,
         "baseline_total_sessions": None,
@@ -328,6 +326,15 @@ def get_applied(config: TjConfig, fix_id: str) -> dict | None:
         if rec.get("id") == fix_id:
             return rec
     return None
+
+
+def set_verify(config: TjConfig, fix_id: str, verify: dict[str, Any]) -> dict:
+    """Overwrite an applied fix's ``verify`` sub-dict — the write side of
+    Phase 3 (``core.optimize.relearn_verify``'s rescan). The caller passes
+    the FULL merged verify dict (old fields + new), not a partial patch, so
+    this stays a plain field overwrite like every other ``_update_record``
+    caller."""
+    return _update_record(config, fix_id, verify=verify)
 
 
 def _save_record(config: TjConfig, record: AppliedFix) -> dict:
@@ -392,9 +399,9 @@ def active_session_warning(conn: Any | None, target_path: str) -> str | None:
 
 # --- Rung 1: CLAUDE.md note ------------------------------------------------
 
-NOTE_SECTION_HEADER = "## TokenJam fixes (auto-added)"
+NOTE_SECTION_HEADER = "## TokenJam self-improve (auto-added)"
 _NOTE_INTRO = (
-    "Entries below are written by TokenJam's loop after a human "
+    "Entries below are written by TokenJam's self-improve loop after a human "
     "approves a proposed fix in the Review inbox. Safe to hand-edit the prose; "
     "keep the `<!-- tokenjam:relearn:... -->` markers if you want the inbox's "
     "Revert to keep working."
@@ -455,7 +462,7 @@ def render_skill_content(cluster: dict, signature: str, slug: str) -> str:
         f"# {title}\n\n"
         f"{cluster.get('proposed_fix', '')}\n\n"
         f"## Why this exists\n\n"
-        f"Detected by TokenJam's loop: this pattern recurred in "
+        f"Detected by TokenJam's self-improve loop: this pattern recurred in "
         f"{cluster.get('sessions', 0)} distinct session(s) across {len(repos)} "
         f"repo(s) (rung 2 · skill).\n\n"
         f"## Evidence\n\n{ev_lines}\n\n"
@@ -538,28 +545,23 @@ _REACTIVE_SPECS: dict[str, dict[str, Any]] = {
 
 _SLEEP_CHAIN_MATCHER = (
     '    if tool_name == "Bash" and re.search(r"^\\s*sleep\\b.*(&&|;)", command, re.IGNORECASE):\n'
-    '        return True, ("blocked sleep-chain (TokenJam, signature '
+    '        return True, ("blocked sleep-chain (TokenJam self-improve, signature '
     '{signature}) — use the Monitor tool instead of a busy-wait sleep.")\n'
 )
-#: Families an enforcement rung can actually be written for: a hand-authored
-#: GUARD matcher (`_GUARD_FAMILIES`) or a hand-authored REACTIVE spec
-#: (`_REACTIVE_SPECS`). Anything else has no matcher, so a hook written for it
-#: could only ever be inert; `render_hook_content` refuses instead of writing
-#: one (see its docstring).
-def matchered_families() -> set[str]:
-    """The families a rung 3-5 hook can be rendered for. Resolved lazily so a
-    future matcher addition is picked up without a second registry to keep in
-    sync."""
-    return set(_GUARD_FAMILIES) | set(_REACTIVE_SPECS)
+_STUB_MATCHER = (
+    "    # TODO: no automatic matcher implemented yet for family '{family_key}' — "
+    "this hook\n    # currently never blocks; enabling it is safe but a no-op "
+    "until a matcher is added.\n"
+)
 
 
 def _render_guard_hook(title: str, rung: int | None, signature: str) -> str:
     """A PreToolUse GUARD script -- can block, only for `_GUARD_FAMILIES`."""
     matcher = _SLEEP_CHAIN_MATCHER.format(signature=signature)
     return f'''#!/usr/bin/env python3
-"""TokenJam hook -- {title} (rung {rung}, signature {signature}).
+"""TokenJam self-improve hook -- {title} (rung {rung}, signature {signature}).
 
-Auto-generated by TokenJam's loop after a human approved this
+Auto-generated by TokenJam's self-improve loop after a human approved this
 fix in the Review inbox. DISABLED by default -- wiring this into
 settings.json requires an explicit "Enable enforcement" confirmation; see
 the staged patch sitting next to this file (``*.settings-patch.json``).
@@ -613,9 +615,9 @@ def _render_reactive_hook(
     note_repr = repr(spec["note"])
     include_listing = bool(spec["include_cwd_listing"])
     return f'''#!/usr/bin/env python3
-"""TokenJam hook -- {title} (rung {rung}, signature {signature}).
+"""TokenJam self-improve hook -- {title} (rung {rung}, signature {signature}).
 
-Auto-generated by TokenJam's loop after a human approved this
+Auto-generated by TokenJam's self-improve loop after a human approved this
 fix in the Review inbox. DISABLED by default -- wiring this into
 settings.json requires an explicit "Enable enforcement" confirmation; see
 the staged patch sitting next to this file (``*.settings-patch.json``).
@@ -684,7 +686,7 @@ def _context(payload: dict) -> str:
         except OSError:
             listing = ""
         extra = f" Actual working directory: {{cwd or '(unknown)'}}. Top-level entries: {{listing}}."
-    return f"[TokenJam, signature {signature}] {{_NOTE}}{{extra}}"
+    return f"[TokenJam self-improve, signature {signature}] {{_NOTE}}{{extra}}"
 
 
 def main() -> int:
@@ -713,42 +715,72 @@ if __name__ == "__main__":
 '''
 
 
-def render_hook_content(cluster: dict, signature: str) -> str:
-    """The enforcement artifact for a rung 3-5 apply.
+def _render_stub_hook(family_key: str, title: str, rung: int | None, signature: str) -> str:
+    """The safe no-op stub for any family without a real matcher yet."""
+    matcher = _STUB_MATCHER.format(family_key=family_key)
+    return f'''#!/usr/bin/env python3
+"""TokenJam self-improve hook -- {title} (rung {rung}, signature {signature}).
 
-    A family with no hand-authored matcher (neither a GUARD matcher nor a
-    REACTIVE spec) has nothing to fire on, so the only hook that could be
-    written for it is one that never does anything. Writing that would put a
-    record in the ledger, a file on disk and an "applied" badge on the card
-    for a fix that cannot possibly work; the honest move is to refuse and
-    offer rung 1 instead, which writes a real note carrying the same guidance.
-    """
+Auto-generated by TokenJam's self-improve loop after a human approved this
+fix in the Review inbox. DISABLED by default -- wiring this into
+settings.json requires an explicit "Enable enforcement" confirmation; see
+the staged patch sitting next to this file (``*.settings-patch.json``).
+
+FAIL-OPEN: the whole body runs under a blanket try/except. Any unexpected
+error here allows the tool call through (exit 0) rather than blocking it or
+crashing the session.
+"""
+import json
+import re
+import sys
+
+
+def _decide(payload: dict) -> tuple[bool, str]:
+    """Return (should_block, reason). Never raises -- see main()'s try/except."""
+    tool_name = payload.get("tool_name", "")
+    tool_input = payload.get("tool_input") or {{}}
+    command = str(tool_input.get("command", "")) if tool_name == "Bash" else ""
+{matcher}    return False, ""
+
+
+def main() -> int:
+    try:
+        raw = sys.stdin.read()
+        payload = json.loads(raw) if raw else {{}}
+        blocked, reason = _decide(payload)
+        if blocked:
+            print(reason, file=sys.stderr)
+            return 2
+        return 0
+    except Exception:
+        return 0   # fail-open: never block on our own bug
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+# tokenjam:relearn:{signature}
+'''
+
+
+def render_hook_content(cluster: dict, signature: str) -> str:
     family_key = cluster.get("family_key") or ""
     title = cluster.get("title", signature)
     rung = cluster.get("rung")
-    # `matchered_families()` answers "does a matcher exist at all", which is
-    # exactly the refusal question. Reading the two underlying tables here
-    # instead would make this the second registry that accessor exists to
-    # prevent; the dispatch below only picks WHICH renderer, once the family
-    # is already known to have one.
-    if family_key not in matchered_families():
-        raise RelearnApplyRefused(
-            f"no matcher exists for family '{family_key or 'unknown'}', so a rung "
-            f"{rung} hook for it would be written but never fire. Refusing to write "
-            f"a fix that looks applied and does nothing. Apply this at rung 1 "
-            f"instead: it writes the same guidance as a reversible note."
-        )
     if family_key in _GUARD_FAMILIES:
         return _render_guard_hook(title, rung, signature)
-    return _render_reactive_hook(_REACTIVE_SPECS[family_key], title, rung, signature)
+    spec = _REACTIVE_SPECS.get(family_key)
+    if spec is not None:
+        return _render_reactive_hook(spec, title, rung, signature)
+    return _render_stub_hook(family_key, title, rung, signature)
 
 
 def _enforcement_wiring(family_key: str) -> tuple[str, str]:
     """(event, tool-matcher) for the `settings.json` wiring `apply_relearn_fix`
-    stages -- the ONLY event/tools this rung-3 hook is ever invoked for. Only
-    reached for a family that HAS a matcher; `render_hook_content` refuses an
-    un-matchered family before any wiring is staged, so the trailing default
-    below is unreachable belt-and-braces, not a supported path."""
+    stages -- the ONLY event/tools this rung-3 hook is ever invoked for.
+    Unknown/stub families default to PreToolUse/Bash, which is inert (the stub
+    never blocks) and keeps an un-matchered family maximally narrow rather
+    than firing on every tool."""
     if family_key in _GUARD_FAMILIES:
         return "PreToolUse", "Bash"
     spec = _REACTIVE_SPECS.get(family_key)
@@ -771,11 +803,11 @@ def render_settings_patch(hook_path: Path, event: str = "PreToolUse", matcher: s
 
 def _write_target(target: Path, content: str) -> None:
     """Write a rung's rendered content — atomically (preserving mode) when the
-    target already exists, else a plain create (``atomic_write`` needs an
+    target already exists, else a plain create (``_atomic_write`` needs an
     existing file to stat for its mode).
 
     Refuses a symlinked target outright (must-fix #3): checked here (not just
-    inside ``atomic_write``) because a BROKEN symlink's ``.exists()`` is
+    inside ``_atomic_write``) because a BROKEN symlink's ``.exists()`` is
     False, which would otherwise fall through to the plain-create branch and
     write through the link unchecked.
     """
@@ -784,8 +816,8 @@ def _write_target(target: Path, content: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         try:
-            atomic_write(target, content)
-        except AtomicWriteRefused as exc:
+            _atomic_write(target, content)
+        except SummarizeRefused as exc:
             raise RelearnApplyRefused(str(exc)) from exc
     else:
         target.write_text(content, encoding="utf-8")
@@ -814,24 +846,10 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     symlink, or (rung 1) the target isn't an allowlisted note file."""
     import difflib
 
-    from tokenjam.core.optimize.analyzers.deadweight import (
-        APPLY_KIND_MCP_REMOVE,
-        build_mcp_remove_plan,
-    )
-    from tokenjam.core.optimize.model_apply import APPLY_KINDS, build_model_plan
-
     signature = cluster["signature"]
-    apply_kind = str(cluster.get("apply_kind") or "")
     rung = int(cluster["rung"])
-    # The MCP-remove kind sits outside model_apply's own registry (it edits a
-    # config file, not a model id), so it's checked as a sibling here rather
-    # than folded into APPLY_KINDS itself — that constant stays scoped to
-    # "the model-routing kinds" its own module docstring promises.
-    known_apply_kinds = (*APPLY_KINDS, APPLY_KIND_MCP_REMOVE)
-    if not apply_kind and rung not in RUNG_KIND:
+    if rung not in RUNG_KIND:
         raise RelearnApplyRefused(f"unknown rung {rung}.")
-    if apply_kind and apply_kind not in known_apply_kinds:
-        raise RelearnApplyRefused(f"unknown apply kind {apply_kind!r}.")
     if not target_path:
         raise RelearnApplyRefused("no target path given — pick one before approving.")
 
@@ -844,20 +862,7 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
         )
     pre_image = _read_pre_image(target)
 
-    if apply_kind == APPLY_KIND_MCP_REMOVE:
-        # A dead MCP server's config entry. Same shape as the model-routing
-        # kinds below (a deterministic edit of a value already written down),
-        # just rendered by the analyzer that already resolved the exact
-        # config file instead of by model_apply.
-        new_content = build_mcp_remove_plan(cluster, target, pre_image)
-    elif apply_kind:
-        # The two model-routing kinds (an agent file's `model:` key, a
-        # registered repo's model-id string). Both are edits of an existing
-        # value, so they skip the rung ladder entirely and only rewrite bytes
-        # that were already there; everything downstream (backup, git commit,
-        # ledger, revert) is the shared machinery.
-        new_content = build_model_plan(cluster, target, pre_image)
-    elif rung == RUNG_NOTE:
+    if rung == RUNG_NOTE:
         if not _is_allowed_note_target(target, pre_image):
             raise RelearnApplyRefused(
                 f"{target} is not an allowlisted note target (must be a CLAUDE.md/*.md "
@@ -883,8 +888,15 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     return {
         "signature": signature, "rung": rung, "slug": slug, "target_path": str(target),
         "pre_image": pre_image, "new_content": new_content, "diff": diff,
-        "kind": apply_kind or RUNG_KIND[rung],
+        "kind": RUNG_KIND[rung],
     }
+
+
+def preview_relearn_fix(cluster: dict, *, target_path: str) -> dict:
+    """Dry-run: exactly what ``apply_relearn_fix(..., go=True)`` would write,
+    without touching disk. Raises ``RelearnApplyRefused`` on the same guards
+    the real apply enforces (unknown rung, no target, hostile overwrite)."""
+    return {"dry_run": True, **_build_write_plan(cluster, target_path)}
 
 
 def apply_relearn_fix(
@@ -921,7 +933,7 @@ def apply_relearn_fix(
     _write_target(target, plan["new_content"])
 
     enforcement: dict[str, Any] | None = None
-    if rung in ENFORCEMENT_RUNGS and not cluster.get("apply_kind"):
+    if rung in ENFORCEMENT_RUNGS:
         target.chmod(0o755)
         settings_path = target.parent.parent / "settings.json"
         patch_path = target.parent / f"{plan['slug']}.settings-patch.json"
@@ -944,10 +956,7 @@ def apply_relearn_fix(
             rel_paths.append(str(Path(enforcement["patch_path"]).relative_to(repo_root)))
         commit_sha = _git_commit(
             repo_root, rel_paths,
-            _commit_message(
-                "apply", cluster.get("title", plan["signature"]), plan["signature"],
-                rung, plan["kind"],
-            ),
+            _commit_message("apply", cluster.get("title", plan["signature"]), plan["signature"], rung),
         )
 
     from tokenjam.utils.time_parse import utcnow
@@ -963,10 +972,20 @@ def apply_relearn_fix(
     )
     record.verify["baseline_sessions"] = cluster.get("sessions")
     record.verify["baseline_occurrences"] = cluster.get("occurrences")
-    # No verify pass reads this exposure denominator anymore (see the
-    # `verify` field's class docstring above); left unset rather than
-    # computed since nothing consumes it.
-    record.verify["baseline_total_sessions"] = None
+    # Best-effort exposure denominator (Phase 3 verify) — total sessions in
+    # this fix's scope up to right now, counted the SAME way a later verify
+    # pass counts the post-apply side (core.optimize.relearn_verify.
+    # count_sessions_in_scope), so the two rates are comparable. Never lets a
+    # scan failure sink the apply itself.
+    try:
+        from tokenjam.core.optimize import relearn_verify
+
+        repo_filter = repo_root.name if (scope == "project" and repo_root) else None
+        record.verify["baseline_total_sessions"] = relearn_verify.count_sessions_in_scope(
+            None, conn, repo_filter, before=applied_at_dt,
+        )
+    except Exception:
+        record.verify["baseline_total_sessions"] = None
     return {"dry_run": False, "record": _save_record(config, record)}
 
 
@@ -1113,10 +1132,7 @@ def revert_applied_fix(config: TjConfig, fix_id: str) -> dict:
         if add is not None and add.returncode == 0:
             commit = _run_git(
                 ["commit", "--no-verify", "-m",
-                 _commit_message(
-                     "revert", rec["title"], rec["signature"], rec["rung"],
-                     rec.get("kind"),
-                 ),
+                 _commit_message("revert", rec["title"], rec["signature"], rec["rung"]),
                  "--", rel],
                 repo_root,
             )

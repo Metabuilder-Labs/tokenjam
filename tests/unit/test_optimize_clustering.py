@@ -1,6 +1,6 @@
 """Unit tests for the shared clustering primitives (core/optimize/clustering.py)
 plus a byte-stable regression guard: the three miners that now consume the
-helper (pothole, plan_reuse, workflow_restructure) must produce the SAME
+helper (relearn, plan_reuse, workflow_restructure) must produce the SAME
 signatures/titles/groupings they did before the consolidation.
 
 The golden values here were captured from the pre-refactor code; if a future
@@ -48,10 +48,10 @@ def test_mask_variables_default_is_substitutions_only():
     assert mask_variables("Keep  Case 9", subs) == "Keep  Case <N>"
 
 
-# --- byte-stable regression guard: pothole -----------------------------------
+# --- byte-stable regression guard: relearn -----------------------------------
 
-def test_pothole_normalizer_byte_stable():
-    from tokenjam.core.optimize.analyzers.pothole import _generic_signature, _normalize_generic
+def test_relearn_normalizer_byte_stable():
+    from tokenjam.core.optimize.analyzers.relearn import _generic_signature, _normalize_generic
     assert _normalize_generic(
         "Error at /Users/x/proj/file.py line 42 at 2026-07-21T10:00:00Z id 3f2a1b9c8d7e"
     ) == "error at <path> line <n> at <ts> id <id>"
@@ -59,8 +59,8 @@ def test_pothole_normalizer_byte_stable():
         "Bash:no such file <path> at <ts>"
 
 
-def test_pothole_clustering_byte_stable():
-    from tokenjam.core.optimize.analyzers.pothole import (
+def test_relearn_clustering_byte_stable():
+    from tokenjam.core.optimize.analyzers.relearn import (
         FailureEpisode,
         _recurring,
         cluster_failures,
