@@ -24,12 +24,26 @@ export const GenAIAttributes = {
   SPAN_CREATE_AGENT: "create_agent",
   SPAN_TOOL_CALL: "gen_ai.tool.call",
   SPAN_LLM_CALL: "gen_ai.llm.call",
+
+  // Outcome / feedback event (emerging gen_ai outcome-event semconv, OTel
+  // semconv issue #2665). recordOutcome() emits a span carrying these; the
+  // outcome-type attribute is the marker TokenJam Cloud's ROI ingest keys off.
+  SPAN_OUTCOME: "gen_ai.outcome",
+  OUTCOME_EVENT_NAME: "gen_ai.outcome",
+  EVENT_NAME: "event.name",
+  OUTCOME_TYPE: "gen_ai.outcome.type",
+  OUTCOME_SUCCESS: "gen_ai.outcome.success",
+  OUTCOME_VALUE_USD: "gen_ai.outcome.value_usd",
 } as const;
 
 export const TjAttributes = {
   COST_USD: "tokenjam.cost_usd",
   ALERT_TYPE: "tokenjam.alert.type",
   ALERT_SEVERITY: "tokenjam.alert.severity",
+  // session.id is the key the canonical OTLP parser reads for a span's session.
+  SESSION_ID: "session.id",
+  // Explicit workflow key for an outcome event (see recordOutcome).
+  WORKFLOW_ID: "tokenjam.workflow_id",
   SANDBOX_EVENT: "tokenjam.sandbox.event",
   EGRESS_HOST: "tokenjam.sandbox.egress_host",
   EGRESS_PORT: "tokenjam.sandbox.egress_port",
