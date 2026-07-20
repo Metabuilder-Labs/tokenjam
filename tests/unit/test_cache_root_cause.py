@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.config import TjConfig
+from tokenjam.core.config import OptimizeConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
@@ -82,6 +82,43 @@ def test_a1_not_flagged_below_call_volume(db):
     since, until = _window()
     uncached, _, _ = _compute_root_cause_candidates(db.conn, since, until, None)
     assert uncached == []
+
+
+def test_min_calls_override_flags_below_default_call_volume(db):
+    """`_compute_root_cause_candidates`'s `min_calls` param (what run() threads
+    from `[optimize] min_calls_for_root_cause`) surfaces the exact data from
+    test_a1_not_flagged_below_call_volume once lowered."""
+    _seed_uncached(db, calls=MIN_CALLS_FOR_ROOT_CAUSE - 1, input_tokens=4000)
+    since, until = _window()
+    uncached, _, _ = _compute_root_cause_candidates(
+        db.conn, since, until, None, min_calls=MIN_CALLS_FOR_ROOT_CAUSE - 1,
+    )
+    assert len(uncached) == 1
+
+
+def test_run_reads_min_calls_for_root_cause_from_ctx_config(db):
+    """The registered run(ctx) entry point reads
+    `ctx.config.optimize.min_calls_for_root_cause`."""
+    _seed_uncached(db, calls=MIN_CALLS_FOR_ROOT_CAUSE - 1, input_tokens=4000)
+    since, until = _window()
+
+    default_report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["cache"],
+    )
+    assert default_report.findings["cache"].uncached_agents == []
+
+    lowered_config = TjConfig(
+        version="1",
+        optimize=OptimizeConfig(min_calls_for_root_cause=MIN_CALLS_FOR_ROOT_CAUSE - 1),
+    )
+    lowered_report = build_report(
+        db=db, config=lowered_config, since=since, until=until,
+        findings=["cache"],
+    )
+    lowered_finding = lowered_report.findings["cache"]
+    assert len(lowered_finding.uncached_agents) == 1
+    assert lowered_finding.min_calls_for_root_cause == MIN_CALLS_FOR_ROOT_CAUSE - 1
 
 
 def test_a1_not_flagged_when_prefix_too_small(db):
@@ -319,6 +356,57 @@ def test_uncached_agent_never_also_appears_as_thrash_or_lookback(db):
     assert any(c.agent_id == "agent-dedup" for c in uncached)
     assert not any(c.agent_id == "agent-dedup" for c in thrash)
     assert not any(c.agent_id == "agent-dedup" for c in lookback)
+
+
+def test_thrash_shaped_agent_never_also_appears_as_lookback(db):
+    """An agent whose data satisfies A2 (regular writes, low read:write ratio)
+    ALSO has long, tool-heavy turns shaped like an A3 lookback miss. A2's
+    priority means A3 is never even evaluated for this agent — one card, not
+    two, and never across BOTH the ``cache`` and ``cache_thrash`` analyzer
+    values (the two ``CostProposal.analyzer`` strings this check family uses)."""
+    agent = "agent-both"
+    for i in range(15):
+        sid = f"both-{i}"
+        t0 = BASE + timedelta(hours=i)
+        db.insert_span(make_llm_span(
+            agent_id=agent, provider="anthropic", model="claude-sonnet-5",
+            input_tokens=3000, cache_tokens=0, cache_write_tokens=5000,
+            session_id=sid, start_time=t0,
+        ))
+        # A3-shaped structure layered on top: >10 tool calls before the miss.
+        for j in range(11):
+            db.insert_span(make_tool_span(
+                agent_id=agent, tool_name="Read", session_id=sid,
+                start_time=t0 + timedelta(minutes=5, seconds=j),
+            ))
+        db.insert_span(make_llm_span(
+            agent_id=agent, provider="anthropic", model="claude-sonnet-5",
+            input_tokens=3000, cache_tokens=0, cache_write_tokens=0,
+            session_id=sid, start_time=t0 + timedelta(minutes=10),
+        ))
+    since, until = _window()
+    uncached, thrash, lookback = _compute_root_cause_candidates(db.conn, since, until, None)
+    assert not any(c.agent_id == agent for c in uncached)
+    assert any(c.agent_id == agent for c in thrash)
+    assert not any(c.agent_id == agent for c in lookback)
+
+    from tokenjam.core.optimize.analyzers.cache_efficacy import CacheEfficacyFinding
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    report = OptimizeReport(
+        window=WindowSummary(since=since, until=until, days=1, sessions=15, spans=1,
+                              total_tokens=1, total_cost_usd=1.0, thin_data=False),
+        findings={"cache": CacheEfficacyFinding(
+            uncached_agents=uncached, thrash_agents=thrash, lookback_miss_agents=lookback,
+        )},
+    )
+    props_for_agent = [
+        p for p in cost_proposals_from_report(report)
+        if p.analyzer in ("cache", "cache_thrash") and p.baseline.get("agent_id") == agent
+    ]
+    assert len(props_for_agent) == 1
+    assert props_for_agent[0].analyzer == "cache_thrash"
 
 
 # --------------------------------------------------------------------------- #
