@@ -71,6 +71,33 @@ new TjClient(options: TjClientOptions)
 | `client.send(span)` | Buffer a span; auto-flushes when `batchSize` is reached. |
 | `client.flush()` | Immediately send all buffered spans. Returns `IngestResult | null`. |
 | `client.shutdown()` | Flush remaining spans and stop the timer. Call before process exit. |
+| `client.recordOutcome(options)` | Emit a gen_ai outcome event attaching a business outcome to a workflow. |
+
+### Record an outcome
+
+Attach a business outcome to a workflow in one call — the emerging gen_ai
+outcome event (OTel semconv issue #2665) TokenJam Cloud's ROI backend ingests.
+
+```typescript
+await client.recordOutcome({
+  outcomeType: "ticket_resolved", // required marker
+  sessionId: "sess-9",            // at least one of sessionId / workflowId
+  success: true,
+  valueUsd: 25.0,                 // optional, self-reported
+});
+```
+
+| Option | Type | Description |
+|---|---|---|
+| `outcomeType` | `string` | Required. Caller-defined label (e.g. `"ticket_resolved"`). The marker attribute. |
+| `workflowId` | `string` | Explicit workflow key. At least one of `workflowId` / `sessionId` is required. |
+| `sessionId` | `string` | Session (or root session of a fan-out) the outcome belongs to. |
+| `success` | `boolean` | Whether the outcome was achieved. Defaults to `true`. |
+| `valueUsd` | `number` | **Optional, self-reported** business value. TokenJam does not measure or verify it. |
+| `agentId` | `string` | Emitting agent id. |
+| `attributes` | `Record<string, unknown>` | Extra attributes attached verbatim. |
+
+**ROI compute is a TokenJam Cloud feature.** The SDK only emits the event.
 
 ## SpanBuilder
 

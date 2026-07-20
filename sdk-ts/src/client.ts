@@ -2,9 +2,42 @@
  * TjClient — sends spans to the TokenJam REST API.
  * Communicates via HTTP POST to /api/v1/spans in OTLP JSON format.
  */
-import { GenAIAttributes } from "./semconv.js";
+import { GenAIAttributes, TjAttributes } from "./semconv.js";
+import { SpanBuilder } from "./span-builder.js";
 import type { IngestResult, OtlpSpan, OtlpValue, Span, SpanBatch } from "./types.js";
 import { SpanKind, SpanStatus } from "./types.js";
+
+export interface RecordOutcomeOptions {
+  /**
+   * The kind of outcome, a caller-defined label
+   * (e.g. "ticket_resolved", "lead_qualified", "pr_merged"). Required — this is
+   * the marker attribute; without it the event is not recognised downstream.
+   */
+  outcomeType: string;
+  /**
+   * An explicit workflow key to attach the outcome to. Optional if sessionId is
+   * given. At least one of workflowId / sessionId is required.
+   */
+  workflowId?: string;
+  /**
+   * The session (or root session of a fan-out) the outcome belongs to. At least
+   * one of workflowId / sessionId is required.
+   */
+  sessionId?: string;
+  /** Whether the outcome was achieved (execution succeeded). Defaults to true. */
+  success?: boolean;
+  /**
+   * An OPTIONAL, SELF-REPORTED business value for the outcome in USD. A value
+   * YOU declare — TokenJam does not measure or verify it. Negative values are
+   * treated as undeclared. ROI compute (declared value / measured cost) is a
+   * TokenJam Cloud feature; the SDK only emits the event.
+   */
+  valueUsd?: number;
+  /** The emitting agent id (stamped as gen_ai.agent.id). */
+  agentId?: string;
+  /** Extra attributes attached verbatim to the event. */
+  attributes?: Record<string, unknown>;
+}
 
 export interface TjClientOptions {
   /** Base URL of the TokenJam server (default: http://127.0.0.1:7391) */
@@ -130,6 +163,58 @@ export class TjClient {
     if (this.buffer.length >= this.batchSize) {
       await this.flush();
     }
+  }
+
+  /**
+   * Emit a gen_ai outcome event attaching a business outcome to a workflow.
+   *
+   * A thin wrapper that builds and sends one outcome span carrying the emerging
+   * gen_ai outcome-event attributes (OTel semconv issue #2665) that TokenJam
+   * Cloud's ROI ingest keys off — one call instead of hand-POSTing OTLP JSON.
+   * The span is buffered like any other (auto-flushes at batchSize).
+   *
+   * ROI compute is a TokenJam Cloud feature; the SDK only emits the event.
+   * `valueUsd` is self-reported — TokenJam does not measure or verify it.
+   *
+   * @throws if outcomeType is empty, or neither workflowId nor sessionId is set.
+   */
+  async recordOutcome(options: RecordOutcomeOptions): Promise<void> {
+    if (!options.outcomeType) {
+      throw new Error("recordOutcome requires a non-empty outcomeType");
+    }
+    if (!options.workflowId && !options.sessionId) {
+      throw new Error(
+        "recordOutcome requires at least one of workflowId or sessionId"
+      );
+    }
+
+    const builder = new SpanBuilder(GenAIAttributes.SPAN_OUTCOME)
+      .kind(SpanKind.CLIENT)
+      // The marker attrs the Cloud ROI ingest keys off, plus the stock
+      // event.name so the event can also ride the OTLP event path.
+      .attribute(GenAIAttributes.EVENT_NAME, GenAIAttributes.OUTCOME_EVENT_NAME)
+      .attribute(GenAIAttributes.OUTCOME_TYPE, options.outcomeType)
+      .attribute(GenAIAttributes.OUTCOME_SUCCESS, options.success ?? true);
+
+    if (options.workflowId) {
+      builder.attribute(TjAttributes.WORKFLOW_ID, options.workflowId);
+    }
+    if (options.sessionId) {
+      // session.id is the key the canonical OTLP parser reads (not the
+      // SpanBuilder.sessionId() gen_ai.session.id form).
+      builder.attribute(TjAttributes.SESSION_ID, options.sessionId);
+    }
+    if (options.agentId) {
+      builder.agentId(options.agentId);
+    }
+    if (options.valueUsd != null) {
+      builder.attribute(GenAIAttributes.OUTCOME_VALUE_USD, options.valueUsd);
+    }
+    for (const [key, value] of Object.entries(options.attributes ?? {})) {
+      builder.attribute(key, value);
+    }
+
+    await this.send(builder.build());
   }
 
   /**

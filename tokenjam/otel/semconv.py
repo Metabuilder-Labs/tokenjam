@@ -55,6 +55,20 @@ class GenAIAttributes:
     SPAN_TOOL_CALL    = "gen_ai.tool.call"
     SPAN_LLM_CALL     = "gen_ai.llm.call"
 
+    # Outcome / feedback event (emerging gen_ai outcome-event semconv, OTel
+    # semconv issue #2665). `record_outcome()` emits a span carrying these so a
+    # business outcome (+ an optional self-reported $ value) can be attached to a
+    # workflow. The standard event NAME is OUTCOME_EVENT_NAME; the outcome TYPE
+    # attribute is the marker TokenJam Cloud's ROI ingest keys off
+    # (roi.is_outcome_event). ROI compute is a Cloud feature — the OSS SDK only
+    # EMITS the event; the local stack ingests it as a normal span (no local ROI).
+    SPAN_OUTCOME       = "gen_ai.outcome"
+    OUTCOME_EVENT_NAME = "gen_ai.outcome"
+    EVENT_NAME         = "event.name"
+    OUTCOME_TYPE       = "gen_ai.outcome.type"
+    OUTCOME_SUCCESS    = "gen_ai.outcome.success"
+    OUTCOME_VALUE_USD  = "gen_ai.outcome.value_usd"
+
 
 class OpenInferenceAttributes:
     """OpenInference (Arize) span attribute names.
@@ -229,6 +243,11 @@ class TjAttributes:
     # the dashboard can group a run's member sessions and render a parent tree.
     RUN_ID            = "tokenjam.run_id"
     PARENT_SESSION_ID = "tokenjam.parent_session_id"
+    # Explicit workflow key for an outcome event (`record_outcome`). When set, it
+    # overrides the session-root walk on the Cloud ROI side (roi.write_outcome
+    # keys the outcome to this id when no session_id is given). Lets a caller
+    # attach an outcome to a workflow it names itself rather than by session.
+    WORKFLOW_ID       = "tokenjam.workflow_id"
     # Privacy-safe hash of a tool call's arguments, computed at ingest BEFORE the
     # raw `gen_ai.tool.input` is stripped per capture config. Lets retry-loop
     # detection tell an identical repeated call from normal repeated tool use
