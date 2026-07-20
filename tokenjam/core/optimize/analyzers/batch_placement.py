@@ -31,8 +31,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from tokenjam.core.optimize.accounting import four_type_token_sum_sql
-
 #: The Batch API bills a flat half of standard prices.
 BATCH_DISCOUNT = 0.50
 
@@ -90,11 +88,6 @@ class BatchPlacementFinding:
     estimate_basis:      str = BATCH_ESTIMATE_BASIS
     estimate_confidence: str = "estimated"
     friction:            str = BATCH_FRICTION_NOTE
-    # Effective thresholds this run applied (config-overridable, see
-    # core.config.OptimizeConfig) — carried on the finding so a renderer never
-    # hardcodes a number that could be stale against the user's own config.
-    min_sessions_for_cadence: int   = MIN_SESSIONS_FOR_CADENCE
-    min_group_cost_usd:       float = MIN_GROUP_COST_USD
 
 
 def gap_coefficient_of_variation(starts: list[datetime]) -> float | None:
@@ -132,7 +125,8 @@ def _session_rows(
         f"FIRST(agent_id) AS agent_id, "
         f"MIN(start_time) FILTER (WHERE model IS NOT NULL) AS first_call, "
         f"COALESCE(SUM(cost_usd), 0.0) AS cost_usd, "
-        f"{four_type_token_sum_sql(alias='tokens')} "
+        f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens "
+        f"+ cache_write_tokens), 0) AS tokens "
         f"FROM spans WHERE {where} "
         f"GROUP BY session_id",
         params,
@@ -173,17 +167,11 @@ def analyze_batch_placement(
     until: datetime,
     agent_id: str | None,
     window_cost_usd: float,
-    *,
-    min_sessions_for_cadence: int = MIN_SESSIONS_FOR_CADENCE,
-    min_group_cost_usd: float = MIN_GROUP_COST_USD,
 ) -> BatchPlacementFinding | None:
     """Workload groups whose shape allows a batch-lane discussion.
 
     Returns ``None`` when nothing qualifies, so the card is simply absent rather
-    than rendering an empty candidate list. ``min_sessions_for_cadence`` and
-    ``min_group_cost_usd`` override the module constants of the same name
-    (config-overridable via ``core.config.OptimizeConfig``); the defaults
-    reproduce today's behaviour unchanged.
+    than rendering an empty candidate list.
     """
     rows = _session_rows(conn, since, until, agent_id)
     if not rows:
@@ -207,7 +195,7 @@ def analyze_batch_placement(
 
     candidates: list[BatchCandidate] = []
     for agent, sessions in sorted(by_agent.items()):
-        if len(sessions) < min_sessions_for_cadence:
+        if len(sessions) < MIN_SESSIONS_FOR_CADENCE:
             continue
         if any(s["session_id"] in interactive for s in sessions):
             continue
@@ -216,7 +204,7 @@ def analyze_batch_placement(
         if cv is None or cv >= MAX_START_GAP_CV:
             continue
         cost = sum(s["cost_usd"] for s in sessions)
-        if cost < min_group_cost_usd:
+        if cost < MIN_GROUP_COST_USD:
             continue
         gaps = [
             (b - a).total_seconds()
@@ -247,6 +235,4 @@ def analyze_batch_placement(
         ),
         estimated_recoverable_usd=round(candidate_cost * BATCH_DISCOUNT, 6),
         estimated_recoverable_tokens=sum(c.tokens for c in candidates),
-        min_sessions_for_cadence=min_sessions_for_cadence,
-        min_group_cost_usd=min_group_cost_usd,
     )
