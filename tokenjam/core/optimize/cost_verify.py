@@ -37,6 +37,7 @@ from tokenjam.core.cost import calculate_cost
 from tokenjam.core.optimize.relearn_verify import (
     VERDICT_IMPROVED,
     VERDICT_INSUFFICIENT_DATA,
+    VERDICT_NO_CHANGE,
     VERDICT_REGRESSED,
 )
 from tokenjam.core.pricing import get_rates
@@ -152,20 +153,6 @@ def _downsize_metric(rows: list[tuple], models: set[str]) -> dict[str, Any]:
             "oversized_usd": oversized_usd}
 
 
-def _placement_metric(rows: list[tuple]) -> dict[str, Any]:
-    """Per-session dollars on the flagged workload group.
-
-    Usage records carry no batch/service-tier marker today, so the receipt is a
-    spend drop on the same workload after the user marks the change applied,
-    with no claim about what caused it.
-    """
-    sessions = {str(r[0] or "") for r in rows}
-    n_sessions = len(sessions)
-    total_usd = _priced_usd(rows)
-    return {"value": (total_usd / n_sessions) if n_sessions else 0.0,
-            "sessions": n_sessions, "calls": len(rows), "total_usd": total_usd}
-
-
 def _cache_metric(rows: list[tuple]) -> dict[str, Any]:
     """Cache-read efficacy = cache_tokens / (input + cache) for the flagged
     (provider, model), plus the input-vs-cache priced value of the gap."""
@@ -184,6 +171,18 @@ def _trim_metric(rows: list[tuple]) -> dict[str, Any]:
     value = (input_tok / calls) if calls else 0.0
     return {"value": value, "sessions": len({str(r[0] or "") for r in rows}),
             "calls": calls, "input_tokens": input_tok}
+
+
+def _deadweight_metric(rows: list[tuple]) -> dict[str, Any]:
+    """Average total input tokens PER SESSION (not per call). An MCP schema-
+    injection tax is paid once per session's context, not once per call, so
+    the per-session average — not ``_trim_metric``'s per-call average — is
+    the comparable metric for the deadweight branch."""
+    input_tok = sum(int(r[3] or 0) for r in rows)
+    sessions = {str(r[0] or "") for r in rows}
+    n_sessions = len(sessions)
+    value = (input_tok / n_sessions) if n_sessions else 0.0
+    return {"value": value, "sessions": n_sessions, "calls": len(rows), "input_tokens": input_tok}
 
 
 def _dominant_model(rows: list[tuple]) -> tuple[str, str]:
@@ -218,6 +217,76 @@ def _verdict(realized_usd_delta: float, post_calls: int) -> tuple[str, str]:
         f"no measured improvement on the flagged cost dimension (realized delta "
         f"${realized_usd_delta:.4f}) across {post_calls} call(s) after your change",
     )
+
+
+def _measure_deadweight_delta(
+    conn: Any, target: dict[str, Any], agent_id: str | None,
+    pre_start: datetime, pre_end: datetime, post_start: datetime, post_end: datetime,
+    now: datetime,
+) -> dict[str, Any]:
+    """Deadweight's verify branch: is the server still in its configured set,
+    and if not, how much did per-session input tokens drop.
+
+    Distinct from the other four analyzers' improved/regressed verdict: a
+    server that's STILL configured is ``no_change`` — nothing to measure
+    yet, never folded into "regressed" (the user hasn't actually acted on
+    the card). Only once the server is gone from its detected source does
+    this measure a real delta, gated by the same exposure floor as every
+    other cost analyzer; a delta at or below zero still surfaces as
+    ``regressed``, never silently kept as a win.
+    """
+    from tokenjam.core.optimize.analyzers.deadweight import server_still_configured
+
+    server_name = str(target.get("server") or "")
+    source = str(target.get("source") or "")
+    still_configured = server_still_configured(server_name, source)
+
+    pre = _deadweight_metric(_rows_for(conn, pre_start, pre_end, agent_id))
+    post_rows = _rows_for(conn, post_start, post_end, agent_id)
+    post = _deadweight_metric(post_rows)
+
+    base = {
+        "pre_value": round(pre["value"], 6),
+        "post_value": round(post["value"], 6),
+        "pre_sessions": pre["sessions"],
+        "post_sessions": post["sessions"],
+        "estimate_basis": ESTIMATE_BASIS_COST_VERIFY,
+        "last_checked_at": now.isoformat(),
+    }
+
+    if still_configured:
+        return {
+            **base,
+            "verdict": VERDICT_NO_CHANGE,
+            "reason": (
+                f"`{server_name}` still appears in its configured set "
+                f"({source or 'unknown source'}); nothing to measure until "
+                f"it's actually removed or project-scoped"
+            ),
+            "realized_usd_delta": None,
+            "realized_tokens_delta": None,
+        }
+
+    per_session_drop = max(0.0, pre["value"] - post["value"])
+    saved_tokens = per_session_drop * post["sessions"]
+    realized_tokens: int | None = int(saved_tokens)
+    prov, model = _dominant_model(post_rows)
+    rates = get_rates(prov, model)
+    input_rate = rates.input_per_mtok if rates is not None else 0.0
+    realized_usd = round((saved_tokens / 1_000_000) * input_rate, 6)
+
+    verdict, reason = _verdict(realized_usd, post["calls"])
+    if verdict == VERDICT_INSUFFICIENT_DATA:
+        realized_usd = None  # type: ignore[assignment]
+        realized_tokens = None
+
+    return {
+        **base,
+        "verdict": verdict,
+        "reason": reason,
+        "realized_usd_delta": realized_usd,
+        "realized_tokens_delta": realized_tokens,
+    }
 
 
 def measure_cost_delta(
@@ -315,17 +384,13 @@ def measure_cost_delta(
         realized_usd = max(0.0, pre["value"] - post["value"]) * post["sessions"]
         post_calls = post["calls"]
 
-    elif analyzer == "placement":
-        # Spend on the flagged workload group, per session, before versus after
-        # the marker. Scoped by agent where the card names a single workload;
-        # a multi-workload card measures the whole set it listed.
-        agents = [str(a) for a in (target.get("agents") or []) if a]
-        scope_agent = agent_id or (agents[0] if len(agents) == 1 else None)
-        pre = _placement_metric(_rows_for(conn, pre_start, pre_end, scope_agent))
-        post_rows = _rows_for(conn, post_start, post_end, scope_agent)
-        post = _placement_metric(post_rows)
-        realized_usd = max(0.0, pre["value"] - post["value"]) * post["sessions"]
-        post_calls = post["calls"]
+    elif analyzer == "deadweight":
+        # Distinct verdict shape (no_change is possible) — computed and
+        # returned by its own helper rather than falling into the shared
+        # improved/regressed tail below.
+        return _measure_deadweight_delta(
+            conn, target, agent_id, pre_start, pre_end, post_start, post_end, now,
+        )
 
     else:
         return {**empty, "reason": f"unknown cost analyzer {analyzer!r}"}
