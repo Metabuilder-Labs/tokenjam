@@ -34,6 +34,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tokenjam.core.cost import calculate_cost
+from tokenjam.core.optimize import accounting
 from tokenjam.core.optimize.relearn_verify import (
     VERDICT_IMPROVED,
     VERDICT_INSUFFICIENT_DATA,
@@ -95,7 +96,14 @@ def _rows_for(
     filters. Returns (session_id, provider, model, input, output, cache,
     cache_write). ``subagent_only`` scopes to Task-dispatched subagent spans
     (``sub_agent_id IS NOT NULL``) — the fan-out the subagent analyzer flags.
-    Never raises — a bad query yields ``[]``."""
+    Never raises — a bad query yields ``[]``.
+
+    Rows are collapsed by CALL identity before they are returned
+    (``core.optimize.accounting``), so a call observed by more than one ingest
+    path is priced once rather than once per row. Every dollar figure in this
+    module is computed from these rows, which is what makes the receipts
+    immune to a duplicated ingest.
+    """
     clauses = ["start_time >= $1", "start_time < $2", "model IS NOT NULL"]
     params: list[Any] = [since, until]
     if subagent_only:
@@ -111,8 +119,8 @@ def _rows_for(
         clauses.append(f"provider = ${len(params)}")
     where = " AND ".join(clauses)
     try:
-        return conn.execute(
-            "SELECT session_id, provider, model, "
+        raw = conn.execute(
+            "SELECT span_id, attributes, session_id, provider, model, "
             "COALESCE(input_tokens,0), COALESCE(output_tokens,0), "
             "COALESCE(cache_tokens,0), COALESCE(cache_write_tokens,0) "
             f"FROM spans WHERE {where}",
@@ -120,6 +128,11 @@ def _rows_for(
         ).fetchall()
     except Exception:
         return []
+    keyed = [
+        (accounting.call_identity(r[0], r[2], r[1]), *r[2:])
+        for r in raw
+    ]
+    return [tuple(row[1:]) for row in accounting.dedupe_by_call_identity(keyed)]
 
 
 def _priced_usd(rows: list[tuple]) -> float:
