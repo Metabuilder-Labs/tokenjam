@@ -165,17 +165,68 @@ def _downsize_to_proposal(finding: Any) -> list[CostProposal]:
     )]
 
 
+def _per_agent_cache_recoverable_by_model(finding: Any) -> dict[tuple[str, str], tuple[float, int]]:
+    """Sum of ``estimated_recoverable_usd``/``estimated_recoverable_tokens``
+    already claimed by the root-caused per-agent cards (A1 uncached / A2
+    thrash / A3 lookback), keyed by (provider, model).
+
+    The generic per-(provider, model) efficacy row and these per-agent checks
+    both read from the SAME underlying spans — a flagged agent's own calls
+    are part of the aggregate the generic row's efficacy is computed over. So
+    the dollars a per-agent card claims must be subtracted from the generic
+    row's figure before it's surfaced, or the Review-inbox rollup (which sums
+    every open card's ``estimated_recoverable_usd`` with no analyzer
+    allowlist) double-counts the same waste under two signatures. See
+    ``_cache_to_proposals``.
+    """
+    totals: dict[tuple[str, str], tuple[float, int]] = {}
+    groups = (
+        getattr(finding, "uncached_agents", []) or [],
+        getattr(finding, "thrash_agents", []) or [],
+        getattr(finding, "lookback_miss_agents", []) or [],
+    )
+    for group in groups:
+        for c in group:
+            usd = getattr(c, "estimated_recoverable_usd", None) or 0.0
+            tokens = getattr(c, "estimated_recoverable_tokens", None) or 0
+            if usd <= 0 and tokens <= 0:
+                continue
+            key = (c.provider, c.model)
+            prev_usd, prev_tokens = totals.get(key, (0.0, 0))
+            totals[key] = (prev_usd + usd, prev_tokens + tokens)
+    return totals
+
+
 def _cache_to_proposals(finding: Any) -> list[CostProposal]:
-    """One proposal per flagged (provider, model) cache-efficacy row."""
+    """One proposal per flagged (provider, model) cache-efficacy row.
+
+    Reduced by whatever the more specific per-agent root-cause cards (A1/A2/
+    A3) already claim for that same (provider, model) — see
+    ``_per_agent_cache_recoverable_by_model`` — so the rollup never sums the
+    same underlying waste twice under two different signatures.
+    """
     if finding is None:
         return []
     from tokenjam.core.optimize.analyzers.cache_efficacy import (
         estimate_cache_recoverable,
     )
 
+    already_claimed = _per_agent_cache_recoverable_by_model(finding)
+
     proposals: list[CostProposal] = []
     for row in getattr(finding, "flagged", []) or []:
         usd, tokens = estimate_cache_recoverable([row])
+        claimed_usd, claimed_tokens = already_claimed.get((row.provider, row.model), (0.0, 0))
+        basis = str(getattr(finding, "estimate_basis", "") or "")
+        if claimed_usd > 0 or claimed_tokens > 0:
+            usd = round(max(0.0, (usd or 0.0) - claimed_usd), 6)
+            tokens = max(0, (tokens or 0) - claimed_tokens)
+            basis = (
+                basis + (" " if basis else "")
+                + f"Reduced by ${claimed_usd:.4f} already attributed to more "
+                "specific per-agent cache proposals for this model, so the "
+                "rollup does not double-count the same spend."
+            )
         evidence = (
             f"{row.provider}/{row.model}: {row.efficacy * 100:.0f}% of input "
             f"tokens served from cache over {row.input_tokens:,} input tokens "
@@ -203,7 +254,7 @@ def _cache_to_proposals(finding: Any) -> list[CostProposal]:
             ),
             estimated_recoverable_usd=usd,
             estimated_recoverable_tokens=tokens,
-            estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+            estimate_basis=basis,
         ))
     return proposals
 
