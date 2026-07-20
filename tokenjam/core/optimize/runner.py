@@ -39,6 +39,7 @@ ANALYZER_ORDER: list[str] = [
     "summarize",
     "relearn",
     "verbosity",
+    "deadweight",
 ]
 
 THIN_DATA_DAYS = 7
