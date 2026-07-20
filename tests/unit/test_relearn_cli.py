@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import subprocess
 
+import click
 import pytest
 from click.testing import CliRunner
 
-from tokenjam.cli.cmd_relearn import cmd_relearn
+from tokenjam.cli.relearn_write_verbs import register_write_verbs
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.optimize import relearn_apply as pa
 from tokenjam.core.optimize import relearn_proposals, relearn_store
@@ -64,9 +65,17 @@ def _git_repo(tmp_path):
     return repo
 
 
+def _group() -> click.Group:
+    """The verbs attached to a ``tj relearn`` group, exactly as the real group
+    picks them up. Built here rather than imported so this file tests the
+    registration function too."""
+    group = click.Group("relearn")
+    return register_write_verbs(group)
+
+
 def _run(cfg, args, *, output_json=False):
     return CliRunner().invoke(
-        cmd_relearn, args,
+        _group(), args,
         obj={"config": cfg, "db": None, "output_json": output_json},
     )
 
@@ -254,12 +263,16 @@ def test_verify_with_no_applied_fixes_is_a_clean_no_op(cfg):
 
 # --- House voice ---------------------------------------------------------------
 
+def test_every_verb_is_registered_on_the_group():
+    assert sorted(_group().commands) == ["apply", "enable", "list", "revert", "verify"]
+
+
 @pytest.mark.parametrize("args", [
     ["--help"], ["list", "--help"], ["apply", "--help"],
     ["enable", "--help"], ["revert", "--help"], ["verify", "--help"],
 ])
 def test_cli_help_text_avoids_em_dashes_and_the_word_quota(args):
-    out = CliRunner().invoke(cmd_relearn, args, obj={}).output
+    out = CliRunner().invoke(_group(), args, obj={}).output
     assert "—" not in out
     assert "quota" not in out.lower()
 
