@@ -857,8 +857,11 @@ def build_proposals(
         scope = _scope_for(cluster.repos)
         # Workspace-less (OTel) clusters have nowhere to write: no cwd, no
         # target, and the card must not offer an apply path it can't honor.
-        advise_only = bool(advise_only_repos) and all(
-            r in advise_only_repos for r in repos
+        # `bool(advise_only_repos) and ...` defeats mypy's None-narrowing since
+        # it's wrapped in a call; guarding on the name itself narrows it to
+        # `set[str]` inside the genexpr while keeping identical truthiness.
+        advise_only = bool(
+            advise_only_repos and all(r in advise_only_repos for r in repos)
         )
         repo_cwd = "" if advise_only else (
             repo_cwd_map.get(repos[0], "") if len(repos) == 1 else ""
