@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`tj` (TokenJam) is a local-first, OTel-native **cost-optimization layer** for AI agents (with a full observability stack underneath). No cloud backend, no signup. It captures telemetry from agent runtimes, stores it in a local DuckDB database, and runs the optimize analyzers (`downsize` / `cache` / `cache-recommend` / `script` / `trim` / `reuse` / `subagent` / `verbosity` / `summarize` / `budget-projection`, plus `relearn`, the self-improve loop's detector) that surface cost-saving candidates from real usage — plus a CLI, local REST API, web UI, and MCP server for querying. Install via `pipx install tokenjam` (recommended — sidesteps PEP 668 on Homebrew Python and Debian 12+/Ubuntu 24+) or `pip install tokenjam` in a venv. Run via `tj <subcommand>`. Requires Python >=3.10.
+`tj` (TokenJam) is a local-first, OTel-native **cost-optimization layer** for AI agents (with a full observability stack underneath). No cloud backend, no signup. It captures telemetry from agent runtimes, stores it in a local DuckDB database, and runs the optimize analyzers (`downsize` / `cache` / `cache-recommend` / `script` / `trim` / `reuse` / `subagent` / `verbosity` / `summarize` / `budget-projection`, plus `relearn`, the loop's detector) that surface cost-saving candidates from real usage — plus a CLI, local REST API, web UI, and MCP server for querying. Install via `pipx install tokenjam` (recommended — sidesteps PEP 668 on Homebrew Python and Debian 12+/Ubuntu 24+) or `pip install tokenjam` in a venv. Run via `tj <subcommand>`. Requires Python >=3.10.
 
 ## Build & Development
 
