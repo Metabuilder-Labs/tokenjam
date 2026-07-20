@@ -2,19 +2,19 @@
 
 A cost proposal is advise-only (see ``cost_proposals``): its fix lives in the
 user's own application code, which tokenjam has no workspace to write into. So
-unlike ``relearn_apply`` there is NO file write, no rung routing, no git commit
+unlike ``pothole_apply`` there is NO file write, no rung routing, no git commit
 here. "Apply" means exactly one thing: the user tells tokenjam "I made this
 change" so the loop can start measuring whether it moved the cost needle.
 
 That "I changed something at time T, watch whether it holds" is the loop
 primitive ``core.loop.Expectation`` already models (the same one the OTel
-relearn lane keys on — ``relearn_otel_verify``). Marking a cost proposal
+pothole lane keys on — ``pothole_otel_verify``). Marking a cost proposal
 applied therefore:
 
   1. creates an ``Expectation`` whose ``created_at`` is the "applied at T"
      marker and whose ``agent_id`` scopes the later measurement, and
   2. appends a record to a small ``cost_applied.json`` ledger (mirroring
-     ``relearn_apply``'s ``applied_fixes.json``) carrying the proposal snapshot
+     ``pothole_apply``'s ``applied_fixes.json``) carrying the proposal snapshot
      + the ``target_key`` the delta-verify pass re-measures against.
 
 The realized dollar delta lands back in that record's ``verify`` sub-dict (see
@@ -29,17 +29,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from tokenjam.core.optimize.relearn_apply import _storage_base_dir
+from tokenjam.core.optimize.pothole_apply import _storage_base_dir
 
 
 class CostApplyRefused(Exception):
     """Raised when a mark-applied request can't be honored (bad payload, no DB).
-    The API layer translates this to a 409, mirroring RelearnApplyRefused."""
+    The API layer translates this to a 409, mirroring PotholeApplyRefused."""
 
 
 def cost_applied_path(config: Any) -> Path:
     """``<storage-parent>/cost_applied.json`` — honors --config / storage.path
-    exactly like ``relearn_apply.applied_fixes_path`` (never the real ~/.tj for
+    exactly like ``pothole_apply.applied_fixes_path`` (never the real ~/.tj for
     a :memory: / "" storage.path)."""
     return _storage_base_dir(config) / "cost_applied.json"
 
@@ -124,8 +124,8 @@ def mark_applied(
     """Record that the user applied a cost proposal.
 
     ``proposal`` is the CostProposal dict the client already holds from
-    ``GET /relearn/cost-proposals`` (re-posted, never re-looked-up server-side,
-    so a stale cache can't mark a DIFFERENT proposal — same guard the relearn
+    ``GET /pothole/cost-proposals`` (re-posted, never re-looked-up server-side,
+    so a stale cache can't mark a DIFFERENT proposal — same guard the pothole
     apply path uses). Creates the Expectation marker + appends the ledger
     record. Idempotent per signature: an existing non-reverted record for the
     same signature is returned unchanged rather than duplicated.

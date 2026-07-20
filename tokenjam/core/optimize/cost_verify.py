@@ -1,7 +1,7 @@
 """Delta-verify for applied cost proposals — the receipts.
 
 A cost proposal is advise-only, so there is no transcript recurrence to
-re-count (that is ``relearn_verify``'s job). What we CAN measure is whether the
+re-count (that is ``pothole_verify``'s job). What we CAN measure is whether the
 cost signal the analyzer flagged actually moved after the user marked their
 change: fewer dollars on the oversized model, a higher cache hit ratio, fewer
 input tokens per call on the bloated step.
@@ -15,7 +15,7 @@ the SAME ``core.cost.calculate_cost`` the rest of tokenjam uses (per-model,
 per-token-type, BOTH ``cache_tokens`` and ``cache_write_tokens`` included — the
 recurring omission this workspace guards against).
 
-Honesty (identical discipline to ``relearn_verify``):
+Honesty (identical discipline to ``pothole_verify``):
 
   * **Correlational, never causal.** The user's change is one of many things
     that shifted at the marker. This measures co-occurrence and says so.
@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tokenjam.core.cost import calculate_cost
-from tokenjam.core.optimize.relearn_verify import (
+from tokenjam.core.optimize.pothole_verify import (
     VERDICT_IMPROVED,
     VERDICT_INSUFFICIENT_DATA,
     VERDICT_REGRESSED,
@@ -89,17 +89,12 @@ def _window_bounds(marker: datetime, now: datetime) -> tuple[datetime, datetime,
 def _rows_for(
     conn: Any, since: datetime, until: datetime, agent_id: str | None,
     *, model: str | None = None, provider: str | None = None,
-    subagent_only: bool = False,
 ) -> list[tuple]:
     """LLM spans in ``[since, until)`` with optional agent/model/provider
     filters. Returns (session_id, provider, model, input, output, cache,
-    cache_write). ``subagent_only`` scopes to Task-dispatched subagent spans
-    (``sub_agent_id IS NOT NULL``) — the fan-out the subagent analyzer flags.
-    Never raises — a bad query yields ``[]``."""
+    cache_write). Never raises — a bad query yields ``[]``."""
     clauses = ["start_time >= $1", "start_time < $2", "model IS NOT NULL"]
     params: list[Any] = [since, until]
-    if subagent_only:
-        clauses.append("sub_agent_id IS NOT NULL")
     if agent_id:
         params.append(agent_id)
         clauses.append(f"agent_id = ${len(params)}")
@@ -288,19 +283,6 @@ def measure_cost_delta(
         realized_usd = (saved_tokens / 1_000_000) * input_rate
         post_calls = post["calls"]
 
-    elif analyzer == "subagent":
-        # Fan-out model-mix cost delta: per-session dollars spent on the
-        # oversized model(s) across SUBAGENT spans only (sub_agent_id NOT NULL),
-        # before vs after the marker. Same shape as downsize, scoped to the
-        # Task-dispatched fan-out the subagent analyzer flags.
-        models = {str(m) for m in (target.get("models") or [])}
-        pre = _downsize_metric(
-            _rows_for(conn, pre_start, pre_end, agent_id, subagent_only=True), models)
-        post_rows = _rows_for(conn, post_start, post_end, agent_id, subagent_only=True)
-        post = _downsize_metric(post_rows, models)
-        realized_usd = max(0.0, pre["value"] - post["value"]) * post["sessions"]
-        post_calls = post["calls"]
-
     else:
         return {**empty, "reason": f"unknown cost analyzer {analyzer!r}"}
 
@@ -390,7 +372,7 @@ def rescan_all(
 def cost_compound_ledger(records: list[dict[str, Any]]) -> dict[str, Any]:
     """The Applied section's cost summary: total realized dollars across every
     VERIFIED, improved (non-reverted) cost fix, plus a verdict breakdown. The
-    dollar-denominated sibling of ``relearn_verify.compound_ledger``."""
+    dollar-denominated sibling of ``pothole_verify.compound_ledger``."""
     total_usd = 0.0
     total_tokens = 0
     verified = improved = regressed = insufficient = 0

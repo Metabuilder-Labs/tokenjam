@@ -1,21 +1,21 @@
 """Adapt cost-analyzer findings into Review-inbox proposals ("advisories with
 receipts").
 
-The self-improve loop's relearn detector already produces
-``RelearnCluster`` proposals that the Lens Improve inbox renders and that a
+The self-improve loop's pothole detector already produces
+``PotholeCluster`` proposals that the Lens Improve inbox renders and that a
 user can mark, apply, and verify. Three *cost* analyzers — ``downsize``
 (model over-sizing), ``cache`` (cache efficacy), ``trim`` (prompt bloat) —
 produce findings of a different shape. This module adapts each finding into a
-``CostProposal`` so the inbox can list them BESIDE the relearn proposals, typed
+``CostProposal`` so the inbox can list them BESIDE the pothole proposals, typed
 by a distinct ``kind`` field.
 
-Two structural facts carry over from the relearn ``advise_only`` lane and are
+Two structural facts carry over from the pothole ``advise_only`` lane and are
 NOT optional here:
 
   * **Advise-only everywhere.** A cost fix lives in the user's own application
     code (a model-routing decision, a cache-prefix change, a prompt edit), not
     a workspace tokenjam may write into. So a cost proposal has NO apply path —
-    exactly like an ``advise_only`` ``RelearnCluster`` (empty
+    exactly like an ``advise_only`` ``PotholeCluster`` (empty
     ``suggested_target``). The card carries a recommendation and, where
     sensible, a copyable config/code suggestion; the user applies it themselves.
   * **Estimated / correlational, never causal.** Every saving figure a cost
@@ -42,31 +42,20 @@ COST_CORRELATIONAL_CAVEAT = (
     "before changing anything."
 )
 
-#: The analyzers this wiring covers, by registration name.
-COST_ANALYZERS = ("downsize", "cache", "trim", "subagent", "deadweight")
-
-# The rung-1 sizing-rubric note a CC-origin subagent proposal writes into the
-# workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
-# edit — it names the observed oversized dispatches and states the routing rule.
-SUBAGENT_RUBRIC_INTRO = (
-    "Right-size Task-dispatched subagents: default a subagent to the cheapest "
-    "same-family model that fits its shape, and only reach for a premium-tier "
-    "model (Opus / Fable) when the subtask genuinely needs deep reasoning. A "
-    "subagent that does little tool work and returns a short result rarely needs "
-    "the premium tier."
-)
+#: The three analyzers this wiring covers, by registration name.
+COST_ANALYZERS = ("downsize", "cache", "trim")
 
 
 @dataclass
 class CostProposal:
     """One cost analyzer's finding, shaped for the Review inbox.
 
-    Mirrors the fields the inbox already reads off a ``RelearnCluster`` (title,
+    Mirrors the fields the inbox already reads off a ``PotholeCluster`` (title,
     evidence, an estimate with its basis, ``advise_only``) plus the cost-
     specific ``target_key`` the delta-verify pass re-measures against.
     """
     kind:      str                     # always "cost" — the inbox discriminator
-    analyzer:  str                     # "downsize" | "cache" | "trim" | "subagent"
+    analyzer:  str                     # "downsize" | "cache" | "trim"
     signature: str                     # stable identity for dedup + verify keying
     title:     str
     # WHICH thing is flagged, machine-readable — the key ``cost_verify`` uses to
@@ -96,18 +85,6 @@ class CostProposal:
     # Best-effort service scope for the marker/expectation the user creates on
     # "mark applied" (Expectation.agent_id). "" when the finding spans agents.
     agent_id:             str = ""
-    # Workspace-apply plumbing (subagent right-sizing only). Unlike the three
-    # advise-only analyzers, a CC-origin subagent finding HAS a writable surface
-    # — a rung-1 sizing rubric note in the workspace's CLAUDE.md — so its card
-    # can route an actual, reversible, human-gated write through the existing
-    # relearn apply path (``relearn_apply.apply_relearn_fix``). The adapter (not
-    # the analyzer) supplies these; ``apply_capable`` gates the apply action, and
-    # a proposal with no clean workspace surface degrades to advise-only like the
-    # other three (``apply_capable=False``, ``advise_only=True``).
-    apply_capable:        bool = False
-    rung:                 int  = 0
-    scope:                str  = ""
-    proposed_fix:         str  = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -271,195 +248,6 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
     return proposals
 
 
-def _subagent_to_proposals(finding: Any) -> list[CostProposal]:
-    """One proposal covering the subagent right-sizing finding.
-
-    Unlike the three advise-only analyzers, this one is workspace-appliable for
-    the common (CC-origin) case: the fan-out model choice is made by the
-    orchestrating agent, which reads the workspace's CLAUDE.md — so a rung-1
-    sizing rubric note IS a legitimate, reversible workspace fix. The subagent
-    analyzer runs only over Claude Code data (``sub_agent_id`` is populated by
-    the CC backfill; other runtimes carry NULL and are ignored), so a finding
-    here is CC-origin, hence ``apply_capable``. If no oversized model is priced
-    (nothing to key a delta on), the proposal degrades to advise-only.
-
-    The delta-verify pass measures the fan-out model-mix cost delta across the
-    over-powered models, so a single proposal listing them keeps the finding-
-    level estimate coherent (mirrors the downsize adapter).
-    """
-    if finding is None:
-        return []
-    flagged = list(getattr(finding, "flagged", []) or [])
-    over_powered = [r for r in flagged if "over_powered" in (getattr(r, "flags", []) or [])]
-    if not over_powered:
-        return []
-
-    models = sorted({str(r.model) for r in over_powered})
-    subagents = len({(r.session_id, r.sub_agent_id) for r in over_powered})
-    pct = float(getattr(finding, "percent_of_cost", 0.0) or 0.0) * 100
-    model_list = ", ".join(models)
-    evidence = (
-        f"{subagents} subagent dispatch(es) ran on a premium-tier model "
-        f"({model_list}) but did little work (small output, few tool calls). "
-        f"Subagents are {pct:.0f}% of the window's cost."
-    )
-    proposed_fix = (
-        SUBAGENT_RUBRIC_INTRO
-        + f"\n\nObserved oversized dispatches ran on: {model_list}. Route that "
-        "shape to the cheaper same-family model next time."
-    )
-    # Apply-capable when we have a concrete model to name in the rubric; else
-    # degrade to advise-only (no clean workspace surface to write).
-    apply_capable = bool(models)
-    return [CostProposal(
-        kind="cost",
-        analyzer="subagent",
-        signature="cost:subagent",
-        title="Over-powered subagent dispatches (route the fan-out to a cheaper model)",
-        target_key={"models": models, "subagent": True},
-        evidence=evidence,
-        baseline={
-            "flagged_subagents": subagents,
-            "flagged_cost_usd": float(getattr(finding, "flagged_cost_usd", 0.0) or 0.0),
-            "subagent_cost_usd": float(getattr(finding, "subagent_cost_usd", 0.0) or 0.0),
-            "percent_of_cost": float(getattr(finding, "percent_of_cost", 0.0) or 0.0),
-        },
-        advise_text=(
-            "Lower the model tier for the flagged Task dispatches. On Claude Code "
-            "this is a sizing rubric in your CLAUDE.md (apply it below) that the "
-            "orchestrating agent reads before it spawns subagents. "
-            + str(getattr(finding, "caveat", "") or "")
-        ).strip(),
-        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
-        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
-        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-        advise_only=not apply_capable,
-        apply_capable=apply_capable,
-        rung=1 if apply_capable else 0,
-        scope="project" if apply_capable else "",
-        proposed_fix=proposed_fix if apply_capable else "",
-    )]
-
-
-def _mcp_remove_plumbing(server: Any) -> dict[str, Any]:
-    """Whether ``server``'s config entry can be removed directly, and where.
-
-    Unlike ``model_swap`` there is no search step: ``ConfiguredServer``
-    already resolved the exact config file at detection time. This just
-    re-verifies that still holds (the file can have moved, or a human can
-    have already removed the entry by hand) at proposal-build time, so the
-    card's pre-filled target is current, not stale analyzer-time data.
-    """
-    from tokenjam.core.optimize.analyzers.deadweight import (
-        APPLY_KIND_MCP_REMOVE,
-        mcp_remove_precheck,
-    )
-
-    check = mcp_remove_precheck(server.source, server.name)
-    if not check["ok"]:
-        return {"apply_capable": False, "apply_blocked_reason": check["reason"]}
-    return {
-        "apply_capable": True,
-        "apply_kind": APPLY_KIND_MCP_REMOVE,
-        "source_path": check["target_path"],
-        "target_path": check["target_path"],
-        "apply_blocked_reason": "",
-    }
-
-
-def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
-    """One proposal per dead-weight MCP server (Component C1).
-
-    Reads ONLY ``DeadweightFinding.dead_servers`` — the C2 tax table (which
-    lists every configured server, dead or alive, purely for ranked
-    visibility) never feeds a proposal here, so a server's schema-injection
-    tax is never counted both in the tax table AND a proposal (the same
-    dedup guarantee ``compute_deadweight_finding`` itself enforces on
-    ``estimated_recoverable_tokens`` / ``estimated_recoverable_usd``).
-
-    ``estimated_recoverable_usd`` is carried straight off the analyzer's own
-    ``ServerDeadweight.estimated_tax_usd_90d`` — the analyzer already prices
-    the token tax through ``core/pricing.py`` at the dominant model observed
-    in that server's sessions (never a hardcoded rate; see
-    ``deadweight._pricing_note``). Stays ``None`` when no priced model was
-    observed for that server — this adapter never invents a rate itself.
-
-    Apply-capable, like ``downsize``'s ``model_swap`` cards: the fix is a
-    deterministic edit of a value already written down (the server's own
-    ``mcpServers`` entry), so it routes through the same
-    ``relearn_apply.apply_relearn_fix`` machinery under
-    ``APPLY_KIND_MCP_REMOVE`` — reversible, git-committed where the config
-    lives in a repo, one-step revert. Falls back to the one-paste ``claude
-    mcp remove`` command, with the reason stated, when the precondition
-    doesn't hold (file missing, malformed, or the entry already gone).
-    """
-    if finding is None:
-        return []
-    proposals: list[CostProposal] = []
-    for server in getattr(finding, "dead_servers", []) or []:
-        evidence = (
-            f"`{server.name}` MCP server ({server.scope} scope, configured at "
-            f"{server.source}) made 0 tool calls across {server.sessions_present} "
-            f"session(s) in the window."
-        )
-        if server.deferred_sessions:
-            evidence += (
-                f" ToolSearch deferred its schema in {server.deferred_sessions} "
-                f"of those session(s)."
-            )
-        scope_flag = "user" if server.scope == "user" else "project"
-        plumbing = _mcp_remove_plumbing(server)
-        advise = (
-            server.fix + " Removing (or project-scoping) it is reversible "
-            "and loses no data; it only stops the standing schema-injection "
-            "tax on future sessions."
-        )
-        if plumbing.get("apply_capable"):
-            advise += (
-                f" tokenjam can remove this exact entry from "
-                f"{plumbing['target_path']}, with the change committed and "
-                f"revertable in one call."
-            )
-        elif plumbing.get("apply_blocked_reason"):
-            advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
-        proposals.append(CostProposal(
-            kind="cost",
-            analyzer="deadweight",
-            signature=f"cost:deadweight:{server.name}",
-            title=f"Unused MCP server: {server.name}",
-            target_key={
-                "server": server.name, "scope": server.scope, "source": server.source,
-            },
-            evidence=evidence,
-            baseline={
-                "sessions_present": server.sessions_present,
-                "invocations": server.invocations,
-                "deferred_sessions": server.deferred_sessions,
-                "scope": server.scope,
-                "source": server.source,
-                "example_sessions": list(server.example_sessions),
-                "priced_model": server.priced_model,
-            },
-            advise_text=advise,
-            suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
-            estimated_recoverable_tokens=server.estimated_tax_tokens_90d or None,
-            estimated_recoverable_usd=server.estimated_tax_usd_90d,
-            estimate_basis=(
-                server.tax_construction
-                + " Projected over a 90-day window from the sessions observed."
-            ),
-            advise_only=not plumbing.get("apply_capable", False),
-            apply_capable=bool(plumbing.get("apply_capable")),
-            apply_kind=str(plumbing.get("apply_kind", "")),
-            agent_name=server.name,
-            source_path=str(plumbing.get("source_path", "")),
-            target_path=str(plumbing.get("target_path", "")),
-            scope=server.scope,
-            apply_blocked_reason=str(plumbing.get("apply_blocked_reason", "")),
-        ))
-    return proposals
-
-
 #: Default look-back for the daemon/CLI cost-proposal recompute. Matches the
 #: monthly framing the cost analyzers project against.
 DEFAULT_COST_WINDOW_DAYS = 30
@@ -483,7 +271,7 @@ def recompute_cost_proposals(
     """
     from datetime import timedelta
 
-    from tokenjam.core.optimize import relearn_store
+    from tokenjam.core.optimize import pothole_store
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
 
@@ -499,7 +287,7 @@ def recompute_cost_proposals(
         return []
 
     try:
-        relearn_store.write_cost_proposals(proposals, config=config)
+        pothole_store.write_cost_proposals(proposals, config=config)
     except Exception:
         pass
     return proposals
@@ -509,19 +297,15 @@ def cost_proposals_from_report(report: Any) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
-    the ``cache`` / ``trim`` / ``subagent`` / ``deadweight`` findings off
-    ``report.findings``. Missing findings (analyzer not run, no candidates)
-    contribute nothing. Never raises — a malformed finding is skipped so one
-    bad analyzer can't sink the inbox.
+    the ``cache`` / ``trim`` findings off ``report.findings``. Missing findings
+    (analyzer not run, no candidates) contribute nothing. Never raises — a
+    malformed finding is skipped so one bad analyzer can't sink the inbox.
     """
-    findings = getattr(report, "findings", {}) or {}
     proposals: list[CostProposal] = []
     adapters = (
         (_downsize_to_proposal, getattr(report, "downgrade", None)),
-        (_cache_to_proposals, findings.get("cache")),
-        (_trim_to_proposals, findings.get("trim")),
-        (_subagent_to_proposals, findings.get("subagent")),
-        (_deadweight_to_proposals, findings.get("deadweight")),
+        (_cache_to_proposals, (getattr(report, "findings", {}) or {}).get("cache")),
+        (_trim_to_proposals, (getattr(report, "findings", {}) or {}).get("trim")),
     )
     for adapter, finding in adapters:
         try:
