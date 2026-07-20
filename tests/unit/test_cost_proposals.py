@@ -345,6 +345,132 @@ def test_subagent_proposal_degrades_to_advise_only_without_over_powered():
     assert _subagent_to_proposals(SubagentRightsizingFinding(flagged=[])) == []
 
 
+# --- deadweight (C1: MCP dead-weight servers) --------------------------------
+
+def _dead_server(**overrides):
+    from tokenjam.core.optimize.analyzers.deadweight import ServerDeadweight
+    fields = dict(
+        name="apollo", scope="project", source="/repo/.mcp.json",
+        sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
+        estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_90d=225_000,
+        tax_construction="25,000 tok/session (full schema injection), cited estimate.",
+        fix="Remove or project-scope the `apollo` MCP server (/repo/.mcp.json); "
+            "zero tool calls across 10 session(s) in this window.",
+        example_sessions=["s0", "s1", "s2"],
+    )
+    fields.update(overrides)
+    return ServerDeadweight(**fields)
+
+
+def _deadweight_finding(dead_servers=None, tax_table=None):
+    from tokenjam.core.optimize.analyzers.deadweight import ContextTaxRow, DeadweightFinding
+    dead_servers = dead_servers if dead_servers is not None else [_dead_server()]
+    tax_table = tax_table if tax_table is not None else [
+        ContextTaxRow(source="MCP schema: apollo", sessions=10,
+                      avg_tokens_per_session=25_000, total_tokens_window=250_000),
+    ]
+    return DeadweightFinding(
+        sessions_scanned=10, configured_servers=1,
+        servers=dead_servers, dead_servers=dead_servers, tax_table=tax_table,
+        estimated_recoverable_tokens=sum(s.estimated_tax_tokens_90d for s in dead_servers) or None,
+        estimate_basis="dead-server 90d tax sum",
+    )
+
+
+def test_deadweight_proposal_shape_and_fields():
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    props = _deadweight_to_proposals(_deadweight_finding())
+    assert len(props) == 1
+    p = props[0]
+    assert p.kind == "cost"
+    assert p.analyzer == "deadweight"
+    assert p.signature == "cost:deadweight:apollo"
+    assert p.advise_only is True
+    assert p.correlational is True
+    assert p.estimate_confidence == "estimated"
+    assert "apollo" in p.title
+    assert "0 tool calls" in p.evidence
+    assert p.target_key == {"server": "apollo", "scope": "project", "source": "/repo/.mcp.json"}
+    assert p.baseline["example_sessions"] == ["s0", "s1", "s2"]
+    assert p.estimated_recoverable_tokens == 225_000
+    assert p.estimated_recoverable_usd is None  # tokens-only, never a stacked $ guess
+    assert "claude mcp remove apollo --scope project" in p.suggestion
+
+
+def test_deadweight_proposal_notes_deferred_sessions_in_evidence():
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    server = _dead_server(deferred_sessions=4)
+    p = _deadweight_to_proposals(_deadweight_finding(dead_servers=[server]))[0]
+    assert "ToolSearch deferred" in p.evidence
+    assert "4" in p.evidence
+
+
+def test_deadweight_proposal_empty_for_no_dead_servers():
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    assert _deadweight_to_proposals(_deadweight_finding(dead_servers=[])) == []
+    assert _deadweight_to_proposals(None) == []
+
+
+def test_deadweight_wired_into_cost_analyzers_and_report_adapter():
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS, cost_proposals_from_report
+    assert "deadweight" in COST_ANALYZERS
+
+    rep = _report()
+    rep.findings["deadweight"] = _deadweight_finding()
+    props = {p.analyzer for p in cost_proposals_from_report(rep)}
+    assert "deadweight" in props
+
+
+def test_deadweight_tax_table_never_becomes_a_second_proposal():
+    """Dedup guarantee: a live (non-dead) server sits in the tax table for
+    visibility but must never itself spawn a proposal, and a dead server's
+    proposal total must equal exactly its OWN 90d tax -- never the tax
+    table's (possibly multi-row) sum."""
+    from tokenjam.core.optimize.analyzers.deadweight import ContextTaxRow
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+
+    dead = _dead_server(name="apollo", estimated_tax_tokens_90d=225_000)
+    finding = _deadweight_finding(
+        dead_servers=[dead],
+        tax_table=[
+            ContextTaxRow(source="MCP schema: apollo", sessions=10,
+                          avg_tokens_per_session=25_000, total_tokens_window=250_000),
+            # A live server: present in the tax table, but not in dead_servers.
+            ContextTaxRow(source="MCP schema: exa", sessions=10,
+                          avg_tokens_per_session=25_000, total_tokens_window=250_000),
+            ContextTaxRow(source="CLAUDE.md", sessions=10,
+                          avg_tokens_per_session=500, total_tokens_window=5_000),
+        ],
+    )
+    props = _deadweight_to_proposals(finding)
+    assert len(props) == 1
+    assert props[0].estimated_recoverable_tokens == 225_000
+    assert finding.estimated_recoverable_tokens == 225_000  # never the tax-table's 505,000 sum
+
+
+# --- deadweight finding round-trips through report_to_dict/report_from_dict --
+
+def test_deadweight_finding_survives_report_dict_round_trip():
+    from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    w = WindowSummary(since=MARKER, until=NOW, days=5, sessions=10, spans=100,
+                      total_tokens=1, total_cost_usd=5.0, thin_data=False)
+    report = OptimizeReport(window=w, findings={"deadweight": _deadweight_finding()})
+
+    payload = report_to_dict(report)
+    rebuilt = report_from_dict(payload)
+
+    finding = rebuilt.findings["deadweight"]
+    assert finding.configured_servers == 1
+    assert len(finding.dead_servers) == 1
+    assert finding.dead_servers[0].name == "apollo"
+    assert finding.dead_servers[0].example_sessions == ["s0", "s1", "s2"]
+    assert finding.estimated_recoverable_tokens == 225_000
+    assert len(finding.tax_table) == 1
+    assert finding.tax_table[0].source == "MCP schema: apollo"
+
+
 def _seed_sub(db, *, model, when, count=30, provider="anthropic"):
     for i in range(count):
         db.insert_span(make_llm_span(

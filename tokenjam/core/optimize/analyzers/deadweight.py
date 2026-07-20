@@ -59,6 +59,10 @@ from tokenjam.core.transcript import _SYSTEM_REMINDER_RE, read_records, resolve_
 #: dead weight (spec: "start N=10").
 MIN_SESSIONS_DEADWEIGHT = 10
 
+#: How many example session ids a dead server's card carries as evidence
+#: (mirrors relearn.py's MAX_EXAMPLE_SESSIONS convention).
+MAX_EXAMPLE_SESSIONS = 3
+
 #: Full MCP-connector schema-injection tax, per server, when its tool schemas
 #: are loaded (not deferred) — a documented community/founder-research figure
 #: (~25K tokens/call for an attached MCP connector's injected tool
@@ -320,6 +324,7 @@ class ServerDeadweight:
     estimated_tax_tokens_90d:         int
     tax_construction:                 str
     fix:                              str
+    example_sessions:                 list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -407,6 +412,7 @@ def compute_deadweight_finding(
         sessions_present = 0
         invocations = 0
         deferred_sessions = 0
+        example_sessions: list[str] = []
         for session_id, signal in per_session.items():
             deferred_here = server.name in signal.deferred_servers
             present = deferred_here or server.scope == "user" or (
@@ -418,6 +424,8 @@ def compute_deadweight_finding(
             invocations += signal.mcp_invocations.get(server.name, 0)
             if deferred_here:
                 deferred_sessions += 1
+            if len(example_sessions) < MAX_EXAMPLE_SESSIONS:
+                example_sessions.append(session_id)
 
         dead = sessions_present >= MIN_SESSIONS_DEADWEIGHT and invocations == 0
         non_deferred = max(sessions_present - deferred_sessions, 0)
@@ -446,6 +454,7 @@ def compute_deadweight_finding(
                 f"({server.source}); zero tool calls across {sessions_present} "
                 f"session(s) in this window."
             ),
+            example_sessions=example_sessions,
         )
         finding.servers.append(row)
         if sessions_present > 0:
