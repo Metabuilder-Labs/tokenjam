@@ -65,12 +65,19 @@ def write_cache(
     detector job vs the optimize path). To keep this "the same proposal store"
     without one producer clobbering the other, an existing ``cost_proposals``
     block is read back and preserved here rather than dropped.
+
+    Detection time is also when each cluster gets its stable ``proposal_id``
+    (``relearn_proposals.stamp_proposal_ids``): the apply paths accept a stored
+    proposal ID and nothing else, so the IDs have to exist on the record the
+    detector itself wrote.
     """
+    from tokenjam.core.optimize.relearn_proposals import stamp_proposal_ids
+
     p = path or default_cache_path(config)
     existing = read_cache(p, config=config) or {}
     payload = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
-        "finding": asdict(finding),
+        "finding": stamp_proposal_ids(asdict(finding)),
     }
     if "cost_proposals" in existing:
         payload["cost_proposals"] = existing["cost_proposals"]
