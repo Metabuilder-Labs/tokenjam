@@ -106,15 +106,18 @@ def _user_pricing_file() -> Path | None:
 def _config_pricing_section() -> dict | None:
     """Return the [pricing] section of the discovered main config, or None.
 
-    Read directly from the config file (not via a full TjConfig parse) so the
-    pricing loader stays light and free of the config dataclass tree. Any
-    error — no config file, unreadable, malformed — degrades silently to None;
-    config problems surface through the normal config-load path elsewhere.
+    Config discovery honors ``TJ_CONFIG`` the same way ``load_config`` does,
+    so the [pricing] section is read from the same file as the rest of the
+    app. Read directly from the config file (not via a full TjConfig parse)
+    so the pricing loader stays light and free of the config dataclass tree.
+    Any error — no config file, unreadable, malformed — degrades silently to
+    None; config problems surface through the normal config-load path
+    elsewhere.
     """
     from tokenjam.core.config import find_config_file
 
     try:
-        path = find_config_file()
+        path = find_config_file(os.environ.get("TJ_CONFIG"))
     except (FileNotFoundError, OSError):
         return None
     if path is None:
