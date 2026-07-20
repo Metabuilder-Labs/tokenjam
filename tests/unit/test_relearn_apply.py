@@ -223,15 +223,42 @@ def test_hook_allows_unrelated_command(cfg, tmp_path):
     assert proc.returncode == 0
 
 
-def test_stub_matcher_for_unknown_family_never_blocks(cfg, tmp_path):
+def test_matcherless_family_refuses_rung_3_and_offers_rung_1(cfg, tmp_path):
+    # A family with no hand-authored matcher used to get an inert TODO stub
+    # hook: a file on disk, a ledger record, an "applied" badge, and zero
+    # behaviour. Apply must refuse it outright and point at rung 1 instead.
     cluster = _cluster(signature="mystery", family_key="mystery_family",
                         title="some novel relearn", rung=3)
     target = tmp_path / ".claude" / "hooks" / "mystery.py"
-    pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
-    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "sleep 5 && ls"}})
-    proc = subprocess.run([sys.executable, str(target)], input=payload,
-                           text=True, capture_output=True, timeout=10)
-    assert proc.returncode == 0   # no matcher wired for an unknown family — never blocks
+
+    with pytest.raises(pa.RelearnApplyRefused) as exc:
+        pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+
+    assert "no matcher exists" in str(exc.value)
+    assert "rung 1" in str(exc.value)
+    assert not target.exists()          # nothing written
+    assert not pa.list_applied(cfg)     # nothing recorded as applied
+
+
+def test_matcherless_family_refuses_the_dry_run_too(cfg, tmp_path):
+    # The refusal has to land on the preview as well, or the card shows a diff
+    # for a hook the real apply will then reject.
+    cluster = _cluster(signature="mystery", family_key="mystery_family", rung=3)
+    target = tmp_path / ".claude" / "hooks" / "mystery.py"
+    with pytest.raises(pa.RelearnApplyRefused):
+        pa.preview_relearn_fix(cluster, target_path=str(target))
+
+
+def test_matchered_families_are_exactly_the_hand_authored_ones(cfg, tmp_path):
+    # The refusal boundary: every family listed here has a real matcher, and a
+    # rung-3 apply for each writes a hook file.
+    assert pa.matchered_families() == {"sleep_chain", "cwd_confusion",
+                                       "stale_read_race", "edit_string_not_found"}
+    for family in sorted(pa.matchered_families()):
+        target = tmp_path / ".claude" / "hooks" / f"{family}.py"
+        cluster = _cluster(signature=family, family_key=family, rung=3)
+        pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
+        assert target.is_file()
 
 
 # --- rung 3: PostToolUseFailure REACTIVE hooks (cwd_confusion, stale_read_race,
