@@ -6,7 +6,7 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "node --test dist/client.test.js dist/span-builder.test.js dist/semconv.test.js",
+    "test": "node --test dist/client.test.js dist/record-outcome.test.js dist/span-builder.test.js dist/semconv.test.js",
     "pretest": "tsc",
     "lint": "tsc --noEmit"
   },

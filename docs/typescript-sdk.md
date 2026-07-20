@@ -62,6 +62,29 @@ new SpanBuilder("invoke_agent")
   .build();
 ```
 
+## Record an outcome
+
+Attach a business outcome to a workflow in one call instead of hand-building an
+OTLP event. `recordOutcome` emits the emerging gen_ai outcome event (OTel
+semconv issue #2665):
+
+```ts
+await client.recordOutcome({
+  outcomeType: "ticket_resolved",
+  sessionId: "sess-9",
+  success: true,
+  valueUsd: 25.0, // optional, self-reported
+});
+```
+
+At least one of `workflowId` / `sessionId` is required. `valueUsd` is
+**optional and self-reported** — a value you declare, which TokenJam does not
+measure or verify.
+
+**ROI is a TokenJam Cloud feature.** The SDK only *emits* the outcome event;
+turning declared value ÷ measured cost into an ROI figure happens in TokenJam
+Cloud. There is no local ROI compute.
+
 ## Errors and retries
 
 The client buffers up to 1000 spans if `tj serve` is unreachable, retries with exponential backoff (3 attempts, 2s base delay), and drops the buffer on process exit.
