@@ -43,7 +43,18 @@ COST_CORRELATIONAL_CAVEAT = (
 )
 
 #: The three analyzers this wiring covers, by registration name.
-COST_ANALYZERS = ("downsize", "cache", "trim")
+COST_ANALYZERS = ("downsize", "cache", "trim", "subagent")
+
+# The rung-1 sizing-rubric note a CC-origin subagent proposal writes into the
+# workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
+# edit — it names the observed oversized dispatches and states the routing rule.
+SUBAGENT_RUBRIC_INTRO = (
+    "Right-size Task-dispatched subagents: default a subagent to the cheapest "
+    "same-family model that fits its shape, and only reach for a premium-tier "
+    "model (Opus / Fable) when the subtask genuinely needs deep reasoning. A "
+    "subagent that does little tool work and returns a short result rarely needs "
+    "the premium tier."
+)
 
 
 @dataclass
@@ -55,7 +66,7 @@ class CostProposal:
     specific ``target_key`` the delta-verify pass re-measures against.
     """
     kind:      str                     # always "cost" — the inbox discriminator
-    analyzer:  str                     # "downsize" | "cache" | "trim"
+    analyzer:  str                     # "downsize" | "cache" | "trim" | "subagent"
     signature: str                     # stable identity for dedup + verify keying
     title:     str
     # WHICH thing is flagged, machine-readable — the key ``cost_verify`` uses to
@@ -85,6 +96,18 @@ class CostProposal:
     # Best-effort service scope for the marker/expectation the user creates on
     # "mark applied" (Expectation.agent_id). "" when the finding spans agents.
     agent_id:             str = ""
+    # Workspace-apply plumbing (subagent right-sizing only). Unlike the three
+    # advise-only analyzers, a CC-origin subagent finding HAS a writable surface
+    # — a rung-1 sizing rubric note in the workspace's CLAUDE.md — so its card
+    # can route an actual, reversible, human-gated write through the existing
+    # pothole apply path (``pothole_apply.apply_pothole_fix``). The adapter (not
+    # the analyzer) supplies these; ``apply_capable`` gates the apply action, and
+    # a proposal with no clean workspace surface degrades to advise-only like the
+    # other three (``apply_capable=False``, ``advise_only=True``).
+    apply_capable:        bool = False
+    rung:                 int  = 0
+    scope:                str  = ""
+    proposed_fix:         str  = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +271,76 @@ def _trim_to_proposals(finding: Any) -> list[CostProposal]:
     return proposals
 
 
+def _subagent_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal covering the subagent right-sizing finding.
+
+    Unlike the three advise-only analyzers, this one is workspace-appliable for
+    the common (CC-origin) case: the fan-out model choice is made by the
+    orchestrating agent, which reads the workspace's CLAUDE.md — so a rung-1
+    sizing rubric note IS a legitimate, reversible workspace fix. The subagent
+    analyzer runs only over Claude Code data (``sub_agent_id`` is populated by
+    the CC backfill; other runtimes carry NULL and are ignored), so a finding
+    here is CC-origin, hence ``apply_capable``. If no oversized model is priced
+    (nothing to key a delta on), the proposal degrades to advise-only.
+
+    The delta-verify pass measures the fan-out model-mix cost delta across the
+    over-powered models, so a single proposal listing them keeps the finding-
+    level estimate coherent (mirrors the downsize adapter).
+    """
+    if finding is None:
+        return []
+    flagged = list(getattr(finding, "flagged", []) or [])
+    over_powered = [r for r in flagged if "over_powered" in (getattr(r, "flags", []) or [])]
+    if not over_powered:
+        return []
+
+    models = sorted({str(r.model) for r in over_powered})
+    subagents = len({(r.session_id, r.sub_agent_id) for r in over_powered})
+    pct = float(getattr(finding, "percent_of_cost", 0.0) or 0.0) * 100
+    model_list = ", ".join(models)
+    evidence = (
+        f"{subagents} subagent dispatch(es) ran on a premium-tier model "
+        f"({model_list}) but did little work (small output, few tool calls). "
+        f"Subagents are {pct:.0f}% of the window's cost."
+    )
+    proposed_fix = (
+        SUBAGENT_RUBRIC_INTRO
+        + f"\n\nObserved oversized dispatches ran on: {model_list}. Route that "
+        "shape to the cheaper same-family model next time."
+    )
+    # Apply-capable when we have a concrete model to name in the rubric; else
+    # degrade to advise-only (no clean workspace surface to write).
+    apply_capable = bool(models)
+    return [CostProposal(
+        kind="cost",
+        analyzer="subagent",
+        signature="cost:subagent",
+        title="Over-powered subagent dispatches (route the fan-out to a cheaper model)",
+        target_key={"models": models, "subagent": True},
+        evidence=evidence,
+        baseline={
+            "flagged_subagents": subagents,
+            "flagged_cost_usd": float(getattr(finding, "flagged_cost_usd", 0.0) or 0.0),
+            "subagent_cost_usd": float(getattr(finding, "subagent_cost_usd", 0.0) or 0.0),
+            "percent_of_cost": float(getattr(finding, "percent_of_cost", 0.0) or 0.0),
+        },
+        advise_text=(
+            "Lower the model tier for the flagged Task dispatches. On Claude Code "
+            "this is a sizing rubric in your CLAUDE.md (apply it below) that the "
+            "orchestrating agent reads before it spawns subagents. "
+            + str(getattr(finding, "caveat", "") or "")
+        ).strip(),
+        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
+        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        advise_only=not apply_capable,
+        apply_capable=apply_capable,
+        rung=1 if apply_capable else 0,
+        scope="project" if apply_capable else "",
+        proposed_fix=proposed_fix if apply_capable else "",
+    )]
+
+
 #: Default look-back for the daemon/CLI cost-proposal recompute. Matches the
 #: monthly framing the cost analyzers project against.
 DEFAULT_COST_WINDOW_DAYS = 30
@@ -297,15 +390,18 @@ def cost_proposals_from_report(report: Any) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
-    the ``cache`` / ``trim`` findings off ``report.findings``. Missing findings
-    (analyzer not run, no candidates) contribute nothing. Never raises — a
-    malformed finding is skipped so one bad analyzer can't sink the inbox.
+    the ``cache`` / ``trim`` / ``subagent`` findings off ``report.findings``.
+    Missing findings (analyzer not run, no candidates) contribute nothing. Never
+    raises — a malformed finding is skipped so one bad analyzer can't sink the
+    inbox.
     """
+    findings = getattr(report, "findings", {}) or {}
     proposals: list[CostProposal] = []
     adapters = (
         (_downsize_to_proposal, getattr(report, "downgrade", None)),
-        (_cache_to_proposals, (getattr(report, "findings", {}) or {}).get("cache")),
-        (_trim_to_proposals, (getattr(report, "findings", {}) or {}).get("trim")),
+        (_cache_to_proposals, findings.get("cache")),
+        (_trim_to_proposals, findings.get("trim")),
+        (_subagent_to_proposals, findings.get("subagent")),
     )
     for adapter, finding in adapters:
         try:

@@ -291,6 +291,82 @@ def post_cost_mark_applied(request: Request, body: MarkCostAppliedRequest) -> di
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+class ApplyWorkspaceCostRequest(BaseModel):
+    # The subagent (CC-origin) proposal the client holds, plus the confirmed
+    # write target. Re-posted so a stale cache can't apply a DIFFERENT proposal.
+    signature:    str
+    analyzer:     str = ""
+    title:        str = ""
+    target_key:   dict[str, Any] = {}
+    baseline:     dict[str, Any] = {}
+    advise_text:  str = ""
+    agent_id:     str = ""
+    estimated_recoverable_usd:    float | None = None
+    estimated_recoverable_tokens: int | None = None
+    estimate_basis: str = ""
+    # Apply plumbing (adapter-supplied). rung is 1 for the sizing-rubric note.
+    proposed_fix: str = ""
+    rung:         int = 1
+    scope:        str = "project"
+    target_path:  str = ""
+    go:           bool = False
+    force:        bool = False
+
+
+@router.post("/pothole/cost-proposals/apply-workspace", dependencies=_WRITE_AUTH)
+def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest) -> dict[str, Any]:
+    """Apply a CC-origin subagent proposal's sizing-rubric note to the workspace.
+
+    Unlike the three advise-only analyzers, a subagent right-sizing finding has a
+    writable surface (a rung-1 CLAUDE.md sizing rubric the orchestrating agent
+    reads before spawning subagents). This routes the actual write through the
+    EXISTING pothole apply path (``pothole_apply.apply_pothole_fix``) — same
+    reversible, git-committed, human-gated (dry-run first) discipline — then
+    records the cost marker so the delta-verify pass measures the fan-out
+    model-mix cost delta after it. ``go=false`` returns the dry-run diff; a
+    second call with ``go=true`` writes. 403 outside home; 409 on a refusal.
+    """
+    _reject_target_outside_home(body.target_path)
+    config = _config(request)
+    db = getattr(request.app.state, "db", None)
+    # The cluster shape pothole_apply renders a rung-1 note from.
+    cluster = {
+        "signature": body.signature,
+        "family_key": "subagent_rightsizing",
+        "title": body.title or body.signature,
+        "proposed_fix": body.proposed_fix,
+        "rung": body.rung,
+        "sessions": int(body.baseline.get("flagged_subagents", 0) or 0),
+        "repos": [],
+        "examples": [],
+    }
+    try:
+        applied = pothole_apply.apply_pothole_fix(
+            config, cluster, target_path=body.target_path, scope=body.scope,
+            go=body.go, conn=_conn(request), force=body.force,
+        )
+    except pothole_apply.PotholeApplyRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # Dry-run: return the diff, don't touch the cost ledger.
+    if not body.go or applied.get("dry_run"):
+        return {"applied": applied, "cost_record": None}
+
+    # Real write happened: drop the cost marker so the realized fan-out model-mix
+    # delta is measured against this moment.
+    cost_record = None
+    if db is not None:
+        try:
+            cost_record = cost_apply.mark_applied(
+                db, config, body.model_dump(exclude={
+                    "proposed_fix", "rung", "scope", "target_path", "go", "force",
+                }),
+            )
+        except cost_apply.CostApplyRefused:
+            cost_record = None
+    return {"applied": applied, "cost_record": cost_record}
+
+
 @router.get("/pothole/cost-applied", dependencies=[Depends(require_api_key)])
 def get_cost_applied(request: Request) -> dict[str, Any]:
     """Every applied (and reverted) cost fix, plus the realized-dollars ledger

@@ -7669,7 +7669,7 @@ function AppliedFixRow({ rec, onChanged }) {
 // user's own application code — so "Mark applied" only drops a marker the
 // delta-verify pass (core/optimize/cost_verify.py) measures a realized dollar
 // delta against, shown back here as a receipt.
-const COST_ANALYZER_LABELS = { downsize: 'downsize', cache: 'cache', trim: 'trim' };
+const COST_ANALYZER_LABELS = { downsize: 'downsize', cache: 'cache', trim: 'trim', subagent: 'subagent' };
 
 function fmtUsd(v) {
   const n = Number(v || 0);
@@ -7709,15 +7709,35 @@ function CostLedgerSummary({ ledger }) {
 // One pending cost proposal card. Advise-only: an evidence line, the
 // recommendation, an optional copyable suggestion, and a labeled estimate — but
 // only a "Mark applied" marker button, never an apply-to-code write.
-function CostProposalCard({ prop, busy, onMark, onDismiss }) {
+function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
   const usd = prop.estimated_recoverable_usd;
   const toks = prop.estimated_recoverable_tokens;
+  // Workspace-apply state (subagent, CC-origin only): a target path + a dry-run
+  // diff before the real, reversible write — routed through the same
+  // human-gated pothole apply path.
+  const [target, setTarget] = useState('');
+  const [wbusy, setWbusy] = useState(false);
+  const [werr, setWerr] = useState(null);
+  const [preview, setPreview] = useState(null);
+
+  const applyWorkspace = async (go) => {
+    if (!target.trim()) { setWerr('enter a CLAUDE.md path to write the note into'); return; }
+    setWbusy(true); setWerr(null);
+    try {
+      const r = await apiPostOrDetail('/pothole/cost-proposals/apply-workspace',
+        { ...prop, target_path: target.trim(), go });
+      if (go) { onChanged && onChanged(); }
+      else { setPreview((r.applied && r.applied.diff) || '(no changes)'); }
+    } catch (e) { setWerr(e.message || String(e)); }
+    finally { setWbusy(false); }
+  };
+
   return html`
     <div class="opt-section" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[prop.analyzer] || prop.analyzer}</span>
         <span style="font-weight:500">${prop.title}</span>
-        <span class="dim" style="font-size:11px">advise-only</span>
+        <span class="dim" style="font-size:11px">${prop.apply_capable ? 'workspace fix · rung 1' : 'advise-only'}</span>
         ${(usd != null || toks != null) ? html`<span class="mono" style="margin-left:auto;color:var(--accent);font-size:12.5px">${usd != null ? '~' + fmtUsd(usd) : ''}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>` : null}
       </div>
       <div class="sz-note" style="margin-top:8px">${prop.evidence}</div>
@@ -7725,11 +7745,28 @@ function CostProposalCard({ prop, busy, onMark, onDismiss }) {
       <div class="sz-note" style="margin-top:2px">${prop.advise_text}</div>
       ${prop.suggestion ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${prop.suggestion}</pre>` : null}
       <div class="opt-caveat" style="font-size:11.5px;margin-top:8px">${prop.caveat}</div>
-      <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-        <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied →'}</button>
-        <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
-        <span class="dim" style="font-size:11.5px">Marking records a checkpoint; the loop then measures the realized delta over your later calls.</span>
-      </div>
+
+      ${prop.apply_capable ? html`
+        <div class="opt-section" style="margin:10px 0 0">
+          <div class="opt-title" style="font-size:12.5px">Apply the sizing note <span class="dim" style="font-weight:400">· writes a reversible rung-1 note; confirm the target first</span></div>
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+            <input class="rename-input" style="flex:1;min-width:280px" value=${target}
+              placeholder="/absolute/path/to/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
+            <button class="cur-btn" disabled=${wbusy} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
+            <button class="cur-btn primary" disabled=${wbusy} onClick=${() => applyWorkspace(true)}>Apply note →</button>
+          </div>
+          ${preview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${preview}</pre>` : null}
+          ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
+          <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized fan-out cost delta after it.</div>
+        </div>
+      ` : html`
+        <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+          <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied →'}</button>
+          <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
+          <span class="dim" style="font-size:11.5px">Marking records a checkpoint; the loop then measures the realized delta over your later calls.</span>
+        </div>
+      `}
+      ${prop.apply_capable ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
     </div>`;
 }
 
@@ -7884,7 +7921,7 @@ function ReviewInboxView({ params }) {
     ${visibleCost.length > 0 ? html`
       <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize / cache / trim analyzers — advise-only, with verified receipts once you mark one applied</span></div>
       <div style="margin-top:8px">
-        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} />`)}
+        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
       </div>
     ` : null}
 

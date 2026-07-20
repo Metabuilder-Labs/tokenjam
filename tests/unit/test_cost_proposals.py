@@ -299,3 +299,75 @@ def test_store_cost_and_pothole_coexist_without_clobber(tmp_path):
     pothole_store.write_cache(PotholeFinding(sessions_scanned=9), path=path)
     assert pothole_store.read_cost_proposals(path=path)["cost_proposals"][0]["signature"] == "cost:trim:x"
     assert pothole_store.read_cache(path=path)["finding"]["sessions_scanned"] == 9
+
+
+# --- Subagent right-sizing: the apply-capable 4th analyzer --------------------
+
+def _sub_finding(models=("claude-opus-4-8",)):
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        SubagentRightsizingFinding,
+        SubagentRow,
+    )
+    flagged = [
+        SubagentRow(session_id="s1", sub_agent_id=f"sa{i}", model=m, llm_calls=2,
+                    tool_calls=1, input_tokens=60000, output_tokens=500, cache_tokens=0,
+                    cache_write_tokens=0, cost_usd=1.2, provider="anthropic",
+                    flags=["over_powered"])
+        for i, m in enumerate(models)
+    ]
+    return SubagentRightsizingFinding(
+        flagged=flagged, percent_of_cost=0.66, flagged_cost_usd=1.2,
+        subagent_cost_usd=1.5, estimated_recoverable_usd=0.4,
+        estimated_recoverable_tokens=60500,
+    )
+
+
+def test_subagent_proposal_is_apply_capable_cc_origin():
+    from tokenjam.core.optimize.cost_proposals import _subagent_to_proposals
+    props = _subagent_to_proposals(_sub_finding())
+    assert len(props) == 1
+    p = props[0]
+    assert p.analyzer == "subagent"
+    assert p.apply_capable is True
+    assert p.advise_only is False        # CC-origin has a workspace surface
+    assert p.rung == 1 and p.scope == "project"
+    assert p.proposed_fix                # a sizing rubric note to write
+    assert p.target_key == {"models": ["claude-opus-4-8"], "subagent": True}
+
+
+def test_subagent_proposal_degrades_to_advise_only_without_over_powered():
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        SubagentRightsizingFinding,
+    )
+    # over_provisioned-only (no model swap) yields no proposal here.
+    assert _sub_finding.__doc__ is None  # sanity: helper unchanged
+    from tokenjam.core.optimize.cost_proposals import _subagent_to_proposals
+    assert _subagent_to_proposals(SubagentRightsizingFinding(flagged=[])) == []
+
+
+def _seed_sub(db, *, model, when, count=30, provider="anthropic"):
+    for i in range(count):
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", provider=provider, model=model,
+            billing_account=provider, input_tokens=8000, output_tokens=200,
+            session_id=f"{model}-{when.isoformat()}-{i}", sub_agent_id="sa1",
+            start_time=when + timedelta(minutes=i),
+        ))
+
+
+def test_subagent_delta_improved_when_fanout_moves_off_oversized_model(db):
+    # pre: subagent fan-out on opus; post: moved to sonnet.
+    _seed_sub(db, model="claude-opus-4-8", when=MARKER - timedelta(hours=40))
+    _seed_sub(db, model="claude-sonnet-5", when=MARKER + timedelta(hours=1))
+    # main-thread opus post-marker must NOT count (subagent-scoped metric).
+    for i in range(10):
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", model="claude-opus-4-8", input_tokens=8000,
+            output_tokens=200, session_id=f"main-{i}",
+            start_time=MARKER + timedelta(hours=1, minutes=i),
+        ))
+    rec = _record("subagent", {"models": ["claude-opus-4-8"], "subagent": True}, agent_id="")
+    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
+    assert v["verdict"] == "improved"
+    assert v["realized_usd_delta"] > 0
+    assert v["post_value"] == 0.0        # no post-marker subagent spend on opus

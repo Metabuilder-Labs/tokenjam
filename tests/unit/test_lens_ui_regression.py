@@ -2110,3 +2110,13 @@ def test_cost_proposals_wired_into_review_inbox(html):
     assert "Cost advisories" in html
     # Honesty discipline (Rule 14): the realized delta is estimated / correlational.
     assert "realized_usd_delta" in html
+
+
+def test_subagent_cost_card_has_workspace_apply_flow(html):
+    # The subagent (4th) analyzer is apply-capable: its CC-origin card routes a
+    # reversible rung-1 note through the apply-workspace endpoint (dry-run diff
+    # then write), unlike the three advise-only analyzers.
+    assert "'/pothole/cost-proposals/apply-workspace'" in html
+    assert "apply_capable" in html
+    assert "Apply note" in html
+    assert "subagent: 'subagent'" in html

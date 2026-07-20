@@ -89,12 +89,17 @@ def _window_bounds(marker: datetime, now: datetime) -> tuple[datetime, datetime,
 def _rows_for(
     conn: Any, since: datetime, until: datetime, agent_id: str | None,
     *, model: str | None = None, provider: str | None = None,
+    subagent_only: bool = False,
 ) -> list[tuple]:
     """LLM spans in ``[since, until)`` with optional agent/model/provider
     filters. Returns (session_id, provider, model, input, output, cache,
-    cache_write). Never raises — a bad query yields ``[]``."""
+    cache_write). ``subagent_only`` scopes to Task-dispatched subagent spans
+    (``sub_agent_id IS NOT NULL``) — the fan-out the subagent analyzer flags.
+    Never raises — a bad query yields ``[]``."""
     clauses = ["start_time >= $1", "start_time < $2", "model IS NOT NULL"]
     params: list[Any] = [since, until]
+    if subagent_only:
+        clauses.append("sub_agent_id IS NOT NULL")
     if agent_id:
         params.append(agent_id)
         clauses.append(f"agent_id = ${len(params)}")
@@ -281,6 +286,19 @@ def measure_cost_delta(
         rates = get_rates(prov, model)
         input_rate = rates.input_per_mtok if rates is not None else 0.0
         realized_usd = (saved_tokens / 1_000_000) * input_rate
+        post_calls = post["calls"]
+
+    elif analyzer == "subagent":
+        # Fan-out model-mix cost delta: per-session dollars spent on the
+        # oversized model(s) across SUBAGENT spans only (sub_agent_id NOT NULL),
+        # before vs after the marker. Same shape as downsize, scoped to the
+        # Task-dispatched fan-out the subagent analyzer flags.
+        models = {str(m) for m in (target.get("models") or [])}
+        pre = _downsize_metric(
+            _rows_for(conn, pre_start, pre_end, agent_id, subagent_only=True), models)
+        post_rows = _rows_for(conn, post_start, post_end, agent_id, subagent_only=True)
+        post = _downsize_metric(post_rows, models)
+        realized_usd = max(0.0, pre["value"] - post["value"]) * post["sessions"]
         post_calls = post["calls"]
 
     else:
