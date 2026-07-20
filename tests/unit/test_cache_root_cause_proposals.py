@@ -7,12 +7,14 @@ storage under ``tmp_path``, nothing touching a real ``~/.tj``.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from tokenjam.core.config import TjConfig
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.optimize import cost_verify
+from tokenjam.core.optimize import build_report, cost_verify
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
     CacheEfficacyFinding,
     LookbackMissCandidate,
@@ -22,6 +24,8 @@ from tokenjam.core.optimize.analyzers.cache_efficacy import (
 )
 from tokenjam.core.optimize.cost_proposals import (
     _cache_thrash_to_proposals,
+    _cache_to_proposals,
+    _per_agent_cache_recoverable_by_model,
     cost_proposals_from_report,
 )
 from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
@@ -188,6 +192,78 @@ def test_signatures_are_distinct_across_all_cache_check_kinds():
     )
     sigs = [p.signature for p in cost_proposals_from_report(report)]
     assert len(sigs) == len(set(sigs))
+
+
+# --- The generic per-(provider,model) card CAN overlap a per-agent card ------
+#
+# The generic ``cost:cache:<provider>:<model>`` card and the new per-agent
+# cards read the SAME underlying spans (a flagged agent's calls are part of
+# the aggregate the generic row's efficacy is computed over). This is a real
+# overlap, not a hypothetical: an agent that's the dominant (or sole) driver
+# of a model's window-wide low efficacy trips both. The generic card's dollar
+# figure must be reduced by whatever the per-agent cards already claim for
+# that model, so the rollup never counts the same spend twice.
+
+def test_per_agent_recoverable_by_model_sums_across_all_three_checks():
+    uc = _uncached_candidate(agent_id="a")
+    th = _thrash_candidate(agent_id="b")
+    lb = _lookback_candidate(agent_id="c")
+    finding = CacheEfficacyFinding(uncached_agents=[uc], thrash_agents=[th],
+                                    lookback_miss_agents=[lb])
+    totals = _per_agent_cache_recoverable_by_model(finding)
+    key = ("anthropic", "claude-sonnet-5")  # all three fixtures share this model
+    assert totals[key][0] == pytest.approx(uc.estimated_recoverable_usd
+                                            + th.estimated_recoverable_usd
+                                            + lb.estimated_recoverable_usd)
+    assert totals[key][1] == (uc.estimated_recoverable_tokens or 0) + (lb.estimated_recoverable_tokens or 0)
+
+
+def test_per_agent_recoverable_by_model_ignores_non_overlapping_models():
+    uc = _uncached_candidate(agent_id="a")
+    finding = CacheEfficacyFinding(uncached_agents=[uc])
+    totals = _per_agent_cache_recoverable_by_model(finding)
+    assert ("openai", "gpt-4o") not in totals
+
+
+def test_generic_per_model_card_is_reduced_by_overlapping_per_agent_claim(db):
+    """End-to-end: one agent is the model's ENTIRE window traffic, so it trips
+    both the generic per-model card AND its own A1 uncached card off the same
+    spans. The generic card must not still claim the full, unreduced figure."""
+    agent = "agent-solo"
+    for i in range(25):
+        db.insert_span(make_llm_span(
+            agent_id=agent, provider="anthropic", model="claude-sonnet-5",
+            input_tokens=4000, cache_tokens=0, cache_write_tokens=0,
+            session_id=f"s-{i // 5}",
+            start_time=MARKER + timedelta(minutes=i),
+        ))
+    since, until = MARKER - timedelta(hours=1), MARKER + timedelta(hours=1)
+    report = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                           findings=["cache"])
+    finding = report.findings["cache"]
+    assert len(finding.uncached_agents) == 1        # A1 fires
+    assert len(finding.flagged) == 1                # the generic row also fires
+
+    # What the generic card WOULD claim with no per-agent overlap subtracted.
+    unclaimed_variant = replace(finding, uncached_agents=[], thrash_agents=[],
+                                 lookback_miss_agents=[])
+    original = _cache_to_proposals(unclaimed_variant)[0].estimated_recoverable_usd
+
+    proposals = cost_proposals_from_report(report)
+    generic = next(p for p in proposals if p.signature == "cost:cache:anthropic:claude-sonnet-5")
+    agent_card = next(p for p in proposals if p.signature == "cost:cache-uncached:agent-solo")
+
+    assert generic.estimated_recoverable_usd < original
+    assert generic.estimated_recoverable_usd == pytest.approx(
+        max(0.0, original - agent_card.estimated_recoverable_usd), abs=1e-4,
+    )
+    # The two cards combined never exceed what the single generic card would
+    # have claimed alone — no inflation from counting the same spend twice.
+    assert (
+        generic.estimated_recoverable_usd + agent_card.estimated_recoverable_usd
+        <= original + 1e-6
+    )
+    assert "double-count" in generic.estimate_basis
 
 
 # --- Delta-verify: cache_thrash receipts --------------------------------------
