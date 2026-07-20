@@ -7541,7 +7541,14 @@ function RelearnApplyModal({ cluster, onClose, onApplied }) {
     if (!target.trim()) { setError('enter a target path first'); return; }
     setBusy(true); setError(null);
     try {
-      const body = { ...cluster, scope, target_path: target.trim(), go: true, force: !!force };
+      // Only the proposal's ID travels: the server reads the cluster content
+      // from its own stored proposals, so the browser can't apply anything the
+      // detector didn't produce. Scope + target stay client-supplied because
+      // the human edits them here before approving.
+      const body = {
+        proposal_id: cluster.proposal_id,
+        scope, target_path: target.trim(), go: true, force: !!force,
+      };
       const r = await apiPostOrDetail('/relearn/apply', body);
       setWarning(null);
       setResult(r.record);
