@@ -1106,7 +1106,7 @@ def estimated_recoverable_rollup(
     """
     seen: dict[str, dict[str, Any]] = {}
     for p in proposals:
-        row = asdict(p) if is_dataclass(p) else dict(p)
+        row = asdict(p) if is_dataclass(p) and not isinstance(p, type) else dict(p)
         sig = str(row.get("signature") or "")
         if not sig or sig in seen:
             continue  # empty/duplicate signature never counts twice

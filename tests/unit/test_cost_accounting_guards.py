@@ -28,8 +28,11 @@ from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import accounting, cost_verify
 from tokenjam.core.optimize import runner as runner_mod
 from tokenjam.core.optimize.analyzers import (
+    batch_placement,
     budget_projection,
     cache_efficacy,
+    deadweight,
+    downsize_agents,
     model_downgrade,
     output_verbosity,
     prompt_bloat,
@@ -209,9 +212,19 @@ def test_dedupe_keeps_the_last_observation():
 
 #: Every module that builds a token aggregate. Add yours here when you add an
 #: aggregate; that is the whole wiring cost of the guard.
+#:
+#: Scope caveat: this list drives the SQL-TEXT rule only. A module that adds up
+#: token types in Python is outside its reach and needs the value-level probe
+#: (``four_type_probe_row`` / ``missing_token_types``) instead — see the probe
+#: tests below. ``deadweight`` and ``downsize_agents`` are listed as no-op
+#: entries: neither builds a four-type token sum in SQL today (deadweight
+#: estimates a per-session tax from character counts; downsize_agents' one SUM
+#: is a deliberate thinking-token attribute extraction), so they are here to
+#: catch a future SQL aggregate rather than to assert one now.
 _AGGREGATE_MODULES = [
     accounting, cost_verify, runner_mod,
-    budget_projection, cache_efficacy, model_downgrade, output_verbosity,
+    batch_placement, budget_projection, cache_efficacy, deadweight,
+    downsize_agents, model_downgrade, output_verbosity,
     prompt_bloat, subagent_rightsizing, workflow_restructure,
 ]
 
