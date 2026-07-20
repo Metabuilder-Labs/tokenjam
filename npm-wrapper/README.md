@@ -20,7 +20,7 @@ npx tokenjam onboard   # set up the loop that fixes them, or: pipx install token
 
 ## What you get
 
-`tj onboard` is guided setup: it writes a config, generates an ingest secret, and asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) to wire the right path. For Claude Code and Codex that means backfilling recent history and installing a statusline and hooks for live capture; restart and you're live. Onboarding ends by showing the mistakes your agent keeps making and offers to enable your first fix, and it unlocks the self-improve loop, all seven analyzers, the Lens dashboard, and the zero-token statusline in one command.
+`tj onboard` is guided setup: it writes a config, generates an ingest secret, and asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) to wire the right path. For Claude Code and Codex that means backfilling recent history and installing a statusline and hooks for live capture; restart and you're live. Onboarding ends by showing the mistakes your agent keeps making and offers to enable your first fix, and it unlocks the self-improve loop, all six analyzers, the Lens dashboard, and the zero-token statusline in one command.
 
 ## Commands
 
@@ -42,7 +42,7 @@ tj optimize   # cost-saving candidates from your actual usage
 tj serve      # open the Lens dashboard at http://127.0.0.1:7391/
 ```
 
-- Full feature set, the self-improve loop, seven analyzers, and Lens screenshots: [github.com/Metabuilder-Labs/tokenjam](https://github.com/Metabuilder-Labs/tokenjam)
+- Full feature set, the self-improve loop, six analyzers, and Lens screenshots: [github.com/Metabuilder-Labs/tokenjam](https://github.com/Metabuilder-Labs/tokenjam)
 - Product site and docs: [tokenjam.dev](https://tokenjam.dev)
 
 ## How the launcher works

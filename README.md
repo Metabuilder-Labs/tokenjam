@@ -229,8 +229,9 @@ Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls 
 
 `tj optimize` (no args) runs every analyzer: the six above, plus `relearn` (the self-improve loop's
 detector), `verbosity` (sessions whose output runs high versus the per-task-shape median),
-`budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]`
-ceiling), and `cache-recommend` (the Cache card's breakpoint-suggestion half). Run a subset with
+`summarize` (structure-aware prompt-file summarization candidates), `budget-projection` (projects your
+monthly run-rate against a configured `[budget.<provider>]` ceiling), and `cache-recommend` (the Cache
+card's breakpoint-suggestion half). Run a subset with
 `tj optimize downsize cache reuse`.
 
 ---
