@@ -23,7 +23,7 @@ telemetry for the failures they keep re-hitting, fixes them at the harness level
 config), and verifies the waste actually stopped. Works with Claude Code and Claude Agent SDK apps
 today, and with any SDK agent over OpenTelemetry (detect, advise, verify).
 
-Self-improvement is the mechanism; a lower bill is the point. TokenJam doesn't just show you what
+Finding and fixing repeated waste is the mechanism; a lower bill is the point. TokenJam doesn't just show you what
 your agents cost. It watches how your agent actually works, catches the blockers it silently re-hits
 session after session, and closes the loop: propose a fix, you approve it, it applies reversibly, and
 it checks whether the mistake actually stopped.
@@ -119,7 +119,7 @@ Point any OTLP exporter at `tj serve` and production agents flow in with zero co
 
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Backfills your last 30 days, wires a zero-token statusline, runs the self-improve loop plus all six analyzers + Lens |
+| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Backfills your last 30 days, wires a zero-token statusline, runs the loop plus all six analyzers + Lens |
 | **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
 | **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, plus the loop's detect, advise, and verify over your spans |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
@@ -227,7 +227,7 @@ Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls 
 </tr>
 </table>
 
-`tj optimize` (no args) runs every analyzer: the six above, plus `relearn` (the self-improve loop's
+`tj optimize` (no args) runs every analyzer: the six above, plus `relearn` (the loop's
 detector), `verbosity` (sessions whose output runs high versus the per-task-shape median),
 `summarize` (structure-aware prompt-file summarization candidates), `budget-projection` (projects your
 monthly run-rate against a configured `[budget.<provider>]` ceiling), and `cache-recommend` (the Cache
@@ -239,8 +239,10 @@ card's breakpoint-suggestion half). Run a subset with
 ## Lens: the local dashboard
 
 `tj serve` runs Lens at `http://127.0.0.1:7391/`. It opens on the **Improve** lens: a **Review inbox**
-where the self-improve loop's proposed fixes land for your approval, a Dashboard that lands you on
-recurring mistakes and current health, and Status. Flip to the **Observe** lens for Traces, Cost,
+where the loop's proposed fixes land for your approval, a Dashboard that lands you on
+recurring mistakes and current health, and Status. The downsize, cache, and trim analyzers file
+advise-only proposals here too, with the realized dollar delta measured over your later calls once you
+mark one applied. Flip to the **Observe** lens for Traces, Cost,
 Analytics, Alerts, Drift, Optimize, and Budget. Plan-tier-aware, fully offline, no signup.
 
 <table>
@@ -332,7 +334,7 @@ Bench reports measured pass-rate on a suite, never "certified" or "quality prese
 
 ## Roadmap
 
-**Shipped:** Self-improve loop (detect, propose, approve, apply, verify) on workspace agents, plus detect, advise, and verify for any OTel agent · Downsize · Cache · Script · Trim · Reuse · Subagent right-sizing · Claude Code + Codex onboarding · MCP server · Lens web UI (Improve + Observe lenses) · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview · Context & premium-model audits · Close-the-loop annotations/expectations · Prompt summarization (advisory) · Enforcement-plane proxy (suggest mode)
+**Shipped:** The fix-and-verify loop (detect, propose, approve, apply, verify) on workspace agents, plus detect, advise, and verify for any OTel agent · Downsize · Cache · Script · Trim · Reuse · Subagent right-sizing · Claude Code + Codex onboarding · MCP server · Lens web UI (Improve + Observe lenses) · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview · Context & premium-model audits · Close-the-loop annotations/expectations · Prompt summarization (advisory) · Enforcement-plane proxy (suggest mode)
 
 **Up next** (roughly):
 - [ ] Auto-apply for Agent SDK app repos, on the same human-gated ladder
