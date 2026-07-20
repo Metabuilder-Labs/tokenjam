@@ -1,13 +1,13 @@
-"""On-disk cache for the pothole aggregator's (expensive, full-corpus) result.
+"""On-disk cache for the relearn aggregator's (expensive, full-corpus) result.
 
-The detector (``core.optimize.analyzers.pothole``) takes tens of seconds over
+The detector (``core.optimize.analyzers.relearn``) takes tens of seconds over
 a real local corpus — far too slow to compute per HTTP request. ``tj serve``
 computes it on a background schedule using a FRESH DuckDB connection (mirrors
 the retention job's own-connection pattern in ``cli/cmd_serve.py``, so a slow
 scan never contends with the live request connection's write lock — see the
-DuckDB single-writer pothole this very module exists to help catch more of).
+DuckDB single-writer relearn this very module exists to help catch more of).
 This module is the read/write boundary: a small JSON file at
-``~/.tj/pothole_cache.json`` plus an in-process lock so two overlapping
+``~/.tj/relearn_cache.json`` plus an in-process lock so two overlapping
 recomputes never race each other's writes.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from tokenjam.core.optimize.analyzers.pothole import PotholeFinding, compute_pothole_finding
+from tokenjam.core.optimize.analyzers.relearn import RelearnFinding, compute_relearn_finding
 
 if TYPE_CHECKING:
     from tokenjam.core.config import TjConfig
@@ -29,16 +29,16 @@ _COMPUTING = threading.Event()
 
 
 def default_cache_path(config: TjConfig | None = None) -> Path:
-    """``<storage-parent>/pothole_cache.json`` when ``config`` is given — this
+    """``<storage-parent>/relearn_cache.json`` when ``config`` is given — this
     honors ``--config`` / ``storage.path`` (and falls back to a config-scoped
     TEMP dir, never the real ``~/.tj``, when ``storage.path`` is ``""``/
-    ``":memory:"``; see ``pothole_apply._storage_base_dir``). Without a
+    ``":memory:"``; see ``relearn_apply._storage_base_dir``). Without a
     ``config`` (legacy callers), the old hardcoded ``~/.tj`` default."""
     if config is not None:
-        from tokenjam.core.optimize.pothole_apply import _storage_base_dir
+        from tokenjam.core.optimize.relearn_apply import _storage_base_dir
 
-        return _storage_base_dir(config) / "pothole_cache.json"
-    return Path.home() / ".tj" / "pothole_cache.json"
+        return _storage_base_dir(config) / "relearn_cache.json"
+    return Path.home() / ".tj" / "relearn_cache.json"
 
 
 def read_cache(
@@ -55,13 +55,13 @@ def read_cache(
 
 
 def write_cache(
-    finding: PotholeFinding, path: Path | None = None, *, config: TjConfig | None = None,
+    finding: RelearnFinding, path: Path | None = None, *, config: TjConfig | None = None,
 ) -> dict[str, Any]:
     """Atomically write the finding (temp file + rename), never a partial file
     a concurrent reader could observe.
 
     The cache file is shared with the cost-proposal producer (see
-    ``write_cost_proposals``): the two write on different cadences (the pothole
+    ``write_cost_proposals``): the two write on different cadences (the relearn
     detector job vs the optimize path). To keep this "the same proposal store"
     without one producer clobbering the other, an existing ``cost_proposals``
     block is read back and preserved here rather than dropped.
@@ -109,8 +109,8 @@ def read_cost_proposals(
 def write_cost_proposals(
     proposals: list[Any], path: Path | None = None, *, config: TjConfig | None = None,
 ) -> dict[str, Any]:
-    """Write the cost proposals into the SAME cache file the pothole finding
-    lives in, under a separate ``cost_proposals`` key, preserving the pothole
+    """Write the cost proposals into the SAME cache file the relearn finding
+    lives in, under a separate ``cost_proposals`` key, preserving the relearn
     ``finding`` block. ``proposals`` is a list of ``CostProposal`` (or plain
     dicts). Atomic; best-effort on I/O error."""
     from dataclasses import is_dataclass
@@ -161,16 +161,16 @@ def recompute_now(
                 projects_root = loop_transcript_root(config)
             except Exception:
                 projects_root = None
-        finding = compute_pothole_finding(conn, projects_root=projects_root)
+        finding = compute_relearn_finding(conn, projects_root=projects_root)
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to
         # the real ~/.tj — see default_cache_path).
         result = write_cache(finding, cache_path, config=config)
         if config is not None:
             try:
-                from tokenjam.core.optimize import pothole_verify
+                from tokenjam.core.optimize import relearn_verify
 
-                pothole_verify.rescan_all(config, conn, projects_root=projects_root)
+                relearn_verify.rescan_all(config, conn, projects_root=projects_root)
             except Exception:
                 pass   # best-effort — a verify failure never sinks the detector's own cache write
         return result
@@ -216,5 +216,5 @@ def trigger_background_recompute(
                 except Exception:
                     pass
 
-    threading.Thread(target=_job, name="pothole-recompute", daemon=True).start()
+    threading.Thread(target=_job, name="relearn-recompute", daemon=True).start()
     return True

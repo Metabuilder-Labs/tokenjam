@@ -1,4 +1,4 @@
-"""Unit tests for the cross-session pothole aggregator (core/optimize/analyzers/pothole.py).
+"""Unit tests for the cross-session relearn aggregator (core/optimize/analyzers/relearn.py).
 
 Mirrors ``test_transcript.py``'s fixture style — hand-written Claude Code
 on-disk JSONL records, no I/O beyond a ``tmp_path`` projects root. The
@@ -13,10 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from tokenjam.core.optimize.analyzers.pothole import (
+from tokenjam.core.optimize.analyzers.relearn import (
     MIN_RECURRING_SESSIONS,
     FailureEpisode,
-    analyze_potholes,
+    analyze_relearns,
     classify_known_family,
     cluster_failures,
     extract_failures_for_session,
@@ -181,7 +181,7 @@ def test_classify_deferred_tool_cold_still_matches_non_offset_errors():
 def test_command_not_found_is_rung_one_with_real_guidance():
     # Downgraded from rung 5 (no safe automatic config/env writer exists) to
     # a rung-1 CLAUDE.md note with genuinely useful guidance — not a stub.
-    from tokenjam.core.optimize.analyzers.pothole import _FAMILY_BY_KEY
+    from tokenjam.core.optimize.analyzers.relearn import _FAMILY_BY_KEY
 
     fam = _FAMILY_BY_KEY["command_not_found"]
     assert fam["rung"] == 1
@@ -189,10 +189,10 @@ def test_command_not_found_is_rung_one_with_real_guidance():
     assert "mapfile" in fam["fix"] or "shopt" in fam["fix"]
 
 
-# --- User-decline exclusion (not a pothole) ------------------------------------
+# --- User-decline exclusion (not a relearn) ------------------------------------
 
-def test_user_decline_is_not_a_pothole(tmp_path):
-    from tokenjam.core.optimize.analyzers.pothole import is_user_decline
+def test_user_decline_is_not_a_relearn(tmp_path):
+    from tokenjam.core.optimize.analyzers.relearn import is_user_decline
 
     assert is_user_decline("The user doesn't want to proceed with this tool use.") is True
     assert is_user_decline("Exit plan mode?") is True
@@ -259,14 +259,14 @@ def test_cluster_separates_different_families(tmp_path):
     assert len(clusters) == 2
 
 
-# --- Full pipeline (analyze_potholes) ------------------------------------------
+# --- Full pipeline (analyze_relearns) ------------------------------------------
 
 def test_recurring_cluster_surfaces_as_a_proposal(tmp_path):
     for i in range(MIN_RECURRING_SESSIONS):
         _cwd_confusion_session(tmp_path, f"-Users-test-repo{i}", f"cwd-{i}")
     sessions = [(f"cwd-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
 
-    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
 
     assert finding.sessions_scanned == MIN_RECURRING_SESSIONS
     assert len(finding.clusters) == 1
@@ -286,7 +286,7 @@ def test_command_not_found_proposal_is_rung_one_note(tmp_path):
         _command_not_found_session(tmp_path, f"-Users-test-cnf{i}", f"cnf-{i}")
     sessions = [(f"cnf-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
 
-    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
 
     assert len(finding.clusters) == 1
     cluster = finding.clusters[0]
@@ -300,7 +300,7 @@ def test_below_threshold_cluster_is_dropped(tmp_path):
         _edit_before_read_session(tmp_path, f"-Users-test-repo{i}", f"ebr-{i}")
     sessions = [(f"ebr-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS - 1)]
 
-    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
 
     assert finding.clusters == []
     assert finding.failures_examined == MIN_RECURRING_SESSIONS - 1
@@ -311,7 +311,7 @@ def test_single_repo_cluster_scopes_to_project(tmp_path):
         _edit_before_read_session(tmp_path, "-Users-test-onerepo", f"ebr-one-{i}")
     sessions = [(f"ebr-one-{i}", "onerepo") for i in range(MIN_RECURRING_SESSIONS)]
 
-    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
 
     assert len(finding.clusters) == 1
     assert finding.clusters[0].scope == "project"
@@ -323,7 +323,7 @@ def test_clean_sessions_produce_no_proposals(tmp_path):
         _clean_session(tmp_path, "-Users-test-clean", f"clean-{i}")
     sessions = [(f"clean-{i}", "cleanrepo") for i in range(5)]
 
-    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
 
     assert finding.clusters == []
     assert finding.failures_examined == 0
@@ -339,7 +339,7 @@ def test_already_codified_cluster_is_dropped(tmp_path):
 
     doc_text = "known gotcha: always confirm cwd — errors read 'no such file or directory'."
 
-    finding = analyze_potholes(
+    finding = analyze_relearns(
         sessions, projects_root=tmp_path, distill_enabled=False, codified_doc_text=doc_text,
     )
 
@@ -348,7 +348,7 @@ def test_already_codified_cluster_is_dropped(tmp_path):
 
 
 def test_is_already_codified_requires_the_exact_phrase():
-    from tokenjam.core.optimize.analyzers.pothole import _RawCluster
+    from tokenjam.core.optimize.analyzers.relearn import _RawCluster
 
     cluster = _RawCluster(signature="cwd_confusion", family_key="cwd_confusion", title="x")
     # A generic, partial mention isn't enough — the exact phrase must appear.
@@ -360,7 +360,7 @@ def test_is_already_codified_requires_the_exact_phrase():
 def test_is_already_codified_never_drops_a_residual_cluster():
     """No known family_key -> always treated as novel (see is_already_codified
     docstring: a wrongful drop here would silently hide new signal)."""
-    from tokenjam.core.optimize.analyzers.pothole import _RawCluster
+    from tokenjam.core.optimize.analyzers.relearn import _RawCluster
 
     cluster = _RawCluster(signature="Bash:some weird thing", family_key=None, title="Bash: some weird thing")
     assert is_already_codified(cluster, "some weird thing is a documented gotcha") is False
@@ -417,7 +417,7 @@ _REAL_LEGIT_SAMPLES: dict[str, list[str]] = {
 
 @pytest.mark.parametrize("family, samples", _REAL_THIN_SAMPLES.items())
 def test_confabulated_bash_chain_evidence_is_too_thin(family, samples):
-    from tokenjam.core.optimize.analyzers.pothole import (
+    from tokenjam.core.optimize.analyzers.relearn import (
         FailureEpisode,
         _RawCluster,
         _evidence_too_thin_for_distill,
@@ -435,7 +435,7 @@ def test_confabulated_bash_chain_evidence_is_too_thin(family, samples):
 
 @pytest.mark.parametrize("family, samples", _REAL_LEGIT_SAMPLES.items())
 def test_legit_evidence_is_not_too_thin(family, samples):
-    from tokenjam.core.optimize.analyzers.pothole import (
+    from tokenjam.core.optimize.analyzers.relearn import (
         FailureEpisode,
         _RawCluster,
         _evidence_too_thin_for_distill,
@@ -458,7 +458,7 @@ def test_confidence_gate_suppresses_confabulations_even_with_a_warm_cache(tmp_pa
     import hashlib
     import json
 
-    from tokenjam.core.optimize.analyzers.pothole import (
+    from tokenjam.core.optimize.analyzers.relearn import (
         MIN_DISTILL_CLUSTER_SESSIONS,
         FailureEpisode,
         _RawCluster,
@@ -504,14 +504,14 @@ def test_confidence_gate_suppresses_confabulations_even_with_a_warm_cache(tmp_pa
 
 
 # --- CLI text-view rendering regression -------------------------------------
-# `pothole` was registered in ANALYZER_REGISTRY/ANALYZER_ORDER but never wired
+# `relearn` was registered in ANALYZER_REGISTRY/ANALYZER_ORDER but never wired
 # into cmd_optimize's `_FINDING_RENDERERS` dispatch table, so `_rank_findings`
-# silently dropped it and `tj optimize pothole` (text view) fell through to
+# silently dropped it and `tj optimize relearn` (text view) fell through to
 # the generic "No candidates flagged in this window" empty state — even with
 # real clusters sitting in `--json`.
 
-def test_pothole_in_click_choices_and_renderer():
-    """pothole appears in the positional Click choices (auto-derived from the
+def test_relearn_in_click_choices_and_renderer():
+    """relearn appears in the positional Click choices (auto-derived from the
     registry) and has a human-readable renderer wired into the dispatch
     table — mirrors the same regression guard used for `verbosity`."""
     from tokenjam.cli.cmd_optimize import _FINDING_RENDERERS, cmd_optimize
@@ -519,23 +519,23 @@ def test_pothole_in_click_choices_and_renderer():
     findings_param = next(
         p for p in cmd_optimize.params if getattr(p, "name", None) == "findings"
     )
-    assert "pothole" in findings_param.type.choices
-    assert "pothole" in _FINDING_RENDERERS
+    assert "relearn" in findings_param.type.choices
+    assert "relearn" in _FINDING_RENDERERS
 
 
-def test_render_pothole_shows_clusters_without_error(tmp_path, capsys):
+def test_render_relearn_shows_clusters_without_error(tmp_path, capsys):
     """The finding renders through the CLI dispatch path and surfaces the
     cluster signature + occurrences + rung — not a generic empty state."""
-    from tokenjam.cli.cmd_optimize import _render_pothole
+    from tokenjam.cli.cmd_optimize import _render_relearn
 
     for i in range(MIN_RECURRING_SESSIONS):
         _cwd_confusion_session(tmp_path, f"-Users-test-render{i}", f"render-{i}")
     sessions = [(f"render-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
-    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
     assert finding.clusters  # sanity: the analyzer actually found the cluster
 
     for mode in ("api", "subscription", "local", "unknown"):
-        _render_pothole(finding, pricing_mode=mode, marker="①")
+        _render_relearn(finding, pricing_mode=mode, marker="①")
     out = capsys.readouterr().out
     assert "cwd_confusion" in out
     assert f"{finding.clusters[0].occurrences}" in out
@@ -543,9 +543,9 @@ def test_render_pothole_shows_clusters_without_error(tmp_path, capsys):
     assert "No candidates flagged" not in out
 
 
-def test_render_report_surfaces_pothole_clusters_instead_of_no_candidates(tmp_path, capsys):
+def test_render_report_surfaces_relearn_clusters_instead_of_no_candidates(tmp_path, capsys):
     """End-to-end regression: a report whose only finding is a
-    populated `pothole` cluster set must NOT fall through to the
+    populated `relearn` cluster set must NOT fall through to the
     cost-optimizer's generic "No candidates flagged" empty state."""
     from tokenjam.cli.cmd_optimize import _render_report
     from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
@@ -554,7 +554,7 @@ def test_render_report_surfaces_pothole_clusters_instead_of_no_candidates(tmp_pa
     for i in range(MIN_RECURRING_SESSIONS):
         _cwd_confusion_session(tmp_path, f"-Users-test-e2e{i}", f"e2e-{i}")
     sessions = [(f"e2e-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
-    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
     assert finding.clusters
 
     now = utcnow()
@@ -564,18 +564,18 @@ def test_render_report_surfaces_pothole_clusters_instead_of_no_candidates(tmp_pa
             total_tokens=100_000, total_cost_usd=0.0, thin_data=False,
         ),
         downgrade=None,
-        findings={"pothole": finding},
+        findings={"relearn": finding},
     )
-    _render_report(report, agent=None, requested=["pothole"], pricing_mode="local")
+    _render_report(report, agent=None, requested=["relearn"], pricing_mode="local")
     out = capsys.readouterr().out
     assert "No candidates flagged" not in out
     assert "cwd_confusion" in out
 
 
 def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, capsys):
-    """Collapse variant: a pothole finding must surface its clusters in
+    """Collapse variant: a relearn finding must surface its clusters in
     full even when the window's total tokens are enormous (a heavy
-    `tj optimize pothole --since 365d` run). Potholes are recurring-failure
+    `tj optimize relearn --since 365d` run). Relearns are recurring-failure
     clusters, not a token-reclamation finding, so a huge window denominator
     must NOT push them below DE_MINIMIS_SHARE and collapse them into the
     "Minor findings — ~0.0% of window tokens" pointer — that hides the headline
@@ -588,7 +588,7 @@ def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, c
     for i in range(MIN_RECURRING_SESSIONS):
         _cwd_confusion_session(tmp_path, f"-Users-test-huge{i}", f"huge-{i}")
     sessions = [(f"huge-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
-    finding = analyze_potholes(sessions, projects_root=tmp_path, distill_enabled=False)
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
     assert finding.clusters
     assert finding.estimated_recoverable_tokens  # a positive, rank-able estimate
 
@@ -601,9 +601,9 @@ def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, c
             total_tokens=2_000_000_000, total_cost_usd=0.0, thin_data=False,
         ),
         downgrade=None,
-        findings={"pothole": finding},
+        findings={"relearn": finding},
     )
-    _render_report(report, agent=None, requested=["pothole"], pricing_mode="local")
+    _render_report(report, agent=None, requested=["relearn"], pricing_mode="local")
     out = capsys.readouterr().out
     assert "cwd_confusion" in out                 # clusters surfaced in full
     assert f"{finding.clusters[0].occurrences}" in out

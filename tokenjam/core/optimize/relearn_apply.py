@@ -1,6 +1,6 @@
 """The self-improve loop's Apply stage (SPEC.md §4 step 5, §6, §7).
 
-Routes an approved pothole-cluster proposal to a write at the right
+Routes an approved relearn-cluster proposal to a write at the right
 intervention-ladder rung (SPEC §6):
 
   rung 1 (note)        -> append a marked section to a CLAUDE.md
@@ -48,7 +48,7 @@ ENFORCEMENT_RUNGS = {3, 4, 5}   # hook / wrapper / config — always human-gated
 RUNG_KIND = {1: "note", 2: "skill", 3: "hook", 4: "wrapper", 5: "config"}
 
 
-class PotholeApplyRefused(Exception):
+class RelearnApplyRefused(Exception):
     """Refusing to apply/enable/revert (house-voice message) — callers map to a 409."""
 
 
@@ -61,7 +61,7 @@ def slugify(text: str) -> str:
 # --- Storage roots ---------------------------------------------------------
 
 def _storage_base_dir(config: TjConfig) -> Path:
-    """The directory every pothole_apply/pothole_store artifact is parented
+    """The directory every relearn_apply/relearn_store artifact is parented
     under: ``<storage-parent>`` (mirrors ``core.summarize.session.
     summary_root``'s DEC-026 convention) when ``storage.path`` names a real
     file, else a TEMP directory — NEVER the real ``~/.tj`` (must-fix #4: an
@@ -69,7 +69,7 @@ def _storage_base_dir(config: TjConfig) -> Path:
     into a real local install).
 
     The temp dir is minted once and cached ON the config object itself
-    (``config._pothole_memory_tmp_root``), so repeated calls against the SAME
+    (``config._relearn_memory_tmp_root``), so repeated calls against the SAME
     config instance agree — apply, then a later revert against that same
     live config (e.g. within one ``tj serve`` process), must resolve to the
     same path. A DIFFERENT config object (a different process, a different
@@ -79,24 +79,24 @@ def _storage_base_dir(config: TjConfig) -> Path:
     sp = config.storage.path
     if sp not in ("", ":memory:"):
         return Path(sp).expanduser().parent
-    cached = getattr(config, "_pothole_memory_tmp_root", None)
+    cached = getattr(config, "_relearn_memory_tmp_root", None)
     if isinstance(cached, Path):
         return cached
-    tmp_root = Path(tempfile.mkdtemp(prefix="tokenjam-pothole-mem-"))
+    tmp_root = Path(tempfile.mkdtemp(prefix="tokenjam-relearn-mem-"))
     try:
-        config._pothole_memory_tmp_root = tmp_root   # type: ignore[attr-defined]
+        config._relearn_memory_tmp_root = tmp_root   # type: ignore[attr-defined]
     except Exception:
         pass   # best-effort caching only — a read-only/duck-typed config just re-mints each call
     return tmp_root
 
 
-def pothole_apply_root(config: TjConfig) -> Path:
-    """``<storage-parent>/pothole_apply/`` — see ``_storage_base_dir``."""
-    return _storage_base_dir(config) / "pothole_apply"
+def relearn_apply_root(config: TjConfig) -> Path:
+    """``<storage-parent>/relearn_apply/`` — see ``_storage_base_dir``."""
+    return _storage_base_dir(config) / "relearn_apply"
 
 
 def _backups_dir(config: TjConfig) -> Path:
-    return pothole_apply_root(config) / "backups"
+    return relearn_apply_root(config) / "backups"
 
 
 def applied_fixes_path(config: TjConfig) -> Path:
@@ -225,33 +225,33 @@ def _save_backup(config: TjConfig, fix_id: str, target: str, pre_image: str | No
 
 def _restore_backup(config: TjConfig, fix_id: str) -> dict[str, Any]:
     """Undo one apply: restore the pre-image, or delete the file this apply
-    created. Raises ``PotholeApplyRefused`` if there's no backup record, or
+    created. Raises ``RelearnApplyRefused`` if there's no backup record, or
     (must-fix #3) if the target has since become a symlink — checked BEFORE
     branching on ``created``/``is_file`` so a swapped-in symlink can't
     redirect either a restore-write or a delete through it.
     """
     orig_f, meta_f = _backup_paths(config, fix_id)
     if not meta_f.is_file():
-        raise PotholeApplyRefused(f"no backup found for applied fix {fix_id} — cannot revert.")
+        raise RelearnApplyRefused(f"no backup found for applied fix {fix_id} — cannot revert.")
     try:
         meta = json.loads(meta_f.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise PotholeApplyRefused(f"backup metadata for {fix_id} is unreadable — cannot revert.") from exc
+        raise RelearnApplyRefused(f"backup metadata for {fix_id} is unreadable — cannot revert.") from exc
     target = Path(meta["target_path"]).expanduser()
     if target.is_symlink():
-        raise PotholeApplyRefused(f"{target} is a symlink — refusing to revert through it.")
+        raise RelearnApplyRefused(f"{target} is a symlink — refusing to revert through it.")
     if meta.get("created"):
         if target.is_file():
             target.unlink()
         return {"target_path": str(target), "action": "deleted"}
     if not orig_f.is_file():
-        raise PotholeApplyRefused(f"backup blob for {fix_id} is missing — cannot revert.")
+        raise RelearnApplyRefused(f"backup blob for {fix_id} is missing — cannot revert.")
     original = orig_f.read_text(encoding="utf-8")
     if target.is_file():
         try:
             _atomic_write(target, original)
         except SummarizeRefused as exc:
-            raise PotholeApplyRefused(str(exc)) from exc
+            raise RelearnApplyRefused(str(exc)) from exc
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(original, encoding="utf-8")
@@ -278,7 +278,7 @@ class AppliedFix:
     state:           str = "applied"        # applied | reverted
     reverted_at:     str | None = None
     revert_commit:   str | None = None
-    # Scaffold for Phase 3 (verify, see core.optimize.pothole_verify) —
+    # Scaffold for Phase 3 (verify, see core.optimize.relearn_verify) —
     # baseline counts at apply time so a later rescan can measure the
     # recurrence delta for this exact signature. `baseline_sessions` is the
     # cluster's distinct AFFECTED sessions (from the proposal); `baseline_
@@ -330,7 +330,7 @@ def get_applied(config: TjConfig, fix_id: str) -> dict | None:
 
 def set_verify(config: TjConfig, fix_id: str, verify: dict[str, Any]) -> dict:
     """Overwrite an applied fix's ``verify`` sub-dict — the write side of
-    Phase 3 (``core.optimize.pothole_verify``'s rescan). The caller passes
+    Phase 3 (``core.optimize.relearn_verify``'s rescan). The caller passes
     the FULL merged verify dict (old fields + new), not a partial patch, so
     this stays a plain field overwrite like every other ``_update_record``
     caller."""
@@ -351,7 +351,7 @@ def _update_record(config: TjConfig, fix_id: str, **fields: Any) -> dict:
             rec.update(fields)
             _write_ledger(config, records)
             return rec
-    raise PotholeApplyRefused(f"no applied_fixes record {fix_id}.")
+    raise RelearnApplyRefused(f"no applied_fixes record {fix_id}.")
 
 
 # --- Active-session guard (SPEC §7 — never apply mid-session) ------------------
@@ -360,8 +360,8 @@ def active_session_warning(conn: Any | None, target_path: str) -> str | None:
     """Best-effort: is there a LIVE session in the repo ``target_path`` lives
     in? Returns a human warning string, or None when it's safe (or unknown —
     a missing/failed DB check never blocks; it just can't vouch for safety).
-    Mirrors the ``agent_id`` repo-label convention used by the pothole
-    detector itself (``analyzers.pothole._repo_map_from_db``).
+    Mirrors the ``agent_id`` repo-label convention used by the relearn
+    detector itself (``analyzers.relearn._repo_map_from_db``).
     """
     if conn is None:
         return None
@@ -390,7 +390,7 @@ def active_session_warning(conn: Any | None, target_path: str) -> str | None:
                     f"an active session was seen in a repo matching '{label}' "
                     f"within the last {int(SESSION_STALE_THRESHOLD.total_seconds() // 60)} "
                     f"minutes — applying now risks the exact 'file modified since read' "
-                    f"pothole this loop exists to fix. Prefer an idle boundary."
+                    f"relearn this loop exists to fix. Prefer an idle boundary."
                 )
         return None
     except Exception:
@@ -403,7 +403,7 @@ NOTE_SECTION_HEADER = "## TokenJam self-improve (auto-added)"
 _NOTE_INTRO = (
     "Entries below are written by TokenJam's self-improve loop after a human "
     "approves a proposed fix in the Review inbox. Safe to hand-edit the prose; "
-    "keep the `<!-- tokenjam:pothole:... -->` markers if you want the inbox's "
+    "keep the `<!-- tokenjam:relearn:... -->` markers if you want the inbox's "
     "Revert to keep working."
 )
 
@@ -411,13 +411,13 @@ _NOTE_INTRO = (
 def _note_block(cluster: dict, signature: str) -> str:
     repos = cluster.get("repos") or []
     return (
-        f"<!-- tokenjam:pothole:{signature} -->\n"
+        f"<!-- tokenjam:relearn:{signature} -->\n"
         f"### {cluster.get('title', signature)}\n\n"
         f"{cluster.get('proposed_fix', '')}\n\n"
         f"_Evidence: {cluster.get('sessions', 0)} session(s) across "
         f"{len(repos)} repo(s). Rung {cluster.get('rung')}. "
         f"Revert from the Review inbox._\n"
-        f"<!-- /tokenjam:pothole:{signature} -->"
+        f"<!-- /tokenjam:relearn:{signature} -->"
     )
 
 
@@ -426,8 +426,8 @@ def render_note_content(existing: str, cluster: dict, signature: str) -> str:
     else appends one — creating the shared section header on first use."""
     block = _note_block(cluster, signature)
     marker_re = re.compile(
-        rf"<!-- tokenjam:pothole:{re.escape(signature)} -->.*?"
-        rf"<!-- /tokenjam:pothole:{re.escape(signature)} -->",
+        rf"<!-- tokenjam:relearn:{re.escape(signature)} -->.*?"
+        rf"<!-- /tokenjam:relearn:{re.escape(signature)} -->",
         re.DOTALL,
     )
     if marker_re.search(existing):
@@ -466,7 +466,7 @@ def render_skill_content(cluster: dict, signature: str, slug: str) -> str:
         f"{cluster.get('sessions', 0)} distinct session(s) across {len(repos)} "
         f"repo(s) (rung 2 · skill).\n\n"
         f"## Evidence\n\n{ev_lines}\n\n"
-        f"<!-- tokenjam:pothole:{signature} -->\n"
+        f"<!-- tokenjam:relearn:{signature} -->\n"
     )
 
 
@@ -600,7 +600,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-# tokenjam:pothole:{signature}
+# tokenjam:relearn:{signature}
 '''
 
 
@@ -711,7 +711,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-# tokenjam:pothole:{signature}
+# tokenjam:relearn:{signature}
 '''
 
 
@@ -759,7 +759,7 @@ def main() -> int:
 if __name__ == "__main__":
     sys.exit(main())
 
-# tokenjam:pothole:{signature}
+# tokenjam:relearn:{signature}
 '''
 
 
@@ -776,7 +776,7 @@ def render_hook_content(cluster: dict, signature: str) -> str:
 
 
 def _enforcement_wiring(family_key: str) -> tuple[str, str]:
-    """(event, tool-matcher) for the `settings.json` wiring `apply_pothole_fix`
+    """(event, tool-matcher) for the `settings.json` wiring `apply_relearn_fix`
     stages -- the ONLY event/tools this rung-3 hook is ever invoked for.
     Unknown/stub families default to PreToolUse/Bash, which is inert (the stub
     never blocks) and keeps an un-matchered family maximally narrow rather
@@ -812,13 +812,13 @@ def _write_target(target: Path, content: str) -> None:
     write through the link unchecked.
     """
     if target.is_symlink():
-        raise PotholeApplyRefused(f"{target} is a symlink — refusing to write through it.")
+        raise RelearnApplyRefused(f"{target} is a symlink — refusing to write through it.")
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         try:
             _atomic_write(target, content)
         except SummarizeRefused as exc:
-            raise PotholeApplyRefused(str(exc)) from exc
+            raise RelearnApplyRefused(str(exc)) from exc
     else:
         target.write_text(content, encoding="utf-8")
 
@@ -828,20 +828,20 @@ def _write_target(target: Path, content: str) -> None:
 def _is_allowed_note_target(target: Path, pre_image: str | None) -> bool:
     """A rung-1 note may only land on: (a) a ``*.md`` file (covers
     ``CLAUDE.md``, the intended target — any Markdown doc is a reasonable
-    note home), or (b) a file that ALREADY carries a ``tokenjam:pothole:``
+    note home), or (b) a file that ALREADY carries a ``tokenjam:relearn:``
     marker (a prior legitimate apply — the same rung 2/3 re-apply allowance).
     Anything else (a ``.py``, ``.zshrc``, etc.) is refused outright, closing
     the "rung=1 + arbitrary target_path corrupts any file" gap."""
     if target.suffix.lower() == ".md":
         return True
-    return pre_image is not None and "tokenjam:pothole:" in pre_image
+    return pre_image is not None and "tokenjam:relearn:" in pre_image
 
 
 # --- Write plan (shared by dry-run preview and the real apply) ----------------
 
 def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     """Render what WOULD be written for ``cluster`` at ``target_path`` — pure,
-    no disk writes. Raises ``PotholeApplyRefused`` if a non-TokenJam file
+    no disk writes. Raises ``RelearnApplyRefused`` if a non-TokenJam file
     already sits at a create-only target (skill / hook), the target is a
     symlink, or (rung 1) the target isn't an allowlisted note file."""
     import difflib
@@ -849,14 +849,14 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     signature = cluster["signature"]
     rung = int(cluster["rung"])
     if rung not in RUNG_KIND:
-        raise PotholeApplyRefused(f"unknown rung {rung}.")
+        raise RelearnApplyRefused(f"unknown rung {rung}.")
     if not target_path:
-        raise PotholeApplyRefused("no target path given — pick one before approving.")
+        raise RelearnApplyRefused("no target path given — pick one before approving.")
 
     slug = slugify(cluster.get("title") or cluster.get("family_key") or signature)
     target = Path(target_path).expanduser()
     if target.is_symlink():
-        raise PotholeApplyRefused(
+        raise RelearnApplyRefused(
             f"{target} is a symlink — refusing to write through it. Point target_path "
             f"at the real file."
         )
@@ -864,15 +864,15 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
 
     if rung == RUNG_NOTE:
         if not _is_allowed_note_target(target, pre_image):
-            raise PotholeApplyRefused(
+            raise RelearnApplyRefused(
                 f"{target} is not an allowlisted note target (must be a CLAUDE.md/*.md "
-                f"file, or already carry a tokenjam:pothole marker) — refusing to write "
+                f"file, or already carry a tokenjam:relearn marker) — refusing to write "
                 f"a rung-1 note there."
             )
         new_content = render_note_content(pre_image or "", cluster, signature)
     else:
-        if pre_image is not None and "tokenjam:pothole:" not in pre_image:
-            raise PotholeApplyRefused(
+        if pre_image is not None and "tokenjam:relearn:" not in pre_image:
+            raise RelearnApplyRefused(
                 f"{target} already exists and wasn't written by TokenJam — refusing to "
                 f"overwrite it. Choose a different target path."
             )
@@ -892,14 +892,14 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     }
 
 
-def preview_pothole_fix(cluster: dict, *, target_path: str) -> dict:
-    """Dry-run: exactly what ``apply_pothole_fix(..., go=True)`` would write,
-    without touching disk. Raises ``PotholeApplyRefused`` on the same guards
+def preview_relearn_fix(cluster: dict, *, target_path: str) -> dict:
+    """Dry-run: exactly what ``apply_relearn_fix(..., go=True)`` would write,
+    without touching disk. Raises ``RelearnApplyRefused`` on the same guards
     the real apply enforces (unknown rung, no target, hostile overwrite)."""
     return {"dry_run": True, **_build_write_plan(cluster, target_path)}
 
 
-def apply_pothole_fix(
+def apply_relearn_fix(
     config: TjConfig,
     cluster: dict,
     *,
@@ -912,7 +912,7 @@ def apply_pothole_fix(
     """Write an approved proposal at its rung. Default dry-run (mirrors
     ``apply_staged``'s contract) — pass ``go=True`` to actually write.
 
-    Raises ``PotholeApplyRefused`` (callers map to 409) when: the rung/target
+    Raises ``RelearnApplyRefused`` (callers map to 409) when: the rung/target
     is invalid, a non-TokenJam file already sits at a create-only target, or
     (when ``force`` is not set) a live session was just seen in the target's
     repo (SPEC §7 — never apply mid-session).
@@ -923,7 +923,7 @@ def apply_pothole_fix(
 
     warning = active_session_warning(conn, plan["target_path"])
     if warning and not force:
-        raise PotholeApplyRefused(warning)
+        raise RelearnApplyRefused(warning)
 
     target = Path(plan["target_path"]).expanduser()
     rung = plan["rung"]
@@ -974,14 +974,14 @@ def apply_pothole_fix(
     record.verify["baseline_occurrences"] = cluster.get("occurrences")
     # Best-effort exposure denominator (Phase 3 verify) — total sessions in
     # this fix's scope up to right now, counted the SAME way a later verify
-    # pass counts the post-apply side (core.optimize.pothole_verify.
+    # pass counts the post-apply side (core.optimize.relearn_verify.
     # count_sessions_in_scope), so the two rates are comparable. Never lets a
     # scan failure sink the apply itself.
     try:
-        from tokenjam.core.optimize import pothole_verify
+        from tokenjam.core.optimize import relearn_verify
 
         repo_filter = repo_root.name if (scope == "project" and repo_root) else None
-        record.verify["baseline_total_sessions"] = pothole_verify.count_sessions_in_scope(
+        record.verify["baseline_total_sessions"] = relearn_verify.count_sessions_in_scope(
             None, conn, repo_filter, before=applied_at_dt,
         )
     except Exception:
@@ -1041,16 +1041,16 @@ def enable_enforcement(config: TjConfig, fix_id: str, *, confirm: bool) -> dict:
     UI's "this intercepts your tools" warning); never auto-fires."""
     rec = get_applied(config, fix_id)
     if rec is None:
-        raise PotholeApplyRefused(f"no applied fix {fix_id}.")
+        raise RelearnApplyRefused(f"no applied fix {fix_id}.")
     if rec["rung"] not in ENFORCEMENT_RUNGS:
-        raise PotholeApplyRefused("only rung 3-5 (hook/wrapper/config) fixes need enabling.")
+        raise RelearnApplyRefused("only rung 3-5 (hook/wrapper/config) fixes need enabling.")
     if rec["state"] != "applied":
-        raise PotholeApplyRefused("this fix was reverted — re-apply it before enabling.")
+        raise RelearnApplyRefused("this fix was reverted — re-apply it before enabling.")
     enforcement = rec.get("enforcement") or {}
     if enforcement.get("enabled"):
         return rec
     if not confirm:
-        raise PotholeApplyRefused(
+        raise RelearnApplyRefused(
             "enabling enforcement wires this hook into settings.json, where it "
             "intercepts your tool calls on every matching call — pass an explicit "
             "confirmation to proceed."
@@ -1078,7 +1078,7 @@ def disable_enforcement(config: TjConfig, fix_id: str) -> dict:
     only the settings.json entry is removed) — a no-op if already disabled."""
     rec = get_applied(config, fix_id)
     if rec is None:
-        raise PotholeApplyRefused(f"no applied fix {fix_id}.")
+        raise RelearnApplyRefused(f"no applied fix {fix_id}.")
     enforcement = rec.get("enforcement") or {}
     if not enforcement.get("enabled"):
         return rec
@@ -1107,7 +1107,7 @@ def revert_applied_fix(config: TjConfig, fix_id: str) -> dict:
     Idempotent — reverting an already-reverted fix is a no-op."""
     rec = get_applied(config, fix_id)
     if rec is None:
-        raise PotholeApplyRefused(f"no applied fix {fix_id}.")
+        raise RelearnApplyRefused(f"no applied fix {fix_id}.")
     if rec["state"] == "reverted":
         return rec
 

@@ -15,11 +15,11 @@ import pytest
 
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.loop import create_expectation, list_expectation_runs
-from tokenjam.core.optimize.pothole_otel_verify import (
+from tokenjam.core.optimize.relearn_otel_verify import (
     measure_span_recurrence,
     verify_otel_expectation,
 )
-from tokenjam.core.optimize.pothole_verify import (
+from tokenjam.core.optimize.relearn_verify import (
     VERDICT_IMPROVED,
     VERDICT_INSUFFICIENT_DATA,
     VERDICT_REGRESSED,

@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from tokenjam.core.optimize.analyzers.pothole import (
+from tokenjam.core.optimize.analyzers.relearn import (
     _FAMILY_BY_KEY,
     _generic_signature,
     _repo_map_from_db,
@@ -43,7 +43,7 @@ from tokenjam.core.optimize.analyzers.pothole import (
     FailureEpisode,
     GROUNDED_TOKENS_PER_OCCURRENCE,
 )
-from tokenjam.core.optimize.pothole_apply import ENFORCEMENT_RUNGS, RUNG_NOTE
+from tokenjam.core.optimize.relearn_apply import ENFORCEMENT_RUNGS, RUNG_NOTE
 from tokenjam.core.transcript import resolve_projects_root
 
 # --- Tunables ------------------------------------------------------------
@@ -289,7 +289,7 @@ def _scope_repo_filter(rec: dict[str, Any]) -> str | None:
     """``None`` = unscoped (matches every repo — a user-global fix, or a
     project fix whose repo couldn't be resolved). A project-scoped fix
     filters to the basename of its recorded ``repo_root`` — best-effort:
-    the write target's git root is normally the same repo the pothole's
+    the write target's git root is normally the same repo the relearn's
     sessions were seen in."""
     if rec.get("scope") != "project":
         return None
@@ -399,21 +399,21 @@ def rescan_all(
     projects_root: Path | str | None = None,
 ) -> dict[str, int]:
     """Recompute verify for every applied (non-reverted) fix in the ledger —
-    the entry point the background pothole-rescan job calls on the SAME
+    the entry point the background relearn-rescan job calls on the SAME
     cadence as the detector (SPEC §4 step 6: "on each rescan"). Never raises;
     a single bad record is skipped, not fatal to the whole pass."""
-    from tokenjam.core.optimize import pothole_apply
+    from tokenjam.core.optimize import relearn_apply
 
     checked = 0
     updated = 0
-    for rec in pothole_apply.list_applied(config):
+    for rec in relearn_apply.list_applied(config):
         if rec.get("state") == "reverted":
             continue
         checked += 1
         try:
             new_fields = recompute_verify_for_record(rec, conn=conn, projects_root=projects_root)
             merged = {**(rec.get("verify") or {}), **new_fields}
-            pothole_apply.set_verify(config, rec["id"], merged)
+            relearn_apply.set_verify(config, rec["id"], merged)
             updated += 1
         except Exception:
             continue

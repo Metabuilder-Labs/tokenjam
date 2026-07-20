@@ -252,7 +252,7 @@ class LoopConfig:
         verify path.
       * no workspace (a plain OTel service) = the ADVISE lane. Detect + advise +
         verify only, off stored spans; no auto-apply path exists at all. See
-        `core/optimize/pothole_otel.py`.
+        `core/optimize/relearn_otel.py`.
 
     `None` (the default) keeps the historical behaviour: `resolve_projects_root`
     falls back to `TJ_CLAUDE_PROJECTS_ROOT` and then `~/.claude/projects`.

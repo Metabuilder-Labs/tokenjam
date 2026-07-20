@@ -1549,9 +1549,9 @@ const html = htm.bind(h);
 // --- API ---
 const apiKeyMeta = document.querySelector('meta[name="tj-api-key"]');
 const API_KEY = apiKeyMeta ? apiKeyMeta.getAttribute('content') : null;
-// Local write token (require_pothole_write_auth, api/deps.py) -- always
+// Local write token (require_relearn_write_auth, api/deps.py) -- always
 // present (injected regardless of api.auth.enabled), required on every
-// mutating pothole call (apply/enable/disable/revert/refresh). Sent on every
+// mutating relearn call (apply/enable/disable/revert/refresh). Sent on every
 // POST below; routes that don't check it simply ignore the extra header.
 const writeTokenMeta = document.querySelector('meta[name="tj-write-token"]');
 const WRITE_TOKEN = writeTokenMeta ? writeTokenMeta.getAttribute('content') : null;
@@ -7419,27 +7419,27 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 // explorer (which reads `since` from the same URL params).
 // ---- Review inbox (Improve lens home) ----
 // The self-improve loop's Approve stage (self-improve-loop SPEC.md §12 /
-// §8 reuse map): pending pothole fixes the cross-session pothole aggregator
-// (core/optimize/analyzers/pothole.py, served from a background-refreshed
-// cache at GET /pothole/proposals — see api/routes/pothole.py) land here for
+// §8 reuse map): pending relearn fixes the cross-session relearn aggregator
+// (core/optimize/analyzers/relearn.py, served from a background-refreshed
+// cache at GET /relearn/proposals — see api/routes/relearn.py) land here for
 // a human to review. Phase 2 wires Approve to a real write, routed by rung,
-// through POST /pothole/apply (core.optimize.pothole_apply — git-commit or
+// through POST /relearn/apply (core.optimize.relearn_apply — git-commit or
 // gzip-backup reversible, disabled-by-default for hook/wrapper/config rungs).
 // Dismiss stays a client-side-only hide (localStorage, never sent to the
 // server). The chassis (listhead / listbox / addbar / cur-modal) is forked
 // from Optimize ▸ Summarize's curate → diff → Apply/Reject screen
 // (~6410-7040 above), per Phase A's scaffold.
-const POTHOLE_DISMISSED_KEY = 'tj_pothole_dismissed_v1';
+const RELEARN_DISMISSED_KEY = 'tj_relearn_dismissed_v1';
 
-function loadDismissedPotholes() {
+function loadDismissedRelearns() {
   try {
-    const raw = localStorage.getItem(POTHOLE_DISMISSED_KEY);
+    const raw = localStorage.getItem(RELEARN_DISMISSED_KEY);
     return raw ? new Set(JSON.parse(raw)) : new Set();
   } catch (e) { return new Set(); }
 }
 
-function saveDismissedPotholes(set) {
-  try { localStorage.setItem(POTHOLE_DISMISSED_KEY, JSON.stringify([...set])); } catch (e) { /* best-effort */ }
+function saveDismissedRelearns(set) {
+  try { localStorage.setItem(RELEARN_DISMISSED_KEY, JSON.stringify([...set])); } catch (e) { /* best-effort */ }
 }
 
 const RUNG_LABELS = {
@@ -7502,7 +7502,7 @@ function CompoundLedgerSummary({ ledger }) {
     </div>`;
 }
 
-function PotholeRow({ cluster, checked, onToggle, onExpand }) {
+function RelearnRow({ cluster, checked, onToggle, onExpand }) {
   const tokens = cluster.estimated_recoverable_tokens || 0;
   return html`
     <tr class="cur-row" key=${cluster.signature}>
@@ -7520,7 +7520,7 @@ function PotholeRow({ cluster, checked, onToggle, onExpand }) {
 // The card's Approve flow: preview -> (optional active-session warning ->
 // "apply anyway") -> write. Scope + target are ALWAYS human-editable before
 // Approve (§7 — repo-identity is noisy; never trust the suggestion blindly).
-function PotholeApplyModal({ cluster, onClose, onApplied }) {
+function RelearnApplyModal({ cluster, onClose, onApplied }) {
   const [scope, setScope] = useState('project');
   const [target, setTarget] = useState('');
   const [busy, setBusy] = useState(false);
@@ -7542,7 +7542,7 @@ function PotholeApplyModal({ cluster, onClose, onApplied }) {
     setBusy(true); setError(null);
     try {
       const body = { ...cluster, scope, target_path: target.trim(), go: true, force: !!force };
-      const r = await apiPostOrDetail('/pothole/apply', body);
+      const r = await apiPostOrDetail('/relearn/apply', body);
       setWarning(null);
       setResult(r.record);
       onApplied && onApplied(r.record);
@@ -7651,13 +7651,13 @@ function AppliedFixRow({ rec, onChanged }) {
       ${rec.state === 'applied' ? html`<${VerifyLine} verify=${rec.verify} rung=${rec.rung} />` : null}
       ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
       <div style="display:flex;gap:10px;align-items:center">
-        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
+        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/relearn/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
         ${isEnforcement && rec.state === 'applied' && !(enforcement && enforcement.enabled) ? (
           confirming
-            ? html`<span style="color:var(--warn);font-size:12px">This intercepts your tool calls on every matching call. <span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/enable`, { confirm: true }))}>Confirm enable →</span> <span class="sz-link" onClick=${() => setConfirming(false)}>cancel</span></span>`
+            ? html`<span style="color:var(--warn);font-size:12px">This intercepts your tool calls on every matching call. <span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/relearn/${rec.id}/enable`, { confirm: true }))}>Confirm enable →</span> <span class="sz-link" onClick=${() => setConfirming(false)}>cancel</span></span>`
             : html`<span class="sz-link" onClick=${() => setConfirming(true)}>Enable enforcement…</span>`
         ) : null}
-        ${isEnforcement && rec.state === 'applied' && enforcement && enforcement.enabled ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/disable`, {}))}>Disable enforcement</span>` : null}
+        ${isEnforcement && rec.state === 'applied' && enforcement && enforcement.enabled ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/relearn/${rec.id}/disable`, {}))}>Disable enforcement</span>` : null}
       </div>
     </div>`;
 }
@@ -7665,7 +7665,7 @@ function AppliedFixRow({ rec, onChanged }) {
 // ---- Cost proposals (the same inbox, a distinct `kind`) ----
 // The downsize/cache/trim analyzers' findings adapted into advise-only
 // proposals (core/optimize/cost_proposals.py), served at
-// GET /pothole/cost-proposals. They carry NO apply path — the fix lives in the
+// GET /relearn/cost-proposals. They carry NO apply path — the fix lives in the
 // user's own application code — so "Mark applied" only drops a marker the
 // delta-verify pass (core/optimize/cost_verify.py) measures a realized dollar
 // delta against, shown back here as a receipt.
@@ -7678,7 +7678,7 @@ function fmtUsd(v) {
 
 // One applied cost proposal's realized-delta receipt: verdict + the measured
 // dollar/token delta (shown only for a real "improved" verdict), reusing the
-// same VERDICT_LABELS the pothole lane uses. Correlational, never causal.
+// same VERDICT_LABELS the relearn lane uses. Correlational, never causal.
 function CostVerifyLine({ verify }) {
   if (!verify) return null;
   const label = VERDICT_LABELS[verify.verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
@@ -7714,7 +7714,7 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
   const toks = prop.estimated_recoverable_tokens;
   // Workspace-apply state (subagent, CC-origin only): a target path + a dry-run
   // diff before the real, reversible write — routed through the same
-  // human-gated pothole apply path.
+  // human-gated relearn apply path.
   const [target, setTarget] = useState('');
   const [wbusy, setWbusy] = useState(false);
   const [werr, setWerr] = useState(null);
@@ -7724,7 +7724,7 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
     if (!target.trim()) { setWerr('enter a CLAUDE.md path to write the note into'); return; }
     setWbusy(true); setWerr(null);
     try {
-      const r = await apiPostOrDetail('/pothole/cost-proposals/apply-workspace',
+      const r = await apiPostOrDetail('/relearn/cost-proposals/apply-workspace',
         { ...prop, target_path: target.trim(), go });
       if (go) { onChanged && onChanged(); }
       else { setPreview((r.applied && r.applied.diff) || '(no changes)'); }
@@ -7776,7 +7776,7 @@ function CostAppliedRow({ rec, onChanged }) {
   const [error, setError] = useState(null);
   const revert = async () => {
     setBusy(true); setError(null);
-    try { await apiPostOrDetail(`/pothole/cost-applied/${rec.id}/revert`, {}); onChanged && onChanged(); }
+    try { await apiPostOrDetail(`/relearn/cost-applied/${rec.id}/revert`, {}); onChanged && onChanged(); }
     catch (e) { setError(e.message || String(e)); }
     finally { setBusy(false); }
   };
@@ -7796,7 +7796,7 @@ function CostAppliedRow({ rec, onChanged }) {
 
 function ReviewInboxView({ params }) {
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
-  const [dismissed, setDismissed] = useState(() => loadDismissedPotholes());
+  const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
   const [modalSig, setModalSig] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -7810,7 +7810,7 @@ function ReviewInboxView({ params }) {
 
   const load = useCallback(async () => {
     try {
-      const r = await api('/pothole/proposals');
+      const r = await api('/relearn/proposals');
       const f = r.finding || {};
       setD({
         loading: false, error: null, status: r.status, computedAt: r.computed_at,
@@ -7824,7 +7824,7 @@ function ReviewInboxView({ params }) {
 
   const loadApplied = useCallback(async () => {
     try {
-      const r = await api('/pothole/applied');
+      const r = await api('/relearn/applied');
       setApplied(r.applied || []);
       setLedger(r.ledger || null);
     } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
@@ -7832,11 +7832,11 @@ function ReviewInboxView({ params }) {
 
   const loadCost = useCallback(async () => {
     try {
-      const r = await api('/pothole/cost-proposals');
+      const r = await api('/relearn/cost-proposals');
       setCostProps(r.proposals || []);
-    } catch (e) { /* the pothole list is load-bearing; degrade quietly */ }
+    } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {
-      const r = await api('/pothole/cost-applied');
+      const r = await api('/relearn/cost-applied');
       setCostApplied(r.applied || []);
       setCostLedger(r.ledger || null);
     } catch (e) { /* degrade quietly */ }
@@ -7852,27 +7852,27 @@ function ReviewInboxView({ params }) {
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
-    try { await apiPost('/pothole/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
+    try { await apiPost('/relearn/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
     // The cost proposals + their realized deltas recompute on the same cadence.
-    try { await apiPost('/pothole/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
+    try { await apiPost('/relearn/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
     setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
   }, [load, loadCost]);
 
   const markCostApplied = useCallback(async (prop) => {
     setMarking(prop.signature);
     try {
-      await apiPostOrDetail('/pothole/cost-proposals/apply', prop);
+      await apiPostOrDetail('/relearn/cost-proposals/apply', prop);
       await loadCost();
     } catch (e) { /* surfaced on next refresh; keep the card in place */ }
     finally { setMarking(null); }
   }, [loadCost]);
 
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
-  const potholeCount = visible.length;
+  const relearnCount = visible.length;
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
     const next = new Set([...dismissed, ...checked]);
-    setDismissed(next); saveDismissedPotholes(next);
+    setDismissed(next); saveDismissedRelearns(next);
     setChecked(new Set());
   };
   const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
@@ -7886,16 +7886,16 @@ function ReviewInboxView({ params }) {
 
   const dismissCost = (sig) => {
     const next = new Set([...dismissed, sig]);
-    setDismissed(next); saveDismissedPotholes(next);
+    setDismissed(next); saveDismissedRelearns(next);
   };
 
   return html`
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
-    <div class="sz-note">Pothole fixes the self-improve loop's cross-session detector finds land here for review — each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung — you confirm the scope + target first; <b>Dismiss</b> hides a row locally (this browser only — it is not sent to the server).</div>
+    <div class="sz-note">The recurring mistakes your agent keeps repeating land here so it can relearn them. Each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
 
     <div class="cur-listhead">
       <span>
-        ${potholeCount} pending · <b style="color:var(--warn)">${potholeCount}</b> potholes · <b style="color:var(--accent)">0</b> strategies
+        ${relearnCount} pending · <b style="color:var(--warn)">${relearnCount}</b> recurring mistakes · <b style="color:var(--accent)">0</b> strategies
         ${d.computedAt ? html` · <span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
         ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
       </span>
@@ -7908,14 +7908,14 @@ function ReviewInboxView({ params }) {
           ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
           ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
           ${!d.error && !d.loading && d.status === 'never_run' ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No scan has run yet — click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</td></tr>` : null}
-          ${!d.error && !d.loading && d.status !== 'never_run' && potholeCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</td></tr>` : null}
-          ${!d.error && !d.loading ? visible.map(c => html`<${PotholeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
+          ${!d.error && !d.loading && d.status !== 'never_run' && relearnCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</td></tr>` : null}
+          ${!d.error && !d.loading ? visible.map(c => html`<${RelearnRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
         </tbody>
       </table>
     </div>
     <div class="cur-addbar">
       <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
-      <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
+      <span class="dim" style="font-size:12px">${relearnCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
     </div>
 
     ${visibleCost.length > 0 ? html`
@@ -7941,7 +7941,7 @@ function ReviewInboxView({ params }) {
       </div>
     ` : null}
 
-    <${PotholeApplyModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} onApplied=${onApplied} />
+    <${RelearnApplyModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} onApplied=${onApplied} />
   `;
 }
 
@@ -7963,7 +7963,7 @@ function DashboardView({ params }) {
       // full cost history — that user upgrading to review past spend must NOT
       // see "No data yet" (the front door was gating purely on active agents and
       // returning before /cost was ever fetched — issue: historical-only empty).
-      const [cost, status, compare, opt, al, drift, traces, pothole] = await Promise.all([
+      const [cost, status, compare, opt, al, drift, traces, relearn] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
         api('/status').catch(() => ({ agents: [] })),
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
@@ -7971,7 +7971,7 @@ function DashboardView({ params }) {
         api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
         api('/drift').catch(() => ({ agents: [] })),
         api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
-        api('/pothole/proposals').catch(() => ({ finding: null })),
+        api('/relearn/proposals').catch(() => ({ finding: null })),
       ]);
       // "No data yet" only when there is genuinely NO telemetry: no cost history
       // AND no tokens AND no sessions/agents AND no traces. Historical cost or
@@ -7982,7 +7982,7 @@ function DashboardView({ params }) {
       const empty = !hasCost && !hasAgents && !hasTraces;
       setD({ loading: false, empty, error: null, cost, compare, opt,
         alerts: al.alerts || [], drift, traces: traces.traces || [],
-        pendingFixes: ((pothole && pothole.finding && pothole.finding.clusters) || []).length });
+        pendingFixes: ((relearn && relearn.finding && relearn.finding.clusters) || []).length });
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }

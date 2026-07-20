@@ -1,6 +1,6 @@
-"""Unit tests for the self-improve loop's Verify stage (core.optimize.pothole_verify).
+"""Unit tests for the self-improve loop's Verify stage (core.optimize.relearn_verify).
 
-Two layers, mirroring test_pothole.py / test_pothole_apply.py's fixture style:
+Two layers, mirroring test_relearn.py / test_relearn_apply.py's fixture style:
 
   1. ``compute_verdict`` is pure (no I/O) — every verdict branch is exercised
      with plain numbers, no fixtures needed.
@@ -20,11 +20,11 @@ from pathlib import Path
 import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
-from tokenjam.core.optimize import pothole_apply as pa
-from tokenjam.core.optimize import pothole_verify as pv
-from tokenjam.core.optimize.analyzers.pothole import _generic_signature
+from tokenjam.core.optimize import relearn_apply as pa
+from tokenjam.core.optimize import relearn_verify as pv
+from tokenjam.core.optimize.analyzers.relearn import _generic_signature
 
-# --- Fixture builders (mirrors test_pothole.py) --------------------------------
+# --- Fixture builders (mirrors test_relearn.py) --------------------------------
 
 def _user_prompt(text: str) -> dict:
     return {"type": "user", "message": {"role": "user", "content": text}}
@@ -380,11 +380,11 @@ def test_rescan_all_updates_the_ledger_end_to_end(cfg, tmp_path):
         "rung": 1, "sessions": 5, "occurrences": 10,
         "repos": ["demo"], "examples": [],
     }
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="user-global", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="user-global", go=True)
     fix_id = result["record"]["id"]
 
     # Freeze applied_at + baseline_total_sessions for a deterministic comparison
-    # (apply_pothole_fix stamps utcnow(), which we can't control from here).
+    # (apply_relearn_fix stamps utcnow(), which we can't control from here).
     ledger_path = pa.applied_fixes_path(cfg)
     records = json.loads(ledger_path.read_text())
     records[0]["applied_at"] = applied_at.isoformat()
@@ -418,7 +418,7 @@ def test_rescan_all_skips_reverted_fixes(cfg, tmp_path):
         "rung": 1, "sessions": 5, "occurrences": 10,
         "repos": ["demo"], "examples": [],
     }
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(target), scope="user-global", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="user-global", go=True)
     fix_id = result["record"]["id"]
     pa.revert_applied_fix(cfg, fix_id)
 
@@ -434,7 +434,7 @@ def test_rescan_all_reports_enforcement_disabled_for_unwired_hook(cfg, tmp_path)
         "rung": 3, "sessions": 5, "occurrences": 10,
         "repos": ["demo"], "examples": [],
     }
-    result = pa.apply_pothole_fix(cfg, cluster, target_path=str(hook_target), scope="user-global", go=True)
+    result = pa.apply_relearn_fix(cfg, cluster, target_path=str(hook_target), scope="user-global", go=True)
     fix_id = result["record"]["id"]
     assert result["record"]["enforcement"]["enabled"] is False   # disabled by default
 

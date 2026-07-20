@@ -3,7 +3,7 @@
 Three analyzers mine recurring cross-session patterns and shared the same
 control flow, each with its own hand-rolled copy:
 
-  * ``analyzers.pothole``            — clusters failure signatures.
+  * ``analyzers.relearn``            — clusters failure signatures.
   * ``analyzers.plan_reuse``         — clusters planning skeletons.
   * ``analyzers.workflow_restructure`` — clusters (tool, arg-shape) sequences.
 
@@ -48,7 +48,7 @@ def recurring(
     surfaced finding), and insertion order is kept so downstream ranking is
     unchanged. ``size_fn`` defaults to ``len`` (a bucket is a member list); pass
     a custom one when the recurrence measure isn't the raw count — e.g. the
-    pothole lane counts DISTINCT sessions, not raw occurrences.
+    relearn lane counts DISTINCT sessions, not raw occurrences.
     """
     return {
         key: bucket for key, bucket in buckets.items()

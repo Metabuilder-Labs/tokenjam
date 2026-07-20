@@ -1,21 +1,21 @@
 """Adapt cost-analyzer findings into Review-inbox proposals ("advisories with
 receipts").
 
-The self-improve loop's pothole detector already produces
-``PotholeCluster`` proposals that the Lens Improve inbox renders and that a
+The self-improve loop's relearn detector already produces
+``RelearnCluster`` proposals that the Lens Improve inbox renders and that a
 user can mark, apply, and verify. Three *cost* analyzers — ``downsize``
 (model over-sizing), ``cache`` (cache efficacy), ``trim`` (prompt bloat) —
 produce findings of a different shape. This module adapts each finding into a
-``CostProposal`` so the inbox can list them BESIDE the pothole proposals, typed
+``CostProposal`` so the inbox can list them BESIDE the relearn proposals, typed
 by a distinct ``kind`` field.
 
-Two structural facts carry over from the pothole ``advise_only`` lane and are
+Two structural facts carry over from the relearn ``advise_only`` lane and are
 NOT optional here:
 
   * **Advise-only everywhere.** A cost fix lives in the user's own application
     code (a model-routing decision, a cache-prefix change, a prompt edit), not
     a workspace tokenjam may write into. So a cost proposal has NO apply path —
-    exactly like an ``advise_only`` ``PotholeCluster`` (empty
+    exactly like an ``advise_only`` ``RelearnCluster`` (empty
     ``suggested_target``). The card carries a recommendation and, where
     sensible, a copyable config/code suggestion; the user applies it themselves.
   * **Estimated / correlational, never causal.** Every saving figure a cost
@@ -61,7 +61,7 @@ SUBAGENT_RUBRIC_INTRO = (
 class CostProposal:
     """One cost analyzer's finding, shaped for the Review inbox.
 
-    Mirrors the fields the inbox already reads off a ``PotholeCluster`` (title,
+    Mirrors the fields the inbox already reads off a ``RelearnCluster`` (title,
     evidence, an estimate with its basis, ``advise_only``) plus the cost-
     specific ``target_key`` the delta-verify pass re-measures against.
     """
@@ -100,7 +100,7 @@ class CostProposal:
     # advise-only analyzers, a CC-origin subagent finding HAS a writable surface
     # — a rung-1 sizing rubric note in the workspace's CLAUDE.md — so its card
     # can route an actual, reversible, human-gated write through the existing
-    # pothole apply path (``pothole_apply.apply_pothole_fix``). The adapter (not
+    # relearn apply path (``relearn_apply.apply_relearn_fix``). The adapter (not
     # the analyzer) supplies these; ``apply_capable`` gates the apply action, and
     # a proposal with no clean workspace surface degrades to advise-only like the
     # other three (``apply_capable=False``, ``advise_only=True``).
@@ -364,7 +364,7 @@ def recompute_cost_proposals(
     """
     from datetime import timedelta
 
-    from tokenjam.core.optimize import pothole_store
+    from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
 
@@ -380,7 +380,7 @@ def recompute_cost_proposals(
         return []
 
     try:
-        pothole_store.write_cost_proposals(proposals, config=config)
+        relearn_store.write_cost_proposals(proposals, config=config)
     except Exception:
         pass
     return proposals

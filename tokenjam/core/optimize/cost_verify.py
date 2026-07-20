@@ -1,7 +1,7 @@
 """Delta-verify for applied cost proposals — the receipts.
 
 A cost proposal is advise-only, so there is no transcript recurrence to
-re-count (that is ``pothole_verify``'s job). What we CAN measure is whether the
+re-count (that is ``relearn_verify``'s job). What we CAN measure is whether the
 cost signal the analyzer flagged actually moved after the user marked their
 change: fewer dollars on the oversized model, a higher cache hit ratio, fewer
 input tokens per call on the bloated step.
@@ -15,7 +15,7 @@ the SAME ``core.cost.calculate_cost`` the rest of tokenjam uses (per-model,
 per-token-type, BOTH ``cache_tokens`` and ``cache_write_tokens`` included — the
 recurring omission this workspace guards against).
 
-Honesty (identical discipline to ``pothole_verify``):
+Honesty (identical discipline to ``relearn_verify``):
 
   * **Correlational, never causal.** The user's change is one of many things
     that shifted at the marker. This measures co-occurrence and says so.
@@ -34,7 +34,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from tokenjam.core.cost import calculate_cost
-from tokenjam.core.optimize.pothole_verify import (
+from tokenjam.core.optimize.relearn_verify import (
     VERDICT_IMPROVED,
     VERDICT_INSUFFICIENT_DATA,
     VERDICT_REGRESSED,
@@ -390,7 +390,7 @@ def rescan_all(
 def cost_compound_ledger(records: list[dict[str, Any]]) -> dict[str, Any]:
     """The Applied section's cost summary: total realized dollars across every
     VERIFIED, improved (non-reverted) cost fix, plus a verdict breakdown. The
-    dollar-denominated sibling of ``pothole_verify.compound_ledger``."""
+    dollar-denominated sibling of ``relearn_verify.compound_ledger``."""
     total_usd = 0.0
     total_tokens = 0
     verified = improved = regressed = insufficient = 0

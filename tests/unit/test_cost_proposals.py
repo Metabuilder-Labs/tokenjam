@@ -3,7 +3,7 @@ self-improve loop as advise-only proposals with delta-verify receipts.
 
 Fully isolated: the DB is an ``InMemoryBackend`` and every JSON ledger/store
 write is routed under ``tmp_path`` via ``cfg.storage.path`` — nothing here
-touches a real ``~/.tj`` / ``~/.claude`` (mirrors ``test_pothole_apply``).
+touches a real ``~/.tj`` / ``~/.claude`` (mirrors ``test_relearn_apply``).
 """
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.optimize import cost_apply, cost_verify, pothole_store
+from tokenjam.core.optimize import cost_apply, cost_verify, relearn_store
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
     CacheEfficacyFinding,
     CacheEfficacyRow,
 )
-from tokenjam.core.optimize.analyzers.pothole import PotholeFinding
+from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
 from tokenjam.core.optimize.analyzers.prompt_bloat import BloatPrompt, PromptBloatFinding
 from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 from tokenjam.core.optimize.types import (
@@ -279,26 +279,26 @@ def test_cost_compound_ledger_sums_realized_dollars():
     assert ledger["verified_count"] == 3
 
 
-# --- Store: cost proposals share the pothole cache file ----------------------
+# --- Store: cost proposals share the relearn cache file ----------------------
 
-def test_store_cost_and_pothole_coexist_without_clobber(tmp_path):
-    path = tmp_path / "pothole_cache.json"
-    # Pothole finding written first.
-    pothole_store.write_cache(PotholeFinding(sessions_scanned=7), path=path)
+def test_store_cost_and_relearn_coexist_without_clobber(tmp_path):
+    path = tmp_path / "relearn_cache.json"
+    # Relearn finding written first.
+    relearn_store.write_cache(RelearnFinding(sessions_scanned=7), path=path)
     # Cost proposals written into the SAME file must preserve the finding.
-    pothole_store.write_cost_proposals(
+    relearn_store.write_cost_proposals(
         [{"kind": "cost", "analyzer": "trim", "signature": "cost:trim:x"}], path=path,
     )
-    cost_block = pothole_store.read_cost_proposals(path=path)
+    cost_block = relearn_store.read_cost_proposals(path=path)
     assert cost_block is not None
     assert cost_block["cost_proposals"][0]["signature"] == "cost:trim:x"
-    # The pothole finding is still intact.
-    raw = pothole_store.read_cache(path=path)
+    # The relearn finding is still intact.
+    raw = relearn_store.read_cache(path=path)
     assert raw["finding"]["sessions_scanned"] == 7
-    # A later pothole recompute preserves the cost proposals.
-    pothole_store.write_cache(PotholeFinding(sessions_scanned=9), path=path)
-    assert pothole_store.read_cost_proposals(path=path)["cost_proposals"][0]["signature"] == "cost:trim:x"
-    assert pothole_store.read_cache(path=path)["finding"]["sessions_scanned"] == 9
+    # A later relearn recompute preserves the cost proposals.
+    relearn_store.write_cache(RelearnFinding(sessions_scanned=9), path=path)
+    assert relearn_store.read_cost_proposals(path=path)["cost_proposals"][0]["signature"] == "cost:trim:x"
+    assert relearn_store.read_cache(path=path)["finding"]["sessions_scanned"] == 9
 
 
 # --- Subagent right-sizing: the apply-capable 4th analyzer --------------------

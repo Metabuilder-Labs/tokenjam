@@ -34,8 +34,8 @@ it checks whether the mistake actually stopped.
 npx tokenjam        # a read-only report of your agent's recurring mistakes. nothing installed, nothing kept
 ```
 
-Bare `npx tokenjam` reads the Claude Code logs you already have and prints the potholes your agent
-keeps driving into. When you want the loop that fixes them, onboard:
+Bare `npx tokenjam` reads the Claude Code logs you already have and prints the recurring mistakes your
+agent keeps repeating. When you want the loop that fixes them, onboard:
 
 ```bash
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
@@ -61,8 +61,8 @@ Five stages, human-gated where it counts.
    and OTel spans for everything else, then clusters the blockers your agent silently re-hits across
    sessions: wrong-directory reads, edit-before-read, blocked sleep loops, stale-read races,
    domain-blocked fetches. A pattern has to recur across at least three distinct sessions before it
-   becomes a **pothole**.
-2. **Propose.** For each pothole TokenJam drafts the lightest fix that could work, on a ladder:
+   counts as a recurring mistake worth fixing.
+2. **Propose.** For each recurring mistake TokenJam drafts the lightest fix that could work, on a ladder:
    a **note** appended to your `CLAUDE.md`, then a **skill** (`.claude/skills/<name>/SKILL.md`), then
    a runtime **hook** (or wrapper / config) that catches the mistake as it happens.
 3. **Approve.** Nothing is written until you say so. You review the evidence (the repro sessions) and
@@ -78,7 +78,7 @@ Five stages, human-gated where it counts.
 
 You drive this from three places, no new command to learn: `tj onboard` surfaces your first fix, the
 `tj serve` daemon keeps the detector warm and serves the **Review inbox** in Lens (where you approve,
-apply, and watch verification), and `tj optimize pothole` prints the current potholes from the CLI.
+apply, and watch verification), and `tj optimize relearn` prints the current findings from the CLI.
 
 ---
 
@@ -227,7 +227,7 @@ Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls 
 </tr>
 </table>
 
-`tj optimize` (no args) runs every analyzer: the six above, plus `pothole` (the self-improve loop's
+`tj optimize` (no args) runs every analyzer: the six above, plus `relearn` (the self-improve loop's
 detector), `verbosity` (sessions whose output runs high versus the per-task-shape median),
 `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]`
 ceiling), and `cache-recommend` (the Cache card's breakpoint-suggestion half). Run a subset with

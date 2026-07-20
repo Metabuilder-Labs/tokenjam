@@ -37,7 +37,7 @@ ANALYZER_ORDER: list[str] = [
     "trim",
     "subagent",
     "summarize",
-    "pothole",
+    "relearn",
     "verbosity",
 ]
 
@@ -340,10 +340,10 @@ def _build_finding_constructors() -> dict:
         SummarizeCandidate,
         SummarizeFinding,
     )
-    from tokenjam.core.optimize.analyzers.pothole import (
-        PotholeCluster,
-        PotholeExample,
-        PotholeFinding,
+    from tokenjam.core.optimize.analyzers.relearn import (
+        RelearnCluster,
+        RelearnExample,
+        RelearnFinding,
     )
     from tokenjam.core.optimize.analyzers.output_verbosity import (
         VERBOSITY_HONESTY_CAVEAT,
@@ -466,13 +466,13 @@ def _build_finding_constructors() -> dict:
             avg_reduction_pct=d.get("avg_reduction_pct"),
         )
 
-    def _pothole(d: dict) -> PotholeFinding:
+    def _relearn(d: dict) -> RelearnFinding:
         clusters = []
         for c in d.get("clusters") or []:
             cc = dict(c)
-            cc["examples"] = [PotholeExample(**e) for e in cc.get("examples") or []]
-            clusters.append(PotholeCluster(**cc))
-        return PotholeFinding(
+            cc["examples"] = [RelearnExample(**e) for e in cc.get("examples") or []]
+            clusters.append(RelearnCluster(**cc))
+        return RelearnFinding(
             clusters=clusters,
             sessions_scanned=int(d.get("sessions_scanned", 0)),
             failures_examined=int(d.get("failures_examined", 0)),
@@ -509,7 +509,7 @@ def _build_finding_constructors() -> dict:
         "trim": _prompt_bloat,
         "subagent": _subagent,
         "summarize": _summarize,
-        "pothole": _pothole,
+        "relearn": _relearn,
         "verbosity": _verbosity,
     }
 
