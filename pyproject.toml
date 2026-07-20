@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "tokenjam"
 version = "0.5.7"
-description = "TokenJam: the local-first, OTel-native self-improvement loop for AI agents"
+description = "TokenJam: a local-first, OTel-native cost-saving utility for AI agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Anil Murty", email = "anil@metabldr.com" }]
-keywords = ["ai", "agents", "self-improvement", "claude-code", "observability", "opentelemetry", "llm"]
+keywords = ["ai", "agents", "cost-optimization", "claude-code", "observability", "opentelemetry", "llm"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

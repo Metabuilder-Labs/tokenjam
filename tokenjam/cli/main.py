@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         no_color: bool, db_path: str | None, agent: str | None,
         verbose: bool) -> None:
-    """tj - the self-improvement loop for AI agents."""
+    """tj - a cost-saving utility for AI agents."""
     ctx.ensure_object(dict)
 
     # Bare `tj` (no subcommand) → branded home screen (#240): banner +

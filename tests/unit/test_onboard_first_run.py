@@ -21,7 +21,7 @@ def test_welcome_banner_shows_brand_version_and_value_prop(capsys):
     assert "TokenJam" in out
     assert __version__ in out
     # One-line value prop; honest framing, no promised savings (Rule 14).
-    assert "self-improvement loop for AI agents" in out
+    assert "cost-saving utility for AI agents" in out
     assert "saves you" not in out.lower()
 
 
