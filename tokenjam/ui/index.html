@@ -881,6 +881,11 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
+.measured-tag {
+  font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--success); border: 1px solid var(--success);
+  border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
+}
 a.health-tile {
   display: block; text-decoration: none; color: inherit;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -7794,6 +7799,40 @@ function CostAppliedRow({ rec, onChanged }) {
     </div>`;
 }
 
+// Components E + G1 — the Review inbox entry tile: the estimated-recoverable
+// headline (E, summed server-side over the OPEN, not-yet-applied cost-
+// proposal cards — core/optimize/cost_proposals.py's
+// estimated_recoverable_rollup) beside its measured twin, the cumulative
+// verified-saved receipts (G1, GET /relearn/receipts — core/optimize/
+// receipts.py, combining the relearn ledger's tokens with the cost-verify
+// ledger's tokens AND dollars). Deliberately two SEPARATE, distinctly
+// labeled numbers — an estimate and a measurement never get added together.
+function ReceiptsHeader({ rollup, receiptsData }) {
+  const hasRollup = rollup && rollup.proposal_count > 0;
+  const hasReceipts = receiptsData && receiptsData.verified_count > 0;
+  if (!hasRollup && !hasReceipts) return null;
+  return html`
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 18px">
+      ${hasRollup ? html`
+        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="estimated-tag" title=${rollup.estimate_basis}>est.</span></div>
+          <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">${fmtUsd(rollup.estimated_recoverable_usd)}
+            <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollup.proposal_count} proposal${rollup.proposal_count === 1 ? '' : 's'}</span>
+          </div>
+        </div>
+      ` : null}
+      ${hasReceipts ? html`
+        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Verified saved to date <span class="measured-tag" title=${receiptsData.estimate_basis}>measured</span></div>
+          <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
+            <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
+          </div>
+          <div class="dim" style="font-size:11px;margin-top:6px">${receiptsData.verified_count} checked · ${receiptsData.improved_count} improved · ${receiptsData.regressed_count} regressed · ${receiptsData.no_change_count} no change · ${receiptsData.insufficient_data_count} still measuring</div>
+        </div>
+      ` : null}
+    </div>`;
+}
+
 function ReviewInboxView({ params }) {
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
@@ -7804,8 +7843,10 @@ function ReviewInboxView({ params }) {
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
   const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
   const [costProps, setCostProps] = useState([]);         // advise-only cost proposals (downsize/cache/trim)
+  const [costRollup, setCostRollup] = useState(null);      // Component E — estimated-recoverable headline
   const [costApplied, setCostApplied] = useState([]);     // marked-applied cost proposals + their realized deltas
   const [costLedger, setCostLedger] = useState(null);     // realized dollars across verified cost changes
+  const [receiptsData, setReceiptsData] = useState(null); // Component G1 — combined verified-saved receipts
   const [marking, setMarking] = useState(null);           // signature currently being marked applied
 
   const load = useCallback(async () => {
@@ -7834,6 +7875,7 @@ function ReviewInboxView({ params }) {
     try {
       const r = await api('/relearn/cost-proposals');
       setCostProps(r.proposals || []);
+      setCostRollup(r.rollup || null);   // Component E — server-computed, ignores local dismiss state
     } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {
       const r = await api('/relearn/cost-applied');
@@ -7842,30 +7884,38 @@ function ReviewInboxView({ params }) {
     } catch (e) { /* degrade quietly */ }
   }, []);
 
+  const loadReceipts = useCallback(async () => {
+    try {
+      const r = await api('/relearn/receipts');
+      setReceiptsData(r || null);
+    } catch (e) { /* degrade quietly — the rollup tile is enough on its own */ }
+  }, []);
+
   useEffect(() => {
-    load(); loadApplied(); loadCost();
+    load(); loadApplied(); loadCost(); loadReceipts();
     // Light poll while a background pass may be computing (or right after a
     // manual refresh) so the empty/computing state resolves without a reload.
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
     return () => clearInterval(timer);
-  }, [load, loadApplied, loadCost]);
+  }, [load, loadApplied, loadCost, loadReceipts]);
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
     try { await apiPost('/relearn/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
     // The cost proposals + their realized deltas recompute on the same cadence.
     try { await apiPost('/relearn/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
-    setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
-  }, [load, loadCost]);
+    setTimeout(() => { setRefreshing(false); load(); loadCost(); loadReceipts(); }, 1500);
+  }, [load, loadCost, loadReceipts]);
 
   const markCostApplied = useCallback(async (prop) => {
     setMarking(prop.signature);
     try {
       await apiPostOrDetail('/relearn/cost-proposals/apply', prop);
       await loadCost();
+      await loadReceipts();
     } catch (e) { /* surfaced on next refresh; keep the card in place */ }
     finally { setMarking(null); }
-  }, [loadCost]);
+  }, [loadCost, loadReceipts]);
 
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
   const relearnCount = visible.length;
@@ -7881,7 +7931,7 @@ function ReviewInboxView({ params }) {
 
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
-    loadApplied();
+    loadApplied(); loadReceipts();
   };
 
   const dismissCost = (sig) => {
@@ -7892,6 +7942,8 @@ function ReviewInboxView({ params }) {
   return html`
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
     <div class="sz-note">The recurring mistakes your agent keeps repeating land here so it can relearn them. Each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
+
+    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${receiptsData} />
 
     <div class="cur-listhead">
       <span>
@@ -7921,7 +7973,7 @@ function ReviewInboxView({ params }) {
     ${visibleCost.length > 0 ? html`
       <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers, with verified receipts once you apply one</span></div>
       <div style="margin-top:8px">
-        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
+        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); loadReceipts(); }} />`)}
       </div>
     ` : null}
 
@@ -7929,7 +7981,7 @@ function ReviewInboxView({ params }) {
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories <span class="dim" style="font-weight:400;font-size:12px">· the realized delta the loop measured after you marked each one</span></div>
       <${CostLedgerSummary} ledger=${costLedger} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} onChanged=${loadCost} />`)}
+        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} onChanged=${() => { loadCost(); loadReceipts(); }} />`)}
       </div>
     ` : null}
 
@@ -7937,7 +7989,7 @@ function ReviewInboxView({ params }) {
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
       <${CompoundLedgerSummary} ledger=${ledger} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${loadApplied} />`)}
+        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${() => { loadApplied(); loadReceipts(); }} />`)}
       </div>
     ` : null}
 
