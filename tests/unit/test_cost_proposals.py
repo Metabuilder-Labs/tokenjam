@@ -20,7 +20,10 @@ from tokenjam.core.optimize.analyzers.cache_efficacy import (
 )
 from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
 from tokenjam.core.optimize.analyzers.prompt_bloat import BloatPrompt, PromptBloatFinding
-from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+from tokenjam.core.optimize.cost_proposals import (
+    cost_proposals_from_report,
+    estimated_recoverable_rollup,
+)
 from tokenjam.core.optimize.types import (
     DowngradeFinding,
     OptimizeReport,
@@ -607,3 +610,128 @@ def test_subagent_delta_improved_when_fanout_moves_off_oversized_model(db):
     assert v["verdict"] == "improved"
     assert v["realized_usd_delta"] > 0
     assert v["post_value"] == 0.0        # no post-marker subagent spend on opus
+
+
+# --- Component E: the estimated-recoverable rollup --------------------------
+
+def test_rollup_sums_across_analyzers_and_reports_window():
+    proposals = [
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0},
+        {"signature": "cost:cache:anthropic:claude-sonnet-5", "analyzer": "cache",
+         "title": "t2", "estimated_recoverable_usd": 1.2},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_usd"] == 4.2
+    assert rollup["proposal_count"] == 2
+    assert rollup["window_days"] == 30
+    assert rollup["estimate_confidence"] == "estimated"
+    by_analyzer = {a["analyzer"]: a for a in rollup["by_analyzer"]}
+    assert by_analyzer["downsize"]["count"] == 1
+    assert by_analyzer["cache"]["usd"] == 1.2
+
+
+def test_rollup_dedupes_by_signature_never_double_counting():
+    # A stale/duplicate cache entry carrying the SAME signature twice must
+    # only contribute once — the second copy is dropped, not summed again.
+    proposals = [
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0},
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1-stale",
+         "estimated_recoverable_usd": 3.0},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_usd"] == 3.0
+    assert rollup["proposal_count"] == 1
+
+
+def test_rollup_empty_state():
+    rollup = estimated_recoverable_rollup([])
+    assert rollup["estimated_recoverable_usd"] == 0.0
+    assert rollup["proposal_count"] == 0
+    assert rollup["by_analyzer"] == []
+    assert rollup["contributing"] == []
+    assert "no open" in rollup["estimate_basis"]
+
+
+def test_rollup_skips_proposals_with_no_dollar_estimate():
+    # A card with an estimate of None still exists in the inbox individually;
+    # it just isn't folded into this aggregate (folding in None would
+    # silently misstate what's summed "across N proposals").
+    proposals = [
+        {"signature": "cost:trim:agentA", "analyzer": "trim", "title": "t",
+         "estimated_recoverable_usd": None},
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t2",
+         "estimated_recoverable_usd": 2.5},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["proposal_count"] == 1
+    assert rollup["estimated_recoverable_usd"] == 2.5
+
+
+def test_rollup_is_generic_over_an_unregistered_future_analyzer():
+    # No special-casing by analyzer name — a brand-new analyzer's cards (not
+    # in cost_proposals.COST_ANALYZERS) are picked up with zero code changes
+    # here, as long as they carry the shared CostProposal fields.
+    proposals = [
+        {"signature": "cost:deadweight:some-mcp-server", "analyzer": "deadweight",
+         "title": "Unused MCP server", "estimated_recoverable_usd": 0.75},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_usd"] == 0.75
+    assert rollup["proposal_count"] == 1
+    assert rollup["by_analyzer"][0]["analyzer"] == "deadweight"
+
+
+def test_rollup_ignores_a_proposal_with_no_signature():
+    proposals = [{"analyzer": "downsize", "title": "no sig",
+                  "estimated_recoverable_usd": 5.0}]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["proposal_count"] == 0
+    assert rollup["estimated_recoverable_usd"] == 0.0
+
+
+def test_rollup_all_open_cards_carry_none_renders_empty_state():
+    # Every open card exists but none carries a dollar estimate (e.g. every
+    # cache-thrash card came back "not worth it at this cadence") — the
+    # rollup must still render the sensible empty state, not a zero that
+    # looks like a real (if tiny) measured sum.
+    proposals = [
+        {"signature": "cost:cache:thrash:agentA", "analyzer": "cache", "title": "t1",
+         "estimated_recoverable_usd": None},
+        {"signature": "cost:deadweight:mcp-x", "analyzer": "deadweight", "title": "t2",
+         "estimated_recoverable_usd": None},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_usd"] == 0.0
+    assert rollup["proposal_count"] == 0
+    assert rollup["by_analyzer"] == []
+    assert rollup["contributing"] == []
+    assert "no open" in rollup["estimate_basis"]
+
+
+def test_rollup_mixed_none_and_real_estimates_across_analyzers():
+    # Mirrors two sibling-branch card shapes that intentionally emit None:
+    # Component A's cache-thrash card when the TTL arithmetic comes out
+    # negative ("not worth it at this cadence"), and Component C's
+    # deferred-tools deadweight card. Neither should be coerced into the sum
+    # or into "N proposals" — only the two real-valued cards contribute.
+    proposals = [
+        {"signature": "cost:cache:thrash:agentA", "analyzer": "cache", "title": "not worth it",
+         "estimated_recoverable_usd": None},
+        {"signature": "cost:deadweight:mcp-x", "analyzer": "deadweight", "title": "deferred server",
+         "estimated_recoverable_usd": None},
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "real card 1",
+         "estimated_recoverable_usd": 3.0},
+        {"signature": "cost:cache:anthropic:claude-sonnet-5", "analyzer": "cache", "title": "real card 2",
+         "estimated_recoverable_usd": 1.5},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_usd"] == 4.5
+    assert rollup["proposal_count"] == 2   # only the two real-valued cards
+    signatures = {c["signature"] for c in rollup["contributing"]}
+    assert signatures == {"cost:downsize", "cost:cache:anthropic:claude-sonnet-5"}
+    by_analyzer = {a["analyzer"]: a for a in rollup["by_analyzer"]}
+    assert by_analyzer["cache"]["count"] == 1     # only the real-valued cache card
+    assert by_analyzer["cache"]["usd"] == 1.5
+    assert "deadweight" not in by_analyzer        # its only card was None-only
