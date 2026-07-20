@@ -525,6 +525,17 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
     else:
         snippet = SILENT_INVALIDATOR_CHECKLIST
 
+    # Rollup contract: `estimated_recoverable_usd` feeds a generic cross-card
+    # dollar rollup, so it must only ever be populated when THIS card's own
+    # recommended fix actually recovers it. The "instability" checklist and
+    # the ttl_worth_it==True variant both recommend a fix that closes the
+    # wasted-spend gap, so `wasted_usd` stands as the headline. When the TTL
+    # break-even comes out negative, the card explicitly says "not worth it"
+    # — recommending against the only fix on offer — so the headline must NOT
+    # carry a positive number nobody should act on; excluded (None), not zero
+    # coerced to a false-looking "no waste" claim.
+    recoverable_usd = None if (cause == "ttl" and ttl_worth_it is False) else wasted_usd
+
     return ThrashAgentCandidate(
         agent_id=agent_id, provider=provider, model=model, calls=len(calls),
         cache_write_tokens=total_write, cache_read_tokens=total_read,
@@ -532,13 +543,13 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
         inter_call_gap_p50_minutes=round(gap_p50, 2),
         ttl_worth_it=ttl_worth_it, ttl_breakeven_usd=ttl_breakeven_usd,
         cache_control_snippet=snippet,
-        estimated_recoverable_usd=wasted_usd,
+        estimated_recoverable_usd=recoverable_usd,
         estimate_basis=(
             "wasted = cache-write tokens x (write rate - cache-read rate); "
             "what was paid to write the prefix versus what the same tokens "
-            "would have cost read from a stable cache. The TTL variant's "
-            "break-even (ttl_breakeven_usd) is a separate, honest projection "
-            "that can come out negative — see cause=='ttl' ? ttl_worth_it."
+            "would have cost read from a stable cache. Excluded (None) when "
+            "the TTL variant's break-even is negative, since the card's own "
+            "recommended fix (switching TTL) would not recover it."
         ),
     )
 
