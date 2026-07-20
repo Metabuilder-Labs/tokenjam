@@ -256,10 +256,12 @@ def _matcher_for(rec: dict[str, Any]) -> tuple[Callable[[FailureEpisode], bool],
       verify one applied fix, which isn't worth the $ cost. Reported as not
       measurable rather than guessed at.
     """
-    family_key = rec.get("family_key")
-    signature = rec.get("signature")
+    # Coerced to str at the boundary: the ledger record is an untyped dict, and
+    # both values are closed over as string defaults by the matchers below.
+    family_key = str(rec.get("family_key") or "")
+    signature = str(rec.get("signature") or "")
 
-    if family_key and str(family_key).startswith("distilled:"):
+    if family_key.startswith("distilled:"):
         return (
             lambda f: False, False,
             "distilled (LLM-merged) pattern family — recurrence re-matching isn't "
