@@ -44,8 +44,8 @@ COST_CORRELATIONAL_CAVEAT = (
     "before changing anything."
 )
 
-#: The three analyzers this wiring covers, by registration name.
-COST_ANALYZERS = ("downsize", "cache", "trim", "subagent")
+#: The analyzers this wiring covers, by registration name.
+COST_ANALYZERS = ("downsize", "cache", "trim", "subagent", "deadweight")
 
 # The rung-1 sizing-rubric note a CC-origin subagent proposal writes into the
 # workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
@@ -925,6 +925,72 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
     )]
 
 
+def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per dead-weight MCP server (Component C1).
+
+    Reads ONLY ``DeadweightFinding.dead_servers`` — the C2 tax table (which
+    lists every configured server, dead or alive, purely for ranked
+    visibility) never feeds a proposal here, so a server's schema-injection
+    tax is never counted both in the tax table AND a proposal (the same
+    dedup guarantee ``compute_deadweight_finding`` itself enforces on
+    ``estimated_recoverable_tokens`` / ``estimated_recoverable_usd``).
+
+    ``estimated_recoverable_usd`` is carried straight off the analyzer's own
+    ``ServerDeadweight.estimated_tax_usd_90d`` — the analyzer already prices
+    the token tax through ``core/pricing.py`` at the dominant model observed
+    in that server's sessions (never a hardcoded rate; see
+    ``deadweight._pricing_note``). Stays ``None`` when no priced model was
+    observed for that server — this adapter never invents a rate itself.
+    """
+    if finding is None:
+        return []
+    proposals: list[CostProposal] = []
+    for server in getattr(finding, "dead_servers", []) or []:
+        evidence = (
+            f"`{server.name}` MCP server ({server.scope} scope, configured at "
+            f"{server.source}) made 0 tool calls across {server.sessions_present} "
+            f"session(s) in the window."
+        )
+        if server.deferred_sessions:
+            evidence += (
+                f" ToolSearch deferred its schema in {server.deferred_sessions} "
+                f"of those session(s)."
+            )
+        scope_flag = "user" if server.scope == "user" else "project"
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="deadweight",
+            signature=f"cost:deadweight:{server.name}",
+            title=f"Unused MCP server: {server.name}",
+            target_key={
+                "server": server.name, "scope": server.scope, "source": server.source,
+            },
+            evidence=evidence,
+            baseline={
+                "sessions_present": server.sessions_present,
+                "invocations": server.invocations,
+                "deferred_sessions": server.deferred_sessions,
+                "scope": server.scope,
+                "source": server.source,
+                "example_sessions": list(server.example_sessions),
+                "priced_model": server.priced_model,
+            },
+            advise_text=(
+                server.fix + " Removing (or project-scoping) it is reversible "
+                "and loses no data; it only stops the standing schema-injection "
+                "tax on future sessions."
+            ),
+            suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
+            estimated_recoverable_tokens=server.estimated_tax_tokens_90d or None,
+            estimated_recoverable_usd=server.estimated_tax_usd_90d,
+            estimate_basis=(
+                server.tax_construction
+                + " Projected over a 90-day window from the sessions observed."
+            ),
+        ))
+    return proposals
+
+
 #: Default look-back for the daemon/CLI cost-proposal recompute. Matches the
 #: monthly framing the cost analyzers project against.
 DEFAULT_COST_WINDOW_DAYS = 30
@@ -974,10 +1040,10 @@ def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProp
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
-    the ``cache`` / ``trim`` / ``subagent`` / ``placement`` findings off
-    ``report.findings``. Missing findings (analyzer not run, no candidates)
-    contribute nothing. Never raises — a malformed finding is skipped so one bad
-    analyzer can't sink the inbox.
+    the ``cache`` / ``trim`` / ``subagent`` / ``placement`` / ``deadweight``
+    findings off ``report.findings``. Missing findings (analyzer not run, no
+    candidates) contribute nothing. Never raises — a malformed finding is
+    skipped so one bad analyzer can't sink the inbox.
 
     ``config`` is optional and used for one thing: looking up the local source
     path a user registered for an agent, which decides whether the downsize card
@@ -995,6 +1061,7 @@ def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProp
         (_trim_to_proposals, findings.get("trim")),
         (lambda f: _subagent_to_proposals(f, config), findings.get("subagent")),
         (_placement_to_proposals, findings.get("placement")),
+        (_deadweight_to_proposals, findings.get("deadweight")),
     )
     for adapter, finding in adapters:
         try:
