@@ -353,6 +353,12 @@ def _build_finding_constructors() -> dict:
         VerbosityCandidate,
         VerbosityFinding,
     )
+    from tokenjam.core.optimize.analyzers.deadweight import (
+        ContextTaxRow,
+        DEADWEIGHT_HONESTY_CAVEAT,
+        DeadweightFinding,
+        ServerDeadweight,
+    )
     from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
@@ -509,6 +515,23 @@ def _build_finding_constructors() -> dict:
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
+    def _deadweight(d: dict) -> DeadweightFinding:
+        servers = [ServerDeadweight(**s) for s in d.get("servers") or []]
+        dead_servers = [ServerDeadweight(**s) for s in d.get("dead_servers") or []]
+        tax_table = [ContextTaxRow(**r) for r in d.get("tax_table") or []]
+        return DeadweightFinding(
+            sessions_scanned=int(d.get("sessions_scanned", 0)),
+            configured_servers=int(d.get("configured_servers", 0)),
+            servers=servers,
+            dead_servers=dead_servers,
+            tax_table=tax_table,
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "estimated"),
+            caveat=d.get("caveat", DEADWEIGHT_HONESTY_CAVEAT),
+            notes=list(d.get("notes") or []),
+        )
+
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
@@ -518,6 +541,7 @@ def _build_finding_constructors() -> dict:
         "subagent": _subagent,
         "summarize": _summarize,
         "relearn": _relearn,
+        "deadweight": _deadweight,
         "verbosity": _verbosity,
     }
 

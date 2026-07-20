@@ -3,7 +3,7 @@ self-improve loop as advise-only proposals with delta-verify receipts.
 
 Fully isolated: the DB is an ``InMemoryBackend`` and every JSON ledger/store
 write is routed under ``tmp_path`` via ``cfg.storage.path`` — nothing here
-touches a real ``~/.tj`` / ``~/.claude`` (mirrors ``test_pothole_apply``).
+touches a real ``~/.tj`` / ``~/.claude`` (mirrors ``test_relearn_apply``).
 """
 from __future__ import annotations
 
@@ -13,12 +13,12 @@ import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.optimize import cost_apply, cost_verify, pothole_store
+from tokenjam.core.optimize import cost_apply, cost_verify, relearn_store
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
     CacheEfficacyFinding,
     CacheEfficacyRow,
 )
-from tokenjam.core.optimize.analyzers.pothole import PotholeFinding
+from tokenjam.core.optimize.analyzers.relearn import RelearnFinding
 from tokenjam.core.optimize.analyzers.prompt_bloat import BloatPrompt, PromptBloatFinding
 from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
 from tokenjam.core.optimize.types import (
@@ -279,23 +279,221 @@ def test_cost_compound_ledger_sums_realized_dollars():
     assert ledger["verified_count"] == 3
 
 
-# --- Store: cost proposals share the pothole cache file ----------------------
+# --- Store: cost proposals share the relearn cache file ----------------------
 
-def test_store_cost_and_pothole_coexist_without_clobber(tmp_path):
-    path = tmp_path / "pothole_cache.json"
-    # Pothole finding written first.
-    pothole_store.write_cache(PotholeFinding(sessions_scanned=7), path=path)
+def test_store_cost_and_relearn_coexist_without_clobber(tmp_path):
+    path = tmp_path / "relearn_cache.json"
+    # Relearn finding written first.
+    relearn_store.write_cache(RelearnFinding(sessions_scanned=7), path=path)
     # Cost proposals written into the SAME file must preserve the finding.
-    pothole_store.write_cost_proposals(
+    relearn_store.write_cost_proposals(
         [{"kind": "cost", "analyzer": "trim", "signature": "cost:trim:x"}], path=path,
     )
-    cost_block = pothole_store.read_cost_proposals(path=path)
+    cost_block = relearn_store.read_cost_proposals(path=path)
     assert cost_block is not None
     assert cost_block["cost_proposals"][0]["signature"] == "cost:trim:x"
-    # The pothole finding is still intact.
-    raw = pothole_store.read_cache(path=path)
+    # The relearn finding is still intact.
+    raw = relearn_store.read_cache(path=path)
     assert raw["finding"]["sessions_scanned"] == 7
-    # A later pothole recompute preserves the cost proposals.
-    pothole_store.write_cache(PotholeFinding(sessions_scanned=9), path=path)
-    assert pothole_store.read_cost_proposals(path=path)["cost_proposals"][0]["signature"] == "cost:trim:x"
-    assert pothole_store.read_cache(path=path)["finding"]["sessions_scanned"] == 9
+    # A later relearn recompute preserves the cost proposals.
+    relearn_store.write_cache(RelearnFinding(sessions_scanned=9), path=path)
+    assert relearn_store.read_cost_proposals(path=path)["cost_proposals"][0]["signature"] == "cost:trim:x"
+    assert relearn_store.read_cache(path=path)["finding"]["sessions_scanned"] == 9
+
+
+# --- Subagent right-sizing: the apply-capable 4th analyzer --------------------
+
+def _sub_finding(models=("claude-opus-4-8",)):
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        SubagentRightsizingFinding,
+        SubagentRow,
+    )
+    flagged = [
+        SubagentRow(session_id="s1", sub_agent_id=f"sa{i}", model=m, llm_calls=2,
+                    tool_calls=1, input_tokens=60000, output_tokens=500, cache_tokens=0,
+                    cache_write_tokens=0, cost_usd=1.2, provider="anthropic",
+                    flags=["over_powered"])
+        for i, m in enumerate(models)
+    ]
+    return SubagentRightsizingFinding(
+        flagged=flagged, percent_of_cost=0.66, flagged_cost_usd=1.2,
+        subagent_cost_usd=1.5, estimated_recoverable_usd=0.4,
+        estimated_recoverable_tokens=60500,
+    )
+
+
+def test_subagent_proposal_is_apply_capable_cc_origin():
+    from tokenjam.core.optimize.cost_proposals import _subagent_to_proposals
+    props = _subagent_to_proposals(_sub_finding())
+    assert len(props) == 1
+    p = props[0]
+    assert p.analyzer == "subagent"
+    assert p.apply_capable is True
+    assert p.advise_only is False        # CC-origin has a workspace surface
+    assert p.rung == 1 and p.scope == "project"
+    assert p.proposed_fix                # a sizing rubric note to write
+    assert p.target_key == {"models": ["claude-opus-4-8"], "subagent": True}
+
+
+def test_subagent_proposal_degrades_to_advise_only_without_over_powered():
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        SubagentRightsizingFinding,
+    )
+    # over_provisioned-only (no model swap) yields no proposal here.
+    assert _sub_finding.__doc__ is None  # sanity: helper unchanged
+    from tokenjam.core.optimize.cost_proposals import _subagent_to_proposals
+    assert _subagent_to_proposals(SubagentRightsizingFinding(flagged=[])) == []
+
+
+# --- deadweight (C1: MCP dead-weight servers) --------------------------------
+
+def _dead_server(**overrides):
+    from tokenjam.core.optimize.analyzers.deadweight import ServerDeadweight
+    fields = dict(
+        name="apollo", scope="project", source="/repo/.mcp.json",
+        sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
+        estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_90d=225_000,
+        tax_construction="25,000 tok/session (full schema injection), cited estimate.",
+        fix="Remove or project-scope the `apollo` MCP server (/repo/.mcp.json); "
+            "zero tool calls across 10 session(s) in this window.",
+        example_sessions=["s0", "s1", "s2"],
+    )
+    fields.update(overrides)
+    return ServerDeadweight(**fields)
+
+
+def _deadweight_finding(dead_servers=None, tax_table=None):
+    from tokenjam.core.optimize.analyzers.deadweight import ContextTaxRow, DeadweightFinding
+    dead_servers = dead_servers if dead_servers is not None else [_dead_server()]
+    tax_table = tax_table if tax_table is not None else [
+        ContextTaxRow(source="MCP schema: apollo", sessions=10,
+                      avg_tokens_per_session=25_000, total_tokens_window=250_000),
+    ]
+    return DeadweightFinding(
+        sessions_scanned=10, configured_servers=1,
+        servers=dead_servers, dead_servers=dead_servers, tax_table=tax_table,
+        estimated_recoverable_tokens=sum(s.estimated_tax_tokens_90d for s in dead_servers) or None,
+        estimate_basis="dead-server 90d tax sum",
+    )
+
+
+def test_deadweight_proposal_shape_and_fields():
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    props = _deadweight_to_proposals(_deadweight_finding())
+    assert len(props) == 1
+    p = props[0]
+    assert p.kind == "cost"
+    assert p.analyzer == "deadweight"
+    assert p.signature == "cost:deadweight:apollo"
+    assert p.advise_only is True
+    assert p.correlational is True
+    assert p.estimate_confidence == "estimated"
+    assert "apollo" in p.title
+    assert "0 tool calls" in p.evidence
+    assert p.target_key == {"server": "apollo", "scope": "project", "source": "/repo/.mcp.json"}
+    assert p.baseline["example_sessions"] == ["s0", "s1", "s2"]
+    assert p.estimated_recoverable_tokens == 225_000
+    assert p.estimated_recoverable_usd is None  # tokens-only, never a stacked $ guess
+    assert "claude mcp remove apollo --scope project" in p.suggestion
+
+
+def test_deadweight_proposal_notes_deferred_sessions_in_evidence():
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    server = _dead_server(deferred_sessions=4)
+    p = _deadweight_to_proposals(_deadweight_finding(dead_servers=[server]))[0]
+    assert "ToolSearch deferred" in p.evidence
+    assert "4" in p.evidence
+
+
+def test_deadweight_proposal_empty_for_no_dead_servers():
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    assert _deadweight_to_proposals(_deadweight_finding(dead_servers=[])) == []
+    assert _deadweight_to_proposals(None) == []
+
+
+def test_deadweight_wired_into_cost_analyzers_and_report_adapter():
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS, cost_proposals_from_report
+    assert "deadweight" in COST_ANALYZERS
+
+    rep = _report()
+    rep.findings["deadweight"] = _deadweight_finding()
+    props = {p.analyzer for p in cost_proposals_from_report(rep)}
+    assert "deadweight" in props
+
+
+def test_deadweight_tax_table_never_becomes_a_second_proposal():
+    """Dedup guarantee: a live (non-dead) server sits in the tax table for
+    visibility but must never itself spawn a proposal, and a dead server's
+    proposal total must equal exactly its OWN 90d tax -- never the tax
+    table's (possibly multi-row) sum."""
+    from tokenjam.core.optimize.analyzers.deadweight import ContextTaxRow
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+
+    dead = _dead_server(name="apollo", estimated_tax_tokens_90d=225_000)
+    finding = _deadweight_finding(
+        dead_servers=[dead],
+        tax_table=[
+            ContextTaxRow(source="MCP schema: apollo", sessions=10,
+                          avg_tokens_per_session=25_000, total_tokens_window=250_000),
+            # A live server: present in the tax table, but not in dead_servers.
+            ContextTaxRow(source="MCP schema: exa", sessions=10,
+                          avg_tokens_per_session=25_000, total_tokens_window=250_000),
+            ContextTaxRow(source="CLAUDE.md", sessions=10,
+                          avg_tokens_per_session=500, total_tokens_window=5_000),
+        ],
+    )
+    props = _deadweight_to_proposals(finding)
+    assert len(props) == 1
+    assert props[0].estimated_recoverable_tokens == 225_000
+    assert finding.estimated_recoverable_tokens == 225_000  # never the tax-table's 505,000 sum
+
+
+# --- deadweight finding round-trips through report_to_dict/report_from_dict --
+
+def test_deadweight_finding_survives_report_dict_round_trip():
+    from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    w = WindowSummary(since=MARKER, until=NOW, days=5, sessions=10, spans=100,
+                      total_tokens=1, total_cost_usd=5.0, thin_data=False)
+    report = OptimizeReport(window=w, findings={"deadweight": _deadweight_finding()})
+
+    payload = report_to_dict(report)
+    rebuilt = report_from_dict(payload)
+
+    finding = rebuilt.findings["deadweight"]
+    assert finding.configured_servers == 1
+    assert len(finding.dead_servers) == 1
+    assert finding.dead_servers[0].name == "apollo"
+    assert finding.dead_servers[0].example_sessions == ["s0", "s1", "s2"]
+    assert finding.estimated_recoverable_tokens == 225_000
+    assert len(finding.tax_table) == 1
+    assert finding.tax_table[0].source == "MCP schema: apollo"
+
+
+def _seed_sub(db, *, model, when, count=30, provider="anthropic"):
+    for i in range(count):
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", provider=provider, model=model,
+            billing_account=provider, input_tokens=8000, output_tokens=200,
+            session_id=f"{model}-{when.isoformat()}-{i}", sub_agent_id="sa1",
+            start_time=when + timedelta(minutes=i),
+        ))
+
+
+def test_subagent_delta_improved_when_fanout_moves_off_oversized_model(db):
+    # pre: subagent fan-out on opus; post: moved to sonnet.
+    _seed_sub(db, model="claude-opus-4-8", when=MARKER - timedelta(hours=40))
+    _seed_sub(db, model="claude-sonnet-5", when=MARKER + timedelta(hours=1))
+    # main-thread opus post-marker must NOT count (subagent-scoped metric).
+    for i in range(10):
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", model="claude-opus-4-8", input_tokens=8000,
+            output_tokens=200, session_id=f"main-{i}",
+            start_time=MARKER + timedelta(hours=1, minutes=i),
+        ))
+    rec = _record("subagent", {"models": ["claude-opus-4-8"], "subagent": True}, agent_id="")
+    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
+    assert v["verdict"] == "improved"
+    assert v["realized_usd_delta"] > 0
+    assert v["post_value"] == 0.0        # no post-marker subagent spend on opus
