@@ -165,17 +165,68 @@ def _downsize_to_proposal(finding: Any) -> list[CostProposal]:
     )]
 
 
+def _per_agent_cache_recoverable_by_model(finding: Any) -> dict[tuple[str, str], tuple[float, int]]:
+    """Sum of ``estimated_recoverable_usd``/``estimated_recoverable_tokens``
+    already claimed by the root-caused per-agent cards (A1 uncached / A2
+    thrash / A3 lookback), keyed by (provider, model).
+
+    The generic per-(provider, model) efficacy row and these per-agent checks
+    both read from the SAME underlying spans — a flagged agent's own calls
+    are part of the aggregate the generic row's efficacy is computed over. So
+    the dollars a per-agent card claims must be subtracted from the generic
+    row's figure before it's surfaced, or the Review-inbox rollup (which sums
+    every open card's ``estimated_recoverable_usd`` with no analyzer
+    allowlist) double-counts the same waste under two signatures. See
+    ``_cache_to_proposals``.
+    """
+    totals: dict[tuple[str, str], tuple[float, int]] = {}
+    groups = (
+        getattr(finding, "uncached_agents", []) or [],
+        getattr(finding, "thrash_agents", []) or [],
+        getattr(finding, "lookback_miss_agents", []) or [],
+    )
+    for group in groups:
+        for c in group:
+            usd = getattr(c, "estimated_recoverable_usd", None) or 0.0
+            tokens = getattr(c, "estimated_recoverable_tokens", None) or 0
+            if usd <= 0 and tokens <= 0:
+                continue
+            key = (c.provider, c.model)
+            prev_usd, prev_tokens = totals.get(key, (0.0, 0))
+            totals[key] = (prev_usd + usd, prev_tokens + tokens)
+    return totals
+
+
 def _cache_to_proposals(finding: Any) -> list[CostProposal]:
-    """One proposal per flagged (provider, model) cache-efficacy row."""
+    """One proposal per flagged (provider, model) cache-efficacy row.
+
+    Reduced by whatever the more specific per-agent root-cause cards (A1/A2/
+    A3) already claim for that same (provider, model) — see
+    ``_per_agent_cache_recoverable_by_model`` — so the rollup never sums the
+    same underlying waste twice under two different signatures.
+    """
     if finding is None:
         return []
     from tokenjam.core.optimize.analyzers.cache_efficacy import (
         estimate_cache_recoverable,
     )
 
+    already_claimed = _per_agent_cache_recoverable_by_model(finding)
+
     proposals: list[CostProposal] = []
     for row in getattr(finding, "flagged", []) or []:
         usd, tokens = estimate_cache_recoverable([row])
+        claimed_usd, claimed_tokens = already_claimed.get((row.provider, row.model), (0.0, 0))
+        basis = str(getattr(finding, "estimate_basis", "") or "")
+        if claimed_usd > 0 or claimed_tokens > 0:
+            usd = round(max(0.0, (usd or 0.0) - claimed_usd), 6)
+            tokens = max(0, (tokens or 0) - claimed_tokens)
+            basis = (
+                basis + (" " if basis else "")
+                + f"Reduced by ${claimed_usd:.4f} already attributed to more "
+                "specific per-agent cache proposals for this model, so the "
+                "rollup does not double-count the same spend."
+            )
         evidence = (
             f"{row.provider}/{row.model}: {row.efficacy * 100:.0f}% of input "
             f"tokens served from cache over {row.input_tokens:,} input tokens "
@@ -203,7 +254,159 @@ def _cache_to_proposals(finding: Any) -> list[CostProposal]:
             ),
             estimated_recoverable_usd=usd,
             estimated_recoverable_tokens=tokens,
-            estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+            estimate_basis=basis,
+        ))
+    return proposals
+
+
+def _cache_uncached_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per A1 uncached-agent candidate (see
+    ``analyzers.cache_efficacy``): an agent group making cacheable calls with
+    prompt caching never attempted. Verified through the same efficacy metric
+    as ``_cache_to_proposals`` (agent-scoped), so no ``cost_verify`` change
+    is needed for this check."""
+    if finding is None:
+        return []
+    proposals: list[CostProposal] = []
+    for c in getattr(finding, "uncached_agents", []) or []:
+        evidence = (
+            f"{c.agent_id}: {c.calls} calls on {c.model} with zero prompt "
+            f"caching attempted (no cache reads, no cache writes) across "
+            f"{c.sessions} session(s); assumed stable prefix "
+            f"~{c.assumed_prefix_tokens:,} tokens (this agent's own p25 input size)."
+        )
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="cache",
+            signature=f"cost:cache-uncached:{c.agent_id}",
+            title=f"Uncached agent: {c.agent_id}",
+            target_key={"agent_id": c.agent_id, "provider": c.provider, "model": c.model},
+            evidence=evidence,
+            baseline={
+                "agent_id": c.agent_id, "provider": c.provider, "model": c.model,
+                "calls": c.calls, "sessions": c.sessions,
+                "assumed_prefix_tokens": c.assumed_prefix_tokens,
+            },
+            advise_text=(
+                "Add a cache_control breakpoint on this agent's stable prefix "
+                "(system prompt / tool definitions) so repeated calls read "
+                "from cache instead of paying full input price every time."
+            ),
+            suggestion=c.cache_control_snippet,
+            estimated_recoverable_usd=c.estimated_recoverable_usd,
+            estimated_recoverable_tokens=c.estimated_recoverable_tokens,
+            estimate_basis=c.estimate_basis,
+            agent_id=c.agent_id,
+        ))
+    return proposals
+
+
+def _cache_thrash_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per A2 cache-thrash candidate. Card text branches on the
+    detected root cause: a TTL-cadence card (honest break-even, which may say
+    the switch isn't worth it) versus an instability checklist card."""
+    if finding is None:
+        return []
+    from tokenjam.core.optimize.analyzers.cache_efficacy import (
+        SILENT_INVALIDATOR_CHECKLIST,
+    )
+
+    proposals: list[CostProposal] = []
+    for c in getattr(finding, "thrash_agents", []) or []:
+        evidence = (
+            f"{c.agent_id}: caching attempted on {c.model} but read:write "
+            f"ratio is {c.read_write_ratio:.2f} over {c.calls} calls "
+            f"({c.cache_read_tokens:,} cache-read tokens vs "
+            f"{c.cache_write_tokens:,} cache-write tokens); median inter-call "
+            f"gap {c.inter_call_gap_p50_minutes:.1f} min."
+        )
+        if c.cause == "ttl":
+            if c.ttl_worth_it:
+                advise = (
+                    "Calls land more than 5 minutes apart, so the default "
+                    "5-minute cache write is expiring before it's reused. "
+                    "Switching to the 1-hour cache TTL is estimated to pay "
+                    "off at this cadence."
+                )
+            else:
+                advise = (
+                    "Calls land more than 5 minutes apart, so the default "
+                    "5-minute cache write is expiring before it's reused. "
+                    "The 1-hour TTL's write premium doesn't clear at this "
+                    "cadence: caching not worth it at this cadence."
+                )
+        else:
+            advise = (
+                "Calls land close enough together that a TTL expiry doesn't "
+                "explain the miss rate; the prefix itself is likely changing "
+                "between calls. " + SILENT_INVALIDATOR_CHECKLIST
+            )
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="cache_thrash",
+            signature=f"cost:cache-thrash:{c.agent_id}",
+            title=f"Cache thrash: {c.agent_id}",
+            target_key={"agent_id": c.agent_id, "provider": c.provider, "model": c.model},
+            evidence=evidence,
+            baseline={
+                "agent_id": c.agent_id, "provider": c.provider, "model": c.model,
+                "calls": c.calls, "cache_write_tokens": c.cache_write_tokens,
+                "cache_read_tokens": c.cache_read_tokens,
+                "read_write_ratio": c.read_write_ratio, "cause": c.cause,
+                "inter_call_gap_p50_minutes": c.inter_call_gap_p50_minutes,
+                "ttl_worth_it": c.ttl_worth_it,
+                "ttl_breakeven_usd": c.ttl_breakeven_usd,
+            },
+            advise_text=advise,
+            suggestion=c.cache_control_snippet,
+            estimated_recoverable_usd=c.estimated_recoverable_usd,
+            estimated_recoverable_tokens=c.estimated_recoverable_tokens,
+            estimate_basis=c.estimate_basis,
+            agent_id=c.agent_id,
+        ))
+    return proposals
+
+
+def _cache_lookback_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per A3 20-block-lookback-miss candidate. Weakest-
+    confidence check of the three; the analyzer only classifies an agent here
+    when A1/A2 don't already explain its cache waste."""
+    if finding is None:
+        return []
+    from tokenjam.core.optimize.analyzers.cache_efficacy import LOOKBACK_BLOCK_LIMIT
+
+    proposals: list[CostProposal] = []
+    for c in getattr(finding, "lookback_miss_agents", []) or []:
+        evidence = (
+            f"{c.agent_id}: {c.miss_count} cache miss(es) on {c.model}, each "
+            f"directly following a turn with an estimated "
+            f"{c.avg_prior_turn_blocks:.0f} content blocks (lookback limit: "
+            f"{LOOKBACK_BLOCK_LIMIT})."
+        )
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="cache",
+            signature=f"cost:cache-lookback:{c.agent_id}",
+            title=f"20-block lookback miss: {c.agent_id}",
+            target_key={"agent_id": c.agent_id, "provider": c.provider, "model": c.model},
+            evidence=evidence,
+            baseline={
+                "agent_id": c.agent_id, "provider": c.provider, "model": c.model,
+                "miss_count": c.miss_count,
+                "avg_prior_turn_blocks": c.avg_prior_turn_blocks,
+            },
+            advise_text=(
+                "Anthropic's cache breakpoint search looks back at most "
+                f"{LOOKBACK_BLOCK_LIMIT} content blocks. Long tool-heavy "
+                "turns push the prior breakpoint out of range; add an "
+                "intermediate cache_control breakpoint every ~15 blocks in "
+                "long tool-use turns."
+            ),
+            suggestion=c.cache_control_snippet,
+            estimated_recoverable_usd=c.estimated_recoverable_usd,
+            estimated_recoverable_tokens=c.estimated_recoverable_tokens,
+            estimate_basis=c.estimate_basis,
+            agent_id=c.agent_id,
         ))
     return proposals
 
@@ -400,6 +603,9 @@ def cost_proposals_from_report(report: Any) -> list[CostProposal]:
     adapters = (
         (_downsize_to_proposal, getattr(report, "downgrade", None)),
         (_cache_to_proposals, findings.get("cache")),
+        (_cache_uncached_to_proposals, findings.get("cache")),
+        (_cache_thrash_to_proposals, findings.get("cache")),
+        (_cache_lookback_to_proposals, findings.get("cache")),
         (_trim_to_proposals, findings.get("trim")),
         (_subagent_to_proposals, findings.get("subagent")),
     )
