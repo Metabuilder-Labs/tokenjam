@@ -35,6 +35,7 @@ from tokenjam.core.optimize import (
     cost_apply,
     cost_proposals as cost_proposals_mod,
     cost_verify,
+    receipts,
     relearn_apply,
     relearn_store,
     relearn_verify,
@@ -232,17 +233,48 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     """Cost proposals for the Review inbox, listed beside relearn proposals.
 
     Returns ``{"status": "ready"|"never_run", "computed_at": iso|null,
-    "proposals": [dict, ...]}``. A fresh install (no cost recompute has run)
-    reports ``never_run`` with an empty list — the inbox renders its empty
-    state, not an error."""
-    block = relearn_store.read_cost_proposals(config=_config(request))
+    "proposals": [dict, ...], "rollup": dict}``. A fresh install (no cost
+    recompute has run) reports ``never_run`` with an empty list — the inbox
+    renders its empty state, not an error.
+
+    ``rollup`` is Component E's single "estimated recoverable" headline
+    (``cost_proposals.estimated_recoverable_rollup``): the sum of
+    ``estimated_recoverable_usd`` across the OPEN proposals only — every
+    proposal whose signature isn't already in the (non-reverted) cost-applied
+    ledger. Computed here, not client-side, so the headline reflects every
+    viewer's state consistently (a browser's local "dismiss" never affects
+    this figure — dismissing hides a card from one person's view, it doesn't
+    change what's actually still outstanding)."""
+    config = _config(request)
+    block = relearn_store.read_cost_proposals(config=config)
+    proposals = list(block.get("cost_proposals") or []) if block is not None else []
+    applied_sigs = {
+        rec.get("signature") for rec in cost_apply.list_applied(config)
+        if rec.get("state") != "reverted"
+    }
+    open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
+    rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals)
     if block is None:
-        return {"status": "never_run", "computed_at": None, "proposals": []}
+        return {"status": "never_run", "computed_at": None, "proposals": [], "rollup": rollup}
     return {
         "status": "ready",
         "computed_at": block.get("cost_computed_at"),
-        "proposals": block.get("cost_proposals") or [],
+        "proposals": proposals,
+        "rollup": rollup,
     }
+
+
+@router.get("/relearn/receipts", dependencies=[Depends(require_api_key)])
+def get_relearn_receipts(request: Request) -> dict[str, Any]:
+    """Component G1: the cumulative "verified saved" receipts — the measured
+    twin of the ``rollup`` field above (Component E). Combines the relearn
+    ledger and the cost-verify ledger (``core.optimize.receipts``);
+    read-only, no recompute triggered here — it rides the same ``/refresh``
+    cadence the two source ledgers already recompute on."""
+    config = _config(request)
+    relearn_records = relearn_apply.list_applied(config)
+    cost_records = cost_apply.list_applied(config)
+    return receipts.verified_saved_summary(relearn_records, cost_records)
 
 
 @router.post("/relearn/cost-proposals/refresh", dependencies=_WRITE_AUTH)
