@@ -52,12 +52,30 @@ def client(app):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
 
 
-def _apply_body(target_path: str, *, rung: int = 1, go: bool = True) -> dict:
+def _apply_body(target_path: str, *, proposal_id: str = "rp_unused000000", go: bool = True) -> dict:
+    """An apply request names a STORED proposal; the cluster content itself is
+    never accepted from the caller (see the F2 tests at the bottom)."""
     return {
-        "signature": "cwd_confusion", "family_key": "cwd_confusion",
-        "title": "cwd / relative-path confusion", "proposed_fix": "fix it",
-        "rung": rung, "scope": "project", "target_path": target_path, "go": go,
+        "proposal_id": proposal_id, "scope": "project",
+        "target_path": target_path, "go": go,
     }
+
+
+@pytest.fixture
+def stored_proposal(config) -> str:
+    """Persist a detector finding the way a real recompute does, and hand back
+    the proposal ID the write endpoints will accept."""
+    from tokenjam.core.optimize import relearn_proposals, relearn_store
+    from tokenjam.core.optimize.analyzers.relearn import RelearnCluster, RelearnFinding
+
+    cluster = RelearnCluster(
+        signature="cwd_confusion", family_key="cwd_confusion",
+        title="cwd / relative-path confusion", sessions=5, occurrences=9,
+        repos=["demo"], rung=1, scope="project",
+        proposed_fix="Verify an absolute cwd before a relative Read.",
+    )
+    relearn_store.write_cache(RelearnFinding(clusters=[cluster]), config=config)
+    return relearn_proposals.list_proposals(config)[0]["proposal_id"]
 
 
 # --- must-fix #1: write endpoints require the local write token, always -------
@@ -149,7 +167,7 @@ async def test_apply_refuses_target_outside_home(app, client, monkeypatch, tmp_p
     assert not outside.exists()
 
 
-async def test_apply_allows_target_inside_home(app, client, monkeypatch, tmp_path):
+async def test_apply_allows_target_inside_home(app, client, monkeypatch, tmp_path, stored_proposal):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
@@ -158,7 +176,7 @@ async def test_apply_allows_target_inside_home(app, client, monkeypatch, tmp_pat
     inside = fake_home / "CLAUDE.md"
     inside.write_text("# Repo\n", encoding="utf-8")
     r = await client.post(
-        "/api/v1/relearn/apply", json=_apply_body(str(inside)),
+        "/api/v1/relearn/apply", json=_apply_body(str(inside), proposal_id=stored_proposal),
         headers={"X-TJ-Local-Token": token},
     )
     assert r.status_code == 200
@@ -167,7 +185,9 @@ async def test_apply_allows_target_inside_home(app, client, monkeypatch, tmp_pat
 
 # --- must-fix #2 (routed through the API): rung-1 note target allowlist -------
 
-async def test_apply_note_route_refuses_non_markdown_target(app, client, monkeypatch, tmp_path):
+async def test_apply_note_route_refuses_non_markdown_target(
+    app, client, monkeypatch, tmp_path, stored_proposal,
+):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
@@ -176,7 +196,7 @@ async def test_apply_note_route_refuses_non_markdown_target(app, client, monkeyp
     target = fake_home / "evil.py"
     target.write_text("print('do not touch me')\n", encoding="utf-8")
     r = await client.post(
-        "/api/v1/relearn/apply", json=_apply_body(str(target)),
+        "/api/v1/relearn/apply", json=_apply_body(str(target), proposal_id=stored_proposal),
         headers={"X-TJ-Local-Token": token},
     )
     assert r.status_code == 409
@@ -195,8 +215,37 @@ Body.
 """
 
 
+def _store_cost_proposal(config, **overrides) -> str:
+    """Persist a model-routing cost proposal the way an optimize pass does, and
+    hand back the ID the write endpoints will accept."""
+    from tokenjam.core.optimize import relearn_proposals, relearn_store
+    from tokenjam.core.optimize.cost_proposals import CostProposal
+
+    fields = {
+        "kind": "cost", "analyzer": "subagent",
+        "signature": "cost:subagent:explore",
+        "title": "Over-powered subagent explore",
+        "target_key": {}, "evidence": "", "baseline": {},
+        "advise_text": "Route explore to the cheaper same-family model.",
+        "proposed_fix": "Route explore to the cheaper same-family model.",
+        "rung": 0, "scope": "project", "apply_capable": True,
+        "apply_kind": "agent_model", "agent_name": "explore",
+        "current_model": "claude-opus-4-8", "proposed_model": "claude-haiku-4-5",
+    }
+    fields.update(overrides)
+    relearn_store.write_cost_proposals([CostProposal(**fields)], config=config)
+    return relearn_proposals.list_cost_proposals(config)[0]["proposal_id"]
+
+
+@pytest.fixture
+def stored_cost_proposal(config) -> str:
+    """A stored model-routing cost proposal, so the apply below names a card
+    the detector actually produced."""
+    return _store_cost_proposal(config)
+
+
 async def test_agent_model_apply_opens_a_cost_verify_window(
-    app, client, config, monkeypatch, tmp_path,
+    app, client, config, monkeypatch, tmp_path, stored_cost_proposal,
 ):
     """A subagent model write is a cost fix with a file to edit, so the same
     approval that rewrites the frontmatter must also start the exposure window
@@ -212,16 +261,10 @@ async def test_agent_model_apply_opens_a_cost_verify_window(
     target.parent.mkdir(parents=True)
     target.write_text(_AGENT_FILE, encoding="utf-8")
 
-    body = {
-        "signature": "cost:subagent:explore",
-        "title": "Over-powered subagent explore",
-        "rung": 0, "scope": "project", "target_path": str(target), "go": True,
-        "apply_kind": "agent_model", "agent_name": "explore",
-        "current_model": "claude-opus-4-8", "proposed_model": "claude-haiku-4-5",
-        "analyzer": "subagent",
-    }
     r = await client.post(
-        "/api/v1/relearn/apply", json=body, headers={"X-TJ-Local-Token": token},
+        "/api/v1/relearn/apply",
+        json=_apply_body(str(target), proposal_id=stored_cost_proposal),
+        headers={"X-TJ-Local-Token": token},
     )
 
     assert r.status_code == 200
@@ -238,8 +281,103 @@ async def test_agent_model_apply_opens_a_cost_verify_window(
     ]
 
 
+# --- F2 for the model-routing kinds: the values come from the STORE ----------
+
+async def test_apply_refuses_a_caller_supplied_model(
+    app, client, monkeypatch, tmp_path, stored_cost_proposal,
+):
+    """A valid proposal_id does not buy the right to name the model. The card
+    was rendered from the stored proposal, so the stored proposal is what the
+    human approved; echoing a different value back is refused outright."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "workspace" / ".claude" / "agents" / "explore.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_AGENT_FILE, encoding="utf-8")
+
+    body = _apply_body(str(target), proposal_id=stored_cost_proposal)
+    body["proposed_model"] = "claude-opus-4-8"      # keep the expensive model
+    r = await client.post(
+        "/api/v1/relearn/apply", json=body,
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 422
+    assert target.read_text() == _AGENT_FILE        # nothing written at all
+
+
+async def test_apply_refuses_a_caller_supplied_source_path(
+    app, client, monkeypatch, tmp_path, config,
+):
+    """The model_swap safety case rests on source_path having been REGISTERED
+    in the user's own config. A caller-supplied path would aim the write at any
+    repo on disk, so the request carrying one is refused before anything runs."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    victim = fake_home / "someone-elses-repo" / "config.py"
+    victim.parent.mkdir(parents=True)
+    victim.write_text('MODEL = "claude-opus-4-8"\n', encoding="utf-8")
+
+    proposal_id = _store_cost_proposal(
+        config, apply_kind="model_swap", source_path=str(fake_home / "registered"),
+    )
+    body = _apply_body(str(victim), proposal_id=proposal_id)
+    body["source_path"] = str(victim.parent)
+    r = await client.post(
+        "/api/v1/relearn/apply", json=body,
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 422
+    assert victim.read_text() == 'MODEL = "claude-opus-4-8"\n'
+
+
+async def test_apply_writes_the_stored_model_not_a_requested_one(
+    app, client, monkeypatch, tmp_path, stored_cost_proposal,
+):
+    """The positive half of the same guarantee: with only an ID on the wire,
+    the model that lands in the file is the one the detector proposed."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "workspace" / ".claude" / "agents" / "explore.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_AGENT_FILE, encoding="utf-8")
+
+    r = await client.post(
+        "/api/v1/relearn/apply",
+        json=_apply_body(str(target), proposal_id=stored_cost_proposal),
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 200
+    assert "model: claude-haiku-4-5" in target.read_text()
+
+
+async def test_apply_refuses_a_stored_proposal_missing_a_required_field(
+    app, client, monkeypatch, tmp_path, config,
+):
+    """An incomplete stored proposal is refused by name rather than falling
+    back to anything the caller sent — there is no longer a fallback."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "workspace" / ".claude" / "agents" / "explore.md"
+    target.parent.mkdir(parents=True)
+    target.write_text(_AGENT_FILE, encoding="utf-8")
+
+    proposal_id = _store_cost_proposal(config, proposed_model="")
+    r = await client.post(
+        "/api/v1/relearn/apply",
+        json=_apply_body(str(target), proposal_id=proposal_id),
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 409
+    assert "proposed_model" in r.json()["detail"]
+    assert target.read_text() == _AGENT_FILE
+
+
 async def test_rung_ladder_apply_opens_no_cost_window(
-    app, client, config, monkeypatch, tmp_path,
+    app, client, config, monkeypatch, tmp_path, stored_proposal,
 ):
     """A plain note fix has no priced metric, so it must not create a cost
     marker whose delta nothing can measure."""
@@ -253,9 +391,82 @@ async def test_rung_ladder_apply_opens_no_cost_window(
     inside = fake_home / "CLAUDE.md"
     inside.write_text("# Repo\n", encoding="utf-8")
     r = await client.post(
-        "/api/v1/relearn/apply", json=_apply_body(str(inside)),
+        "/api/v1/relearn/apply", json=_apply_body(str(inside), proposal_id=stored_proposal),
         headers={"X-TJ-Local-Token": token},
     )
     assert r.status_code == 200
     assert "cost_marker" not in r.json()
     assert cost_apply.list_applied(config) == []
+
+
+# --- F2: apply accepts a STORED proposal ID and nothing else ------------------
+
+async def test_apply_refuses_an_unstored_proposal_id(app, client, monkeypatch, tmp_path):
+    """The integrity hole: before this, any authenticated local caller could
+    hand-build a cluster and have it written. Now an ID the detector never
+    produced has no way in."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "CLAUDE.md"
+    target.write_text("# Repo\n", encoding="utf-8")
+
+    r = await client.post(
+        "/api/v1/relearn/apply",
+        json=_apply_body(str(target), proposal_id="rp_000000000000"),
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 404
+    assert "no stored proposal" in r.json()["detail"]
+    assert target.read_text() == "# Repo\n"
+
+
+async def test_apply_rejects_a_client_constructed_cluster_payload(
+    app, client, monkeypatch, tmp_path, stored_proposal,
+):
+    """A caller that posts cluster content alongside a valid ID is refused
+    outright (422) rather than having its payload silently ignored: whatever
+    the human reviewed is what gets written, and the caller is told so."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "CLAUDE.md"
+    target.write_text("# Repo\n", encoding="utf-8")
+
+    body = _apply_body(str(target), proposal_id=stored_proposal)
+    body.update({"signature": "attacker", "rung": 3, "title": "not from the detector",
+                 "proposed_fix": "rm -rf /"})
+    r = await client.post(
+        "/api/v1/relearn/apply", json=body,
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 422
+    assert target.read_text() == "# Repo\n"
+
+
+async def test_apply_writes_the_stored_content_not_the_requested_content(
+    app, client, monkeypatch, tmp_path, stored_proposal,
+):
+    """End to end: the note that lands on disk carries the DETECTOR's title
+    and fix text, sourced from the stored proposal."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    target = fake_home / "CLAUDE.md"
+    target.write_text("# Repo\n", encoding="utf-8")
+
+    r = await client.post(
+        "/api/v1/relearn/apply", json=_apply_body(str(target), proposal_id=stored_proposal),
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    assert r.status_code == 200
+    written = target.read_text()
+    assert "cwd / relative-path confusion" in written
+    assert "Verify an absolute cwd before a relative Read." in written
+
+
+async def test_stored_proposals_are_listed_with_their_ids(client, stored_proposal):
+    r = await client.get("/api/v1/relearn/proposals")
+    assert r.status_code == 200
+    clusters = r.json()["finding"]["clusters"]
+    assert [c["proposal_id"] for c in clusters] == [stored_proposal]

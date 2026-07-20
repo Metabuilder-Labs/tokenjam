@@ -38,10 +38,39 @@ _ID_HEX_LEN = 12
 #: The cluster fields the apply machinery reads. Anything else on a stored
 #: proposal (display-only counts, novelty flags, suggested targets) is not part
 #: of what gets written, so it never reaches ``relearn_apply``.
+#:
+#: The trailing five are the model-routing fields a cost proposal carries
+#: (``core.optimize.model_apply``). They are projected from the STORE for the
+#: same reason the rest of the cluster is: the card the human approved was
+#: rendered from the stored proposal, so the stored proposal — not the request
+#: that echoes it back — is the authoritative record of what they approved.
+#: ``source_path`` especially: the model_swap safety case rests on that path
+#: having been REGISTERED in the user's own config, and a caller-supplied path
+#: would aim the write at any repo on disk.
 APPLY_CLUSTER_FIELDS = (
     "signature", "family_key", "title", "proposed_fix", "rung",
     "sessions", "occurrences", "repos", "examples",
+    "apply_kind", "agent_name", "current_model", "proposed_model", "source_path",
 )
+
+#: Per apply kind, the stored fields the write genuinely cannot be built
+#: without. A proposal missing one is refused by name rather than silently
+#: falling back to anything the caller sent.
+MODEL_ROUTING_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "agent_model": ("proposed_model",),
+    "model_swap": ("source_path", "current_model", "proposed_model"),
+}
+
+
+def missing_apply_fields(cluster: dict[str, Any]) -> tuple[str, ...]:
+    """The required fields this cluster's ``apply_kind`` needs and does not
+    have. Empty for a rung-ladder fix (no ``apply_kind``) and for a complete
+    model-routing proposal."""
+    apply_kind = str(cluster.get("apply_kind") or "")
+    if not apply_kind:
+        return ()
+    required = MODEL_ROUTING_REQUIRED_FIELDS.get(apply_kind, ())
+    return tuple(f for f in required if not str(cluster.get(f) or "").strip())
 
 
 def proposal_id_for(signature: str) -> str:
@@ -66,6 +95,28 @@ def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
         for c in clusters
     ]
     return {**finding, "clusters": stamped}
+
+
+def list_cost_proposals(
+    config: TjConfig | None = None, *, path: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Every stored COST proposal from the last completed optimize pass, each
+    with its ``proposal_id``.
+
+    Cost proposals live in the same cache file under their own key and are
+    addressable by ID on the same terms as a relearn cluster: the model-routing
+    apply kinds are cost cards, so an apply that names one has to be able to
+    resolve it from the store.
+    """
+    from tokenjam.core.optimize import relearn_store
+
+    block = relearn_store.read_cost_proposals(path, config=config)
+    if not isinstance(block, dict):
+        return []
+    return [
+        {**pr, "proposal_id": proposal_id_for(str(pr.get("signature") or ""))}
+        for pr in (block.get("cost_proposals") or []) if isinstance(pr, dict)
+    ]
 
 
 def list_proposals(
@@ -97,6 +148,9 @@ def get_proposal(
     if not proposal_id:
         return None
     for proposal in list_proposals(config, path=path):
+        if proposal.get("proposal_id") == proposal_id:
+            return proposal
+    for proposal in list_cost_proposals(config, path=path):
         if proposal.get("proposal_id") == proposal_id:
             return proposal
     return None
