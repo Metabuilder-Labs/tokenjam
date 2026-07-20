@@ -13,9 +13,7 @@ Phase 1 (detect + surface) was read-only. Phase 2 (this module's ``/apply``,
 Approve stage: writes route through ``core.optimize.relearn_apply`` for every
 rung-routing / backup / git-commit / fail-open guarantee — this route only
 translates HTTP <-> that module's ``RelearnApplyRefused`` (-> 409) contract,
-it never hand-rolls a parallel write path. ``/apply`` names a STORED proposal
-(``core.optimize.relearn_proposals``) and never accepts cluster content from
-the caller, so what gets written is always something the detector produced.
+it never hand-rolls a parallel write path.
 
 Phase 3 (Verify + Compound, ``core.optimize.relearn_verify``) rides the SAME
 ``/refresh`` cadence: every background/manual recompute also re-measures each
@@ -30,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
 
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
 from tokenjam.core.optimize import (
@@ -38,7 +36,6 @@ from tokenjam.core.optimize import (
     cost_proposals as cost_proposals_mod,
     cost_verify,
     relearn_apply,
-    relearn_proposals,
     relearn_store,
     relearn_verify,
 )
@@ -137,18 +134,18 @@ def refresh_relearn_proposals(request: Request) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 class ApplyRelearnRequest(BaseModel):
-    """A named STORED proposal plus the human's confirmed write target.
-
-    The cluster content itself is never accepted from the client: it is looked
-    up server-side from the detector's own stored proposals
-    (``core.optimize.relearn_proposals``). ``extra="forbid"`` makes that
-    explicit rather than silent, so a caller still posting a hand-built
-    cluster gets a 422 telling it what changed instead of having its payload
-    quietly ignored.
-    """
-    model_config = ConfigDict(extra="forbid")
-
-    proposal_id:    str
+    # The full cluster the client already has from GET /relearn/proposals —
+    # re-posted rather than re-looked-up server-side so a stale cache can't
+    # silently apply a DIFFERENT cluster than the one the human reviewed.
+    signature:      str
+    family_key:     str | None = None
+    title:          str
+    proposed_fix:   str = ""
+    rung:           int
+    sessions:       int = 0
+    occurrences:    int = 0
+    repos:          list[str] = []
+    examples:       list[dict[str, Any]] = []
     # Scope override (§7 — "repo-identity is noisy"): the human confirms both
     # before Approve, never inferred silently.
     scope:          str
@@ -165,42 +162,73 @@ class ApplyRelearnRequest(BaseModel):
     current_model:  str = ""
     proposed_model: str = ""
     source_path:    str = ""
+    # Which cost analyzer's card this write came from, so the same apply also
+    # opens a cost-verify exposure window and the realized delta lands in the
+    # ledger the receipts surface reads dollars from. Empty for rung-ladder
+    # fixes, whose receipts are recurrence-based rather than priced.
+    analyzer:       str = ""
+    agent_id:       str = ""
 
 
 @router.post("/relearn/apply", dependencies=_WRITE_AUTH)
 def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str, Any]:
     """Dry-run (default) or write (``go=true``) an approved fix at its rung.
 
-    Takes a ``proposal_id`` from ``GET /relearn/proposals``. 404s when no
-    stored proposal carries that ID: a client-constructed cluster has no way
-    into the write machinery, which is what makes "human-gated" a property of
-    the server rather than of the UI flow.
-
-    409s (via ``RelearnApplyRefused``) on: an unknown rung, a family with no
-    matcher at an enforcement rung, a create-only target (skill/hook) that
-    already holds a non-TokenJam file, or (unless ``force=true``) a live
-    session just seen in the target repo (§7: never apply mid-session). The
-    UI's re-send-with-force is the explicit "apply anyway" the spec calls for.
-    403s when ``target_path`` resolves outside the user's home directory
-    (defense-in-depth allowlist).
+    409s (via ``RelearnApplyRefused``) on: an unknown rung, a create-only
+    target (skill/hook) that already holds a non-TokenJam file, or — unless
+    ``force=true`` — a live session just seen in the target repo (§7: never
+    apply mid-session). The UI's re-send-with-force is the explicit
+    "apply anyway" the spec calls for. 403s when ``target_path`` resolves
+    outside the user's home directory (defense-in-depth allowlist).
     """
     _reject_target_outside_home(body.target_path)
-    stored = relearn_proposals.get_proposal(body.proposal_id, config=_config(request))
-    if stored is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no stored proposal {body.proposal_id}. Refresh the proposals "
-                   f"and apply one the detector actually produced.",
-        )
-    cluster = relearn_proposals.cluster_for_apply(stored)
+    cluster = body.model_dump(
+        exclude={"scope", "target_path", "go", "force", "analyzer", "agent_id"},
+    )
     try:
-        return relearn_apply.apply_relearn_fix(
+        result = relearn_apply.apply_relearn_fix(
             _config(request), cluster,
             target_path=body.target_path, scope=body.scope,
             go=body.go, conn=_conn(request), force=body.force,
         )
     except relearn_apply.RelearnApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if body.go and body.apply_kind and body.analyzer:
+        result["cost_marker"] = _open_cost_verify_window(request, body)
+    return result
+
+
+def _open_cost_verify_window(request: Request, body: ApplyRelearnRequest) -> dict[str, Any] | None:
+    """Start the priced exposure window for a model-routing write.
+
+    A model swap is a cost fix that happens to have a file to edit, so its
+    receipt has to be a measured dollar delta on spans, not a recurrence count.
+    That measurement hangs off the cost-applied ledger, so the same approval
+    that wrote the file also opens the window. Best-effort: a marker that cannot
+    be created must never fail an apply that already succeeded on disk.
+    """
+    from tokenjam.core.optimize import cost_apply
+
+    proposal = {
+        "signature": body.signature,
+        "analyzer": body.analyzer,
+        "title": body.title,
+        "agent_id": body.agent_id,
+        "advise_text": body.proposed_fix,
+        "target_key": {
+            "models": [body.current_model] if body.current_model else [],
+            "subagent": body.analyzer == "subagent",
+            "agent_name": body.agent_name,
+        },
+        "baseline": {"proposed_model": body.proposed_model},
+        "estimated_recoverable_usd": None,
+        "estimated_recoverable_tokens": None,
+        "estimate_basis": "",
+    }
+    try:
+        return cost_apply.mark_applied(_conn(request), _config(request), proposal)
+    except Exception:
+        return None
 
 
 @router.get("/relearn/applied", dependencies=[Depends(require_api_key)])

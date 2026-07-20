@@ -254,6 +254,42 @@ def test_missing_agent_file_falls_back_to_the_guidance_block(tmp_path, monkeypat
     assert card.signature == "cost:subagent"
 
 
+def test_subagent_verify_receipt_is_a_priced_dollar_delta(db_backend):
+    # The measured receipt for a subagent model write has to be dollars priced
+    # per model over the fan-out spans, not a token count: the fix changes the
+    # rate, not the volume.
+    from tokenjam.core.optimize import cost_verify
+    from tests.factories import make_llm_span
+
+    marker = NOW - timedelta(days=5)
+    for label, when, model in (
+        ("pre", marker - timedelta(hours=40), "claude-opus-4-8"),
+        ("post", marker + timedelta(hours=1), "claude-haiku-4-5"),
+    ):
+        for i in range(30):
+            db_backend.insert_span(make_llm_span(
+                agent_id="orchestrator", provider="anthropic", model=model,
+                input_tokens=30_000, output_tokens=800,
+                cache_tokens=5_000, cache_write_tokens=1_000,
+                session_id=f"sess-{label}-{i}", sub_agent_id="explore",
+                start_time=when + timedelta(minutes=i),
+            ))
+
+    record = {
+        "id": "rec-1", "expectation_id": "exp-1",
+        "signature": "cost:subagent:explore", "analyzer": "subagent",
+        "kind": "cost", "title": "t",
+        "target_key": {"models": ["claude-opus-4-8"], "subagent": True,
+                       "agent_name": "explore"},
+        "agent_id": "", "applied_at": marker.isoformat(), "baseline": {},
+        "estimated_recoverable_usd": None, "estimated_recoverable_tokens": None,
+        "estimate_basis": "", "state": "applied", "verify": {},
+    }
+    verdict = cost_verify.measure_cost_delta(db_backend.conn, record, now=NOW)
+    assert verdict["verdict"] == "improved"
+    assert verdict["realized_usd_delta"] > 0
+
+
 # --------------------------------------------------------------------------- #
 # D1: the batch placement card
 # --------------------------------------------------------------------------- #
@@ -348,6 +384,28 @@ def test_card_copy_has_no_em_dash_and_never_says_quota(tmp_path, field):
         text = getattr(card, field) or ""
         assert "—" not in text, f"em dash in {card.signature}.{field}"
         assert "quota" not in text.lower(), f"'quota' in {card.signature}.{field}"
+
+
+def test_cards_carry_the_fields_the_rollup_sums(tmp_path):
+    # The rollup reads signature, analyzer, title and estimated_recoverable_usd
+    # generically, with no analyzer allowlist, so each card must fill all four
+    # and no two may share a signature.
+    cards = _all_cards(tmp_path)
+    signatures = [c.signature for c in cards]
+    assert len(signatures) == len(set(signatures))
+    for card in cards:
+        assert card.signature and card.analyzer and card.title
+        assert card.estimated_recoverable_usd is not None
+        assert card.estimated_recoverable_usd > 0
+
+
+def test_an_agent_the_swap_would_not_save_on_gets_no_card(tmp_path):
+    finding = _downsize_finding()
+    finding.per_agent[0].delta_usd = -0.5
+    props = cp.cost_proposals_from_report(_report(downgrade=finding), config=_cfg(tmp_path))
+    # No per-agent card claiming a negative recovery; the window-wide card,
+    # whose own estimate is finding-level, takes over.
+    assert [p.signature for p in props if p.analyzer == "downsize"] == ["cost:downsize"]
 
 
 def test_every_dollar_figure_is_tagged_and_has_a_construction_footnote(tmp_path):
