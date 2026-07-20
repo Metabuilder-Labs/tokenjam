@@ -77,6 +77,7 @@ These examples demonstrate what makes tj unique: real-time alerting and behavior
 | [`sensitive_actions_demo.py`](alerts_and_drift/sensitive_actions_demo.py) | None | Fires alerts when agent calls sensitive tools |
 | [`budget_breach_demo.py`](alerts_and_drift/budget_breach_demo.py) | None | Exceeds budget limits, shows cost alerts |
 | [`drift_demo.py`](alerts_and_drift/drift_demo.py) | None | Builds baseline, then triggers drift detection |
+| [`record_outcome_demo.py`](alerts_and_drift/record_outcome_demo.py) | None | Attaches a business outcome (+ self-reported value) to a workflow via `record_outcome()` |
 
 These examples include the required `tj.toml` config snippets as comments at the top of each file. Copy the relevant config to your `tj.toml` before running.
 

@@ -74,6 +74,36 @@ record_tool_call(
 )
 ```
 
+## Record an outcome
+
+Attach a business outcome to a workflow in one line instead of hand-POSTing an
+OTLP event. `record_outcome` emits the emerging gen_ai outcome event (OTel
+semconv issue #2665) alongside your spans:
+
+```python
+from tokenjam.sdk import record_outcome
+
+# Inside an active @watch() / AgentSession, the session is inherited:
+record_outcome("ticket_resolved", success=True, value_usd=25.00)
+
+# Or attach to a workflow / session you name yourself:
+record_outcome(
+    "lead_qualified",
+    workflow_id="onboarding-run-42",
+    success=True,
+    value_usd=500.00,
+)
+```
+
+At least one of `workflow_id` / `session_id` is required (an active session
+satisfies it). `value_usd` is **optional and self-reported** — a value you
+declare, which TokenJam does not measure or verify.
+
+**ROI is a TokenJam Cloud feature.** The OSS SDK only *emits* the outcome event
+(and the local stack ingests it as a normal span). Turning declared value ÷
+measured cost into an ROI figure happens in TokenJam Cloud — there is no local
+ROI compute.
+
 ## Examples
 
 The [`examples/`](../examples/) directory has runnable agents for every integration. See [`examples/README.md`](../examples/README.md) for the full list.
