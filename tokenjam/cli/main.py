@@ -194,3 +194,9 @@ cli.add_command(cmd_demo, name="demo")
 
 from tokenjam.cli.cmd_summarize import cmd_summarize  # noqa: E402
 cli.add_command(cmd_summarize, name="summarize")
+
+# The self-improve loop's terminal write path (list/apply/enable/revert) plus
+# the on-demand verify recompute. Registered last so its group stays a single
+# self-contained block.
+from tokenjam.cli.cmd_relearn import cmd_relearn  # noqa: E402
+cli.add_command(cmd_relearn, name="relearn")
