@@ -321,6 +321,57 @@ def test_uncached_agent_never_also_appears_as_thrash_or_lookback(db):
     assert not any(c.agent_id == "agent-dedup" for c in lookback)
 
 
+def test_thrash_shaped_agent_never_also_appears_as_lookback(db):
+    """An agent whose data satisfies A2 (regular writes, low read:write ratio)
+    ALSO has long, tool-heavy turns shaped like an A3 lookback miss. A2's
+    priority means A3 is never even evaluated for this agent — one card, not
+    two, and never across BOTH the ``cache`` and ``cache_thrash`` analyzer
+    values (the two ``CostProposal.analyzer`` strings this check family uses)."""
+    agent = "agent-both"
+    for i in range(15):
+        sid = f"both-{i}"
+        t0 = BASE + timedelta(hours=i)
+        db.insert_span(make_llm_span(
+            agent_id=agent, provider="anthropic", model="claude-sonnet-5",
+            input_tokens=3000, cache_tokens=0, cache_write_tokens=5000,
+            session_id=sid, start_time=t0,
+        ))
+        # A3-shaped structure layered on top: >10 tool calls before the miss.
+        for j in range(11):
+            db.insert_span(make_tool_span(
+                agent_id=agent, tool_name="Read", session_id=sid,
+                start_time=t0 + timedelta(minutes=5, seconds=j),
+            ))
+        db.insert_span(make_llm_span(
+            agent_id=agent, provider="anthropic", model="claude-sonnet-5",
+            input_tokens=3000, cache_tokens=0, cache_write_tokens=0,
+            session_id=sid, start_time=t0 + timedelta(minutes=10),
+        ))
+    since, until = _window()
+    uncached, thrash, lookback = _compute_root_cause_candidates(db.conn, since, until, None)
+    assert not any(c.agent_id == agent for c in uncached)
+    assert any(c.agent_id == agent for c in thrash)
+    assert not any(c.agent_id == agent for c in lookback)
+
+    from tokenjam.core.optimize.analyzers.cache_efficacy import CacheEfficacyFinding
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    report = OptimizeReport(
+        window=WindowSummary(since=since, until=until, days=1, sessions=15, spans=1,
+                              total_tokens=1, total_cost_usd=1.0, thin_data=False),
+        findings={"cache": CacheEfficacyFinding(
+            uncached_agents=uncached, thrash_agents=thrash, lookback_miss_agents=lookback,
+        )},
+    )
+    props_for_agent = [
+        p for p in cost_proposals_from_report(report)
+        if p.analyzer in ("cache", "cache_thrash") and p.baseline.get("agent_id") == agent
+    ]
+    assert len(props_for_agent) == 1
+    assert props_for_agent[0].analyzer == "cache_thrash"
+
+
 # --------------------------------------------------------------------------- #
 # report_to_dict / report_from_dict round-trip (the daemon -> CLI JSON path)
 # --------------------------------------------------------------------------- #
