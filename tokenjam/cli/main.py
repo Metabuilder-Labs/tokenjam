@@ -144,6 +144,7 @@ from tokenjam.cli.cmd_statusline import cmd_statusline  # noqa: E402
 from tokenjam.cli.cmd_loop import cmd_loop  # noqa: E402
 from tokenjam.cli.cmd_resume_brief import cmd_resume_brief  # noqa: E402
 from tokenjam.cli.cmd_ping import cmd_ping  # noqa: E402
+from tokenjam.cli.cmd_relearn import cmd_relearn  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 cli.add_command(cmd_status, name="status")
@@ -176,6 +177,7 @@ cli.add_command(cmd_statusline, name="statusline")
 cli.add_command(cmd_loop, name="loop")
 cli.add_command(cmd_resume_brief, name="resume-brief")
 cli.add_command(cmd_ping, name="ping")
+cli.add_command(cmd_relearn, name="relearn")
 
 # cmd_drift is provided by task 05 — register if available
 try:
