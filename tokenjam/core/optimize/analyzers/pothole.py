@@ -50,6 +50,7 @@ from typing import Any, Iterable
 
 from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
+from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
@@ -262,20 +263,24 @@ _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 _HEX_ID_RE = re.compile(r"\b[0-9a-fA-F]{12,}\b")
 _NUMBER_RE = re.compile(r"\b\d+\b")
 _TIMESTAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?")
-_WS_RE = re.compile(r"\s+")
+
+#: Ordered substitutions for the generic-signature normalizer. Order matters:
+#: timestamps and uuids are masked before bare hex/number runs so their internal
+#: digits aren't partially replaced first (see mask_variables).
+_GENERIC_SUBS = [
+    (_TIMESTAMP_RE, "<TS>"),
+    (_UUID_RE, "<UUID>"),
+    (_PATH_RE, "<PATH>"),
+    (_HEX_ID_RE, "<ID>"),
+    (_NUMBER_RE, "<N>"),
+]
 
 
 def _normalize_generic(text: str) -> str:
     """Strip paths/uuids/hex-ids/numbers/timestamps so unrelated values collapse
     into the same signature. Deterministic, no LLM — the fast path before the
     distill pass on whatever this misses."""
-    out = _TIMESTAMP_RE.sub("<TS>", text)
-    out = _UUID_RE.sub("<UUID>", out)
-    out = _PATH_RE.sub("<PATH>", out)
-    out = _HEX_ID_RE.sub("<ID>", out)
-    out = _NUMBER_RE.sub("<N>", out)
-    out = _WS_RE.sub(" ", out).strip().lower()
-    return out
+    return mask_variables(text, _GENERIC_SUBS, collapse_ws=True, lowercase=True)
 
 
 def _generic_signature(tool_name: str, error_text: str) -> str:
@@ -425,27 +430,41 @@ class _RawCluster:
         return {f.repo for f in self.failures}
 
 
+def _failure_signature(failure: FailureEpisode) -> tuple[str, str | None, str]:
+    """``(signature, family_key, title)`` for one failure: a known family (sig ==
+    family_key) or a generic normalized signature. The single classify point
+    ``cluster_failures`` keys on."""
+    family_key = classify_known_family(failure.tool_name, failure.error_text, failure.label)
+    if family_key is not None:
+        return family_key, family_key, _FAMILY_BY_KEY[family_key]["title"]
+    sig = _generic_signature(failure.tool_name, failure.error_text)
+    return sig, None, f"{failure.tool_name}: {failure.error_text[:60] or failure.label}"
+
+
 def cluster_failures(failures: list[FailureEpisode]) -> dict[str, _RawCluster]:
-    """Bucket failures by known family first, else a generic normalized signature."""
+    """Bucket failures by known family first, else a generic normalized signature.
+
+    Groups via the shared ``group_by_key`` (order-preserving), then builds one
+    ``_RawCluster`` per group with its title/family taken from the group's FIRST
+    failure — the same failure that used to create the bucket inline, so titles
+    stay byte-identical."""
+    buckets = group_by_key(failures, lambda f: _failure_signature(f)[0])
     clusters: dict[str, _RawCluster] = {}
-    for failure in failures:
-        family_key = classify_known_family(failure.tool_name, failure.error_text, failure.label)
-        if family_key is not None:
-            sig = family_key
-            title = _FAMILY_BY_KEY[family_key]["title"]
-        else:
-            sig = _generic_signature(failure.tool_name, failure.error_text)
-            title = f"{failure.tool_name}: {failure.error_text[:60] or failure.label}"
-        bucket = clusters.get(sig)
-        if bucket is None:
-            bucket = _RawCluster(signature=sig, family_key=family_key, title=title)
-            clusters[sig] = bucket
-        bucket.failures.append(failure)
+    for sig, group in buckets.items():
+        _, family_key, title = _failure_signature(group[0])
+        clusters[sig] = _RawCluster(
+            signature=sig, family_key=family_key, title=title, failures=group,
+        )
     return clusters
 
 
 def _recurring(clusters: dict[str, _RawCluster], min_sessions: int) -> list[_RawCluster]:
-    return [c for c in clusters.values() if len(c.session_ids) >= min_sessions]
+    """Clusters seen across at least ``min_sessions`` DISTINCT sessions — the
+    recurrence gate, on distinct-session count (not raw occurrences)."""
+    kept = recurring(
+        clusters, min_members=min_sessions, size_fn=lambda c: len(c.session_ids),
+    )
+    return list(kept.values())
 
 
 # --- Distill pass over the residual (non-family) bucket -----------------------

@@ -34,6 +34,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from tokenjam.core.optimize.clustering import group_by_key, recurring
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.otel.semconv import GenAIAttributes
@@ -169,19 +170,19 @@ def run(ctx: AnalyzerContext) -> None:
         sig_seq.append((str(tool_name), arg_sig))
 
     # Cluster sessions by full signature (tuple of (tool, arg-shape)) tuples.
-    cluster_members: dict[tuple, list[str]] = {}
-    for session_id, seq in session_signatures.items():
-        key = tuple(seq)
-        cluster_members.setdefault(key, []).append(session_id)
+    cluster_members = group_by_key(
+        session_signatures.keys(),
+        key_fn=lambda sid: tuple(session_signatures[sid]),
+    )
 
-    # Build the report rows. Only clusters above the threshold are surfaced.
+    # Build the report rows. Only clusters above the recurrence threshold are
+    # surfaced (the shared filter); the per-cluster aggregation stays local.
     interesting: list[WorkflowCluster] = []
     total_cluster_cost = 0.0   # recoverable USD: full cost of clustered sessions
     total_cluster_tokens = 0   # recoverable tokens: replacing the call frees them
-    for signature, members in cluster_members.items():
-        if len(members) < MIN_CLUSTER_INSTANCES:
-            continue
-
+    for signature, members in recurring(
+        cluster_members, min_members=MIN_CLUSTER_INSTANCES,
+    ).items():
         # Aggregate session-level cost + tokens + duration for the cluster.
         placeholders = ",".join(f"${i + 1}" for i in range(len(members)))
         agg = ctx.conn.execute(

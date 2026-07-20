@@ -39,6 +39,7 @@ import json
 import re
 from typing import Any, Literal, NamedTuple
 
+from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext, ReuseCluster, ReuseFinding
 from tokenjam.otel.semconv import GenAIAttributes
@@ -98,13 +99,14 @@ _PATH_RE = re.compile(r"(?:~|\.{0,2})?/[\w.\-/]+")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _NUM_RE = re.compile(r"\d+")
 
+#: Ordered substitutions for the prompt-prefix normalizer (path before date
+#: before bare digits, so internal digits aren't partially replaced first).
+_STRIP_SUBS = [(_PATH_RE, "<PATH>"), (_DATE_RE, "<DATE>"), (_NUM_RE, "<NUM>")]
+
 
 def _strip_variables(text: str) -> str:
     """Replace path-, date-, and number-looking spans with fixed placeholders."""
-    text = _PATH_RE.sub("<PATH>", text)
-    text = _DATE_RE.sub("<DATE>", text)
-    text = _NUM_RE.sub("<NUM>", text)
-    return text
+    return mask_variables(text, _STRIP_SUBS)
 
 
 def _is_llm(row: _SpanRow) -> bool:
@@ -183,11 +185,9 @@ def _cluster_sessions(plans: list[_SessionPlan]) -> dict[str, list[_SessionPlan]
     plans by their deterministic cluster key. Swapping in semantic clustering
     later is a one-function change.
     """
-    clusters: dict[str, list[_SessionPlan]] = {}
-    for plan in plans:
-        key = _cluster_key(plan.tool_signature, plan.prompt_prefix_hash)
-        clusters.setdefault(key, []).append(plan)
-    return clusters
+    return group_by_key(
+        plans, lambda plan: _cluster_key(plan.tool_signature, plan.prompt_prefix_hash),
+    )
 
 
 @register("reuse")
@@ -255,10 +255,10 @@ def run(ctx: AnalyzerContext) -> None:
     clusters_raw = _cluster_sessions(plans)
 
     surfaced: list[ReuseCluster] = []
-    for cluster_id, members in clusters_raw.items():
+    # Recurrence gate first (the shared threshold filter); the remaining
+    # per-cluster gates (avg tokens, recoverable floor) stay analyzer-specific.
+    for cluster_id, members in recurring(clusters_raw, min_members=MIN_REPETITIONS).items():
         reps = len(members)
-        if reps < MIN_REPETITIONS:
-            continue
 
         avg_tokens = round(sum(m.planning_tokens for m in members) / reps)
         if avg_tokens < MIN_PLANNING_TOKENS:
