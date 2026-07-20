@@ -38,6 +38,7 @@ ANALYZER_ORDER: list[str] = [
     "subagent",
     "summarize",
     "verbosity",
+    "deadweight",
 ]
 
 THIN_DATA_DAYS = 7
