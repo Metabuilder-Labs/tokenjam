@@ -7702,7 +7702,7 @@ function CostLedgerSummary({ ledger }) {
         <span style="font-size:20px;font-weight:600;color:var(--accent)">${fmtUsd(ledger.total_realized_usd)}</span>
         <span class="dim" style="font-size:12px">realized across ${ledger.improved_count} verified change(s) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
       </div>
-      <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.regressed_count} no movement · ${ledger.insufficient_data_count} still measuring</div>
+      <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} no movement · ${ledger.insufficient_data_count} still measuring</div>
     </div>`;
 }
 

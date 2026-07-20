@@ -349,6 +349,29 @@ def test_cost_compound_ledger_sums_realized_dollars():
     assert ledger["verified_count"] == 3
 
 
+def test_cost_compound_ledger_no_change_bucket_sums_to_verified():
+    # A no_change record (deadweight: server still configured) must land in
+    # its own named bucket, not just inflate verified_count with nowhere to
+    # go -- the named buckets must always add back up to verified_count.
+    records = [
+        {"state": "applied", "verify": {"verdict": "improved",
+         "realized_usd_delta": 0.5, "realized_tokens_delta": 1000}},
+        {"state": "applied", "verify": {"verdict": "no_change"}},
+        {"state": "applied", "verify": {"verdict": "no_change"}},
+        {"state": "applied", "verify": {"verdict": "regressed",
+         "realized_usd_delta": 0.0}},
+        {"state": "applied", "verify": {"verdict": "insufficient_data"}},
+    ]
+    ledger = cost_verify.cost_compound_ledger(records)
+    assert ledger["no_change_count"] == 2
+    assert ledger["verified_count"] == 5
+    assert (
+        ledger["improved_count"] + ledger["no_change_count"]
+        + ledger["regressed_count"] + ledger["insufficient_data_count"]
+        == ledger["verified_count"]
+    )
+
+
 # --- Store: cost proposals share the relearn cache file ----------------------
 
 def test_store_cost_and_relearn_coexist_without_clobber(tmp_path):
