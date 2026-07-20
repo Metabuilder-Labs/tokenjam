@@ -1,9 +1,16 @@
-"""``tj relearn`` -- the terminal write path for the self-improve loop.
+"""``tj relearn`` write verbs -- the terminal write path for the loop.
 
 Until now the only way to approve a proposal was the Lens Review inbox: a
 browser, on a machine with a display, talking to a running ``tj serve``. A
 terminal-first or headless install could detect its recurring failures and
 then do nothing about them. These verbs close that gap.
+
+They live in their own module, apart from the ``tj relearn`` group itself, so
+the write side and the read side of the group can be developed without one
+owning the other's file. ``cmd_relearn`` attaches them with::
+
+    from tokenjam.cli.relearn_write_verbs import register_write_verbs
+    register_write_verbs(cmd_relearn)
 
 Thin by construction. Every command here is a wrapper over the SAME functions
 the API route calls (``core.optimize.relearn_proposals`` for the stored
@@ -55,16 +62,11 @@ def _emit(ctx: click.Context, payload: dict) -> bool:
     return False
 
 
-@click.group("relearn")
-def cmd_relearn() -> None:
-    """Review, apply and revert the fixes for your agent's recurring failures."""
-
-
 # --------------------------------------------------------------------------- #
 # F1: list / apply / enable / revert
 # --------------------------------------------------------------------------- #
 
-@cmd_relearn.command("list")
+@click.command("list")
 @click.pass_context
 def list_cmd(ctx: click.Context) -> None:
     """List the stored proposals, with the IDs `tj relearn apply` takes."""
@@ -93,7 +95,7 @@ def list_cmd(ctx: click.Context) -> None:
     )
 
 
-@cmd_relearn.command("apply")
+@click.command("apply")
 @click.argument("proposal_id")
 @click.option("--go", is_flag=True, help="Actually write the fix (default is a dry run).")
 @click.option("--target", "target_path", default=None,
@@ -152,7 +154,7 @@ def apply_cmd(ctx, proposal_id, go, target_path, scope, force):
     console.print(f"[dim]Undo with [bold]tj relearn revert {rec['id']}[/bold].[/dim]")
 
 
-@cmd_relearn.command("enable")
+@click.command("enable")
 @click.argument("fix_id")
 @click.option("--yes", is_flag=True,
               help="Confirm wiring this hook into settings.json.")
@@ -171,7 +173,7 @@ def enable_cmd(ctx, fix_id, yes):
     )
 
 
-@cmd_relearn.command("revert")
+@click.command("revert")
 @click.argument("fix_id")
 @click.pass_context
 def revert_cmd(ctx, fix_id):
@@ -194,7 +196,7 @@ def revert_cmd(ctx, fix_id):
 # scheduled pass calls.
 # --------------------------------------------------------------------------- #
 
-@cmd_relearn.command("verify")
+@click.command("verify")
 @click.pass_context
 def verify_cmd(ctx):
     """Recompute the verify receipts now instead of waiting for the schedule."""
@@ -219,3 +221,24 @@ def verify_cmd(ctx):
             "skipped. Stop it with `tj stop` and re-run for those.[/dim]"
         )
     console.print("[dim]Read the results with [bold]tj relearn list[/bold] or the Review inbox.[/dim]")
+
+
+# --------------------------------------------------------------------------- #
+# Registration
+# --------------------------------------------------------------------------- #
+
+#: Every verb this module contributes to the ``tj relearn`` group, in the order
+#: they should appear.
+WRITE_VERBS = (list_cmd, apply_cmd, enable_cmd, revert_cmd, verify_cmd)
+
+
+def register_write_verbs(group: click.Group) -> click.Group:
+    """Attach this module's verbs to the ``tj relearn`` group and return it.
+
+    The group itself is defined in ``cli/cmd_relearn.py``; this keeps the write
+    side out of that file so the two halves of the group stay independently
+    editable. Returns the group so a caller can chain or assert on it.
+    """
+    for command in WRITE_VERBS:
+        group.add_command(command)
+    return group
