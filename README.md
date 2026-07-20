@@ -239,7 +239,9 @@ ceiling), and `cache-recommend` (the Cache card's breakpoint-suggestion half). R
 
 `tj serve` runs Lens at `http://127.0.0.1:7391/`. It opens on the **Improve** lens: a **Review inbox**
 where the self-improve loop's proposed fixes land for your approval, a Dashboard that lands you on
-recurring mistakes and current health, and Status. Flip to the **Observe** lens for Traces, Cost,
+recurring mistakes and current health, and Status. The downsize, cache, and trim analyzers file
+advise-only proposals here too, with the realized dollar delta measured over your later calls once you
+mark one applied. Flip to the **Observe** lens for Traces, Cost,
 Analytics, Alerts, Drift, Optimize, and Budget. Plan-tier-aware, fully offline, no signup.
 
 <table>

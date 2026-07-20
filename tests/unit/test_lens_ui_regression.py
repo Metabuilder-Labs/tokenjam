@@ -2091,3 +2091,22 @@ def test_recommendations_panel_present_and_fetches_endpoint(html):
     # measured vs estimated fields straight from the endpoint payload.
     assert "measured_recovered_tokens" in html
     assert "estimated_recoverable_tokens" in html
+
+
+# --- cost proposals in the Review inbox (advise-only, with receipts) ----- #
+def test_cost_proposals_wired_into_review_inbox(html):
+    # The downsize/cache/trim analyzers surface as advise-only cost proposals in
+    # the same Review inbox, fetched from the cost endpoints and rendered with a
+    # distinct `kind` badge, an estimate, and (after Mark applied) the realized
+    # delta receipt. Keep the fetch + render wiring present.
+    assert "function CostProposalCard" in html
+    assert "function CostAppliedRow" in html
+    assert "function CostVerifyLine" in html
+    assert "api('/pothole/cost-proposals')" in html
+    assert "api('/pothole/cost-applied')" in html
+    assert "'/pothole/cost-proposals/apply'" in html
+    # The card is advise-only: a marker button, never an apply-to-code write.
+    assert "Mark applied" in html
+    assert "Cost advisories" in html
+    # Honesty discipline (Rule 14): the realized delta is estimated / correlational.
+    assert "realized_usd_delta" in html

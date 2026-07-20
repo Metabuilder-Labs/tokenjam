@@ -31,7 +31,14 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from tokenjam.api.deps import require_api_key, require_pothole_write_auth
-from tokenjam.core.optimize import pothole_apply, pothole_store, pothole_verify
+from tokenjam.core.optimize import (
+    cost_apply,
+    cost_proposals as cost_proposals_mod,
+    cost_verify,
+    pothole_apply,
+    pothole_store,
+    pothole_verify,
+)
 
 router = APIRouter()
 
@@ -210,4 +217,94 @@ def post_pothole_revert(request: Request, fix_id: str) -> dict[str, Any]:
     try:
         return pothole_apply.revert_applied_fix(_config(request), fix_id)
     except pothole_apply.PotholeApplyRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------------------- #
+# Cost proposals — the same Review inbox, a distinct `kind`. These are the
+# downsize/cache/trim analyzers' findings adapted into advise-only proposals
+# (core.optimize.cost_proposals). They carry NO apply path (the fix lives in the
+# user's own code); "apply" is a marker the delta-verify pass measures against.
+# --------------------------------------------------------------------------- #
+
+@router.get("/pothole/cost-proposals", dependencies=[Depends(require_api_key)])
+def get_cost_proposals(request: Request) -> dict[str, Any]:
+    """Cost proposals for the Review inbox, listed beside pothole proposals.
+
+    Returns ``{"status": "ready"|"never_run", "computed_at": iso|null,
+    "proposals": [dict, ...]}``. A fresh install (no cost recompute has run)
+    reports ``never_run`` with an empty list — the inbox renders its empty
+    state, not an error."""
+    block = pothole_store.read_cost_proposals(config=_config(request))
+    if block is None:
+        return {"status": "never_run", "computed_at": None, "proposals": []}
+    return {
+        "status": "ready",
+        "computed_at": block.get("cost_computed_at"),
+        "proposals": block.get("cost_proposals") or [],
+    }
+
+
+@router.post("/pothole/cost-proposals/refresh", dependencies=_WRITE_AUTH)
+def refresh_cost_proposals(request: Request) -> dict[str, Any]:
+    """Recompute cost proposals over the default window AND re-measure the
+    realized delta of every applied cost fix (same cadence). Degrades to
+    ``{"status": "unavailable"}`` when the daemon has no direct DB connection
+    (e.g. a proxy) rather than erroring."""
+    config = _config(request)
+    db = getattr(request.app.state, "db", None)
+    if db is None or getattr(db, "conn", None) is None:
+        return {"status": "unavailable", "reason": "no direct database connection"}
+    proposals = cost_proposals_mod.recompute_cost_proposals(db, config)
+    verify = cost_verify.rescan_all(db, config)
+    return {"status": "ready", "proposals": len(proposals), "verified": verify}
+
+
+class MarkCostAppliedRequest(BaseModel):
+    # The full proposal the client already holds from GET /pothole/cost-proposals
+    # — re-posted so a stale cache can't mark a DIFFERENT proposal than the one
+    # the human reviewed (same guard as ApplyPotholeRequest).
+    signature:   str
+    analyzer:    str = ""
+    title:       str = ""
+    target_key:  dict[str, Any] = {}
+    baseline:    dict[str, Any] = {}
+    advise_text: str = ""
+    agent_id:    str = ""
+    estimated_recoverable_usd:    float | None = None
+    estimated_recoverable_tokens: int | None = None
+    estimate_basis: str = ""
+
+
+@router.post("/pothole/cost-proposals/apply", dependencies=_WRITE_AUTH)
+def post_cost_mark_applied(request: Request, body: MarkCostAppliedRequest) -> dict[str, Any]:
+    """Mark a cost proposal applied: create the fix marker (an Expectation) and
+    a ledger record the delta-verify pass measures against. There is NO code
+    write — cost proposals are advise-only. 409 on a malformed proposal or when
+    the marker can't be created (no writable DB)."""
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        raise HTTPException(status_code=503, detail="Server not fully initialised (db missing).")
+    try:
+        return cost_apply.mark_applied(db, _config(request), body.model_dump())
+    except cost_apply.CostApplyRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/pothole/cost-applied", dependencies=[Depends(require_api_key)])
+def get_cost_applied(request: Request) -> dict[str, Any]:
+    """Every applied (and reverted) cost fix, plus the realized-dollars ledger
+    summary (``cost_verify.cost_compound_ledger``)."""
+    applied = cost_apply.list_applied(_config(request))
+    return {"applied": applied, "ledger": cost_verify.cost_compound_ledger(applied)}
+
+
+@router.post("/pothole/cost-applied/{record_id}/revert", dependencies=_WRITE_AUTH)
+def post_cost_revert(request: Request, record_id: str) -> dict[str, Any]:
+    """Mark a cost fix reverted (the user undid their change). Advise-only, so
+    there is no file to restore — this just stops the ledger counting its
+    realized delta."""
+    try:
+        return cost_apply.revert_applied(_config(request), record_id)
+    except cost_apply.CostApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

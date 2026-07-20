@@ -58,12 +58,31 @@ def write_cache(
     finding: PotholeFinding, path: Path | None = None, *, config: TjConfig | None = None,
 ) -> dict[str, Any]:
     """Atomically write the finding (temp file + rename), never a partial file
-    a concurrent reader could observe."""
+    a concurrent reader could observe.
+
+    The cache file is shared with the cost-proposal producer (see
+    ``write_cost_proposals``): the two write on different cadences (the pothole
+    detector job vs the optimize path). To keep this "the same proposal store"
+    without one producer clobbering the other, an existing ``cost_proposals``
+    block is read back and preserved here rather than dropped.
+    """
     p = path or default_cache_path(config)
+    existing = read_cache(p, config=config) or {}
     payload = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "finding": asdict(finding),
     }
+    if "cost_proposals" in existing:
+        payload["cost_proposals"] = existing["cost_proposals"]
+        payload["cost_computed_at"] = existing.get("cost_computed_at")
+    _atomic_write(p, payload)
+    return payload
+
+
+def _atomic_write(p: Path, payload: dict[str, Any]) -> None:
+    """Temp-file + rename write; a concurrent reader never sees a partial file.
+    Best-effort — an OSError (read-only fs, missing parent that can't be made)
+    degrades to a no-op, never raises."""
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".tmp")
@@ -71,6 +90,38 @@ def write_cache(
         tmp.replace(p)
     except OSError:
         pass
+
+
+def read_cost_proposals(
+    path: Path | None = None, *, config: TjConfig | None = None,
+) -> dict[str, Any] | None:
+    """The last-written cost-proposal block, or ``None`` if none has ever been
+    computed. Shape: ``{"cost_computed_at": iso, "cost_proposals": [dict, ...]}``."""
+    raw = read_cache(path, config=config)
+    if raw is None or "cost_proposals" not in raw:
+        return None
+    return {
+        "cost_computed_at": raw.get("cost_computed_at"),
+        "cost_proposals": raw.get("cost_proposals") or [],
+    }
+
+
+def write_cost_proposals(
+    proposals: list[Any], path: Path | None = None, *, config: TjConfig | None = None,
+) -> dict[str, Any]:
+    """Write the cost proposals into the SAME cache file the pothole finding
+    lives in, under a separate ``cost_proposals`` key, preserving the pothole
+    ``finding`` block. ``proposals`` is a list of ``CostProposal`` (or plain
+    dicts). Atomic; best-effort on I/O error."""
+    from dataclasses import is_dataclass
+
+    p = path or default_cache_path(config)
+    existing = read_cache(p, config=config) or {}
+    serialised = [asdict(pr) if is_dataclass(pr) else dict(pr) for pr in proposals]
+    payload = dict(existing)
+    payload["cost_proposals"] = serialised
+    payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()
+    _atomic_write(p, payload)
     return payload
 
 
