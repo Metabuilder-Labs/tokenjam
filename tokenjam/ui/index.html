@@ -8075,7 +8075,7 @@ function DashboardView({ params }) {
                 <div class="band-label">Health at a glance</div>
                 <div class="tile-grid compact">
                   <${HealthTile} label="Pending fixes" value=${d.pendingFixes || 0} attention=${(d.pendingFixes || 0) > 0} href="#/review"
-                    sub="self-improve loop — review inbox" />
+                    sub="the loop, review inbox" />
                   <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
                     href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
                   <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"

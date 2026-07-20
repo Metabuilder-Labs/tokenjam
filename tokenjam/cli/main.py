@@ -1,8 +1,13 @@
 import os
+from typing import TYPE_CHECKING
 
 import click
 from tokenjam.core.config import load_config
 from tokenjam.core.db import open_db
+
+if TYPE_CHECKING:
+    from tokenjam.core.api_backend import ApiBackend
+    from tokenjam.core.db import DuckDBBackend
 
 
 @click.group(
@@ -24,7 +29,7 @@ from tokenjam.core.db import open_db
 def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         no_color: bool, db_path: str | None, agent: str | None,
         verbose: bool) -> None:
-    """tj - the self-improvement loop for AI agents."""
+    """tj - a cost-saving utility for AI agents."""
     ctx.ensure_object(dict)
 
     # Bare `tj` (no subcommand) → branded home screen (#240): banner +
@@ -78,7 +83,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
             reconfigure(no_color=True)
         return
 
-    db = None
+    db: "DuckDBBackend | ApiBackend | None" = None
     try:
         db = open_db(config.storage)
     except Exception as e:
@@ -139,6 +144,7 @@ from tokenjam.cli.cmd_statusline import cmd_statusline  # noqa: E402
 from tokenjam.cli.cmd_loop import cmd_loop  # noqa: E402
 from tokenjam.cli.cmd_resume_brief import cmd_resume_brief  # noqa: E402
 from tokenjam.cli.cmd_ping import cmd_ping  # noqa: E402
+from tokenjam.cli.cmd_relearn import cmd_relearn  # noqa: E402
 
 cli.add_command(cmd_onboard, name="onboard")
 cli.add_command(cmd_status, name="status")
@@ -171,6 +177,7 @@ cli.add_command(cmd_statusline, name="statusline")
 cli.add_command(cmd_loop, name="loop")
 cli.add_command(cmd_resume_brief, name="resume-brief")
 cli.add_command(cmd_ping, name="ping")
+cli.add_command(cmd_relearn, name="relearn")
 
 # cmd_drift is provided by task 05 — register if available
 try:
