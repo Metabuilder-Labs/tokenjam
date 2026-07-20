@@ -21,7 +21,7 @@ from typing import Any
 import click
 
 from tokenjam.core.config import TjConfig
-from tokenjam.utils.formatting import console
+from tokenjam.utils.formatting import console, format_cost
 
 
 @click.group("relearn", invoke_without_command=False)
@@ -69,7 +69,7 @@ def _render_receipts(summary: dict[str, Any]) -> None:
         return
 
     console.print(
-        f"[bold]${summary['verified_saved_usd']:.2f}[/bold] verified saved to date "
+        f"[bold]{format_cost(summary['verified_saved_usd'])}[/bold] verified saved to date "
         f"[dim](measured · {summary['improved_count']} improved fix(es))[/dim]"
     )
     console.print(
