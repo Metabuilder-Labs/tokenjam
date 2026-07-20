@@ -30,7 +30,7 @@ proposals. It never touches the DB, the store, or the network.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any
 
 # House-style label strings. Kept verbatim on every cost proposal so no channel
@@ -474,3 +474,93 @@ def cost_proposals_from_report(report: Any) -> list[CostProposal]:
         except Exception:
             continue
     return proposals
+
+
+# --------------------------------------------------------------------------- #
+# Component E — the Review inbox's single "estimated recoverable" headline.
+# Pure arithmetic over whatever proposals the caller hands it (the API route
+# is what narrows that set to "open" — not yet applied — before calling
+# this); kept separate so the sum/dedup logic is unit-testable on its own and
+# never entangled with the applied-ledger lookup.
+# --------------------------------------------------------------------------- #
+
+def estimated_recoverable_rollup(
+    proposals: list[Any],
+    *,
+    window_days: int = DEFAULT_COST_WINDOW_DAYS,
+) -> dict[str, Any]:
+    """Sum ``estimated_recoverable_usd`` across ``proposals``, deduplicated by
+    ``signature`` (a proposal's stable identity — see the ``CostProposal``
+    docstring) so a stale or duplicate cache entry is never double-counted.
+
+    Generic over ``analyzer``: reads only the shared ``CostProposal`` fields,
+    so a new analyzer's cards are picked up automatically with no changes
+    here (§3's dedup rule already lives one layer down, in each analyzer's
+    adapter — one underlying waste source becomes one card before it ever
+    reaches this function).
+
+    Only a proposal carrying a numeric estimate contributes to the sum AND to
+    ``proposal_count`` — a card with no estimate yet still renders
+    individually in the inbox, it just isn't folded into this aggregate
+    (counting it in "N proposals" without a dollar contribution would
+    silently understate the average the headline implies).
+
+    Tagged ``estimated`` — see ``receipts.verified_saved_summary`` for the
+    measured twin (Component G1). The two figures are NEVER added together;
+    every caller must keep them as two clearly labeled numbers.
+    """
+    seen: dict[str, dict[str, Any]] = {}
+    for p in proposals:
+        row = asdict(p) if is_dataclass(p) else dict(p)
+        sig = str(row.get("signature") or "")
+        if not sig or sig in seen:
+            continue  # empty/duplicate signature never counts twice
+        seen[sig] = row
+
+    contributing: list[dict[str, Any]] = []
+    by_analyzer: dict[str, dict[str, Any]] = {}
+    total_usd = 0.0
+    for row in seen.values():
+        usd = row.get("estimated_recoverable_usd")
+        if usd is None:
+            continue
+        usd = float(usd)
+        total_usd += usd
+        analyzer = str(row.get("analyzer") or "unknown")
+        entry = by_analyzer.setdefault(analyzer, {"analyzer": analyzer, "count": 0, "usd": 0.0})
+        entry["count"] += 1
+        entry["usd"] = round(entry["usd"] + usd, 6)
+        contributing.append({
+            "signature": row.get("signature"), "analyzer": analyzer,
+            "title": row.get("title"), "usd": round(usd, 6),
+        })
+
+    proposal_count = len(contributing)
+    if proposal_count == 0:
+        basis = (
+            "no open (not yet applied) cost proposal currently carries a "
+            "dollar estimate. Estimated, correlational; never mixed with "
+            "the measured verified-saved figure."
+        )
+    else:
+        breakdown = "; ".join(
+            f"{a['analyzer']} ({a['count']})"
+            for a in sorted(by_analyzer.values(), key=lambda x: x["analyzer"])
+        )
+        basis = (
+            f"sum of estimated_recoverable_usd across {proposal_count} open "
+            f"(not yet applied), deduplicated-by-signature cost proposal(s) "
+            f"over the last {window_days}d; contributing analyzers: {breakdown}. "
+            "Estimated, correlational; never mixed with the measured "
+            "verified-saved figure."
+        )
+
+    return {
+        "estimated_recoverable_usd": round(total_usd, 6),
+        "proposal_count": proposal_count,
+        "window_days": window_days,
+        "by_analyzer": sorted(by_analyzer.values(), key=lambda x: x["analyzer"]),
+        "contributing": contributing,
+        "estimate_confidence": COST_ESTIMATE_CONFIDENCE,
+        "estimate_basis": basis,
+    }
