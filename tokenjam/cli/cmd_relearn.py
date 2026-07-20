@@ -1,10 +1,9 @@
 """`tj relearn` — the self-improve loop's CLI surface.
 
-Component F1 (a separate, in-flight addition to THIS SAME group) wires
-``list`` / ``apply <proposal-id> [--go]`` / ``enable`` / ``revert`` as thin
-wrappers over ``relearn_apply`` / the API-layer functions. This file wires
-only Component G1's read-only ``receipts`` command, kept in its own block
-below so the two land in one clean merge.
+The group's write verbs (``list`` / ``apply <proposal-id> [--go]`` / ``enable``
+/ ``revert`` / ``verify``) live in ``cli/relearn_write_verbs.py`` and are
+attached at the bottom of this file; this file owns the group itself plus the
+read-only ``receipts`` command.
 
 ``receipts`` needs no DB connection — it reads the two on-disk ledgers
 (``relearn_apply.list_applied`` / ``cost_apply.list_applied``) the same way
@@ -30,9 +29,8 @@ def cmd_relearn() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Component G1 — read-only receipts. Component F1's list/apply/enable/revert
-# verbs land as sibling ``@cmd_relearn.command(...)`` functions in this same
-# group; nothing below needs to change for that to merge cleanly.
+# Read-only receipts. The write verbs are attached from
+# ``cli/relearn_write_verbs.py`` at the bottom of this file.
 # --------------------------------------------------------------------------- #
 
 @cmd_relearn.command("receipts")
@@ -84,3 +82,13 @@ def _render_receipts(summary: dict[str, Any]) -> None:
         f"{summary['insufficient_data_count']} still measuring[/dim]"
     )
     console.print(f"[dim]{summary['estimate_basis']}[/dim]")
+
+
+# --------------------------------------------------------------------------- #
+# Write verbs (list / apply / enable / revert / verify) — defined in their own
+# module, attached here so `tj relearn` exposes the whole group.
+# --------------------------------------------------------------------------- #
+
+from tokenjam.cli.relearn_write_verbs import register_write_verbs  # noqa: E402
+
+register_write_verbs(cmd_relearn)
