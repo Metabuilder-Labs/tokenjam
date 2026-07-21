@@ -839,6 +839,16 @@ def _render_report(
                 report.findings[name], pricing_mode=pricing_mode, marker=marker,
                 persona=persona,
             )
+        elif name == "cache-recommend":
+            # Persona-gated cache_control snippet, same reason resend/downsize
+            # get `persona` above — see `_render_cache_recommend`. Called
+            # directly for the same mypy reason documented on the `resend`
+            # branch: `_FINDING_RENDERERS`'s inferred call signature doesn't
+            # include `persona`.
+            _render_cache_recommend(
+                report.findings[name], pricing_mode=pricing_mode, marker=marker,
+                persona=persona,
+            )
         else:
             _FINDING_RENDERERS[name](
                 report.findings[name], pricing_mode=pricing_mode, marker=marker,
@@ -1528,12 +1538,22 @@ def _render_cache_root_causes(finding, *, pricing_mode: str) -> None:
 
 
 def _render_cache_recommend(
-    finding, *, pricing_mode: str = "api", marker: str = "",
+    finding, *, pricing_mode: str = "api", marker: str = "", persona: str = "unknown",
 ) -> None:
     """
     Render the cache-recommend finding — Anthropic-only v1 breakpoint
     candidates. When the analyzer is disabled (capture.prompts off), surface
     the hint instead of an empty table.
+
+    Each candidate's `cache_control_snippet` is an edit to the raw Anthropic
+    API request — a lever a Claude Code session never has, since the harness
+    constructs that request, not the user. Gated by the same rule
+    `cost_proposals._persona_gated_cache_fields` applies to the Review-inbox
+    proposal built from this same finding: `persona == "claude-code"` swaps
+    the snippet for the honest no-lever explanation (imported from
+    `cost_proposals` so the CLI never drifts from the web copy); every other
+    persona, including "unknown", still gets the snippet — for cache advice
+    the risky direction is under-offering a real fix, not over-offering one.
     """
     console.print(_finding_header(marker, "Cache recommend:"))
     if not finding.enabled:
@@ -1597,6 +1617,14 @@ def _render_cache_recommend(
                     f"for {c.model or 'this model'}[/dim]"
                 )
         console.print(f"           [dim italic]{sample}[/dim italic]")
+        if persona == "claude-code":
+            from tokenjam.core.optimize.cost_proposals import CACHE_NO_LEVER_TEXT
+            console.print(f"           [dim]{_rich_escape(CACHE_NO_LEVER_TEXT)}[/dim]")
+        else:
+            console.print("           [dim]cache_control:[/dim]")
+            console.print(
+                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
+            )
 
     if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
         console.print(
@@ -1741,7 +1769,44 @@ def _render_prompt_bloat(
             f"[bold]{p.bloat_chars}[/bold] bloat / {p.prompt_chars} chars  "
             f"[dim]~{p.estimated_token_reduction} tokens trimmable[/dim]"
         )
-        console.print(f"           [dim italic]{sample}[/dim italic]")
+        console.print(f"           [dim italic]{_rich_escape(sample)}[/dim italic]")
+        # Provenance (read-only, see prompt_bloat.py's module docstring): most
+        # prompts end unattributed — that's the conservative, expected outcome,
+        # not a gap — so this block only prints when a catalog file actually
+        # cleared the verbatim-containment bar. `trim` never edits the file; the
+        # pointer below is a navigation hint into `summarize`, which owns editing.
+        #
+        # This gate is also the deliberate persona split, not an accident of
+        # the provenance check: source_path is only ever set when the prompt
+        # verbatim-contains a catalog file (CLAUDE.md, AGENTS.md, ...), which
+        # by definition means a harness-shaped workspace `summarize` can act
+        # on. A pure-SDK caller (no catalog file in play) never gets a
+        # source_path and so never sees this pointer — the flagged-text
+        # section below is that caller's whole, complete answer: there's
+        # nothing degraded about it, it's the only thing to point at since
+        # they construct the prompt themselves rather than editing a file.
+        if p.source_path:
+            console.print(
+                f"           [dim]Attributed to [bold]{_rich_escape(p.source_path)}[/bold] "
+                f"({_rich_escape(p.source_basis)})[/dim]"
+            )
+            console.print(
+                f"           [dim]Review it: [bold]tj summarize list "
+                f"{_rich_escape(p.source_path)}[/bold][/dim]"
+            )
+        # The flagged text itself, not just the bloat percentage — a user
+        # can't act on "38% low-signal" alone; they need to see what to cut.
+        regions = p.regions[:3]
+        if regions:
+            console.print("           [dim]Flagged text:[/dim]")
+            for r in regions:
+                text = _rich_escape(r.sample_chars.replace("\n", " ").strip())
+                console.print(f"             [dim]·[/dim] [italic]{text}…[/italic] "
+                              f"[dim]({r.char_length} chars)[/dim]")
+            if len(p.regions) > 3:
+                console.print(
+                    f"             [dim]… and {len(p.regions) - 3} more region(s).[/dim]"
+                )
     console.print(
         "     [dim]For per-prompt highlights run: "
         "[bold]tj report --trim[/bold][/dim]"

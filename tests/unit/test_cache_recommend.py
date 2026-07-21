@@ -24,6 +24,13 @@ def db():
     backend.close()
 
 
+def _flat(out: str) -> str:
+    """Collapse Rich's terminal-width line wrapping to a single line so a
+    long fixed string can be matched by substring regardless of where the
+    console happened to wrap it."""
+    return " ".join(out.split())
+
+
 def _config(capture_prompts: bool) -> TjConfig:
     return TjConfig(
         version="1",
@@ -287,3 +294,97 @@ def test_render_cache_recommend_suppresses_dollars_off_api(db, capsys):
     assert "$" not in out
     assert "cacheable/call" in out       # the token-level opportunity still shows
     assert "doesn't bill per token" in out
+
+
+# -- CLI rendering: cache_control snippet, persona-gated --
+#
+# Mirrors the gate `cost_proposals._persona_gated_cache_fields` applies to
+# the Review-inbox proposal built from this same finding (see
+# test_cache_root_cause_proposals.py for that side): a `cache_control` edit
+# is on the raw Anthropic API request, code a Claude Code session never
+# constructs itself. "unknown" stays actionable here (the CLI's default when
+# no persona is threaded through) -- the risky direction for cache advice is
+# withholding a real fix, not over-offering one.
+
+def _build_cache_recommend_report(db):
+    _seed_with_prompt(db, prompt="SYSTEM: " + "you are helpful. " * 200,
+                      count=5, input_tokens=2500, model="claude-sonnet-4-6")
+    config = _config(capture_prompts=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["cache-recommend"])
+    return report.findings["cache-recommend"]
+
+
+def test_render_cache_recommend_shows_snippet_by_default(db, capsys):
+    from tokenjam.cli.cmd_optimize import _render_cache_recommend
+
+    finding = _build_cache_recommend_report(db)
+    c = finding.candidates[0]
+    assert c.cache_control_snippet
+
+    _render_cache_recommend(finding, pricing_mode="api")
+    out = capsys.readouterr().out
+
+    assert "cache_control:" in out
+    assert '"cache_control"' in out
+    assert '"type": "ephemeral"' in out
+
+
+def test_render_cache_recommend_unknown_persona_still_shows_snippet(db, capsys):
+    """`unknown` (the CLI default) stays on the actionable branch -- the
+    opposite grouping from `_persona_gated_write_fields`'s writes, and
+    exactly the rule `_persona_gated_cache_fields` documents."""
+    from tokenjam.cli.cmd_optimize import _render_cache_recommend
+
+    finding = _build_cache_recommend_report(db)
+
+    _render_cache_recommend(finding, pricing_mode="api", persona="unknown")
+    out = capsys.readouterr().out
+
+    assert '"cache_control"' in out
+
+
+def test_render_cache_recommend_claude_code_suppresses_snippet(db, capsys):
+    """A Claude Code session doesn't construct the raw Anthropic request --
+    the harness does -- so the snippet is swapped for the honest no-lever
+    explanation, imported straight from cost_proposals so the CLI never
+    drifts from the web copy."""
+    from tokenjam.cli.cmd_optimize import _render_cache_recommend
+    from tokenjam.core.optimize.cost_proposals import CACHE_NO_LEVER_TEXT
+
+    finding = _build_cache_recommend_report(db)
+
+    _render_cache_recommend(finding, pricing_mode="api", persona="claude-code")
+    out = _flat(capsys.readouterr().out)
+
+    assert '"cache_control"' not in out
+    assert CACHE_NO_LEVER_TEXT in out
+
+
+def test_render_cache_recommend_mixed_persona_still_shows_snippet(db, capsys):
+    from tokenjam.cli.cmd_optimize import _render_cache_recommend
+
+    finding = _build_cache_recommend_report(db)
+
+    _render_cache_recommend(finding, pricing_mode="api", persona="mixed")
+    out = capsys.readouterr().out
+
+    assert '"cache_control"' in out
+
+
+def test_render_cache_recommend_snippet_uses_plain_console_print(db, capsys):
+    """Matches `_render_cache_root_causes`'s existing snippet treatment:
+    printed on its own line via `markup=False, highlight=False,
+    soft_wrap=True` -- not interpolated into a Rich-markup f-string, which
+    would risk brackets in the JSON snippet being swallowed as style tags."""
+    from tokenjam.cli.cmd_optimize import _render_cache_recommend
+
+    finding = _build_cache_recommend_report(db)
+    c = finding.candidates[0]
+
+    _render_cache_recommend(finding, pricing_mode="api")
+    out = capsys.readouterr().out
+
+    assert c.cache_control_snippet in out
