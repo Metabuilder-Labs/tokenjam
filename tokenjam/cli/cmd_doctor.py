@@ -16,7 +16,8 @@ from tokenjam.utils.formatting import console, display_path
     "--repair",
     is_flag=True,
     help="Attempt to fix issues that have a known repair path (e.g. rebuild the "
-         "spans table when DuckDB column statistics are corrupt — see issue #56).",
+         "spans table when DuckDB column statistics are corrupt: "
+         "https://github.com/Metabuilder-Labs/tokenjam/issues/56).",
 )
 @click.pass_context
 def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
@@ -283,7 +284,8 @@ def _check_spans_stats(db: object) -> dict:
                        "— trace-detail queries (`tj traces <id>`, dashboard "
                        "trace view) will return no spans. Run `tj doctor "
                        "--repair` to rebuild the table (data is preserved). "
-                       "See issue #56.",
+                       "Background: "
+                       "https://github.com/Metabuilder-Labs/tokenjam/issues/56.",
             "repair_action": "rebuild_spans",
         }
     return {"name": "Spans column statistics", "level": "ok",
@@ -324,7 +326,7 @@ def _check_schema_integrity(db: object) -> dict:
             "message": (
                 "Live schema is missing column(s) the code writes on ingest: "
                 f"{', '.join(missing)}. These were recorded as migrated but never "
-                "landed (see #55); ingest of affected rows fails with a DuckDB "
+                "landed; ingest of affected rows fails with a DuckDB "
                 "Binder Error and is silently dropped, surfacing as a blank/stale "
                 "Status page. Run `tj doctor --repair` to add them (idempotent, "
                 "data preserved)."
@@ -546,8 +548,8 @@ def _check_mcp_wiring(config: object) -> dict:
             "level": "warning",
             "message": (
                 f"MCP server registered in {', '.join(found_locations)} — an "
-                "in-loop MCP is a per-turn quota tax on subscription users "
-                "(+36% measured, ticket #59), not the recommended surface for "
+                "in-loop MCP is a per-turn token tax on subscription users "
+                "(+36% measured), not the recommended surface for "
                 "Claude Code / Codex. Remove it: " + "; ".join(removal_hints) + ". "
                 "The MCP is meant for SDK / API integrations only."
             ),
