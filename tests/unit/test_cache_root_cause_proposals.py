@@ -21,7 +21,13 @@ from tokenjam.core.optimize.analyzers.cache_efficacy import (
     UncachedAgentCandidate,
     _compute_root_cause_candidates,
 )
+from tokenjam.core.optimize.analyzers.cache_recommend import CachePrefixCandidate
+from tokenjam.core.optimize.analyzers.cache_recommend import (
+    CacheRecommendFinding,
+)
 from tokenjam.core.optimize.cost_proposals import (
+    CACHE_NO_LEVER_TEXT,
+    _cache_recommend_to_proposals,
     _cache_thrash_to_proposals,
     _cache_to_proposals,
     _per_agent_cache_recoverable_by_model,
@@ -263,4 +269,168 @@ def test_generic_per_model_card_is_reduced_by_overlapping_per_agent_claim(db):
         <= original + 1e-6
     )
     assert "double-count" in generic.estimate_basis
+
+
+# --- Persona-gated fix TEXT (cache / cache_thrash / cache-recommend) ---------
+#
+# Unlike script/reuse/verbosity there's no workspace write to gate here —
+# every cache fix is a `cache_control` edit on the raw Anthropic API request,
+# which a Claude Code session never constructs itself. A claude-code window
+# must get the honest no-lever reason instead of an instruction it can't
+# follow; every other persona is unaffected (byte-identical to before this
+# gating existed).
+
+def _cache_finding_for_persona_tests():
+    return CacheEfficacyFinding(
+        flagged=[_flagged_row()],
+        uncached_agents=[_uncached_candidate()],
+        thrash_agents=[_thrash_candidate(cause="ttl", ttl_worth_it=True)],
+        lookback_miss_agents=[_lookback_candidate()],
+    )
+
+
+def _flagged_row():
+    from tokenjam.core.optimize.analyzers.cache_efficacy import CacheEfficacyRow
+    return CacheEfficacyRow(
+        provider="anthropic", model="claude-sonnet-5", input_tokens=200_000,
+        cache_tokens=1_000, efficacy=0.01, support="full", flagged=True,
+    )
+
+
+@pytest.mark.parametrize("adapter_name", [
+    "_cache_to_proposals", "_cache_uncached_to_proposals",
+    "_cache_thrash_to_proposals", "_cache_lookback_to_proposals",
+])
+def test_claude_code_persona_gets_no_lever_text_and_no_snippet(adapter_name):
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(_cache_finding_for_persona_tests(), persona="claude-code")
+    assert len(props) == 1
+    p = props[0]
+    assert p.advise_text == CACHE_NO_LEVER_TEXT
+    assert p.suggestion == ""
+    # The diagnostic stays true and useful regardless of persona.
+    assert p.evidence
+    assert p.estimated_recoverable_usd is not None or p.estimated_recoverable_tokens is not None
+
+
+@pytest.mark.parametrize("adapter_name", [
+    "_cache_to_proposals", "_cache_uncached_to_proposals",
+    "_cache_thrash_to_proposals", "_cache_lookback_to_proposals",
+])
+@pytest.mark.parametrize("persona", ["sdk", "unknown", "mixed"])
+def test_non_claude_code_personas_keep_the_instruction(adapter_name, persona):
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(_cache_finding_for_persona_tests(), persona=persona)
+    assert len(props) == 1
+    p = props[0]
+    assert p.advise_text != CACHE_NO_LEVER_TEXT
+    assert "cache" in p.advise_text.lower() or "TTL" in p.advise_text
+
+    # The default (no persona kwarg) must resolve exactly like "unknown" —
+    # never silently assume claude-code.
+    default_props = adapter(_cache_finding_for_persona_tests())
+    assert default_props[0].advise_text != CACHE_NO_LEVER_TEXT
+
+
+def test_cost_proposals_from_report_gates_the_whole_cache_family_on_persona():
+    report = OptimizeReport(
+        window=_window(), findings={"cache": _cache_finding_for_persona_tests()},
+    )
+    report.persona = "claude-code"
+    by_sig = {p.signature: p for p in cost_proposals_from_report(report)}
+    generic = by_sig["cost:cache:anthropic:claude-sonnet-5"]
+    assert generic.advise_text == CACHE_NO_LEVER_TEXT
+    uncached = by_sig["cost:cache-uncached:svc-uncached"]
+    assert uncached.advise_text == CACHE_NO_LEVER_TEXT
+    assert uncached.suggestion == ""
+
+    report.persona = "sdk"
+    by_sig = {p.signature: p for p in cost_proposals_from_report(report)}
+    assert by_sig["cost:cache:anthropic:claude-sonnet-5"].advise_text != CACHE_NO_LEVER_TEXT
+    assert by_sig["cost:cache-uncached:svc-uncached"].suggestion
+
+
+# --- cache-recommend proposal: shape, snippet, persona gate, dedup ----------
+
+def _prefix_candidate(**overrides):
+    fields = dict(
+        prefix_hash="abc123def456", sample_chars="SYSTEM: you are helpful...",
+        occurrences=5, avg_input_tokens=2500.0, estimated_cacheable_tokens=1000,
+        model="claude-sonnet-5",
+        cache_control_snippet='# claude-sonnet-5: prefix seen in 5 calls\n'
+                               '{"cache_control": {"type": "ephemeral"}}',
+        estimated_recoverable_usd=0.4, estimated_recoverable_tokens=4000,
+    )
+    fields.update(overrides)
+    return CachePrefixCandidate(**fields)
+
+
+def _recommend_finding(candidates=None, **overrides):
+    candidates = candidates if candidates is not None else [_prefix_candidate()]
+    fields = dict(
+        enabled=True, candidates=candidates,
+        estimated_recoverable_usd=sum(c.estimated_recoverable_usd or 0 for c in candidates) or None,
+        estimated_recoverable_tokens=sum(c.estimated_recoverable_tokens or 0 for c in candidates) or None,
+        estimate_basis="recommend basis",
+    )
+    fields.update(overrides)
+    return CacheRecommendFinding(**fields)
+
+
+def test_cache_recommend_proposal_shape_carries_the_snippet_as_suggestion():
+    props = _cache_recommend_to_proposals(_recommend_finding(), persona="sdk")
+    assert len(props) == 1
+    p = props[0]
+    assert p.kind == "cost"
+    assert p.analyzer == "cache-recommend"
+    assert p.signature == "cost:cache-recommend:abc123def456"
+    assert p.suggestion == _prefix_candidate().cache_control_snippet
+    assert "cache_control" in p.advise_text
+    assert p.estimated_recoverable_usd == 0.4
+    assert p.estimated_recoverable_tokens == 4000
+
+
+def test_cache_recommend_proposal_empty_for_disabled_or_no_candidates():
+    assert _cache_recommend_to_proposals(None) == []
+    assert _cache_recommend_to_proposals(_recommend_finding(enabled=False)) == []
+    assert _cache_recommend_to_proposals(_recommend_finding(candidates=[])) == []
+
+
+def test_cache_recommend_claude_code_gets_no_lever_text():
+    p = _cache_recommend_to_proposals(_recommend_finding(), persona="claude-code")[0]
+    assert p.advise_text == CACHE_NO_LEVER_TEXT
+    assert p.suggestion == ""
+    assert p.evidence  # diagnostic stays
+
+
+def test_cache_recommend_is_reduced_by_overlapping_per_agent_cache_claim():
+    """A prefix candidate on the same model an A1 uncached-agent card already
+    claimed must not ALSO claim the full figure under a third signature."""
+    candidate = _prefix_candidate(model="claude-sonnet-5",
+                                   estimated_recoverable_usd=1.0,
+                                   estimated_recoverable_tokens=10_000)
+    recommend_finding = _recommend_finding(candidates=[candidate])
+    cache_finding = CacheEfficacyFinding(
+        uncached_agents=[_uncached_candidate(agent_id="svc-uncached")],
+    )
+    unreduced = _cache_recommend_to_proposals(recommend_finding)[0].estimated_recoverable_usd
+    reduced = _cache_recommend_to_proposals(recommend_finding, cache_finding)[0]
+    assert reduced.estimated_recoverable_usd < unreduced
+    assert reduced.estimated_recoverable_usd == pytest.approx(
+        max(0.0, unreduced - _uncached_candidate().estimated_recoverable_usd), abs=1e-4,
+    )
+    assert "double-count" in reduced.estimate_basis
+
+
+def test_cache_recommend_wired_into_cost_analyzers_and_report_adapter():
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+    assert "cache-recommend" in COST_ANALYZERS
+
+    report = OptimizeReport(
+        window=_window(), findings={"cache-recommend": _recommend_finding()},
+    )
+    analyzers = {p.analyzer for p in cost_proposals_from_report(report)}
+    assert "cache-recommend" in analyzers
 
