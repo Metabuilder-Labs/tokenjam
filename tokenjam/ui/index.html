@@ -903,6 +903,10 @@ a.health-tile.attn { border-color: var(--warn); }
 .health-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: 'Geist Mono', monospace; }
 .opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* Deep-link highlight for a Review-inbox cost advisory (card → apply hop).
+   The card's own inline `border` wins over a plain class rule, so this needs
+   !important to actually show against it. */
+.opt-section.rev-focus { border-color: var(--accent) !important; box-shadow: 0 0 0 1px var(--accent); }
 .opt-title { font-family: 'Geist', sans-serif; font-size: 15px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .opt-rec { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
 .opt-line { font-size: 13px; line-height: 1.6; margin: 4px 0; }
@@ -6050,6 +6054,15 @@ function optimizeFindingHref(name, since) {
   return '#/optimize?' + sp.toString();
 }
 
+// Reverse hop: deep-link a detail card's evidence into the Review inbox's
+// matching cost advisory (or advisories — one analyzer can carry several).
+// The `analyzer` param drives ReviewInboxView's scroll-into-view + highlight
+// of every open advisory that analyzer produced, mirroring
+// optimizeFindingHref's card-level (not per-instance) granularity.
+function reviewProposalHref(analyzer) {
+  return '#/review?analyzer=' + encodeURIComponent(analyzer);
+}
+
 // Title-case a registry key for display. Centralizes capitalization so a tile
 // for a not-yet-known analyzer still renders title-case instead of the raw
 // lowercase key (#162) — registry keys are lowercase by convention.
@@ -6201,7 +6214,7 @@ function HealthTile({ label, value, attention, href, sub }) {
 }
 
 // ---- Optimize detail screen ----
-function OptimizeFinding({ name, opt, framing }) {
+function OptimizeFinding({ name, opt, framing, hasProposal }) {
   const meta = ANALYZER_META[name] || { title: capitalize(name) };
   let body = null;
   if (name === 'downsize') {
@@ -6294,6 +6307,7 @@ function OptimizeFinding({ name, opt, framing }) {
       ${rec ? html`<span class="opt-rec">${rec} <span class="estimated-tag" title=${fd && fd.estimate_basis}>estimated recoverable</span></span>` : null}
     </div>
     ${body}
+    ${hasProposal ? html`<div class="opt-line" style="margin-top:10px"><a class="sz-link" href=${reviewProposalHref(name)}>A fix for this is ready. Review it in the Review inbox →</a></div>` : null}
   </section>`;
 }
 
@@ -6341,7 +6355,7 @@ function OptimizeView({ params }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set() });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -6357,7 +6371,12 @@ function OptimizeView({ params }) {
       // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
       // Best-effort — must not blank the Optimize screen.
       const rec = await api('/recommendations').catch(() => null);
-      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec });
+      // Which analyzers currently have an open Review-inbox proposal — drives
+      // the card → Review-inbox link below. Best-effort: a failed or empty
+      // fetch just means no card offers the link, never an error state.
+      const cp = await api('/relearn/cost-proposals').catch(() => null);
+      const proposalAnalyzers = new Set((cp && cp.proposals || []).map(p => p.analyzer));
+      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
@@ -6492,7 +6511,7 @@ function OptimizeView({ params }) {
       ${st.rec && st.rec.rows && st.rec.rows.length ? html`<${RecommendationsPanel} rec=${st.rec} />` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
-      ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}
+      ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section"><div class="opt-title">Budget projection</div>
         ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtFramedDollar(b.projected_overage_usd, framing)}</span>` : '— within budget'}</div>`)}
       </section>` : null}
@@ -7859,12 +7878,34 @@ function CopySnippetButton({ text }) {
 // way to mark it done). The badge below says which one this card is; a
 // snippet fix gets its own labeled block so the snippet reads as the
 // deliverable, not a footnote.
-function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
+// Per apply_kind, the section title, hint, and primary-button copy for
+// CostProposalCard's direct-edit apply flow — the write differs by what's
+// actually changing (a config entry removed vs a model id swapped), so the
+// card has to say which rather than a one-size "Apply the sizing note".
+const APPLY_KIND_COPY = {
+  model_swap:  { title: 'Apply the model swap', hint: 'writes the new model id at the registered source path; confirm the target first', button: 'Apply swap' },
+  agent_model: { title: "Apply the agent's model change", hint: "sets this subagent's definition-file model key directly; confirm the target first", button: 'Apply change' },
+  mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; confirm the target first", button: 'Remove entry' },
+};
+
+function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged }) {
   const usd = prop.estimated_recoverable_usd;
   const toks = prop.estimated_recoverable_tokens;
-  // Workspace-apply state (subagent, CC-origin only): a target path + a dry-run
-  // diff before the real, reversible write — routed through the same
-  // human-gated relearn apply path.
+  // Two apply-capable shapes, routed through two different endpoints:
+  //  - no apply_kind (subagent rubric / script / reuse / verbosity): the fix
+  //    is a workspace surface an orchestrator reads, not a value tokenjam can
+  //    edit outright -> /relearn/cost-proposals/apply-workspace (unchanged).
+  //  - an apply_kind (model_swap / agent_model / mcp_remove): a deterministic
+  //    edit of a value already written down -> /relearn/apply, the SAME
+  //    endpoint a relearn cluster's Approve uses. relearn_proposals.
+  //    cluster_for_apply already projects apply_kind/agent_name/source_path/
+  //    current_model/proposed_model off the stored cost proposal, so this
+  //    needs no server-side change.
+  const hasApplyKind = !!prop.apply_kind;
+
+  // Workspace-apply state (subagent rubric / script / reuse / verbosity): a
+  // target path + a dry-run diff before the real, reversible write — routed
+  // through the same human-gated relearn apply path.
   const [target, setTarget] = useState('');
   const [wbusy, setWbusy] = useState(false);
   const [werr, setWerr] = useState(null);
@@ -7882,24 +7923,58 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
     finally { setWbusy(false); }
   };
 
+  // Apply-kind state: the target pre-fills from the server-resolved
+  // prop.target_path (already the exact file the analyzer found) rather than
+  // asking the user to type/guess it, unlike the workspace-note flow above
+  // where the target genuinely is the human's call.
+  const [akTarget, setAkTarget] = useState(prop.target_path || '');
+  const [akBusy, setAkBusy] = useState(false);
+  const [akErr, setAkErr] = useState(null);
+  const [akWarning, setAkWarning] = useState(null);   // active-session 409 — offers "apply anyway"
+  const [akPreview, setAkPreview] = useState(null);
+
+  useEffect(() => { setAkTarget(prop.target_path || ''); }, [prop.proposal_id]);
+
+  const applyKindFix = async (go, force) => {
+    if (!akTarget.trim()) { setAkErr('enter a target path first'); return; }
+    setAkBusy(true); setAkErr(null);
+    try {
+      const r = await apiPostOrDetail('/relearn/apply', {
+        proposal_id: prop.proposal_id, scope: prop.scope || 'project',
+        target_path: akTarget.trim(), go, force: !!force,
+      });
+      if (go) { setAkWarning(null); onChanged && onChanged(); }
+      else { setAkPreview(r.diff || '(no changes)'); }
+    } catch (e) {
+      // Same active-session guard relearn's own Approve modal offers a retry
+      // for (SPEC §7: never apply mid-session unless the human insists).
+      if (e.status === 409 && /active session/.test(e.message || '')) { setAkWarning(e.message); }
+      else { setAkErr(e.message || String(e)); }
+    } finally { setAkBusy(false); }
+  };
+
+  const akCopy = APPLY_KIND_COPY[prop.apply_kind] || { title: 'Apply this fix', hint: 'confirm the target first', button: 'Apply' };
+
   // The badge names the fix modality, not a verdict on the proposal: a
   // snippet fix is a complete, concrete deliverable (the user pastes it
   // themselves) — never phrased as a lesser "advise-only" fallback. Plain
   // advise-only survives for the rare proposal with no pasteable snippet at
-  // all (prose advice only).
+  // all (prose advice only). An apply_kind fix skips the rung ladder
+  // entirely (see relearn_apply's _build_write_plan), so it never carries a
+  // rung — "rung 1" would be wrong here, unlike the workspace-note flow.
   const modalityLabel = prop.apply_capable
-    ? 'workspace fix · rung 1'
+    ? (hasApplyKind ? 'workspace fix · direct edit' : 'workspace fix · rung 1')
     : (prop.suggestion ? 'snippet fix · apply yourself' : 'advise-only');
 
   return html`
-    <div class="opt-section" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
+    <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[prop.analyzer] || prop.analyzer}</span>
         <span style="font-weight:500">${prop.title}</span>
         <span class="dim" style="font-size:11px">${modalityLabel}</span>
         ${(usd != null || toks != null) ? html`<span class="mono" style="margin-left:auto;color:var(--accent);font-size:12.5px">${usd != null ? '~' + fmtUsd(usd) : ''}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>` : null}
       </div>
-      <div class="sz-note" style="margin-top:8px">${prop.evidence}</div>
+      <div class="sz-note" style="margin-top:8px">${prop.evidence} <a class="sz-link" style="font-size:11.5px" href=${optimizeFindingHref(prop.analyzer)}>See the evidence →</a></div>
       <div class="opt-title" style="font-size:12.5px;margin-top:10px">Recommendation</div>
       <div class="sz-note" style="margin-top:2px">${prop.advise_text}</div>
       ${prop.suggestion ? html`
@@ -7913,7 +7988,21 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
       ` : null}
       <div class="opt-caveat" style="font-size:11.5px;margin-top:8px">${prop.caveat}</div>
 
-      ${prop.apply_capable ? html`
+      ${prop.apply_capable ? (hasApplyKind ? html`
+        <div class="opt-section" style="margin:10px 0 0">
+          <div class="opt-title" style="font-size:12.5px">${akCopy.title} <span class="dim" style="font-weight:400">· ${akCopy.hint}</span></div>
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+            <input class="rename-input" style="flex:1;min-width:280px" value=${akTarget}
+              placeholder="/absolute/path/to/target" onInput=${e => setAkTarget(e.target.value)} />
+            <button class="cur-btn" disabled=${akBusy} onClick=${() => applyKindFix(false)}>${akBusy ? 'working…' : 'Preview'}</button>
+            <button class="cur-btn primary" disabled=${akBusy} onClick=${() => applyKindFix(true)}>${akCopy.button} →</button>
+          </div>
+          ${akPreview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${akPreview}</pre>` : null}
+          ${akWarning ? html`<div class="opt-caveat" style="color:var(--warn)">${akWarning} <span class="sz-link" onClick=${() => applyKindFix(true, true)}>Apply anyway →</span></div>` : null}
+          ${akErr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${akErr}</div>` : null}
+          <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized cost delta after it.</div>
+        </div>
+      ` : html`
         <div class="opt-section" style="margin:10px 0 0">
           <div class="opt-title" style="font-size:12.5px">Apply the sizing note <span class="dim" style="font-weight:400">· writes a reversible rung-1 note; confirm the target first</span></div>
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
@@ -7926,7 +8015,7 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
           ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
           <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized fan-out cost delta after it.</div>
         </div>
-      ` : html`
+      `) : html`
         <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
           <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : (prop.suggestion ? 'I applied this →' : 'Mark applied →')}</button>
           <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
@@ -8040,6 +8129,9 @@ function ReceiptsHeader({ rollup, receiptsData, rollupFraming }) {
 }
 
 function ReviewInboxView({ params }) {
+  // Deep-link from an Optimize detail card's "review it" link (reviewProposalHref)
+  // — scrolls to and highlights every open cost advisory from this analyzer.
+  const analyzerFocus = readParam(params, 'analyzer', '');
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
@@ -8100,6 +8192,15 @@ function ReviewInboxView({ params }) {
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
     return () => clearInterval(timer);
   }, [load, loadApplied, loadCost]);
+
+  // Scroll the first matching advisory into view once the cost proposals have
+  // loaded (deep-link from an Optimize detail card). Highlighting every match
+  // for this analyzer is handled per-card below (rev-focus).
+  useEffect(() => {
+    if (!analyzerFocus) return;
+    const el = document.querySelector(`[data-analyzer="${analyzerFocus}"]`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [analyzerFocus, costProps]);
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -8189,7 +8290,7 @@ function ReviewInboxView({ params }) {
     ${visibleCost.length > 0 ? html`
       <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers</span></div>
       <div style="margin-top:8px">
-        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
+        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
       </div>
     ` : null}
 
