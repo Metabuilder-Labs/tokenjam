@@ -10,8 +10,8 @@ intervention-ladder rung (SPEC §6):
       ``enable_enforcement`` explicitly before it ever runs
 
 Reversibility (SPEC §10 — "reversible"): every write here is preceded by a
-pre-image snapshot (reusing ``core.summarize.apply``'s atomic-write
-primitive), and git-committed when the target lives inside a git repo. A
+pre-image snapshot (reusing ``core.atomic_write``'s atomic-write primitive),
+and git-committed when the target lives inside a git repo. A
 matching ``revert_applied_fix`` restores the pre-image (or deletes a
 freshly-created file) in one call and commits that too. Every apply /
 enable / disable / revert is recorded to a durable, DB-independent ledger
@@ -35,9 +35,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from tokenjam.core.atomic_write import AtomicWriteRefused, atomic_write
 from tokenjam.core.config import TjConfig
-from tokenjam.core.summarize.apply import _atomic_write
-from tokenjam.core.summarize.session import SummarizeRefused
 
 # --- Rungs (SPEC §6) -----------------------------------------------------------
 
@@ -199,7 +198,7 @@ def _commit_message(
     )
 
 
-# --- Backup (pre-image) store — reuses `_atomic_write`, own namespace so it
+# --- Backup (pre-image) store — reuses `atomic_write`, own namespace so it
 # never collides with core.summarize's own backups keyed by resolved path ------
 
 def _backup_paths(config: TjConfig, fix_id: str) -> tuple[Path, Path]:
@@ -253,8 +252,8 @@ def _restore_backup(config: TjConfig, fix_id: str) -> dict[str, Any]:
     original = orig_f.read_text(encoding="utf-8")
     if target.is_file():
         try:
-            _atomic_write(target, original)
-        except SummarizeRefused as exc:
+            atomic_write(target, original)
+        except AtomicWriteRefused as exc:
             raise RelearnApplyRefused(str(exc)) from exc
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -772,11 +771,11 @@ def render_settings_patch(hook_path: Path, event: str = "PreToolUse", matcher: s
 
 def _write_target(target: Path, content: str) -> None:
     """Write a rung's rendered content — atomically (preserving mode) when the
-    target already exists, else a plain create (``_atomic_write`` needs an
+    target already exists, else a plain create (``atomic_write`` needs an
     existing file to stat for its mode).
 
     Refuses a symlinked target outright (must-fix #3): checked here (not just
-    inside ``_atomic_write``) because a BROKEN symlink's ``.exists()`` is
+    inside ``atomic_write``) because a BROKEN symlink's ``.exists()`` is
     False, which would otherwise fall through to the plain-create branch and
     write through the link unchecked.
     """
@@ -785,8 +784,8 @@ def _write_target(target: Path, content: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         try:
-            _atomic_write(target, content)
-        except SummarizeRefused as exc:
+            atomic_write(target, content)
+        except AtomicWriteRefused as exc:
             raise RelearnApplyRefused(str(exc)) from exc
     else:
         target.write_text(content, encoding="utf-8")
