@@ -1289,59 +1289,240 @@ def _render_cache_efficacy(
 ) -> None:
     """
     Render the cache finding — current caching-ratio table per
-    (provider, model). When any rows are flagged, surface them prominently;
-    otherwise show the full table dimmed so the user sees the underlying
-    data even when no recommendation is warranted.
+    (provider, model), followed by the root-caused per-agent candidates
+    behind it (A1 uncached / A2 thrash / A3 lookback miss, see
+    `_render_cache_root_causes`). When any ratio rows are flagged, surface
+    them prominently; otherwise show the full table dimmed so the user sees
+    the underlying data even when no recommendation is warranted. The ratio
+    table only measures the (provider, model) efficacy gap; the root-cause
+    section is what actually carries a ready cache_control_snippet.
     """
     console.print(_finding_header(marker, "Cache efficacy:"))
-    if not finding.rows:
+    has_root_cause = bool(
+        finding.uncached_agents or finding.thrash_agents or finding.lookback_miss_agents
+    )
+    if not finding.rows and not has_root_cause:
         console.print(
             "     [dim]No LLM spans with provider/model in this window.[/dim]"
         )
         return
 
-    flagged = list(finding.flagged) if finding.flagged else []
-    if flagged:
-        # Effective thresholds, not the historical hardcoded 30%/100K: a user
-        # who has lowered [optimize] cache_efficacy_threshold / min_cache_input_tokens
-        # must see the bar they actually configured, not the old default.
-        console.print(
-            f"     • [bold]{len(flagged)}[/bold] (provider, model) "
-            f"row{'s' if len(flagged) != 1 else ''} flagged below the "
-            f"{finding.efficacy_threshold * 100:.0f}% efficacy threshold at "
-            f"≥{format_tokens(finding.min_input_tokens)} input tokens:"
-        )
-        for r in flagged:
+    if finding.rows:
+        flagged = list(finding.flagged) if finding.flagged else []
+        if flagged:
+            # Effective thresholds, not the historical hardcoded 30%/100K: a user
+            # who has lowered [optimize] cache_efficacy_threshold / min_cache_input_tokens
+            # must see the bar they actually configured, not the old default.
             console.print(
-                f"       [bold]{r.provider}/{r.model}[/bold]  "
-                f"{r.efficacy*100:.0f}% efficacy  "
-                f"({format_tokens(r.input_tokens)} input / "
-                f"{format_tokens(r.cache_tokens)} cache)"
+                f"     • [bold]{len(flagged)}[/bold] (provider, model) "
+                f"row{'s' if len(flagged) != 1 else ''} flagged below the "
+                f"{finding.efficacy_threshold * 100:.0f}% efficacy threshold at "
+                f"≥{format_tokens(finding.min_input_tokens)} input tokens:"
             )
-        # Diagnosis and remedy live under two different finding keys — this
-        # renderer only measures the ratio; the actual cache_control breakpoint
-        # candidates come from `cache-recommend`. Point there explicitly so a
-        # user reading `cache` alone doesn't miss the fix.
-        console.print(
-            "     [yellow]→[/yellow] Run [bold]tj optimize cache-recommend[/bold] "
-            "for concrete cache_control breakpoint candidates."
-        )
-        console.print()
+            for r in flagged:
+                console.print(
+                    f"       [bold]{r.provider}/{r.model}[/bold]  "
+                    f"{r.efficacy*100:.0f}% efficacy  "
+                    f"({format_tokens(r.input_tokens)} input / "
+                    f"{format_tokens(r.cache_tokens)} cache)"
+                )
+            # Diagnosis and remedy live under two different finding keys — this
+            # renderer only measures the ratio; the actual cache_control breakpoint
+            # candidates come from `cache-recommend`. Point there explicitly so a
+            # user reading `cache` alone doesn't miss the fix.
+            console.print(
+                "     [yellow]→[/yellow] Run [bold]tj optimize cache-recommend[/bold] "
+                "for concrete cache_control breakpoint candidates."
+            )
+            console.print()
 
-    console.print("     [dim]All (provider, model) usage in window:[/dim]")
-    for r in finding.rows:
-        caveat = ""
-        if r.support == "best_effort":
-            caveat = " [dim](best-effort)[/dim]"
-        elif r.support == "unsupported":
-            caveat = " [dim](unsupported)[/dim]"
-        flag_marker = "[yellow]![/yellow] " if r.flagged else "  "
+        console.print("     [dim]All (provider, model) usage in window:[/dim]")
+        for r in finding.rows:
+            caveat = ""
+            if r.support == "best_effort":
+                caveat = " [dim](best-effort)[/dim]"
+            elif r.support == "unsupported":
+                caveat = " [dim](unsupported)[/dim]"
+            flag_marker = "[yellow]![/yellow] " if r.flagged else "  "
+            console.print(
+                f"     {flag_marker}{r.provider}/{r.model}  "
+                f"[dim]efficacy[/dim] {r.efficacy*100:.0f}%  "
+                f"[dim]input[/dim] {format_tokens(r.input_tokens)}  "
+                f"[dim]cache[/dim] {format_tokens(r.cache_tokens)}"
+                f"{caveat}"
+            )
+
+    console.print()
+    _render_cache_root_causes(finding, pricing_mode=pricing_mode)
+
+
+def _render_cache_root_causes(finding, *, pricing_mode: str) -> None:
+    """
+    Render the three root-caused per-agent candidates behind the ratio table
+    above (see `_classify_a1` / `_classify_a2` / `_classify_a3` in
+    analyzers/cache_efficacy.py):
+
+    - A1 uncached agents: caching never attempted at all (zero cache reads
+      AND zero cache writes on every call) despite a prefix large enough to
+      matter.
+    - A2 cache thrash: caching attempted regularly, but more was spent
+      writing the prefix than was ever recovered reading it back. The card
+      branches on cause — "ttl" (calls land more than five minutes apart, so
+      the default 5-minute write keeps expiring before reuse) versus
+      "instability" (calls land close together, so a TTL expiry doesn't
+      explain it — the prefix itself is likely changing between calls).
+    - A3 lookback miss: recurring cache misses that directly follow a long,
+      tool-heavy turn — the shape of Anthropic's 20-block breakpoint
+      lookback limit. Weakest-confidence of the three; an agent only lands
+      here when A1/A2 don't already explain its waste.
+
+    Classification is mutually exclusive per agent (uncached beats thrash
+    beats lookback — see `_compute_root_cause_candidates`). Unlike the ratio
+    table above, every candidate here carries a ready `cache_control_snippet`
+    — the same data `cost_proposals.py` turns into the A1/A2/A3 cost
+    proposals.
+    """
+    uncached = finding.uncached_agents
+    thrash = finding.thrash_agents
+    lookback = finding.lookback_miss_agents
+    if not uncached and not thrash and not lookback:
         console.print(
-            f"     {flag_marker}{r.provider}/{r.model}  "
-            f"[dim]efficacy[/dim] {r.efficacy*100:.0f}%  "
-            f"[dim]input[/dim] {format_tokens(r.input_tokens)}  "
-            f"[dim]cache[/dim] {format_tokens(r.cache_tokens)}"
-            f"{caveat}"
+            f"     [dim]No agent group cleared the "
+            f"≥{finding.min_calls_for_root_cause} calls threshold for "
+            f"root-cause classification. Lower "
+            f"\\[optimize] min_calls_for_root_cause in tj.toml to classify "
+            f"smaller agent groups.[/dim]"
+        )
+        return
+
+    console.print("     [dim]Root-caused agent candidates:[/dim]")
+
+    if uncached:
+        n = len(uncached)
+        console.print(
+            f"     • [bold]{n}[/bold] agent{'s' if n != 1 else ''} never "
+            f"attempt caching [dim](zero cache reads, zero cache writes, "
+            f"prefix large enough to matter)[/dim]:"
+        )
+        for c in uncached[:5]:
+            console.print(
+                f"       [bold]{c.agent_id}[/bold]  {c.provider}/{c.model}  "
+                f"{c.calls} call{'s' if c.calls != 1 else ''} / "
+                f"{c.sessions} session{'s' if c.sessions != 1 else ''}  "
+                f"[dim]~{format_tokens(c.assumed_prefix_tokens)} assumed prefix[/dim]"
+            )
+            if pricing_mode == "api":
+                if c.estimated_recoverable_usd is not None:
+                    console.print(
+                        f"           [dim]≈[/dim] "
+                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"estimated recoverable over this window"
+                    )
+                else:
+                    console.print(
+                        "           [dim]no dollar figure: no priced rate "
+                        f"observed for {c.model or 'this model'}[/dim]"
+                    )
+            console.print("           [dim]cache_control:[/dim]")
+            console.print(
+                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
+            )
+        if n > 5:
+            console.print(f"       [dim]… and {n - 5} more.[/dim]")
+
+    if thrash:
+        n = len(thrash)
+        console.print(
+            f"     • [bold]{n}[/bold] agent{'s' if n != 1 else ''} "
+            f"thrashing the cache [dim](writing more than is ever read "
+            f"back)[/dim]:"
+        )
+        for c in thrash[:5]:
+            console.print(
+                f"       [bold]{c.agent_id}[/bold]  {c.provider}/{c.model}  "
+                f"read:write [bold]{c.read_write_ratio:.2f}[/bold]  "
+                f"[dim]({format_tokens(c.cache_read_tokens)} read / "
+                f"{format_tokens(c.cache_write_tokens)} write, {c.calls} "
+                f"calls, gap p50 {c.inter_call_gap_p50_minutes:.1f} min)[/dim]"
+            )
+            if c.cause == "ttl":
+                if c.ttl_worth_it:
+                    console.print(
+                        "           [dim]cause: calls land more than 5 min "
+                        "apart, so the default 5-minute cache write keeps "
+                        "expiring — the 1-hour TTL is estimated to pay off "
+                        "at this cadence[/dim]"
+                    )
+                else:
+                    console.print(
+                        "           [dim]cause: calls land more than 5 min "
+                        "apart, but the 1-hour TTL's write premium doesn't "
+                        "clear at this cadence — caching not worth it "
+                        "here[/dim]"
+                    )
+            else:
+                console.print(
+                    "           [dim]cause: calls land close enough "
+                    "together that TTL expiry doesn't explain it — the "
+                    "prefix itself is likely changing between calls[/dim]"
+                )
+            if pricing_mode == "api":
+                if c.estimated_recoverable_usd is not None:
+                    console.print(
+                        f"           [dim]≈[/dim] "
+                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"wasted writing this prefix over this window"
+                    )
+                else:
+                    console.print(
+                        "           [dim]no dollar figure: the recommended "
+                        "fix would not recover it[/dim]"
+                    )
+            console.print("           [dim]cache_control:[/dim]")
+            console.print(
+                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
+            )
+        if n > 5:
+            console.print(f"       [dim]… and {n - 5} more.[/dim]")
+
+    if lookback:
+        n = len(lookback)
+        console.print(
+            f"     • [bold]{n}[/bold] agent{'s' if n != 1 else ''} hitting "
+            f"the 20-block lookback limit [dim](long tool-heavy turns "
+            f"pushing the prior breakpoint out of range)[/dim]:"
+        )
+        for c in lookback[:5]:
+            console.print(
+                f"       [bold]{c.agent_id}[/bold]  {c.provider}/{c.model}  "
+                f"{c.miss_count} miss{'es' if c.miss_count != 1 else ''}  "
+                f"[dim](avg {c.avg_prior_turn_blocks:.0f} blocks in the "
+                f"prior turn)[/dim]"
+            )
+            if pricing_mode == "api":
+                if c.estimated_recoverable_usd is not None:
+                    console.print(
+                        f"           [dim]≈[/dim] "
+                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"estimated recoverable over this window"
+                    )
+                else:
+                    console.print(
+                        "           [dim]no dollar figure: no priced rate "
+                        f"observed for {c.model or 'this model'}[/dim]"
+                    )
+            console.print("           [dim]cache_control:[/dim]")
+            console.print(
+                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
+            )
+        if n > 5:
+            console.print(f"       [dim]… and {n - 5} more.[/dim]")
+
+    if pricing_mode != "api":
+        console.print(
+            "     [dim]This plan doesn't bill per token, so no dollar "
+            "figures are shown for these candidates; the counts above still "
+            "show the caching opportunity.[/dim]"
         )
 
 

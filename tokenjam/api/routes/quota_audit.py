@@ -68,7 +68,9 @@ def get_quota_audit(
         (until_dt - since_dt).total_seconds() / 86400.0, 1.0 / 86400.0
     )
 
-    audit = audit_opus_quota(conn, since_dt, until_dt, agent_id, window_days)
+    audit = audit_opus_quota(
+        conn, since_dt, until_dt, agent_id, window_days, config=config,
+    )
     payload = audit_to_dict(audit)
 
     # Plan-tier framing, computed exactly as cmd_quota_audit._framing_for does —
