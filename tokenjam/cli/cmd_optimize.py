@@ -423,6 +423,7 @@ _MINOR_FINDING_LABELS = {
     "relearn":         "Relearn",
     "verbosity":       "Verbosity",
     "deadweight":      "Deadweight",
+    "placement":       "Batch placement",
 }
 
 
@@ -826,7 +827,8 @@ def _render_report(
             else:
                 console.print(
                     f"     [dim]• {label} — ~{share * 100:.1f}% of window "
-                    f"tokens. Run [bold]tj optimize {name}[/bold] for "
+                    f"tokens. Run [bold]tj optimize "
+                    f"{_FINDING_COMMAND.get(name, name)}[/bold] for "
                     f"detail.[/dim]"
                 )
         console.print()
@@ -1812,6 +1814,96 @@ def _render_deadweight(
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
+def _cadence_phrase(seconds: float) -> str:
+    """A median inter-start gap as something a person reads at a glance."""
+    if seconds >= 86400:
+        return f"~{seconds / 86400:.1f}d"
+    if seconds >= 3600:
+        return f"~{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"~{seconds / 60:.0f}m"
+    return f"~{seconds:.0f}s"
+
+
+def _render_placement(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the batch-placement finding — unattended, cadence-regular workloads
+    whose shape allows a Batch API discussion. Third finding of this shape to
+    ship without a text-view renderer (relearn, then deadweight): absent from
+    _FINDING_RENDERERS it reaches the web tab and --json but falls through to
+    the generic empty state in the CLI.
+
+    The estimate here is a PRICE difference on the same tokens, not tokens
+    freed, so the token figure is labelled as the size of the affected
+    workload and never as "recoverable". The Batch API's flat discount is an
+    api-billed lever, so subscription and local plans are told that plainly
+    rather than shown a dollar figure that cannot apply to them.
+    """
+    console.print(_finding_header(marker, "Batch placement:"))
+    if not finding.candidates:
+        console.print(
+            "     [dim]No unattended, cadence-regular workloads in this "
+            "window.[/dim]"
+        )
+        return
+
+    n = len(finding.candidates)
+    console.print(
+        f"     • [bold]{n}[/bold] workload{'s' if n != 1 else ''} "
+        f"{'fit' if n != 1 else 'fits'} the batch "
+        f"shape [dim](regular cadence, no human turn after the first model "
+        f"call)[/dim]: [bold]{finding.percent_of_window_cost:.1f}%[/bold] of "
+        f"window cost"
+    )
+    for c in finding.candidates[:10]:
+        console.print(
+            f"       [bold]{c.agent_id}[/bold]  "
+            f"{c.sessions} session{'s' if c.sessions != 1 else ''} every "
+            f"{_cadence_phrase(c.median_gap_seconds)} "
+            f"[dim](cadence spread {c.gap_cv:.2f})[/dim]  "
+            f"{format_tokens(c.tokens)} tokens"
+        )
+        if pricing_mode == "api":
+            console.print(
+                f"          [dim]spend[/dim] {format_cost(c.cost_usd)} "
+                f"[dim]→ at the batch rate[/dim] "
+                f"[green]{format_cost(c.cost_usd - c.estimated_batch_saving_usd)}[/green] "
+                f"[dim](a difference of "
+                f"{format_cost(c.estimated_batch_saving_usd)}, estimated)[/dim]"
+            )
+    if len(finding.candidates) > 10:
+        console.print(
+            f"       [dim]… and {len(finding.candidates) - 10} more.[/dim]"
+        )
+
+    if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+        console.print(
+            f"     • [green]~{format_cost(finding.estimated_recoverable_usd)}[/green] "
+            f"estimated price difference over this window "
+            f"[dim](the same work, billed at the Batch API's flat rate)[/dim]"
+        )
+    else:
+        console.print(
+            "     [dim]The Batch API's discount is an api-billed price lever, "
+            "so no dollar figure is shown for this plan. The workload sizes "
+            "above still say how much work fits the shape.[/dim]"
+        )
+
+    if finding.estimate_basis:
+        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.friction:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.friction}[/italic]")
+
+
+#: Findings that are NOT their own registered analyzer name: the command that
+#: produces them differs from the key they are filed under. Without this the
+#: Minor-findings pointer would tell the reader to run `tj optimize placement`,
+#: which is not a valid analyzer choice and exits with an error.
+_FINDING_COMMAND = {"placement": "downsize"}
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
@@ -1823,4 +1915,5 @@ _FINDING_RENDERERS = {
     "relearn":      _render_relearn,
     "verbosity":    _render_verbosity,
     "deadweight":   _render_deadweight,
+    "placement":    _render_placement,
 }
