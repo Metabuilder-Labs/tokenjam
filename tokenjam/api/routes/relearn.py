@@ -13,7 +13,9 @@ Phase 1 (detect + surface) was read-only. Phase 2 (this module's ``/apply``,
 Approve stage: writes route through ``core.optimize.relearn_apply`` for every
 rung-routing / backup / git-commit / fail-open guarantee — this route only
 translates HTTP <-> that module's ``RelearnApplyRefused`` (-> 409) contract,
-it never hand-rolls a parallel write path.
+it never hand-rolls a parallel write path. ``/apply`` names a STORED proposal
+(``core.optimize.relearn_proposals``) and never accepts cluster content from
+the caller, so what gets written is always something the detector produced.
 
 Phase 3 (Verify + Compound, ``core.optimize.relearn_verify``) rides the SAME
 ``/refresh`` cadence: every background/manual recompute also re-measures each
@@ -28,15 +30,21 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
+from tokenjam.core.framing import (
+    WindowSummary,
+    compute_framing,
+    plan_determination_mix,
+)
 from tokenjam.core.optimize import (
     cost_apply,
     cost_proposals as cost_proposals_mod,
     cost_verify,
     receipts,
     relearn_apply,
+    relearn_proposals,
     relearn_store,
     relearn_verify,
 )
@@ -79,9 +87,87 @@ def _config(request: Request):
     return config
 
 
+def _framing(request: Request) -> dict[str, Any]:
+    """Plan-tier framing block for this module's dollar-bearing payloads.
+
+    Same single compute path every other cost surface uses
+    (``core.framing.compute_framing``) so the UI never re-derives the
+    suppress-dollars-for-subscription rule in JS. The mix is
+    window-INDEPENDENT (``plan_determination_mix``, as on /status): the
+    receipts and the cost ledger are cumulative-to-date figures, not scoped
+    to a window. Degrades to the config-declared plan when the daemon has no
+    direct DB connection (e.g. a proxy), exactly as ``compute_framing``
+    already handles an empty mix.
+    """
+    db = getattr(request.app.state, "db", None)
+    conn = getattr(db, "conn", None) if db is not None else None
+    mix = plan_determination_mix(conn) if conn is not None else {}
+    framing = compute_framing(
+        _config(request),
+        WindowSummary(plan_tier_mix=mix, sessions=sum(mix.values())),
+    )
+    return framing.to_dict()
+
+
 def _conn(request: Request) -> Any | None:
     db = getattr(request.app.state, "db", None)
     return getattr(db, "conn", None) if db is not None else None
+
+
+def _resolvable_session_ids(conn: Any | None, session_ids: list[str]) -> set[str]:
+    """Subset of `session_ids` that exist as rows in the sessions table."""
+    if conn is None or not session_ids:
+        return set()
+    placeholders = ", ".join(f"${i}" for i in range(1, len(session_ids) + 1))
+    try:
+        rows = conn.execute(
+            f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders})",
+            session_ids,
+        ).fetchall()
+    except Exception:
+        return set()
+    return {str(r[0]) for r in rows}
+
+
+def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
+    """Copy of `finding` with each cluster example stamped `session_resolvable`.
+
+    The detector sources example session ids from Claude Code transcript files
+    on disk (`<projects_root>/**/<session_id>.jsonl`), so an example can name a
+    session that was never ingested into the sessions table. Resolvability is
+    computed at read time rather than baked into the cached finding, so it also
+    covers findings stored before this field existed and stays correct as more
+    sessions get ingested. The Review inbox links only resolvable examples and
+    renders the rest as plain evidence text instead of a link to a dead page.
+    """
+    if not isinstance(finding, dict):
+        return finding
+    clusters = finding.get("clusters")
+    if not isinstance(clusters, list):
+        return finding
+    ids = sorted({
+        str(ex["session_id"])
+        for c in clusters if isinstance(c, dict)
+        for ex in (c.get("examples") or [])
+        if isinstance(ex, dict) and ex.get("session_id")
+    })
+    resolvable = _resolvable_session_ids(conn, ids)
+    return {
+        **finding,
+        "clusters": [
+            c if not isinstance(c, dict) else {
+                **c,
+                "examples": [
+                    ex if not isinstance(ex, dict) else {
+                        **ex,
+                        "session_resolvable": str(ex.get("session_id")) in resolvable,
+                    }
+                    for ex in (c.get("examples") or [])
+                ],
+            }
+            for c in clusters
+        ],
+    }
 
 
 @router.get("/relearn/proposals", dependencies=[Depends(require_api_key)])
@@ -104,10 +190,16 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
             "computed_at": None,
             "finding": None,
         }
+    finding = cached.get("finding")
+    if isinstance(finding, dict):
+        # Re-stamp on read as well as on write, so a cache written before the
+        # proposal id or the advise-only reason existed still resolves without
+        # waiting for a recompute. Idempotent.
+        finding = relearn_proposals.stamp_proposal_ids(finding)
     return {
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
-        "finding": cached.get("finding"),
+        "finding": _with_example_resolvability(finding, _conn(request)),
     }
 
 
@@ -135,57 +227,70 @@ def refresh_relearn_proposals(request: Request) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 class ApplyRelearnRequest(BaseModel):
-    # The full cluster the client already has from GET /relearn/proposals —
-    # re-posted rather than re-looked-up server-side so a stale cache can't
-    # silently apply a DIFFERENT cluster than the one the human reviewed.
-    signature:      str
-    family_key:     str | None = None
-    title:          str
-    proposed_fix:   str = ""
-    rung:           int
-    sessions:       int = 0
-    occurrences:    int = 0
-    repos:          list[str] = []
-    examples:       list[dict[str, Any]] = []
+    """A named STORED proposal plus the human's confirmed write target.
+
+    The cluster content itself is never accepted from the client: it is looked
+    up server-side from the detector's own stored proposals
+    (``core.optimize.relearn_proposals``). ``extra="forbid"`` makes that
+    explicit rather than silent, so a caller still posting a hand-built
+    cluster gets a 422 telling it what changed instead of having its payload
+    quietly ignored.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id:    str
     # Scope override (§7 — "repo-identity is noisy"): the human confirms both
     # before Approve, never inferred silently.
     scope:          str
     target_path:    str
     go:             bool = False
     force:          bool = False   # bypass the active-session warning
-    # Model-routing apply kinds (``core.optimize.model_apply``): setting an
-    # agent file's `model:` key, or swapping one exact model id in a repo the
-    # user registered. Empty on every rung-ladder fix, which is every other
-    # proposal. The model ids travel with the request for the same reason the
-    # cluster does: the human approved THESE values on the card.
-    apply_kind:     str = ""
-    agent_name:     str = ""
-    current_model:  str = ""
-    proposed_model: str = ""
-    source_path:    str = ""
-    # Which cost analyzer's card this write came from, so the same apply also
-    # opens a cost-verify exposure window and the realized delta lands in the
-    # ledger the receipts surface reads dollars from. Empty for rung-ladder
-    # fixes, whose receipts are recurrence-based rather than priced.
-    analyzer:       str = ""
-    agent_id:       str = ""
+
+    # Nothing else. The model-routing values (apply_kind / agent_name /
+    # current_model / proposed_model / source_path) and the cost-verify routing
+    # (analyzer / agent_id) all come off the stored proposal, because the card
+    # the human approved was rendered FROM that stored proposal. Reading them
+    # back out of the request would be trusting the caller to echo faithfully
+    # something the server already knows — and would let any holder of a valid
+    # proposal_id aim source_path at an unregistered repo, which is the exact
+    # precondition the model_swap safety case rests on.
 
 
 @router.post("/relearn/apply", dependencies=_WRITE_AUTH)
 def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str, Any]:
     """Dry-run (default) or write (``go=true``) an approved fix at its rung.
 
-    409s (via ``RelearnApplyRefused``) on: an unknown rung, a create-only
-    target (skill/hook) that already holds a non-TokenJam file, or — unless
-    ``force=true`` — a live session just seen in the target repo (§7: never
-    apply mid-session). The UI's re-send-with-force is the explicit
-    "apply anyway" the spec calls for. 403s when ``target_path`` resolves
-    outside the user's home directory (defense-in-depth allowlist).
+    Takes a ``proposal_id`` from ``GET /relearn/proposals``. 404s when no
+    stored proposal carries that ID: a client-constructed cluster has no way
+    into the write machinery, which is what makes "human-gated" a property of
+    the server rather than of the UI flow.
+
+    409s (via ``RelearnApplyRefused``) on: an unknown rung, a family with no
+    matcher at an enforcement rung, a create-only target (skill/hook) that
+    already holds a non-TokenJam file, or (unless ``force=true``) a live
+    session just seen in the target repo (§7: never apply mid-session). The
+    UI's re-send-with-force is the explicit "apply anyway" the spec calls for.
+    403s when ``target_path`` resolves outside the user's home directory
+    (defense-in-depth allowlist).
     """
     _reject_target_outside_home(body.target_path)
-    cluster = body.model_dump(
-        exclude={"scope", "target_path", "go", "force", "analyzer", "agent_id"},
-    )
+    stored = relearn_proposals.get_proposal(body.proposal_id, config=_config(request))
+    if stored is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no stored proposal {body.proposal_id}. Refresh the proposals "
+                   f"and apply one the detector actually produced.",
+        )
+    cluster = relearn_proposals.cluster_for_apply(stored)
+    missing = relearn_proposals.missing_apply_fields(cluster)
+    if missing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"stored proposal {body.proposal_id} is missing "
+                   f"{', '.join(missing)}, which its "
+                   f"{cluster.get('apply_kind')} apply cannot be built without. "
+                   f"Recompute the proposals and retry.",
+        )
     try:
         result = relearn_apply.apply_relearn_fix(
             _config(request), cluster,
@@ -194,12 +299,14 @@ def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str,
         )
     except relearn_apply.RelearnApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if body.go and body.apply_kind and body.analyzer:
-        result["cost_marker"] = _open_cost_verify_window(request, body)
+    if body.go and cluster.get("apply_kind") and stored.get("analyzer"):
+        result["cost_marker"] = _open_cost_verify_window(request, stored, cluster)
     return result
 
 
-def _open_cost_verify_window(request: Request, body: ApplyRelearnRequest) -> dict[str, Any] | None:
+def _open_cost_verify_window(
+    request: Request, stored: dict[str, Any], cluster: dict[str, Any],
+) -> dict[str, Any] | None:
     """Start the priced exposure window for a model-routing write.
 
     A model swap is a cost fix that happens to have a file to edit, so its
@@ -207,21 +314,27 @@ def _open_cost_verify_window(request: Request, body: ApplyRelearnRequest) -> dic
     That measurement hangs off the cost-applied ledger, so the same approval
     that wrote the file also opens the window. Best-effort: a marker that cannot
     be created must never fail an apply that already succeeded on disk.
+
+    Every value here comes from the STORED proposal, never the request body,
+    for the same reason the write itself does: the ledger must record what the
+    detector produced and the human reviewed, not what a caller asserts.
     """
     from tokenjam.core.optimize import cost_apply
 
+    analyzer = str(stored.get("analyzer") or "")
+    current_model = str(cluster.get("current_model") or "")
     proposal = {
-        "signature": body.signature,
-        "analyzer": body.analyzer,
-        "title": body.title,
-        "agent_id": body.agent_id,
-        "advise_text": body.proposed_fix,
+        "signature": str(cluster.get("signature", "")),
+        "analyzer": analyzer,
+        "title": str(cluster.get("title", "")),
+        "agent_id": str(stored.get("agent_id") or ""),
+        "advise_text": str(cluster.get("proposed_fix", "")),
         "target_key": {
-            "models": [body.current_model] if body.current_model else [],
-            "subagent": body.analyzer == "subagent",
-            "agent_name": body.agent_name,
+            "models": [current_model] if current_model else [],
+            "subagent": analyzer == "subagent",
+            "agent_name": str(cluster.get("agent_name") or ""),
         },
-        "baseline": {"proposed_model": body.proposed_model},
+        "baseline": {"proposed_model": str(cluster.get("proposed_model") or "")},
         "estimated_recoverable_usd": None,
         "estimated_recoverable_tokens": None,
         "estimate_basis": "",
@@ -301,20 +414,32 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     change what's actually still outstanding)."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
-    proposals = list(block.get("cost_proposals") or []) if block is not None else []
+    # Listed WITH their proposal_ids: a model-routing card's Approve names an
+    # ID and nothing else, so the ID has to travel with the card it belongs to.
+    proposals: list[dict[str, Any]] = (
+        relearn_proposals.list_cost_proposals(config) if block is not None else []
+    )
     applied_sigs = {
         rec.get("signature") for rec in cost_apply.list_applied(config)
         if rec.get("state") != "reverted"
     }
     open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
     rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals)
+    # Same plan-tier framing the receipts / cost-ledger payloads carry, so the
+    # estimated-recoverable headline picks the same unit as its measured twin
+    # sitting next to it rather than always leading with dollars.
+    framing = _framing(request)
     if block is None:
-        return {"status": "never_run", "computed_at": None, "proposals": [], "rollup": rollup}
+        return {
+            "status": "never_run", "computed_at": None, "proposals": [],
+            "rollup": rollup, "framing": framing,
+        }
     return {
         "status": "ready",
         "computed_at": block.get("cost_computed_at"),
         "proposals": proposals,
         "rollup": rollup,
+        "framing": framing,
     }
 
 
@@ -324,11 +449,16 @@ def get_relearn_receipts(request: Request) -> dict[str, Any]:
     twin of the ``rollup`` field above (Component E). Combines the relearn
     ledger and the cost-verify ledger (``core.optimize.receipts``);
     read-only, no recompute triggered here — it rides the same ``/refresh``
-    cadence the two source ledgers already recompute on."""
+    cadence the two source ledgers already recompute on.
+
+    Carries the plan-tier ``framing`` block: ``verified_saved_usd`` can only
+    ever count the API-billed slice, so on a subscription-dominant corpus the
+    UI must lead with the (complete) token figure rather than the dollars."""
     config = _config(request)
     relearn_records = relearn_apply.list_applied(config)
     cost_records = cost_apply.list_applied(config)
-    return receipts.verified_saved_summary(relearn_records, cost_records)
+    summary = receipts.verified_saved_summary(relearn_records, cost_records)
+    return {**summary, "framing": _framing(request)}
 
 
 @router.post("/relearn/cost-proposals/refresh", dependencies=_WRITE_AUTH)
@@ -346,53 +476,70 @@ def refresh_cost_proposals(request: Request) -> dict[str, Any]:
     return {"status": "ready", "proposals": len(proposals), "verified": verify}
 
 
+def _stored_cost_proposal(request: Request, proposal_id: str) -> dict[str, Any]:
+    """The stored cost proposal with this ID, or a 404.
+
+    Resolved from the detector's own stored proposals
+    (``relearn_proposals.list_cost_proposals``) rather than from the request
+    body, so the ledger records what the detector produced and the human
+    reviewed. The cost ledger feeds the "verified saved" receipts, and a
+    receipt is only worth anything if its numbers were earned.
+    """
+    for proposal in relearn_proposals.list_cost_proposals(_config(request)):
+        if proposal.get("proposal_id") == proposal_id:
+            return proposal
+    raise HTTPException(
+        status_code=404,
+        detail=f"no stored cost proposal {proposal_id}. Refresh the cost "
+               f"proposals and apply one the detector actually produced.",
+    )
+
+
 class MarkCostAppliedRequest(BaseModel):
-    # The full proposal the client already holds from GET /relearn/cost-proposals
-    # — re-posted so a stale cache can't mark a DIFFERENT proposal than the one
-    # the human reviewed (same guard as ApplyRelearnRequest).
-    signature:   str
-    analyzer:    str = ""
-    title:       str = ""
-    target_key:  dict[str, Any] = {}
-    baseline:    dict[str, Any] = {}
-    advise_text: str = ""
-    agent_id:    str = ""
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None = None
-    estimate_basis: str = ""
+    """A named STORED cost proposal, and nothing else.
+
+    The proposal's content (signature, analyzer, target_key, baseline, the
+    estimate and its basis) is looked up server-side from the detector's own
+    stored cost proposals, never accepted from the client — the same guard
+    ``ApplyRelearnRequest`` uses. ``extra="forbid"`` makes that explicit rather
+    than silent, so a caller still posting a hand-built proposal gets a 422
+    telling it what changed instead of having its numbers quietly ignored.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: str
 
 
 @router.post("/relearn/cost-proposals/apply", dependencies=_WRITE_AUTH)
 def post_cost_mark_applied(request: Request, body: MarkCostAppliedRequest) -> dict[str, Any]:
     """Mark a cost proposal applied: create the fix marker (an Expectation) and
     a ledger record the delta-verify pass measures against. There is NO code
-    write — cost proposals are advise-only. 409 on a malformed proposal or when
+    write — cost proposals are advise-only.
+
+    Takes a ``proposal_id`` from ``GET /relearn/cost-proposals``. 404s when no
+    stored cost proposal carries that ID. 409 on a malformed proposal or when
     the marker can't be created (no writable DB)."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Server not fully initialised (db missing).")
+    stored = _stored_cost_proposal(request, body.proposal_id)
     try:
-        return cost_apply.mark_applied(db, _config(request), body.model_dump())
+        return cost_apply.mark_applied(db, _config(request), stored)
     except cost_apply.CostApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class ApplyWorkspaceCostRequest(BaseModel):
-    # The subagent (CC-origin) proposal the client holds, plus the confirmed
-    # write target. Re-posted so a stale cache can't apply a DIFFERENT proposal.
-    signature:    str
-    analyzer:     str = ""
-    title:        str = ""
-    target_key:   dict[str, Any] = {}
-    baseline:     dict[str, Any] = {}
-    advise_text:  str = ""
-    agent_id:     str = ""
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None = None
-    estimate_basis: str = ""
-    # Apply plumbing (adapter-supplied). rung is 1 for the sizing-rubric note.
-    proposed_fix: str = ""
-    rung:         int = 1
+    """A named STORED cost proposal plus the human's confirmed write target.
+
+    Same split as ``ApplyRelearnRequest``: the proposal's content and its apply
+    plumbing (``proposed_fix``, ``rung``) come off the store, because the card
+    the human approved was rendered FROM that stored proposal; only the write
+    target and the go/force confirmations are the caller's to choose.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id:  str
     scope:        str = "project"
     target_path:  str = ""
     go:           bool = False
@@ -401,30 +548,44 @@ class ApplyWorkspaceCostRequest(BaseModel):
 
 @router.post("/relearn/cost-proposals/apply-workspace", dependencies=_WRITE_AUTH)
 def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest) -> dict[str, Any]:
-    """Apply a CC-origin subagent proposal's sizing-rubric note to the workspace.
+    """Apply an ``apply_capable`` cost proposal's workspace note/skill.
 
-    Unlike the three advise-only analyzers, a subagent right-sizing finding has a
-    writable surface (a rung-1 CLAUDE.md sizing rubric the orchestrating agent
-    reads before spawning subagents). This routes the actual write through the
-    EXISTING relearn apply path (``relearn_apply.apply_relearn_fix``) — same
-    reversible, git-committed, human-gated (dry-run first) discipline — then
-    records the cost marker so the delta-verify pass measures the fan-out
-    model-mix cost delta after it. ``go=false`` returns the dry-run diff; a
-    second call with ``go=true`` writes. 403 outside home; 409 on a refusal.
+    Covers every analyzer whose fix is a workspace surface an orchestrating
+    agent (or the model itself) reads before acting, rather than a file this
+    proposal can edit outright: ``subagent`` (rung-1 sizing rubric),
+    ``script`` (rung-2 deterministic-workflow skill), ``reuse`` (rung-1
+    planning-skeleton note), ``verbosity`` (rung-1 output-brevity note). This
+    routes the actual write through the EXISTING relearn apply path
+    (``relearn_apply.apply_relearn_fix``) — same reversible, git-committed,
+    human-gated (dry-run first) discipline — then records the cost marker so
+    the delta-verify pass measures the realized delta after it. ``go=false``
+    returns the dry-run diff; a second call with ``go=true`` writes. 404 on an
+    unknown ``proposal_id``; 403 outside home; 409 on a refusal.
     """
     _reject_target_outside_home(body.target_path)
     config = _config(request)
     db = getattr(request.app.state, "db", None)
-    # The cluster shape relearn_apply renders a rung-1 note from.
+    stored = _stored_cost_proposal(request, body.proposal_id)
+    signature = str(stored.get("signature") or "")
+    analyzer = str(stored.get("analyzer") or "")
+    baseline = dict(stored.get("baseline") or {})
+    # The cluster shape relearn_apply renders a rung-1/2 note/skill from,
+    # projected from the STORE: a caller-supplied proposed_fix would be
+    # arbitrary text written into the user's workspace under a reviewed
+    # proposal's name. `apply_sessions` falls back to the subagent analyzer's
+    # own baseline key (`flagged_subagents`) so this generalization doesn't
+    # change that analyzer's existing behavior.
     cluster = {
-        "signature": body.signature,
-        "family_key": "subagent_rightsizing",
-        "title": body.title or body.signature,
-        "proposed_fix": body.proposed_fix,
-        "rung": body.rung,
-        "sessions": int(body.baseline.get("flagged_subagents", 0) or 0),
-        "repos": [],
-        "examples": [],
+        "signature": signature,
+        "family_key": f"cost_{analyzer}" if analyzer else "cost_proposal",
+        "title": str(stored.get("title") or "") or signature,
+        "proposed_fix": str(stored.get("proposed_fix") or ""),
+        "rung": int(stored.get("rung") or 1),
+        "sessions": int(
+            baseline.get("apply_sessions", baseline.get("flagged_subagents", 0)) or 0
+        ),
+        "repos": list(baseline.get("apply_repos") or []),
+        "examples": list(baseline.get("apply_examples") or []),
     }
     try:
         applied = relearn_apply.apply_relearn_fix(
@@ -443,11 +604,7 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
     cost_record = None
     if db is not None:
         try:
-            cost_record = cost_apply.mark_applied(
-                db, config, body.model_dump(exclude={
-                    "proposed_fix", "rung", "scope", "target_path", "go", "force",
-                }),
-            )
+            cost_record = cost_apply.mark_applied(db, config, stored)
         except cost_apply.CostApplyRefused:
             cost_record = None
     return {"applied": applied, "cost_record": cost_record}
@@ -456,9 +613,15 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
 @router.get("/relearn/cost-applied", dependencies=[Depends(require_api_key)])
 def get_cost_applied(request: Request) -> dict[str, Any]:
     """Every applied (and reverted) cost fix, plus the realized-dollars ledger
-    summary (``cost_verify.cost_compound_ledger``)."""
+    summary (``cost_verify.cost_compound_ledger``), plus the plan-tier
+    ``framing`` block so the ledger's realized dollars are suppressed /
+    reframed for subscription users like every other cost surface."""
     applied = cost_apply.list_applied(_config(request))
-    return {"applied": applied, "ledger": cost_verify.cost_compound_ledger(applied)}
+    return {
+        "applied": applied,
+        "ledger": cost_verify.cost_compound_ledger(applied),
+        "framing": _framing(request),
+    }
 
 
 @router.post("/relearn/cost-applied/{record_id}/revert", dependencies=_WRITE_AUTH)
