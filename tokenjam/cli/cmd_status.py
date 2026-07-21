@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import click
 
 from tokenjam.core.models import Alert, AlertFilters
 from tokenjam.utils.formatting import console, format_cost, format_tokens, status_icon
 from tokenjam.utils.time_parse import utcnow
+
+#: Window the recoverable teaser looks back over, matching `tj optimize`'s
+#: own `--since` default so the figure means the same thing in both places.
+_TEASER_WINDOW_DAYS = 30
+
+#: Below this, "$X recoverable" reads as noise rather than a real pointer —
+#: stay silent instead of printing a sub-dollar figure.
+_TEASER_MIN_USD = 1.0
 
 
 @click.command("status")
@@ -116,14 +125,66 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
             "has_active_alerts": has_active_alerts,
             "unknown_plan_tier_sessions": unknown_count,
         }, default=str))
-    elif unknown_count > 0:
-        console.print(
-            f"[dim]Note: {unknown_count} session(s) have unknown plan tier. "
-            f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
-            f"(or [bold]--codex[/bold]) to set it.[/dim]"
-        )
+    else:
+        if unknown_count > 0:
+            console.print(
+                f"[dim]Note: {unknown_count} session(s) have unknown plan tier. "
+                f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
+                f"(or [bold]--codex[/bold]) to set it.[/dim]"
+            )
+        teaser = _recoverable_teaser(db, ctx.obj.get("config"))
+        if teaser:
+            console.print(teaser)
 
     ctx.exit(1 if has_active_alerts else 0)
+
+
+def _recoverable_teaser(db, config) -> str | None:
+    """One-line `tj optimize` pointer for `tj status` — nothing in status,
+    doctor, statusline or the banner ever mentioned optimize existed.
+
+    Reuses the same recoverable-savings contract every analyzer already
+    carries (`estimated_recoverable_usd`, #111) rather than inventing a new
+    figure, scoped to `COST_ANALYZERS` — the analyzers that actually feed the
+    cost/apply rail (`cost_proposals.py`) — so a one-line teaser doesn't add
+    to the cross-analyzer double-counting the full Optimize view already has.
+    Silent (returns None) whenever the figure wouldn't mean anything: no
+    direct DB connection (daemon holds the lock), no usage, a non-api pricing
+    mode (a raw dollar figure misrepresents a flat-fee/local plan), or a
+    sub-$1 total.
+    """
+    conn = getattr(db, "conn", None)
+    if conn is None or config is None:
+        return None
+    try:
+        from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
+        from tokenjam.core.optimize import build_report
+        from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+        since_dt = utcnow() - timedelta(days=_TEASER_WINDOW_DAYS)
+        until_dt = utcnow()
+
+        plan_mix = plan_tier_mix(conn, since_dt, until_dt, None)
+        if pricing_mode_for(dominant_plan(plan_mix)) != "api":
+            return None
+
+        report = build_report(
+            db=db, config=config, since=since_dt, until=until_dt,
+            findings=list(COST_ANALYZERS),
+        )
+        total = report.downgrade.estimated_recoverable_usd or 0.0 if report.downgrade else 0.0
+        for finding in (report.findings or {}).values():
+            total += getattr(finding, "estimated_recoverable_usd", None) or 0.0
+
+        if total < _TEASER_MIN_USD:
+            return None
+        return (
+            f"[dim]{format_cost(total)} recoverable: run "
+            f"[bold]tj optimize[/bold][/dim]"
+        )
+    except Exception:
+        # Never let a teaser computation break `tj status` itself.
+        return None
 
 
 def _fmt_dur(seconds: float | None, *, coarse: bool = False) -> str:
