@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import click
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import AsyncIterator
 
+from tokenjam.core.server_state import server_state_path
 from tokenjam.utils.formatting import console
 
 
@@ -74,7 +74,7 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     # Same reasoning for `scheduler.start()`: don't fire off a background
     # thread for a server that's about to exit with EADDRINUSE.
     import json as _json
-    _state_path = Path.home() / ".local" / "share" / "tj" / "server.state"
+    _state_path = server_state_path()
 
     # Optional enforcement-plane proxy (#219) — a second in-process listener on
     # config.proxy.port, started/stopped with the server's lifespan. Suggest
