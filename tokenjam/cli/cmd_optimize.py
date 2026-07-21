@@ -849,6 +849,15 @@ def _render_report(
                 report.findings[name], pricing_mode=pricing_mode, marker=marker,
                 persona=persona,
             )
+        elif name == "cache":
+            # Same persona gate as `cache-recommend` just above, applied to
+            # the A1/A2/A3 root-caused candidates nested inside this finding
+            # — see `_render_cache_root_causes` / `_render_cache_control_or_
+            # no_lever`. Same mypy reason for the direct call.
+            _render_cache_efficacy(
+                report.findings[name], pricing_mode=pricing_mode, marker=marker,
+                persona=persona,
+            )
         else:
             _FINDING_RENDERERS[name](
                 report.findings[name], pricing_mode=pricing_mode, marker=marker,
@@ -1295,8 +1304,31 @@ def _finding_header(marker: str, label: str) -> str:
     return f"  [bold]{prefix}{label}[/bold]"
 
 
+def _render_cache_control_or_no_lever(snippet: str, persona: str) -> None:
+    """Persona-gated `cache_control` snippet render, shared by every
+    cache-family CLI renderer that prints one (`cache`'s A1/A2/A3
+    root-caused candidates below, `cache-recommend`'s prefix candidates).
+
+    A `cache_control` fix is an edit to the raw Anthropic API request, a
+    lever a Claude Code session never has — the harness constructs that
+    request, not the user. Mirrors
+    `cost_proposals._persona_gated_cache_fields`: `persona == "claude-code"`
+    swaps the snippet for the honest no-lever explanation (imported from
+    `cost_proposals` so the CLI never drifts from the web copy); every
+    other persona, including "unknown", keeps the actionable snippet — for
+    cache advice the risky direction is under-offering a real fix, not
+    over-offering one (the opposite default from `_persona_gated_write_fields`).
+    """
+    if persona == "claude-code":
+        from tokenjam.core.optimize.cost_proposals import CACHE_NO_LEVER_TEXT
+        console.print(f"           [dim]{_rich_escape(CACHE_NO_LEVER_TEXT)}[/dim]")
+        return
+    console.print("           [dim]cache_control:[/dim]")
+    console.print(snippet, markup=False, highlight=False, soft_wrap=True)
+
+
 def _render_cache_efficacy(
-    finding, *, pricing_mode: str = "api", marker: str = "",
+    finding, *, pricing_mode: str = "api", marker: str = "", persona: str = "unknown",
 ) -> None:
     """
     Render the cache finding — current caching-ratio table per
@@ -1364,10 +1396,12 @@ def _render_cache_efficacy(
             )
 
     console.print()
-    _render_cache_root_causes(finding, pricing_mode=pricing_mode)
+    _render_cache_root_causes(finding, pricing_mode=pricing_mode, persona=persona)
 
 
-def _render_cache_root_causes(finding, *, pricing_mode: str) -> None:
+def _render_cache_root_causes(
+    finding, *, pricing_mode: str, persona: str = "unknown",
+) -> None:
     """
     Render the three root-caused per-agent candidates behind the ratio table
     above (see `_classify_a1` / `_classify_a2` / `_classify_a3` in
@@ -1391,7 +1425,9 @@ def _render_cache_root_causes(finding, *, pricing_mode: str) -> None:
     beats lookback — see `_compute_root_cause_candidates`). Unlike the ratio
     table above, every candidate here carries a ready `cache_control_snippet`
     — the same data `cost_proposals.py` turns into the A1/A2/A3 cost
-    proposals.
+    proposals, gated by the same `persona` rule those proposals apply (see
+    `_render_cache_control_or_no_lever`): a claude-code window gets the
+    honest no-lever explanation instead of a request edit it can't make.
     """
     uncached = finding.uncached_agents
     thrash = finding.thrash_agents
@@ -1434,10 +1470,7 @@ def _render_cache_root_causes(finding, *, pricing_mode: str) -> None:
                         "           [dim]no dollar figure: no priced rate "
                         f"observed for {c.model or 'this model'}[/dim]"
                     )
-            console.print("           [dim]cache_control:[/dim]")
-            console.print(
-                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
-            )
+            _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
         if n > 5:
             console.print(f"       [dim]… and {n - 5} more.[/dim]")
 
@@ -1489,10 +1522,7 @@ def _render_cache_root_causes(finding, *, pricing_mode: str) -> None:
                         "           [dim]no dollar figure: the recommended "
                         "fix would not recover it[/dim]"
                     )
-            console.print("           [dim]cache_control:[/dim]")
-            console.print(
-                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
-            )
+            _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
         if n > 5:
             console.print(f"       [dim]… and {n - 5} more.[/dim]")
 
@@ -1522,10 +1552,7 @@ def _render_cache_root_causes(finding, *, pricing_mode: str) -> None:
                         "           [dim]no dollar figure: no priced rate "
                         f"observed for {c.model or 'this model'}[/dim]"
                     )
-            console.print("           [dim]cache_control:[/dim]")
-            console.print(
-                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
-            )
+            _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
         if n > 5:
             console.print(f"       [dim]… and {n - 5} more.[/dim]")
 
@@ -1617,14 +1644,7 @@ def _render_cache_recommend(
                     f"for {c.model or 'this model'}[/dim]"
                 )
         console.print(f"           [dim italic]{sample}[/dim italic]")
-        if persona == "claude-code":
-            from tokenjam.core.optimize.cost_proposals import CACHE_NO_LEVER_TEXT
-            console.print(f"           [dim]{_rich_escape(CACHE_NO_LEVER_TEXT)}[/dim]")
-        else:
-            console.print("           [dim]cache_control:[/dim]")
-            console.print(
-                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
-            )
+        _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
 
     if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
         console.print(
