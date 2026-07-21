@@ -306,9 +306,18 @@ def cmd_optimize(
         # `recompute_cost_proposals` already never raises (it returns [] on
         # failure), so a broken window here degrades to a stale/empty
         # cost-proposals list, never a broken `tj optimize`.
+        #
+        # Pass `analyzer_findings` through as the scope: a plain `tj optimize`
+        # (analyzer_findings is None) still refreshes every cost analyzer,
+        # matching the bugfix above. A scoped invocation (e.g. `tj optimize
+        # cache`) only recomputes the analyzers it actually asked for, so it
+        # never pays for `deadweight`'s full on-disk transcript scan just
+        # because `deadweight` happens to share the cost-proposal store.
         try:
             from tokenjam.core.optimize.cost_proposals import recompute_cost_proposals
-            recompute_cost_proposals(db, config, agent_id=agent)
+            recompute_cost_proposals(
+                db, config, agent_id=agent, requested_analyzers=analyzer_findings,
+            )
         except Exception:
             pass
 

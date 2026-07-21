@@ -1534,15 +1534,35 @@ def recompute_cost_proposals(
     *,
     window_days: int = DEFAULT_COST_WINDOW_DAYS,
     agent_id: str | None = None,
+    requested_analyzers: list[str] | None = None,
 ) -> list[CostProposal]:
     """Build an ``OptimizeReport`` over the last ``window_days``, adapt the
-    three cost findings into proposals, and write them into the shared proposal
-    store. Returns the proposals. Never raises — a build failure yields ``[]``
-    (the inbox shows its empty state), never a crash on the refresh path.
+    cost findings into proposals, and write them into the shared proposal
+    store. Returns the newly-computed proposals. Never raises — a build
+    failure yields ``[]`` (the inbox shows its empty state), never a crash on
+    the refresh path.
 
     This is the "daemon path produces findings -> same proposal store" entry
     point the Review-inbox refresh calls; ``tj optimize`` can call it too so a
     manual run also refreshes the inbox.
+
+    ``requested_analyzers``, when given, scopes the recompute to whichever of
+    ``COST_ANALYZERS`` the caller actually asked for — a scoped, cheap
+    invocation (e.g. ``tj optimize cache``, a pure-DB analyzer) never pays for
+    an analyzer it never requested, ``deadweight``'s full on-disk transcript
+    scan chief among them. ``None`` (the default) preserves the original
+    CLI-only-user bugfix this function exists for: an unscoped ``tj optimize``
+    (or the web Review inbox's manual refresh button) still refreshes EVERY
+    cost analyzer. If the intersection with ``COST_ANALYZERS`` is empty (the
+    caller requested only non-cost analyzers, e.g. ``downgrade``), this is a
+    complete no-op — no report is built at all.
+
+    A scoped recompute only overwrites the store's entries for the analyzers
+    it actually ran this time; every other analyzer's most-recently-computed
+    proposals are carried forward unchanged. ``write_cost_proposals`` replaces
+    the whole ``cost_proposals`` list on write, so a naive scoped write would
+    otherwise silently wipe every other analyzer's cards from the Review
+    inbox the moment someone ran a scoped `tj optimize <analyzer>`.
     """
     from datetime import timedelta
 
@@ -1551,12 +1571,21 @@ def recompute_cost_proposals(
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
 
+    if requested_analyzers is None:
+        analyzers_to_run = list(COST_ANALYZERS)
+    else:
+        requested = set(requested_analyzers)
+        analyzers_to_run = [name for name in COST_ANALYZERS if name in requested]
+    if not analyzers_to_run:
+        return []
+    is_scoped = len(analyzers_to_run) < len(COST_ANALYZERS)
+
     try:
         until = utcnow()
         since = until - timedelta(days=max(1, window_days))
         report = build_report(
             db, config, since, until, agent_id=agent_id,
-            findings=list(COST_ANALYZERS),
+            findings=analyzers_to_run,
         )
         # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so the
         # web Review inbox suppresses the same dollar figures the CLI does
@@ -1572,7 +1601,15 @@ def recompute_cost_proposals(
         return []
 
     try:
-        relearn_store.write_cost_proposals(proposals, config=config)
+        to_write: list[Any] = proposals
+        if is_scoped:
+            existing = relearn_store.read_cache(config=config) or {}
+            carried_over = [
+                p for p in (existing.get("cost_proposals") or [])
+                if isinstance(p, dict) and p.get("analyzer") not in analyzers_to_run
+            ]
+            to_write = carried_over + proposals
+        relearn_store.write_cost_proposals(to_write, config=config)
     except Exception:
         pass
     return proposals

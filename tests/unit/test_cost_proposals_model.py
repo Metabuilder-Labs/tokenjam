@@ -357,6 +357,101 @@ def test_recompute_cost_proposals_resolves_pricing_mode_from_sessions(tmp_path):
         db.close()
 
 
+def _spans_db(n=8):
+    from tokenjam.core.db import InMemoryBackend
+    from tokenjam.utils.time_parse import utcnow
+    from tests.factories import make_llm_span
+
+    backend = InMemoryBackend()
+    start = utcnow() - timedelta(days=2)
+    for i in range(n):
+        backend.insert_span(make_llm_span(
+            model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=1_000, output_tokens=200, cache_tokens=500,
+            cost_usd=0.01, session_id=f"s-{i}", start_time=start,
+        ))
+    return backend
+
+
+def test_recompute_cost_proposals_scoped_skips_deadweight_scan(tmp_path, monkeypatch):
+    """A scoped, cheap invocation (`tj optimize cache`) must not pay for
+    `deadweight`'s full on-disk transcript scan just because `deadweight`
+    shares the cost-proposal store (`COST_ANALYZERS` includes it). Fail the
+    test hard if the disk-scanning entry point is even called."""
+    from tokenjam.core.optimize.analyzers import deadweight as deadweight_mod
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(
+            "deadweight.compute_deadweight_finding must not run for a "
+            "requested_analyzers=['cache'] recompute"
+        )
+
+    monkeypatch.setattr(deadweight_mod, "compute_deadweight_finding", _boom)
+
+    db = _spans_db()
+    try:
+        proposals = cp.recompute_cost_proposals(
+            db, _cfg(tmp_path), requested_analyzers=["cache"],
+        )
+        assert all(p.analyzer == "cache" for p in proposals)
+    finally:
+        db.close()
+
+
+def test_recompute_cost_proposals_scoped_no_cost_analyzer_is_noop(tmp_path, monkeypatch):
+    """Requesting only a non-cost analyzer (e.g. `downgrade`) must skip the
+    recompute entirely — no report built, no analyzer run at all."""
+    from tokenjam.core.optimize import runner
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("build_report must not run when no requested "
+                              "analyzer intersects COST_ANALYZERS")
+
+    monkeypatch.setattr(runner, "build_report", _boom)
+    db = _spans_db()
+    try:
+        proposals = cp.recompute_cost_proposals(
+            db, _cfg(tmp_path), requested_analyzers=["downgrade"],
+        )
+        assert proposals == []
+    finally:
+        db.close()
+
+
+def test_recompute_cost_proposals_scoped_preserves_other_analyzers_cards(tmp_path):
+    """A scoped recompute must not wipe out OTHER analyzers' most-recently
+    computed cards in the shared store — `write_cost_proposals` replaces the
+    whole list on write, so a naive scoped write would silently empty the
+    Review inbox for every analyzer except the one just requested."""
+    from tokenjam.core.optimize import relearn_store
+
+    cfg = _cfg(tmp_path)
+    db = _spans_db()
+    try:
+        # Full, unscoped recompute first — seeds the store with whatever
+        # every cost analyzer finds (may be empty on this tiny fixture, but
+        # we only need ONE analyzer's proposal to survive below).
+        relearn_store.write_cost_proposals(
+            [{
+                "kind": "cost", "analyzer": "trim", "signature": "cost:trim:x",
+                "title": "pre-existing trim card", "target_key": {}, "evidence": "",
+                "baseline": {}, "advise_text": "",
+            }],
+            config=cfg,
+        )
+
+        cp.recompute_cost_proposals(db, cfg, requested_analyzers=["cache"])
+
+        stored = relearn_store.read_cache(config=cfg) or {}
+        analyzers_present = {p["analyzer"] for p in stored.get("cost_proposals", [])}
+        assert "trim" in analyzers_present, (
+            "scoped recompute for 'cache' must not drop the pre-existing "
+            "'trim' card from the shared store"
+        )
+    finally:
+        db.close()
+
+
 # --------------------------------------------------------------------------- #
 # House rules on every string these cards can print
 # --------------------------------------------------------------------------- #
