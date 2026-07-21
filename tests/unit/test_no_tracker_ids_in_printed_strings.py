@@ -1,6 +1,6 @@
 """No UNQUALIFIED tracker reference may reach a string the product prints.
 
-The problem is ambiguity, not references. A bare ``#56`` resolves against
+The problem is ambiguity, not references. A bare ``#99999`` resolves against
 whatever repository the reader happens to be looking at, and internal and
 public number spaces genuinely collide, so the same token can be correct here
 and confidently wrong once pasted into an issue, a screenshot or another
@@ -8,7 +8,7 @@ repo's thread. A printed string travels further than any other kind, straight
 out of the terminal and into all three.
 
 So this guard bans the BARE form and permits a qualified one, either
-``owner/repo#56`` or a full URL. A pointer to real background is useful
+``owner/repo#99999`` or a full URL. A pointer to real background is useful
 information the user should get; deleting it is a loss. An earlier version of
 this guard banned every reference, and it promptly pushed a scrub into
 removing a correct public issue link from the spans-column-statistics warning,
@@ -129,8 +129,8 @@ def test_the_pattern_separates_references_from_colours_and_ordinals():
     """The discriminators, pinned. If someone loosens the pattern to silence a
     failure, this says which cases it was built to tell apart."""
     # Tracker references: caught.
-    assert _TRACKER_REF.search("landed (see #55); ingest fails")
-    assert _TRACKER_REF.search("(+36% measured, ticket #59)")
+    assert _TRACKER_REF.search("landed (see #99999); ingest fails")
+    assert _TRACKER_REF.search("(+36% measured, ticket #99998)")
     # An ordinal is a number sign and ONE digit used as a word.
     assert not _TRACKER_REF.search("[bold]Your #1 fix:[/bold]")
     # Colour literals live in markup, which is excluded by literal shape.
@@ -146,15 +146,15 @@ def test_a_qualified_reference_passes_where_its_bare_twin_fails(tmp_path):
     never make deleting a true reference look like the correct move."""
     sentence = 'MSG = "column statistics are corrupt. Background: {ref}."\n'
     bare = tmp_path / "bare.py"
-    bare.write_text(sentence.format(ref="see issue #56"), encoding="utf-8")
+    bare.write_text(sentence.format(ref="see issue #99999"), encoding="utf-8")
     qualified = tmp_path / "qualified.py"
     qualified.write_text(
-        sentence.format(ref="see Metabuilder-Labs/tokenjam#56"), encoding="utf-8",
+        sentence.format(ref="see Metabuilder-Labs/tokenjam#99999"), encoding="utf-8",
     )
     url = tmp_path / "url.py"
     url.write_text(
         sentence.format(
-            ref="see https://github.com/Metabuilder-Labs/tokenjam/issues/56",
+            ref="see https://github.com/Metabuilder-Labs/tokenjam/issues/99999",
         ),
         encoding="utf-8",
     )
