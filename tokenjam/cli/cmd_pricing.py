@@ -2,6 +2,7 @@ import json
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.pricing import load_pricing_sources, load_pricing_table
 from tokenjam.utils.formatting import console, make_table
 
@@ -14,14 +15,12 @@ def cmd_pricing() -> None:
 @cmd_pricing.command("list")
 @click.option("--model", default=None,
               help="Filter to model names containing this substring.")
-@click.option("--json", "output_json_flag", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_pricing_list(ctx: click.Context, model: str | None,
                      output_json_flag: bool) -> None:
     """List the resolved per-model rates (input/output/cache, in $/MTok)."""
-    # Honour either `tj --json pricing list` or `tj pricing list --json`.
-    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    output_json = resolve_output_json(ctx, output_json_flag)
 
     table = load_pricing_table()  # {provider: {model: ModelRates}}
     sources = load_pricing_sources()  # {(provider, model): "override"|"packaged"}

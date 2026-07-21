@@ -33,6 +33,7 @@ from typing import Any
 import click
 from rich.markup import escape
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.method_capture import load_session_method
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
@@ -73,11 +74,10 @@ _KIND_STYLE = {
 @click.option("--last", is_flag=True,
               help="Reconstruct the most recent substantial session "
                    "(the default when no --session is given).")
-@click.option("--json", "output_json", is_flag=True,
-              help="Emit machine-readable JSON (the folded method spine).")
+@json_option
 @click.pass_context
 def cmd_session_story(ctx: click.Context, session_id: str | None,
-                      last: bool, output_json: bool) -> None:
+                      last: bool, output_json_flag: bool) -> None:
     """Show turn-by-turn HOW a Claude Code session attempted its task.
 
     Reconstructs the session's method — its ordered moves and, for each
@@ -85,6 +85,7 @@ def cmd_session_story(ctx: click.Context, session_id: str | None,
     transcript (or a persisted snapshot when the transcript was pruned). With no
     ``--session``, auto-selects the most recent substantial session.
     """
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     if db is None:
         raise click.ClickException("session-story requires a database connection.")

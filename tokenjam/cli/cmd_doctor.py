@@ -6,12 +6,13 @@ import click
 import duckdb
 from rich.markup import escape
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import find_config_file, load_config
 from tokenjam.utils.formatting import console, display_path
 
 
 @click.command("doctor")
-@click.option("--json", "output_json", is_flag=True)
+@json_option
 @click.option(
     "--repair",
     is_flag=True,
@@ -20,8 +21,9 @@ from tokenjam.utils.formatting import console, display_path
          "https://github.com/Metabuilder-Labs/tokenjam/issues/56).",
 )
 @click.pass_context
-def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
+def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None:
     """Run health checks on tj configuration and environment."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     config = ctx.obj["config"]
     checks: list[dict] = []
 

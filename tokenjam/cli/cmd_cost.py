@@ -1,5 +1,6 @@
 import click
 import json
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.cost import compute_cost_diff
 from tokenjam.core.models import CostFilters
 from tokenjam.utils.formatting import console, make_table, format_cost, format_tokens
@@ -15,11 +16,12 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 @click.option("--compare", "compare", default=None,
               help="Compare to a prior window. Accepts 'previous', 'last-week', "
                    "'last-month', 'last-7d', 'last-30d', or 'YYYY-MM-DD:YYYY-MM-DD'.")
-@click.option("--json", "output_json", is_flag=True)
+@json_option
 @click.pass_context
 def cmd_cost(ctx: click.Context, agent: str | None, since: str,
-             group_by: str, compare: str | None, output_json: bool) -> None:
+             group_by: str, compare: str | None, output_json_flag: bool) -> None:
     """Show cost breakdown by agent, model, day, or tool."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     try:
         since_dt = parse_since(since)
