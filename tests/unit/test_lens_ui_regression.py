@@ -2290,3 +2290,95 @@ def test_stat_line_drops_the_token_segment_when_there_is_no_estimate(html):
     assert "${d.estTokens ? html`" in head
     assert "` : null}" in head
     assert "~0 tok" not in head
+
+
+# --- Review inbox select-all ----------------------------------------------- #
+def test_select_all_checkbox_sits_in_the_table_header_column(html):
+    # Same checkbox column and table styling as the rows it controls, not a new
+    # control bolted beside the table.
+    assert "function SelectAllCheckbox" in html
+    assert (
+        '<thead><tr><th style="width:26px"><${SelectAllCheckbox} '
+        "total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} />"
+    ) in html
+    # The per-row checkbox is untouched.
+    assert '<td><input type="checkbox" checked=${checked} onChange=${onToggle} /></td>' in html
+
+
+def test_select_all_reports_the_indeterminate_state_on_a_partial_selection(html):
+    # `indeterminate` is a DOM property with no HTML attribute, so it has to be
+    # assigned through a ref. A header box that shows plain "checked" over a
+    # partial selection invites accidental bulk actions.
+    start = html.index("function SelectAllCheckbox")
+    end = html.index("function RelearnRow", start)
+    fn = html[start:end]
+    assert "ref.current.indeterminate = selected > 0 && selected < total" in fn
+    # Fully checked only when every listed row is selected.
+    assert "const all = total > 0 && selected === total" in fn
+    assert "checked=${all}" in fn
+
+
+def test_select_all_toggles_off_when_everything_is_selected(html):
+    start = html.index("function nextSelectAllSelection")
+    end = html.index("// The table's select-all box.", start)
+    fn = html[start:end]
+    assert "if (all) next.delete(sig)" in fn
+    assert "else next.add(sig)" in fn
+    # The component delegates to it over the RENDERED row set.
+    assert (
+        "nextSelectAllSelection(visible.map(c => c.signature), prev)"
+    ) in html
+
+
+def test_select_all_applies_only_to_the_rendered_rows(html):
+    # THE load-bearing one. The list filters out locally-dismissed rows and rows
+    # approved in this session, so select-all must iterate `visible`, never the
+    # unfiltered d.clusters, or it would dismiss rows the user never saw.
+    start = html.index("const selectedVisible =")
+    end = html.index("const modalCluster =", start)
+    block = html[start:end]
+    assert "visible.filter(c => checked.has(c.signature))" in block
+    assert "visible.map(c => c.signature)" in block
+    assert "d.clusters" not in block
+    # The filter that makes `visible` a strict subset is still in place.
+    assert (
+        "const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) "
+        "&& !appliedSigs.has(c.signature))"
+    ) in html
+
+
+def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
+    # `checked` is not pruned when a row leaves the list, so dismissing the raw
+    # set would sweep along a signature that is no longer on screen.
+    start = html.index("const dismissChecked =")
+    end = html.index("const modalCluster =", start)
+    fn = html[start:end]
+    assert "visible.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
+    assert "...checked]" not in fn
+
+
+def test_dismiss_button_states_its_blast_radius(html):
+    # The action names how many rows it will act on before it fires, and counts
+    # the same scoped selection the header checkbox reports.
+    assert (
+        "disabled=${selectedCount === 0} onClick=${dismissChecked}>"
+        "${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}"
+    ) in html
+    # Not the raw, unscoped set that could overstate it.
+    assert "disabled=${checked.size === 0}" not in html
+
+
+def test_select_all_adds_no_bulk_approve(html):
+    # Dismiss is local and undone by a reload; Approve writes to disk. Exactly
+    # one bulk action exists on this table.
+    # Anchor inside ReviewInboxView: `cur-addbar` is used by other screens too.
+    view = html[html.index("function ReviewInboxView"):]
+    start = view.index('<div class="cur-addbar">')
+    end = view.index("visibleCost.length > 0", start)
+    bar = view[start:end]
+    # Exactly one button, and it is the Dismiss one. (The trailing hint text
+    # does mention Approve, pointing at the per-row flow, which is unchanged.)
+    assert bar.count("<button") == 1
+    assert "dismissChecked" in bar
+    assert "onClick=${approveChecked}" not in html
+    assert "Approve checked" not in html
