@@ -7523,6 +7523,37 @@ function CompoundLedgerSummary({ ledger }) {
     </div>`;
 }
 
+// The select-all state transition, kept pure and outside the component so it
+// can be exercised directly rather than only asserted against as markup.
+// `visibleSigs` is the RENDERED row set: clicking a fully-selected box clears
+// exactly those rows from the selection, anything else adds them all. Rows the
+// list is not showing are never touched in either direction.
+function nextSelectAllSelection(visibleSigs, checkedSigs) {
+  const next = new Set(checkedSigs);
+  const all = visibleSigs.length > 0 && visibleSigs.every(sig => next.has(sig));
+  for (const sig of visibleSigs) {
+    if (all) next.delete(sig);
+    else next.add(sig);
+  }
+  return next;
+}
+
+// The table's select-all box. `indeterminate` has no HTML attribute and cannot
+// be expressed as a checked value, so it is assigned to the DOM node through a
+// ref on every render — a two-state header box over a partial selection is a
+// well-known source of accidental bulk actions.
+function SelectAllCheckbox({ total, selected, onToggle }) {
+  const ref = useRef(null);
+  const all = total > 0 && selected === total;
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = selected > 0 && selected < total;
+  });
+  return html`<input type="checkbox" ref=${ref} checked=${all} disabled=${total === 0}
+    title=${all ? 'Clear selection' : 'Select all listed'}
+    aria-label=${all ? 'Clear selection' : 'Select all listed'}
+    onChange=${onToggle} />`;
+}
+
 function RelearnRow({ cluster, checked, onToggle, onExpand }) {
   const tokens = cluster.estimated_recoverable_tokens || 0;
   return html`
@@ -8008,10 +8039,23 @@ function ReviewInboxView({ params }) {
   const relearnCount = visible.length;
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
-    const next = new Set([...dismissed, ...checked]);
+    // Only the selected rows that are actually listed: a stale signature left in
+    // `checked` after its row was approved must not be swept along silently.
+    const next = new Set([...dismissed, ...visible.filter(c => checked.has(c.signature)).map(c => c.signature)]);
     setDismissed(next); saveDismissedRelearns(next);
     setChecked(new Set());
   };
+  // Selection is scoped to `visible` — the rows actually rendered — never to
+  // d.clusters. The list filters out locally-dismissed rows and rows approved
+  // in this session, and `checked` is not pruned when a row leaves the list, so
+  // counting raw `checked` would both overstate the button's blast radius and
+  // let select-all reach a row the user cannot see.
+  const selectedVisible = visible.filter(c => checked.has(c.signature));
+  const selectedCount = selectedVisible.length;
+  const allVisibleSelected = visible.length > 0 && selectedCount === visible.length;
+  // Clicking a fully-selected box clears it; anything else selects the lot.
+  const toggleAll = () => setChecked(
+    prev => nextSelectAllSelection(visible.map(c => c.signature), prev));
   const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
   const costAppliedSigs = new Set((costApplied || []).filter(r => r.state !== 'reverted').map(r => r.signature));
   const visibleCost = (costProps || []).filter(p => !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
@@ -8042,7 +8086,7 @@ function ReviewInboxView({ params }) {
     </div>
     <div class="cur-listbox">
       <table class="cur-table">
-        <thead><tr><th style="width:26px"></th><th>Signature</th><th>Sessions</th><th>Rung</th><th style="text-align:right">Est. savings</th><th>Status</th></tr></thead>
+        <thead><tr><th style="width:26px"><${SelectAllCheckbox} total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} /></th><th>Signature</th><th>Sessions</th><th>Rung</th><th style="text-align:right">Est. savings</th><th>Status</th></tr></thead>
         <tbody>
           ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
           ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
@@ -8053,7 +8097,7 @@ function ReviewInboxView({ params }) {
       </table>
     </div>
     <div class="cur-addbar">
-      <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
+      <button class="cur-btn" disabled=${selectedCount === 0} onClick=${dismissChecked}>${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}</button>
       <span class="dim" style="font-size:12px">${relearnCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
     </div>
 
