@@ -220,7 +220,7 @@ Key flags: `--since`, `--agent`, `--budget`, `--budget-usd`, `--compare`, `--exp
 
 ### `tj relearn`
 
-Review, apply, and verify fixes for the recurring failures `tj optimize relearn` detects. The same proposals the Lens Review inbox shows, from the terminal. The detector runs on a schedule inside `tj serve`, so `list` is empty until a pass has completed.
+Review and apply fixes for the recurring failures `tj optimize relearn` detects. The same proposals the Lens Review inbox shows, from the terminal. The detector runs on a schedule inside `tj serve`, so `list` is empty until a pass has completed.
 
 ```bash
 tj relearn list                            # stored proposals, with their IDs
@@ -228,23 +228,14 @@ tj relearn apply <proposal_id>             # preview the exact diff (dry run)
 tj relearn apply <proposal_id> --go        # write it, with a backup and a commit
 tj relearn enable <fix_id> --yes           # wire an applied enforcement fix live
 tj relearn revert <fix_id>                 # undo an applied fix
-tj relearn verify                          # recompute the receipts now
-tj relearn receipts                        # cumulative verified-saved totals
 tj relearn eval-case <proposal_id>         # the evidence as JSON, for your own eval tooling
 ```
 
-The human gate is unconditional: `apply` is a dry run unless you pass `--go`, `enable` refuses without `--yes` because a hook starts intercepting tool calls once it is wired in, and every write is reversible with `revert`. `receipts` and `eval-case` are read-only.
+The human gate is unconditional: `apply` is a dry run unless you pass `--go`, `enable` refuses without `--yes` because a hook starts intercepting tool calls once it is wired in, and every write is reversible with `revert`. `eval-case` is read-only.
 
-`verify` normally recomputes the on-disk receipts for applied fixes, the pass the daemon otherwise runs on a six-hour schedule. For an advise-only proposal there is no applied fix to recompute: the agent has no workspace to write into, so you applied the fix yourself. Mark when it went live with `tj loop expect`, then measure the signature's recurrence in spans either side of that moment. A decisive result is written into the same loop ledger `tj loop history` reads.
+Subcommands: `list`, `apply`, `enable`, `revert`, `eval-case`.
 
-```bash
-tj relearn verify --otel <proposal_id> --expectation <expectation_id>
-tj relearn verify --otel <proposal_id> --expectation <expectation_id> --no-record
-```
-
-Subcommands: `list`, `apply`, `enable`, `revert`, `verify`, `receipts`, `eval-case`.
-
-Key flags: `apply`: `--go`, `--target`, `--scope`, `--force`; `enable`: `--yes`; `verify`: `--otel`, `--expectation`, `--no-record`; `receipts`: `--json`; `eval-case`: `--out`.
+Key flags: `apply`: `--go`, `--target`, `--scope`, `--force`; `enable`: `--yes`; `eval-case`: `--out`.
 
 ### `tj route`
 
