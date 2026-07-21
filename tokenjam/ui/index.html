@@ -6066,6 +6066,21 @@ function fmtFramedSavings(usd, tokens, framing) {
   return usd == null ? '—' : fmtCost(usd);
 }
 
+// Is the server telling us NOT to lead with dollars? Reads the explicit
+// server-side decision (`display_rule`, core/framing.py) rather than
+// re-deriving it, with a pricing_mode fallback for older payloads. True for a
+// subscription-dominant corpus (a dollar figure there covers only the
+// API-billed slice, so it understates), for local inference, and for an
+// unknown plan. Callers make TOKENS the headline in that case.
+const DOLLARS_SUPPRESSED_RULES = new Set([
+  'suppress_dollars_for_subscription_share', 'tokens_only', 'suppress_dollars_unknown',
+]);
+function dollarsSuppressed(framing) {
+  if (!framing) return false;
+  if (framing.display_rule) return DOLLARS_SUPPRESSED_RULES.has(framing.display_rule);
+  return framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local';
+}
+
 // Count agents whose latest session breaches the 2σ drift threshold on any
 // tracked metric (mirrors the Drift screen's z-score logic).
 function driftSignalCount(drift) {
@@ -7713,16 +7728,21 @@ function CostVerifyLine({ verify }) {
     </div>`;
 }
 
-// The cost ledger: realized dollars summed across every VERIFIED, improved cost
-// fix — the dollar sibling of CompoundLedgerSummary.
-function CostLedgerSummary({ ledger }) {
+// The cost ledger: realized savings summed across every VERIFIED, improved cost
+// fix — the sibling of CompoundLedgerSummary. Same server-decided unit
+// hierarchy as ReceiptsHeader: these dollars only cover the API-billed slice,
+// so a suppressing framing leads with the ledger's realized TOKENS instead and
+// demotes the dollars to a scoped, dim line.
+function CostLedgerSummary({ ledger, framing }) {
   if (!ledger || !ledger.verified_count) return null;
+  const suppressed = dollarsSuppressed(framing);
   return html`
     <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
-        <span style="font-size:20px;font-weight:600;color:var(--accent)">${fmtUsd(ledger.total_realized_usd)}</span>
+        <span style="font-size:20px;font-weight:600;color:var(--accent)">${suppressed ? fmtTokens(ledger.total_realized_tokens) + ' tok' : fmtUsd(ledger.total_realized_usd)}</span>
         <span class="dim" style="font-size:12px">realized across ${ledger.improved_count} verified change(s) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
       </div>
+      ${suppressed && ledger.total_realized_usd > 0 ? html`<div class="dim" style="font-size:12px;margin-top:4px">${fmtUsd(ledger.total_realized_usd)} of that is on API-billed traffic</div>` : null}
       <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} no movement · ${ledger.insufficient_data_count} still measuring</div>
     </div>`;
 }
@@ -7823,10 +7843,18 @@ function CostAppliedRow({ rec, onChanged }) {
 // receipts.py, combining the relearn ledger's tokens with the cost-verify
 // ledger's tokens AND dollars). Deliberately two SEPARATE, distinctly
 // labeled numbers — an estimate and a measurement never get added together.
+//
+// UNIT HIERARCHY is server-decided (`receiptsData.framing`, core/framing.py):
+// `verified_saved_usd` can only ever count the API-billed slice of the corpus,
+// so on a subscription-dominant one it is a small, misleading number while the
+// token figure is complete. When that framing suppresses dollars the TOKENS
+// take the headline slot and the dollars drop to a dim line explicitly scoped
+// to API-billed traffic; otherwise the dollars-first hierarchy is unchanged.
 function ReceiptsHeader({ rollup, receiptsData }) {
   const hasRollup = rollup && rollup.proposal_count > 0;
   const hasReceipts = receiptsData && receiptsData.verified_count > 0;
   if (!hasRollup && !hasReceipts) return null;
+  const suppressed = hasReceipts && dollarsSuppressed(receiptsData.framing);
   return html`
     <div style="display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 18px">
       ${hasRollup ? html`
@@ -7840,9 +7868,14 @@ function ReceiptsHeader({ rollup, receiptsData }) {
       ${hasReceipts ? html`
         <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
           <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Verified saved to date <span class="measured-tag" title=${receiptsData.estimate_basis}>measured</span></div>
-          <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
-            <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
-          </div>
+          ${suppressed ? html`
+            <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtTokens(receiptsData.verified_saved_tokens)} tok</div>
+            ${receiptsData.verified_saved_usd > 0 ? html`<div class="dim" style="font-size:12px;margin-top:2px">${fmtUsd(receiptsData.verified_saved_usd)} of that is on API-billed traffic</div>` : null}
+          ` : html`
+            <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
+              <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
+            </div>
+          `}
           <div class="dim" style="font-size:11px;margin-top:6px">${receiptsData.verified_count} checked · ${receiptsData.improved_count} improved · ${receiptsData.regressed_count} regressed · ${receiptsData.no_change_count} no change · ${receiptsData.insufficient_data_count} still measuring</div>
         </div>
       ` : null}
@@ -7861,7 +7894,8 @@ function ReviewInboxView({ params }) {
   const [costProps, setCostProps] = useState([]);         // advise-only cost proposals (downsize/cache/trim)
   const [costRollup, setCostRollup] = useState(null);      // Component E — estimated-recoverable headline
   const [costApplied, setCostApplied] = useState([]);     // marked-applied cost proposals + their realized deltas
-  const [costLedger, setCostLedger] = useState(null);     // realized dollars across verified cost changes
+  const [costLedger, setCostLedger] = useState(null);     // realized savings across verified cost changes
+  const [costFraming, setCostFraming] = useState(null);   // plan-tier framing for the cost ledger's units
   const [receiptsData, setReceiptsData] = useState(null); // Component G1 — combined verified-saved receipts
   const [marking, setMarking] = useState(null);           // signature currently being marked applied
 
@@ -7897,6 +7931,7 @@ function ReviewInboxView({ params }) {
       const r = await api('/relearn/cost-applied');
       setCostApplied(r.applied || []);
       setCostLedger(r.ledger || null);
+      setCostFraming(r.framing || null);
     } catch (e) { /* degrade quietly */ }
   }, []);
 
@@ -7997,7 +8032,7 @@ function ReviewInboxView({ params }) {
 
     ${costApplied.length > 0 ? html`
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories <span class="dim" style="font-weight:400;font-size:12px">· the realized delta the loop measured after you marked each one</span></div>
-      <${CostLedgerSummary} ledger=${costLedger} />
+      <${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />
       <div class="cur-listbox" style="margin-top:8px">
         ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} onChanged=${() => { loadCost(); loadReceipts(); }} />`)}
       </div>
