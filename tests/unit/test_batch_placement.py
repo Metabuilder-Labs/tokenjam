@@ -152,3 +152,52 @@ def test_jitter_either_side_of_the_cv_threshold(db):
     assert "tight" in names
     assert "loose" not in names
     assert finding.candidates[0].gap_cv < MAX_START_GAP_CV
+
+
+# --------------------------------------------------------------------------- #
+# Serialization round-trip (the daemon path)
+# --------------------------------------------------------------------------- #
+
+def test_placement_survives_the_report_dict_round_trip(db):
+    """`report_from_dict` drops any finding name it has no constructor for, so
+    a missing entry loses the whole card over HTTP: the CLI deserialises the
+    report a running `tj serve` hands back through exactly this path, while the
+    in-process run keeps the dataclass and never notices."""
+    from tokenjam.core.optimize.analyzers.batch_placement import BatchPlacementFinding
+    from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    _cron_sessions(db, count=6, cost_usd=1.0)
+    since, until = _window()
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    assert finding is not None
+
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=since, until=until, days=WINDOW_DAYS, sessions=6, spans=6,
+            total_tokens=15_900, total_cost_usd=6.0, thin_data=False,
+        ),
+        findings={"placement": finding},
+    )
+    restored = report_from_dict(report_to_dict(report)).findings.get("placement")
+
+    assert isinstance(restored, BatchPlacementFinding)
+    assert restored.window_cost_usd == finding.window_cost_usd
+    assert restored.candidate_cost_usd == finding.candidate_cost_usd
+    assert restored.percent_of_window_cost == finding.percent_of_window_cost
+    assert restored.estimated_recoverable_usd == finding.estimated_recoverable_usd
+    assert restored.estimate_basis == finding.estimate_basis
+    assert restored.friction == finding.friction
+    # The nested candidates come back as dataclasses, not dicts.
+    assert [c.agent_id for c in restored.candidates] == ["nightly"]
+    original = finding.candidates[0]
+    candidate = restored.candidates[0]
+    assert candidate.sessions == original.sessions
+    assert candidate.first_start == original.first_start
+    assert candidate.last_start == original.last_start
+    assert candidate.median_gap_seconds == original.median_gap_seconds
+    assert candidate.gap_cv == original.gap_cv
+    assert candidate.cost_usd == original.cost_usd
+    assert candidate.tokens == original.tokens
+    assert (candidate.estimated_batch_saving_usd
+            == original.estimated_batch_saving_usd)

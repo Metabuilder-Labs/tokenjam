@@ -322,6 +322,12 @@ def _build_finding_constructors() -> dict:
         ThrashAgentCandidate,
         UncachedAgentCandidate,
     )
+    from tokenjam.core.optimize.analyzers.batch_placement import (
+        BATCH_ESTIMATE_BASIS,
+        BATCH_FRICTION_NOTE,
+        BatchCandidate,
+        BatchPlacementFinding,
+    )
     from tokenjam.core.optimize.analyzers.cache_recommend import (
         CachePrefixCandidate,
         CacheRecommendFinding,
@@ -534,6 +540,20 @@ def _build_finding_constructors() -> dict:
             notes=list(d.get("notes") or []),
         )
 
+    def _placement(d: dict) -> BatchPlacementFinding:
+        candidates = [BatchCandidate(**c) for c in d.get("candidates") or []]
+        return BatchPlacementFinding(
+            candidates=candidates,
+            window_cost_usd=float(d.get("window_cost_usd", 0.0)),
+            candidate_cost_usd=float(d.get("candidate_cost_usd", 0.0)),
+            percent_of_window_cost=float(d.get("percent_of_window_cost", 0.0)),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", BATCH_ESTIMATE_BASIS),
+            estimate_confidence=d.get("estimate_confidence", "estimated"),
+            friction=d.get("friction", BATCH_FRICTION_NOTE),
+        )
+
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
@@ -545,6 +565,12 @@ def _build_finding_constructors() -> dict:
         "relearn": _relearn,
         "deadweight": _deadweight,
         "verbosity": _verbosity,
+        # Not a registered analyzer name of its own: the downsize analyzer
+        # attaches the batch-placement check under this key. It still needs a
+        # constructor, or the finding is dropped on the daemon path (the CLI
+        # deserialises the HTTP report through report_from_dict, which ignores
+        # any finding name absent from this table).
+        "placement": _placement,
     }
 
 
