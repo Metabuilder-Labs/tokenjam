@@ -147,3 +147,50 @@ def test_run_integrates_with_build_report(db, config):
     assert finding.confidence == "structural"
     assert len(finding.rows) == 1
     assert len(finding.flagged) == 1
+
+
+# --- CLI text-view rendering: remedy line ------------------------------------
+# `cache` reports the efficacy ratio but the actual fix (a cache_control
+# breakpoint) lives under the separate `cache-recommend` finding -- a user
+# reading `cache` alone could miss it entirely. The renderer must point there.
+
+def test_render_cache_flagged_rows_point_to_cache_recommend(capsys):
+    from tokenjam.cli.cmd_optimize import _render_cache_efficacy
+    from tokenjam.core.optimize.analyzers.cache_efficacy import (
+        CacheEfficacyFinding,
+        CacheEfficacyRow,
+    )
+
+    row = CacheEfficacyRow(
+        provider="anthropic", model="claude-sonnet-4-6",
+        input_tokens=150_000, cache_tokens=10_000, efficacy=0.06,
+        support="full", flagged=True,
+    )
+    finding = CacheEfficacyFinding(rows=[row], flagged=[row])
+
+    _render_cache_efficacy(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out
+
+    assert "tj optimize cache-recommend" in out
+
+
+def test_render_cache_no_flagged_rows_omits_remedy_pointer(capsys):
+    """No flagged rows means nothing to fix -- don't print a remedy pointer
+    that implies a problem the table doesn't show."""
+    from tokenjam.cli.cmd_optimize import _render_cache_efficacy
+    from tokenjam.core.optimize.analyzers.cache_efficacy import (
+        CacheEfficacyFinding,
+        CacheEfficacyRow,
+    )
+
+    row = CacheEfficacyRow(
+        provider="anthropic", model="claude-sonnet-4-6",
+        input_tokens=150_000, cache_tokens=100_000, efficacy=0.67,
+        support="full", flagged=False,
+    )
+    finding = CacheEfficacyFinding(rows=[row], flagged=[])
+
+    _render_cache_efficacy(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out
+
+    assert "tj optimize cache-recommend" not in out

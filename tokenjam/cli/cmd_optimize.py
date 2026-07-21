@@ -387,6 +387,7 @@ _MINOR_FINDING_LABELS = {
     "verbosity":       "Verbosity",
     "deadweight":      "Deadweight",
     "placement":       "Batch placement",
+    "summarize":       "Summarize",
 }
 
 
@@ -1210,6 +1211,14 @@ def _render_cache_efficacy(
                 f"({format_tokens(r.input_tokens)} input / "
                 f"{format_tokens(r.cache_tokens)} cache)"
             )
+        # Diagnosis and remedy live under two different finding keys — this
+        # renderer only measures the ratio; the actual cache_control breakpoint
+        # candidates come from `cache-recommend`. Point there explicitly so a
+        # user reading `cache` alone doesn't miss the fix.
+        console.print(
+            "     [yellow]→[/yellow] Run [bold]tj optimize cache-recommend[/bold] "
+            "for concrete cache_control breakpoint candidates."
+        )
         console.print()
 
     console.print("     [dim]All (provider, model) usage in window:[/dim]")
@@ -1651,6 +1660,51 @@ def _render_verbosity(
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
+def _render_summarize(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the summarize finding — catalog prompt files (CLAUDE.md / AGENTS.md /
+    globals) whose prose could be summarized. Registered and runs like every
+    other analyzer, but had no entry in `_FINDING_RENDERERS`, so it was
+    silently dropped from plain-text `tj optimize` output and only reachable
+    via `--json`.
+
+    Tokens-only by design (see core/optimize/analyzers/summarize.py):
+    `estimated_recoverable_usd` is intentionally None — there's no per-file
+    call telemetry to amortize a dollar figure over — so this renderer never
+    fabricates one, only the per-call token reduction.
+    """
+    console.print(_finding_header(marker, "Summarize:"))
+    if not finding.candidates:
+        console.print(
+            "     [dim]No catalog prompt files (CLAUDE.md / AGENTS.md / "
+            "globals) with summarizable prose found.[/dim]"
+        )
+        return
+
+    tokens = finding.estimated_recoverable_tokens or 0
+    console.print(
+        f"     • [bold]{finding.files}[/bold] file{'s' if finding.files != 1 else ''} "
+        f"summarizable, ~[bold]{format_tokens(tokens)}[/bold] per call "
+        f"[dim](aggregate {finding.reduction_pct}% prose reduction)[/dim]"
+    )
+    for c in finding.candidates[:5]:
+        console.print(
+            f"       [dim]{c.path}[/dim]  [dim]({c.scope})[/dim]  "
+            f"~{format_tokens(c.est_tokens_saved)} saved  "
+            f"[dim]{c.reduction_pct}% reduction[/dim]"
+        )
+    if len(finding.candidates) > 5:
+        console.print(f"       [dim]… and {len(finding.candidates) - 5} more.[/dim]")
+    console.print(
+        "     [yellow]→[/yellow] Run [bold]tj summarize list[/bold] to review, "
+        "then [bold]tj summarize prep <path>[/bold] to generate a rewrite."
+    )
+    if finding.caveat:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
 def _render_deadweight(
     finding, *, pricing_mode: str = "api", marker: str = "",
 ) -> None:
@@ -1847,4 +1901,5 @@ _FINDING_RENDERERS = {
     "verbosity":    _render_verbosity,
     "deadweight":   _render_deadweight,
     "placement":    _render_placement,
+    "summarize":    _render_summarize,
 }

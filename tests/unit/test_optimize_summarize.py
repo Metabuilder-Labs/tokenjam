@@ -122,6 +122,80 @@ def test_scan_error_never_breaks_the_report(db, monkeypatch, caplog):
     assert any("scan failed" in r.message for r in caplog.records)
 
 
+# --- CLI text-view rendering regression --------------------------------------
+# Same class of defect deadweight/relearn hit before: `summarize` was registered
+# in ANALYZER_REGISTRY and ran on every report, but had no entry in cmd_optimize's
+# _FINDING_RENDERERS dispatch table, so `_rank_findings` silently dropped it and
+# plain-text `tj optimize` never showed it -- only `--json` did.
+
+def test_summarize_in_click_choices_and_renderer():
+    from tokenjam.cli.cmd_optimize import (
+        _FINDING_RENDERERS,
+        _MINOR_FINDING_LABELS,
+        cmd_optimize,
+    )
+
+    findings_param = next(
+        p for p in cmd_optimize.params if getattr(p, "name", None) == "findings"
+    )
+    assert "summarize" in findings_param.type.choices
+    assert "summarize" in _FINDING_RENDERERS
+    assert "summarize" in _MINOR_FINDING_LABELS
+
+
+def test_render_summarize_lists_candidates_and_points_to_summarize_list(db, monkeypatch, capsys):
+    """The finding renders through the CLI dispatch path, names the files, the
+    per-call token saving, and points at `tj summarize` -- never fabricates a
+    dollar figure (estimated_recoverable_usd stays None by design)."""
+    from tokenjam.cli.cmd_optimize import _render_summarize
+
+    _patch_scan(monkeypatch, [_cand("./CLAUDE.md", 410), _cand("./AGENTS.md", 300)])
+    finding = _run(db)
+
+    for mode in ("api", "subscription", "local", "unknown"):
+        _render_summarize(finding, pricing_mode=mode, marker="①")
+    out = capsys.readouterr().out
+
+    assert "CLAUDE.md" in out
+    assert "AGENTS.md" in out
+    assert "710" in out or "710" in out.replace(",", "")  # aggregate tokens saved
+    assert "tj summarize list" in out
+    assert "tj summarize prep" in out
+    assert "$" not in out  # no fabricated dollar figure
+
+
+def test_render_summarize_empty_state_names_the_reason(db, monkeypatch, capsys):
+    from tokenjam.cli.cmd_optimize import _render_summarize
+
+    _patch_scan(monkeypatch, [])
+    finding = _run(db)
+
+    _render_summarize(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out
+
+    assert "No catalog prompt files" in out
+    assert "tj summarize list" not in out  # no remedy pointer on an empty finding
+
+
+def test_render_report_surfaces_summarize_instead_of_generic_empty(db, monkeypatch, capsys):
+    """End-to-end: a report whose only finding is a populated summarize set
+    must not fall through to the generic "No candidates flagged" empty state."""
+    from tokenjam.cli.cmd_optimize import _render_report
+
+    _seed_window(db)
+    _patch_scan(monkeypatch, [_cand("./CLAUDE.md", 410)])
+    since, until = _window()
+    report = build_report(db=db, config=TjConfig(version="1"),
+                          since=since, until=until, findings=["summarize"])
+    assert report.findings["summarize"].candidates  # sanity
+
+    _render_report(report, agent=None, requested=["summarize"], pricing_mode="local")
+    out = capsys.readouterr().out
+
+    assert "No candidates flagged" not in out
+    assert "CLAUDE.md" in out
+
+
 def test_finding_round_trips(db, monkeypatch):
     _seed_window(db)
     _patch_scan(monkeypatch, [_cand("./CLAUDE.md", 410)])
