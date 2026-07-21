@@ -687,7 +687,7 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
     if healed:
         logger.warning(
             "Schema self-heal: added missing column(s) %s recorded as migrated "
-            "but never landed (#55). Ingest of affected rows would otherwise fail "
+            "but never landed. Ingest of affected rows would otherwise fail "
             "with a DuckDB Binder Error and be silently dropped.",
             ", ".join(healed),
         )
