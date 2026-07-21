@@ -91,4 +91,4 @@ def test_doc_analyzer_count_matches_the_registry(relpath):
 def test_the_registry_is_the_number_the_docs_were_updated_to():
     """A tripwire on the number itself. Adding or removing an analyzer should
     fail here first, as the prompt to go update every doc listed above."""
-    assert len(ANALYZER_REGISTRY) == 12
+    assert len(ANALYZER_REGISTRY) == 13
