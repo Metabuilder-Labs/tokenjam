@@ -2133,3 +2133,16 @@ def test_relearn_example_session_links_only_when_resolvable(html):
     )
     # The snippet (the evidence itself) is rendered either way.
     assert "${ex.snippet}" in html
+
+
+def test_sessions_nav_entry_present(html):
+    # The session views (Map / Approach / Timeline) were reachable only by
+    # following a link out of another screen. A sidebar entry makes them
+    # discoverable; the paramless route lands on the session list the Status
+    # view already renders, and the entry highlights while a session is open.
+    assert (
+        '<a href="#/sessions" class="nav-link" data-view="sessions" '
+        'data-lens="improve">' in html
+    )
+    assert "case 'sessions':" in html
+    assert "sessions: 'improve'" in html
