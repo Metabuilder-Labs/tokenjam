@@ -903,6 +903,10 @@ a.health-tile.attn { border-color: var(--warn); }
 .health-sub { font-size: 11px; color: var(--text-faint); margin-top: 4px; font-family: 'Geist Mono', monospace; }
 .opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+/* Deep-link highlight for a Review-inbox cost advisory (card → apply hop).
+   The card's own inline `border` wins over a plain class rule, so this needs
+   !important to actually show against it. */
+.opt-section.rev-focus { border-color: var(--accent) !important; box-shadow: 0 0 0 1px var(--accent); }
 .opt-title { font-family: 'Geist', sans-serif; font-size: 15px; font-weight: 700; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .opt-rec { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 6px; }
 .opt-line { font-size: 13px; line-height: 1.6; margin: 4px 0; }
@@ -6050,6 +6054,15 @@ function optimizeFindingHref(name, since) {
   return '#/optimize?' + sp.toString();
 }
 
+// Reverse hop: deep-link a detail card's evidence into the Review inbox's
+// matching cost advisory (or advisories — one analyzer can carry several).
+// The `analyzer` param drives ReviewInboxView's scroll-into-view + highlight
+// of every open advisory that analyzer produced, mirroring
+// optimizeFindingHref's card-level (not per-instance) granularity.
+function reviewProposalHref(analyzer) {
+  return '#/review?analyzer=' + encodeURIComponent(analyzer);
+}
+
 // Title-case a registry key for display. Centralizes capitalization so a tile
 // for a not-yet-known analyzer still renders title-case instead of the raw
 // lowercase key (#162) — registry keys are lowercase by convention.
@@ -6201,7 +6214,7 @@ function HealthTile({ label, value, attention, href, sub }) {
 }
 
 // ---- Optimize detail screen ----
-function OptimizeFinding({ name, opt, framing }) {
+function OptimizeFinding({ name, opt, framing, hasProposal }) {
   const meta = ANALYZER_META[name] || { title: capitalize(name) };
   let body = null;
   if (name === 'downsize') {
@@ -6294,6 +6307,7 @@ function OptimizeFinding({ name, opt, framing }) {
       ${rec ? html`<span class="opt-rec">${rec} <span class="estimated-tag" title=${fd && fd.estimate_basis}>estimated recoverable</span></span>` : null}
     </div>
     ${body}
+    ${hasProposal ? html`<div class="opt-line" style="margin-top:10px"><a class="sz-link" href=${reviewProposalHref(name)}>A fix for this is ready. Review it in the Review inbox →</a></div>` : null}
   </section>`;
 }
 
@@ -6341,7 +6355,7 @@ function OptimizeView({ params }) {
   const focus = readParam(params, 'finding', DEFAULTS.finding);
   const setFilter = (k, v) => navigate('optimize', { since, agent_id: agentId, compare, finding: focus, [k]: v }, DEFAULTS);
 
-  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null });
+  const [st, setSt] = useState({ loading: true, error: null, opt: null, cmp: null, comp: null, bk: [], rec: null, proposalAnalyzers: new Set() });
 
   const load = useCallback(async () => {
     setSt(s => ({ ...s, loading: !s.opt, error: null }));
@@ -6357,7 +6371,12 @@ function OptimizeView({ params }) {
       // Recommendation-outcome ledger: measured-recovered vs estimated-recoverable.
       // Best-effort — must not blank the Optimize screen.
       const rec = await api('/recommendations').catch(() => null);
-      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec });
+      // Which analyzers currently have an open Review-inbox proposal — drives
+      // the card → Review-inbox link below. Best-effort: a failed or empty
+      // fetch just means no card offers the link, never an error state.
+      const cp = await api('/relearn/cost-proposals').catch(() => null);
+      const proposalAnalyzers = new Set((cp && cp.proposals || []).map(p => p.analyzer));
+      setSt({ loading: false, error: null, opt, cmp, comp, bk, rec, proposalAnalyzers });
     } catch (e) { setSt(s => ({ ...s, loading: false, error: e.message || String(e) })); }
   }, [since, agentId, compare]);
 
@@ -6492,7 +6511,7 @@ function OptimizeView({ params }) {
       ${st.rec && st.rec.rows && st.rec.rows.length ? html`<${RecommendationsPanel} rec=${st.rec} />` : null}
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
-      ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} />`)}
+      ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section"><div class="opt-title">Budget projection</div>
         ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtFramedDollar(b.projected_overage_usd, framing)}</span>` : '— within budget'}</div>`)}
       </section>` : null}
@@ -7797,9 +7816,8 @@ function AppliedFixRow({ rec, onChanged }) {
 // The downsize/cache/trim analyzers' findings adapted into advise-only
 // proposals (core/optimize/cost_proposals.py), served at
 // GET /relearn/cost-proposals. They carry NO apply path — the fix lives in the
-// user's own application code — so "Mark applied" only drops a marker the
-// delta-verify pass (core/optimize/cost_verify.py) measures a realized dollar
-// delta against, shown back here as a receipt.
+// user's own application code — so "Mark applied" only drops a marker
+// recording what the user approved.
 const COST_ANALYZER_LABELS = { downsize: 'downsize', cache: 'cache', trim: 'trim', subagent: 'subagent' };
 
 function fmtUsd(v) {
@@ -7807,38 +7825,14 @@ function fmtUsd(v) {
   return '$' + (Math.abs(n) < 1 ? n.toFixed(4) : n.toFixed(2));
 }
 
-// One applied cost proposal's realized-delta receipt: verdict + the measured
-// delta (shown only for a real "improved" verdict), reusing the same
-// VERDICT_LABELS the relearn lane uses. Correlational, never causal.
-//
-// Obeys the same framing as every other dollar on the page. Without it a
-// per-proposal "$0.42 lower" rendered while every sibling figure was
-// suppressed, which reads as money off a bill the user never received.
-function CostVerifyLine({ verify, framing }) {
-  if (!verify) return null;
-  const label = VERDICT_LABELS[verify.verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
-  const usd = verify.realized_usd_delta;
-  const toks = verify.realized_tokens_delta;
-  const suppressed = dollarsSuppressed(framing);
-  // Suppressed, the row leads with its token delta and states no dollars; with
-  // no token delta to fall back on there is nothing measurable left to show.
-  const measured = suppressed
-    ? (toks ? '~' + fmtTokens(toks) + ' tok lower' : null)
-    : (usd > 0 ? fmtUsd(usd) + ' lower' + (toks ? ' · ~' + fmtTokens(toks) + ' tok' : '') : null);
-  return html`
-    <div class="dim" style="font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span style=${'color:' + label.color + ';font-weight:500'}>${label.text}</span>
-      ${measured ? html`<span style="color:var(--accent)">· ${measured} <span class="estimated-tag" title="estimated / correlational with your change; not proof the advice caused it">est.</span></span>` : null}
-      ${verify.reason ? html`<span title=${verify.reason} style="cursor:help">ⓘ</span>` : null}
-    </div>`;
-}
-
 // The cost ledger: realized savings summed across every VERIFIED, improved cost
 // fix — the sibling of CompoundLedgerSummary. Same server-decided unit
 // hierarchy as ReceiptsHeader: these dollars are token deltas priced at
-// per-model LIST rates (cost_verify._priced_usd), which is not what a
-// subscription user paid, so a suppressing framing leads with the ledger's
-// realized TOKENS and drops the dollars in favour of the server's qualifier.
+// per-model LIST rates, which is not what a subscription user paid, so a
+// suppressing framing leads with the ledger's realized TOKENS and drops the
+// dollars in favour of the server's qualifier. (Nothing currently populates
+// this ledger — see the ``verify`` field's removal note on the cost-apply
+// record — so this degrades to always hidden until a future redesign.)
 function CostLedgerSummary({ ledger, framing }) {
   if (!ledger || !ledger.verified_count) return null;
   const suppressed = dollarsSuppressed(framing);
@@ -7884,7 +7878,7 @@ function CopySnippetButton({ text }) {
 // way to mark it done). The badge below says which one this card is; a
 // snippet fix gets its own labeled block so the snippet reads as the
 // deliverable, not a footnote.
-function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
+function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged }) {
   const usd = prop.estimated_recoverable_usd;
   const toks = prop.estimated_recoverable_tokens;
   // Workspace-apply state (subagent, CC-origin only): a target path + a dry-run
@@ -7917,14 +7911,14 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
     : (prop.suggestion ? 'snippet fix · apply yourself' : 'advise-only');
 
   return html`
-    <div class="opt-section" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
+    <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[prop.analyzer] || prop.analyzer}</span>
         <span style="font-weight:500">${prop.title}</span>
         <span class="dim" style="font-size:11px">${modalityLabel}</span>
         ${(usd != null || toks != null) ? html`<span class="mono" style="margin-left:auto;color:var(--accent);font-size:12.5px">${usd != null ? '~' + fmtUsd(usd) : ''}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>` : null}
       </div>
-      <div class="sz-note" style="margin-top:8px">${prop.evidence}</div>
+      <div class="sz-note" style="margin-top:8px">${prop.evidence} <a class="sz-link" style="font-size:11.5px" href=${optimizeFindingHref(prop.analyzer)}>See the evidence →</a></div>
       <div class="opt-title" style="font-size:12.5px;margin-top:10px">Recommendation</div>
       <div class="sz-note" style="margin-top:2px">${prop.advise_text}</div>
       ${prop.suggestion ? html`
@@ -7980,32 +7974,27 @@ function CostAppliedRow({ rec, onChanged, framing }) {
         <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
       </div>
       <div class="dim" style="font-size:12px">marked applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}</div>
-      ${rec.state === 'applied' ? html`<${CostVerifyLine} verify=${rec.verify} framing=${framing} />` : null}
       ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
       ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${revert}>${busy ? 'working…' : 'Revert'}</span>` : null}
     </div>`;
 }
 
-// Components E + G1 — the Review inbox entry tile: the estimated-recoverable
-// headline (E, summed server-side over the OPEN, not-yet-applied cost-
-// proposal cards — core/optimize/cost_proposals.py's
-// estimated_recoverable_rollup) beside its measured twin, the cumulative
-// verified-saved receipts (G1, GET /relearn/receipts — core/optimize/
-// receipts.py, combining the relearn ledger's tokens with the cost-verify
-// ledger's tokens AND dollars). Deliberately two SEPARATE, distinctly
-// labeled numbers — an estimate and a measurement never get added together.
+// Component E — the Review inbox entry tile: the estimated-recoverable
+// headline, summed server-side over the OPEN, not-yet-applied cost-proposal
+// cards (core/optimize/cost_proposals.py's estimated_recoverable_rollup).
+// ``ReceiptsHeader`` also renders a "verified saved" tile beside it when
+// ``receiptsData`` is present; nothing currently feeds that prop (the
+// receipts endpoint that used to is gone, pending a bounded-verify
+// redesign), so today only the estimated tile ever shows.
 //
-// UNIT HIERARCHY is server-decided (`receiptsData.framing`, core/framing.py).
-// The two figures are not two views of one number: `verified_saved_tokens`
-// counts BOTH ledgers, while `verified_saved_usd` is the cost-verify ledger
-// alone, because a relearn fix has no single model to price against and the
-// product refuses to invent a rate for it (see receipts.py's RECEIPTS_BASIS).
-// The dollars are also a list-price equivalent, priced across all traffic, not
-// an amount billed — nothing anywhere filters cost by plan tier. So on a
-// subscription-dominant corpus the token figure is the complete and honest
-// headline: when the framing suppresses dollars the TOKENS take the hero slot
-// and the dollars give way to the server's qualifier; otherwise the
-// dollars-first hierarchy is unchanged.
+// UNIT HIERARCHY is server-decided (`receiptsData.framing`, core/framing.py):
+// a relearn fix has no single model to price against and the product refuses
+// to invent a rate for it. The dollars are also a list-price equivalent,
+// priced across all traffic, not an amount billed — nothing anywhere filters
+// cost by plan tier. So on a subscription-dominant corpus the token figure is
+// the complete and honest headline: when the framing suppresses dollars the
+// TOKENS take the hero slot and the dollars give way to the server's
+// qualifier; otherwise the dollars-first hierarchy is unchanged.
 // The estimated tile's token headline is a FLOOR, not a total: only some
 // proposals carry a token estimate. Quote that coverage rather than letting
 // the reader assume the sum spans every open proposal.
@@ -8070,6 +8059,9 @@ function ReceiptsHeader({ rollup, receiptsData, rollupFraming }) {
 }
 
 function ReviewInboxView({ params }) {
+  // Deep-link from an Optimize detail card's "review it" link (reviewProposalHref)
+  // — scrolls to and highlights every open cost advisory from this analyzer.
+  const analyzerFocus = readParam(params, 'analyzer', '');
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
@@ -8084,7 +8076,6 @@ function ReviewInboxView({ params }) {
   const [costApplied, setCostApplied] = useState([]);     // marked-applied cost proposals + their realized deltas
   const [costLedger, setCostLedger] = useState(null);     // realized savings across verified cost changes
   const [costFraming, setCostFraming] = useState(null);   // plan-tier framing for the cost ledger's units
-  const [receiptsData, setReceiptsData] = useState(null); // Component G1 — combined verified-saved receipts
   const [marking, setMarking] = useState(null);           // signature currently being marked applied
 
   const load = useCallback(async () => {
@@ -8124,28 +8115,30 @@ function ReviewInboxView({ params }) {
     } catch (e) { /* degrade quietly */ }
   }, []);
 
-  const loadReceipts = useCallback(async () => {
-    try {
-      const r = await api('/relearn/receipts');
-      setReceiptsData(r || null);
-    } catch (e) { /* degrade quietly — the rollup tile is enough on its own */ }
-  }, []);
-
   useEffect(() => {
-    load(); loadApplied(); loadCost(); loadReceipts();
+    load(); loadApplied(); loadCost();
     // Light poll while a background pass may be computing (or right after a
     // manual refresh) so the empty/computing state resolves without a reload.
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
     return () => clearInterval(timer);
-  }, [load, loadApplied, loadCost, loadReceipts]);
+  }, [load, loadApplied, loadCost]);
+
+  // Scroll the first matching advisory into view once the cost proposals have
+  // loaded (deep-link from an Optimize detail card). Highlighting every match
+  // for this analyzer is handled per-card below (rev-focus).
+  useEffect(() => {
+    if (!analyzerFocus) return;
+    const el = document.querySelector(`[data-analyzer="${analyzerFocus}"]`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [analyzerFocus, costProps]);
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
     try { await apiPost('/relearn/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
-    // The cost proposals + their realized deltas recompute on the same cadence.
+    // The cost proposals recompute on the same cadence.
     try { await apiPost('/relearn/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
-    setTimeout(() => { setRefreshing(false); load(); loadCost(); loadReceipts(); }, 1500);
-  }, [load, loadCost, loadReceipts]);
+    setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
+  }, [load, loadCost]);
 
   const markCostApplied = useCallback(async (prop) => {
     setMarking(prop.signature);
@@ -8154,10 +8147,9 @@ function ReviewInboxView({ params }) {
       // estimate) from its own store, so the ledger records what was detected.
       await apiPostOrDetail('/relearn/cost-proposals/apply', { proposal_id: prop.proposal_id });
       await loadCost();
-      await loadReceipts();
     } catch (e) { /* surfaced on next refresh; keep the card in place */ }
     finally { setMarking(null); }
-  }, [loadCost, loadReceipts]);
+  }, [loadCost]);
 
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
   const relearnCount = visible.length;
@@ -8186,7 +8178,7 @@ function ReviewInboxView({ params }) {
 
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
-    loadApplied(); loadReceipts();
+    loadApplied();
   };
 
   const dismissCost = (sig) => {
@@ -8198,7 +8190,7 @@ function ReviewInboxView({ params }) {
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
     <div class="sz-note">Every row here is waste you are paying for more than once: a mistake your agent repeated across sessions, priced in the tokens it burned. Each row links its evidence (the sessions it recurred in) and the fix that would stop it. <b>Approve</b> writes that fix (git-committed, or backed up if the target is not a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
 
-    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${receiptsData} rollupFraming=${rollupFraming} />
+    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${null} rollupFraming=${rollupFraming} />
 
     <div class="cur-listhead">
       <span>
@@ -8226,17 +8218,17 @@ function ReviewInboxView({ params }) {
     </div>
 
     ${visibleCost.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers, with verified receipts once you apply one</span></div>
+      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers</span></div>
       <div style="margin-top:8px">
-        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); loadReceipts(); }} />`)}
+        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
       </div>
     ` : null}
 
     ${costApplied.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories <span class="dim" style="font-weight:400;font-size:12px">· the realized delta the loop measured after you marked each one</span></div>
+      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories</div>
       <${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} framing=${costFraming} onChanged=${() => { loadCost(); loadReceipts(); }} />`)}
+        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} framing=${costFraming} onChanged=${() => { loadCost(); }} />`)}
       </div>
     ` : null}
 
@@ -8244,7 +8236,7 @@ function ReviewInboxView({ params }) {
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
       <${CompoundLedgerSummary} ledger=${ledger} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${() => { loadApplied(); loadReceipts(); }} />`)}
+        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${() => { loadApplied(); }} />`)}
       </div>
     ` : null}
 
