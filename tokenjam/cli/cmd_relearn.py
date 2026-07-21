@@ -3,7 +3,7 @@
 The group's write verbs (``list`` / ``apply <proposal-id> [--go]`` / ``enable``
 / ``revert`` / ``verify``) live in ``cli/relearn_write_verbs.py`` and are
 attached at the bottom of this file; this file owns the group itself plus the
-read-only ``receipts`` command.
+read-only ``receipts`` and ``eval-case`` commands.
 
 ``receipts`` needs no DB connection — it reads the two on-disk ledgers
 (``relearn_apply.list_applied`` / ``cost_apply.list_applied``) the same way
@@ -15,6 +15,7 @@ UI can never disagree about the number.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import click
@@ -55,6 +56,40 @@ def cmd_relearn_receipts(ctx: click.Context, output_json: bool) -> None:
         return
 
     _render_receipts(summary)
+
+
+@cmd_relearn.command("eval-case")
+@click.argument("proposal_id")
+@click.option("--out", "out_path", default=None,
+              help="Write the JSON here instead of printing it.")
+@click.pass_context
+def cmd_relearn_eval_case(ctx: click.Context, proposal_id: str, out_path: str | None) -> None:
+    """Emit the eval-case JSON artifact for a stored PROPOSAL_ID.
+
+    The advise lane's hand-off. tokenjam cannot apply a fix into an agent it
+    has no workspace for, so an advise-only proposal has no apply path at all;
+    this hands back the same clustered evidence in a plain JSON shape you can
+    feed your own eval tooling as a regression case. Read-only: it writes
+    nothing but the file you name.
+    """
+    from tokenjam.core.optimize import relearn_proposals
+    from tokenjam.core.optimize.relearn_otel import to_eval_case
+
+    config: TjConfig = ctx.obj["config"]
+    stored = relearn_proposals.get_proposal(proposal_id, config=config)
+    if stored is None:
+        raise click.ClickException(
+            f"no stored proposal {proposal_id}. Run `tj relearn list` for the "
+            f"IDs the detector actually produced."
+        )
+    case = to_eval_case(relearn_proposals.relearn_cluster_from(stored))
+    payload = json.dumps(case, indent=2, default=str)
+
+    if out_path:
+        Path(out_path).write_text(payload + "\n", encoding="utf-8")
+        console.print(f"[green]wrote[/] {out_path}")
+        return
+    click.echo(payload)
 
 
 def _render_receipts(summary: dict[str, Any]) -> None:

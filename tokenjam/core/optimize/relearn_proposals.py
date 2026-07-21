@@ -156,6 +156,29 @@ def get_proposal(
     return None
 
 
+def relearn_cluster_from(proposal: dict[str, Any]) -> Any:
+    """Rebuild the ``RelearnCluster`` dataclass a stored proposal was serialised
+    from, for the readers that take the dataclass rather than the dict (the
+    eval-case artifact builder).
+
+    A stored proposal carries display-only keys the dataclass has no field for
+    (``proposal_id``, the model-routing keys), so unknown keys are dropped
+    rather than passed through, and the nested examples are rebuilt too.
+    """
+    from dataclasses import fields
+
+    from tokenjam.core.optimize.analyzers.relearn import RelearnCluster, RelearnExample
+
+    known = {f.name for f in fields(RelearnCluster)}
+    kwargs = {k: v for k, v in proposal.items() if k in known}
+    example_known = {f.name for f in fields(RelearnExample)}
+    kwargs["examples"] = [
+        RelearnExample(**{k: v for k, v in ex.items() if k in example_known})
+        for ex in (proposal.get("examples") or []) if isinstance(ex, dict)
+    ]
+    return RelearnCluster(**kwargs)
+
+
 def cluster_for_apply(proposal: dict[str, Any]) -> dict[str, Any]:
     """The apply-relevant subset of a stored proposal, in the cluster shape
     ``relearn_apply.apply_relearn_fix`` expects. Shared by the API route and
