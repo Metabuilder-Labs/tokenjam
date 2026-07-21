@@ -47,7 +47,10 @@ def test_downsize_section_always_renders(html):
 
 
 def test_downsize_is_first_in_optimize_order(html):
-    assert "const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim']" in html
+    assert (
+        "const order = ['downsize', 'cache', 'cache-recommend', 'script', "
+        "'trim', 'reuse', 'subagent', 'verbosity', 'deadweight']"
+    ) in html
 
 
 # --- #127: four distinct recoverable-tile states --------------------------- #
@@ -233,7 +236,7 @@ def test_status_tile_shows_active_and_elapsed(html):
 # --- #162: Recoverable Waste tiles render consistently --------------------- #
 def test_reuse_tile_title_is_title_cased(html):
     # reuse was missing from ANALYZER_META and slipped through lowercase.
-    assert "reuse:    { title: 'Reuse'" in html
+    assert "reuse:      { title: 'Reuse'" in html
     # Capitalization is centralized so a future 6th analyzer auto-title-cases
     # instead of rendering its raw lowercase registry key.
     assert "function capitalize" in html
@@ -679,19 +682,21 @@ def test_colorfor_neutral_bucket_not_a_palette_hue(html):
     assert "if (s === 'other' || s === '(none)' || s === '') return cssVar('--text-dim')" in html
 
 
-# --- #229: Overview tiles/headline deep-link into Analytics (pre-filtered) --- #
-def test_overview_recoverable_tiles_deeplink_into_analytics(html):
-    # Each recoverable-waste analyzer maps to an Analytics slice, and the tiles
-    # render that deep-link via analyzerSliceHref (not the old Optimize finding
-    # link). The route honors metric/group_by/chart/since, so these are just
-    # well-formed Analytics URLs — no new state machine.
-    assert "const ANALYZER_ANALYTICS_SLICE = {" in html
-    for analyzer in ("downsize", "cache", "script", "reuse", "trim"):
-        assert f"{analyzer}:" in html  # each analyzer has a slice mapping
-    assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
-    # Dashboard tiles drill IN-PLACE (route='dashboard'), not to the Optimize screen.
-    assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
-    assert "'#/optimize?finding=' + t.name" not in html
+# --- #229: Overview tiles deep-link into the Optimize detail card ---------- #
+def test_overview_recoverable_tiles_deeplink_into_optimize(html):
+    # A tile's recoverable number has its evidence and next step on the
+    # Optimize screen's own analyzer card, not an Analytics chart slice — a
+    # tile used to open an Analytics leaderboard with no reuse section at all
+    # for some analyzers. optimizeFindingHref builds a
+    # `#/optimize?...finding=name` deep-link; OptimizeView's focus effect
+    # scrolls to and highlights #opt-<name>.
+    assert "function optimizeFindingHref(name, since)" in html
+    assert "sp.set('finding', name)" in html
+    assert "optimizeFindingHref(t.name, since)" in html
+    # The old Analytics-slice routing is gone — regression guard so a tile
+    # click can't silently land back on a page with no matching section.
+    assert "const ANALYZER_ANALYTICS_SLICE" not in html
+    assert "function analyzerSliceHref" not in html
 
 
 def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
@@ -762,11 +767,12 @@ def test_spend_tile_distinct_under_subscription(html):
     assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
 
 
-def test_dashboard_triage_drills_in_place(html):
-    # Recoverable-waste tiles update the embedded explorer via #/dashboard URL
-    # state (not a jump to standalone #/analytics).
-    assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
-    assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
+def test_dashboard_triage_drills_into_optimize_card(html):
+    # Recoverable-waste tiles navigate to the Optimize screen's matching
+    # analyzer detail card — no longer an in-place Analytics explorer slice
+    # update.
+    assert "optimizeFindingHref(t.name, since)" in html
+    assert "function optimizeFindingHref(name, since)" in html
 # --- #306: Status screen is two content-defined zones (no view toggle) ------ #
 def test_status_screen_has_split_zones(html):
     # The #241/#263 Cards|List view toggle is retired: the Status screen now
