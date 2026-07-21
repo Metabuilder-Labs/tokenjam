@@ -32,6 +32,7 @@ ANALYZER_ORDER: list[str] = [
     "budget-projection",
     "cache",
     "cache-recommend",
+    "resend",
     "script",
     "reuse",
     "trim",
@@ -363,6 +364,12 @@ def _build_finding_constructors() -> dict:
         DeadweightFinding,
         ServerDeadweight,
     )
+    from tokenjam.core.optimize.analyzers.context_resend import (
+        RESEND_HONESTY_CAVEAT,
+        ResendFinding,
+        ResendSessionExample,
+    )
+    from tokenjam.core.context_diagnostic import RecurringInclusion
     from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
@@ -532,6 +539,30 @@ def _build_finding_constructors() -> dict:
             notes=list(d.get("notes") or []),
         )
 
+    def _resend(d: dict) -> ResendFinding:
+        examples = [ResendSessionExample(**e) for e in d.get("examples") or []]
+        recurring = [RecurringInclusion(**r) for r in d.get("recurring_examples") or []]
+        return ResendFinding(
+            sessions_examined=int(d.get("sessions_examined", 0)),
+            multi_turn_sessions=int(d.get("multi_turn_sessions", 0)),
+            turns_examined=int(d.get("turns_examined", 0)),
+            repeat_share=d.get("repeat_share"),
+            repeat_share_median=d.get("repeat_share_median"),
+            repeat_share_p90=d.get("repeat_share_p90"),
+            repeat_tokens=int(d.get("repeat_tokens", 0)),
+            prompt_tokens_total=int(d.get("prompt_tokens_total", 0)),
+            examples=examples,
+            recurring_examples=recurring,
+            fix_compaction=d.get("fix_compaction", ""),
+            fix_cache_control=d.get("fix_cache_control", ""),
+            caveat=d.get("caveat", RESEND_HONESTY_CAVEAT),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            notes=list(d.get("notes") or []),
+        )
+
     def _placement(d: dict) -> BatchPlacementFinding:
         candidates = [BatchCandidate(**c) for c in d.get("candidates") or []]
         return BatchPlacementFinding(
@@ -557,6 +588,7 @@ def _build_finding_constructors() -> dict:
         "relearn": _relearn,
         "deadweight": _deadweight,
         "verbosity": _verbosity,
+        "resend": _resend,
         # Not a registered analyzer name of its own: the downsize analyzer
         # attaches the batch-placement check under this key. It still needs a
         # constructor, or the finding is dropped on the daemon path (the CLI
