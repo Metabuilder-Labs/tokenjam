@@ -17,6 +17,12 @@ it never hand-rolls a parallel write path. ``/apply`` names a STORED proposal
 (``core.optimize.relearn_proposals``) and never accepts cluster content from
 the caller, so what gets written is always something the detector produced.
 
+Phase 3 (Verify + Compound, ``core.optimize.relearn_verify``) rides the SAME
+``/refresh`` cadence: every background/manual recompute also re-measures each
+applied fix's recurrence and writes its verdict back into the ledger (see
+``relearn_store.recompute_now``). ``GET /applied`` now also returns a
+``ledger`` summary (``relearn_verify.compound_ledger``) — realized token
+savings, estimated/correlational, across every verified fix.
 """
 from __future__ import annotations
 
@@ -27,17 +33,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
-from tokenjam.core.framing import (
-    WindowSummary,
-    compute_framing,
-    plan_determination_mix,
-)
 from tokenjam.core.optimize import (
     cost_apply,
     cost_proposals as cost_proposals_mod,
+    cost_verify,
+    receipts,
     relearn_apply,
     relearn_proposals,
     relearn_store,
+    relearn_verify,
 )
 
 router = APIRouter()
@@ -76,28 +80,6 @@ def _config(request: Request):
     if config is None:
         raise HTTPException(status_code=503, detail="Server not fully initialised (config missing).")
     return config
-
-
-def _framing(request: Request) -> dict[str, Any]:
-    """Plan-tier framing block for this module's dollar-bearing payloads.
-
-    Same single compute path every other cost surface uses
-    (``core.framing.compute_framing``) so the UI never re-derives the
-    suppress-dollars-for-subscription rule in JS. The mix is
-    window-INDEPENDENT (``plan_determination_mix``, as on /status): the
-    cost-proposal figures are cumulative-to-date, not scoped to a window.
-    Degrades to the config-declared plan when the daemon has no direct DB
-    connection (e.g. a proxy), exactly as ``compute_framing`` already handles
-    an empty mix.
-    """
-    db = getattr(request.app.state, "db", None)
-    conn = getattr(db, "conn", None) if db is not None else None
-    mix = plan_determination_mix(conn) if conn is not None else {}
-    framing = compute_framing(
-        _config(request),
-        WindowSummary(plan_tier_mix=mix, sessions=sum(mix.values())),
-    )
-    return framing.to_dict()
 
 
 def _conn(request: Request) -> Any | None:
@@ -181,16 +163,12 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
             "computed_at": None,
             "finding": None,
         }
-    finding = cached.get("finding")
-    if isinstance(finding, dict):
-        # Re-stamp on read as well as on write, so a cache written before the
-        # proposal id or the advise-only reason existed still resolves without
-        # waiting for a recompute. Idempotent.
-        finding = relearn_proposals.stamp_proposal_ids(finding)
     return {
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
-        "finding": _with_example_resolvability(finding, _conn(request)),
+        "finding": _with_example_resolvability(
+            cached.get("finding"), _conn(request)
+        ),
     }
 
 
@@ -338,9 +316,11 @@ def _open_cost_verify_window(
 
 @router.get("/relearn/applied", dependencies=[Depends(require_api_key)])
 def get_relearn_applied(request: Request) -> dict[str, Any]:
-    """Every applied fix (applied + reverted) — the inbox's 'Applied' section."""
+    """Every applied fix (applied + reverted) — the inbox's 'Applied' section,
+    plus the Phase 3 Compound ledger summary (``core.optimize.relearn_verify.
+    compound_ledger``): total realized savings across every VERIFIED fix."""
     applied = relearn_apply.list_applied(_config(request))
-    return {"applied": applied}
+    return {"applied": applied, "ledger": relearn_verify.compound_ledger(applied)}
 
 
 class EnableEnforcementRequest(BaseModel):
@@ -414,26 +394,33 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     }
     open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
     rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals)
-    # Same plan-tier framing the cost-applied payload carries, so a dollar
-    # figure rendered here never disagrees with its sibling surfaces.
-    framing = _framing(request)
     if block is None:
-        return {
-            "status": "never_run", "computed_at": None, "proposals": [],
-            "rollup": rollup, "framing": framing,
-        }
+        return {"status": "never_run", "computed_at": None, "proposals": [], "rollup": rollup}
     return {
         "status": "ready",
         "computed_at": block.get("cost_computed_at"),
         "proposals": proposals,
         "rollup": rollup,
-        "framing": framing,
     }
+
+
+@router.get("/relearn/receipts", dependencies=[Depends(require_api_key)])
+def get_relearn_receipts(request: Request) -> dict[str, Any]:
+    """Component G1: the cumulative "verified saved" receipts — the measured
+    twin of the ``rollup`` field above (Component E). Combines the relearn
+    ledger and the cost-verify ledger (``core.optimize.receipts``);
+    read-only, no recompute triggered here — it rides the same ``/refresh``
+    cadence the two source ledgers already recompute on."""
+    config = _config(request)
+    relearn_records = relearn_apply.list_applied(config)
+    cost_records = cost_apply.list_applied(config)
+    return receipts.verified_saved_summary(relearn_records, cost_records)
 
 
 @router.post("/relearn/cost-proposals/refresh", dependencies=_WRITE_AUTH)
 def refresh_cost_proposals(request: Request) -> dict[str, Any]:
-    """Recompute cost proposals over the default window. Degrades to
+    """Recompute cost proposals over the default window AND re-measure the
+    realized delta of every applied cost fix (same cadence). Degrades to
     ``{"status": "unavailable"}`` when the daemon has no direct DB connection
     (e.g. a proxy) rather than erroring."""
     config = _config(request)
@@ -441,7 +428,8 @@ def refresh_cost_proposals(request: Request) -> dict[str, Any]:
     if db is None or getattr(db, "conn", None) is None:
         return {"status": "unavailable", "reason": "no direct database connection"}
     proposals = cost_proposals_mod.recompute_cost_proposals(db, config)
-    return {"status": "ready", "proposals": len(proposals)}
+    verify = cost_verify.rescan_all(db, config)
+    return {"status": "ready", "proposals": len(proposals), "verified": verify}
 
 
 def _stored_cost_proposal(request: Request, proposal_id: str) -> dict[str, Any]:
@@ -450,7 +438,8 @@ def _stored_cost_proposal(request: Request, proposal_id: str) -> dict[str, Any]:
     Resolved from the detector's own stored proposals
     (``relearn_proposals.list_cost_proposals``) rather than from the request
     body, so the ledger records what the detector produced and the human
-    reviewed.
+    reviewed. The cost ledger feeds the "verified saved" receipts, and a
+    receipt is only worth anything if its numbers were earned.
     """
     for proposal in relearn_proposals.list_cost_proposals(_config(request)):
         if proposal.get("proposal_id") == proposal_id:
@@ -480,8 +469,8 @@ class MarkCostAppliedRequest(BaseModel):
 @router.post("/relearn/cost-proposals/apply", dependencies=_WRITE_AUTH)
 def post_cost_mark_applied(request: Request, body: MarkCostAppliedRequest) -> dict[str, Any]:
     """Mark a cost proposal applied: create the fix marker (an Expectation) and
-    a ledger record of what was approved. There is NO code write — cost
-    proposals are advise-only.
+    a ledger record the delta-verify pass measures against. There is NO code
+    write — cost proposals are advise-only.
 
     Takes a ``proposal_id`` from ``GET /relearn/cost-proposals``. 404s when no
     stored cost proposal carries that ID. 409 on a malformed proposal or when
@@ -571,20 +560,17 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
 
 @router.get("/relearn/cost-applied", dependencies=[Depends(require_api_key)])
 def get_cost_applied(request: Request) -> dict[str, Any]:
-    """Every applied (and reverted) cost fix, plus the plan-tier ``framing``
-    block so any dollar figure a caller renders from it is suppressed /
-    reframed for subscription users like every other cost surface."""
+    """Every applied (and reverted) cost fix, plus the realized-dollars ledger
+    summary (``cost_verify.cost_compound_ledger``)."""
     applied = cost_apply.list_applied(_config(request))
-    return {
-        "applied": applied,
-        "framing": _framing(request),
-    }
+    return {"applied": applied, "ledger": cost_verify.cost_compound_ledger(applied)}
 
 
 @router.post("/relearn/cost-applied/{record_id}/revert", dependencies=_WRITE_AUTH)
 def post_cost_revert(request: Request, record_id: str) -> dict[str, Any]:
     """Mark a cost fix reverted (the user undid their change). Advise-only, so
-    there is no file to restore."""
+    there is no file to restore — this just stops the ledger counting its
+    realized delta."""
     try:
         return cost_apply.revert_applied(_config(request), record_id)
     except cost_apply.CostApplyRefused as exc:
