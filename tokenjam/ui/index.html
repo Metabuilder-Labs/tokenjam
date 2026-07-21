@@ -7853,9 +7853,37 @@ function CostLedgerSummary({ ledger, framing }) {
     </div>`;
 }
 
-// One pending cost proposal card. Advise-only: an evidence line, the
-// recommendation, an optional copyable suggestion, and a labeled estimate — but
-// only a "Mark applied" marker button, never an apply-to-code write.
+// Copy-to-clipboard for a snippet fix, same robust pattern as RestoreButton:
+// execCommand first (works inside the click gesture even when the async
+// Clipboard API stalls on a permission prompt), then a best-effort
+// navigator.clipboard upgrade. Feedback fires synchronously either way.
+function CopySnippetButton({ text }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try { document.execCommand('copy'); } catch (_) { /* ignore */ }
+    document.body.removeChild(ta);
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try { navigator.clipboard.writeText(text).catch(() => {}); } catch (_) { /* ignore */ }
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return html`<button class="cur-btn" style="padding:3px 10px;font-size:11px" onClick=${copy}>${copied ? 'copied ✓' : 'Copy'}</button>`;
+}
+
+// One pending cost proposal card. Two equally legitimate fix modalities: a
+// workspace fix (tokenjam writes a file it owns) or a snippet fix (the fix
+// lives in the user's own code, so the card hands over the exact change and a
+// way to mark it done). The badge below says which one this card is; a
+// snippet fix gets its own labeled block so the snippet reads as the
+// deliverable, not a footnote.
 function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
   const usd = prop.estimated_recoverable_usd;
   const toks = prop.estimated_recoverable_tokens;
@@ -7879,18 +7907,35 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
     finally { setWbusy(false); }
   };
 
+  // The badge names the fix modality, not a verdict on the proposal: a
+  // snippet fix is a complete, concrete deliverable (the user pastes it
+  // themselves) — never phrased as a lesser "advise-only" fallback. Plain
+  // advise-only survives for the rare proposal with no pasteable snippet at
+  // all (prose advice only).
+  const modalityLabel = prop.apply_capable
+    ? 'workspace fix · rung 1'
+    : (prop.suggestion ? 'snippet fix · apply yourself' : 'advise-only');
+
   return html`
     <div class="opt-section" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[prop.analyzer] || prop.analyzer}</span>
         <span style="font-weight:500">${prop.title}</span>
-        <span class="dim" style="font-size:11px">${prop.apply_capable ? 'workspace fix · rung 1' : 'advise-only'}</span>
+        <span class="dim" style="font-size:11px">${modalityLabel}</span>
         ${(usd != null || toks != null) ? html`<span class="mono" style="margin-left:auto;color:var(--accent);font-size:12.5px">${usd != null ? '~' + fmtUsd(usd) : ''}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>` : null}
       </div>
       <div class="sz-note" style="margin-top:8px">${prop.evidence}</div>
       <div class="opt-title" style="font-size:12.5px;margin-top:10px">Recommendation</div>
       <div class="sz-note" style="margin-top:2px">${prop.advise_text}</div>
-      ${prop.suggestion ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${prop.suggestion}</pre>` : null}
+      ${prop.suggestion ? html`
+        <div style="margin-top:10px">
+          <div class="opt-title" style="font-size:12.5px">
+            <span>The fix ${prop.apply_capable ? '' : html`<span class="dim" style="font-weight:400">· paste this into your own code</span>`}</span>
+            <${CopySnippetButton} text=${prop.suggestion} />
+          </div>
+          <div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>
+        </div>
+      ` : null}
       <div class="opt-caveat" style="font-size:11.5px;margin-top:8px">${prop.caveat}</div>
 
       ${prop.apply_capable ? html`
@@ -7908,9 +7953,9 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
         </div>
       ` : html`
         <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-          <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied →'}</button>
+          <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : (prop.suggestion ? 'I applied this →' : 'Mark applied →')}</button>
           <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
-          <span class="dim" style="font-size:11.5px">Marking records a checkpoint; the loop then measures the realized delta over your later calls.</span>
+          <span class="dim" style="font-size:11.5px">${prop.suggestion ? 'Copy the fix above, make the change, then mark it done. It also records a checkpoint; the loop then measures the realized delta over your later calls.' : 'Marking records a checkpoint; the loop then measures the realized delta over your later calls.'}</span>
         </div>
       `}
       ${prop.apply_capable ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
