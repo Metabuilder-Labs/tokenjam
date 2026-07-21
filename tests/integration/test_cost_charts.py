@@ -196,3 +196,38 @@ async def test_components_empty_window_is_safe():
     assert d["total_cost_usd"] == 0
     assert d["recoverable"] == []
     assert "framing" in d
+
+
+@pytest.mark.asyncio
+async def test_components_never_invokes_the_full_corpus_relearn_scan(monkeypatch):
+    """`/cost/components` must not run `relearn`: its own docstring says HTTP
+    callers MUST cache it, not compute it per-request (it's a full-corpus,
+    tens-of-seconds scan), and its `RelearnFinding` never carries
+    `estimated_recoverable_usd` — so it contributes nothing to this
+    endpoint's output either way. Tracks invocation via a flag rather than
+    raising, since the route wraps `build_report` in a broad
+    try/except and would otherwise silently swallow an assertion."""
+    from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
+
+    called = {"relearn": False}
+    real_relearn = ANALYZER_REGISTRY["relearn"]
+
+    def _tracking_relearn(ctx):
+        called["relearn"] = True
+        return real_relearn(ctx)
+
+    monkeypatch.setitem(ANALYZER_REGISTRY, "relearn", _tracking_relearn)
+
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed_downsize_and_cache(db)
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        resp = await c.get("/api/v1/cost/components?since=30d")
+
+    assert resp.status_code == 200
+    assert called["relearn"] is False
+    # The other analyzers (downsize, cache/reuse via _seed_downsize_and_cache)
+    # still ran and still surface — this isn't a blanket "findings broken".
+    d = resp.json()
+    assert d["recoverable"], "excluding relearn must not silence every other analyzer"
