@@ -341,6 +341,32 @@ def _subagent_to_proposals(finding: Any) -> list[CostProposal]:
     )]
 
 
+def _mcp_remove_plumbing(server: Any) -> dict[str, Any]:
+    """Whether ``server``'s config entry can be removed directly, and where.
+
+    Unlike ``model_swap`` there is no search step: ``ConfiguredServer``
+    already resolved the exact config file at detection time. This just
+    re-verifies that still holds (the file can have moved, or a human can
+    have already removed the entry by hand) at proposal-build time, so the
+    card's pre-filled target is current, not stale analyzer-time data.
+    """
+    from tokenjam.core.optimize.analyzers.deadweight import (
+        APPLY_KIND_MCP_REMOVE,
+        mcp_remove_precheck,
+    )
+
+    check = mcp_remove_precheck(server.source, server.name)
+    if not check["ok"]:
+        return {"apply_capable": False, "apply_blocked_reason": check["reason"]}
+    return {
+        "apply_capable": True,
+        "apply_kind": APPLY_KIND_MCP_REMOVE,
+        "source_path": check["target_path"],
+        "target_path": check["target_path"],
+        "apply_blocked_reason": "",
+    }
+
+
 def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     """One proposal per dead-weight MCP server (Component C1).
 
@@ -357,6 +383,15 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     in that server's sessions (never a hardcoded rate; see
     ``deadweight._pricing_note``). Stays ``None`` when no priced model was
     observed for that server — this adapter never invents a rate itself.
+
+    Apply-capable, like ``downsize``'s ``model_swap`` cards: the fix is a
+    deterministic edit of a value already written down (the server's own
+    ``mcpServers`` entry), so it routes through the same
+    ``relearn_apply.apply_relearn_fix`` machinery under
+    ``APPLY_KIND_MCP_REMOVE`` — reversible, git-committed where the config
+    lives in a repo, one-step revert. Falls back to the one-paste ``claude
+    mcp remove`` command, with the reason stated, when the precondition
+    doesn't hold (file missing, malformed, or the entry already gone).
     """
     if finding is None:
         return []
@@ -373,6 +408,20 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 f"of those session(s)."
             )
         scope_flag = "user" if server.scope == "user" else "project"
+        plumbing = _mcp_remove_plumbing(server)
+        advise = (
+            server.fix + " Removing (or project-scoping) it is reversible "
+            "and loses no data; it only stops the standing schema-injection "
+            "tax on future sessions."
+        )
+        if plumbing.get("apply_capable"):
+            advise += (
+                f" tokenjam can remove this exact entry from "
+                f"{plumbing['target_path']}, with the change committed and "
+                f"revertable in one call."
+            )
+        elif plumbing.get("apply_blocked_reason"):
+            advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
         proposals.append(CostProposal(
             kind="cost",
             analyzer="deadweight",
@@ -391,11 +440,7 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 "example_sessions": list(server.example_sessions),
                 "priced_model": server.priced_model,
             },
-            advise_text=(
-                server.fix + " Removing (or project-scoping) it is reversible "
-                "and loses no data; it only stops the standing schema-injection "
-                "tax on future sessions."
-            ),
+            advise_text=advise,
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
             estimated_recoverable_tokens=server.estimated_tax_tokens_90d or None,
             estimated_recoverable_usd=server.estimated_tax_usd_90d,
@@ -403,6 +448,14 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 server.tax_construction
                 + " Projected over a 90-day window from the sessions observed."
             ),
+            advise_only=not plumbing.get("apply_capable", False),
+            apply_capable=bool(plumbing.get("apply_capable")),
+            apply_kind=str(plumbing.get("apply_kind", "")),
+            agent_name=server.name,
+            source_path=str(plumbing.get("source_path", "")),
+            target_path=str(plumbing.get("target_path", "")),
+            scope=server.scope,
+            apply_blocked_reason=str(plumbing.get("apply_blocked_reason", "")),
         ))
     return proposals
 

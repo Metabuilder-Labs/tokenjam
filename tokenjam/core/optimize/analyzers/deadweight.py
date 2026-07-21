@@ -45,6 +45,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from json.decoder import scanstring
 from pathlib import Path
 from typing import Any
 
@@ -166,6 +167,234 @@ def enumerate_configured_servers(repo_cwds: set[str]) -> dict[str, ConfiguredSer
                 )
                 entry.cwds.add(cwd)
     return servers
+
+
+def server_still_configured(name: str, source: str) -> bool:
+    """Read-only re-check: does ``name`` still appear in the ``mcpServers``
+    block of its ORIGINAL detected config file (``source``)?
+
+    Distinguishes "still configured" from "actually removed or
+    project-scoped". A missing file and a present-but-empty-of-this-entry
+    file both read as "no longer configured" — either way the tax stopped.
+    Missing ``name``/``source`` can't be verified at all, so this
+    conservatively reports "still configured" rather than falsely claiming a
+    removal.
+    """
+    if not name or not source:
+        return True
+    path = Path(source)
+    if not path.is_file():
+        return False
+    return name in _mcp_server_names(path)
+
+
+# --- Deterministic apply: remove one server's entry from its config file --
+#
+# A dead server's fix is machine-editable — ``ConfiguredServer`` already
+# resolved the exact config file, so there is no search step the way
+# ``model_apply.model_swap`` needs one. The removal is a TARGETED TEXT SPLICE,
+# never a ``json.loads`` -> mutate -> ``json.dumps`` round trip: re-serializing
+# the whole document would reformat every byte (key order, indentation,
+# spacing), turning a one-entry diff into a wholesale rewrite of the user's
+# config. The functions below locate the exact character span of one server's
+# entry inside its ``mcpServers`` block by walking the raw text — using
+# ``json.decoder.scanstring`` only to skip string literals correctly
+# (including escapes), never to reformat anything — and delete only that
+# span. Every other byte in the file is untouched.
+
+#: Apply-kind discriminator for this write, carried on the proposal and the
+#: ledger record (mirrors ``model_apply.APPLY_KIND_*``).
+APPLY_KIND_MCP_REMOVE = "mcp_remove"
+
+_WS_CHARS = " \t\r\n"
+
+
+def _skip_ws(text: str, i: int) -> int:
+    n = len(text)
+    while i < n and text[i] in _WS_CHARS:
+        i += 1
+    return i
+
+
+def _skip_json_value(text: str, i: int) -> int:
+    """Index just past the JSON value starting at ``text[i]`` (already past
+    leading whitespace). Handles strings, objects, arrays and bare scalars
+    (numbers / true / false / null) — enough to walk any value a ``.mcp.json``
+    /``settings.json`` server entry can hold, without needing to know its
+    shape ahead of time."""
+    ch = text[i]
+    if ch == '"':
+        _, end = scanstring(text, i + 1)
+        return end
+    if ch in "{[":
+        depth = 1
+        i += 1
+        n = len(text)
+        while depth > 0 and i < n:
+            c = text[i]
+            if c == '"':
+                _, i = scanstring(text, i + 1)
+                continue
+            if c in "{[":
+                depth += 1
+            elif c in "}]":
+                depth -= 1
+            i += 1
+        return i
+    j = i
+    n = len(text)
+    while j < n and text[j] not in ",}] \t\r\n":
+        j += 1
+    return j
+
+
+def _object_entries(text: str, obj_open: int) -> list[tuple[str, int, int, int]]:
+    """Every TOP-LEVEL entry of the object opening at ``text[obj_open] ==
+    '{'``, as ``(key, key_start, value_start, value_end)``. Nested keys (a
+    server's own ``env``/``args`` block, say) never surface here — depth
+    tracking inside ``_skip_json_value`` is what keeps this to one level."""
+    entries: list[tuple[str, int, int, int]] = []
+    i = _skip_ws(text, obj_open + 1)
+    while i < len(text) and text[i] != "}":
+        key_start = i
+        _key, i = scanstring(text, i + 1)
+        i = _skip_ws(text, i)
+        i += 1  # the colon
+        i = _skip_ws(text, i)
+        value_start = i
+        value_end = _skip_json_value(text, i)
+        entries.append((_key, key_start, value_start, value_end))
+        i = _skip_ws(text, value_end)
+        if i < len(text) and text[i] == ",":
+            i = _skip_ws(text, i + 1)
+    return entries
+
+
+def _mcp_servers_object_open(text: str) -> int | None:
+    """Index of the ``{`` opening the top-level ``mcpServers`` object, or
+    ``None`` when the document doesn't open with an object or carries no such
+    key — the caller falls back to a refusal rather than a guess."""
+    root_open = _skip_ws(text, 0)
+    if root_open >= len(text) or text[root_open] != "{":
+        return None
+    for key, _key_start, value_start, _value_end in _object_entries(text, root_open):
+        if key == "mcpServers" and value_start < len(text) and text[value_start] == "{":
+            return value_start
+    return None
+
+
+def _mcp_server_entry_span(text: str, server_name: str) -> tuple[int, int] | None:
+    """The ``(start, end)`` character span to delete from ``text`` to remove
+    ``server_name``'s entry from the ``mcpServers`` block, or ``None`` when it
+    can't be located this way (no ``mcpServers`` object, or no such key).
+
+    The span always reuses an ADJACENT separator rather than inventing new
+    whitespace: removing a first/middle entry keeps the punctuation that sat
+    between the PRECEDING entry and this one (which becomes the new
+    connector to whatever follows); removing the last (or only) entry instead
+    deletes the separator that sat between the entry before it and this one,
+    so no dangling trailing comma is left before the closing ``}``.
+    """
+    obj_open = _mcp_servers_object_open(text)
+    if obj_open is None:
+        return None
+    entries = _object_entries(text, obj_open)
+    idx = next((i for i, e in enumerate(entries) if e[0] == server_name), None)
+    if idx is None:
+        return None
+    _key, key_start, _value_start, value_end = entries[idx]
+    is_last = idx == len(entries) - 1
+    if is_last:
+        prev_end = entries[idx - 1][3] if idx > 0 else obj_open + 1
+        return prev_end, value_end
+    next_key_start = entries[idx + 1][1]
+    return key_start, next_key_start
+
+
+def render_mcp_remove(pre_image: str | None, server_name: str) -> tuple[str | None, str]:
+    """The config file's new content with ``server_name``'s entry removed
+    from its ``mcpServers`` block.
+
+    Returns ``(content, "")`` on success and ``(None, reason)`` when the
+    removal cannot be made deterministically: no file, invalid JSON, no
+    ``mcpServers`` block, or the server no longer named there (already
+    removed by hand, or by a concurrent edit).
+    """
+    if not server_name:
+        return None, "no server name given for the MCP removal."
+    if pre_image is None:
+        return None, "no config file at that path to edit."
+    try:
+        doc = json.loads(pre_image)
+    except ValueError as exc:
+        return None, f"that file is not valid JSON ({exc}) — refusing to edit it."
+    servers = doc.get("mcpServers") if isinstance(doc, dict) else None
+    if not isinstance(servers, dict) or server_name not in servers:
+        return None, f"`{server_name}` is not in that file's mcpServers block any more."
+    span = _mcp_server_entry_span(pre_image, server_name)
+    if span is None:
+        return None, (
+            f"could not locate `{server_name}`'s entry precisely in the file "
+            f"text — refusing a risky edit."
+        )
+    start, end = span
+    return pre_image[:start] + pre_image[end:], ""
+
+
+def mcp_remove_precheck(source_path: str, server_name: str) -> dict:
+    """Whether ``server_name``'s entry may be removed from ``source_path``,
+    re-checked at apply time — the repo can have moved, the file can have
+    gone missing, or a human can have already hand-removed the entry between
+    the moment the card was built and the moment it is approved.
+
+    Every precondition must hold; any failure returns ``{"ok": False,
+    "reason": ...}`` and the caller falls back to the one-paste ``claude mcp
+    remove`` command, saying why on the card.
+    """
+    if not source_path or not server_name:
+        return {"ok": False, "reason": (
+            "no source config path or server name given for this MCP removal."
+        )}
+    path = Path(source_path).expanduser()
+    if not path.is_file():
+        return {"ok": False, "reason": f"{path} no longer exists on disk — nothing to edit."}
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "reason": f"{path} is not valid JSON ({exc}) — refusing to edit it."}
+    if not server_still_configured(server_name, str(path)):
+        return {"ok": False, "reason": (
+            f"`{server_name}` is no longer in {path}'s mcpServers block — it may "
+            f"already have been removed by hand."
+        )}
+    return {"ok": True, "reason": "", "target_path": str(path)}
+
+
+def build_mcp_remove_plan(cluster: dict, target: Path, pre_image: str | None) -> str:
+    """New content for an ``mcp_remove`` apply: ``cluster``'s server entry
+    deleted from its ``mcpServers`` block, every other byte untouched.
+
+    Raises ``RelearnApplyRefused`` with the refusal reason, which the API
+    layer surfaces as a 409 and the card renders as the fallback explanation
+    — mirrors ``model_apply.build_model_plan``'s contract so the two slot
+    into the same ``relearn_apply._build_write_plan`` dispatch.
+    """
+    from tokenjam.core.optimize.relearn_apply import RelearnApplyRefused
+
+    server_name = str(cluster.get("agent_name") or "")
+    source_path = str(cluster.get("source_path") or "")
+    check = mcp_remove_precheck(source_path, server_name)
+    if not check["ok"]:
+        raise RelearnApplyRefused(check["reason"])
+    if Path(check["target_path"]) != target:
+        raise RelearnApplyRefused(
+            f"the MCP config now lives at {check['target_path']}, not {target}. "
+            f"Refusing to write the stale target."
+        )
+    content, reason = render_mcp_remove(pre_image, server_name)
+    if content is None:
+        raise RelearnApplyRefused(reason)
+    return content
 
 
 # --- Transcript scanning ---------------------------------------------------
