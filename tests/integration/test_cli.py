@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -575,7 +576,11 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
         assert mcp_checks and mcp_checks[0]["level"] == "warning"
         assert "Codex" in mcp_checks[0]["message"]
-        assert "#59" in mcp_checks[0]["message"]
+        # Assert the DURABLE content, never the tracker id: this string is
+        # printed to users, so an id in it escapes into terminals and pasted
+        # bug reports, where it reads as a link to an unrelated public issue.
+        assert "+36% measured" in mcp_checks[0]["message"]
+        assert not re.search(r"#\d+", mcp_checks[0]["message"])
 
     # Clean up codex file
     codex_config.unlink()
