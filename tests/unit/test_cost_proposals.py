@@ -400,7 +400,7 @@ def _workflow_finding(clusters=None, **overrides):
 
 def test_script_proposal_shape_and_apply_fields():
     from tokenjam.core.optimize.cost_proposals import _script_to_proposals
-    props = _script_to_proposals(_workflow_finding())
+    props = _script_to_proposals(_workflow_finding(), persona="claude-code")
     assert len(props) == 1
     p = props[0]
     assert p.kind == "cost"
@@ -480,7 +480,7 @@ def _reuse_finding(clusters=None, **overrides):
 
 def test_reuse_proposal_shape_and_apply_fields():
     from tokenjam.core.optimize.cost_proposals import _reuse_to_proposals
-    props = _reuse_to_proposals(_reuse_finding())
+    props = _reuse_to_proposals(_reuse_finding(), persona="claude-code")
     assert len(props) == 1
     p = props[0]
     assert p.kind == "cost"
@@ -528,7 +528,7 @@ def _verbosity_finding(**overrides):
 
 def test_verbosity_proposal_shape_and_apply_fields():
     from tokenjam.core.optimize.cost_proposals import _verbosity_to_proposals
-    props = _verbosity_to_proposals(_verbosity_finding())
+    props = _verbosity_to_proposals(_verbosity_finding(), persona="claude-code")
     assert len(props) == 1
     p = props[0]
     assert p.kind == "cost"
@@ -569,6 +569,152 @@ def test_script_reuse_verbosity_wired_into_cost_analyzers_and_report_adapter():
     rep.findings["verbosity"] = _verbosity_finding()
     analyzers = {p.analyzer for p in cost_proposals_from_report(rep)}
     assert {"script", "reuse", "verbosity"} <= analyzers
+
+
+# --- Persona-gated fix modality (script / reuse / verbosity only) -----------
+#
+# These three analyzers' only apply path is a rung-1 CLAUDE.md note or rung-2
+# .claude/skills/<slug>/SKILL.md — an artifact nothing in an SDK service's
+# request path ever reads. An "sdk"/"unknown" persona must never see
+# apply_capable=True for them; the identical recommendation must still reach
+# them as a copy-pasteable `suggestion`. A "claude-code" window must be
+# byte-identical to before this gating existed.
+
+def _script_finding_for_persona_tests():
+    return _workflow_finding()
+
+
+def _reuse_finding_for_persona_tests():
+    return _reuse_finding()
+
+
+def _verbosity_finding_for_persona_tests():
+    return _verbosity_finding()
+
+
+@pytest.mark.parametrize("adapter_name,finder", [
+    ("_script_to_proposals", _script_finding_for_persona_tests),
+    ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
+    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
+])
+def test_sdk_persona_gets_snippet_not_write(adapter_name, finder):
+    """An sdk-persona window: no write offered, but the exact same
+    recommendation lands in `suggestion` so the card isn't left inert."""
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(finder(), persona="sdk")
+    assert len(props) == 1
+    p = props[0]
+    assert p.apply_capable is False
+    assert p.advise_only is True
+    assert p.rung == 0
+    assert p.scope == ""
+    assert p.proposed_fix == ""
+    assert p.suggestion  # the recommendation still reaches the sdk user
+    assert p.suggestion == p.advise_text
+
+
+@pytest.mark.parametrize("adapter_name,finder", [
+    ("_script_to_proposals", _script_finding_for_persona_tests),
+    ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
+    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
+])
+def test_unknown_persona_is_gated_same_as_sdk(adapter_name, finder):
+    """"unknown" (no session in the window carries an identifiable agent_id,
+    and no declared plan settles it) is exactly the shape of a pure-SDK
+    caller who never ran `tj onboard` — the failure mode this gating exists
+    to close. Grouped with "sdk", matching
+    `cmd_optimize._render_downgrade_cta`'s CTA."""
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(finder(), persona="unknown")
+    assert len(props) == 1
+    p = props[0]
+    assert p.apply_capable is False
+    assert p.advise_only is True
+    assert p.suggestion == p.advise_text
+
+    # The default persona (no explicit kwarg) must resolve exactly the same
+    # way — a caller that doesn't know the persona must never fall back to
+    # assuming claude-code.
+    default_props = adapter(finder())
+    assert default_props[0].apply_capable is False
+    assert default_props[0].advise_only is True
+
+
+@pytest.mark.parametrize("adapter_name,finder", [
+    ("_script_to_proposals", _script_finding_for_persona_tests),
+    ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
+    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
+])
+def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name, finder):
+    """The exact fields these analyzers produced before persona gating
+    existed: apply_capable/advise_only unchanged, and no `suggestion` is
+    invented for a persona that already gets the real write."""
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(finder(), persona="claude-code")
+    assert len(props) == 1
+    p = props[0]
+    assert p.advise_only is False
+    assert p.apply_capable is True
+    assert p.rung in (1, 2)
+    assert p.scope == "project"
+    assert p.proposed_fix
+    assert p.suggestion == ""  # unchanged from before this gating existed
+
+
+@pytest.mark.parametrize("adapter_name,finder", [
+    ("_script_to_proposals", _script_finding_for_persona_tests),
+    ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
+    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
+])
+def test_mixed_persona_offers_the_write_and_the_snippet(adapter_name, finder):
+    """"mixed": both audiences are meaningfully represented and a single
+    finding isn't attributable to one side or the other, so — mirroring
+    `_render_downgrade_cta`'s "mixed shows both" precedent — the write stays
+    on offer AND the identical text is carried as `suggestion` so the sdk
+    share of the mix isn't left with a card that looks actionable for them
+    but silently isn't."""
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(finder(), persona="mixed")
+    assert len(props) == 1
+    p = props[0]
+    assert p.apply_capable is True
+    assert p.advise_only is False
+    assert p.proposed_fix
+    assert p.suggestion == p.advise_text
+
+
+def test_cost_proposals_from_report_reads_persona_off_the_report():
+    """`cost_proposals_from_report` must never take the caller's word for the
+    persona out-of-band — it reads `report.persona`, the single field
+    `runner.build_report` populates once (see `AnalyzerContext.persona`)."""
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    rep = _report()
+    rep.findings["script"] = _workflow_finding()
+    rep.findings["reuse"] = _reuse_finding()
+    rep.findings["verbosity"] = _verbosity_finding()
+
+    rep.persona = "sdk"
+    by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
+    for name in ("script", "reuse", "verbosity"):
+        assert by_analyzer[name].apply_capable is False
+        assert by_analyzer[name].suggestion
+
+    rep.persona = "claude-code"
+    by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
+    for name in ("script", "reuse", "verbosity"):
+        assert by_analyzer[name].apply_capable is True
+
+    # A report with no persona set at all (e.g. hand-built, pre-gating test
+    # code) defaults to "unknown" -> the fail-safe, not "claude-code".
+    rep.persona = "unknown"
+    by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
+    for name in ("script", "reuse", "verbosity"):
+        assert by_analyzer[name].apply_capable is False
 
 
 # --- Component E: the estimated-recoverable rollup --------------------------
