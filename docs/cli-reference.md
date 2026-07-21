@@ -200,18 +200,51 @@ tj export --format openevals --output traces.json
 
 ### `tj optimize`
 
-Analyze recent usage for cost-saving candidates, cache opportunities, prompt trimming, workflow reuse, and budget exposure.
+Analyze recent usage for cost-saving candidates, cache opportunities, prompt trimming, workflow reuse, recurring failures, and budget exposure.
 
 ```bash
 tj optimize                                # run all analyzers
 tj optimize downsize cache reuse           # run selected analyzers
+tj optimize relearn                        # recurring failures an agent re-hits
 tj optimize --since 7d --agent my-agent    # scope the analysis window
 tj optimize --compare last-7d              # compare against a prior window
 tj optimize --export-config claude-code    # write advisory routing recommendations
 tj optimize --json                         # machine-readable report
 ```
 
+Analyzer names: `downsize`, `cache`, `cache-recommend`, `trim`, `reuse`, `script`, `subagent`, `summarize`, `verbosity`, `deadweight`, `relearn`, `budget-projection`.
+
+`relearn` finds failure signatures that recur across three or more sessions, the blockers an agent silently re-hits. Act on what it finds with `tj relearn`.
+
 Key flags: `--since`, `--agent`, `--budget`, `--budget-usd`, `--compare`, `--export-config`, `--export-templates`, `--json`.
+
+### `tj relearn`
+
+Review, apply, and verify fixes for the recurring failures `tj optimize relearn` detects. The same proposals the Lens Review inbox shows, from the terminal. The detector runs on a schedule inside `tj serve`, so `list` is empty until a pass has completed.
+
+```bash
+tj relearn list                            # stored proposals, with their IDs
+tj relearn apply <proposal_id>             # preview the exact diff (dry run)
+tj relearn apply <proposal_id> --go        # write it, with a backup and a commit
+tj relearn enable <fix_id> --yes           # wire an applied enforcement fix live
+tj relearn revert <fix_id>                 # undo an applied fix
+tj relearn verify                          # recompute the receipts now
+tj relearn receipts                        # cumulative verified-saved totals
+tj relearn eval-case <proposal_id>         # the evidence as JSON, for your own eval tooling
+```
+
+The human gate is unconditional: `apply` is a dry run unless you pass `--go`, `enable` refuses without `--yes` because a hook starts intercepting tool calls once it is wired in, and every write is reversible with `revert`. `receipts` and `eval-case` are read-only.
+
+`verify` normally recomputes the on-disk receipts for applied fixes, the pass the daemon otherwise runs on a six-hour schedule. For an advise-only proposal there is no applied fix to recompute: the agent has no workspace to write into, so you applied the fix yourself. Mark when it went live with `tj loop expect`, then measure the signature's recurrence in spans either side of that moment. A decisive result is written into the same loop ledger `tj loop history` reads.
+
+```bash
+tj relearn verify --otel <proposal_id> --expectation <expectation_id>
+tj relearn verify --otel <proposal_id> --expectation <expectation_id> --no-record
+```
+
+Subcommands: `list`, `apply`, `enable`, `revert`, `verify`, `receipts`, `eval-case`.
+
+Key flags: `apply`: `--go`, `--target`, `--scope`, `--force`; `enable`: `--yes`; `verify`: `--otel`, `--expectation`, `--no-record`; `receipts`: `--json`; `eval-case`: `--out`.
 
 ### `tj route`
 
