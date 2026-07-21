@@ -513,13 +513,14 @@ def _run_validate(
             "while tj serve holds the lock. Stop the daemon (tj stop) and retry."
         )
 
-    # Gate 1: prompt capture must be on — off by default for privacy, so this is
-    # an opt-in power feature. Actionable message + the exact config hint.
+    # Gate 1: prompt capture must be on. Capture defaults on, so this only
+    # fires when it's been explicitly turned off. Actionable message + the
+    # exact config hint either way.
     if not getattr(config.capture, "prompts", False):
         _fail(
             "tj optimize --validate re-runs your recorded prompts, which requires "
-            "prompt capture. It is off by default (privacy). Enable it in your "
-            "config under [capture]:\n\n    [capture]\n    prompts = true\n\n"
+            "prompt capture. It is currently off in your config. Enable it "
+            "under [capture]:\n\n    [capture]\n    prompts = true\n\n"
             "then let a few captured calls accumulate and try again."
         )
 

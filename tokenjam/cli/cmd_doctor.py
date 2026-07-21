@@ -43,6 +43,9 @@ def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
     # 6. Drift configured but inactive
     checks.append(_check_drift_inactive(config, ctx.obj["db"]))
 
+    # 6b. Prompt capture off — trim / cache-recommend / reuse degraded
+    checks.append(_check_capture_prompts(config))
+
     # 7. Webhook URL security
     checks.extend(_check_webhook_security(config))
 
@@ -194,6 +197,25 @@ def _check_schema_vs_capture(config: object) -> dict:
                            "Schema validation will have no data to validate."}
     return {"name": "Schema vs capture", "level": "ok",
             "message": "Schema and capture settings are consistent."}
+
+
+def _check_capture_prompts(config: object) -> dict:
+    """`capture.prompts` defaults on; flag when it's off so the user (running
+    a config that predates the default, or one that turned it off on
+    purpose) knows `trim` and `cache-recommend` produce no findings and
+    `reuse` never reaches its prompt-prefix mode without it — not that
+    they're broken."""
+    if getattr(config.capture, "prompts", False):
+        return {"name": "Prompt capture", "level": "ok",
+                "message": "capture.prompts is on: trim, cache-recommend, "
+                           "and reuse's prompt-prefix mode have data."}
+    return {"name": "Prompt capture", "level": "info",
+            "message": "capture.prompts is off. `tj optimize trim` and "
+                       "`cache-recommend` will produce no findings, and "
+                       "`reuse` stays on tool-sequence-only clustering. Set "
+                       "capture.prompts = true under [capture] in your "
+                       "config to enable them (stored locally in your "
+                       "telemetry DB, never sent anywhere)."}
 
 
 def _check_drift_inactive(config: object, db: object) -> dict:
