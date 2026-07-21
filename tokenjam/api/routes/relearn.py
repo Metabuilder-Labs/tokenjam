@@ -374,53 +374,70 @@ def refresh_cost_proposals(request: Request) -> dict[str, Any]:
     return {"status": "ready", "proposals": len(proposals), "verified": verify}
 
 
+def _stored_cost_proposal(request: Request, proposal_id: str) -> dict[str, Any]:
+    """The stored cost proposal with this ID, or a 404.
+
+    Resolved from the detector's own stored proposals
+    (``relearn_proposals.list_cost_proposals``) rather than from the request
+    body, so the ledger records what the detector produced and the human
+    reviewed. The cost ledger feeds the "verified saved" receipts, and a
+    receipt is only worth anything if its numbers were earned.
+    """
+    for proposal in relearn_proposals.list_cost_proposals(_config(request)):
+        if proposal.get("proposal_id") == proposal_id:
+            return proposal
+    raise HTTPException(
+        status_code=404,
+        detail=f"no stored cost proposal {proposal_id}. Refresh the cost "
+               f"proposals and apply one the detector actually produced.",
+    )
+
+
 class MarkCostAppliedRequest(BaseModel):
-    # The full proposal the client already holds from GET /relearn/cost-proposals
-    # — re-posted so a stale cache can't mark a DIFFERENT proposal than the one
-    # the human reviewed (same guard as ApplyRelearnRequest).
-    signature:   str
-    analyzer:    str = ""
-    title:       str = ""
-    target_key:  dict[str, Any] = {}
-    baseline:    dict[str, Any] = {}
-    advise_text: str = ""
-    agent_id:    str = ""
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None = None
-    estimate_basis: str = ""
+    """A named STORED cost proposal, and nothing else.
+
+    The proposal's content (signature, analyzer, target_key, baseline, the
+    estimate and its basis) is looked up server-side from the detector's own
+    stored cost proposals, never accepted from the client — the same guard
+    ``ApplyRelearnRequest`` uses. ``extra="forbid"`` makes that explicit rather
+    than silent, so a caller still posting a hand-built proposal gets a 422
+    telling it what changed instead of having its numbers quietly ignored.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: str
 
 
 @router.post("/relearn/cost-proposals/apply", dependencies=_WRITE_AUTH)
 def post_cost_mark_applied(request: Request, body: MarkCostAppliedRequest) -> dict[str, Any]:
     """Mark a cost proposal applied: create the fix marker (an Expectation) and
     a ledger record the delta-verify pass measures against. There is NO code
-    write — cost proposals are advise-only. 409 on a malformed proposal or when
+    write — cost proposals are advise-only.
+
+    Takes a ``proposal_id`` from ``GET /relearn/cost-proposals``. 404s when no
+    stored cost proposal carries that ID. 409 on a malformed proposal or when
     the marker can't be created (no writable DB)."""
     db = getattr(request.app.state, "db", None)
     if db is None:
         raise HTTPException(status_code=503, detail="Server not fully initialised (db missing).")
+    stored = _stored_cost_proposal(request, body.proposal_id)
     try:
-        return cost_apply.mark_applied(db, _config(request), body.model_dump())
+        return cost_apply.mark_applied(db, _config(request), stored)
     except cost_apply.CostApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 class ApplyWorkspaceCostRequest(BaseModel):
-    # The subagent (CC-origin) proposal the client holds, plus the confirmed
-    # write target. Re-posted so a stale cache can't apply a DIFFERENT proposal.
-    signature:    str
-    analyzer:     str = ""
-    title:        str = ""
-    target_key:   dict[str, Any] = {}
-    baseline:     dict[str, Any] = {}
-    advise_text:  str = ""
-    agent_id:     str = ""
-    estimated_recoverable_usd:    float | None = None
-    estimated_recoverable_tokens: int | None = None
-    estimate_basis: str = ""
-    # Apply plumbing (adapter-supplied). rung is 1 for the sizing-rubric note.
-    proposed_fix: str = ""
-    rung:         int = 1
+    """A named STORED cost proposal plus the human's confirmed write target.
+
+    Same split as ``ApplyRelearnRequest``: the proposal's content and its apply
+    plumbing (``proposed_fix``, ``rung``) come off the store, because the card
+    the human approved was rendered FROM that stored proposal; only the write
+    target and the go/force confirmations are the caller's to choose.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id:  str
     scope:        str = "project"
     target_path:  str = ""
     go:           bool = False
@@ -438,19 +455,25 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
     reversible, git-committed, human-gated (dry-run first) discipline — then
     records the cost marker so the delta-verify pass measures the fan-out
     model-mix cost delta after it. ``go=false`` returns the dry-run diff; a
-    second call with ``go=true`` writes. 403 outside home; 409 on a refusal.
+    second call with ``go=true`` writes. 404 on an unknown ``proposal_id``;
+    403 outside home; 409 on a refusal.
     """
     _reject_target_outside_home(body.target_path)
     config = _config(request)
     db = getattr(request.app.state, "db", None)
-    # The cluster shape relearn_apply renders a rung-1 note from.
+    stored = _stored_cost_proposal(request, body.proposal_id)
+    signature = str(stored.get("signature") or "")
+    baseline = dict(stored.get("baseline") or {})
+    # The cluster shape relearn_apply renders a rung-1 note from, projected from
+    # the STORE: a caller-supplied proposed_fix would be arbitrary text written
+    # into the user's CLAUDE.md under a reviewed proposal's name.
     cluster = {
-        "signature": body.signature,
+        "signature": signature,
         "family_key": "subagent_rightsizing",
-        "title": body.title or body.signature,
-        "proposed_fix": body.proposed_fix,
-        "rung": body.rung,
-        "sessions": int(body.baseline.get("flagged_subagents", 0) or 0),
+        "title": str(stored.get("title") or "") or signature,
+        "proposed_fix": str(stored.get("proposed_fix") or ""),
+        "rung": int(stored.get("rung") or 1),
+        "sessions": int(baseline.get("flagged_subagents", 0) or 0),
         "repos": [],
         "examples": [],
     }
@@ -471,11 +494,7 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
     cost_record = None
     if db is not None:
         try:
-            cost_record = cost_apply.mark_applied(
-                db, config, body.model_dump(exclude={
-                    "proposed_fix", "rung", "scope", "target_path", "go", "force",
-                }),
-            )
+            cost_record = cost_apply.mark_applied(db, config, stored)
         except cost_apply.CostApplyRefused:
             cost_record = None
     return {"applied": applied, "cost_record": cost_record}

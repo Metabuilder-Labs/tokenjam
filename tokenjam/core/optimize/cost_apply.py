@@ -123,12 +123,14 @@ def mark_applied(
 ) -> dict[str, Any]:
     """Record that the user applied a cost proposal.
 
-    ``proposal`` is the CostProposal dict the client already holds from
-    ``GET /relearn/cost-proposals`` (re-posted, never re-looked-up server-side,
-    so a stale cache can't mark a DIFFERENT proposal — same guard the relearn
-    apply path uses). Creates the Expectation marker + appends the ledger
-    record. Idempotent per signature: an existing non-reverted record for the
-    same signature is returned unchanged rather than duplicated.
+    ``proposal`` is a STORED CostProposal dict, resolved server-side by its
+    ``proposal_id`` (``relearn_proposals.list_cost_proposals``) — never a
+    proposal echoed back by the caller, same guard the relearn apply path
+    uses. The ledger this writes is what the receipts figure is measured from,
+    so every value in it has to be one the detector produced. Creates the
+    Expectation marker + appends the ledger record. Idempotent per signature:
+    an existing non-reverted record for the same signature is returned
+    unchanged rather than duplicated.
 
     Raises CostApplyRefused when the proposal is malformed or the DB is
     unavailable (the marker needs a real ``expectations`` table).

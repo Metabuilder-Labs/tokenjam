@@ -97,19 +97,23 @@ async def test_mark_cost_applied_round_trip(app, client):
     )
     proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
     prop = next(p for p in proposals if p["analyzer"] == "cache")
+    body = {"proposal_id": prop["proposal_id"]}
 
     # Mark applied (the marker) — requires the write token.
-    unauth = await client.post("/api/v1/relearn/cost-proposals/apply", json=prop)
+    unauth = await client.post("/api/v1/relearn/cost-proposals/apply", json=body)
     assert unauth.status_code == 401
 
     r = await client.post(
-        "/api/v1/relearn/cost-proposals/apply", json=prop,
+        "/api/v1/relearn/cost-proposals/apply", json=body,
         headers={"X-TJ-Local-Token": token},
     )
     assert r.status_code == 200
     rec = r.json()
     assert rec["state"] == "applied"
     assert rec["applied_at"]
+    # The ledger carries the STORED estimate, not anything a caller named.
+    assert rec["signature"] == prop["signature"]
+    assert rec["estimated_recoverable_usd"] == prop["estimated_recoverable_usd"]
 
     applied = (await client.get("/api/v1/relearn/cost-applied")).json()
     assert len(applied["applied"]) == 1
@@ -122,6 +126,75 @@ async def test_mark_cost_applied_round_trip(app, client):
     )
     assert rev.status_code == 200
     assert rev.json()["state"] == "reverted"
+
+
+# --- the marker's numbers come from the STORE, never from the caller -------- #
+
+async def test_mark_applied_refuses_a_caller_supplied_estimate(app, client, config):
+    """The cost ledger is what the "verified saved" receipts are measured from,
+    so a caller must not be able to seed it with a number the detector never
+    produced. A valid proposal_id carrying its own estimate is refused outright
+    rather than having the extra field quietly ignored."""
+    from tokenjam.core.optimize import cost_apply
+
+    token = app.state.relearn_write_token
+    hdr = {"X-TJ-Local-Token": token}
+    await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = next(p for p in proposals if p["analyzer"] == "cache")
+
+    r = await client.post(
+        "/api/v1/relearn/cost-proposals/apply",
+        json={"proposal_id": prop["proposal_id"], "estimated_recoverable_usd": 9999.0},
+        headers=hdr,
+    )
+    assert r.status_code == 422
+    assert cost_apply.list_applied(config) == []   # nothing recorded at all
+
+
+async def test_mark_applied_refuses_an_unstored_proposal_id(app, client, config):
+    """An ID the detector never produced has no way into the ledger."""
+    from tokenjam.core.optimize import cost_apply
+
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    r = await client.post(
+        "/api/v1/relearn/cost-proposals/apply",
+        json={"proposal_id": "rp_000000000000"}, headers=hdr,
+    )
+    assert r.status_code == 404
+    assert "no stored cost proposal" in r.json()["detail"]
+    assert cost_apply.list_applied(config) == []
+
+
+async def test_apply_workspace_refuses_a_caller_supplied_proposed_fix(
+    app, client, monkeypatch, tmp_path,
+):
+    """The note text is the stored proposal's, not the request's: a caller-named
+    proposed_fix would be arbitrary text written into the user's CLAUDE.md under
+    a reviewed proposal's name."""
+    from tokenjam.core.optimize import relearn_apply as pa
+
+    home = tmp_path / "home"
+    (home / "proj").mkdir(parents=True)
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: home))
+    target = home / "proj" / "CLAUDE.md"
+
+    hdr = {"X-TJ-Local-Token": app.state.relearn_write_token}
+    await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = proposals[0]
+
+    r = await client.post(
+        "/api/v1/relearn/cost-proposals/apply-workspace",
+        json={
+            "proposal_id": prop["proposal_id"], "target_path": str(target),
+            "go": True, "proposed_fix": "rm -rf everything",
+        },
+        headers=hdr,
+    )
+    assert r.status_code == 422
+    assert not target.exists()
 
 
 async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, db, monkeypatch, tmp_path):
@@ -152,7 +225,7 @@ async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, 
     assert sub["apply_capable"] is True
     assert sub["advise_only"] is False
 
-    body = {**sub, "target_path": str(target)}
+    body = {"proposal_id": sub["proposal_id"], "target_path": str(target)}
 
     # Dry-run: a diff, nothing written, no cost marker.
     dry = await client.post(

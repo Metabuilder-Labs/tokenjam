@@ -7737,7 +7737,7 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
     setWbusy(true); setWerr(null);
     try {
       const r = await apiPostOrDetail('/relearn/cost-proposals/apply-workspace',
-        { ...prop, target_path: target.trim(), go });
+        { proposal_id: prop.proposal_id, target_path: target.trim(), go });
       if (go) { onChanged && onChanged(); }
       else { setPreview((r.applied && r.applied.diff) || '(no changes)'); }
     } catch (e) { setWerr(e.message || String(e)); }
@@ -7917,7 +7917,9 @@ function ReviewInboxView({ params }) {
   const markCostApplied = useCallback(async (prop) => {
     setMarking(prop.signature);
     try {
-      await apiPostOrDetail('/relearn/cost-proposals/apply', prop);
+      // Only the ID: the server resolves the proposal's content (and its
+      // estimate) from its own store, so the ledger records what was detected.
+      await apiPostOrDetail('/relearn/cost-proposals/apply', { proposal_id: prop.proposal_id });
       await loadCost();
       await loadReceipts();
     } catch (e) { /* surfaced on next refresh; keep the card in place */ }
