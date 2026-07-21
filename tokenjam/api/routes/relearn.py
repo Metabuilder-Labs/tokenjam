@@ -425,13 +425,21 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     }
     open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
     rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals)
+    # Same plan-tier framing the receipts / cost-ledger payloads carry, so the
+    # estimated-recoverable headline picks the same unit as its measured twin
+    # sitting next to it rather than always leading with dollars.
+    framing = _framing(request)
     if block is None:
-        return {"status": "never_run", "computed_at": None, "proposals": [], "rollup": rollup}
+        return {
+            "status": "never_run", "computed_at": None, "proposals": [],
+            "rollup": rollup, "framing": framing,
+        }
     return {
         "status": "ready",
         "computed_at": block.get("cost_computed_at"),
         "proposals": proposals,
         "rollup": rollup,
+        "framing": framing,
     }
 
 

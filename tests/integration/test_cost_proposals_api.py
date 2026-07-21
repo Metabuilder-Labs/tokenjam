@@ -302,3 +302,17 @@ async def test_receipts_framing_shows_dollars_on_an_api_corpus(app, client, db):
 
     payload = (await client.get("/api/v1/relearn/receipts")).json()
     assert payload["framing"]["display_rule"] == DISPLAY_SHOW_DOLLARS
+
+
+async def test_cost_proposals_payload_carries_plan_tier_framing(client):
+    """The estimated-recoverable tile picks its unit from the same server-side
+    decision as the measured tile beside it, so the two never disagree."""
+    r = await client.get("/api/v1/relearn/cost-proposals")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["framing"]["display_rule"]
+    # The rollup carries both units plus the coverage the tile has to quote.
+    rollup = payload["rollup"]
+    assert "estimated_recoverable_tokens" in rollup
+    assert "token_proposal_count" in rollup
+    assert "deduplicated_proposal_count" in rollup

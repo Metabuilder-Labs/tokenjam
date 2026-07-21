@@ -735,3 +735,70 @@ def test_rollup_mixed_none_and_real_estimates_across_analyzers():
     assert by_analyzer["cache"]["count"] == 1     # only the real-valued cache card
     assert by_analyzer["cache"]["usd"] == 1.5
     assert "deadweight" not in by_analyzer        # its only card was None-only
+
+
+# --- Component E: the token sum and its coverage ---------------------------
+
+def test_rollup_sums_tokens_independently_of_the_dollar_estimate():
+    # The two estimates are populated by different analyzers, so a proposal can
+    # carry either alone. Folding tokens in only where a dollar figure also
+    # exists would understate the headline the suppressed-dollars path leads
+    # with — here that would report 900 instead of the true 1400.
+    proposals = [
+        {"signature": "a", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0, "estimated_recoverable_tokens": 900},
+        {"signature": "b", "analyzer": "cache", "title": "t2",
+         "estimated_recoverable_tokens": 500},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_tokens"] == 1400
+    assert rollup["token_proposal_count"] == 2
+    assert rollup["deduplicated_proposal_count"] == 2
+    # The dollar sum still counts only the dollar-bearing proposal.
+    assert rollup["estimated_recoverable_usd"] == 3.0
+    assert rollup["proposal_count"] == 1
+
+
+def test_rollup_reports_partial_token_coverage_rather_than_implying_all():
+    # Two of three proposals carry no token estimate. The sum is a floor, and
+    # token_proposal_count vs deduplicated_proposal_count is what lets the tile
+    # say so instead of claiming coverage it does not have.
+    proposals = [
+        {"signature": "a", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0, "estimated_recoverable_tokens": 900},
+        {"signature": "b", "analyzer": "cache", "title": "t2",
+         "estimated_recoverable_usd": 1.0},
+        {"signature": "c", "analyzer": "trim", "title": "t3",
+         "estimated_recoverable_usd": 2.0},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_tokens"] == 900
+    assert rollup["token_proposal_count"] == 1
+    assert rollup["deduplicated_proposal_count"] == 3
+    assert "1 of 3" in rollup["estimate_basis"]
+    assert "floor, not a total" in rollup["estimate_basis"]
+
+
+def test_rollup_token_sum_dedupes_by_signature_too():
+    proposals = [
+        {"signature": "a", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_tokens": 900},
+        {"signature": "a", "analyzer": "downsize", "title": "t1-stale",
+         "estimated_recoverable_tokens": 900},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_tokens"] == 900
+    assert rollup["token_proposal_count"] == 1
+
+
+def test_rollup_with_no_token_estimates_reports_zero_coverage():
+    # Nothing to lead with when dollars are suppressed; the tile hides rather
+    # than rendering a zero, so the counts must make that state distinguishable.
+    proposals = [
+        {"signature": "a", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_tokens"] == 0
+    assert rollup["token_proposal_count"] == 0
+    assert "floor, not a total" not in rollup["estimate_basis"]

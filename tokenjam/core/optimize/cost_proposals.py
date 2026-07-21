@@ -1100,6 +1100,14 @@ def estimated_recoverable_rollup(
     (counting it in "N proposals" without a dollar contribution would
     silently understate the average the headline implies).
 
+    ``estimated_recoverable_tokens`` is summed independently, over whichever
+    proposals carry a token estimate — a different (often overlapping but never
+    identical) set from the dollar-bearing ones. Renderers that lead with the
+    token figure (subscription users, where dollars cover only the API-billed
+    slice) must therefore quote ``token_proposal_count`` rather than
+    ``proposal_count``, and say so against ``deduplicated_proposal_count`` when
+    coverage is partial: the token sum is a floor, not a total.
+
     Tagged ``estimated`` — see ``receipts.verified_saved_summary`` for the
     measured twin (Component G1). The two figures are NEVER added together;
     every caller must keep them as two clearly labeled numbers.
@@ -1115,7 +1123,19 @@ def estimated_recoverable_rollup(
     contributing: list[dict[str, Any]] = []
     by_analyzer: dict[str, dict[str, Any]] = {}
     total_usd = 0.0
+    total_tokens = 0
+    token_proposal_count = 0
     for row in seen.values():
+        # The token sum is counted INDEPENDENTLY of the dollar sum: the two
+        # estimates are populated by different analyzers and a proposal can
+        # carry either one alone. Folding tokens in only where a dollar
+        # estimate also exists would silently understate the token headline
+        # the suppressed-dollars rendering path leads with.
+        tokens = row.get("estimated_recoverable_tokens")
+        if tokens is not None:
+            total_tokens += int(tokens)
+            token_proposal_count += 1
+
         usd = row.get("estimated_recoverable_usd")
         if usd is None:
             continue
@@ -1131,6 +1151,10 @@ def estimated_recoverable_rollup(
         })
 
     proposal_count = len(contributing)
+    # Denominator for BOTH coverage claims: every open, deduplicated proposal,
+    # including the ones carrying neither estimate. A renderer that says "across
+    # N proposals" without this can't tell the reader its figure is partial.
+    deduplicated_proposal_count = len(seen)
     if proposal_count == 0:
         basis = (
             "no open (not yet applied) cost proposal currently carries a "
@@ -1143,16 +1167,27 @@ def estimated_recoverable_rollup(
             for a in sorted(by_analyzer.values(), key=lambda x: x["analyzer"])
         )
         basis = (
-            f"sum of estimated_recoverable_usd across {proposal_count} open "
-            f"(not yet applied), deduplicated-by-signature cost proposal(s) "
-            f"over the last {window_days}d; contributing analyzers: {breakdown}. "
+            f"sum of estimated_recoverable_usd across {proposal_count} of "
+            f"{deduplicated_proposal_count} open (not yet applied), "
+            f"deduplicated-by-signature cost proposal(s) over the last "
+            f"{window_days}d; contributing analyzers: {breakdown}. "
             "Estimated, correlational; never mixed with the measured "
             "verified-saved figure."
+        )
+    if token_proposal_count:
+        basis += (
+            f" Token figure: sum of estimated_recoverable_tokens across "
+            f"{token_proposal_count} of {deduplicated_proposal_count} "
+            f"proposal(s); the rest carry no token estimate, so it is a "
+            f"floor, not a total."
         )
 
     return {
         "estimated_recoverable_usd": round(total_usd, 6),
+        "estimated_recoverable_tokens": total_tokens,
         "proposal_count": proposal_count,
+        "token_proposal_count": token_proposal_count,
+        "deduplicated_proposal_count": deduplicated_proposal_count,
         "window_days": window_days,
         "by_analyzer": sorted(by_analyzer.values(), key=lambda x: x["analyzer"]),
         "contributing": contributing,
