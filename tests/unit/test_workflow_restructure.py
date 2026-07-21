@@ -289,7 +289,7 @@ def test_no_tool_spans_in_window(db):
 def test_cache_write_tokens_included_in_recoverable_total(db):
     """Regression: cache_write_tokens must be included in estimated_recoverable_tokens.
 
-    This verifies the fix for ticket #169 where cache_write_tokens was omitted
+    This verifies the fix for the bug where cache_write_tokens was omitted
     from the per-cluster token sum, causing cache-write-heavy workloads to
     underreport their recoverable savings.
     """
