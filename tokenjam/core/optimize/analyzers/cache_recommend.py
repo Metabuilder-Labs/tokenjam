@@ -16,6 +16,7 @@ mislead. Multi-provider support is a future research project.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +45,13 @@ class CachePrefixCandidate:
     avg_input_tokens: float        # average input_tokens on calls that share this prefix
     estimated_cacheable_tokens: int
     model:          str = ""       # this prefix's dominant model, for pricing
+    # The one-paste fix (#128): a ready cache_control placement for this
+    # exact prefix, built by `_prefix_cache_control_snippet` below. This
+    # analyzer's whole job is WHERE to place a breakpoint, so leaving this
+    # empty and only printing prose stats (as v1 did) meant the one analyzer
+    # whose purpose is placement advice was the one that gave no placement
+    # code, while `cache`'s own A3 lookback-miss path already built one.
+    cache_control_snippet: str = ""
     # Recoverable-savings contract (#111), same field names as every other
     # analyzer. None when no priced rate was observed for `model` — never a
     # zero or a borrowed rate (CLAUDE.md anti-pattern #22).
@@ -64,6 +72,11 @@ class CacheRecommendFinding:
     estimated_recoverable_usd:    float | None = None
     estimated_recoverable_tokens: int | None   = None
     estimate_basis:               str          = ""
+    # The effective occurrence bar this run applied (config-overridable, see
+    # core.config.OptimizeConfig.min_prefix_occurrences) — carried on the
+    # finding so a renderer's empty-state message never hardcodes a number
+    # that could be stale against the user's own config.
+    min_prefix_occurrences:       int          = MIN_PREFIX_OCCURRENCES
 
 
 def _stringify_prompt(value: Any) -> str:
@@ -108,6 +121,33 @@ def _prefix_hash(text: str) -> str:
     return hashlib.sha256(head).hexdigest()[:16]
 
 
+def _prefix_cache_control_snippet(
+    model: str, sample: str, occurrences: int, cacheable_tokens: int,
+) -> str:
+    """The one-paste fix for a recurring prefix. Modelled on
+    `cache_efficacy._uncached_snippet`: a comment identifying which prefix
+    (from the truncated preview already captured, never the full text) plus
+    a placeholder `text` block carrying the `cache_control` breakpoint.
+
+    A placeholder, not the real captured content: `sample` is only the first
+    ~120 characters kept for the UI preview, not the full prefix, and
+    pasting a partial prefix into a "snippet" would silently truncate the
+    user's actual boundary if copied as-is. The preview is enough to let the
+    user recognise WHICH of their own prefixes this is.
+    """
+    preview = sample[:80].replace("\n", " ").replace("\r", " ").strip()
+    model_label = model or "this model"
+    return (
+        f"# {model_label}: prefix seen in {occurrences} calls, starting "
+        f'"{preview}..."; ~{cacheable_tokens:,} tokens estimated cacheable\n'
+        + json.dumps({
+            "type": "text",
+            "text": "<the stable prefix that starts this way, same content every call>",
+            "cache_control": {"type": "ephemeral"},
+        }, indent=2)
+    )
+
+
 def _estimate_candidate_recoverable(
     model: str, cacheable_tokens_per_call: int, occurrences: int,
 ) -> tuple[float | None, int | None]:
@@ -140,10 +180,16 @@ def _estimate_candidate_recoverable(
 @register("cache-recommend")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a CacheRecommendFinding to ctx.report.findings."""
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_prefix_occurrences = getattr(
+        optimize_cfg, "min_prefix_occurrences", MIN_PREFIX_OCCURRENCES,
+    )
+
     capture = getattr(ctx.config, "capture", None)
     if capture is None or not getattr(capture, "prompts", False):
         ctx.report.findings["cache-recommend"] = CacheRecommendFinding(
             enabled=False,
+            min_prefix_occurrences=min_prefix_occurrences,
             hint=(
                 "Enable `[capture] prompts = true` in tj.toml and let the "
                 "daemon collect a window of data before re-running this "
@@ -205,7 +251,7 @@ def run(ctx: AnalyzerContext) -> None:
 
     candidates: list[CachePrefixCandidate] = []
     for h, entry in prefix_counts.items():
-        if entry["count"] < MIN_PREFIX_OCCURRENCES:
+        if entry["count"] < min_prefix_occurrences:
             continue
         avg_in = entry["tokens_sum"] / entry["count"] if entry["count"] else 0.0
         # Rough estimate of cacheable tokens per call. A 2000-char prefix
@@ -230,6 +276,9 @@ def run(ctx: AnalyzerContext) -> None:
             avg_input_tokens=round(avg_in, 1),
             estimated_cacheable_tokens=estimated_cacheable,
             model=dominant_model,
+            cache_control_snippet=_prefix_cache_control_snippet(
+                dominant_model, str(entry["sample"]), int(entry["count"]), estimated_cacheable,
+            ),
             estimated_recoverable_usd=usd,
             estimated_recoverable_tokens=tokens,
         ))
@@ -258,4 +307,5 @@ def run(ctx: AnalyzerContext) -> None:
         estimated_recoverable_usd=finding_usd,
         estimated_recoverable_tokens=finding_tokens,
         estimate_basis=basis,
+        min_prefix_occurrences=min_prefix_occurrences,
     )
