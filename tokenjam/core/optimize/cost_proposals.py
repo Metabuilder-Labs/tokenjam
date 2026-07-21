@@ -417,12 +417,21 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
     return proposals
 
 
-def _placement_to_proposals(finding: Any) -> list[CostProposal]:
+def _placement_to_proposals(
+    finding: Any, *, pricing_mode: str = "api",
+) -> list[CostProposal]:
     """One card for the batch-placement candidates (advise-only).
 
     Advise-only is not a formality here: moving a workload to the batch lane is
     an architectural change in the user's own application, and the card says so
     beside the number.
+
+    The Batch API's flat discount is an api-billed price lever — a
+    subscription or local plan can't pull it, so ``pricing_mode`` gates the
+    dollar figure exactly like the CLI's ``_render_placement`` already does
+    (CLAUDE.md anti-pattern #22: never show a figure the reader can't act
+    on). Without this the web Review inbox showed a batch-placement dollar
+    figure the CLI deliberately suppresses for the same finding.
     """
     if finding is None:
         return []
@@ -443,12 +452,22 @@ def _placement_to_proposals(finding: Any) -> list[CostProposal]:
         f"turn after the first model call ({cadence}). They are "
         f"{percent:.0f}% of the window's spend, {_money(total)} (measured)."
     )
-    advise = (
-        f"The Batch API bills a flat 50% of standard prices, so the same work "
-        f"on the batch lane is {_money(saving)} less over this window "
-        f"(estimated). {getattr(finding, 'friction', '')} Nothing here is "
-        f"applied for you; the change lives in your own application code."
-    )
+    if pricing_mode == "api":
+        advise = (
+            f"The Batch API bills a flat 50% of standard prices, so the same work "
+            f"on the batch lane is {_money(saving)} less over this window "
+            f"(estimated). {getattr(finding, 'friction', '')} Nothing here is "
+            f"applied for you; the change lives in your own application code."
+        )
+        recoverable_usd: float | None = saving
+    else:
+        advise = (
+            f"The Batch API's flat discount is an api-billed price lever, so no "
+            f"dollar figure is shown for this plan. "
+            f"{getattr(finding, 'friction', '')} Nothing here is "
+            f"applied for you; the change lives in your own application code."
+        )
+        recoverable_usd = None
     return [CostProposal(
         kind="cost",
         analyzer="placement",
@@ -477,7 +496,7 @@ def _placement_to_proposals(finding: Any) -> list[CostProposal]:
             "synchronous endpoint:\n"
             + "\n".join(f"#   {c.agent_id}" for c in candidates)
         ),
-        estimated_recoverable_usd=saving,
+        estimated_recoverable_usd=recoverable_usd,
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         agent_id=candidates[0].agent_id if len(candidates) == 1 else "",
@@ -1256,6 +1275,7 @@ def recompute_cost_proposals(
     """
     from datetime import timedelta
 
+    from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
     from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
@@ -1267,7 +1287,16 @@ def recompute_cost_proposals(
             db, config, since, until, agent_id=agent_id,
             findings=list(COST_ANALYZERS),
         )
-        proposals = cost_proposals_from_report(report, config=config)
+        # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so the
+        # web Review inbox suppresses the same dollar figures the CLI does
+        # (placement's batch-lever dollars, currently the only card this
+        # gates — see `_placement_to_proposals`).
+        conn = getattr(db, "conn", None)
+        plan_mix = plan_tier_mix(conn, since, until, agent_id) if conn is not None else {}
+        pricing_mode = pricing_mode_for(dominant_plan(plan_mix))
+        proposals = cost_proposals_from_report(
+            report, config=config, pricing_mode=pricing_mode,
+        )
     except Exception:
         return []
 
@@ -1278,7 +1307,9 @@ def recompute_cost_proposals(
     return proposals
 
 
-def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProposal]:
+def cost_proposals_from_report(
+    report: Any, config: Any = None, *, pricing_mode: str = "api",
+) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
@@ -1292,6 +1323,12 @@ def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProp
     path a user registered for an agent, which decides whether the downsize card
     can offer the gated model-id swap or falls back to its one-paste artifact.
     Without it every card is advise-only.
+
+    ``pricing_mode`` gates the ``placement`` card's dollar figure — the Batch
+    API discount is an api-billed lever, so a subscription/local caller gets
+    the advise text without a number, same as the CLI. Defaults to ``"api"``
+    so existing callers that don't know their caller's plan keep today's
+    behaviour.
     """
     findings = getattr(report, "findings", {}) or {}
     proposals: list[CostProposal] = []
@@ -1303,7 +1340,7 @@ def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProp
         (_cache_lookback_to_proposals, findings.get("cache")),
         (_trim_to_proposals, findings.get("trim")),
         (lambda f: _subagent_to_proposals(f, config), findings.get("subagent")),
-        (_placement_to_proposals, findings.get("placement")),
+        (lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode), findings.get("placement")),
         (_deadweight_to_proposals, findings.get("deadweight")),
         (_script_to_proposals, findings.get("script")),
         (_reuse_to_proposals, findings.get("reuse")),

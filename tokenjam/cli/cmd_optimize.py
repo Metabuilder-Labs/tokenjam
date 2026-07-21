@@ -1288,7 +1288,39 @@ def _render_cache_recommend(
             f"~{format_tokens(c.estimated_cacheable_tokens)} cacheable/call  "
             f"[dim]({format_tokens(int(c.avg_input_tokens))} avg input)[/dim]"
         )
+        # Subscription/local plans don't pay per token — no dollar lever to
+        # show. On api, a candidate can still have no priced rate for its
+        # model, in which case we say why rather than print a $0.00.
+        if pricing_mode == "api":
+            if c.estimated_recoverable_usd is not None:
+                console.print(
+                    f"           [dim]≈[/dim] [green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                    f"estimated over this window [dim](model {c.model})[/dim]"
+                )
+            else:
+                console.print(
+                    f"           [dim]no dollar figure: no priced rate observed "
+                    f"for {c.model or 'this model'}[/dim]"
+                )
         console.print(f"           [dim italic]{sample}[/dim italic]")
+
+    if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+        console.print(
+            f"     • [green]~{format_cost(finding.estimated_recoverable_usd)}[/green] "
+            f"estimated recoverable across these candidates [dim](reads after "
+            f"the first occurrence, minus one cache write per prefix)[/dim]"
+        )
+    elif pricing_mode != "api":
+        console.print(
+            "     [dim]This plan doesn't bill per token, so no dollar figure "
+            "is shown; the token counts above still show the caching "
+            "opportunity.[/dim]"
+        )
+    else:
+        console.print(
+            "     [dim]No dollar figure: no priced Anthropic model rate was "
+            "observed for these candidates.[/dim]"
+        )
 
     if finding.skipped_provider_count:
         console.print(

@@ -32,7 +32,7 @@ def _config(capture_prompts: bool) -> TjConfig:
 
 
 def _seed_with_prompt(db, *, prompt: str, count: int, provider: str = "anthropic",
-                     start=None, input_tokens: int = 2000):
+                     start=None, input_tokens: int = 2000, model: str = "claude-sonnet-4-6"):
     """Insert N spans sharing the same captured prompt."""
     start = start or datetime(2026, 5, 10, tzinfo=timezone.utc)
     # IngestPipeline normally strips content based on capture config — but
@@ -43,7 +43,7 @@ def _seed_with_prompt(db, *, prompt: str, count: int, provider: str = "anthropic
             agent_id="test-agent",
             provider=provider,
             billing_account=provider,
-            model="claude-sonnet-4-6",
+            model=model,
             input_tokens=input_tokens,
             cost_usd=0.005,
             start_time=start + timedelta(minutes=i),
@@ -149,3 +149,86 @@ def test_short_prompts_skipped(db):
     report = build_report(db=db, config=config, since=since, until=until,
                           findings=["cache-recommend"])
     assert report.findings["cache-recommend"].candidates == []
+
+
+# -- N36: pricing the candidate --
+
+def test_candidate_and_finding_carry_a_priced_recoverable_estimate(db):
+    """A repeated prefix on a priced model gets a dollar figure, reusing
+    `cache_efficacy`'s rate-lookup + rate-delta pricing pattern."""
+    _seed_with_prompt(db, prompt="SYSTEM: " + "you are helpful. " * 200,
+                      count=5, input_tokens=2500, model="claude-sonnet-4-6")
+    config = _config(capture_prompts=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["cache-recommend"])
+    finding = report.findings["cache-recommend"]
+    c = finding.candidates[0]
+    assert c.model == "claude-sonnet-4-6"
+    assert c.estimated_recoverable_usd is not None
+    assert c.estimated_recoverable_usd > 0
+    assert c.estimated_recoverable_tokens == c.estimated_cacheable_tokens * (c.occurrences - 1)
+    assert finding.estimated_recoverable_usd == pytest.approx(c.estimated_recoverable_usd)
+    assert finding.estimated_recoverable_tokens == c.estimated_recoverable_tokens
+    assert finding.estimate_basis
+
+
+def test_no_dollar_figure_for_unpriced_model(db):
+    """No rate observed for the model -> None, never a $0.00 or a borrowed
+    rate (CLAUDE.md anti-pattern #22)."""
+    _seed_with_prompt(db, prompt="SYSTEM: " + "you are helpful. " * 200,
+                      count=5, input_tokens=2500,
+                      model="totally-unpriced-model-xyz")
+    config = _config(capture_prompts=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["cache-recommend"])
+    finding = report.findings["cache-recommend"]
+    c = finding.candidates[0]
+    assert c.model == "totally-unpriced-model-xyz"
+    assert c.estimated_recoverable_usd is None
+    assert c.estimated_recoverable_tokens is None
+    assert finding.estimated_recoverable_usd is None
+    assert finding.estimated_recoverable_tokens is None
+
+
+# -- CLI rendering respects pricing_mode --
+
+def test_render_cache_recommend_shows_dollars_on_api(db, capsys):
+    from tokenjam.cli.cmd_optimize import _render_cache_recommend
+
+    _seed_with_prompt(db, prompt="SYSTEM: " + "you are helpful. " * 200,
+                      count=5, input_tokens=2500, model="claude-sonnet-4-6")
+    config = _config(capture_prompts=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["cache-recommend"])
+
+    _render_cache_recommend(report.findings["cache-recommend"], pricing_mode="api")
+    out = capsys.readouterr().out
+    assert "$" in out
+    assert "estimated" in out
+
+
+def test_render_cache_recommend_suppresses_dollars_off_api(db, capsys):
+    """Subscription/local plans don't bill per token, so no dollar figure is
+    shown; the token counts still print (CLAUDE.md anti-pattern #22)."""
+    from tokenjam.cli.cmd_optimize import _render_cache_recommend
+
+    _seed_with_prompt(db, prompt="SYSTEM: " + "you are helpful. " * 200,
+                      count=5, input_tokens=2500, model="claude-sonnet-4-6")
+    config = _config(capture_prompts=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["cache-recommend"])
+
+    for mode in ("subscription", "local"):
+        _render_cache_recommend(report.findings["cache-recommend"], pricing_mode=mode)
+    out = capsys.readouterr().out
+    assert "$" not in out
+    assert "cacheable/call" in out       # the token-level opportunity still shows
+    assert "doesn't bill per token" in out

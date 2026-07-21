@@ -396,6 +396,9 @@ def _build_finding_constructors() -> dict:
             skipped_provider_count=int(d.get("skipped_provider_count", 0)),
             confidence=d.get("confidence", "structural"),
             hint=d.get("hint"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
         )
 
     def _workflow_restructure(d: dict) -> WorkflowRestructureFinding:
