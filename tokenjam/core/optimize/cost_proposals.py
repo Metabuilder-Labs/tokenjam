@@ -2,31 +2,21 @@
 
 The self-improve loop's relearn detector already produces
 ``RelearnCluster`` proposals that the Lens Improve inbox renders and that a
-user can mark and apply. The *cost* analyzers (``downsize`` model
-over-sizing, ``cache`` efficacy, ``cache-recommend`` breakpoint placement,
-``trim`` prompt bloat, ``subagent`` right-sizing, ``deadweight`` dead MCP
-servers, ``script`` deterministic workflows, ``reuse`` repeated planning
-skeletons, ``verbosity`` high-output outliers) produce findings of a
-different shape. This module adapts each finding into a ``CostProposal`` so
-the inbox can list them BESIDE the relearn proposals, typed by a distinct
-``kind`` field.
+user can mark and apply. Three *cost* analyzers — ``downsize``
+(model over-sizing), ``cache`` (cache efficacy), ``trim`` (prompt bloat) —
+produce findings of a different shape. This module adapts each finding into a
+``CostProposal`` so the inbox can list them BESIDE the relearn proposals, typed
+by a distinct ``kind`` field.
 
 Two structural facts carry over from the relearn ``advise_only`` lane and are
 NOT optional here:
 
-  * **Advise-only by default, apply-capable where a real workspace surface
-    exists.** Most cost fixes live in the user's own application code (a
-    model-routing decision, a cache-prefix change, a prompt edit) that
-    tokenjam cannot write into — those cards have NO apply path, exactly like
-    an ``advise_only`` ``RelearnCluster`` (empty ``suggested_target``). A
-    minority (``subagent``, the per-agent slice of ``downsize``, ``script``,
-    ``reuse``, ``verbosity``) DO have a workspace surface an orchestrating
-    agent reads before acting (a CLAUDE.md rubric, a model-id key, a new
-    skill note) and route through the same rung-gated
-    ``relearn_apply.apply_relearn_fix`` machinery the relearn lane uses
-    (``apply_capable=True``, ``rung``, ``scope``, ``proposed_fix``). Every
-    other card carries a recommendation and, where sensible, a copyable
-    config/code suggestion; the user applies it themselves.
+  * **Advise-only everywhere.** A cost fix lives in the user's own application
+    code (a model-routing decision, a cache-prefix change, a prompt edit), not
+    a workspace tokenjam may write into. So a cost proposal has NO apply path —
+    exactly like an ``advise_only`` ``RelearnCluster`` (empty
+    ``suggested_target``). The card carries a recommendation and, where
+    sensible, a copyable config/code suggestion; the user applies it themselves.
   * **Estimated, never causal.** Every saving figure a cost finding carries is
     a heuristic ESTIMATE (house style, CLAUDE.md Rule 14). The adapter
     preserves the finding's own ``estimate_basis`` and labels the figure
@@ -37,8 +27,6 @@ proposals. It never touches the DB, the store, or the network.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -53,43 +41,8 @@ COST_CORRELATIONAL_CAVEAT = (
     "before changing anything."
 )
 
-#: The analyzers this wiring covers, by registration name. ``cache-recommend``
-#: requires ``[capture] prompts = true``; when that's off the analyzer itself
-#: returns an ``enabled=False`` finding with no candidates (same shape as
-#: ``trim``'s own disabled-state guard), so including it here unconditionally
-#: costs nothing when capture is off.
-COST_ANALYZERS = (
-    "downsize", "cache", "cache-recommend", "trim", "subagent", "deadweight",
-    "script", "reuse", "verbosity",
-)
-
-# The rung-1/rung-2 apply notes below all route through the SAME workspace-note
-# machinery `subagent` already uses (`relearn_apply.apply_relearn_fix`, rung 1
-# = CLAUDE.md note, rung 2 = a new .claude/skills/<slug>/SKILL.md). None of
-# these three analyzers has a workspace file it can edit outright the way a
-# model-routing swap does — the fix is behavioral (an orchestrator or the model
-# itself reading guidance), same class of surface as the subagent rubric.
-
-# The rung-2 skill note a `script` proposal writes: the observed tool-call
-# pattern is deterministic enough that a script could run it directly instead
-# of dispatching a full agent turn.
-_SCRIPT_SKILL_INTRO = (
-    "This tool-call pattern repeated across many sessions with the same "
-    "structural shape (same tools, same argument types, different values). "
-    "Consider replacing it with a deterministic script that runs these calls "
-    "directly, and reserve the agent turn for the parts that actually need a "
-    "model's judgment."
-)
-
-# The rung-1 note a `reuse` proposal writes: the planning skeleton recurs.
-_REUSE_NOTE_INTRO = (
-    "This class of task shares a planning skeleton: the same tool sequence "
-    "follows the first planning call, session after session, with only the "
-    "argument values differing (dates, versions, paths). Consider templating "
-    "the plan for this shape instead of re-planning it from scratch each "
-    "time. Review before reusing: a skeleton match is a candidate, not proof "
-    "the plan is identical."
-)
+#: The analyzers this wiring covers, by registration name.
+COST_ANALYZERS = ("downsize", "cache", "trim", "subagent", "deadweight")
 
 # The rung-1 sizing-rubric note a CC-origin subagent proposal writes into the
 # workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
@@ -422,21 +375,12 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
     return proposals
 
 
-def _placement_to_proposals(
-    finding: Any, *, pricing_mode: str = "api",
-) -> list[CostProposal]:
+def _placement_to_proposals(finding: Any) -> list[CostProposal]:
     """One card for the batch-placement candidates (advise-only).
 
     Advise-only is not a formality here: moving a workload to the batch lane is
     an architectural change in the user's own application, and the card says so
     beside the number.
-
-    The Batch API's flat discount is an api-billed price lever — a
-    subscription or local plan can't pull it, so ``pricing_mode`` gates the
-    dollar figure exactly like the CLI's ``_render_placement`` already does
-    (CLAUDE.md anti-pattern #22: never show a figure the reader can't act
-    on). Without this the web Review inbox showed a batch-placement dollar
-    figure the CLI deliberately suppresses for the same finding.
     """
     if finding is None:
         return []
@@ -457,22 +401,12 @@ def _placement_to_proposals(
         f"turn after the first model call ({cadence}). They are "
         f"{percent:.0f}% of the window's spend, {_money(total)} (measured)."
     )
-    if pricing_mode == "api":
-        advise = (
-            f"The Batch API bills a flat 50% of standard prices, so the same work "
-            f"on the batch lane is {_money(saving)} less over this window "
-            f"(estimated). {getattr(finding, 'friction', '')} Nothing here is "
-            f"applied for you; the change lives in your own application code."
-        )
-        recoverable_usd: float | None = saving
-    else:
-        advise = (
-            f"The Batch API's flat discount is an api-billed price lever, so no "
-            f"dollar figure is shown for this plan. "
-            f"{getattr(finding, 'friction', '')} Nothing here is "
-            f"applied for you; the change lives in your own application code."
-        )
-        recoverable_usd = None
+    advise = (
+        f"The Batch API bills a flat 50% of standard prices, so the same work "
+        f"on the batch lane is {_money(saving)} less over this window "
+        f"(estimated). {getattr(finding, 'friction', '')} Nothing here is "
+        f"applied for you; the change lives in your own application code."
+    )
     return [CostProposal(
         kind="cost",
         analyzer="placement",
@@ -501,70 +435,20 @@ def _placement_to_proposals(
             "synchronous endpoint:\n"
             + "\n".join(f"#   {c.agent_id}" for c in candidates)
         ),
-        estimated_recoverable_usd=recoverable_usd,
+        estimated_recoverable_usd=saving,
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         agent_id=candidates[0].agent_id if len(candidates) == 1 else "",
     )]
 
 
-# --------------------------------------------------------------------------- #
-# Persona-gated fix TEXT — the `cache` family (`cache` / `cache_thrash` /
-# `cache-recommend`) only. Unrelated to `_persona_gated_write_fields` below:
-# that helper picks between a workspace WRITE and a snippet fallback for
-# script/reuse/verbosity. No cache proposal has a write to offer in the
-# first place — every cache fix is an edit to a `cache_control` (or TTL)
-# field on the raw Anthropic API request, code a Claude Code session never
-# constructs itself (the harness builds that request on the user's behalf).
-# There's no workspace surface to fall back to for that persona; the
-# instruction itself is the thing they can't act on, so the only honest
-# move is to say why instead of stating it as their fix (CLAUDE.md
-# anti-pattern #22 — never hand out an instruction the reader can't
-# follow). The measured finding underneath (efficacy percentage, token
-# counts, evidence) is unaffected — it's true and useful regardless of who
-# can act on the fix, so only `advise_text`/`suggestion` are ever gated,
-# never `evidence`/`baseline`/the estimate fields.
-#
-# "unknown" stays on the actionable branch (unlike
-# `_persona_gated_write_fields`, which groups "unknown" with "sdk" to keep a
-# WRITE off by default): here the safe default is the opposite direction,
-# since withholding is the risky move (a real fix denied) rather than
-# over-offering one (an unusable write silently succeeding). "mixed" keeps
-# the instruction too — the sdk share of a mixed window can act on it, and
-# suppressing it would cost that share a real fix for no benefit to the
-# claude-code share.
-# --------------------------------------------------------------------------- #
-
-CACHE_NO_LEVER_TEXT = (
-    "Prompt caching is controlled by cache_control fields on the raw "
-    "Anthropic API request. A Claude Code session doesn't construct that "
-    "request itself; the harness does. There's no code here for you to "
-    "edit, so no fix is shown for it."
-)
-
-
-def _persona_gated_cache_fields(
-    persona: str, advise_text: str, suggestion: str = "",
-) -> dict[str, Any]:
-    """Decide, from the window's dominant persona, whether the cache_control
-    instruction (and any snippet) is shown at all. See the module-section
-    comment above for the reasoning."""
-    if persona == "claude-code":
-        return {"advise_text": CACHE_NO_LEVER_TEXT, "suggestion": ""}
-    return {"advise_text": advise_text, "suggestion": suggestion}
-
-
-def _cache_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
+def _cache_to_proposals(finding: Any) -> list[CostProposal]:
     """One proposal per flagged (provider, model) cache-efficacy row.
 
     Reduced by whatever the more specific per-agent root-cause cards (A1/A2/
     A3) already claim for that same (provider, model) — see
     ``_per_agent_cache_recoverable_by_model`` — so the rollup never sums the
     same underlying waste twice under two different signatures.
-
-    The instruction is gated by ``persona`` — see
-    ``_persona_gated_cache_fields``; a ``"claude-code"`` window gets the
-    honest no-lever reason instead of a cache_control edit it can't make.
     """
     if finding is None:
         return []
@@ -608,28 +492,23 @@ def _cache_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProp
                 "efficacy": float(row.efficacy),
                 "efficacy_ceiling": float(getattr(finding, "efficacy_ceiling", 0.80)),
             },
+            advise_text=(
+                "Add a stable cache prefix / enable prompt caching for this model "
+                "so repeated context is served from cache instead of re-billed as "
+                "fresh input."
+            ),
             estimated_recoverable_usd=usd,
             estimated_recoverable_tokens=tokens,
             estimate_basis=basis,
-            **_persona_gated_cache_fields(
-                persona,
-                "Add a stable cache prefix / enable prompt caching for this model "
-                "so repeated context is served from cache instead of re-billed as "
-                "fresh input.",
-            ),
         ))
     return proposals
 
 
-def _cache_uncached_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
+def _cache_uncached_to_proposals(finding: Any) -> list[CostProposal]:
     """One proposal per A1 uncached-agent candidate (see
     ``analyzers.cache_efficacy``): an agent group making cacheable calls with
     prompt caching never attempted. Scored through the same efficacy metric
-    as ``_cache_to_proposals`` (agent-scoped).
-
-    Persona-gated the same way as ``_cache_to_proposals`` — see
-    ``_persona_gated_cache_fields``.
-    """
+    as ``_cache_to_proposals`` (agent-scoped)."""
     if finding is None:
         return []
     proposals: list[CostProposal] = []
@@ -652,32 +531,24 @@ def _cache_uncached_to_proposals(finding: Any, persona: str = "unknown") -> list
                 "calls": c.calls, "sessions": c.sessions,
                 "assumed_prefix_tokens": c.assumed_prefix_tokens,
             },
+            advise_text=(
+                "Add a cache_control breakpoint on this agent's stable prefix "
+                "(system prompt / tool definitions) so repeated calls read "
+                "from cache instead of paying full input price every time."
+            ),
+            suggestion=c.cache_control_snippet,
             estimated_recoverable_usd=c.estimated_recoverable_usd,
             estimated_recoverable_tokens=c.estimated_recoverable_tokens,
             estimate_basis=c.estimate_basis,
             agent_id=c.agent_id,
-            **_persona_gated_cache_fields(
-                persona,
-                "Add a cache_control breakpoint on this agent's stable prefix "
-                "(system prompt / tool definitions) so repeated calls read "
-                "from cache instead of paying full input price every time.",
-                c.cache_control_snippet,
-            ),
         ))
     return proposals
 
 
-def _cache_thrash_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
+def _cache_thrash_to_proposals(finding: Any) -> list[CostProposal]:
     """One proposal per A2 cache-thrash candidate. Card text branches on the
     detected root cause: a TTL-cadence card (honest break-even, which may say
-    the switch isn't worth it) versus an instability checklist card.
-
-    Persona-gated the same way as ``_cache_to_proposals`` — see
-    ``_persona_gated_cache_fields``. The instability checklist is written for
-    someone reading their own prompt-assembly code, so it's gated exactly
-    like the TTL branch's cache_control edit — neither is something a Claude
-    Code session can act on.
-    """
+    the switch isn't worth it) versus an instability checklist card."""
     if finding is None:
         return []
     from tokenjam.core.optimize.analyzers.cache_efficacy import (
@@ -730,23 +601,20 @@ def _cache_thrash_to_proposals(finding: Any, persona: str = "unknown") -> list[C
                 "ttl_worth_it": c.ttl_worth_it,
                 "ttl_breakeven_usd": c.ttl_breakeven_usd,
             },
+            advise_text=advise,
+            suggestion=c.cache_control_snippet,
             estimated_recoverable_usd=c.estimated_recoverable_usd,
             estimated_recoverable_tokens=c.estimated_recoverable_tokens,
             estimate_basis=c.estimate_basis,
             agent_id=c.agent_id,
-            **_persona_gated_cache_fields(persona, advise, c.cache_control_snippet),
         ))
     return proposals
 
 
-def _cache_lookback_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
+def _cache_lookback_to_proposals(finding: Any) -> list[CostProposal]:
     """One proposal per A3 20-block-lookback-miss candidate. Weakest-
     confidence check of the three; the analyzer only classifies an agent here
-    when A1/A2 don't already explain its cache waste.
-
-    Persona-gated the same way as ``_cache_to_proposals`` — see
-    ``_persona_gated_cache_fields``.
-    """
+    when A1/A2 don't already explain its cache waste."""
     if finding is None:
         return []
     from tokenjam.core.optimize.analyzers.cache_efficacy import LOOKBACK_BLOCK_LIMIT
@@ -771,104 +639,18 @@ def _cache_lookback_to_proposals(finding: Any, persona: str = "unknown") -> list
                 "miss_count": c.miss_count,
                 "avg_prior_turn_blocks": c.avg_prior_turn_blocks,
             },
-            estimated_recoverable_usd=c.estimated_recoverable_usd,
-            estimated_recoverable_tokens=c.estimated_recoverable_tokens,
-            estimate_basis=c.estimate_basis,
-            agent_id=c.agent_id,
-            **_persona_gated_cache_fields(
-                persona,
+            advise_text=(
                 "Anthropic's cache breakpoint search looks back at most "
                 f"{LOOKBACK_BLOCK_LIMIT} content blocks. Long tool-heavy "
                 "turns push the prior breakpoint out of range; add an "
                 "intermediate cache_control breakpoint every ~15 blocks in "
-                "long tool-use turns.",
-                c.cache_control_snippet,
+                "long tool-use turns."
             ),
-        ))
-    return proposals
-
-
-def _cache_recommend_to_proposals(
-    finding: Any, cache_finding: Any = None, persona: str = "unknown",
-) -> list[CostProposal]:
-    """One proposal per Anthropic prefix candidate ``cache-recommend`` flags —
-    a placement recommendation for a `cache_control` breakpoint, carrying a
-    ready-to-paste snippet (``CachePrefixCandidate.cache_control_snippet``,
-    built in the analyzer, modelled on ``cache_efficacy``'s own snippet
-    builders).
-
-    Same class of finding as ``_cache_to_proposals``'s A1/A2/A3 root causes —
-    an edit to a raw Anthropic API request a Claude Code session never
-    constructs itself — so it's gated by the same rule; see
-    ``_persona_gated_cache_fields``.
-
-    Reduced by whatever ``cache``'s own per-agent root-cause cards (A1/A2/A3)
-    already claim for the same model — the same dedup rule ``_cache_to_
-    proposals`` applies against its own generic row, via the same
-    ``_per_agent_cache_recoverable_by_model`` helper — so a prefix already
-    counted as an uncached-agent / thrash / lookback-miss recovery doesn't
-    also get counted here under a third signature. ``cache_finding`` is
-    optional (the two analyzers are wired independently and either can be
-    absent from a report); with none supplied, nothing is subtracted.
-    """
-    if finding is None or not getattr(finding, "enabled", False):
-        return []
-    candidates = list(getattr(finding, "candidates", []) or [])
-    if not candidates:
-        return []
-
-    already_claimed = (
-        _per_agent_cache_recoverable_by_model(cache_finding)
-        if cache_finding is not None else {}
-    )
-
-    proposals: list[CostProposal] = []
-    for c in candidates:
-        usd = c.estimated_recoverable_usd
-        tokens = c.estimated_recoverable_tokens
-        basis = str(getattr(finding, "estimate_basis", "") or "")
-        claimed_usd, claimed_tokens = already_claimed.get(("anthropic", c.model), (0.0, 0))
-        if claimed_usd > 0 or claimed_tokens > 0:
-            usd = round(max(0.0, (usd or 0.0) - claimed_usd), 6)
-            tokens = max(0, (tokens or 0) - claimed_tokens)
-            basis = (
-                basis + (" " if basis else "")
-                + f"Reduced by ${claimed_usd:.4f} already attributed to "
-                "per-agent cache proposals for this model, so the rollup "
-                "does not double-count the same spend."
-            )
-        preview = c.sample_chars[:60].replace("\n", " ").strip()
-        evidence = (
-            f'A stable prompt prefix (starting "{preview}...") recurred '
-            f"across {c.occurrences} calls on {c.model or 'an unrecorded model'}, "
-            f"averaging {c.avg_input_tokens:,.0f} input tokens per call; "
-            f"~{c.estimated_cacheable_tokens:,} tokens of that prefix estimated "
-            "cacheable."
-        )
-        proposals.append(CostProposal(
-            kind="cost",
-            analyzer="cache-recommend",
-            signature=f"cost:cache-recommend:{c.prefix_hash}",
-            title=f"Repeated prompt prefix on {c.model or 'unrecorded model'}",
-            target_key={"prefix_hash": c.prefix_hash, "model": c.model},
-            evidence=evidence,
-            baseline={
-                "prefix_hash": c.prefix_hash,
-                "model": c.model,
-                "occurrences": c.occurrences,
-                "avg_input_tokens": c.avg_input_tokens,
-                "estimated_cacheable_tokens": c.estimated_cacheable_tokens,
-            },
-            estimated_recoverable_usd=usd,
-            estimated_recoverable_tokens=tokens,
-            estimate_basis=basis,
-            **_persona_gated_cache_fields(
-                persona,
-                "Add a cache_control breakpoint right after this prefix so "
-                f"repeat calls on {c.model or 'this model'} read it from cache "
-                "instead of paying full input price again.",
-                c.cache_control_snippet,
-            ),
+            suggestion=c.cache_control_snippet,
+            estimated_recoverable_usd=c.estimated_recoverable_usd,
+            estimated_recoverable_tokens=c.estimated_recoverable_tokens,
+            estimate_basis=c.estimate_basis,
+            agent_id=c.agent_id,
         ))
     return proposals
 
@@ -1137,32 +919,6 @@ def _subagent_to_proposals(finding: Any, config: Any = None) -> list[CostProposa
     )]
 
 
-def _mcp_remove_plumbing(server: Any) -> dict[str, Any]:
-    """Whether ``server``'s config entry can be removed directly, and where.
-
-    Unlike ``model_swap`` there is no search step: ``ConfiguredServer``
-    already resolved the exact config file at detection time. This just
-    re-verifies that still holds (the file can have moved, or a human can
-    have already removed the entry by hand) at proposal-build time, so the
-    card's pre-filled target is current, not stale analyzer-time data.
-    """
-    from tokenjam.core.optimize.analyzers.deadweight import (
-        APPLY_KIND_MCP_REMOVE,
-        mcp_remove_precheck,
-    )
-
-    check = mcp_remove_precheck(server.source, server.name)
-    if not check["ok"]:
-        return {"apply_capable": False, "apply_blocked_reason": check["reason"]}
-    return {
-        "apply_capable": True,
-        "apply_kind": APPLY_KIND_MCP_REMOVE,
-        "source_path": check["target_path"],
-        "target_path": check["target_path"],
-        "apply_blocked_reason": "",
-    }
-
-
 def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     """One proposal per dead-weight MCP server (Component C1).
 
@@ -1179,15 +935,6 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     in that server's sessions (never a hardcoded rate; see
     ``deadweight._pricing_note``). Stays ``None`` when no priced model was
     observed for that server — this adapter never invents a rate itself.
-
-    Apply-capable, like ``downsize``'s ``model_swap`` cards: the fix is a
-    deterministic edit of a value already written down (the server's own
-    ``mcpServers`` entry), so it routes through the same
-    ``relearn_apply.apply_relearn_fix`` machinery under
-    ``APPLY_KIND_MCP_REMOVE`` — reversible, git-committed where the config
-    lives in a repo, one-step revert. Falls back to the one-paste ``claude
-    mcp remove`` command, with the reason stated, when the precondition
-    doesn't hold (file missing, malformed, or the entry already gone).
     """
     if finding is None:
         return []
@@ -1204,20 +951,6 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 f"of those session(s)."
             )
         scope_flag = "user" if server.scope == "user" else "project"
-        plumbing = _mcp_remove_plumbing(server)
-        advise = (
-            server.fix + " Removing (or project-scoping) it is reversible "
-            "and loses no data; it only stops the standing schema-injection "
-            "tax on future sessions."
-        )
-        if plumbing.get("apply_capable"):
-            advise += (
-                f" tokenjam can remove this exact entry from "
-                f"{plumbing['target_path']}, with the change committed and "
-                f"revertable in one call."
-            )
-        elif plumbing.get("apply_blocked_reason"):
-            advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
         proposals.append(CostProposal(
             kind="cost",
             analyzer="deadweight",
@@ -1236,7 +969,11 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 "example_sessions": list(server.example_sessions),
                 "priced_model": server.priced_model,
             },
-            advise_text=advise,
+            advise_text=(
+                server.fix + " Removing (or project-scoping) it is reversible "
+                "and loses no data; it only stops the standing schema-injection "
+                "tax on future sessions."
+            ),
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
             estimated_recoverable_tokens=server.estimated_tax_tokens_90d or None,
             estimated_recoverable_usd=server.estimated_tax_usd_90d,
@@ -1244,283 +981,8 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 server.tax_construction
                 + " Projected over a 90-day window from the sessions observed."
             ),
-            advise_only=not plumbing.get("apply_capable", False),
-            apply_capable=bool(plumbing.get("apply_capable")),
-            apply_kind=str(plumbing.get("apply_kind", "")),
-            agent_name=server.name,
-            source_path=str(plumbing.get("source_path", "")),
-            target_path=str(plumbing.get("target_path", "")),
-            scope=server.scope,
-            apply_blocked_reason=str(plumbing.get("apply_blocked_reason", "")),
         ))
     return proposals
-
-
-def _cluster_hash(value: Any) -> str:
-    """Stable 12-hex-char identity for a cluster's structural key. Deterministic
-    across runs over the same underlying signature (a JSON-serialisable
-    structure), used only where the analyzer itself doesn't already hand back
-    a cluster id (contrast ``ReuseCluster.cluster_id``, which does)."""
-    encoded = json.dumps(value, sort_keys=False, default=str)
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]
-
-
-# --------------------------------------------------------------------------- #
-# Persona-gated fix modality — `script` / `reuse` / `verbosity` only.
-#
-# All three write the SAME class of artifact when apply-capable: a rung-1
-# CLAUDE.md note or rung-2 `.claude/skills/<slug>/SKILL.md` file (see
-# `relearn_apply.default_target_path`). Nothing in an SDK-only service's
-# request path ever reads a CLAUDE.md or a `.claude/skills/` note — those are
-# read by an interactive coding-agent harness. Offering that write to an SDK
-# caller is a write that visibly succeeds and changes nothing: a quiet lie in
-# the user's favour (CLAUDE.md anti-pattern #22). The finding underneath is
-# still true for an SDK caller; only the fix MODALITY is wrong, so this never
-# drops the recommendation — it demotes the card to advise-only and carries
-# the identical text as a copy-pasteable `suggestion` instead (the same
-# ``CostProposal.suggestion`` field every advise-only card already renders as
-# a first-class "the fix" block with a Copy button).
-# --------------------------------------------------------------------------- #
-
-def _persona_gated_write_fields(
-    persona: str, proposed_fix: str, rung: int, scope: str,
-) -> dict[str, Any]:
-    """Decide, from the window's dominant persona, whether the rung-1/rung-2
-    workspace write is offered — and fill in the ``CostProposal`` fields that
-    follow from that decision.
-
-    * ``"claude-code"`` — unchanged: the write is genuinely actionable, so it
-      stays offered exactly as before.
-    * ``"sdk"`` and ``"unknown"`` — no write offered. ``"unknown"`` means no
-      session in the window carries an identifiable agent_id and no declared
-      plan settles it either (`core.framing.dominant_persona`) — the exact
-      shape of a pure-SDK caller who never ran ``tj onboard``. Grouping it
-      with ``"sdk"`` here mirrors ``cmd_optimize._render_downgrade_cta``'s
-      CTA, and avoids the one failure mode called out for this fix: silently
-      offering a write to a persona that turns out to be SDK.
-    * ``"mixed"`` — both audiences are meaningfully represented (same
-      precedent as ``_render_downgrade_cta``, which renders both CTAs side
-      by side rather than picking one), and a script/reuse/verbosity finding
-      isn't attributable to one side of the mix or the other. The write
-      stays on offer for the claude-code share; the identical recommendation
-      is ALSO carried as ``suggestion`` so the sdk share of the mix isn't
-      left with a card that looks actionable but silently isn't, for them.
-    """
-    write_offered = persona in {"claude-code", "mixed"}
-    fields: dict[str, Any] = {
-        "advise_only": not write_offered,
-        "apply_capable": write_offered,
-        "rung": rung if write_offered else 0,
-        "scope": scope if write_offered else "",
-        "proposed_fix": proposed_fix if write_offered else "",
-    }
-    # Every persona except a clean claude-code window also gets the snippet
-    # fallback — "mixed" needs it alongside the write (see above), and
-    # "sdk"/"unknown" need it in place of the write.
-    if persona != "claude-code":
-        fields["suggestion"] = proposed_fix
-    return fields
-
-
-def _script_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
-    """One proposal per flagged deterministic-tool-call cluster.
-
-    Apply-capable at rung 2: a skill note naming the repeated call pattern and
-    recommending a script in its place. No agent-file/model-swap surface
-    exists here (this isn't a model-routing finding), so unlike ``subagent``
-    there is only the one apply shape. The skill's slug is derived from the
-    title, which embeds the cluster's own hash so two clusters never collide
-    on the same skill file (`relearn_apply`'s create-only guard would otherwise
-    let a second cluster's apply silently overwrite the first's skill note).
-
-    The write is only actually offered for a ``"claude-code"``/``"mixed"``
-    ``persona`` — see ``_persona_gated_write_fields``. An ``"sdk"``/
-    ``"unknown"`` window gets the identical recommendation as a
-    copy-pasteable snippet instead; the skill note would sit unread by any
-    SDK service's request path.
-    """
-    if finding is None:
-        return []
-    clusters = list(getattr(finding, "clusters", []) or [])
-    if not clusters:
-        return []
-    degraded = bool(getattr(finding, "degraded", False))
-    caveat = str(getattr(finding, "caveat", "") or "")
-
-    proposals: list[CostProposal] = []
-    for cluster in clusters:
-        if cluster.total_cost_usd <= 0 and cluster.total_tokens <= 0:
-            continue
-        cluster_hash = _cluster_hash(cluster.signature)
-        tool_names = [step.get("tool", "?") for step in cluster.signature]
-        tool_list = " -> ".join(tool_names) or "(no tools recorded)"
-        title = f"Deterministic tool pattern: {tool_list} ({cluster_hash})"
-        evidence = (
-            f"{cluster.instances} sessions ran the same tool-call structure "
-            f"({tool_list}), averaging {cluster.avg_tokens:,} input+output "
-            f"tokens and {_money(cluster.avg_cost_usd)} per session."
-        )
-        if degraded:
-            evidence += (
-                " Clustered on tool names only (enable [capture] tool_inputs "
-                "in tj.toml for the finer argument-shape signature)."
-            )
-        advise = (
-            _SCRIPT_SKILL_INTRO + " " + caveat
-        ).strip()
-        proposals.append(CostProposal(
-            kind="cost",
-            analyzer="script",
-            signature=f"cost:script:{cluster_hash}",
-            title=title,
-            target_key={"signature": cluster.signature, "instances": cluster.instances},
-            evidence=evidence,
-            baseline={
-                "instances": cluster.instances,
-                "avg_cost_usd": cluster.avg_cost_usd,
-                "avg_tokens": cluster.avg_tokens,
-                "avg_duration_seconds": cluster.avg_duration_seconds,
-                "example_session_id": cluster.example_session_id,
-                "degraded": degraded,
-                "apply_sessions": cluster.instances,
-                "apply_examples": [
-                    {"session_id": sid, "repo": "", "snippet": tool_list[:160]}
-                    for sid in (cluster.example_session_ids or [])
-                ],
-            },
-            advise_text=advise,
-            estimated_recoverable_usd=cluster.total_cost_usd or None,
-            estimated_recoverable_tokens=cluster.total_tokens or None,
-            estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-            **_persona_gated_write_fields(persona, advise, rung=2, scope="project"),
-        ))
-    return proposals
-
-
-def _reuse_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
-    """One proposal per repeated planning-skeleton cluster.
-
-    Apply-capable at rung 1: a CLAUDE.md note naming the recurring skeleton.
-    Uses the finding's conservative ``cache_reuse_recoverable_*`` figure (you
-    already paid for the plan once), not the ``script_replacement_*`` upper
-    bound, matching ``ReuseFinding``'s own aggregate.
-
-    The write is only actually offered for a ``"claude-code"``/``"mixed"``
-    ``persona`` — see ``_persona_gated_write_fields``.
-    """
-    if finding is None:
-        return []
-    clusters = list(getattr(finding, "clusters", []) or [])
-    if not clusters:
-        return []
-
-    proposals: list[CostProposal] = []
-    for cluster in clusters:
-        if cluster.cache_reuse_recoverable_usd <= 0 and cluster.cache_reuse_recoverable_tokens <= 0:
-            continue
-        tool_list = ", ".join(cluster.tool_signature) or "(no tool calls after the plan)"
-        title = f"Repeated planning skeleton: {tool_list} ({cluster.cluster_id})"
-        evidence = (
-            f"{cluster.repetitions} sessions shared a planning-call skeleton "
-            f"(tool sequence after the plan: {tool_list}), averaging "
-            f"{cluster.avg_planning_tokens:,} planning tokens "
-            f"({_money(cluster.avg_planning_cost_usd)} per call)."
-        )
-        advise = (
-            _REUSE_NOTE_INTRO + " " + str(cluster.caveat or "")
-        ).strip()
-        proposals.append(CostProposal(
-            kind="cost",
-            analyzer="reuse",
-            signature=f"cost:reuse:{cluster.cluster_id}",
-            title=title,
-            target_key={
-                "cluster_id": cluster.cluster_id,
-                "tool_signature": list(cluster.tool_signature),
-            },
-            evidence=evidence,
-            baseline={
-                "repetitions": cluster.repetitions,
-                "avg_planning_tokens": cluster.avg_planning_tokens,
-                "avg_planning_cost_usd": cluster.avg_planning_cost_usd,
-                "skeleton_session_id": cluster.skeleton_session_id,
-                "apply_sessions": cluster.repetitions,
-                "apply_examples": [
-                    {"session_id": sid, "repo": "", "snippet": tool_list[:160]}
-                    for sid in (cluster.example_session_ids or [])
-                ],
-            },
-            advise_text=advise,
-            estimated_recoverable_usd=cluster.cache_reuse_recoverable_usd or None,
-            estimated_recoverable_tokens=cluster.cache_reuse_recoverable_tokens or None,
-            estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-            **_persona_gated_write_fields(persona, advise, rung=1, scope="project"),
-        ))
-    return proposals
-
-
-def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
-    """One proposal for the whole verbosity finding (unlike ``script``/
-    ``reuse``, this is a single window-wide signal, not per-cluster).
-
-    Apply-capable at rung 1: a CLAUDE.md note carrying the finding's own
-    ``remedy_snippet`` plus its suggested ``max_tokens`` cap. This is the
-    least-grounded of the three analyzers by design (output length is not
-    waste), so the note leans on the finding's own honesty caveat rather than
-    asserting a saving. Left un-degraded to advise-only would strand the one
-    lever this analyzer already computes (the remedy snippet) with nowhere to
-    go; a workspace note is the same class of soft, orchestrator-read surface
-    the ``subagent`` rubric already uses, so this reuses that precedent
-    rather than inventing a new one.
-
-    The write is only actually offered for a ``"claude-code"``/``"mixed"``
-    ``persona`` — see ``_persona_gated_write_fields``. This is the sharpest
-    case of the three: the lever itself (``max_tokens``) is genuinely
-    SDK-actionable — an SDK caller can cap it in their own request — it is
-    only the CLAUDE.md *artifact* that is the wrong surface for them. Gating
-    still carries the cap as a ``suggestion`` so that lever isn't lost.
-    """
-    if finding is None:
-        return []
-    total_candidates = int(getattr(finding, "total_candidates", 0) or 0)
-    if total_candidates <= 0:
-        return []
-    remedy = str(getattr(finding, "remedy_snippet", "") or "")
-    max_tokens = getattr(finding, "suggested_max_tokens", None)
-    caveat = str(getattr(finding, "caveat", "") or "")
-    evidence = (
-        f"{total_candidates} session(s) across "
-        f"{int(getattr(finding, 'cohorts_examined', 0) or 0)} task-shape "
-        f"cohort(s) ran output well above their cohort's median."
-    )
-    advise = remedy
-    if max_tokens:
-        advise += (
-            f" Suggested cap for this shape of task: keep responses under "
-            f"about {max_tokens:,} output tokens (the cohort baseline most "
-            f"sessions already sit under)."
-        )
-    advise = (advise + " " + caveat).strip()
-    return [CostProposal(
-        kind="cost",
-        analyzer="verbosity",
-        signature="cost:verbosity",
-        title="High-verbosity output vs cohort baseline",
-        target_key={"total_candidates": total_candidates},
-        evidence=evidence,
-        baseline={
-            "total_candidates": total_candidates,
-            "sessions_examined": int(getattr(finding, "sessions_examined", 0) or 0),
-            "cohorts_examined": int(getattr(finding, "cohorts_examined", 0) or 0),
-            "suggested_max_tokens": max_tokens,
-            "apply_sessions": total_candidates,
-        },
-        advise_text=advise,
-        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
-        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
-        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-        **_persona_gated_write_fields(persona, advise, rung=1, scope="project"),
-    )]
 
 
 #: Default look-back for the daemon/CLI cost-proposal recompute. Matches the
@@ -1546,7 +1008,6 @@ def recompute_cost_proposals(
     """
     from datetime import timedelta
 
-    from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
     from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
@@ -1558,16 +1019,7 @@ def recompute_cost_proposals(
             db, config, since, until, agent_id=agent_id,
             findings=list(COST_ANALYZERS),
         )
-        # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so the
-        # web Review inbox suppresses the same dollar figures the CLI does
-        # (placement's batch-lever dollars, currently the only card this
-        # gates — see `_placement_to_proposals`).
-        conn = getattr(db, "conn", None)
-        plan_mix = plan_tier_mix(conn, since, until, agent_id) if conn is not None else {}
-        pricing_mode = pricing_mode_for(dominant_plan(plan_mix))
-        proposals = cost_proposals_from_report(
-            report, config=config, pricing_mode=pricing_mode,
-        )
+        proposals = cost_proposals_from_report(report, config=config)
     except Exception:
         return []
 
@@ -1578,14 +1030,11 @@ def recompute_cost_proposals(
     return proposals
 
 
-def cost_proposals_from_report(
-    report: Any, config: Any = None, *, pricing_mode: str = "api",
-) -> list[CostProposal]:
+def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
-    the ``cache`` / ``cache-recommend`` / ``trim`` / ``subagent`` /
-    ``placement`` / ``deadweight`` / ``script`` / ``reuse`` / ``verbosity``
+    the ``cache`` / ``trim`` / ``subagent`` / ``placement`` / ``deadweight``
     findings off ``report.findings``. Missing findings (analyzer not run, no
     candidates) contribute nothing. Never raises — a malformed finding is
     skipped so one bad analyzer can't sink the inbox.
@@ -1594,47 +1043,19 @@ def cost_proposals_from_report(
     path a user registered for an agent, which decides whether the downsize card
     can offer the gated model-id swap or falls back to its one-paste artifact.
     Without it every card is advise-only.
-
-    ``pricing_mode`` gates the ``placement`` card's dollar figure — the Batch
-    API discount is an api-billed lever, so a subscription/local caller gets
-    the advise text without a number, same as the CLI. Defaults to ``"api"``
-    so existing callers that don't know their caller's plan keep today's
-    behaviour.
-
-    ``script`` / ``reuse`` / ``verbosity`` read ``report.persona`` (set once
-    by ``runner.build_report`` — see ``AnalyzerContext.persona``) to decide
-    whether their rung-1/rung-2 workspace write is offered at all — see
-    ``_persona_gated_write_fields``. The whole ``cache`` family (``cache`` /
-    ``cache_thrash`` / ``cache-recommend``) reads the same ``persona`` to
-    decide whether their cache_control instruction is shown at all — see
-    ``_persona_gated_cache_fields``; unlike script/reuse/verbosity there is no
-    write to gate, only the instruction text. A report built without a
-    ``persona`` field (e.g. hand-constructed in a test) defaults to
-    ``"unknown"``, which keeps the script/reuse/verbosity write off (that
-    helper's conservative default) while leaving the cache family's
-    instruction on (that helper's conservative default runs the other way —
-    see its own docstring) — neither ever assumes ``"claude-code"``.
     """
     findings = getattr(report, "findings", {}) or {}
-    persona = str(getattr(report, "persona", "") or "unknown")
     proposals: list[CostProposal] = []
     adapters = (
         (lambda f: _downsize_to_proposal(f, config), getattr(report, "downgrade", None)),
-        (lambda f: _cache_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_uncached_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_thrash_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_lookback_to_proposals(f, persona=persona), findings.get("cache")),
-        (
-            lambda f: _cache_recommend_to_proposals(f, findings.get("cache"), persona=persona),
-            findings.get("cache-recommend"),
-        ),
+        (_cache_to_proposals, findings.get("cache")),
+        (_cache_uncached_to_proposals, findings.get("cache")),
+        (_cache_thrash_to_proposals, findings.get("cache")),
+        (_cache_lookback_to_proposals, findings.get("cache")),
         (_trim_to_proposals, findings.get("trim")),
         (lambda f: _subagent_to_proposals(f, config), findings.get("subagent")),
-        (lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode), findings.get("placement")),
+        (_placement_to_proposals, findings.get("placement")),
         (_deadweight_to_proposals, findings.get("deadweight")),
-        (lambda f: _script_to_proposals(f, persona=persona), findings.get("script")),
-        (lambda f: _reuse_to_proposals(f, persona=persona), findings.get("reuse")),
-        (lambda f: _verbosity_to_proposals(f, persona=persona), findings.get("verbosity")),
     )
     for adapter, finding in adapters:
         try:

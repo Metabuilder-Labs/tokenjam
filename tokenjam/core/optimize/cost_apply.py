@@ -4,23 +4,17 @@ A cost proposal is advise-only (see ``cost_proposals``): its fix lives in the
 user's own application code, which tokenjam has no workspace to write into. So
 unlike ``relearn_apply`` there is NO file write, no rung routing, no git commit
 here. "Apply" means exactly one thing: the user tells tokenjam "I made this
-change" so the loop can start measuring whether it moved the cost needle.
+change".
 
-That "I changed something at time T, watch whether it holds" is the loop
-primitive ``core.loop.Expectation`` already models (the same one the OTel
-relearn lane keys on — ``relearn_otel_verify``). Marking a cost proposal
-applied therefore:
+That "I changed something at time T" marker is the loop primitive
+``core.loop.Expectation`` already models. Marking a cost proposal applied
+therefore:
 
   1. creates an ``Expectation`` whose ``created_at`` is the "applied at T"
-     marker and whose ``agent_id`` scopes the later measurement, and
+     marker and whose ``agent_id`` scopes it, and
   2. appends a record to a small ``cost_applied.json`` ledger (mirroring
-     ``relearn_apply``'s ``applied_fixes.json``) carrying the proposal snapshot
-     + the ``target_key`` the delta-verify pass re-measures against.
-
-The realized dollar delta lands back in that record's ``verify`` sub-dict (see
-``cost_verify``), and the pass/regress outcome is written to the loop's own
-fix-history ledger through ``record_expectation_run`` — the same savings
-surface the rest of the loop reads.
+     ``relearn_apply``'s ``applied_fixes.json``) carrying the proposal
+     snapshot + its ``target_key``.
 """
 from __future__ import annotations
 
@@ -61,7 +55,9 @@ class CostAppliedRecord:
     estimate_basis: str
     state:          str = "applied"        # applied | reverted
     reverted_at:    str | None = None
-    # Filled by cost_verify on each rescan — the realized delta receipts.
+    # Historical scaffold from the (removed) verify pass — left in place so an
+    # existing ``cost_applied.json`` on disk still deserializes; nothing reads
+    # past the empty defaults below anymore.
     verify: dict[str, Any] = field(default_factory=lambda: {
         "realized_usd_delta": None, "realized_tokens_delta": None,
         "pre_value": None, "post_value": None,
@@ -104,18 +100,6 @@ def get_applied(config: Any, record_id: str) -> dict | None:
     return None
 
 
-def set_verify(config: Any, record_id: str, verify: dict[str, Any]) -> dict:
-    """Overwrite a record's ``verify`` sub-dict (the write side of the rescan).
-    Raises CostApplyRefused on an unknown id."""
-    records = _load_ledger(config)
-    for rec in records:
-        if rec.get("id") == record_id:
-            rec["verify"] = verify
-            _write_ledger(config, records)
-            return rec
-    raise CostApplyRefused(f"no cost_applied record {record_id}.")
-
-
 def mark_applied(
     db_or_conn: Any,
     config: Any,
@@ -126,11 +110,10 @@ def mark_applied(
     ``proposal`` is a STORED CostProposal dict, resolved server-side by its
     ``proposal_id`` (``relearn_proposals.list_cost_proposals``) — never a
     proposal echoed back by the caller, same guard the relearn apply path
-    uses. The ledger this writes is what the receipts figure is measured from,
-    so every value in it has to be one the detector produced. Creates the
-    Expectation marker + appends the ledger record. Idempotent per signature:
-    an existing non-reverted record for the same signature is returned
-    unchanged rather than duplicated.
+    uses, so every value in the ledger record is one the detector produced.
+    Creates the Expectation marker + appends the ledger record. Idempotent
+    per signature: an existing non-reverted record for the same signature is
+    returned unchanged rather than duplicated.
 
     Raises CostApplyRefused when the proposal is malformed or the DB is
     unavailable (the marker needs a real ``expectations`` table).

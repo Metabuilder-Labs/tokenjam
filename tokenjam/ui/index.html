@@ -1522,6 +1522,7 @@ code.md-code {
   <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review inbox</a>
   <a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="improve"><span class="icon">&#9678;</span> Dashboard</a>
   <a href="#/status" class="nav-link" data-view="status" data-lens="improve"><span class="icon">&bull;</span> Status</a>
+  <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <a href="#/traces" class="nav-link" data-view="traces" data-lens="observe"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Cost</a>
   <a href="#/analytics" class="nav-link" data-view="analytics" data-lens="observe"><span class="icon">&#9636;</span> Analytics</a>
@@ -6065,6 +6066,21 @@ function fmtFramedSavings(usd, tokens, framing) {
   return usd == null ? '—' : fmtCost(usd);
 }
 
+// Is the server telling us NOT to lead with dollars? Reads the explicit
+// server-side decision (`display_rule`, core/framing.py) rather than
+// re-deriving it, with a pricing_mode fallback for older payloads. True for a
+// subscription-dominant corpus (a dollar figure there covers only the
+// API-billed slice, so it understates), for local inference, and for an
+// unknown plan. Callers make TOKENS the headline in that case.
+const DOLLARS_SUPPRESSED_RULES = new Set([
+  'suppress_dollars_for_subscription_share', 'tokens_only', 'suppress_dollars_unknown',
+]);
+function dollarsSuppressed(framing) {
+  if (!framing) return false;
+  if (framing.display_rule) return DOLLARS_SUPPRESSED_RULES.has(framing.display_rule);
+  return framing.pricing_mode === 'subscription' || framing.pricing_mode === 'local';
+}
+
 // Count agents whose latest session breaches the 2σ drift threshold on any
 // tracked metric (mirrors the Drift screen's z-score logic).
 function driftSignalCount(drift) {
@@ -7507,6 +7523,37 @@ function CompoundLedgerSummary({ ledger }) {
     </div>`;
 }
 
+// The select-all state transition, kept pure and outside the component so it
+// can be exercised directly rather than only asserted against as markup.
+// `visibleSigs` is the RENDERED row set: clicking a fully-selected box clears
+// exactly those rows from the selection, anything else adds them all. Rows the
+// list is not showing are never touched in either direction.
+function nextSelectAllSelection(visibleSigs, checkedSigs) {
+  const next = new Set(checkedSigs);
+  const all = visibleSigs.length > 0 && visibleSigs.every(sig => next.has(sig));
+  for (const sig of visibleSigs) {
+    if (all) next.delete(sig);
+    else next.add(sig);
+  }
+  return next;
+}
+
+// The table's select-all box. `indeterminate` has no HTML attribute and cannot
+// be expressed as a checked value, so it is assigned to the DOM node through a
+// ref on every render — a two-state header box over a partial selection is a
+// well-known source of accidental bulk actions.
+function SelectAllCheckbox({ total, selected, onToggle }) {
+  const ref = useRef(null);
+  const all = total > 0 && selected === total;
+  useEffect(() => {
+    if (ref.current) ref.current.indeterminate = selected > 0 && selected < total;
+  });
+  return html`<input type="checkbox" ref=${ref} checked=${all} disabled=${total === 0}
+    title=${all ? 'Clear selection' : 'Select all listed'}
+    aria-label=${all ? 'Clear selection' : 'Select all listed'}
+    onChange=${onToggle} />`;
+}
+
 function RelearnRow({ cluster, checked, onToggle, onExpand }) {
   const tokens = cluster.estimated_recoverable_tokens || 0;
   return html`
@@ -7593,7 +7640,9 @@ function RelearnApplyModal({ cluster, onClose, onApplied }) {
             <div class="opt-title" style="font-size:13px">Evidence — repro sessions</div>
             ${(cluster.examples || []).map((ex, i) => html`
               <div class="sz-runrow" key=${i} style="align-items:flex-start">
-                <a class="sz-link" href=${'#/sessions/' + ex.session_id} target="_blank" rel="noopener">${(ex.session_id || '').slice(0, 12)}</a>
+                ${ex.session_resolvable
+                  ? html`<a class="sz-link" href=${'#/sessions/' + ex.session_id} target="_blank" rel="noopener">${(ex.session_id || '').slice(0, 12)}</a>`
+                  : html`<span class="dim" style="font-size:12px" title="This session was read from a transcript on disk and has not been ingested, so there is no session page to open.">${(ex.session_id || '').slice(0, 12)}</span>`}
                 <span class="dim" style="font-size:12px">${ex.repo}${ex.ts ? ' · ' + ex.ts.slice(0, 16).replace('T', ' ') : ''}</span>
                 <pre class="rev-diff" style="margin:4px 0 0;white-space:pre-wrap;font-size:11.5px;flex-basis:100%">${ex.snippet}</pre>
               </div>`)}
@@ -7684,9 +7733,8 @@ function AppliedFixRow({ rec, onChanged }) {
 // The downsize/cache/trim analyzers' findings adapted into advise-only
 // proposals (core/optimize/cost_proposals.py), served at
 // GET /relearn/cost-proposals. They carry NO apply path — the fix lives in the
-// user's own application code — so "Mark applied" only drops a marker the
-// delta-verify pass (core/optimize/cost_verify.py) measures a realized dollar
-// delta against, shown back here as a receipt.
+// user's own application code — so "Mark applied" only drops a marker
+// recording what the user approved.
 const COST_ANALYZER_LABELS = { downsize: 'downsize', cache: 'cache', trim: 'trim', subagent: 'subagent' };
 
 function fmtUsd(v) {
@@ -7694,32 +7742,24 @@ function fmtUsd(v) {
   return '$' + (Math.abs(n) < 1 ? n.toFixed(4) : n.toFixed(2));
 }
 
-// One applied cost proposal's realized-delta receipt: verdict + the measured
-// dollar/token delta (shown only for a real "improved" verdict), reusing the
-// same VERDICT_LABELS the relearn lane uses. Correlational, never causal.
-function CostVerifyLine({ verify }) {
-  if (!verify) return null;
-  const label = VERDICT_LABELS[verify.verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
-  const usd = verify.realized_usd_delta;
-  const toks = verify.realized_tokens_delta;
-  return html`
-    <div class="dim" style="font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span style=${'color:' + label.color + ';font-weight:500'}>${label.text}</span>
-      ${usd > 0 ? html`<span style="color:var(--accent)">· ${fmtUsd(usd)} lower${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title="estimated / correlational with your change; not proof the advice caused it">est.</span></span>` : null}
-      ${verify.reason ? html`<span title=${verify.reason} style="cursor:help">ⓘ</span>` : null}
-    </div>`;
-}
-
-// The cost ledger: realized dollars summed across every VERIFIED, improved cost
-// fix — the dollar sibling of CompoundLedgerSummary.
-function CostLedgerSummary({ ledger }) {
+// The cost ledger: realized savings summed across every VERIFIED, improved cost
+// fix — the sibling of CompoundLedgerSummary. Same server-decided unit
+// hierarchy as ReceiptsHeader: these dollars are token deltas priced at
+// per-model LIST rates, which is not what a subscription user paid, so a
+// suppressing framing leads with the ledger's realized TOKENS and drops the
+// dollars in favour of the server's qualifier. (Nothing currently populates
+// this ledger — see the ``verify`` field's removal note on the cost-apply
+// record — so this degrades to always hidden until a future redesign.)
+function CostLedgerSummary({ ledger, framing }) {
   if (!ledger || !ledger.verified_count) return null;
+  const suppressed = dollarsSuppressed(framing);
   return html`
     <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
       <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
-        <span style="font-size:20px;font-weight:600;color:var(--accent)">${fmtUsd(ledger.total_realized_usd)}</span>
+        <span style="font-size:20px;font-weight:600;color:var(--accent)">${suppressed ? fmtTokens(ledger.total_realized_tokens) + ' tok' : fmtUsd(ledger.total_realized_usd)}</span>
         <span class="dim" style="font-size:12px">realized across ${ledger.improved_count} verified change(s) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
       </div>
+      ${suppressed && framing && framing.qualifier_text ? html`<div class="qualifier" style="margin-top:6px">${framing.qualifier_text}</div>` : null}
       <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} no movement · ${ledger.insufficient_data_count} still measuring</div>
     </div>`;
 }
@@ -7789,7 +7829,7 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
 }
 
 // One applied cost proposal, with its realized-delta receipt + one-step Revert.
-function CostAppliedRow({ rec, onChanged }) {
+function CostAppliedRow({ rec, onChanged, framing }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const revert = async () => {
@@ -7806,43 +7846,87 @@ function CostAppliedRow({ rec, onChanged }) {
         <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
       </div>
       <div class="dim" style="font-size:12px">marked applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}</div>
-      ${rec.state === 'applied' ? html`<${CostVerifyLine} verify=${rec.verify} />` : null}
       ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
       ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${revert}>${busy ? 'working…' : 'Revert'}</span>` : null}
     </div>`;
 }
 
-// Components E + G1 — the Review inbox entry tile: the estimated-recoverable
-// headline (E, summed server-side over the OPEN, not-yet-applied cost-
-// proposal cards — core/optimize/cost_proposals.py's
-// estimated_recoverable_rollup) beside its measured twin, the cumulative
-// verified-saved receipts (G1, GET /relearn/receipts — core/optimize/
-// receipts.py, combining the relearn ledger's tokens with the cost-verify
-// ledger's tokens AND dollars). Deliberately two SEPARATE, distinctly
-// labeled numbers — an estimate and a measurement never get added together.
-function ReceiptsHeader({ rollup, receiptsData }) {
-  const hasRollup = rollup && rollup.proposal_count > 0;
+// Component E — the Review inbox entry tile: the estimated-recoverable
+// headline, summed server-side over the OPEN, not-yet-applied cost-proposal
+// cards (core/optimize/cost_proposals.py's estimated_recoverable_rollup).
+// ``ReceiptsHeader`` also renders a "verified saved" tile beside it when
+// ``receiptsData`` is present; nothing currently feeds that prop (the
+// receipts endpoint that used to is gone, pending a bounded-verify
+// redesign), so today only the estimated tile ever shows.
+//
+// UNIT HIERARCHY is server-decided (`receiptsData.framing`, core/framing.py):
+// a relearn fix has no single model to price against and the product refuses
+// to invent a rate for it. The dollars are also a list-price equivalent,
+// priced across all traffic, not an amount billed — nothing anywhere filters
+// cost by plan tier. So on a subscription-dominant corpus the token figure is
+// the complete and honest headline: when the framing suppresses dollars the
+// TOKENS take the hero slot and the dollars give way to the server's
+// qualifier; otherwise the dollars-first hierarchy is unchanged.
+// The estimated tile's token headline is a FLOOR, not a total: only some
+// proposals carry a token estimate. Quote that coverage rather than letting
+// the reader assume the sum spans every open proposal.
+function rollupTokenScope(rollup) {
+  const covered = rollup.token_proposal_count || 0;
+  const total = rollup.deduplicated_proposal_count || covered;
+  return covered < total
+    ? `${covered} of ${total} proposals carrying a token estimate`
+    : `${covered} proposal${covered === 1 ? '' : 's'}`;
+}
+
+function ReceiptsHeader({ rollup, receiptsData, rollupFraming }) {
+  const receiptsFraming = receiptsData && receiptsData.framing;
+  const suppressed = dollarsSuppressed(receiptsFraming || rollupFraming);
+  // Suppressed, the estimated tile leads with tokens — so it needs a token
+  // estimate to lead with. With neither unit available there is nothing
+  // honest left to render, and the tile hides rather than showing a zero.
+  const hasRollup = !!rollup && (
+    suppressed ? (rollup.token_proposal_count || 0) > 0 : rollup.proposal_count > 0
+  );
   const hasReceipts = receiptsData && receiptsData.verified_count > 0;
   if (!hasRollup && !hasReceipts) return null;
+  // The plan-tier caveat is the server's own words, rendered in the same
+  // `.qualifier` treatment every other suppressing surface uses. It is stated
+  // once for the row rather than duplicated into both tiles.
+  const qualifier = (receiptsFraming && receiptsFraming.qualifier_text)
+    || (rollupFraming && rollupFraming.qualifier_text);
   return html`
-    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 18px">
-      ${hasRollup ? html`
-        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
-          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="estimated-tag" title=${rollup.estimate_basis}>est.</span></div>
-          <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">${fmtUsd(rollup.estimated_recoverable_usd)}
-            <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollup.proposal_count} proposal${rollup.proposal_count === 1 ? '' : 's'}</span>
+    <div style="margin:10px 0 18px">
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        ${hasRollup ? html`
+          <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+            <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="estimated-tag" title=${rollup.estimate_basis}>est.</span></div>
+            ${suppressed ? html`
+              <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">~${fmtTokens(rollup.estimated_recoverable_tokens)} tok
+                <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollupTokenScope(rollup)}</span>
+              </div>
+            ` : html`
+              <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">${fmtUsd(rollup.estimated_recoverable_usd)}
+                <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollup.proposal_count} proposal${rollup.proposal_count === 1 ? '' : 's'}</span>
+              </div>
+              ${(rollup.estimated_recoverable_tokens || 0) > 0 ? html`<div class="dim" style="font-size:12px;margin-top:2px">~${fmtTokens(rollup.estimated_recoverable_tokens)} tok across ${rollupTokenScope(rollup)}</div>` : null}
+            `}
           </div>
-        </div>
-      ` : null}
-      ${hasReceipts ? html`
-        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
-          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Verified saved to date <span class="measured-tag" title=${receiptsData.estimate_basis}>measured</span></div>
-          <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
-            <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
+        ` : null}
+        ${hasReceipts ? html`
+          <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+            <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Verified saved to date <span class="measured-tag" title=${receiptsData.estimate_basis}>measured</span></div>
+            ${suppressed ? html`
+              <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtTokens(receiptsData.verified_saved_tokens)} tok</div>
+            ` : html`
+              <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
+                <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
+              </div>
+            `}
+            <div class="dim" style="font-size:11px;margin-top:6px">${receiptsData.verified_count} checked · ${receiptsData.improved_count} improved · ${receiptsData.regressed_count} regressed · ${receiptsData.no_change_count} no change · ${receiptsData.insufficient_data_count} still measuring</div>
           </div>
-          <div class="dim" style="font-size:11px;margin-top:6px">${receiptsData.verified_count} checked · ${receiptsData.improved_count} improved · ${receiptsData.regressed_count} regressed · ${receiptsData.no_change_count} no change · ${receiptsData.insufficient_data_count} still measuring</div>
-        </div>
-      ` : null}
+        ` : null}
+      </div>
+      ${qualifier ? html`<div class="qualifier" style="margin-top:8px">${qualifier}</div>` : null}
     </div>`;
 }
 
@@ -7857,9 +7941,10 @@ function ReviewInboxView({ params }) {
   const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
   const [costProps, setCostProps] = useState([]);         // advise-only cost proposals (downsize/cache/trim)
   const [costRollup, setCostRollup] = useState(null);      // Component E — estimated-recoverable headline
+  const [rollupFraming, setRollupFraming] = useState(null); // plan-tier framing for the rollup's units
   const [costApplied, setCostApplied] = useState([]);     // marked-applied cost proposals + their realized deltas
-  const [costLedger, setCostLedger] = useState(null);     // realized dollars across verified cost changes
-  const [receiptsData, setReceiptsData] = useState(null); // Component G1 — combined verified-saved receipts
+  const [costLedger, setCostLedger] = useState(null);     // realized savings across verified cost changes
+  const [costFraming, setCostFraming] = useState(null);   // plan-tier framing for the cost ledger's units
   const [marking, setMarking] = useState(null);           // signature currently being marked applied
 
   const load = useCallback(async () => {
@@ -7889,36 +7974,31 @@ function ReviewInboxView({ params }) {
       const r = await api('/relearn/cost-proposals');
       setCostProps(r.proposals || []);
       setCostRollup(r.rollup || null);   // Component E — server-computed, ignores local dismiss state
+      setRollupFraming(r.framing || null);
     } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {
       const r = await api('/relearn/cost-applied');
       setCostApplied(r.applied || []);
       setCostLedger(r.ledger || null);
+      setCostFraming(r.framing || null);
     } catch (e) { /* degrade quietly */ }
   }, []);
 
-  const loadReceipts = useCallback(async () => {
-    try {
-      const r = await api('/relearn/receipts');
-      setReceiptsData(r || null);
-    } catch (e) { /* degrade quietly — the rollup tile is enough on its own */ }
-  }, []);
-
   useEffect(() => {
-    load(); loadApplied(); loadCost(); loadReceipts();
+    load(); loadApplied(); loadCost();
     // Light poll while a background pass may be computing (or right after a
     // manual refresh) so the empty/computing state resolves without a reload.
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
     return () => clearInterval(timer);
-  }, [load, loadApplied, loadCost, loadReceipts]);
+  }, [load, loadApplied, loadCost]);
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
     try { await apiPost('/relearn/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
-    // The cost proposals + their realized deltas recompute on the same cadence.
+    // The cost proposals recompute on the same cadence.
     try { await apiPost('/relearn/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
-    setTimeout(() => { setRefreshing(false); load(); loadCost(); loadReceipts(); }, 1500);
-  }, [load, loadCost, loadReceipts]);
+    setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
+  }, [load, loadCost]);
 
   const markCostApplied = useCallback(async (prop) => {
     setMarking(prop.signature);
@@ -7927,26 +8007,38 @@ function ReviewInboxView({ params }) {
       // estimate) from its own store, so the ledger records what was detected.
       await apiPostOrDetail('/relearn/cost-proposals/apply', { proposal_id: prop.proposal_id });
       await loadCost();
-      await loadReceipts();
     } catch (e) { /* surfaced on next refresh; keep the card in place */ }
     finally { setMarking(null); }
-  }, [loadCost, loadReceipts]);
+  }, [loadCost]);
 
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
   const relearnCount = visible.length;
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
-    const next = new Set([...dismissed, ...checked]);
+    // Only the selected rows that are actually listed: a stale signature left in
+    // `checked` after its row was approved must not be swept along silently.
+    const next = new Set([...dismissed, ...visible.filter(c => checked.has(c.signature)).map(c => c.signature)]);
     setDismissed(next); saveDismissedRelearns(next);
     setChecked(new Set());
   };
+  // Selection is scoped to `visible` — the rows actually rendered — never to
+  // d.clusters. The list filters out locally-dismissed rows and rows approved
+  // in this session, and `checked` is not pruned when a row leaves the list, so
+  // counting raw `checked` would both overstate the button's blast radius and
+  // let select-all reach a row the user cannot see.
+  const selectedVisible = visible.filter(c => checked.has(c.signature));
+  const selectedCount = selectedVisible.length;
+  const allVisibleSelected = visible.length > 0 && selectedCount === visible.length;
+  // Clicking a fully-selected box clears it; anything else selects the lot.
+  const toggleAll = () => setChecked(
+    prev => nextSelectAllSelection(visible.map(c => c.signature), prev));
   const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
   const costAppliedSigs = new Set((costApplied || []).filter(r => r.state !== 'reverted').map(r => r.signature));
   const visibleCost = (costProps || []).filter(p => !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
 
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
-    loadApplied(); loadReceipts();
+    loadApplied();
   };
 
   const dismissCost = (sig) => {
@@ -7956,13 +8048,13 @@ function ReviewInboxView({ params }) {
 
   return html`
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
-    <div class="sz-note">The recurring mistakes your agent keeps repeating land here so it can relearn them. Each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
+    <div class="sz-note">Every row here is waste you are paying for more than once: a mistake your agent repeated across sessions, priced in the tokens it burned. Each row links its evidence (the sessions it recurred in) and the fix that would stop it. <b>Approve</b> writes that fix (git-committed, or backed up if the target is not a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
 
-    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${receiptsData} />
+    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${null} rollupFraming=${rollupFraming} />
 
     <div class="cur-listhead">
       <span>
-        ${relearnCount} pending · <b style="color:var(--warn)">${relearnCount}</b> recurring mistakes · <b style="color:var(--accent)">0</b> strategies
+        <b style="color:var(--warn)">${relearnCount}</b> recurring mistakes${d.estTokens ? html` · <b style="color:var(--accent)">~${fmtTokens(d.estTokens)} tok</b> recoverable <span class="estimated-tag" title="occurrences x a conservative per-turn token cost, summed across the rows below — review before applying">est.</span>` : null}
         ${d.computedAt ? html` · <span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
         ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
       </span>
@@ -7970,7 +8062,7 @@ function ReviewInboxView({ params }) {
     </div>
     <div class="cur-listbox">
       <table class="cur-table">
-        <thead><tr><th style="width:26px"></th><th>Signature</th><th>Sessions</th><th>Rung</th><th style="text-align:right">Est. savings</th><th>Status</th></tr></thead>
+        <thead><tr><th style="width:26px"><${SelectAllCheckbox} total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} /></th><th>Signature</th><th>Sessions</th><th>Rung</th><th style="text-align:right">Est. savings</th><th>Status</th></tr></thead>
         <tbody>
           ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
           ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
@@ -7981,22 +8073,22 @@ function ReviewInboxView({ params }) {
       </table>
     </div>
     <div class="cur-addbar">
-      <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
+      <button class="cur-btn" disabled=${selectedCount === 0} onClick=${dismissChecked}>${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}</button>
       <span class="dim" style="font-size:12px">${relearnCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
     </div>
 
     ${visibleCost.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers, with verified receipts once you apply one</span></div>
+      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers</span></div>
       <div style="margin-top:8px">
-        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); loadReceipts(); }} />`)}
+        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
       </div>
     ` : null}
 
     ${costApplied.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories <span class="dim" style="font-weight:400;font-size:12px">· the realized delta the loop measured after you marked each one</span></div>
-      <${CostLedgerSummary} ledger=${costLedger} />
+      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories</div>
+      <${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} onChanged=${() => { loadCost(); loadReceipts(); }} />`)}
+        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} framing=${costFraming} onChanged=${() => { loadCost(); }} />`)}
       </div>
     ` : null}
 
@@ -8004,7 +8096,7 @@ function ReviewInboxView({ params }) {
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
       <${CompoundLedgerSummary} ledger=${ledger} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${() => { loadApplied(); loadReceipts(); }} />`)}
+        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${() => { loadApplied(); }} />`)}
       </div>
     ` : null}
 

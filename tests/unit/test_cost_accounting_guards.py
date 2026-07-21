@@ -24,8 +24,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from tokenjam.core.cost import calculate_cost
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.optimize import accounting, cost_verify
+from tokenjam.core.optimize import accounting
 from tokenjam.core.optimize import runner as runner_mod
 from tokenjam.core.optimize.analyzers import (
     batch_placement,
@@ -99,10 +100,39 @@ def _backfill_spans():
             for i, c in enumerate(_CALLS)]
 
 
+def _rows_for(conn, since, until, agent_id: str) -> list[tuple]:
+    """LLM spans in ``[since, until)`` for ``agent_id``, collapsed by CALL
+    identity (``core.optimize.accounting``) — the same dedup the cost surfaces
+    rely on, so a call observed by more than one ingest path is priced once."""
+    raw = conn.execute(
+        "SELECT span_id, attributes, session_id, provider, model, "
+        "COALESCE(input_tokens,0), COALESCE(output_tokens,0), "
+        "COALESCE(cache_tokens,0), COALESCE(cache_write_tokens,0) "
+        "FROM spans WHERE start_time >= $1 AND start_time < $2 AND agent_id = $3",
+        [since, until, agent_id],
+    ).fetchall()
+    keyed = [(accounting.call_identity(r[0], r[2], r[1]), *r[2:]) for r in raw]
+    return [tuple(row[1:]) for row in accounting.dedupe_by_call_identity(keyed)]
+
+
+def _priced_usd(rows: list[tuple]) -> float:
+    """Total USD across rows, priced per-model per-token-type (both cache
+    token types included)."""
+    total = 0.0
+    for _sid, provider, model, in_tok, out_tok, cache_tok, cache_write in rows:
+        total += calculate_cost(
+            str(provider or "unknown"), str(model or ""),
+            int(in_tok or 0), int(out_tok or 0),
+            cache_read_tokens=int(cache_tok or 0),
+            cache_write_tokens=int(cache_write or 0),
+        )
+    return total
+
+
 def _priced_window(conn) -> float:
     """The dollars the cost surfaces would report for the fixture window."""
-    rows = cost_verify._rows_for(conn, WINDOW_START - timedelta(days=1), NOW, "svc-a")
-    return cost_verify._priced_usd(rows)
+    rows = _rows_for(conn, WINDOW_START - timedelta(days=1), NOW, "svc-a")
+    return _priced_usd(rows)
 
 
 def _load(db, spans):
@@ -179,7 +209,7 @@ def test_spans_without_a_call_id_keep_their_row_identity(db):
             cache_tokens=call[3], cache_write_tokens=call[4],
             start_time=WINDOW_START + timedelta(milliseconds=i * 1000),
         ))
-    rows = cost_verify._rows_for(db.conn, WINDOW_START - timedelta(days=1), NOW, "svc-a")
+    rows = _rows_for(db.conn, WINDOW_START - timedelta(days=1), NOW, "svc-a")
     assert len(rows) == len(_CALLS)
 
 
@@ -222,7 +252,7 @@ def test_dedupe_keeps_the_last_observation():
 #: is a deliberate thinking-token attribute extraction), so they are here to
 #: catch a future SQL aggregate rather than to assert one now.
 _AGGREGATE_MODULES = [
-    accounting, cost_verify, runner_mod,
+    accounting, runner_mod,
     batch_placement, budget_projection, cache_efficacy, deadweight,
     downsize_agents, model_downgrade, output_verbosity,
     prompt_bloat, subagent_rightsizing, workflow_restructure,

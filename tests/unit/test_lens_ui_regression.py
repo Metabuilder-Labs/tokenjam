@@ -2093,20 +2093,306 @@ def test_recommendations_panel_present_and_fetches_endpoint(html):
     assert "estimated_recoverable_tokens" in html
 
 
-# --- cost proposals in the Review inbox (advise-only, with receipts) ----- #
+# --- cost proposals in the Review inbox (advise-only) ---------------------- #
 def test_cost_proposals_wired_into_review_inbox(html):
     # The downsize/cache/trim analyzers surface as advise-only cost proposals in
     # the same Review inbox, fetched from the cost endpoints and rendered with a
-    # distinct `kind` badge, an estimate, and (after Mark applied) the realized
-    # delta receipt. Keep the fetch + render wiring present.
+    # distinct `kind` badge and an estimate. Keep the fetch + render wiring
+    # present.
     assert "function CostProposalCard" in html
     assert "function CostAppliedRow" in html
-    assert "function CostVerifyLine" in html
-    assert "api('/pothole/cost-proposals')" in html
-    assert "api('/pothole/cost-applied')" in html
-    assert "'/pothole/cost-proposals/apply'" in html
+    assert "api('/relearn/cost-proposals')" in html
+    assert "api('/relearn/cost-applied')" in html
+    assert "'/relearn/cost-proposals/apply'" in html
     # The card is advise-only: a marker button, never an apply-to-code write.
     assert "Mark applied" in html
     assert "Cost advisories" in html
-    # Honesty discipline (Rule 14): the realized delta is estimated / correlational.
-    assert "realized_usd_delta" in html
+
+
+def test_subagent_cost_card_has_workspace_apply_flow(html):
+    # The subagent (4th) analyzer is apply-capable: its CC-origin card routes a
+    # reversible rung-1 note through the apply-workspace endpoint (dry-run diff
+    # then write), unlike the three advise-only analyzers.
+    assert "'/relearn/cost-proposals/apply-workspace'" in html
+    assert "apply_capable" in html
+    assert "Apply note" in html
+    assert "subagent: 'subagent'" in html
+
+
+def test_relearn_example_session_links_only_when_resolvable(html):
+    # Relearn examples are sourced from transcript files on disk, so many name a
+    # session that was never ingested and 404s on the detail route. The inbox
+    # links only the resolvable ones and keeps the rest as plain evidence text.
+    assert "ex.session_resolvable" in html
+    assert (
+        "? html`<a class=\"sz-link\" href=${'#/sessions/' + ex.session_id}"
+        in html
+    )
+    # The snippet (the evidence itself) is rendered either way.
+    assert "${ex.snippet}" in html
+
+
+def test_sessions_nav_entry_present(html):
+    # The session views (Map / Approach / Timeline) were reachable only by
+    # following a link out of another screen. A sidebar entry makes them
+    # discoverable; the paramless route lands on the session list the Status
+    # view already renders, and the entry highlights while a session is open.
+    assert (
+        '<a href="#/sessions" class="nav-link" data-view="sessions" '
+        'data-lens="improve">' in html
+    )
+    assert "case 'sessions':" in html
+    assert "sessions: 'improve'" in html
+
+
+# --- receipts / cost-ledger unit hierarchy follows the server framing ------- #
+def test_receipts_tile_leads_with_tokens_when_dollars_are_suppressed(html):
+    # `verified_saved_usd` only ever counts the API-billed slice, so on a
+    # subscription-dominant corpus the tile shouted a tiny dollar figure and
+    # whispered the (complete) token one. The hierarchy is now conditional on
+    # the server's display_rule, exactly like every other cost surface.
+    start = html.index("function ReceiptsHeader")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "dollarsSuppressed(receiptsFraming || rollupFraming)" in tile
+    # Suppressed: the TOKEN figure holds the 22px hero slot...
+    assert (
+        'font-size:22px;font-weight:600;color:var(--success);margin-top:4px">'
+        "${fmtTokens(receiptsData.verified_saved_tokens)} tok"
+    ) in tile
+    # ...and the dollars drop out in favour of the server's own qualifier, the
+    # same `.qualifier` treatment the other suppressing surfaces use. We do NOT
+    # write a bespoke scoping sentence here: `verified_saved_usd` is token
+    # deltas priced at per-model list rates, not a figure scoped to API-billed
+    # sessions, so any such claim would be one the code does not support.
+    assert "${qualifier}" in tile
+    assert "of that is on API-billed traffic" not in tile
+    # Not suppressed: today's dollars-first hierarchy is untouched.
+    assert (
+        'font-size:22px;font-weight:600;color:var(--success);margin-top:4px">'
+        "${fmtUsd(receiptsData.verified_saved_usd)}"
+    ) in tile
+    # The MEASURED tag and the full breakdown (regressed included) stay put.
+    assert "measured" in tile
+    assert "${receiptsData.regressed_count} regressed" in tile
+
+
+def test_cost_ledger_summary_leads_with_tokens_when_dollars_are_suppressed(html):
+    # Same bug, same fix, in the "Applied cost advisories" ledger headline.
+    start = html.index("function CostLedgerSummary")
+    end = html.index("function CostProposalCard", start)
+    summary = html[start:end]
+    assert "dollarsSuppressed(framing)" in summary
+    assert (
+        "${suppressed ? fmtTokens(ledger.total_realized_tokens) + ' tok' "
+        ": fmtUsd(ledger.total_realized_usd)}"
+    ) in summary
+    assert "${framing.qualifier_text}" in summary
+    assert "of that is on API-billed traffic" not in summary
+    # The framing reaches it from the server payload, not a JS re-derivation.
+    assert "setCostFraming(r.framing || null)" in html
+    assert "<${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />" in html
+
+
+def test_dollars_suppressed_reads_the_server_display_rule(html):
+    # The suppress/show decision is server-side (core/framing.py); the UI reads
+    # display_rule rather than re-deriving the rule in JS.
+    assert "function dollarsSuppressed" in html
+    for rule in (
+        "'suppress_dollars_for_subscription_share'",
+        "'tokens_only'",
+        "'suppress_dollars_unknown'",
+    ):
+        assert rule in html, f"missing suppressing display_rule {rule}"
+
+
+# --- the estimated-recoverable tile: token hero + honest coverage ---------- #
+def test_estimated_recoverable_tile_leads_with_tokens_when_dollars_suppressed(html):
+    # The tile beside the measured one had the same dollars-first bug. Its token
+    # sum covers only the proposals carrying a token estimate, so the suffix
+    # must state that coverage rather than implying every open proposal.
+    start = html.index("function ReceiptsHeader")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "~${fmtTokens(rollup.estimated_recoverable_tokens)} tok" in tile
+    assert "rollupTokenScope(rollup)" in tile
+    # The estimated/measured visual distinction survives: est. chip + accent on
+    # the estimate, measured chip + success on the measurement.
+    assert 'class="estimated-tag" title=${rollup.estimate_basis}>est.' in tile
+    assert 'class="measured-tag" title=${receiptsData.estimate_basis}>measured' in tile
+    assert "color:var(--accent);margin-top:4px" in tile
+    assert "color:var(--success);margin-top:4px" in tile
+    # The framing reaches the tile from the server, not a JS re-derivation.
+    assert "setRollupFraming(r.framing || null)" in html
+    assert "rollupFraming=${rollupFraming}" in html
+
+
+def test_rollup_token_scope_states_partial_coverage(html):
+    # "M of N proposals carrying a token estimate" whenever coverage is partial;
+    # the bare count only when every deduplicated proposal contributes.
+    start = html.index("function rollupTokenScope")
+    end = html.index("function ReceiptsHeader", start)
+    fn = html[start:end]
+    assert "rollup.token_proposal_count" in fn
+    assert "rollup.deduplicated_proposal_count" in fn
+    assert "of ${total} proposals carrying a token estimate" in fn
+
+
+def test_estimated_tile_hides_when_suppressed_with_no_token_estimate(html):
+    # Dollars suppressed and no token estimate to lead with means there is
+    # nothing honest to render, so the tile hides instead of showing a zero.
+    start = html.index("function ReceiptsHeader")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert (
+        "suppressed ? (rollup.token_proposal_count || 0) > 0 "
+        ": rollup.proposal_count > 0"
+    ) in tile
+
+
+# --- Review inbox copy: cost-led, and no hardcoded zero -------------------- #
+def test_review_inbox_intro_leads_with_cost_not_the_loop(html):
+    intro = "Every row here is waste you are paying for more than once"
+    assert intro in html
+    # The loop-first phrasing is gone...
+    assert "land here so it can relearn them" not in html
+    # ...and every factual detail it carried is still stated.
+    assert "git-committed, or backed up if the target is not a git repo" in html
+    assert "you confirm the scope and target first" in html
+    assert "this browser only; it is not sent to the server" in html
+    # House style: no em dashes, and tokens are never called "quota".
+    assert "—" not in intro
+    assert "quota" not in intro.lower()
+
+
+def test_stat_line_shows_recoverable_tokens_and_drops_the_hardcoded_zero(html):
+    # The third segment was the literal `0` labelled "strategies", so it read
+    # zero for every user in every state. It now carries the recoverable-token
+    # estimate the view already fetches, tagged as an estimate.
+    assert '<b style="color:var(--accent)">0</b> strategies' not in html
+    assert "strategies" not in html
+    assert "~${fmtTokens(d.estTokens)} tok</b> recoverable" in html
+    # Sourced from the value load() already stores, not a second fetch.
+    assert "estTokens: f.estimated_recoverable_tokens" in html
+    # The duplicated pending segment (same variable as the mistake count) is gone.
+    assert "${relearnCount} pending ·" not in html
+
+
+def test_stat_line_drops_the_token_segment_when_there_is_no_estimate(html):
+    # The null path is the one nobody exercises: with no estimate the segment
+    # must disappear entirely rather than rendering "~0 tok recoverable".
+    start = html.index('<div class="cur-listhead">')
+    end = html.index("Rescan now", start)
+    head = html[start:end]
+    assert "${d.estTokens ? html`" in head
+    assert "` : null}" in head
+    assert "~0 tok" not in head
+
+
+# --- Review inbox select-all ----------------------------------------------- #
+def test_select_all_checkbox_sits_in_the_table_header_column(html):
+    # Same checkbox column and table styling as the rows it controls, not a new
+    # control bolted beside the table.
+    assert "function SelectAllCheckbox" in html
+    assert (
+        '<thead><tr><th style="width:26px"><${SelectAllCheckbox} '
+        "total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} />"
+    ) in html
+    # The per-row checkbox is untouched.
+    assert '<td><input type="checkbox" checked=${checked} onChange=${onToggle} /></td>' in html
+
+
+def test_select_all_reports_the_indeterminate_state_on_a_partial_selection(html):
+    # `indeterminate` is a DOM property with no HTML attribute, so it has to be
+    # assigned through a ref. A header box that shows plain "checked" over a
+    # partial selection invites accidental bulk actions.
+    start = html.index("function SelectAllCheckbox")
+    end = html.index("function RelearnRow", start)
+    fn = html[start:end]
+    assert "ref.current.indeterminate = selected > 0 && selected < total" in fn
+    # Fully checked only when every listed row is selected.
+    assert "const all = total > 0 && selected === total" in fn
+    assert "checked=${all}" in fn
+
+
+def test_select_all_toggles_off_when_everything_is_selected(html):
+    start = html.index("function nextSelectAllSelection")
+    end = html.index("// The table's select-all box.", start)
+    fn = html[start:end]
+    assert "if (all) next.delete(sig)" in fn
+    assert "else next.add(sig)" in fn
+    # The component delegates to it over the RENDERED row set.
+    assert (
+        "nextSelectAllSelection(visible.map(c => c.signature), prev)"
+    ) in html
+
+
+def test_select_all_applies_only_to_the_rendered_rows(html):
+    # THE load-bearing one. The list filters out locally-dismissed rows and rows
+    # approved in this session, so select-all must iterate `visible`, never the
+    # unfiltered d.clusters, or it would dismiss rows the user never saw.
+    start = html.index("const selectedVisible =")
+    end = html.index("const modalCluster =", start)
+    block = html[start:end]
+    assert "visible.filter(c => checked.has(c.signature))" in block
+    assert "visible.map(c => c.signature)" in block
+    assert "d.clusters" not in block
+    # The filter that makes `visible` a strict subset is still in place.
+    assert (
+        "const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) "
+        "&& !appliedSigs.has(c.signature))"
+    ) in html
+
+
+def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
+    # `checked` is not pruned when a row leaves the list, so dismissing the raw
+    # set would sweep along a signature that is no longer on screen.
+    start = html.index("const dismissChecked =")
+    end = html.index("const modalCluster =", start)
+    fn = html[start:end]
+    assert "visible.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
+    assert "...checked]" not in fn
+
+
+def test_dismiss_button_states_its_blast_radius(html):
+    # The action names how many rows it will act on before it fires, and counts
+    # the same scoped selection the header checkbox reports.
+    assert (
+        "disabled=${selectedCount === 0} onClick=${dismissChecked}>"
+        "${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}"
+    ) in html
+    # Not the raw, unscoped set that could overstate it.
+    assert "disabled=${checked.size === 0}" not in html
+
+
+def test_select_all_adds_no_bulk_approve(html):
+    # Dismiss is local and undone by a reload; Approve writes to disk. Exactly
+    # one bulk action exists on this table.
+    # Anchor inside ReviewInboxView: `cur-addbar` is used by other screens too.
+    view = html[html.index("function ReviewInboxView"):]
+    start = view.index('<div class="cur-addbar">')
+    end = view.index("visibleCost.length > 0", start)
+    bar = view[start:end]
+    # Exactly one button, and it is the Dismiss one. (The trailing hint text
+    # does mention Approve, pointing at the per-row flow, which is unchanged.)
+    assert bar.count("<button") == 1
+    assert "dismissChecked" in bar
+    assert "onClick=${approveChecked}" not in html
+    assert "Approve checked" not in html
+
+
+# --- no dollar figure escapes the framing, and no false basis in a comment -- #
+def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
+    # The false mechanism must not survive anywhere in the served UI, including
+    # in a comment where no test would otherwise look.
+    assert "can only ever count the API-billed slice" not in html
+    assert "reflect API traffic only" not in html
+    assert "of that is on API-billed traffic" not in html
+
+
+def test_receipts_comment_states_the_real_reason_the_units_differ(html):
+    start = html.index("// UNIT HIERARCHY is server-decided")
+    end = html.index("function ReceiptsHeader", start)
+    comment = html[start:end]
+    assert "no single model to price against" in comment
+    assert "list-price equivalent" in comment

@@ -157,13 +157,6 @@ def recompute_now(
     never blocks waiting for the other one to finish. Callers that want
     non-blocking HTTP-request behaviour should run this on a background
     thread instead (see ``trigger_background_recompute``).
-
-    Phase 3 (verify, SPEC §4 step 6): "on each rescan" is THIS pass — when
-    ``config`` is supplied, every applied (non-reverted) fix's recurrence is
-    re-measured against the same fresh ``conn`` right after the detector
-    itself recomputes, so Verify always runs on the same cadence as Detect
-    with no separate scheduler entry. ``config=None`` (e.g. an older caller)
-    just skips the verify pass — degrade, never fail the detector recompute.
     """
     if not _LOCK.acquire(blocking=False):
         return None
@@ -180,18 +173,25 @@ def recompute_now(
                 projects_root = loop_transcript_root(config)
             except Exception:
                 projects_root = None
-        finding = compute_relearn_finding(conn, projects_root=projects_root)
+        # The persistent per-file parse cache (core.transcript_cache): this
+        # background job re-scans the FULL corpus on every scheduled tick, so
+        # warming/reusing the cache here is where the recurring cost actually
+        # gets paid down across ticks, not just within one `tj optimize` run.
+        transcript_cache_dir = None
+        if config is not None:
+            try:
+                from tokenjam.core.transcript_cache import default_cache_dir
+
+                transcript_cache_dir = default_cache_dir(config)
+            except Exception:
+                transcript_cache_dir = None
+        finding = compute_relearn_finding(
+            conn, projects_root=projects_root, transcript_cache_dir=transcript_cache_dir,
+        )
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to
         # the real ~/.tj — see default_cache_path).
         result = write_cache(finding, cache_path, config=config)
-        if config is not None:
-            try:
-                from tokenjam.core.optimize import relearn_verify
-
-                relearn_verify.rescan_all(config, conn, projects_root=projects_root)
-            except Exception:
-                pass   # best-effort — a verify failure never sinks the detector's own cache write
         return result
     finally:
         _COMPUTING.clear()
