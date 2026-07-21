@@ -6,6 +6,7 @@ from typing import TypedDict
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import (
     AgentConfig,
     find_config_file,
@@ -31,17 +32,17 @@ class _BudgetRow(TypedDict):
               help="Daily budget in USD (0 = remove limit)")
 @click.option("--session", "session_usd", type=float, default=None,
               help="Per-session budget in USD (0 = remove limit)")
-@click.option("--json", "output_json", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_budget(
     ctx: click.Context,
     agent: str | None,
     daily_usd: float | None,
     session_usd: float | None,
-    output_json: bool,
+    output_json_flag: bool,
 ) -> None:
     """View or set cost budgets for agents."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     config = ctx.obj["config"]
     writing = daily_usd is not None or session_usd is not None
 

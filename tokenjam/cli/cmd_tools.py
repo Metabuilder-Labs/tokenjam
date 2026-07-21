@@ -4,6 +4,7 @@ import json
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.utils.formatting import console, make_table
 from tokenjam.utils.time_parse import parse_since
 
@@ -12,11 +13,12 @@ from tokenjam.utils.time_parse import parse_since
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("--since", default="24h", help="Time window (e.g. 1h, 7d)")
 @click.option("--name", "tool_name", default=None, help="Filter to specific tool")
-@click.option("--json", "output_json", is_flag=True)
+@json_option
 @click.pass_context
 def cmd_tools(ctx: click.Context, agent: str | None, since: str,
-              tool_name: str | None, output_json: bool) -> None:
+              tool_name: str | None, output_json_flag: bool) -> None:
     """Show tool call summary."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     agent_filter = agent or ctx.obj.get("agent")
     since_dt = parse_since(since)

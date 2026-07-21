@@ -7,6 +7,7 @@ from types import ModuleType
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.utils.formatting import console
 
 # The scenarios live at repo-root `incidents/` in the dev tree, but ship INSIDE
@@ -57,7 +58,7 @@ def _discover_scenarios() -> dict[str, ModuleType]:
 
 @click.command("demo")
 @click.argument("scenario", required=False, default=None)
-@click.option("--json", "output_json", is_flag=True, help="Output JSON instead of Rich panels")
+@json_option
 @click.option(
     "--live",
     "live",
@@ -67,7 +68,7 @@ def _discover_scenarios() -> dict[str, ModuleType]:
 )
 @click.pass_context
 def cmd_demo(
-    ctx: click.Context, scenario: str | None, output_json: bool, live: bool
+    ctx: click.Context, scenario: str | None, output_json_flag: bool, live: bool
 ) -> None:
     """Run a reproducible AI agent incident scenario.
 
@@ -77,6 +78,7 @@ def cmd_demo(
     tj demo retry-loop --json   Machine-readable output
     tj demo retry-loop --live   Also replay into a running `tj serve`
     """
+    output_json = resolve_output_json(ctx, output_json_flag)
     scenarios = _discover_scenarios()
 
     if scenario is None:

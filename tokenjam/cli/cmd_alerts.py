@@ -2,6 +2,7 @@ import json
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.models import AlertFilters, AlertType, Severity
 from tokenjam.utils.formatting import console, make_table, severity_colour
 from tokenjam.utils.time_parse import parse_since
@@ -18,7 +19,7 @@ from tokenjam.utils.time_parse import parse_since
 )
 @click.option("--type", "alert_type", default=None, help="Filter by alert type")
 @click.option("--unread", is_flag=True, help="Show only unacknowledged alerts")
-@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@json_option
 @click.pass_context
 def cmd_alerts(
     ctx: click.Context,
@@ -27,9 +28,10 @@ def cmd_alerts(
     severity: str | None,
     alert_type: str | None,
     unread: bool,
-    output_json: bool,
+    output_json_flag: bool,
 ) -> None:
     """Show alert history."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     try:
         since_dt = parse_since(since)
