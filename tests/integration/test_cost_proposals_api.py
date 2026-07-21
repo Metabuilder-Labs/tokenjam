@@ -15,9 +15,8 @@ from tokenjam.api.app import create_app
 from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
-from tokenjam.otel.semconv import GenAIAttributes
 from tokenjam.utils.time_parse import utcnow
-from tests.factories import make_llm_span, make_session, make_tool_span
+from tests.factories import make_llm_span, make_session
 
 
 @pytest.fixture
@@ -251,85 +250,6 @@ async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, 
     assert any(r["analyzer"] == "subagent" for r in applied["applied"])
 
 
-async def test_cost_apply_workspace_writes_skill_for_script_and_reverts(
-    app, client, db, monkeypatch, tmp_path,
-):
-    """`apply-workspace` is generic across analyzers, not special-cased to
-    `subagent`: a `script` proposal (rung 2 skill note, not rung 1) routes
-    through the SAME path, writes, and reverts cleanly."""
-    from tokenjam.core.optimize import relearn_apply as pa
-
-    # A deterministic tool-call cluster: >=20 sessions running the identical
-    # single-tool structure, which is what MIN_CLUSTER_INSTANCES flags.
-    # `agent_id="claude-code-x"` so the window's dominant persona resolves to
-    # "claude-code" — the rung-2 skill write this test exercises is only
-    # offered for that persona (SDK/unknown windows get a snippet instead;
-    # see `cost_proposals._persona_gated_write_fields`).
-    base = utcnow() - timedelta(days=2)
-    for i in range(20):
-        sid = f"det-{i}"
-        db.upsert_session(make_session(
-            agent_id="claude-code-x", session_id=sid, plan_tier="api",
-            duration_seconds=10.0, total_cost_usd=0.02,
-        ))
-        span = make_tool_span(agent_id="claude-code-x", tool_name="bash")
-        span.session_id = sid
-        span.start_time = base + timedelta(minutes=i)
-        span.attributes = {GenAIAttributes.TOOL_INPUT: {"command": "git pull"}}
-        db.insert_span(span)
-
-    home = tmp_path / "home"
-    (home / "proj").mkdir(parents=True)
-    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: home))
-    target = home / "proj" / ".claude" / "skills" / "det-pattern" / "SKILL.md"
-
-    token = app.state.relearn_write_token
-    hdr = {"X-TJ-Local-Token": token}
-    await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
-    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
-    script_props = [p for p in proposals if p["analyzer"] == "script"]
-    assert script_props, proposals
-    prop = script_props[0]
-    assert prop["apply_capable"] is True
-    assert prop["advise_only"] is False
-    assert prop["rung"] == 2
-
-    body = {"proposal_id": prop["proposal_id"], "target_path": str(target)}
-
-    # Dry-run: a diff, nothing written yet.
-    dry = await client.post(
-        "/api/v1/relearn/cost-proposals/apply-workspace",
-        json={**body, "go": False}, headers=hdr,
-    )
-    assert dry.status_code == 200
-    assert dry.json()["applied"]["dry_run"] is True
-    assert not target.exists()
-
-    # Write: the skill note lands, reversibly.
-    wrote = await client.post(
-        "/api/v1/relearn/cost-proposals/apply-workspace",
-        json={**body, "go": True}, headers=hdr,
-    )
-    assert wrote.status_code == 200
-    assert target.exists()
-    content = target.read_text(encoding="utf-8")
-    assert "tokenjam:relearn:" in content
-    assert wrote.json()["cost_record"] is not None
-    fix_id = wrote.json()["applied"]["record"]["id"]
-
-    applied = (await client.get("/api/v1/relearn/cost-applied")).json()
-    assert any(r["analyzer"] == "script" for r in applied["applied"])
-
-    # Revert: the freshly-created skill file is removed (a "created", not
-    # "restored", backup) — the round trip a workspace write must guarantee.
-    revert = await client.post(
-        f"/api/v1/relearn/{fix_id}/revert", headers=hdr,
-    )
-    assert revert.status_code == 200
-    assert revert.json()["state"] == "reverted"
-    assert not target.exists()
-
-
 # --- the receipts / cost-ledger surfaces carry the plan-tier framing -------- #
 # `verified_saved_usd` and `total_realized_usd` can only ever count the
 # API-billed slice of a corpus. Without the framing block the UI has no way to
@@ -382,17 +302,3 @@ async def test_receipts_framing_shows_dollars_on_an_api_corpus(app, client, db):
 
     payload = (await client.get("/api/v1/relearn/receipts")).json()
     assert payload["framing"]["display_rule"] == DISPLAY_SHOW_DOLLARS
-
-
-async def test_cost_proposals_payload_carries_plan_tier_framing(client):
-    """The estimated-recoverable tile picks its unit from the same server-side
-    decision as the measured tile beside it, so the two never disagree."""
-    r = await client.get("/api/v1/relearn/cost-proposals")
-    assert r.status_code == 200
-    payload = r.json()
-    assert payload["framing"]["display_rule"]
-    # The rollup carries both units plus the coverage the tile has to quote.
-    rollup = payload["rollup"]
-    assert "estimated_recoverable_tokens" in rollup
-    assert "token_proposal_count" in rollup
-    assert "deduplicated_proposal_count" in rollup

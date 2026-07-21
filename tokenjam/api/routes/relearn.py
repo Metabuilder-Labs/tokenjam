@@ -33,6 +33,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
+from tokenjam.core.framing import (
+    WindowSummary,
+    compute_framing,
+    plan_determination_mix,
+)
 from tokenjam.core.optimize import (
     cost_apply,
     cost_proposals as cost_proposals_mod,
@@ -80,6 +85,28 @@ def _config(request: Request):
     if config is None:
         raise HTTPException(status_code=503, detail="Server not fully initialised (config missing).")
     return config
+
+
+def _framing(request: Request) -> dict[str, Any]:
+    """Plan-tier framing block for this module's dollar-bearing payloads.
+
+    Same single compute path every other cost surface uses
+    (``core.framing.compute_framing``) so the UI never re-derives the
+    suppress-dollars-for-subscription rule in JS. The mix is
+    window-INDEPENDENT (``plan_determination_mix``, as on /status): the
+    receipts and the cost ledger are cumulative-to-date figures, not scoped
+    to a window. Degrades to the config-declared plan when the daemon has no
+    direct DB connection (e.g. a proxy), exactly as ``compute_framing``
+    already handles an empty mix.
+    """
+    db = getattr(request.app.state, "db", None)
+    conn = getattr(db, "conn", None) if db is not None else None
+    mix = plan_determination_mix(conn) if conn is not None else {}
+    framing = compute_framing(
+        _config(request),
+        WindowSummary(plan_tier_mix=mix, sessions=sum(mix.values())),
+    )
+    return framing.to_dict()
 
 
 def _conn(request: Request) -> Any | None:
@@ -414,11 +441,16 @@ def get_relearn_receipts(request: Request) -> dict[str, Any]:
     twin of the ``rollup`` field above (Component E). Combines the relearn
     ledger and the cost-verify ledger (``core.optimize.receipts``);
     read-only, no recompute triggered here — it rides the same ``/refresh``
-    cadence the two source ledgers already recompute on."""
+    cadence the two source ledgers already recompute on.
+
+    Carries the plan-tier ``framing`` block: ``verified_saved_usd`` can only
+    ever count the API-billed slice, so on a subscription-dominant corpus the
+    UI must lead with the (complete) token figure rather than the dollars."""
     config = _config(request)
     relearn_records = relearn_apply.list_applied(config)
     cost_records = cost_apply.list_applied(config)
-    return receipts.verified_saved_summary(relearn_records, cost_records)
+    summary = receipts.verified_saved_summary(relearn_records, cost_records)
+    return {**summary, "framing": _framing(request)}
 
 
 @router.post("/relearn/cost-proposals/refresh", dependencies=_WRITE_AUTH)
@@ -565,9 +597,15 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
 @router.get("/relearn/cost-applied", dependencies=[Depends(require_api_key)])
 def get_cost_applied(request: Request) -> dict[str, Any]:
     """Every applied (and reverted) cost fix, plus the realized-dollars ledger
-    summary (``cost_verify.cost_compound_ledger``)."""
+    summary (``cost_verify.cost_compound_ledger``), plus the plan-tier
+    ``framing`` block so the ledger's realized dollars are suppressed /
+    reframed for subscription users like every other cost surface."""
     applied = cost_apply.list_applied(_config(request))
-    return {"applied": applied, "ledger": cost_verify.cost_compound_ledger(applied)}
+    return {
+        "applied": applied,
+        "ledger": cost_verify.cost_compound_ledger(applied),
+        "framing": _framing(request),
+    }
 
 
 @router.post("/relearn/cost-applied/{record_id}/revert", dependencies=_WRITE_AUTH)
