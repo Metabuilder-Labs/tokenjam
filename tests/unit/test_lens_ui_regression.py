@@ -49,8 +49,67 @@ def test_downsize_section_always_renders(html):
 def test_downsize_is_first_in_optimize_order(html):
     assert (
         "const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', "
-        "'trim', 'reuse', 'subagent', 'verbosity', 'deadweight']"
+        "'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement']"
     ) in html
+
+
+# --- Batch placement card: advise-only, a price difference not recoverable tokens - #
+def _placement_branch(html: str) -> str:
+    start = html.index("} else if (name === 'placement') {")
+    end = html.index(
+        "  } else {\n    const fd = (opt.findings || {})[name];\n    if (!fd) return null;",
+        start,
+    )
+    return html[start:end]
+
+
+def test_placement_registered_in_analyzer_meta_and_order(html):
+    assert "placement:  { title: 'Batch placement'" in html
+    assert "'deadweight', 'placement']" in html
+
+
+def test_placement_section_always_renders_when_nothing_qualifies(html):
+    # Mirrors downsize's own null-slot handling (issue #126): the batch-placement
+    # analyzer drops the key from `findings` entirely rather than carrying a
+    # null-candidates finding when nothing qualifies, so the card must render its
+    # own explicit empty state instead of vanishing via the generic
+    # `if (!fd) return null` used by every other analyzer's card.
+    assert 'id="opt-placement"' in html
+    assert "No unattended, cadence-regular workloads in this window" in html
+
+
+def test_placement_never_uses_recoverable_wording(html):
+    # A batch-placement dollar figure is a PRICE difference on the SAME tokens
+    # (batch bills the same work at half rate, freeing nothing) — the card must
+    # never borrow the "estimated recoverable" wording every sibling analyzer
+    # legitimately uses (CLAUDE.md anti-pattern #22).
+    block = _placement_branch(html)
+    assert "estimated price difference" in block
+    # "estimated-tag" is the CSS class every other card's rendered "estimated
+    # recoverable" badge carries — assert on the class, not the prose string,
+    # since this branch's own explanatory comments legitimately mention the
+    # sibling wording by name.
+    assert "estimated-tag" not in block
+    assert 'class="price-diff-tag"' in block
+
+
+def test_placement_gates_dollar_figure_strictly_on_api_pricing_mode(html):
+    # The Batch API's flat discount is an api-billed lever a subscription,
+    # local, or even "unknown" plan cannot pull — gated strictly on
+    # pricing_mode === 'api' (mirroring the CLI and cost-proposals renderers),
+    # not the shared dollarsSuppressed() helper, which treats 'unknown' as
+    # NOT suppressed.
+    block = _placement_branch(html)
+    assert "framing && framing.pricing_mode === 'api'" in block
+    assert "api-billed price lever, so no dollar figure is shown for this plan" in block
+
+
+def test_placement_offers_no_apply_action(html):
+    # placement is advise-only by design (batch adoption is an architectural
+    # change in the user's own application, not a config flip) — its card
+    # renders no apply affordance of its own.
+    block = _placement_branch(html)
+    assert "<button" not in block
 
 
 # --- #127: four distinct recoverable-tile states --------------------------- #

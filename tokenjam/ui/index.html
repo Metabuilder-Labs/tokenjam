@@ -900,6 +900,15 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--info); border: 1px solid var(--info);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
+/* Distinct from .estimated-tag on purpose (CLAUDE.md anti-pattern #22, trap
+   (a)): `placement`'s dollar figure is a PRICE difference on the same
+   tokens (batch bills the same work at half rate), never tokens freed, so it
+   must never read as "estimated recoverable" like its siblings. */
+.price-diff-tag {
+  font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--info); border: 1px solid var(--info);
+  border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
+}
 a.health-tile {
   display: block; text-decoration: none; color: inherit;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -6048,9 +6057,30 @@ const ANALYZER_META = {
   verbosity:  { title: 'Verbosity',  hint: 'Sessions whose output runs high vs the per-task-shape median' },
   deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
   resend:     { title: 'Context resend', hint: 'How much of each turn re-sends context already sent in an earlier turn' },
+  placement:  { title: 'Batch placement', hint: 'Unattended, cadence-regular workloads that fit the Batch API\'s flat-rate discount' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
+
+// Fallback threshold values for the `placement` empty state, mirroring
+// analyzers/batch_placement.py's MIN_SESSIONS_FOR_CADENCE / MIN_GROUP_COST_USD
+// module defaults. Used only when the finding itself is absent from the
+// payload (nothing qualified this window) — `analyze_batch_placement` returns
+// None rather than a finding carrying the effective (possibly user-tuned via
+// [optimize] in tj.toml) values in that case, so the empty state can't read
+// the run's actual thresholds off the response the way the populated card
+// does off `fd.min_sessions_for_cadence` / `fd.min_group_cost_usd`.
+const PLACEMENT_DEFAULT_MIN_SESSIONS = 5;
+const PLACEMENT_DEFAULT_MIN_GROUP_COST_USD = 1.0;
+
+// A median inter-start gap as something a person reads at a glance — mirrors
+// cmd_optimize.py's `_cadence_phrase`, the CLI placement renderer's own helper.
+function fmtCadence(seconds) {
+  if (seconds >= 86400) return '~' + (seconds / 86400).toFixed(1) + 'd';
+  if (seconds >= 3600) return '~' + (seconds / 3600).toFixed(1) + 'h';
+  if (seconds >= 60) return '~' + Math.round(seconds / 60) + 'm';
+  return '~' + Math.round(seconds) + 's';
+}
 
 // Deep-link a recoverable-waste tile straight to its own analyzer detail card
 // on the Optimize screen (#229) — not an Analytics chart slice. The
@@ -6243,6 +6273,48 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       ${(dg.examples || []).length ? html`<div class="opt-sub">Examples</div>
         <table class="opt-table"><tbody>${dg.examples.map(ex => html`<tr><td class="mono">${(ex.trace_id || '').slice(0, 8)}…</td><td>${ex.tool_calls} tools</td><td class="mono">${ex.model}</td></tr>`)}</tbody></table>` : null}
       ${dg.caveat ? html`<div class="opt-caveat">! ${dg.caveat}</div>` : null}`;
+  } else if (name === 'placement') {
+    // Batch API placement: unattended, cadence-regular workloads whose spend
+    // could move to the Batch API's flat 50% rate. A sibling top-level branch
+    // (not the generic `(opt.findings||{})[name]` path below) because
+    // `analyze_batch_placement` drops the key from `findings` entirely rather
+    // than carrying an empty-candidates finding when nothing qualifies (see
+    // model_downgrade.py's `run()`) — same "null slot means ran, found
+    // nothing" shape as `downsize`/`opt.downgrade` just above, so it gets the
+    // same explicit empty-state treatment (issue #126) instead of vanishing
+    // via the generic `if (!fd) return null` a couple lines down.
+    const fd = (opt.findings || {})[name];
+    if (!fd) {
+      return html`<section class="opt-section" id="opt-placement">
+        <div class="opt-title">Batch placement</div>
+        <div class="opt-line dim">No unattended, cadence-regular workloads in this window <span class="dim">(≥${PLACEMENT_DEFAULT_MIN_SESSIONS} sessions on a regular cadence, ≥${fmtCost(PLACEMENT_DEFAULT_MIN_GROUP_COST_USD)} window spend)</span>. Lower <span class="mono">[optimize] min_sessions_for_cadence</span> / <span class="mono">min_group_cost_usd</span> in tj.toml to consider smaller workloads.</div>
+      </section>`;
+    }
+    // This number is a PRICE difference on the SAME tokens (batch bills the
+    // same work at half rate, freeing nothing), never tokens freed — so
+    // unlike every sibling card this branch renders its own footer line
+    // below instead of the generic "estimated recoverable" one (see
+    // `recUsd`/`recTok` suppression for this name further down), and gates
+    // the dollar figure on `pricing_mode === 'api'` exactly, not just "not
+    // suppressed" — the Batch API discount is an api-billed lever a
+    // subscription/local/unknown plan cannot pull at all, mirroring the
+    // CLI's `_render_placement` and `cost_proposals._placement_to_proposals`
+    // (CLAUDE.md anti-pattern #22). Advise-only by design: batch adoption is
+    // an architectural change (submit + poll) in the user's own application,
+    // so this card offers no apply action — the generic "fix is ready" link
+    // rendered below (data-driven off `hasProposal`) still applies, since it
+    // only ever points at the Review inbox, never an apply button.
+    const n = fd.candidates.length;
+    const isApi = framing && framing.pricing_mode === 'api';
+    body = html`
+      <div class="opt-line">${n} workload${n !== 1 ? 's' : ''} fit the batch shape <span class="dim">(regular cadence, no human turn after the first model call)</span>: <b>${fd.percent_of_window_cost}%</b> of window cost.</div>
+      <table class="opt-table"><thead><tr><th>Agent</th><th>Cadence</th><th>Tokens</th>${isApi ? html`<th>Spend → batch rate</th>` : null}</tr></thead>
+        <tbody>${fd.candidates.slice(0, 10).map(c => html`<tr><td class="mono">${c.agent_id}</td><td>${c.sessions} session${c.sessions !== 1 ? 's' : ''} every ${fmtCadence(c.median_gap_seconds)}</td><td>${fmtTokens(c.tokens)}</td>${isApi ? html`<td class="mono">${fmtCost(c.cost_usd)} → <span style="color:var(--success)">${fmtCost(c.cost_usd - c.estimated_batch_saving_usd)}</span></td>` : null}</tr>`)}</tbody></table>
+      ${fd.candidates.length > 10 ? html`<div class="opt-line dim">…and ${fd.candidates.length - 10} more.</div>` : null}
+      ${isApi && fd.estimated_recoverable_usd != null ? html`
+        <div class="opt-line" style="margin-top:8px"><span style="color:var(--success)">~${fmtCost(fd.estimated_recoverable_usd)}</span> estimated price difference over this window <span class="price-diff-tag" title=${fd.estimate_basis}>price difference</span> <span class="dim">(the same work, billed at the Batch API's flat rate)</span></div>`
+        : html`<div class="opt-line dim" style="margin-top:8px">The Batch API's discount is an api-billed price lever, so no dollar figure is shown for this plan. The workload sizes above still say how much work fits the shape.</div>`}
+      ${fd.friction ? html`<div class="opt-caveat">! ${fd.friction}</div>` : null}`;
   } else {
     const fd = (opt.findings || {})[name];
     if (!fd) return null;
@@ -6337,10 +6409,14 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
           ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     }
   }
-  // Recoverable estimate line (when present)
+  // Recoverable estimate line (when present). `placement` is excluded: its
+  // figure is a price difference, not recoverable tokens, and its own branch
+  // above renders its own footer with the "price difference" label instead
+  // (CLAUDE.md anti-pattern #22 — the generic "estimated recoverable" wording
+  // below would be dishonest for a figure that frees no tokens at all).
   const fd = name === 'downsize' ? opt.downgrade : (opt.findings || {})[name];
-  const recUsd = fd ? fd.estimated_recoverable_usd : null;
-  const recTok = fd ? fd.estimated_recoverable_tokens : null;
+  const recUsd = name === 'placement' ? null : (fd ? fd.estimated_recoverable_usd : null);
+  const recTok = name === 'placement' ? null : (fd ? fd.estimated_recoverable_tokens : null);
   const rec = (recUsd != null || recTok != null) ? fmtFramedSavings(recUsd, recTok, framing) : null;
 
   return html`<section class="opt-section" id=${'opt-' + name}>
@@ -6435,7 +6511,7 @@ function OptimizeView({ params }) {
   // own full surface in the Review inbox, summarize its own bespoke box
   // below and its own screen (SummarizeView); giving them a second,
   // thinner card here would just duplicate that richer treatment.
-  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight'];
+  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement'];
   const compFraming = st.comp ? st.comp.framing : framing;
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const waste = buildComponentWaste(st.comp, useTokens);
