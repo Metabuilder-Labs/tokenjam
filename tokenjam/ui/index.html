@@ -7593,7 +7593,9 @@ function RelearnApplyModal({ cluster, onClose, onApplied }) {
             <div class="opt-title" style="font-size:13px">Evidence — repro sessions</div>
             ${(cluster.examples || []).map((ex, i) => html`
               <div class="sz-runrow" key=${i} style="align-items:flex-start">
-                <a class="sz-link" href=${'#/sessions/' + ex.session_id} target="_blank" rel="noopener">${(ex.session_id || '').slice(0, 12)}</a>
+                ${ex.session_resolvable
+                  ? html`<a class="sz-link" href=${'#/sessions/' + ex.session_id} target="_blank" rel="noopener">${(ex.session_id || '').slice(0, 12)}</a>`
+                  : html`<span class="dim" style="font-size:12px" title="This session was read from a transcript on disk and has not been ingested, so there is no session page to open.">${(ex.session_id || '').slice(0, 12)}</span>`}
                 <span class="dim" style="font-size:12px">${ex.repo}${ex.ts ? ' · ' + ex.ts.slice(0, 16).replace('T', ' ') : ''}</span>
                 <pre class="rev-diff" style="margin:4px 0 0;white-space:pre-wrap;font-size:11.5px;flex-basis:100%">${ex.snippet}</pre>
               </div>`)}

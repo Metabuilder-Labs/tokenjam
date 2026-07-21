@@ -2120,3 +2120,16 @@ def test_subagent_cost_card_has_workspace_apply_flow(html):
     assert "apply_capable" in html
     assert "Apply note" in html
     assert "subagent: 'subagent'" in html
+
+
+def test_relearn_example_session_links_only_when_resolvable(html):
+    # Relearn examples are sourced from transcript files on disk, so many name a
+    # session that was never ingested and 404s on the detail route. The inbox
+    # links only the resolvable ones and keeps the rest as plain evidence text.
+    assert "ex.session_resolvable" in html
+    assert (
+        "? html`<a class=\"sz-link\" href=${'#/sessions/' + ex.session_id}"
+        in html
+    )
+    # The snippet (the evidence itself) is rendered either way.
+    assert "${ex.snippet}" in html

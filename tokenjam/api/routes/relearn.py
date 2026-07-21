@@ -87,6 +87,62 @@ def _conn(request: Request) -> Any | None:
     return getattr(db, "conn", None) if db is not None else None
 
 
+def _resolvable_session_ids(conn: Any | None, session_ids: list[str]) -> set[str]:
+    """Subset of `session_ids` that exist as rows in the sessions table."""
+    if conn is None or not session_ids:
+        return set()
+    placeholders = ", ".join(f"${i}" for i in range(1, len(session_ids) + 1))
+    try:
+        rows = conn.execute(
+            f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders})",
+            session_ids,
+        ).fetchall()
+    except Exception:
+        return set()
+    return {str(r[0]) for r in rows}
+
+
+def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
+    """Copy of `finding` with each cluster example stamped `session_resolvable`.
+
+    The detector sources example session ids from Claude Code transcript files
+    on disk (`<projects_root>/**/<session_id>.jsonl`), so an example can name a
+    session that was never ingested into the sessions table. Resolvability is
+    computed at read time rather than baked into the cached finding, so it also
+    covers findings stored before this field existed and stays correct as more
+    sessions get ingested. The Review inbox links only resolvable examples and
+    renders the rest as plain evidence text instead of a link to a dead page.
+    """
+    if not isinstance(finding, dict):
+        return finding
+    clusters = finding.get("clusters")
+    if not isinstance(clusters, list):
+        return finding
+    ids = sorted({
+        str(ex["session_id"])
+        for c in clusters if isinstance(c, dict)
+        for ex in (c.get("examples") or [])
+        if isinstance(ex, dict) and ex.get("session_id")
+    })
+    resolvable = _resolvable_session_ids(conn, ids)
+    return {
+        **finding,
+        "clusters": [
+            c if not isinstance(c, dict) else {
+                **c,
+                "examples": [
+                    ex if not isinstance(ex, dict) else {
+                        **ex,
+                        "session_resolvable": str(ex.get("session_id")) in resolvable,
+                    }
+                    for ex in (c.get("examples") or [])
+                ],
+            }
+            for c in clusters
+        ],
+    }
+
+
 @router.get("/relearn/proposals", dependencies=[Depends(require_api_key)])
 def get_relearn_proposals(request: Request) -> dict[str, Any]:
     """Cached relearn-detector proposals for the Review inbox.
@@ -110,7 +166,9 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
     return {
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
-        "finding": cached.get("finding"),
+        "finding": _with_example_resolvability(
+            cached.get("finding"), _conn(request)
+        ),
     }
 
 

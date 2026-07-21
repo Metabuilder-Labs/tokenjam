@@ -470,3 +470,39 @@ async def test_stored_proposals_are_listed_with_their_ids(client, stored_proposa
     assert r.status_code == 200
     clusters = r.json()["finding"]["clusters"]
     assert [c["proposal_id"] for c in clusters] == [stored_proposal]
+
+
+# --- example session ids: link only when the session actually resolves --------
+
+async def test_proposals_flag_example_sessions_that_resolve(config, db, client):
+    """Relearn examples come from transcript files on disk, so some name a
+    session that was never ingested. The route stamps each example with
+    `session_resolvable` so the inbox can avoid linking to a dead page."""
+    from tests.factories import make_session
+    from tokenjam.core.optimize import relearn_store
+    from tokenjam.core.optimize.analyzers.relearn import (
+        RelearnCluster,
+        RelearnExample,
+        RelearnFinding,
+    )
+
+    db.upsert_session(make_session(session_id="ingested-1", agent_id="claude-code-demo"))
+    cluster = RelearnCluster(
+        signature="cwd_confusion", family_key="cwd_confusion",
+        title="cwd / relative-path confusion", sessions=2, occurrences=3,
+        repos=["demo"], rung=1, scope="project",
+        proposed_fix="Verify an absolute cwd before a relative Read.",
+        examples=[
+            RelearnExample(session_id="ingested-1", repo="demo", ts=None, snippet="a"),
+            RelearnExample(session_id="transcript-only-1", repo="demo", ts=None, snippet="b"),
+        ],
+    )
+    relearn_store.write_cache(RelearnFinding(clusters=[cluster]), config=config)
+
+    resp = await client.get("/api/v1/relearn/proposals")
+    assert resp.status_code == 200
+    examples = resp.json()["finding"]["clusters"][0]["examples"]
+    flags = {e["session_id"]: e["session_resolvable"] for e in examples}
+    assert flags == {"ingested-1": True, "transcript-only-1": False}
+    # The evidence itself is never dropped, only its link.
+    assert {e["snippet"] for e in examples} == {"a", "b"}
