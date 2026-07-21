@@ -465,3 +465,44 @@ def test_eval_case_surface_avoids_em_dashes_and_the_word_quota(cfg):
     )
     assert "—" not in out
     assert "quota" not in out.lower()
+
+
+# --- the advise / apply seam, stated in the terminal too ------------------------
+
+def test_list_marks_advise_only_proposals_and_states_why(cfg):
+    _store(cfg, _advise_cluster(), _cluster())
+
+    result = _run(cfg, ["list"])
+
+    assert result.exit_code == 0, result.output
+    assert "advise-only" in result.output
+    assert "workspace fix" in result.output
+    assert "no workspace" in result.output
+
+
+def test_list_omits_the_seam_note_when_every_proposal_is_applicable(cfg):
+    _store(cfg, _cluster())
+    result = _run(cfg, ["list"])
+    assert "advise-only" not in result.output
+    assert "no workspace" not in result.output
+
+
+def test_apply_on_an_advise_only_proposal_says_why_there_is_no_target(cfg):
+    """Not "no suggested target path, pass one with --target": the detector did
+    not fail to guess a path, there is no workspace to write into at all."""
+    [pid] = _store(cfg, _advise_cluster())
+
+    result = _run(cfg, ["apply", pid])
+
+    assert result.exit_code != 0
+    assert "no workspace" in result.output
+    assert "--target" not in result.output
+
+
+def test_list_json_carries_the_flag_and_the_reason(cfg):
+    [pid] = _store(cfg, _advise_cluster())
+    payload = json.loads(_run(cfg, ["list"], output_json=True).output)
+    proposal = payload["proposals"][0]
+    assert proposal["proposal_id"] == pid
+    assert proposal["advise_only"] is True
+    assert proposal["advise_only_reason"] == relearn_proposals.ADVISE_ONLY_REASON

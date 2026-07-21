@@ -7516,7 +7516,7 @@ function RelearnRow({ cluster, checked, onToggle, onExpand }) {
         ${cluster.family_key && cluster.family_key.startsWith('distilled:') ? html` <span class="dim" style="font-size:10.5px">· distilled</span>` : null}
       </td>
       <td class="mono">${cluster.sessions}</td>
-      <td><span class="dim" style="font-size:12px">${cluster.rung} · ${RUNG_LABELS[cluster.rung] || ''}</span></td>
+      <td><span class="dim" style="font-size:12px">${cluster.advise_only ? 'advise-only' : cluster.rung + ' · ' + (RUNG_LABELS[cluster.rung] || '')}</span></td>
       <td class="mono" style="text-align:right;color:var(--accent)">~${fmtTokens(tokens)} tok <span class="estimated-tag" title="occurrences x a conservative per-turn token cost — review before applying">est.</span></td>
       <td><span class="rev-state staged">pending</span></td>
     </tr>`;
@@ -7600,7 +7600,12 @@ function RelearnApplyModal({ cluster, onClose, onApplied }) {
             ${(!cluster.examples || cluster.examples.length === 0) ? html`<div class="dim" style="font-size:12.5px">No example sessions captured.</div>` : null}
           </div>
 
-          ${!result ? html`
+          ${cluster.advise_only ? html`
+            <div class="opt-section" style="margin:0 0 6px">
+              <div class="opt-title" style="font-size:13px">No apply path <span class="dim" style="font-weight:400">· advise-only</span></div>
+              <div class="sz-note" style="margin-top:4px">${cluster.advise_only_reason || 'Every agent in this cluster is a service tokenjam has no workspace for, so there is no file to write a fix into. Apply the recommendation yourself, then measure it with tj relearn verify --otel.'}</div>
+            </div>
+          ` : !result ? html`
             <div class="opt-section" style="margin:0 0 6px">
               <div class="opt-title" style="font-size:13px">Where to write it <span class="dim" style="font-weight:400">— repo-identity is noisy; confirm before approving</span></div>
               <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
@@ -7625,7 +7630,8 @@ function RelearnApplyModal({ cluster, onClose, onApplied }) {
           ${error ? html`<div class="opt-caveat" style="color:var(--error)">${error}</div>` : null}
         </div>
         <div class="cur-modal-foot">
-          ${!result ? html`
+          ${cluster.advise_only ? html`<span class="dim" style="font-size:12px">Nothing to approve: this recommendation is yours to apply.</span>`
+            : !result ? html`
             <button class="cur-btn primary" disabled=${busy} onClick=${() => doApprove(false)}>${busy ? 'Applying…' : 'Approve →'}</button>
           ` : html`<span class="dim" style="font-size:12px">Applied. Manage enforcement/revert from the Applied section below.</span>`}
           <button class="cur-btn" style="margin-left:auto" onClick=${onClose}>Close</button>

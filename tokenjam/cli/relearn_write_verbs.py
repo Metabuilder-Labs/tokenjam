@@ -79,7 +79,7 @@ def list_cmd(ctx: click.Context) -> None:
             "inside `tj serve`; give it a pass over your sessions first.[/dim]"
         )
         return
-    table = make_table("ID", "TITLE", "SESSIONS", "RUNG", "SCOPE")
+    table = make_table("ID", "TITLE", "SESSIONS", "RUNG", "SCOPE", "APPLY")
     for p in proposals:
         table.add_row(
             str(p.get("proposal_id") or ""),
@@ -87,12 +87,17 @@ def list_cmd(ctx: click.Context) -> None:
             str(p.get("sessions") or 0),
             str(p.get("rung") or ""),
             str(p.get("scope") or ""),
+            "advise-only" if p.get("advise_only") else "workspace fix",
         )
     console.print(table)
     console.print(
         "[dim]Preview one with [bold]tj relearn apply <id>[/bold]; "
         "write it with [bold]--go[/bold].[/dim]"
     )
+    # State the seam rather than leaving the user to infer it from an apply
+    # that refuses. An advise-only proposal has no file to be written into.
+    if any(p.get("advise_only") for p in proposals):
+        console.print(f"[dim]{relearn_proposals.ADVISE_ONLY_REASON}[/dim]")
 
 
 @click.command("apply")
@@ -116,8 +121,12 @@ def apply_cmd(ctx, proposal_id, go, target_path, scope, force):
         )
     target = (target_path or stored.get("suggested_target") or "").strip()
     if not target:
+        # An advise-only proposal has no target because there is no workspace,
+        # not because the detector failed to guess one. Say which.
         raise click.ClickException(
-            "this proposal has no suggested target path. Pass one with --target."
+            relearn_proposals.ADVISE_ONLY_REASON
+            if stored.get("advise_only")
+            else "this proposal has no suggested target path. Pass one with --target."
         )
     cluster = relearn_proposals.cluster_for_apply(stored)
     try:
