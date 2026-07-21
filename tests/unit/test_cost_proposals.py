@@ -1,5 +1,5 @@
 """Unit tests for wiring the cost analyzers (downsize/cache/trim) into the
-self-improve loop as advise-only proposals with delta-verify receipts.
+self-improve loop as advise-only proposals.
 
 Fully isolated: the DB is an ``InMemoryBackend`` and every JSON ledger/store
 write is routed under ``tmp_path`` via ``cfg.storage.path`` — nothing here
@@ -13,7 +13,7 @@ import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.optimize import cost_apply, cost_verify, relearn_store
+from tokenjam.core.optimize import cost_apply, relearn_store
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
     CacheEfficacyFinding,
     CacheEfficacyRow,
@@ -159,222 +159,6 @@ def test_mark_applied_refuses_empty_signature(db, cfg):
         cost_apply.mark_applied(db, cfg, {"signature": ""})
 
 
-# --- Delta-verify: the receipts ----------------------------------------------
-
-def _seed(db, *, agent, model, input_tok, when, count=30, provider="anthropic",
-          cache_tok=0):
-    for i in range(count):
-        db.insert_span(make_llm_span(
-            agent_id=agent, provider=provider, model=model, billing_account=provider,
-            input_tokens=input_tok, output_tokens=200, cache_tokens=cache_tok,
-            session_id=f"{agent}-{when.isoformat()}-{i}",
-            start_time=when + timedelta(minutes=i),
-        ))
-
-
-def _record(analyzer, target_key, agent_id="svc-a"):
-    return {
-        "id": "rec-1", "expectation_id": "exp-1", "signature": f"cost:{analyzer}",
-        "analyzer": analyzer, "kind": "cost", "title": "t", "target_key": target_key,
-        "agent_id": agent_id, "applied_at": MARKER.isoformat(), "baseline": {},
-        "estimated_recoverable_usd": None, "estimated_recoverable_tokens": None,
-        "estimate_basis": "", "state": "applied", "verify": {},
-    }
-
-
-def test_trim_delta_improved_when_input_per_call_drops(db):
-    # pre: 10k input/call; post: 4k input/call — a real trim.
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=4_000,
-          when=MARKER + timedelta(hours=1))
-    v = cost_verify.measure_cost_delta(db.conn, _record("trim", {"agent_id": "svc-a"}), now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_tokens_delta"] > 0
-    assert v["realized_usd_delta"] > 0
-
-
-def test_trim_delta_regressed_when_no_improvement(db):
-    # pre and post identical — no movement -> regressed, not silently kept.
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=8_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=8_000,
-          when=MARKER + timedelta(hours=1))
-    v = cost_verify.measure_cost_delta(db.conn, _record("trim", {"agent_id": "svc-a"}), now=NOW)
-    assert v["verdict"] == "regressed"
-
-
-def test_cache_delta_improved_when_efficacy_rises(db):
-    # pre: mostly fresh input; post: mostly cache reads for the flagged model.
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=10_000, cache_tok=500,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=2_000, cache_tok=9_000,
-          when=MARKER + timedelta(hours=1))
-    rec = _record("cache", {"provider": "anthropic", "model": "claude-sonnet-5"})
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["post_value"] > v["pre_value"]        # efficacy rose
-
-
-def test_downsize_delta_improved_when_oversized_share_drops(db):
-    # pre: all calls on the oversized model; post: moved to the cheaper one.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=8_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=8_000,
-          when=MARKER + timedelta(hours=1))
-    rec = _record("downsize", {"models": ["claude-opus-4-8"]})
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_usd_delta"] > 0
-
-
-def test_insufficient_data_below_exposure_gate(db):
-    # Only a handful of post calls — no confident verdict.
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=4_000,
-          when=MARKER + timedelta(hours=1), count=3)
-    v = cost_verify.measure_cost_delta(db.conn, _record("trim", {"agent_id": "svc-a"}), now=NOW)
-    assert v["verdict"] == "insufficient_data"
-    assert v["realized_usd_delta"] is None
-
-
-# --- Delta-verify: deadweight (C1's "measured" receipt) -----------------------
-
-def _deadweight_target(tmp_path, *, still_present):
-    """A real on-disk config file the verify branch re-reads. ``still_present``
-    controls whether the ORIGINAL detected server entry is still there —
-    the exact still-configured re-check ``server_still_configured`` performs."""
-    import json
-    config_path = tmp_path / ".mcp.json"
-    servers = {"apollo": {}} if still_present else {}
-    config_path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
-    return {"server": "apollo", "scope": "project", "source": str(config_path)}
-
-
-def test_deadweight_delta_no_change_when_still_configured(db, tmp_path):
-    # Even with a real drop in the spans, a still-configured server must
-    # read as no_change -- the user hasn't actually removed it yet.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
-          when=MARKER + timedelta(hours=1))
-    target = _deadweight_target(tmp_path, still_present=True)
-    rec = _record("deadweight", target, agent_id="svc-a")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "no_change"
-    assert v["realized_usd_delta"] is None
-    assert v["realized_tokens_delta"] is None
-    assert "still appears in its configured set" in v["reason"]
-
-
-def test_deadweight_delta_measured_drop_when_removed(db, tmp_path):
-    # pre: 10k input tok/session; post (server removed): 2k input tok/session.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
-          when=MARKER + timedelta(hours=1))
-    target = _deadweight_target(tmp_path, still_present=False)
-    rec = _record("deadweight", target, agent_id="svc-a")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_tokens_delta"] > 0
-    assert v["realized_usd_delta"] > 0
-
-
-def test_deadweight_delta_regressed_when_removed_but_no_drop(db, tmp_path):
-    # Removed from config, but per-session input tokens didn't actually
-    # fall -- must surface as regressed, never silently kept as a win.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=8_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=8_000,
-          when=MARKER + timedelta(hours=1))
-    target = _deadweight_target(tmp_path, still_present=False)
-    rec = _record("deadweight", target, agent_id="svc-a")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "regressed"
-
-
-def test_deadweight_delta_insufficient_when_removed_but_thin_exposure(db, tmp_path):
-    # Removed from config, but too few post-marker calls for a confident verdict.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
-          when=MARKER + timedelta(hours=1), count=3)
-    target = _deadweight_target(tmp_path, still_present=False)
-    rec = _record("deadweight", target, agent_id="svc-a")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "insufficient_data"
-    assert v["realized_usd_delta"] is None
-    assert v["realized_tokens_delta"] is None
-
-
-def test_verify_record_writes_ledger_and_outcome(db, cfg):
-    from tokenjam.core.loop import create_expectation, list_expectation_runs
-
-    exp = create_expectation(db, name="trim svc-a", agent_id="svc-a")
-    rec = _record("trim", {"agent_id": "svc-a"})
-    rec["expectation_id"] = exp.expectation_id
-    # Persist the record so set_verify can find it.
-    from tokenjam.core.optimize.cost_apply import _write_ledger
-    _write_ledger(cfg, [rec])
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=4_000,
-          when=MARKER + timedelta(hours=1))
-
-    v = cost_verify.verify_record(db, cfg, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    # Outcome written to the loop's fix-history ledger.
-    runs = list_expectation_runs(db, exp.expectation_id)
-    assert len(runs) == 1
-    assert runs[0].outcome == "pass"
-    # And persisted onto the record.
-    stored = cost_apply.get_applied(cfg, "rec-1")
-    assert stored["verify"]["verdict"] == "improved"
-
-
-def test_cost_compound_ledger_sums_realized_dollars():
-    records = [
-        {"state": "applied", "verify": {"verdict": "improved",
-         "realized_usd_delta": 0.5, "realized_tokens_delta": 1000}},
-        {"state": "applied", "verify": {"verdict": "regressed",
-         "realized_usd_delta": 0.0}},
-        {"state": "reverted", "verify": {"verdict": "improved",
-         "realized_usd_delta": 9.9}},   # reverted never counts
-        {"state": "applied", "verify": {"verdict": "insufficient_data"}},
-    ]
-    ledger = cost_verify.cost_compound_ledger(records)
-    assert ledger["total_realized_usd"] == 0.5
-    assert ledger["improved_count"] == 1
-    assert ledger["regressed_count"] == 1
-    assert ledger["insufficient_data_count"] == 1
-    assert ledger["verified_count"] == 3
-
-
-def test_cost_compound_ledger_no_change_bucket_sums_to_verified():
-    # A no_change record (deadweight: server still configured) must land in
-    # its own named bucket, not just inflate verified_count with nowhere to
-    # go -- the named buckets must always add back up to verified_count.
-    records = [
-        {"state": "applied", "verify": {"verdict": "improved",
-         "realized_usd_delta": 0.5, "realized_tokens_delta": 1000}},
-        {"state": "applied", "verify": {"verdict": "no_change"}},
-        {"state": "applied", "verify": {"verdict": "no_change"}},
-        {"state": "applied", "verify": {"verdict": "regressed",
-         "realized_usd_delta": 0.0}},
-        {"state": "applied", "verify": {"verdict": "insufficient_data"}},
-    ]
-    ledger = cost_verify.cost_compound_ledger(records)
-    assert ledger["no_change_count"] == 2
-    assert ledger["verified_count"] == 5
-    assert (
-        ledger["improved_count"] + ledger["no_change_count"]
-        + ledger["regressed_count"] + ledger["insufficient_data_count"]
-        == ledger["verified_count"]
-    )
-
-
 # --- Store: cost proposals share the relearn cache file ----------------------
 
 def test_store_cost_and_relearn_coexist_without_clobber(tmp_path):
@@ -489,8 +273,25 @@ def test_deadweight_proposal_shape_and_fields():
     assert p.target_key == {"server": "apollo", "scope": "project", "source": "/repo/.mcp.json"}
     assert p.baseline["example_sessions"] == ["s0", "s1", "s2"]
     assert p.estimated_recoverable_tokens == 225_000
-    assert p.estimated_recoverable_usd is None  # tokens-only, never a stacked $ guess
+    # The base fixture's server carries no priced model -- the adapter must
+    # never invent a rate, so the card stays tokens-only for this server.
+    assert p.estimated_recoverable_usd is None
     assert "claude mcp remove apollo --scope project" in p.suggestion
+
+
+def test_deadweight_proposal_carries_priced_usd_from_server():
+    """When the analyzer priced the tax (a model was observed across the
+    server's sessions), the adapter must carry that $ figure straight
+    through -- never recompute or invent a rate of its own."""
+    from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
+    server = _dead_server(
+        priced_model="claude-opus-4-8",
+        estimated_tax_usd_per_session=0.125,
+        estimated_tax_usd_90d=1.40625,
+    )
+    p = _deadweight_to_proposals(_deadweight_finding(dead_servers=[server]))[0]
+    assert p.estimated_recoverable_usd == 1.40625
+    assert p.baseline["priced_model"] == "claude-opus-4-8"
 
 
 def test_deadweight_proposal_notes_deferred_sessions_in_evidence():
@@ -599,7 +400,7 @@ def _workflow_finding(clusters=None, **overrides):
 
 def test_script_proposal_shape_and_apply_fields():
     from tokenjam.core.optimize.cost_proposals import _script_to_proposals
-    props = _script_to_proposals(_workflow_finding())
+    props = _script_to_proposals(_workflow_finding(), persona="claude-code")
     assert len(props) == 1
     p = props[0]
     assert p.kind == "cost"
@@ -679,7 +480,7 @@ def _reuse_finding(clusters=None, **overrides):
 
 def test_reuse_proposal_shape_and_apply_fields():
     from tokenjam.core.optimize.cost_proposals import _reuse_to_proposals
-    props = _reuse_to_proposals(_reuse_finding())
+    props = _reuse_to_proposals(_reuse_finding(), persona="claude-code")
     assert len(props) == 1
     p = props[0]
     assert p.kind == "cost"
@@ -727,7 +528,7 @@ def _verbosity_finding(**overrides):
 
 def test_verbosity_proposal_shape_and_apply_fields():
     from tokenjam.core.optimize.cost_proposals import _verbosity_to_proposals
-    props = _verbosity_to_proposals(_verbosity_finding())
+    props = _verbosity_to_proposals(_verbosity_finding(), persona="claude-code")
     assert len(props) == 1
     p = props[0]
     assert p.kind == "cost"
@@ -770,32 +571,150 @@ def test_script_reuse_verbosity_wired_into_cost_analyzers_and_report_adapter():
     assert {"script", "reuse", "verbosity"} <= analyzers
 
 
-def _seed_sub(db, *, model, when, count=30, provider="anthropic"):
-    for i in range(count):
-        db.insert_span(make_llm_span(
-            agent_id="claude-code-x", provider=provider, model=model,
-            billing_account=provider, input_tokens=8000, output_tokens=200,
-            session_id=f"{model}-{when.isoformat()}-{i}", sub_agent_id="sa1",
-            start_time=when + timedelta(minutes=i),
-        ))
+# --- Persona-gated fix modality (script / reuse / verbosity only) -----------
+#
+# These three analyzers' only apply path is a rung-1 CLAUDE.md note or rung-2
+# .claude/skills/<slug>/SKILL.md — an artifact nothing in an SDK service's
+# request path ever reads. An "sdk"/"unknown" persona must never see
+# apply_capable=True for them; the identical recommendation must still reach
+# them as a copy-pasteable `suggestion`. A "claude-code" window must be
+# byte-identical to before this gating existed.
+
+def _script_finding_for_persona_tests():
+    return _workflow_finding()
 
 
-def test_subagent_delta_improved_when_fanout_moves_off_oversized_model(db):
-    # pre: subagent fan-out on opus; post: moved to sonnet.
-    _seed_sub(db, model="claude-opus-4-8", when=MARKER - timedelta(hours=40))
-    _seed_sub(db, model="claude-sonnet-5", when=MARKER + timedelta(hours=1))
-    # main-thread opus post-marker must NOT count (subagent-scoped metric).
-    for i in range(10):
-        db.insert_span(make_llm_span(
-            agent_id="claude-code-x", model="claude-opus-4-8", input_tokens=8000,
-            output_tokens=200, session_id=f"main-{i}",
-            start_time=MARKER + timedelta(hours=1, minutes=i),
-        ))
-    rec = _record("subagent", {"models": ["claude-opus-4-8"], "subagent": True}, agent_id="")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_usd_delta"] > 0
-    assert v["post_value"] == 0.0        # no post-marker subagent spend on opus
+def _reuse_finding_for_persona_tests():
+    return _reuse_finding()
+
+
+def _verbosity_finding_for_persona_tests():
+    return _verbosity_finding()
+
+
+@pytest.mark.parametrize("adapter_name,finder", [
+    ("_script_to_proposals", _script_finding_for_persona_tests),
+    ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
+    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
+])
+def test_sdk_persona_gets_snippet_not_write(adapter_name, finder):
+    """An sdk-persona window: no write offered, but the exact same
+    recommendation lands in `suggestion` so the card isn't left inert."""
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(finder(), persona="sdk")
+    assert len(props) == 1
+    p = props[0]
+    assert p.apply_capable is False
+    assert p.advise_only is True
+    assert p.rung == 0
+    assert p.scope == ""
+    assert p.proposed_fix == ""
+    assert p.suggestion  # the recommendation still reaches the sdk user
+    assert p.suggestion == p.advise_text
+
+
+@pytest.mark.parametrize("adapter_name,finder", [
+    ("_script_to_proposals", _script_finding_for_persona_tests),
+    ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
+    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
+])
+def test_unknown_persona_is_gated_same_as_sdk(adapter_name, finder):
+    """"unknown" (no session in the window carries an identifiable agent_id,
+    and no declared plan settles it) is exactly the shape of a pure-SDK
+    caller who never ran `tj onboard` — the failure mode this gating exists
+    to close. Grouped with "sdk", matching
+    `cmd_optimize._render_downgrade_cta`'s CTA."""
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(finder(), persona="unknown")
+    assert len(props) == 1
+    p = props[0]
+    assert p.apply_capable is False
+    assert p.advise_only is True
+    assert p.suggestion == p.advise_text
+
+    # The default persona (no explicit kwarg) must resolve exactly the same
+    # way — a caller that doesn't know the persona must never fall back to
+    # assuming claude-code.
+    default_props = adapter(finder())
+    assert default_props[0].apply_capable is False
+    assert default_props[0].advise_only is True
+
+
+@pytest.mark.parametrize("adapter_name,finder", [
+    ("_script_to_proposals", _script_finding_for_persona_tests),
+    ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
+    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
+])
+def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name, finder):
+    """The exact fields these analyzers produced before persona gating
+    existed: apply_capable/advise_only unchanged, and no `suggestion` is
+    invented for a persona that already gets the real write."""
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(finder(), persona="claude-code")
+    assert len(props) == 1
+    p = props[0]
+    assert p.advise_only is False
+    assert p.apply_capable is True
+    assert p.rung in (1, 2)
+    assert p.scope == "project"
+    assert p.proposed_fix
+    assert p.suggestion == ""  # unchanged from before this gating existed
+
+
+@pytest.mark.parametrize("adapter_name,finder", [
+    ("_script_to_proposals", _script_finding_for_persona_tests),
+    ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
+    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
+])
+def test_mixed_persona_offers_the_write_and_the_snippet(adapter_name, finder):
+    """"mixed": both audiences are meaningfully represented and a single
+    finding isn't attributable to one side or the other, so — mirroring
+    `_render_downgrade_cta`'s "mixed shows both" precedent — the write stays
+    on offer AND the identical text is carried as `suggestion` so the sdk
+    share of the mix isn't left with a card that looks actionable for them
+    but silently isn't."""
+    import tokenjam.core.optimize.cost_proposals as cp
+    adapter = getattr(cp, adapter_name)
+    props = adapter(finder(), persona="mixed")
+    assert len(props) == 1
+    p = props[0]
+    assert p.apply_capable is True
+    assert p.advise_only is False
+    assert p.proposed_fix
+    assert p.suggestion == p.advise_text
+
+
+def test_cost_proposals_from_report_reads_persona_off_the_report():
+    """`cost_proposals_from_report` must never take the caller's word for the
+    persona out-of-band — it reads `report.persona`, the single field
+    `runner.build_report` populates once (see `AnalyzerContext.persona`)."""
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    rep = _report()
+    rep.findings["script"] = _workflow_finding()
+    rep.findings["reuse"] = _reuse_finding()
+    rep.findings["verbosity"] = _verbosity_finding()
+
+    rep.persona = "sdk"
+    by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
+    for name in ("script", "reuse", "verbosity"):
+        assert by_analyzer[name].apply_capable is False
+        assert by_analyzer[name].suggestion
+
+    rep.persona = "claude-code"
+    by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
+    for name in ("script", "reuse", "verbosity"):
+        assert by_analyzer[name].apply_capable is True
+
+    # A report with no persona set at all (e.g. hand-built, pre-gating test
+    # code) defaults to "unknown" -> the fail-safe, not "claude-code".
+    rep.persona = "unknown"
+    by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
+    for name in ("script", "reuse", "verbosity"):
+        assert by_analyzer[name].apply_capable is False
 
 
 # --- Component E: the estimated-recoverable rollup --------------------------
@@ -921,3 +840,70 @@ def test_rollup_mixed_none_and_real_estimates_across_analyzers():
     assert by_analyzer["cache"]["count"] == 1     # only the real-valued cache card
     assert by_analyzer["cache"]["usd"] == 1.5
     assert "deadweight" not in by_analyzer        # its only card was None-only
+
+
+# --- Component E: the token sum and its coverage ---------------------------
+
+def test_rollup_sums_tokens_independently_of_the_dollar_estimate():
+    # The two estimates are populated by different analyzers, so a proposal can
+    # carry either alone. Folding tokens in only where a dollar figure also
+    # exists would understate the headline the suppressed-dollars path leads
+    # with — here that would report 900 instead of the true 1400.
+    proposals = [
+        {"signature": "a", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0, "estimated_recoverable_tokens": 900},
+        {"signature": "b", "analyzer": "cache", "title": "t2",
+         "estimated_recoverable_tokens": 500},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_tokens"] == 1400
+    assert rollup["token_proposal_count"] == 2
+    assert rollup["deduplicated_proposal_count"] == 2
+    # The dollar sum still counts only the dollar-bearing proposal.
+    assert rollup["estimated_recoverable_usd"] == 3.0
+    assert rollup["proposal_count"] == 1
+
+
+def test_rollup_reports_partial_token_coverage_rather_than_implying_all():
+    # Two of three proposals carry no token estimate. The sum is a floor, and
+    # token_proposal_count vs deduplicated_proposal_count is what lets the tile
+    # say so instead of claiming coverage it does not have.
+    proposals = [
+        {"signature": "a", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0, "estimated_recoverable_tokens": 900},
+        {"signature": "b", "analyzer": "cache", "title": "t2",
+         "estimated_recoverable_usd": 1.0},
+        {"signature": "c", "analyzer": "trim", "title": "t3",
+         "estimated_recoverable_usd": 2.0},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_tokens"] == 900
+    assert rollup["token_proposal_count"] == 1
+    assert rollup["deduplicated_proposal_count"] == 3
+    assert "1 of 3" in rollup["estimate_basis"]
+    assert "floor, not a total" in rollup["estimate_basis"]
+
+
+def test_rollup_token_sum_dedupes_by_signature_too():
+    proposals = [
+        {"signature": "a", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_tokens": 900},
+        {"signature": "a", "analyzer": "downsize", "title": "t1-stale",
+         "estimated_recoverable_tokens": 900},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_tokens"] == 900
+    assert rollup["token_proposal_count"] == 1
+
+
+def test_rollup_with_no_token_estimates_reports_zero_coverage():
+    # Nothing to lead with when dollars are suppressed; the tile hides rather
+    # than rendering a zero, so the counts must make that state distinguishable.
+    proposals = [
+        {"signature": "a", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["estimated_recoverable_tokens"] == 0
+    assert rollup["token_proposal_count"] == 0
+    assert "floor, not a total" not in rollup["estimate_basis"]

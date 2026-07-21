@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from tokenjam.core.config import TjConfig
+from tokenjam.core.framing import agent_persona_mix, config_declared_plan, dominant_persona
 from tokenjam.utils.time_parse import utcnow
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
 from tokenjam.core.optimize.types import (
@@ -118,7 +119,15 @@ def build_report(
     summary = summarize_window(conn, since, until, agent_id=agent_id)
     window_days = max(summary.days, 1.0 / 86400.0)
 
-    report = OptimizeReport(window=summary)
+    # Dominant persona for this window, computed exactly once — see
+    # `AnalyzerContext.persona` / `OptimizeReport.persona`. Same functions
+    # (`agent_persona_mix` / `dominant_persona`) the CLI uses for its own
+    # persona-dependent CTA (`cmd_optimize._render_downgrade_cta`); this is
+    # not a second classifier, just a second place that needed the answer.
+    agent_mix = agent_persona_mix(conn, since, until, agent_id=agent_id)
+    persona = dominant_persona(agent_mix, declared_plan=config_declared_plan(config))
+
+    report = OptimizeReport(window=summary, persona=persona)
     if summary.thin_data:
         report.notes.append(
             "Window contains less than ~1 week of activity — projections shown "
@@ -136,6 +145,7 @@ def build_report(
         report=report,
         budget_provider_filter=budget_provider_filter,
         budget_usd_override=budget_usd_override,
+        persona=persona,
     )
 
     selected = set(findings) if findings is not None else set(ANALYZER_REGISTRY.keys())
@@ -306,6 +316,7 @@ def report_from_dict(d: dict) -> OptimizeReport:
         budgets=budgets,
         notes=list(d.get("notes") or []),
         findings=findings,
+        persona=str(d.get("persona", "unknown")),
     )
 
 
