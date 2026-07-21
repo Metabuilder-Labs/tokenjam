@@ -20,6 +20,7 @@ from tokenjam.core.model_tiers import is_premium_tier
 from tokenjam.core.optimize.analyzers.batch_placement import (
     MIN_GROUP_COST_USD,
     MIN_SESSIONS_FOR_CADENCE,
+    BatchPlacementFinding,
     analyze_batch_placement,
 )
 from tokenjam.core.optimize.analyzers.downsize_agents import (
@@ -386,23 +387,35 @@ def run(ctx: AnalyzerContext) -> None:
     it under ``findings['placement']``. It stays a check rather than its own
     registered analyzer so the placement card ships without a new analyzer name
     on the CLI.
+
+    ``findings['placement']`` is ALWAYS set, even when nothing qualifies:
+    ``analyze_batch_placement`` returns ``None`` in that case (its own
+    "return None rather than an empty finding" contract), so this wraps that
+    into an empty ``BatchPlacementFinding`` carrying the effective thresholds.
+    Without this, the key was simply absent from ``findings`` whenever no
+    workload qualified, which made every renderer's own "nothing qualified"
+    empty-state branch unreachable dead code.
     """
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
     )
     optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_sessions_for_cadence = getattr(
+        optimize_cfg, "min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE,
+    )
+    min_group_cost_usd = getattr(
+        optimize_cfg, "min_group_cost_usd", MIN_GROUP_COST_USD,
+    )
     placement = analyze_batch_placement(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
         ctx.summary.total_cost_usd or 0.0,
-        min_sessions_for_cadence=getattr(
-            optimize_cfg, "min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE,
-        ),
-        min_group_cost_usd=getattr(
-            optimize_cfg, "min_group_cost_usd", MIN_GROUP_COST_USD,
-        ),
+        min_sessions_for_cadence=min_sessions_for_cadence,
+        min_group_cost_usd=min_group_cost_usd,
     )
-    if placement is not None:
-        ctx.report.findings["placement"] = placement
+    ctx.report.findings["placement"] = placement or BatchPlacementFinding(
+        min_sessions_for_cadence=min_sessions_for_cadence,
+        min_group_cost_usd=min_group_cost_usd,
+    )
 
 
 # ---------------------------------------------------------------------------

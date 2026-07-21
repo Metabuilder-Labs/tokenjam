@@ -95,6 +95,15 @@ class BatchPlacementFinding:
     # hardcodes a number that could be stale against the user's own config.
     min_sessions_for_cadence: int   = MIN_SESSIONS_FOR_CADENCE
     min_group_cost_usd:       float = MIN_GROUP_COST_USD
+    # Recoverable-savings contract addendum: `estimated_recoverable_usd` here is
+    # a PRICE difference on the same tokens (the Batch API bills the same work
+    # at a flat half rate; it frees zero tokens), never a genuine token
+    # reduction. Generic recoverable-waste collectors (e.g.
+    # api/routes/cost.py's `_collect_recoverable`) read this flag to exclude
+    # the finding from a "recoverable" overlay without a name-based special
+    # case, so a future price-difference-only analyzer gets the same
+    # treatment for free by setting this on its own finding.
+    is_price_difference:     bool  = True
 
 
 def gap_coefficient_of_variation(starts: list[datetime]) -> float | None:

@@ -251,6 +251,53 @@ async def test_components_empty_window_is_safe():
     assert "framing" in d
 
 
+def _seed_placement_candidate(db, *, agent_id="nightly", count=6, gap_hours=6.0, cost_usd=2.0):
+    """Cadence-regular, unattended sessions (no human turn after the first
+    model call) that satisfy analyzers.batch_placement's shape — used to prove
+    a real, non-empty placement finding still never leaks into
+    `/cost/components`'s recoverable overlay."""
+    now = utcnow()
+    for i in range(count):
+        db.insert_span(make_llm_span(
+            agent_id=agent_id, model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=2_000, output_tokens=500, cache_tokens=100,
+            cache_write_tokens=50, cost_usd=cost_usd,
+            session_id=f"{agent_id}-{i}",
+            start_time=now - timedelta(days=10) + timedelta(hours=gap_hours * i),
+        ))
+
+
+@pytest.mark.asyncio
+async def test_components_excludes_placement_price_difference_from_recoverable():
+    """`placement`'s dollar figure is a PRICE difference on the same tokens
+    (the Batch API bills the same work at a flat half rate, freeing nothing),
+    never tokens freed. Even when a real candidate qualifies (a positive
+    estimated_recoverable_usd, same shape as every other recoverable finding),
+    it must never appear in the component-waste chart's recoverable overlay."""
+    from tokenjam.core.optimize.analyzers.batch_placement import analyze_batch_placement
+    from tokenjam.utils.time_parse import parse_since
+
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed_downsize_and_cache(db)
+    _seed_placement_candidate(db)
+
+    # Sanity: placement really does find a candidate over this window,
+    # otherwise the assertion below would pass for the wrong reason.
+    since_dt = parse_since("30d")
+    finding = analyze_batch_placement(db.conn, since_dt, utcnow(), None, 999.0)
+    assert finding is not None
+    assert finding.estimated_recoverable_usd
+
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost/components?since=30d")).json()
+    rec = {r["analyzer"] for r in d["recoverable"]}
+    assert "placement" not in rec
+    # Other analyzers still surface — the exclusion isn't a blanket failure.
+    assert rec, "excluding placement must not silence every other analyzer"
+
+
 @pytest.mark.asyncio
 async def test_components_never_invokes_the_full_corpus_relearn_scan(monkeypatch):
     """`/cost/components` must not run `relearn`: its own docstring says HTTP

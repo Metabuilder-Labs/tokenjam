@@ -275,6 +275,14 @@ def _collect_recoverable(report) -> list[dict]:
     (Rule 14) and the component its savings act on. Only positive estimates are
     surfaced (a None/0 estimate is "nothing to recover", not an overlay bar).
 
+    A finding whose `is_price_difference` is True (e.g. `placement`: the Batch
+    API bills the same work at a flat half rate and frees zero tokens) is
+    excluded entirely rather than folded into "recoverable" — a price
+    difference on the same tokens is not waste this overlay can honestly call
+    recoverable. Reads the flag off the finding itself (default False when
+    absent) so a future price-difference-only analyzer is excluded
+    automatically, with no name check added here.
+
     Returned biggest-first (by USD, then tokens) so a caller can render "largest
     opportunity + N more" without re-deriving the order — and so index 0 is
     always the entry `largest_recoverable_*` below is drawn from."""
@@ -282,6 +290,8 @@ def _collect_recoverable(report) -> list[dict]:
 
     def add(name: str, finding) -> None:
         if finding is None:
+            return
+        if getattr(finding, "is_price_difference", False):
             return
         usd = getattr(finding, "estimated_recoverable_usd", None)
         tok = getattr(finding, "estimated_recoverable_tokens", None)
@@ -346,8 +356,11 @@ async def get_cost_components(
     / cache-write. The overlay is each analyzer's *estimated recoverable* waste —
     registry-driven, carrying the analyzer's own caveat verbatim. "Estimated
     recoverable" is never conflated with the measured cost and never called
-    "saved" (Critical Rule 14). Every figure routes through the framing block so
-    subscription/local users see token-share, not raw dollars."""
+    "saved" (Critical Rule 14). A finding that is a price difference on the
+    same tokens rather than tokens freed (`placement`) is excluded from the
+    overlay entirely by `_collect_recoverable`, not just relabeled. Every
+    figure routes through the framing block so subscription/local users see
+    token-share, not raw dollars."""
     db = request.app.state.db
     config = request.app.state.config
     since_dt = parse_since(since) if since else None

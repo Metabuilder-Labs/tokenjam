@@ -22,6 +22,7 @@ class _FakeFinding:
     estimated_recoverable_tokens: int | None
     estimate_basis: str = ""
     caveat: str = ""
+    is_price_difference: bool = False
 
 
 @dataclass
@@ -44,6 +45,25 @@ def test_collect_recoverable_sorted_biggest_first():
     out = _collect_recoverable(report)
     assert [r["analyzer"] for r in out] == ["trim", "reuse", "cache"]
     assert [r["estimated_recoverable_usd"] for r in out] == [50.0, 20.0, 5.0]
+
+
+def test_collect_recoverable_excludes_price_difference_findings():
+    """A finding that is a PRICE difference on the same tokens (batch bills
+    the same work at a flat rate, freeing nothing) must never be folded into
+    the "recoverable" overlay alongside findings that genuinely free tokens,
+    even though it carries the same estimated_recoverable_usd/_tokens fields."""
+    report = _FakeReport(
+        downgrade=None,
+        findings={
+            "cache": _FakeFinding(estimated_recoverable_usd=5.0, estimated_recoverable_tokens=100),
+            "placement": _FakeFinding(
+                estimated_recoverable_usd=50.0, estimated_recoverable_tokens=200,
+                is_price_difference=True,
+            ),
+        },
+    )
+    out = _collect_recoverable(report)
+    assert [r["analyzer"] for r in out] == ["cache"]
 
 
 def test_collect_recoverable_ties_broken_by_tokens():

@@ -6062,17 +6062,6 @@ const ANALYZER_META = {
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
 
-// Fallback threshold values for the `placement` empty state, mirroring
-// analyzers/batch_placement.py's MIN_SESSIONS_FOR_CADENCE / MIN_GROUP_COST_USD
-// module defaults. Used only when the finding itself is absent from the
-// payload (nothing qualified this window) — `analyze_batch_placement` returns
-// None rather than a finding carrying the effective (possibly user-tuned via
-// [optimize] in tj.toml) values in that case, so the empty state can't read
-// the run's actual thresholds off the response the way the populated card
-// does off `fd.min_sessions_for_cadence` / `fd.min_group_cost_usd`.
-const PLACEMENT_DEFAULT_MIN_SESSIONS = 5;
-const PLACEMENT_DEFAULT_MIN_GROUP_COST_USD = 1.0;
-
 // A median inter-start gap as something a person reads at a glance — mirrors
 // cmd_optimize.py's `_cadence_phrase`, the CLI placement renderer's own helper.
 function fmtCadence(seconds) {
@@ -6181,8 +6170,13 @@ function classifyFinding(name, fd, skipped) {
   if (fd && fd.enabled === false) {
     return { state: 'not_ready', hint: fd.hint || (ANALYZER_META[name] || {}).hint };
   }
-  const usd = fd ? fd.estimated_recoverable_usd : null;
-  const tokens = fd ? fd.estimated_recoverable_tokens : null;
+  // A price difference on the same tokens (e.g. `placement`: the Batch API
+  // bills the same work at a flat half rate, freeing nothing) is not
+  // recoverable waste — never surface it as an "actionable" $ tile here.
+  // Registry-driven off the finding's own flag, not a name check, so a
+  // future price-difference-only analyzer is excluded automatically.
+  const usd = (fd && !fd.is_price_difference) ? fd.estimated_recoverable_usd : null;
+  const tokens = (fd && !fd.is_price_difference) ? fd.estimated_recoverable_tokens : null;
   if (usd != null && usd > 0) {
     return { state: 'actionable', usd, tokens, basis: fd.estimate_basis || '' };
   }
@@ -6276,18 +6270,23 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
   } else if (name === 'placement') {
     // Batch API placement: unattended, cadence-regular workloads whose spend
     // could move to the Batch API's flat 50% rate. A sibling top-level branch
-    // (not the generic `(opt.findings||{})[name]` path below) because
-    // `analyze_batch_placement` drops the key from `findings` entirely rather
-    // than carrying an empty-candidates finding when nothing qualifies (see
-    // model_downgrade.py's `run()`) — same "null slot means ran, found
-    // nothing" shape as `downsize`/`opt.downgrade` just above, so it gets the
-    // same explicit empty-state treatment (issue #126) instead of vanishing
-    // via the generic `if (!fd) return null` a couple lines down.
+    // (not the generic `(opt.findings||{})[name]` path below) because it
+    // needs its own empty-state copy and its own "price difference" footer
+    // (below) instead of the generic "estimated recoverable" one. `fd` is
+    // always present: model_downgrade.py's `run()` populates
+    // `findings['placement']` unconditionally, with an empty `candidates`
+    // list and the run's effective thresholds when nothing qualified, so the
+    // empty state below reads `fd.min_sessions_for_cadence` /
+    // `fd.min_group_cost_usd` off the response rather than a hardcoded
+    // fallback that could drift from the Python defaults. The `!fd` guard
+    // stays only as a defensive fallback against an older server payload.
     const fd = (opt.findings || {})[name];
-    if (!fd) {
+    if (!fd) return null;
+    const n = fd.candidates.length;
+    if (n === 0) {
       return html`<section class="opt-section" id="opt-placement">
         <div class="opt-title">Batch placement</div>
-        <div class="opt-line dim">No unattended, cadence-regular workloads in this window <span class="dim">(≥${PLACEMENT_DEFAULT_MIN_SESSIONS} sessions on a regular cadence, ≥${fmtCost(PLACEMENT_DEFAULT_MIN_GROUP_COST_USD)} window spend)</span>. Lower <span class="mono">[optimize] min_sessions_for_cadence</span> / <span class="mono">min_group_cost_usd</span> in tj.toml to consider smaller workloads.</div>
+        <div class="opt-line dim">No unattended, cadence-regular workloads in this window <span class="dim">(≥${fd.min_sessions_for_cadence} sessions on a regular cadence, ≥${fmtCost(fd.min_group_cost_usd)} window spend)</span>. Lower <span class="mono">[optimize] min_sessions_for_cadence</span> / <span class="mono">min_group_cost_usd</span> in tj.toml to consider smaller workloads.</div>
       </section>`;
     }
     // This number is a PRICE difference on the SAME tokens (batch bills the
@@ -6298,13 +6297,12 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
     // the dollar figure on `pricing_mode === 'api'` exactly, not just "not
     // suppressed" — the Batch API discount is an api-billed lever a
     // subscription/local/unknown plan cannot pull at all, mirroring the
-    // CLI's `_render_placement` and `cost_proposals._placement_to_proposals`
-    // (CLAUDE.md anti-pattern #22). Advise-only by design: batch adoption is
-    // an architectural change (submit + poll) in the user's own application,
-    // so this card offers no apply action — the generic "fix is ready" link
-    // rendered below (data-driven off `hasProposal`) still applies, since it
-    // only ever points at the Review inbox, never an apply button.
-    const n = fd.candidates.length;
+    // CLI's `_render_placement` and `cost_proposals._placement_to_proposals`.
+    // Advise-only by design: batch adoption is an architectural change
+    // (submit + poll) in the user's own application, so this card offers no
+    // apply action — the generic "fix is ready" link rendered below
+    // (data-driven off `hasProposal`) still applies, since it only ever
+    // points at the Review inbox, never an apply button.
     const isApi = framing && framing.pricing_mode === 'api';
     body = html`
       <div class="opt-line">${n} workload${n !== 1 ? 's' : ''} fit the batch shape <span class="dim">(regular cadence, no human turn after the first model call)</span>: <b>${fd.percent_of_window_cost}%</b> of window cost.</div>

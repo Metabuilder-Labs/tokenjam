@@ -14,6 +14,7 @@ from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize.analyzers.batch_placement import (
     BATCH_DISCOUNT,
     MAX_START_GAP_CV,
+    MIN_SESSIONS_FOR_CADENCE,
     analyze_batch_placement,
     gap_coefficient_of_variation,
 )
@@ -184,9 +185,14 @@ def test_downsize_run_reads_placement_thresholds_from_ctx_config(db):
             window_days=WINDOW_DAYS, summary=summary, report=OptimizeReport(window=summary),
         )
 
+    # `findings['placement']` is ALWAYS set now (an empty-candidates finding
+    # carrying the effective thresholds, not an absent key) so the card's own
+    # empty-state renderer has something to read the thresholds off of.
     default_ctx = _ctx(TjConfig(version="1"))
     run_downsize(default_ctx)
-    assert "placement" not in default_ctx.report.findings
+    assert "placement" in default_ctx.report.findings
+    assert default_ctx.report.findings["placement"].candidates == []
+    assert default_ctx.report.findings["placement"].min_sessions_for_cadence == MIN_SESSIONS_FOR_CADENCE
 
     lowered_ctx = _ctx(TjConfig(
         version="1", optimize=OptimizeConfig(min_sessions_for_cadence=4),
@@ -194,6 +200,7 @@ def test_downsize_run_reads_placement_thresholds_from_ctx_config(db):
     run_downsize(lowered_ctx)
     assert "placement" in lowered_ctx.report.findings
     assert lowered_ctx.report.findings["placement"].min_sessions_for_cadence == 4
+    assert len(lowered_ctx.report.findings["placement"].candidates) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +262,7 @@ def test_placement_survives_the_report_dict_round_trip(db):
     assert restored.percent_of_window_cost == finding.percent_of_window_cost
     assert restored.estimated_recoverable_usd == finding.estimated_recoverable_usd
     assert restored.estimate_basis == finding.estimate_basis
+    assert restored.is_price_difference is True
     assert restored.friction == finding.friction
     # The nested candidates come back as dataclasses, not dicts.
     assert [c.agent_id for c in restored.candidates] == ["nightly"]
@@ -269,6 +277,36 @@ def test_placement_survives_the_report_dict_round_trip(db):
     assert candidate.tokens == original.tokens
     assert (candidate.estimated_batch_saving_usd
             == original.estimated_batch_saving_usd)
+
+
+def test_empty_placement_finding_survives_the_report_dict_round_trip():
+    """The daemon path must carry the run's effective thresholds through for
+    the EMPTY-candidates case too: `model_downgrade.py`'s `run()` now always
+    sets `findings['placement']`, so a `tj serve` request over HTTP hands back
+    an empty finding, not a missing key, whenever nothing qualified. Without
+    threading `min_sessions_for_cadence` / `min_group_cost_usd` through the
+    round trip, the CLI's empty-state card would show the module defaults
+    instead of the user's own [optimize] config."""
+    from tokenjam.core.optimize.analyzers.batch_placement import BatchPlacementFinding
+    from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    since, until = _window()
+    empty = BatchPlacementFinding(min_sessions_for_cadence=9, min_group_cost_usd=3.5)
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=since, until=until, days=WINDOW_DAYS, sessions=0, spans=0,
+            total_tokens=0, total_cost_usd=0.0, thin_data=False,
+        ),
+        findings={"placement": empty},
+    )
+    restored = report_from_dict(report_to_dict(report)).findings.get("placement")
+
+    assert isinstance(restored, BatchPlacementFinding)
+    assert restored.candidates == []
+    assert restored.min_sessions_for_cadence == 9
+    assert restored.min_group_cost_usd == 3.5
+    assert restored.is_price_difference is True
 
 
 def test_null_cache_columns_do_not_zero_a_candidates_tokens(db):

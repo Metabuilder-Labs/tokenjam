@@ -337,6 +337,8 @@ def _build_finding_constructors() -> dict:
     from tokenjam.core.optimize.analyzers.batch_placement import (
         BATCH_ESTIMATE_BASIS,
         BATCH_FRICTION_NOTE,
+        MIN_GROUP_COST_USD,
+        MIN_SESSIONS_FOR_CADENCE,
         BatchCandidate,
         BatchPlacementFinding,
     )
@@ -597,6 +599,17 @@ def _build_finding_constructors() -> dict:
             estimate_basis=d.get("estimate_basis", BATCH_ESTIMATE_BASIS),
             estimate_confidence=d.get("estimate_confidence", "estimated"),
             friction=d.get("friction", BATCH_FRICTION_NOTE),
+            # Effective thresholds this run applied, carried through so the
+            # empty-state card (now always rendered, not just when candidates
+            # exist) reads the daemon's actual config rather than the module
+            # defaults on the deserialising side.
+            min_sessions_for_cadence=int(
+                d.get("min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE)
+            ),
+            min_group_cost_usd=float(
+                d.get("min_group_cost_usd", MIN_GROUP_COST_USD)
+            ),
+            is_price_difference=bool(d.get("is_price_difference", True)),
         )
 
     return {
