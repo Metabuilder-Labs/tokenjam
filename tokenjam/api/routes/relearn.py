@@ -33,11 +33,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
 
 from tokenjam.api.deps import require_api_key, require_relearn_write_auth
-from tokenjam.core.framing import (
-    WindowSummary,
-    compute_framing,
-    plan_determination_mix,
-)
 from tokenjam.core.optimize import (
     cost_apply,
     cost_proposals as cost_proposals_mod,
@@ -87,87 +82,9 @@ def _config(request: Request):
     return config
 
 
-def _framing(request: Request) -> dict[str, Any]:
-    """Plan-tier framing block for this module's dollar-bearing payloads.
-
-    Same single compute path every other cost surface uses
-    (``core.framing.compute_framing``) so the UI never re-derives the
-    suppress-dollars-for-subscription rule in JS. The mix is
-    window-INDEPENDENT (``plan_determination_mix``, as on /status): the
-    receipts and the cost ledger are cumulative-to-date figures, not scoped
-    to a window. Degrades to the config-declared plan when the daemon has no
-    direct DB connection (e.g. a proxy), exactly as ``compute_framing``
-    already handles an empty mix.
-    """
-    db = getattr(request.app.state, "db", None)
-    conn = getattr(db, "conn", None) if db is not None else None
-    mix = plan_determination_mix(conn) if conn is not None else {}
-    framing = compute_framing(
-        _config(request),
-        WindowSummary(plan_tier_mix=mix, sessions=sum(mix.values())),
-    )
-    return framing.to_dict()
-
-
 def _conn(request: Request) -> Any | None:
     db = getattr(request.app.state, "db", None)
     return getattr(db, "conn", None) if db is not None else None
-
-
-def _resolvable_session_ids(conn: Any | None, session_ids: list[str]) -> set[str]:
-    """Subset of `session_ids` that exist as rows in the sessions table."""
-    if conn is None or not session_ids:
-        return set()
-    placeholders = ", ".join(f"${i}" for i in range(1, len(session_ids) + 1))
-    try:
-        rows = conn.execute(
-            f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders})",
-            session_ids,
-        ).fetchall()
-    except Exception:
-        return set()
-    return {str(r[0]) for r in rows}
-
-
-def _with_example_resolvability(finding: Any, conn: Any | None) -> Any:
-    """Copy of `finding` with each cluster example stamped `session_resolvable`.
-
-    The detector sources example session ids from Claude Code transcript files
-    on disk (`<projects_root>/**/<session_id>.jsonl`), so an example can name a
-    session that was never ingested into the sessions table. Resolvability is
-    computed at read time rather than baked into the cached finding, so it also
-    covers findings stored before this field existed and stays correct as more
-    sessions get ingested. The Review inbox links only resolvable examples and
-    renders the rest as plain evidence text instead of a link to a dead page.
-    """
-    if not isinstance(finding, dict):
-        return finding
-    clusters = finding.get("clusters")
-    if not isinstance(clusters, list):
-        return finding
-    ids = sorted({
-        str(ex["session_id"])
-        for c in clusters if isinstance(c, dict)
-        for ex in (c.get("examples") or [])
-        if isinstance(ex, dict) and ex.get("session_id")
-    })
-    resolvable = _resolvable_session_ids(conn, ids)
-    return {
-        **finding,
-        "clusters": [
-            c if not isinstance(c, dict) else {
-                **c,
-                "examples": [
-                    ex if not isinstance(ex, dict) else {
-                        **ex,
-                        "session_resolvable": str(ex.get("session_id")) in resolvable,
-                    }
-                    for ex in (c.get("examples") or [])
-                ],
-            }
-            for c in clusters
-        ],
-    }
 
 
 @router.get("/relearn/proposals", dependencies=[Depends(require_api_key)])
@@ -190,16 +107,10 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
             "computed_at": None,
             "finding": None,
         }
-    finding = cached.get("finding")
-    if isinstance(finding, dict):
-        # Re-stamp on read as well as on write, so a cache written before the
-        # proposal id or the advise-only reason existed still resolves without
-        # waiting for a recompute. Idempotent.
-        finding = relearn_proposals.stamp_proposal_ids(finding)
     return {
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
-        "finding": _with_example_resolvability(finding, _conn(request)),
+        "finding": cached.get("finding"),
     }
 
 
@@ -425,21 +336,13 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     }
     open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
     rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals)
-    # Same plan-tier framing the receipts / cost-ledger payloads carry, so the
-    # estimated-recoverable headline picks the same unit as its measured twin
-    # sitting next to it rather than always leading with dollars.
-    framing = _framing(request)
     if block is None:
-        return {
-            "status": "never_run", "computed_at": None, "proposals": [],
-            "rollup": rollup, "framing": framing,
-        }
+        return {"status": "never_run", "computed_at": None, "proposals": [], "rollup": rollup}
     return {
         "status": "ready",
         "computed_at": block.get("cost_computed_at"),
         "proposals": proposals,
         "rollup": rollup,
-        "framing": framing,
     }
 
 
@@ -449,16 +352,11 @@ def get_relearn_receipts(request: Request) -> dict[str, Any]:
     twin of the ``rollup`` field above (Component E). Combines the relearn
     ledger and the cost-verify ledger (``core.optimize.receipts``);
     read-only, no recompute triggered here — it rides the same ``/refresh``
-    cadence the two source ledgers already recompute on.
-
-    Carries the plan-tier ``framing`` block: ``verified_saved_usd`` can only
-    ever count the API-billed slice, so on a subscription-dominant corpus the
-    UI must lead with the (complete) token figure rather than the dollars."""
+    cadence the two source ledgers already recompute on."""
     config = _config(request)
     relearn_records = relearn_apply.list_applied(config)
     cost_records = cost_apply.list_applied(config)
-    summary = receipts.verified_saved_summary(relearn_records, cost_records)
-    return {**summary, "framing": _framing(request)}
+    return receipts.verified_saved_summary(relearn_records, cost_records)
 
 
 @router.post("/relearn/cost-proposals/refresh", dependencies=_WRITE_AUTH)
@@ -548,44 +446,36 @@ class ApplyWorkspaceCostRequest(BaseModel):
 
 @router.post("/relearn/cost-proposals/apply-workspace", dependencies=_WRITE_AUTH)
 def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest) -> dict[str, Any]:
-    """Apply an ``apply_capable`` cost proposal's workspace note/skill.
+    """Apply a CC-origin subagent proposal's sizing-rubric note to the workspace.
 
-    Covers every analyzer whose fix is a workspace surface an orchestrating
-    agent (or the model itself) reads before acting, rather than a file this
-    proposal can edit outright: ``subagent`` (rung-1 sizing rubric),
-    ``script`` (rung-2 deterministic-workflow skill), ``reuse`` (rung-1
-    planning-skeleton note), ``verbosity`` (rung-1 output-brevity note). This
-    routes the actual write through the EXISTING relearn apply path
-    (``relearn_apply.apply_relearn_fix``) — same reversible, git-committed,
-    human-gated (dry-run first) discipline — then records the cost marker so
-    the delta-verify pass measures the realized delta after it. ``go=false``
-    returns the dry-run diff; a second call with ``go=true`` writes. 404 on an
-    unknown ``proposal_id``; 403 outside home; 409 on a refusal.
+    Unlike the three advise-only analyzers, a subagent right-sizing finding has a
+    writable surface (a rung-1 CLAUDE.md sizing rubric the orchestrating agent
+    reads before spawning subagents). This routes the actual write through the
+    EXISTING relearn apply path (``relearn_apply.apply_relearn_fix``) — same
+    reversible, git-committed, human-gated (dry-run first) discipline — then
+    records the cost marker so the delta-verify pass measures the fan-out
+    model-mix cost delta after it. ``go=false`` returns the dry-run diff; a
+    second call with ``go=true`` writes. 404 on an unknown ``proposal_id``;
+    403 outside home; 409 on a refusal.
     """
     _reject_target_outside_home(body.target_path)
     config = _config(request)
     db = getattr(request.app.state, "db", None)
     stored = _stored_cost_proposal(request, body.proposal_id)
     signature = str(stored.get("signature") or "")
-    analyzer = str(stored.get("analyzer") or "")
     baseline = dict(stored.get("baseline") or {})
-    # The cluster shape relearn_apply renders a rung-1/2 note/skill from,
-    # projected from the STORE: a caller-supplied proposed_fix would be
-    # arbitrary text written into the user's workspace under a reviewed
-    # proposal's name. `apply_sessions` falls back to the subagent analyzer's
-    # own baseline key (`flagged_subagents`) so this generalization doesn't
-    # change that analyzer's existing behavior.
+    # The cluster shape relearn_apply renders a rung-1 note from, projected from
+    # the STORE: a caller-supplied proposed_fix would be arbitrary text written
+    # into the user's CLAUDE.md under a reviewed proposal's name.
     cluster = {
         "signature": signature,
-        "family_key": f"cost_{analyzer}" if analyzer else "cost_proposal",
+        "family_key": "subagent_rightsizing",
         "title": str(stored.get("title") or "") or signature,
         "proposed_fix": str(stored.get("proposed_fix") or ""),
         "rung": int(stored.get("rung") or 1),
-        "sessions": int(
-            baseline.get("apply_sessions", baseline.get("flagged_subagents", 0)) or 0
-        ),
-        "repos": list(baseline.get("apply_repos") or []),
-        "examples": list(baseline.get("apply_examples") or []),
+        "sessions": int(baseline.get("flagged_subagents", 0) or 0),
+        "repos": [],
+        "examples": [],
     }
     try:
         applied = relearn_apply.apply_relearn_fix(
@@ -613,15 +503,9 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
 @router.get("/relearn/cost-applied", dependencies=[Depends(require_api_key)])
 def get_cost_applied(request: Request) -> dict[str, Any]:
     """Every applied (and reverted) cost fix, plus the realized-dollars ledger
-    summary (``cost_verify.cost_compound_ledger``), plus the plan-tier
-    ``framing`` block so the ledger's realized dollars are suppressed /
-    reframed for subscription users like every other cost surface."""
+    summary (``cost_verify.cost_compound_ledger``)."""
     applied = cost_apply.list_applied(_config(request))
-    return {
-        "applied": applied,
-        "ledger": cost_verify.cost_compound_ledger(applied),
-        "framing": _framing(request),
-    }
+    return {"applied": applied, "ledger": cost_verify.cost_compound_ledger(applied)}
 
 
 @router.post("/relearn/cost-applied/{record_id}/revert", dependencies=_WRITE_AUTH)

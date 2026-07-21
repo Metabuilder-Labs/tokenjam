@@ -881,6 +881,11 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
+.measured-tag {
+  font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--success); border: 1px solid var(--success);
+  border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
+}
 a.health-tile {
   display: block; text-decoration: none; color: inherit;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -1549,9 +1554,9 @@ const html = htm.bind(h);
 // --- API ---
 const apiKeyMeta = document.querySelector('meta[name="tj-api-key"]');
 const API_KEY = apiKeyMeta ? apiKeyMeta.getAttribute('content') : null;
-// Local write token (require_pothole_write_auth, api/deps.py) -- always
+// Local write token (require_relearn_write_auth, api/deps.py) -- always
 // present (injected regardless of api.auth.enabled), required on every
-// mutating pothole call (apply/enable/disable/revert/refresh). Sent on every
+// mutating relearn call (apply/enable/disable/revert/refresh). Sent on every
 // POST below; routes that don't check it simply ignore the extra header.
 const writeTokenMeta = document.querySelector('meta[name="tj-write-token"]');
 const WRITE_TOKEN = writeTokenMeta ? writeTokenMeta.getAttribute('content') : null;
@@ -7419,27 +7424,27 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
 // explorer (which reads `since` from the same URL params).
 // ---- Review inbox (Improve lens home) ----
 // The self-improve loop's Approve stage (self-improve-loop SPEC.md §12 /
-// §8 reuse map): pending pothole fixes the cross-session pothole aggregator
-// (core/optimize/analyzers/pothole.py, served from a background-refreshed
-// cache at GET /pothole/proposals — see api/routes/pothole.py) land here for
+// §8 reuse map): pending relearn fixes the cross-session relearn aggregator
+// (core/optimize/analyzers/relearn.py, served from a background-refreshed
+// cache at GET /relearn/proposals — see api/routes/relearn.py) land here for
 // a human to review. Phase 2 wires Approve to a real write, routed by rung,
-// through POST /pothole/apply (core.optimize.pothole_apply — git-commit or
+// through POST /relearn/apply (core.optimize.relearn_apply — git-commit or
 // gzip-backup reversible, disabled-by-default for hook/wrapper/config rungs).
 // Dismiss stays a client-side-only hide (localStorage, never sent to the
 // server). The chassis (listhead / listbox / addbar / cur-modal) is forked
 // from Optimize ▸ Summarize's curate → diff → Apply/Reject screen
 // (~6410-7040 above), per Phase A's scaffold.
-const POTHOLE_DISMISSED_KEY = 'tj_pothole_dismissed_v1';
+const RELEARN_DISMISSED_KEY = 'tj_relearn_dismissed_v1';
 
-function loadDismissedPotholes() {
+function loadDismissedRelearns() {
   try {
-    const raw = localStorage.getItem(POTHOLE_DISMISSED_KEY);
+    const raw = localStorage.getItem(RELEARN_DISMISSED_KEY);
     return raw ? new Set(JSON.parse(raw)) : new Set();
   } catch (e) { return new Set(); }
 }
 
-function saveDismissedPotholes(set) {
-  try { localStorage.setItem(POTHOLE_DISMISSED_KEY, JSON.stringify([...set])); } catch (e) { /* best-effort */ }
+function saveDismissedRelearns(set) {
+  try { localStorage.setItem(RELEARN_DISMISSED_KEY, JSON.stringify([...set])); } catch (e) { /* best-effort */ }
 }
 
 const RUNG_LABELS = {
@@ -7502,7 +7507,7 @@ function CompoundLedgerSummary({ ledger }) {
     </div>`;
 }
 
-function PotholeRow({ cluster, checked, onToggle, onExpand }) {
+function RelearnRow({ cluster, checked, onToggle, onExpand }) {
   const tokens = cluster.estimated_recoverable_tokens || 0;
   return html`
     <tr class="cur-row" key=${cluster.signature}>
@@ -7520,7 +7525,7 @@ function PotholeRow({ cluster, checked, onToggle, onExpand }) {
 // The card's Approve flow: preview -> (optional active-session warning ->
 // "apply anyway") -> write. Scope + target are ALWAYS human-editable before
 // Approve (§7 — repo-identity is noisy; never trust the suggestion blindly).
-function PotholeApplyModal({ cluster, onClose, onApplied }) {
+function RelearnApplyModal({ cluster, onClose, onApplied }) {
   const [scope, setScope] = useState('project');
   const [target, setTarget] = useState('');
   const [busy, setBusy] = useState(false);
@@ -7541,8 +7546,15 @@ function PotholeApplyModal({ cluster, onClose, onApplied }) {
     if (!target.trim()) { setError('enter a target path first'); return; }
     setBusy(true); setError(null);
     try {
-      const body = { ...cluster, scope, target_path: target.trim(), go: true, force: !!force };
-      const r = await apiPostOrDetail('/pothole/apply', body);
+      // Only the proposal's ID travels: the server reads the cluster content
+      // from its own stored proposals, so the browser can't apply anything the
+      // detector didn't produce. Scope + target stay client-supplied because
+      // the human edits them here before approving.
+      const body = {
+        proposal_id: cluster.proposal_id,
+        scope, target_path: target.trim(), go: true, force: !!force,
+      };
+      const r = await apiPostOrDetail('/relearn/apply', body);
       setWarning(null);
       setResult(r.record);
       onApplied && onApplied(r.record);
@@ -7651,13 +7663,13 @@ function AppliedFixRow({ rec, onChanged }) {
       ${rec.state === 'applied' ? html`<${VerifyLine} verify=${rec.verify} rung=${rec.rung} />` : null}
       ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
       <div style="display:flex;gap:10px;align-items:center">
-        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
+        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/relearn/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
         ${isEnforcement && rec.state === 'applied' && !(enforcement && enforcement.enabled) ? (
           confirming
-            ? html`<span style="color:var(--warn);font-size:12px">This intercepts your tool calls on every matching call. <span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/enable`, { confirm: true }))}>Confirm enable →</span> <span class="sz-link" onClick=${() => setConfirming(false)}>cancel</span></span>`
+            ? html`<span style="color:var(--warn);font-size:12px">This intercepts your tool calls on every matching call. <span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/relearn/${rec.id}/enable`, { confirm: true }))}>Confirm enable →</span> <span class="sz-link" onClick=${() => setConfirming(false)}>cancel</span></span>`
             : html`<span class="sz-link" onClick=${() => setConfirming(true)}>Enable enforcement…</span>`
         ) : null}
-        ${isEnforcement && rec.state === 'applied' && enforcement && enforcement.enabled ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/pothole/${rec.id}/disable`, {}))}>Disable enforcement</span>` : null}
+        ${isEnforcement && rec.state === 'applied' && enforcement && enforcement.enabled ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/relearn/${rec.id}/disable`, {}))}>Disable enforcement</span>` : null}
       </div>
     </div>`;
 }
@@ -7665,11 +7677,11 @@ function AppliedFixRow({ rec, onChanged }) {
 // ---- Cost proposals (the same inbox, a distinct `kind`) ----
 // The downsize/cache/trim analyzers' findings adapted into advise-only
 // proposals (core/optimize/cost_proposals.py), served at
-// GET /pothole/cost-proposals. They carry NO apply path — the fix lives in the
+// GET /relearn/cost-proposals. They carry NO apply path — the fix lives in the
 // user's own application code — so "Mark applied" only drops a marker the
 // delta-verify pass (core/optimize/cost_verify.py) measures a realized dollar
 // delta against, shown back here as a receipt.
-const COST_ANALYZER_LABELS = { downsize: 'downsize', cache: 'cache', trim: 'trim' };
+const COST_ANALYZER_LABELS = { downsize: 'downsize', cache: 'cache', trim: 'trim', subagent: 'subagent' };
 
 function fmtUsd(v) {
   const n = Number(v || 0);
@@ -7678,7 +7690,7 @@ function fmtUsd(v) {
 
 // One applied cost proposal's realized-delta receipt: verdict + the measured
 // dollar/token delta (shown only for a real "improved" verdict), reusing the
-// same VERDICT_LABELS the pothole lane uses. Correlational, never causal.
+// same VERDICT_LABELS the relearn lane uses. Correlational, never causal.
 function CostVerifyLine({ verify }) {
   if (!verify) return null;
   const label = VERDICT_LABELS[verify.verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
@@ -7709,15 +7721,35 @@ function CostLedgerSummary({ ledger }) {
 // One pending cost proposal card. Advise-only: an evidence line, the
 // recommendation, an optional copyable suggestion, and a labeled estimate — but
 // only a "Mark applied" marker button, never an apply-to-code write.
-function CostProposalCard({ prop, busy, onMark, onDismiss }) {
+function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
   const usd = prop.estimated_recoverable_usd;
   const toks = prop.estimated_recoverable_tokens;
+  // Workspace-apply state (subagent, CC-origin only): a target path + a dry-run
+  // diff before the real, reversible write — routed through the same
+  // human-gated relearn apply path.
+  const [target, setTarget] = useState('');
+  const [wbusy, setWbusy] = useState(false);
+  const [werr, setWerr] = useState(null);
+  const [preview, setPreview] = useState(null);
+
+  const applyWorkspace = async (go) => {
+    if (!target.trim()) { setWerr('enter a CLAUDE.md path to write the note into'); return; }
+    setWbusy(true); setWerr(null);
+    try {
+      const r = await apiPostOrDetail('/relearn/cost-proposals/apply-workspace',
+        { proposal_id: prop.proposal_id, target_path: target.trim(), go });
+      if (go) { onChanged && onChanged(); }
+      else { setPreview((r.applied && r.applied.diff) || '(no changes)'); }
+    } catch (e) { setWerr(e.message || String(e)); }
+    finally { setWbusy(false); }
+  };
+
   return html`
     <div class="opt-section" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[prop.analyzer] || prop.analyzer}</span>
         <span style="font-weight:500">${prop.title}</span>
-        <span class="dim" style="font-size:11px">advise-only</span>
+        <span class="dim" style="font-size:11px">${prop.apply_capable ? 'workspace fix · rung 1' : 'advise-only'}</span>
         ${(usd != null || toks != null) ? html`<span class="mono" style="margin-left:auto;color:var(--accent);font-size:12.5px">${usd != null ? '~' + fmtUsd(usd) : ''}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>` : null}
       </div>
       <div class="sz-note" style="margin-top:8px">${prop.evidence}</div>
@@ -7725,11 +7757,28 @@ function CostProposalCard({ prop, busy, onMark, onDismiss }) {
       <div class="sz-note" style="margin-top:2px">${prop.advise_text}</div>
       ${prop.suggestion ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${prop.suggestion}</pre>` : null}
       <div class="opt-caveat" style="font-size:11.5px;margin-top:8px">${prop.caveat}</div>
-      <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-        <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied →'}</button>
-        <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
-        <span class="dim" style="font-size:11.5px">Marking records a checkpoint; the loop then measures the realized delta over your later calls.</span>
-      </div>
+
+      ${prop.apply_capable ? html`
+        <div class="opt-section" style="margin:10px 0 0">
+          <div class="opt-title" style="font-size:12.5px">Apply the sizing note <span class="dim" style="font-weight:400">· writes a reversible rung-1 note; confirm the target first</span></div>
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+            <input class="rename-input" style="flex:1;min-width:280px" value=${target}
+              placeholder="/absolute/path/to/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
+            <button class="cur-btn" disabled=${wbusy} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
+            <button class="cur-btn primary" disabled=${wbusy} onClick=${() => applyWorkspace(true)}>Apply note →</button>
+          </div>
+          ${preview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${preview}</pre>` : null}
+          ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
+          <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized fan-out cost delta after it.</div>
+        </div>
+      ` : html`
+        <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
+          <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied →'}</button>
+          <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
+          <span class="dim" style="font-size:11.5px">Marking records a checkpoint; the loop then measures the realized delta over your later calls.</span>
+        </div>
+      `}
+      ${prop.apply_capable ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
     </div>`;
 }
 
@@ -7739,7 +7788,7 @@ function CostAppliedRow({ rec, onChanged }) {
   const [error, setError] = useState(null);
   const revert = async () => {
     setBusy(true); setError(null);
-    try { await apiPostOrDetail(`/pothole/cost-applied/${rec.id}/revert`, {}); onChanged && onChanged(); }
+    try { await apiPostOrDetail(`/relearn/cost-applied/${rec.id}/revert`, {}); onChanged && onChanged(); }
     catch (e) { setError(e.message || String(e)); }
     finally { setBusy(false); }
   };
@@ -7757,9 +7806,43 @@ function CostAppliedRow({ rec, onChanged }) {
     </div>`;
 }
 
+// Components E + G1 — the Review inbox entry tile: the estimated-recoverable
+// headline (E, summed server-side over the OPEN, not-yet-applied cost-
+// proposal cards — core/optimize/cost_proposals.py's
+// estimated_recoverable_rollup) beside its measured twin, the cumulative
+// verified-saved receipts (G1, GET /relearn/receipts — core/optimize/
+// receipts.py, combining the relearn ledger's tokens with the cost-verify
+// ledger's tokens AND dollars). Deliberately two SEPARATE, distinctly
+// labeled numbers — an estimate and a measurement never get added together.
+function ReceiptsHeader({ rollup, receiptsData }) {
+  const hasRollup = rollup && rollup.proposal_count > 0;
+  const hasReceipts = receiptsData && receiptsData.verified_count > 0;
+  if (!hasRollup && !hasReceipts) return null;
+  return html`
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 18px">
+      ${hasRollup ? html`
+        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="estimated-tag" title=${rollup.estimate_basis}>est.</span></div>
+          <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">${fmtUsd(rollup.estimated_recoverable_usd)}
+            <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollup.proposal_count} proposal${rollup.proposal_count === 1 ? '' : 's'}</span>
+          </div>
+        </div>
+      ` : null}
+      ${hasReceipts ? html`
+        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Verified saved to date <span class="measured-tag" title=${receiptsData.estimate_basis}>measured</span></div>
+          <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
+            <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
+          </div>
+          <div class="dim" style="font-size:11px;margin-top:6px">${receiptsData.verified_count} checked · ${receiptsData.improved_count} improved · ${receiptsData.regressed_count} regressed · ${receiptsData.no_change_count} no change · ${receiptsData.insufficient_data_count} still measuring</div>
+        </div>
+      ` : null}
+    </div>`;
+}
+
 function ReviewInboxView({ params }) {
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
-  const [dismissed, setDismissed] = useState(() => loadDismissedPotholes());
+  const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
   const [modalSig, setModalSig] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -7767,13 +7850,15 @@ function ReviewInboxView({ params }) {
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
   const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
   const [costProps, setCostProps] = useState([]);         // advise-only cost proposals (downsize/cache/trim)
+  const [costRollup, setCostRollup] = useState(null);      // Component E — estimated-recoverable headline
   const [costApplied, setCostApplied] = useState([]);     // marked-applied cost proposals + their realized deltas
   const [costLedger, setCostLedger] = useState(null);     // realized dollars across verified cost changes
+  const [receiptsData, setReceiptsData] = useState(null); // Component G1 — combined verified-saved receipts
   const [marking, setMarking] = useState(null);           // signature currently being marked applied
 
   const load = useCallback(async () => {
     try {
-      const r = await api('/pothole/proposals');
+      const r = await api('/relearn/proposals');
       const f = r.finding || {};
       setD({
         loading: false, error: null, status: r.status, computedAt: r.computed_at,
@@ -7787,7 +7872,7 @@ function ReviewInboxView({ params }) {
 
   const loadApplied = useCallback(async () => {
     try {
-      const r = await api('/pothole/applied');
+      const r = await api('/relearn/applied');
       setApplied(r.applied || []);
       setLedger(r.ledger || null);
     } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
@@ -7795,47 +7880,58 @@ function ReviewInboxView({ params }) {
 
   const loadCost = useCallback(async () => {
     try {
-      const r = await api('/pothole/cost-proposals');
+      const r = await api('/relearn/cost-proposals');
       setCostProps(r.proposals || []);
-    } catch (e) { /* the pothole list is load-bearing; degrade quietly */ }
+      setCostRollup(r.rollup || null);   // Component E — server-computed, ignores local dismiss state
+    } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {
-      const r = await api('/pothole/cost-applied');
+      const r = await api('/relearn/cost-applied');
       setCostApplied(r.applied || []);
       setCostLedger(r.ledger || null);
     } catch (e) { /* degrade quietly */ }
   }, []);
 
+  const loadReceipts = useCallback(async () => {
+    try {
+      const r = await api('/relearn/receipts');
+      setReceiptsData(r || null);
+    } catch (e) { /* degrade quietly — the rollup tile is enough on its own */ }
+  }, []);
+
   useEffect(() => {
-    load(); loadApplied(); loadCost();
+    load(); loadApplied(); loadCost(); loadReceipts();
     // Light poll while a background pass may be computing (or right after a
     // manual refresh) so the empty/computing state resolves without a reload.
     const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
     return () => clearInterval(timer);
-  }, [load, loadApplied, loadCost]);
+  }, [load, loadApplied, loadCost, loadReceipts]);
 
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
-    try { await apiPost('/pothole/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
+    try { await apiPost('/relearn/refresh', {}); } catch (e) { /* surfaced via next load()'s status */ }
     // The cost proposals + their realized deltas recompute on the same cadence.
-    try { await apiPost('/pothole/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
-    setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
-  }, [load, loadCost]);
+    try { await apiPost('/relearn/cost-proposals/refresh', {}); } catch (e) { /* degrade quietly */ }
+    setTimeout(() => { setRefreshing(false); load(); loadCost(); loadReceipts(); }, 1500);
+  }, [load, loadCost, loadReceipts]);
 
   const markCostApplied = useCallback(async (prop) => {
     setMarking(prop.signature);
     try {
-      await apiPostOrDetail('/pothole/cost-proposals/apply', prop);
+      // Only the ID: the server resolves the proposal's content (and its
+      // estimate) from its own store, so the ledger records what was detected.
+      await apiPostOrDetail('/relearn/cost-proposals/apply', { proposal_id: prop.proposal_id });
       await loadCost();
+      await loadReceipts();
     } catch (e) { /* surfaced on next refresh; keep the card in place */ }
     finally { setMarking(null); }
-  }, [loadCost]);
+  }, [loadCost, loadReceipts]);
 
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
-  const potholeCount = visible.length;
+  const relearnCount = visible.length;
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
     const next = new Set([...dismissed, ...checked]);
-    setDismissed(next); saveDismissedPotholes(next);
+    setDismissed(next); saveDismissedRelearns(next);
     setChecked(new Set());
   };
   const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
@@ -7844,21 +7940,23 @@ function ReviewInboxView({ params }) {
 
   const onApplied = (record) => {
     setAppliedSigs(s => new Set([...s, record.signature]));
-    loadApplied();
+    loadApplied(); loadReceipts();
   };
 
   const dismissCost = (sig) => {
     const next = new Set([...dismissed, sig]);
-    setDismissed(next); saveDismissedPotholes(next);
+    setDismissed(next); saveDismissedRelearns(next);
   };
 
   return html`
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
-    <div class="sz-note">Pothole fixes the self-improve loop's cross-session detector finds land here for review — each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung — you confirm the scope + target first; <b>Dismiss</b> hides a row locally (this browser only — it is not sent to the server).</div>
+    <div class="sz-note">The recurring mistakes your agent keeps repeating land here so it can relearn them. Each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
+
+    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${receiptsData} />
 
     <div class="cur-listhead">
       <span>
-        ${potholeCount} pending · <b style="color:var(--warn)">${potholeCount}</b> potholes · <b style="color:var(--accent)">0</b> strategies
+        ${relearnCount} pending · <b style="color:var(--warn)">${relearnCount}</b> recurring mistakes · <b style="color:var(--accent)">0</b> strategies
         ${d.computedAt ? html` · <span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
         ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
       </span>
@@ -7871,20 +7969,20 @@ function ReviewInboxView({ params }) {
           ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
           ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
           ${!d.error && !d.loading && d.status === 'never_run' ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No scan has run yet — click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</td></tr>` : null}
-          ${!d.error && !d.loading && d.status !== 'never_run' && potholeCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</td></tr>` : null}
-          ${!d.error && !d.loading ? visible.map(c => html`<${PotholeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
+          ${!d.error && !d.loading && d.status !== 'never_run' && relearnCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</td></tr>` : null}
+          ${!d.error && !d.loading ? visible.map(c => html`<${RelearnRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
         </tbody>
       </table>
     </div>
     <div class="cur-addbar">
       <button class="cur-btn" disabled=${checked.size === 0} onClick=${dismissChecked}>Dismiss checked</button>
-      <span class="dim" style="font-size:12px">${potholeCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
+      <span class="dim" style="font-size:12px">${relearnCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
     </div>
 
     ${visibleCost.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize / cache / trim analyzers — advise-only, with verified receipts once you mark one applied</span></div>
+      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers, with verified receipts once you apply one</span></div>
       <div style="margin-top:8px">
-        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} />`)}
+        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); loadReceipts(); }} />`)}
       </div>
     ` : null}
 
@@ -7892,7 +7990,7 @@ function ReviewInboxView({ params }) {
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories <span class="dim" style="font-weight:400;font-size:12px">· the realized delta the loop measured after you marked each one</span></div>
       <${CostLedgerSummary} ledger=${costLedger} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} onChanged=${loadCost} />`)}
+        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} onChanged=${() => { loadCost(); loadReceipts(); }} />`)}
       </div>
     ` : null}
 
@@ -7900,11 +7998,11 @@ function ReviewInboxView({ params }) {
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
       <${CompoundLedgerSummary} ledger=${ledger} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${loadApplied} />`)}
+        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${() => { loadApplied(); loadReceipts(); }} />`)}
       </div>
     ` : null}
 
-    <${PotholeApplyModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} onApplied=${onApplied} />
+    <${RelearnApplyModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} onApplied=${onApplied} />
   `;
 }
 
@@ -7926,7 +8024,7 @@ function DashboardView({ params }) {
       // full cost history — that user upgrading to review past spend must NOT
       // see "No data yet" (the front door was gating purely on active agents and
       // returning before /cost was ever fetched — issue: historical-only empty).
-      const [cost, status, compare, opt, al, drift, traces, pothole] = await Promise.all([
+      const [cost, status, compare, opt, al, drift, traces, relearn] = await Promise.all([
         api('/cost', { since, group_by: 'day' }),
         api('/status').catch(() => ({ agents: [] })),
         api('/cost/compare', { since, compare: 'previous' }).catch(() => null),
@@ -7934,7 +8032,7 @@ function DashboardView({ params }) {
         api('/alerts', { since, unread: 'true' }).catch(() => ({ alerts: [] })),
         api('/drift').catch(() => ({ agents: [] })),
         api('/traces', { since, limit: 6 }).catch(() => ({ traces: [] })),
-        api('/pothole/proposals').catch(() => ({ finding: null })),
+        api('/relearn/proposals').catch(() => ({ finding: null })),
       ]);
       // "No data yet" only when there is genuinely NO telemetry: no cost history
       // AND no tokens AND no sessions/agents AND no traces. Historical cost or
@@ -7945,7 +8043,7 @@ function DashboardView({ params }) {
       const empty = !hasCost && !hasAgents && !hasTraces;
       setD({ loading: false, empty, error: null, cost, compare, opt,
         alerts: al.alerts || [], drift, traces: traces.traces || [],
-        pendingFixes: ((pothole && pothole.finding && pothole.finding.clusters) || []).length });
+        pendingFixes: ((relearn && relearn.finding && relearn.finding.clusters) || []).length });
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -8038,7 +8136,7 @@ function DashboardView({ params }) {
                 <div class="band-label">Health at a glance</div>
                 <div class="tile-grid compact">
                   <${HealthTile} label="Pending fixes" value=${d.pendingFixes || 0} attention=${(d.pendingFixes || 0) > 0} href="#/review"
-                    sub="self-improve loop — review inbox" />
+                    sub="the loop, review inbox" />
                   <${HealthTile} label="Unread alerts" value=${d.alerts.length} attention=${d.alerts.length > 0}
                     href="#/alerts?unread=true" sub=${d.alerts.length ? d.alerts[0].severity : 'all clear'} />
                   <${HealthTile} label="Agents drifting" value=${driftN} attention=${driftN > 0} href="#/drift"
