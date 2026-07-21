@@ -29,6 +29,7 @@ from typing import cast
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.utils.formatting import console
 
 # Clearly-labeled test identity so a ping span is never mistaken for real
@@ -68,10 +69,9 @@ class _ProofExporter:
 @click.command("ping")
 @click.option("--agent", "agent_id", default=PING_AGENT_ID, show_default=True,
               help="agent_id to stamp on the test span.")
-@click.option("--json", "output_json", is_flag=True,
-              help="Emit a machine-readable result instead of prose.")
+@json_option
 @click.pass_context
-def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
+def cmd_ping(ctx: click.Context, agent_id: str, output_json_flag: bool) -> None:
     """Emit a labeled test span to prove SDK instrumentation is wired up.
 
     Exits 0 only once delivery is *confirmed* — HTTP mode polls the daemon's
@@ -79,6 +79,7 @@ def cmd_ping(ctx: click.Context, agent_id: str, output_json: bool) -> None:
     just "attempted". See the module docstring for why that distinction
     matters.
     """
+    output_json = resolve_output_json(ctx, output_json_flag)
     config = ctx.obj["config"]
 
     from opentelemetry import trace as trace_api

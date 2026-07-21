@@ -20,6 +20,7 @@ from pathlib import Path
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
 from tokenjam.core.optimize import OptimizeReport, build_report, report_from_dict
 from tokenjam.utils.formatting import console
@@ -48,8 +49,7 @@ def cmd_route() -> None:
 @click.option("--agent", default=None, help="Scope to a specific agent_id.")
 @click.option("--since", default="30d",
               help="Lookback window for the findings (e.g. 7d, 30d).")
-@click.option("--json", "output_json", is_flag=True, default=False,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_route_export(
     ctx: click.Context,
@@ -57,9 +57,10 @@ def cmd_route_export(
     check: bool,
     agent: str | None,
     since: str,
-    output_json: bool,
+    output_json_flag: bool,
 ) -> None:
     """Write (or --check) an advisory router config from the downsize findings."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     if not check and target is None:
         raise click.UsageError("Pass --target ccr|litellm (or --check).")
 

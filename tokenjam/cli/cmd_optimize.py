@@ -7,6 +7,7 @@ from typing import Any, NoReturn
 import click
 from rich.markup import escape as _rich_escape
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
     agent_persona_mix,
@@ -79,8 +80,7 @@ from tokenjam.utils.time_parse import parse_since, utcnow
                    "(default 5, max 20).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, default=False,
               help="Skip the --validate cost-estimate confirmation prompt.")
-@click.option("--json", "output_json", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_optimize(
     ctx: click.Context,
@@ -95,9 +95,10 @@ def cmd_optimize(
     validate_finding: str | None,
     samples: int | None,
     assume_yes: bool,
-    output_json: bool,
+    output_json_flag: bool,
 ) -> None:
     """Analyze recent usage for cost-saving candidates and budget exposure."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     if db is None or config is None:

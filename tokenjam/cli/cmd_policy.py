@@ -20,6 +20,7 @@ from typing import Any
 import click
 from rich.markup import escape
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import (
     AgentConfig,
     AlertChannelConfig,
@@ -64,15 +65,12 @@ def cmd_policy() -> None:
 
 
 @cmd_policy.command("list")
-@click.option("--json", "output_json_flag", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_policy_list(ctx: click.Context, output_json_flag: bool) -> None:
     """List existing alerts, drift, schema, and budget configuration."""
     config: TjConfig = ctx.obj["config"]
-    # Honour either the root `tj --json policy list` form or the
-    # command-level `tj policy list --json` form (#71 finding 6).
-    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    output_json = resolve_output_json(ctx, output_json_flag)
 
     rows = _collect_rows(config)
     has_engine_policies = bool(config.policies)
@@ -150,8 +148,7 @@ def _read_decisions_from_db(config: TjConfig, since, limit: int):
 
 
 @cmd_policy.command("decisions")
-@click.option("--json", "output_json_flag", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.option("--limit", default=20, show_default=True,
               help="Max number of recent decisions to show.")
 @click.option("--since", default=None,
@@ -161,7 +158,7 @@ def cmd_policy_decisions(ctx: click.Context, output_json_flag: bool, limit: int,
                          since: str | None) -> None:
     """Show recent persisted policy decisions + the estimated-recoverable meter."""
     config: TjConfig = ctx.obj["config"]
-    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    output_json = resolve_output_json(ctx, output_json_flag)
 
     since_dt = None
     if since:

@@ -4,6 +4,7 @@ import json
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.models import Alert, AlertFilters
 from tokenjam.utils.formatting import console, format_cost, format_tokens, status_icon
 from tokenjam.utils.time_parse import utcnow
@@ -11,10 +12,11 @@ from tokenjam.utils.time_parse import utcnow
 
 @click.command("status")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
-@click.option("--json", "output_json", is_flag=True)
+@json_option
 @click.pass_context
-def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None:
+def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) -> None:
     """Show agent status overview."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     agent_filter = agent or ctx.obj.get("agent")
 

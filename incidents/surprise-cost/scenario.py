@@ -44,8 +44,13 @@ def run() -> None:
     """
     import click
 
+    from tokenjam.cli.json_option import resolve_output_json
+
     ctx = click.get_current_context(silent=True)
-    output_json = ctx.params.get("output_json", False) if ctx else False
+    output_json = (
+        resolve_output_json(ctx, ctx.params.get("output_json_flag", False))
+        if ctx else False
+    )
 
     env, result, model_breakdown = _execute()
 

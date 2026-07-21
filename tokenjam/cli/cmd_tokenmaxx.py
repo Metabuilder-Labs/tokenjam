@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import click
 
 from tokenjam.cli.data_access import resolve_data_access
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.context_diagnostic import ContextDiagnostic
 from tokenjam.core.framing import Framing
 from tokenjam.utils.formatting import console, format_tokens
@@ -77,12 +78,12 @@ def _classify(overhead_share: float) -> Tier:
 @click.option("--since", default="30d", help="Window for analysis (default 30d).")
 @click.option("--weekly", is_flag=True,
               help="Weekly 'quota Wrapped' recap mode (last 7 days, recap copy).")
-@click.option("--json", "output_json", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
-                  weekly: bool, output_json: bool) -> None:
+                  weekly: bool, output_json_flag: bool) -> None:
     """Your quota/efficiency card: how lean is your context? (screenshottable)"""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     agent = agent or ctx.obj.get("agent")

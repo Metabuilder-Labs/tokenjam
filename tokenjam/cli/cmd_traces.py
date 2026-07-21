@@ -4,6 +4,7 @@ import json
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.models import NormalizedSpan, TraceFilters
 from tokenjam.utils.formatting import console, format_cost, make_table
 from tokenjam.utils.time_parse import parse_since
@@ -15,11 +16,13 @@ from tokenjam.utils.time_parse import parse_since
 @click.option("--limit", default=50, type=int)
 @click.option("--type", "span_type", default=None, help="Filter by span name/type")
 @click.option("--status", default=None, type=click.Choice(["ok", "error"]))
-@click.option("--json", "output_json", is_flag=True)
+@json_option
 @click.pass_context
 def cmd_traces(ctx: click.Context, agent: str | None, since: str, limit: int,
-               span_type: str | None, status: str | None, output_json: bool) -> None:
+               span_type: str | None, status: str | None,
+               output_json_flag: bool) -> None:
     """List recent traces."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     agent_filter = agent or ctx.obj.get("agent")
     try:
@@ -73,10 +76,11 @@ def cmd_traces(ctx: click.Context, agent: str | None, since: str, limit: int,
 
 @click.command("trace")
 @click.argument("trace_id")
-@click.option("--json", "output_json", is_flag=True)
+@json_option
 @click.pass_context
-def cmd_trace(ctx: click.Context, trace_id: str, output_json: bool) -> None:
+def cmd_trace(ctx: click.Context, trace_id: str, output_json_flag: bool) -> None:
     """Show span waterfall for a single trace."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     spans = db.get_trace_spans(trace_id)
 
