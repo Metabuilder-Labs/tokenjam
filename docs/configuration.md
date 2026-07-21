@@ -90,7 +90,7 @@ Set limits via CLI (`tj budget --daily 10`), the REST API (`POST /api/v1/budget`
 
 ## Content capture and privacy
 
-By default, `tj` does not capture prompt content, completion content, or tool inputs/outputs — only token counts, model names, tool names, timestamps, and structural metadata. Enable content capture selectively when you need it (for debugging, trim analysis, or evaluation):
+By default, `tj` captures prompt content (`capture.prompts`) — needed for `tj optimize trim`, `cache-recommend`, and `reuse`'s prompt-prefix mode to work out of the box — plus tool-call inputs from the onboarding templates (`capture.tool_inputs`, Read/Grep/Glob file paths and search queries, not their content). Completion content and tool outputs stay off by default: no analyzer needs them yet, and completion text is the largest, least useful payload. All capture is local-only — it stays in your own telemetry DB and is never sent anywhere. Adjust any flag in `[capture]` when you need something different (or less):
 
 ```toml
 [capture]
@@ -100,7 +100,7 @@ tool_inputs  = true    # capture tool call inputs (gen_ai.tool.input)
 tool_outputs = true    # capture tool call outputs (gen_ai.tool.output)
 ```
 
-The four flags are independent: capture prompts without completions, or tool inputs without prompts. This gives finer control than a single on/off switch.
+The four flags are independent: capture prompts without completions, or tool inputs without prompts. This gives finer control than a single on/off switch. Set `prompts = false` under `[capture]` to turn prompt capture back off.
 
 **Where the gate runs.** All spans flow through `IngestPipeline.process()`, which calls `strip_captured_content()` once before any DB write. The receiver, the OTLP HTTP endpoint, and the Claude Code JSONL backfill all go through this single gate — there's no per-source duplication.
 
