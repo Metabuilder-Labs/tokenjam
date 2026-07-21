@@ -7730,9 +7730,10 @@ function CostVerifyLine({ verify }) {
 
 // The cost ledger: realized savings summed across every VERIFIED, improved cost
 // fix — the sibling of CompoundLedgerSummary. Same server-decided unit
-// hierarchy as ReceiptsHeader: these dollars only cover the API-billed slice,
-// so a suppressing framing leads with the ledger's realized TOKENS instead and
-// demotes the dollars to a scoped, dim line.
+// hierarchy as ReceiptsHeader: these dollars are token deltas priced at
+// per-model LIST rates (cost_verify._priced_usd), which is not what a
+// subscription user paid, so a suppressing framing leads with the ledger's
+// realized TOKENS and drops the dollars in favour of the server's qualifier.
 function CostLedgerSummary({ ledger, framing }) {
   if (!ledger || !ledger.verified_count) return null;
   const suppressed = dollarsSuppressed(framing);
@@ -7742,7 +7743,7 @@ function CostLedgerSummary({ ledger, framing }) {
         <span style="font-size:20px;font-weight:600;color:var(--accent)">${suppressed ? fmtTokens(ledger.total_realized_tokens) + ' tok' : fmtUsd(ledger.total_realized_usd)}</span>
         <span class="dim" style="font-size:12px">realized across ${ledger.improved_count} verified change(s) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
       </div>
-      ${suppressed && ledger.total_realized_usd > 0 ? html`<div class="dim" style="font-size:12px;margin-top:4px">${fmtUsd(ledger.total_realized_usd)} of that is on API-billed traffic</div>` : null}
+      ${suppressed && framing && framing.qualifier_text ? html`<div class="qualifier" style="margin-top:6px">${framing.qualifier_text}</div>` : null}
       <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} no movement · ${ledger.insufficient_data_count} still measuring</div>
     </div>`;
 }
@@ -7850,35 +7851,66 @@ function CostAppliedRow({ rec, onChanged }) {
 // token figure is complete. When that framing suppresses dollars the TOKENS
 // take the headline slot and the dollars drop to a dim line explicitly scoped
 // to API-billed traffic; otherwise the dollars-first hierarchy is unchanged.
-function ReceiptsHeader({ rollup, receiptsData }) {
-  const hasRollup = rollup && rollup.proposal_count > 0;
+// The estimated tile's token headline is a FLOOR, not a total: only some
+// proposals carry a token estimate. Quote that coverage rather than letting
+// the reader assume the sum spans every open proposal.
+function rollupTokenScope(rollup) {
+  const covered = rollup.token_proposal_count || 0;
+  const total = rollup.deduplicated_proposal_count || covered;
+  return covered < total
+    ? `${covered} of ${total} proposals carrying a token estimate`
+    : `${covered} proposal${covered === 1 ? '' : 's'}`;
+}
+
+function ReceiptsHeader({ rollup, receiptsData, rollupFraming }) {
+  const receiptsFraming = receiptsData && receiptsData.framing;
+  const suppressed = dollarsSuppressed(receiptsFraming || rollupFraming);
+  // Suppressed, the estimated tile leads with tokens — so it needs a token
+  // estimate to lead with. With neither unit available there is nothing
+  // honest left to render, and the tile hides rather than showing a zero.
+  const hasRollup = !!rollup && (
+    suppressed ? (rollup.token_proposal_count || 0) > 0 : rollup.proposal_count > 0
+  );
   const hasReceipts = receiptsData && receiptsData.verified_count > 0;
   if (!hasRollup && !hasReceipts) return null;
-  const suppressed = hasReceipts && dollarsSuppressed(receiptsData.framing);
+  // The plan-tier caveat is the server's own words, rendered in the same
+  // `.qualifier` treatment every other suppressing surface uses. It is stated
+  // once for the row rather than duplicated into both tiles.
+  const qualifier = (receiptsFraming && receiptsFraming.qualifier_text)
+    || (rollupFraming && rollupFraming.qualifier_text);
   return html`
-    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 18px">
-      ${hasRollup ? html`
-        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
-          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="estimated-tag" title=${rollup.estimate_basis}>est.</span></div>
-          <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">${fmtUsd(rollup.estimated_recoverable_usd)}
-            <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollup.proposal_count} proposal${rollup.proposal_count === 1 ? '' : 's'}</span>
+    <div style="margin:10px 0 18px">
+      <div style="display:flex;gap:14px;flex-wrap:wrap">
+        ${hasRollup ? html`
+          <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+            <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="estimated-tag" title=${rollup.estimate_basis}>est.</span></div>
+            ${suppressed ? html`
+              <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">~${fmtTokens(rollup.estimated_recoverable_tokens)} tok
+                <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollupTokenScope(rollup)}</span>
+              </div>
+            ` : html`
+              <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">${fmtUsd(rollup.estimated_recoverable_usd)}
+                <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollup.proposal_count} proposal${rollup.proposal_count === 1 ? '' : 's'}</span>
+              </div>
+              ${(rollup.estimated_recoverable_tokens || 0) > 0 ? html`<div class="dim" style="font-size:12px;margin-top:2px">~${fmtTokens(rollup.estimated_recoverable_tokens)} tok across ${rollupTokenScope(rollup)}</div>` : null}
+            `}
           </div>
-        </div>
-      ` : null}
-      ${hasReceipts ? html`
-        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
-          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Verified saved to date <span class="measured-tag" title=${receiptsData.estimate_basis}>measured</span></div>
-          ${suppressed ? html`
-            <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtTokens(receiptsData.verified_saved_tokens)} tok</div>
-            ${receiptsData.verified_saved_usd > 0 ? html`<div class="dim" style="font-size:12px;margin-top:2px">${fmtUsd(receiptsData.verified_saved_usd)} of that is on API-billed traffic</div>` : null}
-          ` : html`
-            <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
-              <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
-            </div>
-          `}
-          <div class="dim" style="font-size:11px;margin-top:6px">${receiptsData.verified_count} checked · ${receiptsData.improved_count} improved · ${receiptsData.regressed_count} regressed · ${receiptsData.no_change_count} no change · ${receiptsData.insufficient_data_count} still measuring</div>
-        </div>
-      ` : null}
+        ` : null}
+        ${hasReceipts ? html`
+          <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+            <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Verified saved to date <span class="measured-tag" title=${receiptsData.estimate_basis}>measured</span></div>
+            ${suppressed ? html`
+              <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtTokens(receiptsData.verified_saved_tokens)} tok</div>
+            ` : html`
+              <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
+                <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
+              </div>
+            `}
+            <div class="dim" style="font-size:11px;margin-top:6px">${receiptsData.verified_count} checked · ${receiptsData.improved_count} improved · ${receiptsData.regressed_count} regressed · ${receiptsData.no_change_count} no change · ${receiptsData.insufficient_data_count} still measuring</div>
+          </div>
+        ` : null}
+      </div>
+      ${qualifier ? html`<div class="qualifier" style="margin-top:8px">${qualifier}</div>` : null}
     </div>`;
 }
 
@@ -7893,6 +7925,7 @@ function ReviewInboxView({ params }) {
   const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
   const [costProps, setCostProps] = useState([]);         // advise-only cost proposals (downsize/cache/trim)
   const [costRollup, setCostRollup] = useState(null);      // Component E — estimated-recoverable headline
+  const [rollupFraming, setRollupFraming] = useState(null); // plan-tier framing for the rollup's units
   const [costApplied, setCostApplied] = useState([]);     // marked-applied cost proposals + their realized deltas
   const [costLedger, setCostLedger] = useState(null);     // realized savings across verified cost changes
   const [costFraming, setCostFraming] = useState(null);   // plan-tier framing for the cost ledger's units
@@ -7926,6 +7959,7 @@ function ReviewInboxView({ params }) {
       const r = await api('/relearn/cost-proposals');
       setCostProps(r.proposals || []);
       setCostRollup(r.rollup || null);   // Component E — server-computed, ignores local dismiss state
+      setRollupFraming(r.framing || null);
     } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {
       const r = await api('/relearn/cost-applied');
@@ -7996,7 +8030,7 @@ function ReviewInboxView({ params }) {
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
     <div class="sz-note">The recurring mistakes your agent keeps repeating land here so it can relearn them. Each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
 
-    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${receiptsData} />
+    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${receiptsData} rollupFraming=${rollupFraming} />
 
     <div class="cur-listhead">
       <span>
