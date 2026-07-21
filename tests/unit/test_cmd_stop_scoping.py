@@ -5,59 +5,65 @@ be running on the same machine.
 The old `_find_serve_pid()` was a bare `pgrep -f "tokenjam\\.serve|tj
 serve|uv run tj serve"` with no scoping at all: any process on the machine
 whose command line matched that pattern got SIGTERM'd, regardless of which
-install started it. `TestCrossInstallIsolation` below spawns a REAL,
-detached child process (not a mock) with a command line that matches the
-old pattern, so a regression back to machine-wide pgrep gets caught for
-real, not just in a mock's argument list.
+install started it. `TestCrossInstallIsolation` below spawns a REAL child
+process (not a mock) with a command line that matches the old pattern, so a
+regression back to machine-wide pgrep gets caught for real, not just in a
+mock's argument list.
 """
 from __future__ import annotations
 
 import json
-import os
-import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from tokenjam.cli.cmd_stop import stop_tj_serve
 from tokenjam.core.server_state import find_own_serve_pid
 
 
-def _spawn_orphan_serve() -> int:
-    """Spawn a real, detached process -- reparented off of the test process
-    the moment the wrapping shell exits, exactly like a real orphaned `tj
-    serve` foreground process, so nothing here is responsible for reaping
-    it (avoids the zombie-stays-"alive"-to-os.kill artifact of a direct
-    subprocess.Popen child).
+def _spawn_serve_lookalike() -> subprocess.Popen[bytes]:
+    """Spawn a real process (not a mock) whose command line contains the
+    literal tokens "tj" "serve", so a bare `pgrep -f "tj serve"` still
+    matches it the same way it would match a real `tj serve` invocation.
 
-    Its command line contains the literal tokens "tj" "serve", so a bare
-    `pgrep -f "tj serve"` still matches it the same way it would match a
-    real `tj serve` invocation.
+    Kept as a genuine, un-detached child of the test process -- NOT
+    backgrounded off of a wrapping shell -- so the test can reap its exit
+    deterministically instead of relying on the OS. A detached process
+    reparents to whatever subreaper owns the job once its wrapping shell
+    exits; on GitHub Actions that's the runner's own "clean up orphan
+    processes" feature, which only sweeps orphans at job completion, not in
+    real time. Until swept, a killed-but-unreaped orphan is a zombie, and a
+    zombie's PID stays allocated -- `os.kill(pid, 0)` keeps reporting it
+    "alive" long after it actually died, which is exactly what made this
+    test flap to a false `stopped=False` in CI (macOS's launchd, by
+    contrast, reaps orphans immediately, which is why a detached process
+    never showed the bug locally).
+
+    Being a direct child isn't enough on its own, though: Python only reaps
+    a child's exit status when something calls `wait()`/`poll()` on it, and
+    nothing does that during `stop_tj_serve`'s `os.kill(pid, 0)` polling
+    loop. So a background thread blocks on `Popen.wait()` here -- a real
+    `waitpid()` call completes the instant the process actually dies, with
+    no polling delay, so by the next `os.kill(pid, 0)` check the PID is
+    already fully freed.
     """
-    result = subprocess.run(
-        [
-            "/bin/sh", "-c",
-            f"{sys.executable} -c 'import time; time.sleep(30)' tj serve "
-            "</dev/null >/dev/null 2>&1 & echo $!",
-        ],
-        capture_output=True, text=True, check=True,
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", "tj", "serve"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    return int(result.stdout.strip())
+    threading.Thread(target=proc.wait, daemon=True).start()
+    return proc
 
 
-def _is_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+def _is_alive(proc: subprocess.Popen[bytes]) -> bool:
+    return proc.poll() is None
 
 
-def _cleanup(pid: int) -> None:
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+def _cleanup(proc: subprocess.Popen[bytes]) -> None:
+    if proc.poll() is None:
+        proc.kill()
+    proc.wait(timeout=5)
 
 
 def _write_state(home: Path, pid: int, port: int = 7391) -> None:
@@ -79,9 +85,9 @@ class TestCrossInstallIsolation:
         home_a.mkdir()
         home_b.mkdir()
 
-        pid_a = _spawn_orphan_serve()
+        proc_a = _spawn_serve_lookalike()
         try:
-            _write_state(home_a, pid_a)
+            _write_state(home_a, proc_a.pid)
             # Install B has no server.state -- nothing running there.
 
             monkeypatch.setattr("tokenjam.cli.cmd_stop.Path.home", lambda: home_b)
@@ -89,29 +95,29 @@ class TestCrossInstallIsolation:
 
             assert stopped is False
             assert stopped_via == []
-            assert _is_alive(pid_a), (
+            assert _is_alive(proc_a), (
                 "tj stop from install B signaled install A's daemon -- "
                 "this is the cross-install kill bug."
             )
         finally:
-            _cleanup(pid_a)
+            _cleanup(proc_a)
 
     def test_stop_from_same_install_stops_its_own_daemon(self, tmp_path, monkeypatch):
         home_a = tmp_path / "home-a"
         home_a.mkdir()
 
-        pid_a = _spawn_orphan_serve()
+        proc_a = _spawn_serve_lookalike()
         try:
-            _write_state(home_a, pid_a)
+            _write_state(home_a, proc_a.pid)
             monkeypatch.setattr("tokenjam.cli.cmd_stop.Path.home", lambda: home_a)
 
             stopped, stopped_via = stop_tj_serve(quiet=True)
 
             assert stopped is True
-            assert any(str(pid_a) in entry for entry in stopped_via)
-            assert not _is_alive(pid_a)
+            assert any(str(proc_a.pid) in entry for entry in stopped_via)
+            assert not _is_alive(proc_a)
         finally:
-            _cleanup(pid_a)
+            _cleanup(proc_a)
 
 
 class TestStaleStateFile:
