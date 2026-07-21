@@ -119,7 +119,7 @@ Point any OTLP exporter at `tj serve` and production agents flow in with zero co
 
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Backfills your last 30 days, wires a zero-token statusline, runs the loop plus all twelve analyzers + Lens |
+| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Backfills your last 30 days, wires a zero-token statusline, runs the loop plus all thirteen analyzers + Lens |
 | **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
 | **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, plus the loop's detect, advise, and verify over your spans |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
@@ -142,10 +142,10 @@ Run bare `tj` any time and it points you to the next best action.
 
 ---
 
-## Twelve analyzers + Lens. One install.
+## Thirteen analyzers + Lens. One install.
 
 Cutting cost is the whole point, and repeated mistakes are only one source of it. From the same
-telemetry, TokenJam surfaces cost-savings advisories across eleven more areas: read-only
+telemetry, TokenJam surfaces cost-savings advisories across twelve more areas: read-only
 recommendations, each one the loop will wrap with a verified receipt as it extends. It reads the
 major agent runtimes, frameworks, providers, and observability tools, then brings them together in a
 local browser dashboard.
@@ -227,13 +227,14 @@ Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls 
 </tr>
 </table>
 
-`tj optimize` (no args) runs all twelve analyzers: the six above, plus `relearn` (the loop's
+`tj optimize` (no args) runs all thirteen analyzers: the six above, plus `relearn` (the loop's
 detector), `verbosity` (sessions whose output runs high versus the per-task-shape median),
 `summarize` (structure-aware prompt-file summarization candidates), `deadweight` (MCP servers whose
 schemas load into every session and are never called), `budget-projection` (projects your
-monthly run-rate against a configured `[budget.<provider>]` ceiling), and `cache-recommend` (the Cache
-card's breakpoint-suggestion half). Each one is individually selectable; run a subset with
-`tj optimize downsize cache reuse`.
+monthly run-rate against a configured `[budget.<provider>]` ceiling), `cache-recommend` (the Cache
+card's breakpoint-suggestion half), and `resend` (token-weighted repeat-context share across turns,
+a structural resend measure independent of whether caching is enabled). Each one is individually
+selectable; run a subset with `tj optimize downsize cache reuse`.
 
 ---
 
