@@ -28,12 +28,13 @@ Lens will often point you at which analyzer is worth running first.
 ## 3. `tj optimize` — find the savings
 
 ```bash
-tj optimize                          # all six analyzers
+tj optimize                          # all twelve analyzers
 tj optimize downsize cache reuse     # just the ones you care about
 ```
 
-Runs the six cost-optimization analyzers (Downsize, Cache, Script, Trim, Reuse, Subagent
-right-sizing) against your real usage and surfaces candidates — never a guaranteed saving, always a
+Runs the twelve cost-optimization analyzers (Downsize, Cache, Cache-recommend, Script, Trim,
+Reuse, Subagent right-sizing, Summarize, Verbosity, Deadweight, Relearn, Budget-projection)
+against your real usage and surfaces candidates — never a guaranteed saving, always a
 "worth a look." See [docs/optimize/](optimize/) for what each analyzer looks for and how to read its
 output.
 
