@@ -393,3 +393,107 @@ def test_deadweight_is_registered_in_runner_order():
 
     assert "deadweight" in ANALYZER_ORDER
     assert "deadweight" in ANALYZER_REGISTRY
+
+
+# --- CLI text-view rendering regression --------------------------------------
+# Same class of defect the relearn analyzer hit: `deadweight` was registered in
+# ANALYZER_REGISTRY/ANALYZER_ORDER but never wired into cmd_optimize's
+# _FINDING_RENDERERS dispatch table, so _rank_findings silently dropped it and
+# `tj optimize deadweight` (text view) printed the generic empty state even
+# with real dead servers sitting in --json.
+
+def test_deadweight_in_click_choices_and_renderer():
+    from tokenjam.cli.cmd_optimize import (
+        _FINDING_RENDERERS,
+        _MINOR_FINDING_LABELS,
+        cmd_optimize,
+    )
+
+    findings_param = next(
+        p for p in cmd_optimize.params if getattr(p, "name", None) == "findings"
+    )
+    assert "deadweight" in findings_param.type.choices
+    assert "deadweight" in _FINDING_RENDERERS
+    assert "deadweight" in _MINOR_FINDING_LABELS
+
+
+def test_render_deadweight_names_the_dead_server(tmp_path, capsys):
+    """The finding renders through the CLI dispatch path and names the dead
+    server, its presence, its zero invocations and the token tax."""
+    from tokenjam.cli.cmd_optimize import _render_deadweight
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.dead_servers  # sanity: the analyzer actually flagged one
+
+    for mode in ("api", "subscription", "local", "unknown"):
+        _render_deadweight(finding, pricing_mode=mode, marker="①")
+    out = capsys.readouterr().out
+
+    assert "apollo" in out
+    assert f"{MIN_SESSIONS_DEADWEIGHT} sessions" in out
+    assert "0 invocations" in out
+    assert "No candidates flagged" not in out
+    # The construction footnote travels with the number.
+    assert "tok/session" in out
+
+
+def test_render_deadweight_omits_dollars_when_no_model_was_priced(tmp_path, capsys):
+    """No priced model observed means no dollar figure at all. Printing
+    $0.00 would read as "this server costs nothing"."""
+    from tokenjam.cli.cmd_optimize import _render_deadweight
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _write_transcript(root, "-repo-a", f"s{i}", [
+            _user_prompt("say hi", cwd=str(project_dir)),
+        ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.dead_servers[0].estimated_tax_usd_90d is None
+
+    _render_deadweight(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out
+
+    assert "apollo" in out
+    assert "$" not in out
+    assert "no priced model observed" in out
+
+
+def test_render_report_surfaces_dead_servers_instead_of_no_candidates(tmp_path, capsys):
+    """End-to-end: a report whose only finding is a populated deadweight set
+    must not fall through to the generic "No candidates flagged" empty state."""
+    from tokenjam.cli.cmd_optimize import _render_report
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+    from tokenjam.utils.time_parse import utcnow
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.dead_servers
+
+    now = utcnow()
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=now, until=now, days=7, sessions=MIN_SESSIONS_DEADWEIGHT,
+            spans=0, total_tokens=100_000, total_cost_usd=0.0, thin_data=False,
+        ),
+        downgrade=None,
+        findings={"deadweight": finding},
+    )
+    _render_report(report, agent=None, requested=["deadweight"], pricing_mode="local")
+    out = capsys.readouterr().out
+
+    assert "No candidates flagged" not in out
+    assert "apollo" in out

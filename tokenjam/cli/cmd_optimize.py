@@ -385,6 +385,7 @@ _MINOR_FINDING_LABELS = {
     "subagent":        "Subagent right-sizing",
     "relearn":         "Relearn",
     "verbosity":       "Verbosity",
+    "deadweight":      "Deadweight",
 }
 
 
@@ -1648,6 +1649,100 @@ def _render_verbosity(
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
+def _render_deadweight(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the deadweight finding — configured MCP servers whose schemas are
+    injected into every session and never invoked. Same class of bug as the
+    relearn renderer above: absent from _FINDING_RENDERERS, the text view fell
+    through to the generic empty state even when --json carried dead servers,
+    because _rank_findings drops any finding name missing from that table.
+    """
+    console.print(_finding_header(marker, "Deadweight:"))
+    if not finding.sessions_scanned:
+        console.print(
+            "     [dim]No Claude Code sessions in this window.[/dim]"
+        )
+        return
+    if not finding.configured_servers:
+        console.print(
+            f"     [dim]Scanned {finding.sessions_scanned} session"
+            f"{'s' if finding.sessions_scanned != 1 else ''}; no MCP server is "
+            f"configured, so nothing is being injected.[/dim]"
+        )
+        return
+
+    if not finding.dead_servers:
+        for note in finding.notes:
+            console.print(f"     [dim]{note}[/dim]")
+        if not finding.notes:
+            console.print(
+                f"     [dim]All {finding.configured_servers} configured MCP "
+                f"server{'s' if finding.configured_servers != 1 else ''} were "
+                f"invoked at least once in this window.[/dim]"
+            )
+    else:
+        n = len(finding.dead_servers)
+        console.print(
+            f"     • [bold]{n}[/bold] dead MCP server{'s' if n != 1 else ''} of "
+            f"[bold]{finding.configured_servers}[/bold] configured "
+            f"[dim](schemas injected every session, never called)[/dim]"
+        )
+        for s in finding.dead_servers:
+            console.print(
+                f"       [bold]{s.name}[/bold] [dim]({s.scope} · {s.source})[/dim]  "
+                f"present in {s.sessions_present} session"
+                f"{'s' if s.sessions_present != 1 else ''}, "
+                f"[yellow]{s.invocations}[/yellow] invocations"
+            )
+            # Dollars only when a priced model was actually observed for this
+            # server. None means no rate was available, and printing $0.00
+            # there would read as "this costs nothing".
+            if pricing_mode == "api" and s.estimated_tax_usd_90d is not None:
+                tax = (
+                    f"~{format_tokens(s.estimated_tax_tokens_90d)} tokens / "
+                    f"{format_cost(s.estimated_tax_usd_90d)} over 90 days "
+                    f"[dim](estimated, priced at {s.priced_model})[/dim]"
+                )
+            else:
+                tax = (
+                    f"~{format_tokens(s.estimated_tax_tokens_90d)} tokens over "
+                    f"90 days [dim](estimated; no priced model observed for "
+                    f"this server, so no dollar figure)[/dim]"
+                )
+            console.print(f"          [dim]tax[/dim] {tax}")
+            if s.tax_construction:
+                console.print(f"          [dim]{s.tax_construction}[/dim]")
+            console.print(f"          [yellow]→[/yellow] {s.fix}")
+
+    # C2 context tax: every always-injected content source, dead or alive. Kept
+    # to the top rows so it stays a pointer rather than a second report.
+    if finding.tax_table:
+        console.print(
+            "     [dim]Always-injected context per session (estimated):[/dim]"
+        )
+        for row in finding.tax_table[:5]:
+            console.print(
+                f"       [dim]{row.source}[/dim]  "
+                f"~{format_tokens(row.avg_tokens_per_session)}/session "
+                f"[dim]× {row.sessions} session"
+                f"{'s' if row.sessions != 1 else ''} = "
+                f"{format_tokens(row.total_tokens_window)} "
+                f"({row.tag})[/dim]"
+            )
+        if len(finding.tax_table) > 5:
+            console.print(
+                f"       [dim]… and {len(finding.tax_table) - 5} more source(s). "
+                f"Full detail with [bold]tj optimize deadweight --json[/bold].[/dim]"
+            )
+
+    if finding.estimate_basis:
+        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.caveat:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
@@ -1658,4 +1753,5 @@ _FINDING_RENDERERS = {
     "subagent":     _render_subagent,
     "relearn":      _render_relearn,
     "verbosity":    _render_verbosity,
+    "deadweight":   _render_deadweight,
 }
