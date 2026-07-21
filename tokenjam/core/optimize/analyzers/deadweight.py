@@ -652,6 +652,7 @@ def compute_deadweight_finding(
     projects_root: Path | str | None = None,
     window_days: float | None = None,
     min_sessions: int = MIN_SESSIONS_DEADWEIGHT,
+    cache_dir: Path | None = None,
 ) -> DeadweightFinding:
     """Full pipeline over a window of Claude Code transcripts. Never raises —
     a missing projects root, an unreadable transcript, or a malformed config
@@ -661,6 +662,14 @@ def compute_deadweight_finding(
     via ``core.config.OptimizeConfig.min_sessions_deadweight``); the module
     constant remains the default so a caller that omits it sees today's
     behaviour unchanged.
+
+    ``cache_dir``, when given, transparently caches each transcript's parsed
+    records on disk (``core.transcript_cache``) so a re-run over an unchanged
+    corpus skips the read + parse entirely. ``None`` (the default) preserves
+    this function's original always-reparse behavior — only the registered
+    ``run(ctx)`` entry point below opts in, so this function's existing
+    "no I/O beyond the passed-in tmp_path root" test contract is unchanged
+    for direct callers.
     """
     finding = DeadweightFinding()
     root = resolve_projects_root(projects_root)
@@ -685,7 +694,7 @@ def compute_deadweight_finding(
     session_cwds: dict[str, str] = {}
     for session_id, path in session_paths:
         try:
-            records = read_records(path)
+            records = read_records(path, cache_dir=cache_dir)
         except Exception:
             continue
         session_cwds[session_id] = _session_cwd(records)
@@ -878,7 +887,14 @@ def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a ``DeadweightFinding`` to
     ``ctx.report.findings["deadweight"]``. Claude Code transcripts lane only
     — reads on-disk JSONL directly, never ``ctx.conn`` (no DB spans needed).
+
+    Passes the resolved persistent parse cache dir (``core.transcript_cache.
+    default_cache_dir``) so a re-run over an unchanged corpus — including a
+    repeat HTTP request against a live ``tj serve`` — skips re-parsing every
+    session it already has a fresh cache entry for.
     """
+    from tokenjam.core.transcript_cache import default_cache_dir
+
     optimize_cfg = getattr(ctx.config, "optimize", None)
     min_sessions = getattr(
         optimize_cfg, "min_sessions_deadweight", MIN_SESSIONS_DEADWEIGHT,
@@ -886,4 +902,5 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.findings["deadweight"] = compute_deadweight_finding(
         ctx.since, ctx.until, window_days=ctx.window_days,
         min_sessions=min_sessions,
+        cache_dir=default_cache_dir(ctx.config),
     )

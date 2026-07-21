@@ -173,7 +173,21 @@ def recompute_now(
                 projects_root = loop_transcript_root(config)
             except Exception:
                 projects_root = None
-        finding = compute_relearn_finding(conn, projects_root=projects_root)
+        # The persistent per-file parse cache (core.transcript_cache): this
+        # background job re-scans the FULL corpus on every scheduled tick, so
+        # warming/reusing the cache here is where the recurring cost actually
+        # gets paid down across ticks, not just within one `tj optimize` run.
+        transcript_cache_dir = None
+        if config is not None:
+            try:
+                from tokenjam.core.transcript_cache import default_cache_dir
+
+                transcript_cache_dir = default_cache_dir(config)
+            except Exception:
+                transcript_cache_dir = None
+        finding = compute_relearn_finding(
+            conn, projects_root=projects_root, transcript_cache_dir=transcript_cache_dir,
+        )
         # cache_path, when omitted, resolves via `config` (honors --config /
         # storage.path, and a :memory:/"" storage.path never falls through to
         # the real ~/.tj — see default_cache_path).

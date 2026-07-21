@@ -366,11 +366,30 @@ async def get_cost_components(
     recoverable: list[dict] = []
     if conn is not None:
         try:
-            from tokenjam.core.optimize import build_report
+            from tokenjam.core.optimize import ANALYZER_REGISTRY, build_report
+
+            # `relearn` is a full-corpus scan the analyzer's OWN docstring
+            # says is too heavy for per-request HTTP use ("callers that serve
+            # this over HTTP MUST cache the result, not compute it per-
+            # request" — core/optimize/analyzers/relearn.py). Worse, its
+            # `RelearnFinding` never carries `estimated_recoverable_usd`, so
+            # `_collect_recoverable` below silently discards its result no
+            # matter what — running it here was guaranteed dead work on every
+            # request. Excluding it by name changes nothing about what this
+            # endpoint returns (verified: no output field ever came from it)
+            # while removing that tax; the Review inbox
+            # (api/routes/relearn.py) already serves relearn's finding from
+            # its own background-refreshed cache. `deadweight` DOES
+            # contribute (it has `estimated_recoverable_usd`) so it still
+            # runs here, but now via the persistent transcript parse cache
+            # (core.transcript_cache, wired into its `run(ctx)` entry point)
+            # so a warm cache makes repeat requests cheap instead of
+            # re-scanning every transcript from scratch each time.
+            findings = [name for name in ANALYZER_REGISTRY if name != "relearn"]
             report = build_report(
                 db=db, config=config,
                 since=since_dt or utcnow(), until=until_dt or utcnow(),
-                agent_id=agent_id,
+                agent_id=agent_id, findings=findings,
             )
             recoverable = _collect_recoverable(report)
         except Exception:
