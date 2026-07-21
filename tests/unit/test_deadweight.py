@@ -20,6 +20,7 @@ from tokenjam.core.optimize.analyzers.deadweight import (
     MIN_SESSIONS_DEADWEIGHT,
     compute_deadweight_finding,
     enumerate_configured_servers,
+    run as run_deadweight,
 )
 
 _NOW = datetime.now(timezone.utc)
@@ -240,6 +241,185 @@ def test_below_threshold_is_not_flagged_dead(tmp_path):
     assert finding.notes  # the "no server cleared the bar" note fires
 
 
+def test_default_min_sessions_preserved_when_unspecified(tmp_path):
+    """compute_deadweight_finding's default `min_sessions` matches the module
+    constant unchanged — the config-thread contract for an unset [optimize]."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.dead_servers == []
+
+
+def test_lower_min_sessions_flags_previously_hidden_server(tmp_path):
+    """The exact data from test_below_threshold_is_not_flagged_dead flags
+    nothing at the default bar; passing a lower min_sessions (what
+    [optimize] min_sessions_deadweight threads through to) flags the server."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    default_finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert default_finding.dead_servers == []
+
+    lowered_finding = compute_deadweight_finding(
+        _SINCE, _UNTIL, projects_root=root, min_sessions=MIN_SESSIONS_DEADWEIGHT - 1,
+    )
+    assert len(lowered_finding.dead_servers) == 1
+    assert lowered_finding.dead_servers[0].name == "apollo"
+    assert lowered_finding.dead_servers[0].sessions_present == MIN_SESSIONS_DEADWEIGHT - 1
+
+
+def test_run_reads_min_sessions_deadweight_from_ctx_config(tmp_path, monkeypatch):
+    """The registered `run(ctx)` entry point (not just compute_deadweight_finding
+    directly) reads `ctx.config.optimize.min_sessions_deadweight` — the actual
+    wiring `tj optimize` exercises."""
+    from tokenjam.core.config import OptimizeConfig, TjConfig
+    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(root))
+
+    summary = WindowSummary(
+        since=_SINCE, until=_UNTIL, days=7.0, sessions=0, spans=0,
+        total_tokens=0, total_cost_usd=0.0, thin_data=False,
+    )
+
+    def _ctx(config) -> AnalyzerContext:
+        return AnalyzerContext(
+            conn=None, config=config, since=_SINCE, until=_UNTIL, agent_id=None,
+            window_days=7.0, summary=summary, report=OptimizeReport(window=summary),
+        )
+
+    default_ctx = _ctx(TjConfig(version="1"))
+    run_deadweight(default_ctx)
+    assert default_ctx.report.findings["deadweight"].dead_servers == []
+
+    lowered_ctx = _ctx(TjConfig(
+        version="1",
+        optimize=OptimizeConfig(min_sessions_deadweight=MIN_SESSIONS_DEADWEIGHT - 1),
+    ))
+    run_deadweight(lowered_ctx)
+    lowered = lowered_ctx.report.findings["deadweight"]
+    assert len(lowered.dead_servers) == 1
+    assert lowered.dead_servers[0].name == "apollo"
+
+
+def test_compute_deadweight_finding_cache_dir_opt_in_matches_uncached(tmp_path):
+    """Passing `cache_dir` must not change the finding — only skip re-parsing
+    on a warm hit (see the two tests below)."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    uncached = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    cached = compute_deadweight_finding(
+        _SINCE, _UNTIL, projects_root=root, cache_dir=tmp_path / "cache",
+    )
+
+    assert [s.name for s in cached.dead_servers] == [s.name for s in uncached.dead_servers]
+    assert cached.sessions_scanned == uncached.sessions_scanned
+
+
+def test_compute_deadweight_finding_warm_cache_skips_reparsing(tmp_path, monkeypatch):
+    """A second call over an UNCHANGED corpus with the same `cache_dir` must
+    not re-read/re-parse any transcript — the whole point of the cache."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+    cache_dir = tmp_path / "cache"
+
+    first = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root, cache_dir=cache_dir)
+    assert first.dead_servers  # sanity: a real signal, not an empty no-op
+
+    def _boom(path):
+        raise AssertionError(f"transcript.read_records reparsed {path} on a warm cache run")
+
+    monkeypatch.setattr("tokenjam.core.transcript._parse_records", _boom)
+
+    second = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root, cache_dir=cache_dir)
+    assert [s.name for s in second.dead_servers] == [s.name for s in first.dead_servers]
+
+
+def test_compute_deadweight_finding_cache_invalidates_on_transcript_edit(tmp_path):
+    """A session whose transcript CHANGES between two cached runs (e.g. an
+    invocation gets appended) must be re-parsed, not served stale."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+    cache_dir = tmp_path / "cache"
+
+    first = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root, cache_dir=cache_dir)
+    assert first.dead_servers  # apollo starts out dead (never invoked)
+
+    # Rewrite one of the sessions so apollo IS invoked — size and mtime both
+    # change, which must invalidate that session's cache entry.
+    _invoking_session(
+        root, "-repo-a", "s0", str(project_dir), "mcp__apollo__apollo_contacts_search",
+    )
+
+    second = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root, cache_dir=cache_dir)
+    assert second.dead_servers == []  # no longer dead — the edit was picked up
+
+
+def test_run_wires_the_persistent_transcript_cache(tmp_path, monkeypatch):
+    """The registered `run(ctx)` entry point (the path `tj optimize` and
+    `/cost/components` actually exercise) resolves and uses a real cache dir
+    from `ctx.config`, not just the standalone `compute_deadweight_finding`
+    function tested above."""
+    from tokenjam.core.config import TjConfig
+    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(root))
+
+    summary = WindowSummary(
+        since=_SINCE, until=_UNTIL, days=7.0, sessions=0, spans=0,
+        total_tokens=0, total_cost_usd=0.0, thin_data=False,
+    )
+    config = TjConfig(version="1")
+
+    def _ctx() -> AnalyzerContext:
+        return AnalyzerContext(
+            conn=None, config=config, since=_SINCE, until=_UNTIL, agent_id=None,
+            window_days=7.0, summary=summary, report=OptimizeReport(window=summary),
+        )
+
+    first_ctx = _ctx()
+    run_deadweight(first_ctx)
+    first = first_ctx.report.findings["deadweight"]
+    assert first.dead_servers
+
+    def _boom(path):
+        raise AssertionError(f"transcript.read_records reparsed {path} on a warm cache run")
+
+    monkeypatch.setattr("tokenjam.core.transcript._parse_records", _boom)
+
+    second_ctx = _ctx()
+    run_deadweight(second_ctx)
+    second = second_ctx.report.findings["deadweight"]
+    assert [s.name for s in second.dead_servers] == [s.name for s in first.dead_servers]
+
+
 def test_invoked_server_is_never_flagged_dead(tmp_path):
     root = tmp_path / "root"
     project_dir = root / "-repo-a"
@@ -393,3 +573,107 @@ def test_deadweight_is_registered_in_runner_order():
 
     assert "deadweight" in ANALYZER_ORDER
     assert "deadweight" in ANALYZER_REGISTRY
+
+
+# --- CLI text-view rendering regression --------------------------------------
+# Same class of defect the relearn analyzer hit: `deadweight` was registered in
+# ANALYZER_REGISTRY/ANALYZER_ORDER but never wired into cmd_optimize's
+# _FINDING_RENDERERS dispatch table, so _rank_findings silently dropped it and
+# `tj optimize deadweight` (text view) printed the generic empty state even
+# with real dead servers sitting in --json.
+
+def test_deadweight_in_click_choices_and_renderer():
+    from tokenjam.cli.cmd_optimize import (
+        _FINDING_RENDERERS,
+        _MINOR_FINDING_LABELS,
+        cmd_optimize,
+    )
+
+    findings_param = next(
+        p for p in cmd_optimize.params if getattr(p, "name", None) == "findings"
+    )
+    assert "deadweight" in findings_param.type.choices
+    assert "deadweight" in _FINDING_RENDERERS
+    assert "deadweight" in _MINOR_FINDING_LABELS
+
+
+def test_render_deadweight_names_the_dead_server(tmp_path, capsys):
+    """The finding renders through the CLI dispatch path and names the dead
+    server, its presence, its zero invocations and the token tax."""
+    from tokenjam.cli.cmd_optimize import _render_deadweight
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.dead_servers  # sanity: the analyzer actually flagged one
+
+    for mode in ("api", "subscription", "local", "unknown"):
+        _render_deadweight(finding, pricing_mode=mode, marker="①")
+    out = capsys.readouterr().out
+
+    assert "apollo" in out
+    assert f"{MIN_SESSIONS_DEADWEIGHT} sessions" in out
+    assert "0 invocations" in out
+    assert "No candidates flagged" not in out
+    # The construction footnote travels with the number.
+    assert "tok/session" in out
+
+
+def test_render_deadweight_omits_dollars_when_no_model_was_priced(tmp_path, capsys):
+    """No priced model observed means no dollar figure at all. Printing
+    $0.00 would read as "this server costs nothing"."""
+    from tokenjam.cli.cmd_optimize import _render_deadweight
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _write_transcript(root, "-repo-a", f"s{i}", [
+            _user_prompt("say hi", cwd=str(project_dir)),
+        ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.dead_servers[0].estimated_tax_usd_90d is None
+
+    _render_deadweight(finding, pricing_mode="api", marker="①")
+    out = capsys.readouterr().out
+
+    assert "apollo" in out
+    assert "$" not in out
+    assert "no priced model observed" in out
+
+
+def test_render_report_surfaces_dead_servers_instead_of_no_candidates(tmp_path, capsys):
+    """End-to-end: a report whose only finding is a populated deadweight set
+    must not fall through to the generic "No candidates flagged" empty state."""
+    from tokenjam.cli.cmd_optimize import _render_report
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+    from tokenjam.utils.time_parse import utcnow
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.dead_servers
+
+    now = utcnow()
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=now, until=now, days=7, sessions=MIN_SESSIONS_DEADWEIGHT,
+            spans=0, total_tokens=100_000, total_cost_usd=0.0, thin_data=False,
+        ),
+        downgrade=None,
+        findings={"deadweight": finding},
+    )
+    _render_report(report, agent=None, requested=["deadweight"], pricing_mode="local")
+    out = capsys.readouterr().out
+
+    assert "No candidates flagged" not in out
+    assert "apollo" in out
