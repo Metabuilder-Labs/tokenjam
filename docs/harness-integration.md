@@ -38,7 +38,7 @@ harness conforms to one thin correlation id.
 ## Easiest setup: the `setup_harness` MCP command
 
 `tj onboard --claude-code` does **not** wire the MCP server (an in-loop MCP is a
-per-turn quota tax on subscription users, ticket #59) — but this one-time setup
+per-turn token tax on subscription users, +36% measured) — but this one-time setup
 helper is a legitimate reason to wire it temporarily. Run
 `claude mcp add tj --scope user -- tj mcp`, then from **inside your harness
 repo** in Claude Code:

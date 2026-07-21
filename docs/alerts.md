@@ -113,4 +113,4 @@ PATCH /api/v1/alerts/{id}/acknowledge  # mark alert as acknowledged
 
 ## MCP (SDK / API integrations)
 
-The MCP server exposes `list_alerts` and `acknowledge_alert` tools for SDK / API integrations that already sit in the request path. It is not wired up for Claude Code or Codex (an in-loop MCP is a per-turn quota tax there, ticket #59) — those agents check alerts via `tj` CLI reports or the dashboard instead.
+The MCP server exposes `list_alerts` and `acknowledge_alert` tools for SDK / API integrations that already sit in the request path. It is not wired up for Claude Code or Codex (an in-loop MCP is a per-turn token tax there, +36% measured) — those agents check alerts via `tj` CLI reports or the dashboard instead.
