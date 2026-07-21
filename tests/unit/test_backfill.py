@@ -858,17 +858,31 @@ def _llm_and_tool(parsed):
 
 
 def test_capture_off_leaves_attributes_unchanged(tmp_path):
-    """Default (no capture / all-False) extracts NO content — attributes stay
+    """Every toggle explicitly off extracts NO content — attributes stay
     exactly {"source": ...} on both the LLM and tool span (#3 default-off)."""
     path = _content_session_file(tmp_path)
 
-    # Both the explicit None default and an all-False CaptureConfig.
+    parsed = parse_claude_code_session(path, capture=CaptureConfig(prompts=False))
+    assert parsed is not None
+    llm, tool = _llm_and_tool(parsed)
+    assert llm.attributes == {"source": "backfill.claude_code"}
+    assert tool.attributes == {"source": "backfill.claude_code"}
+
+
+def test_capture_default_extracts_prompt_only(tmp_path):
+    """`prompts` defaults on (E33) so `capture=None` and a bare `CaptureConfig()`
+    both extract prompt content — needed for `trim` / `cache-recommend` / `reuse`
+    out of the box — while completions/tool_inputs/tool_outputs stay off."""
+    path = _content_session_file(tmp_path)
+
     for capture in (None, CaptureConfig()):
         parsed = parse_claude_code_session(path, capture=capture)
         assert parsed is not None
         llm, tool = _llm_and_tool(parsed)
-        assert llm.attributes == {"source": "backfill.claude_code"}
-        assert tool.attributes == {"source": "backfill.claude_code"}
+        assert llm.attributes[GenAIAttributes.PROMPT_CONTENT] == \
+            "please read the config"
+        assert GenAIAttributes.COMPLETION_CONTENT not in llm.attributes
+        assert GenAIAttributes.TOOL_INPUT not in tool.attributes
 
 
 def test_capture_on_populates_prompt_completion_and_tool_input(tmp_path):
@@ -892,16 +906,25 @@ def test_capture_on_populates_prompt_completion_and_tool_input(tmp_path):
 
 
 def test_capture_flags_are_independent(tmp_path):
-    """Each toggle gates only its own field — flipping one never leaks another."""
+    """Each toggle gates only its own field — flipping one never leaks another.
+
+    `prompts` is explicitly off in both cases below: it defaults on (E33), so
+    leaving it unset would leak PROMPT_CONTENT into a test about `tool_inputs`
+    / `completions` gating independently of it.
+    """
     path = _content_session_file(tmp_path)
 
-    parsed = parse_claude_code_session(path, capture=CaptureConfig(tool_inputs=True))
+    parsed = parse_claude_code_session(
+        path, capture=CaptureConfig(prompts=False, tool_inputs=True),
+    )
     llm, tool = _llm_and_tool(parsed)
     assert GenAIAttributes.TOOL_INPUT in tool.attributes
     assert GenAIAttributes.PROMPT_CONTENT not in llm.attributes
     assert GenAIAttributes.COMPLETION_CONTENT not in llm.attributes
 
-    parsed = parse_claude_code_session(path, capture=CaptureConfig(completions=True))
+    parsed = parse_claude_code_session(
+        path, capture=CaptureConfig(prompts=False, completions=True),
+    )
     llm, tool = _llm_and_tool(parsed)
     assert GenAIAttributes.COMPLETION_CONTENT in llm.attributes
     assert GenAIAttributes.PROMPT_CONTENT not in llm.attributes
@@ -910,15 +933,18 @@ def test_capture_flags_are_independent(tmp_path):
 
 def test_ingest_persists_captured_content_when_config_enables_it(tmp_path):
     """End-to-end through ingest: with config.capture enabled, the stored span's
-    attributes column carries the content; default config stores nothing."""
+    attributes column carries the content; a capture-all-off config stores
+    nothing."""
     from tokenjam.core.config import TjConfig
 
     _content_session_file(tmp_path)
 
-    # Default config -> capture all-False -> no content persisted.
+    # Capture-all-off config -> no content persisted.
+    off_cfg = TjConfig(version="1")
+    off_cfg.capture = CaptureConfig(prompts=False)
     db = InMemoryBackend()
     try:
-        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"))
+        ingest_claude_code(db, root=tmp_path, config=off_cfg)
         attrs = db.conn.execute(
             "SELECT attributes FROM spans WHERE name = $1",
             ["gen_ai.llm.call"],
@@ -1012,9 +1038,11 @@ def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
 
     db = InMemoryBackend()
     try:
-        # 1. First ingest with capture OFF (default config) — spans land with
-        #    NO content, exactly the pre-#10 already-ingested state.
-        ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"))
+        # 1. First ingest with capture explicitly OFF — spans land with NO
+        #    content, exactly the pre-#10 already-ingested state.
+        off_cfg = TjConfig(version="1")
+        off_cfg.capture = CaptureConfig(prompts=False)
+        ingest_claude_code(db, root=tmp_path, config=off_cfg)
 
         def _attrs(name: str) -> dict:
             raw = db.conn.execute(

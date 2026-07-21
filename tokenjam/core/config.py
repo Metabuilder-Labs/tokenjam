@@ -185,7 +185,19 @@ class PolicyConfig:
 
 @dataclass
 class CaptureConfig:
-    prompts:      bool = False
+    """What raw content gets persisted alongside token counts / model names.
+
+    ``prompts`` defaults ON: without prompt text, `cache-recommend` and
+    `trim` never fire and `reuse` never reaches its prompt-prefix mode (all
+    three stay dark for every onboarded user otherwise). Storage is
+    local-only (the user's own telemetry DB), which is why this defaults on
+    rather than opt-in. ``completions`` and ``tool_outputs`` stay off by
+    default — no analyzer needs them yet, and completion text is the
+    largest, least useful payload to store. ``tool_inputs`` stays off here
+    too; the onboarding templates explicitly enable it (Read/Grep/Glob file
+    paths, not content) for `tj context` / the statusline.
+    """
+    prompts:      bool = True
     completions:  bool = False
     tool_inputs:  bool = False
     tool_outputs: bool = False
@@ -575,12 +587,16 @@ def _parse(raw: dict) -> TjConfig:
         openai_base_url=proxy_raw.get("openai_base_url", ProxyConfig.openai_base_url),
     )
 
+    # Fall back to the CaptureConfig defaults (not a hardcoded False) so a
+    # config that predates a given flag — or a hand-authored one that omits
+    # `[capture]` entirely — picks up the current default rather than being
+    # frozen at whatever the flag defaulted to when the file was written.
     capture_raw = raw.get("capture", {})
     capture = CaptureConfig(
-        prompts=capture_raw.get("prompts", False),
-        completions=capture_raw.get("completions", False),
-        tool_inputs=capture_raw.get("tool_inputs", False),
-        tool_outputs=capture_raw.get("tool_outputs", False),
+        prompts=capture_raw.get("prompts", CaptureConfig.prompts),
+        completions=capture_raw.get("completions", CaptureConfig.completions),
+        tool_inputs=capture_raw.get("tool_inputs", CaptureConfig.tool_inputs),
+        tool_outputs=capture_raw.get("tool_outputs", CaptureConfig.tool_outputs),
     )
 
     # [loop] — optional transcript root for non-Claude-Code workspace agents

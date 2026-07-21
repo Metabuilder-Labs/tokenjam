@@ -293,12 +293,21 @@ class TestIngestGate:
         return IngestPipeline(db=db, config=TjConfig(version="1", capture=capture)), db
 
     def test_stripped_when_capture_off(self):
-        # Default capture (all off) — content must be gone from the stored span,
-        # exactly like the litellm path.
-        pipeline, db = self._pipeline(CaptureConfig())
+        # Every toggle explicitly off — content must be gone from the stored
+        # span, exactly like the litellm path.
+        pipeline, db = self._pipeline(CaptureConfig(prompts=False))
         pipeline.process(self._span_with_content())
         stored = db.get_recent_spans("s1", 1)[0]
         assert GenAIAttributes.PROMPT_CONTENT not in stored.attributes
+        assert GenAIAttributes.COMPLETION_CONTENT not in stored.attributes
+        db.close()
+
+    def test_default_capture_keeps_prompt_strips_completion(self):
+        # `prompts` defaults on (E33); `completions` stays off.
+        pipeline, db = self._pipeline(CaptureConfig())
+        pipeline.process(self._span_with_content())
+        stored = db.get_recent_spans("s1", 1)[0]
+        assert "secret prompt" in stored.attributes[GenAIAttributes.PROMPT_CONTENT]
         assert GenAIAttributes.COMPLETION_CONTENT not in stored.attributes
         db.close()
 
