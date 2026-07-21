@@ -11,6 +11,13 @@ SESSION_STALE_THRESHOLD = timedelta(minutes=5)
 # "stale" (zombie). Overridable per-install via [sessions] idle_minutes, applied
 # at the status route — effective_status itself stays config-free.
 SESSION_IDLE_THRESHOLD = timedelta(hours=4)
+# Terminal session statuses: a session that will never produce another span.
+# 'closed' = explicitly ended (POST /sessions/close); 'completed' = wrapped by a
+# real session span (how backfilled Claude Code sessions land). status_at()
+# passes both through untouched, and both belong in the archive rather than the
+# live tiles. Any query that partitions sessions by lifecycle must use this
+# constant instead of spelling one literal into hand-written SQL.
+TERMINAL_STATUSES = ("closed", "completed")
 
 
 class Severity(str, Enum):
