@@ -16,7 +16,8 @@ from tokenjam.utils.formatting import console, display_path
     "--repair",
     is_flag=True,
     help="Attempt to fix issues that have a known repair path (e.g. rebuild the "
-         "spans table when DuckDB column statistics are corrupt).",
+         "spans table when DuckDB column statistics are corrupt: "
+         "https://github.com/Metabuilder-Labs/tokenjam/issues/56).",
 )
 @click.pass_context
 def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
@@ -282,7 +283,9 @@ def _check_spans_stats(db: object) -> dict:
             "message": "DuckDB column statistics on the spans table are corrupt "
                        "— trace-detail queries (`tj traces <id>`, dashboard "
                        "trace view) will return no spans. Run `tj doctor "
-                       "--repair` to rebuild the table (data is preserved).",
+                       "--repair` to rebuild the table (data is preserved). "
+                       "Background: "
+                       "https://github.com/Metabuilder-Labs/tokenjam/issues/56.",
             "repair_action": "rebuild_spans",
         }
     return {"name": "Spans column statistics", "level": "ok",
