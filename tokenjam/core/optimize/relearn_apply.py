@@ -815,14 +815,23 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     symlink, or (rung 1) the target isn't an allowlisted note file."""
     import difflib
 
+    from tokenjam.core.optimize.analyzers.deadweight import (
+        APPLY_KIND_MCP_REMOVE,
+        build_mcp_remove_plan,
+    )
     from tokenjam.core.optimize.model_apply import APPLY_KINDS, build_model_plan
 
     signature = cluster["signature"]
     apply_kind = str(cluster.get("apply_kind") or "")
     rung = int(cluster["rung"])
+    # The MCP-remove kind sits outside model_apply's own registry (it edits a
+    # config file, not a model id), so it's checked as a sibling here rather
+    # than folded into APPLY_KINDS itself — that constant stays scoped to
+    # "the model-routing kinds" its own module docstring promises.
+    known_apply_kinds = (*APPLY_KINDS, APPLY_KIND_MCP_REMOVE)
     if not apply_kind and rung not in RUNG_KIND:
         raise RelearnApplyRefused(f"unknown rung {rung}.")
-    if apply_kind and apply_kind not in APPLY_KINDS:
+    if apply_kind and apply_kind not in known_apply_kinds:
         raise RelearnApplyRefused(f"unknown apply kind {apply_kind!r}.")
     if not target_path:
         raise RelearnApplyRefused("no target path given — pick one before approving.")
@@ -836,7 +845,13 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
         )
     pre_image = _read_pre_image(target)
 
-    if apply_kind:
+    if apply_kind == APPLY_KIND_MCP_REMOVE:
+        # A dead MCP server's config entry. Same shape as the model-routing
+        # kinds below (a deterministic edit of a value already written down),
+        # just rendered by the analyzer that already resolved the exact
+        # config file instead of by model_apply.
+        new_content = build_mcp_remove_plan(cluster, target, pre_image)
+    elif apply_kind:
         # The two model-routing kinds (an agent file's `model:` key, a
         # registered repo's model-id string). Both are edits of an existing
         # value, so they skip the rung ladder entirely and only rewrite bytes
