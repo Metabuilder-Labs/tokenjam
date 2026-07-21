@@ -201,3 +201,27 @@ def test_placement_survives_the_report_dict_round_trip(db):
     assert candidate.tokens == original.tokens
     assert (candidate.estimated_batch_saving_usd
             == original.estimated_batch_saving_usd)
+
+
+def test_null_cache_columns_do_not_zero_a_candidates_tokens(db):
+    """The spans table's four token columns are nullable with no default, so a
+    provider that reports no cache usage stores NULL. A bare
+    `SUM(a + b + c + d)` evaluates that row to NULL and drops it entirely,
+    reporting 0 tokens for a session that really billed thousands. The shared
+    four_type_token_sum_sql helper coalesces each column, which is why every
+    token aggregate has to be built from it."""
+    for i in range(6):
+        span = make_llm_span(
+            agent_id="nightly", model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=2_000, output_tokens=500, cost_usd=1.0,
+            session_id=f"nightly-{i}", start_time=BASE + timedelta(hours=6 * i),
+        )
+        span.cache_tokens = None          # no cache usage reported
+        span.cache_write_tokens = None
+        db.insert_span(span)
+    since, until = _window()
+
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+
+    assert finding is not None
+    assert finding.candidates[0].tokens == 6 * (2_000 + 500)

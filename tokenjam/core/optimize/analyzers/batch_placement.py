@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from tokenjam.core.optimize.accounting import four_type_token_sum_sql
+
 #: The Batch API bills a flat half of standard prices.
 BATCH_DISCOUNT = 0.50
 
@@ -125,8 +127,7 @@ def _session_rows(
         f"FIRST(agent_id) AS agent_id, "
         f"MIN(start_time) FILTER (WHERE model IS NOT NULL) AS first_call, "
         f"COALESCE(SUM(cost_usd), 0.0) AS cost_usd, "
-        f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens "
-        f"+ cache_write_tokens), 0) AS tokens "
+        f"{four_type_token_sum_sql(alias='tokens')} "
         f"FROM spans WHERE {where} "
         f"GROUP BY session_id",
         params,
