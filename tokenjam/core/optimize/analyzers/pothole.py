@@ -376,24 +376,14 @@ def extract_failures_for_session(
     session_id: str,
     repo: str,
     projects_root: Path | str | None = None,
-    *,
-    transcript_cache_dir: Path | None = None,
 ) -> list[FailureEpisode]:
     """Every erroring tool call in one session (main thread + subagents).
 
     Returns ``[]`` when the session has no on-disk transcript (SDK session,
     pruned). Never raises — a malformed transcript yields whatever could be
     parsed (``build_session_story`` already tolerates bad lines).
-
-    ``transcript_cache_dir`` is forwarded straight to ``build_session_story``'s
-    ``cache_dir`` — see that function's docstring and ``core.transcript_cache``.
-    Named distinctly from this module's own ``distill_cache_dir`` (a different,
-    unrelated cache) to avoid the two being confused at a call site.
     """
-    story = build_session_story(
-        session_id, projects_root=projects_root, include_subagents=True,
-        cache_dir=transcript_cache_dir,
-    )
+    story = build_session_story(session_id, projects_root=projects_root, include_subagents=True)
     if story is None:
         return []
 
@@ -922,7 +912,6 @@ def analyze_relearns(
     min_sessions: int = MIN_RECURRING_SESSIONS,
     distill_enabled: bool = True,
     distill_cache_dir: Path | None = None,
-    transcript_cache_dir: Path | None = None,
     codified_doc_text: str = "",
     repo_cwd_map: dict[str, str] | None = None,
     extra_failures: list[FailureEpisode] | None = None,
@@ -936,17 +925,13 @@ def analyze_relearns(
     ``core/optimize/relearn_otel.py``). They join the SAME clustering pass, so a
     signature that recurs across both lanes clusters as one relearn.
     ``advise_only_repos`` is forwarded to ``build_proposals`` to mark the
-    workspace-less clusters. ``transcript_cache_dir`` (distinct from
-    ``distill_cache_dir``, the LLM-distill cache) is forwarded to every
-    per-session transcript parse — see ``core.transcript_cache``.
+    workspace-less clusters.
     """
     all_failures: list[FailureEpisode] = []
     scanned = 0
     for session_id, repo in sessions:
         try:
-            failures = extract_failures_for_session(
-                session_id, repo, projects_root, transcript_cache_dir=transcript_cache_dir,
-            )
+            failures = extract_failures_for_session(session_id, repo, projects_root)
         except Exception:
             continue
         scanned += 1
@@ -1002,12 +987,7 @@ def _repo_map_from_db(conn) -> dict[str, str]:
     return out
 
 
-def _repo_cwd_map_for(
-    sessions: list[tuple[str, str]],
-    projects_root: Path,
-    *,
-    transcript_cache_dir: Path | None = None,
-) -> dict[str, str]:
+def _repo_cwd_map_for(sessions: list[tuple[str, str]], projects_root: Path) -> dict[str, str]:
     """Best-effort repo-label -> cwd, for the novelty doc search AND (Phase 2)
     the Apply stage's suggested target path. Derived from the encoded project
     directory name is unreliable, so this reads each session's transcript's
@@ -1022,7 +1002,7 @@ def _repo_cwd_map_for(
         path = _locate_transcript(session_id, projects_root)
         if path is None:
             continue
-        for record in read_records(path, cache_dir=transcript_cache_dir)[:5]:
+        for record in read_records(path)[:5]:
             cwd = record.get("cwd")
             if isinstance(cwd, str) and cwd:
                 out[repo] = cwd
@@ -1037,7 +1017,6 @@ def compute_relearn_finding(
     projects_root: Path | str | None = None,
     distill_enabled: bool = True,
     min_sessions: int = MIN_RECURRING_SESSIONS,
-    transcript_cache_dir: Path | None = None,
 ) -> RelearnFinding:
     """Standalone entry point that doesn't need a full ``AnalyzerContext`` —
     used by the serve-time background cache job (``api/routes/relearn.py``)
@@ -1058,13 +1037,6 @@ def compute_relearn_finding(
     clustering pass so SDK/OTel services are no longer invisible to the
     detector (``core/optimize/relearn_otel.py``). Their clusters come back
     ``advise_only``: detect and advise, never apply.
-
-    ``transcript_cache_dir``, when given, transparently caches each session's
-    parsed transcript on disk (``core.transcript_cache``) so a re-run over an
-    unchanged corpus skips re-parsing every session it already has a fresh
-    cache entry for. ``None`` (the default) preserves this function's
-    original always-reparse behavior — only the registered ``run(ctx)`` entry
-    point and the serve-time background job opt in.
     """
     root = resolve_projects_root(projects_root)
     repo_map = _repo_map_from_db(conn) if conn is not None else {}
@@ -1103,9 +1075,7 @@ def compute_relearn_finding(
     doc_text = ""
     repo_cwd_map: dict[str, str] = {}
     try:
-        repo_cwd_map = _repo_cwd_map_for(
-            sessions, root, transcript_cache_dir=transcript_cache_dir,
-        )
+        repo_cwd_map = _repo_cwd_map_for(sessions, root)
         doc_text = _doc_text(_candidate_doc_paths(set(repo_cwd_map.values())))
     except Exception:
         doc_text = ""
@@ -1114,7 +1084,7 @@ def compute_relearn_finding(
         sessions, projects_root=root, codified_doc_text=doc_text,
         distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
         extra_failures=span_failures, advise_only_repos=advise_only_repos,
-        min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
+        min_sessions=min_sessions,
     )
 
 
@@ -1123,18 +1093,11 @@ def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a ``RelearnFinding`` to
     ``ctx.report.findings["relearn"]`` — see ``compute_relearn_finding`` for
     the full-corpus behaviour and performance note.
-
-    Passes the resolved persistent parse cache dir (``core.transcript_cache.
-    default_cache_dir``) so a re-run over an unchanged corpus skips
-    re-parsing every session it already has a fresh cache entry for.
     """
-    from tokenjam.core.transcript_cache import default_cache_dir
-
     optimize_cfg = getattr(ctx.config, "optimize", None)
     min_sessions = getattr(
         optimize_cfg, "min_recurring_sessions", MIN_RECURRING_SESSIONS,
     )
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, ctx.since, min_sessions=min_sessions,
-        transcript_cache_dir=default_cache_dir(ctx.config),
     )

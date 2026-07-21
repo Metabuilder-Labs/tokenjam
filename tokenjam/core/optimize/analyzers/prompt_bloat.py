@@ -108,6 +108,11 @@ class PromptBloatFinding:
     estimated_recoverable_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
+    # The effective significance bar this run applied (config-overridable,
+    # see core.config.OptimizeConfig.trim_significance_threshold) — carried on
+    # the finding so a renderer never hardcodes a number that could be stale
+    # against the user's own config.
+    significance_threshold:       float        = SIGNIFICANCE_THRESHOLD
 
 
 def estimate_trim_recoverable(
@@ -192,7 +197,10 @@ def _score_prompt(compressor, text: str) -> list[tuple[str, float]]:
     return [(str(t), float(s)) for t, s in zip(tokens, scores)]
 
 
-def _regions_from_scores(text: str, token_scores: list[tuple[str, float]]) -> list[BloatRegion]:
+def _regions_from_scores(
+    text: str, token_scores: list[tuple[str, float]],
+    *, significance_threshold: float = SIGNIFICANCE_THRESHOLD,
+) -> list[BloatRegion]:
     """
     Convert token-level scores into contiguous bloat regions of the
     underlying text. Walks the prompt linearly, advancing a character
@@ -216,7 +224,7 @@ def _regions_from_scores(text: str, token_scores: list[tuple[str, float]]) -> li
         token_end = idx + len(token_str)
         cursor = token_end
 
-        if score < SIGNIFICANCE_THRESHOLD:
+        if score < significance_threshold:
             if current_start is None:
                 current_start = token_start
             current_scores.append(score)
@@ -282,10 +290,16 @@ def _stringify_prompt(value: Any) -> str:
 @register("trim")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a PromptBloatFinding to ctx.report.findings."""
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    significance_threshold = getattr(
+        optimize_cfg, "trim_significance_threshold", SIGNIFICANCE_THRESHOLD,
+    )
+
     capture = getattr(ctx.config, "capture", None)
     if capture is None or not getattr(capture, "prompts", False):
         ctx.report.findings["trim"] = PromptBloatFinding(
             enabled=False,
+            significance_threshold=significance_threshold,
             hint=(
                 "Enable `[capture] prompts = true` in tj.toml and let the "
                 "daemon collect a window of data before re-running this "
@@ -301,6 +315,7 @@ def run(ctx: AnalyzerContext) -> None:
     except ImportError as exc:
         ctx.report.findings["trim"] = PromptBloatFinding(
             enabled=False,
+            significance_threshold=significance_threshold,
             hint=str(exc),
         )
         return
@@ -323,7 +338,9 @@ def run(ctx: AnalyzerContext) -> None:
     ).fetchall()
 
     if not rows:
-        ctx.report.findings["trim"] = PromptBloatFinding(enabled=True)
+        ctx.report.findings["trim"] = PromptBloatFinding(
+            enabled=True, significance_threshold=significance_threshold,
+        )
         return
 
     # Lazy-instantiate the compressor with cached model storage.
@@ -367,7 +384,9 @@ def run(ctx: AnalyzerContext) -> None:
             prompts_skipped += 1
             continue
 
-        regions = _regions_from_scores(text, scores)
+        regions = _regions_from_scores(
+            text, scores, significance_threshold=significance_threshold,
+        )
         bloat_chars = sum(r.char_length for r in regions)
         significant_chars = len(text) - bloat_chars
         # Rough token-reduction estimate: 4 chars/token, weighted by the
@@ -412,6 +431,7 @@ def run(ctx: AnalyzerContext) -> None:
         per_prompt=per_prompt[:10],
         estimated_recoverable_usd=rec_usd,
         estimated_recoverable_tokens=rec_tokens,
+        significance_threshold=significance_threshold,
         estimate_basis=(
             "low-significance tokens (≈4 chars/token) predicted by LLMLingua-2 "
             "× window input rate — review before editing prompts"

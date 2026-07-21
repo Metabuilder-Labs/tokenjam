@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.config import CaptureConfig, TjConfig
+from tokenjam.core.config import CaptureConfig, OptimizeConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.analyzers.workflow_restructure import (
@@ -158,6 +158,48 @@ def test_below_threshold_not_flagged(db):
     report = build_report(db=db, config=config, since=since, until=until,
                           findings=["script"])
     assert report.findings["script"].clusters == []
+
+
+def test_below_threshold_finding_carries_default_min_cluster_instances(db):
+    """An unset [optimize] section reports the module constant on the finding
+    (config-thread contract: omitting the section preserves today's default)."""
+    _seed_deterministic_cluster(
+        db, count=MIN_CLUSTER_INSTANCES - 1,
+        tools=[("bash", {"command": "echo hi"})],
+    )
+    config = _config(tool_inputs=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["script"])
+    assert report.findings["script"].min_cluster_instances == MIN_CLUSTER_INSTANCES
+
+
+def test_config_lowers_bar_surfaces_previously_hidden_cluster(db):
+    """The exact data from test_below_threshold_not_flagged produces nothing at
+    the default bar; lowering [optimize] min_cluster_instances surfaces it."""
+    _seed_deterministic_cluster(
+        db, count=MIN_CLUSTER_INSTANCES - 1,
+        tools=[("bash", {"command": "echo hi"})],
+    )
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+
+    default_config = _config(tool_inputs=True)
+    default_report = build_report(db=db, config=default_config, since=since,
+                                  until=until, findings=["script"])
+    assert default_report.findings["script"].clusters == []
+
+    lowered_config = TjConfig(
+        version="1", capture=CaptureConfig(tool_inputs=True),
+        optimize=OptimizeConfig(min_cluster_instances=MIN_CLUSTER_INSTANCES - 1),
+    )
+    lowered_report = build_report(db=db, config=lowered_config, since=since,
+                                  until=until, findings=["script"])
+    clusters = lowered_report.findings["script"].clusters
+    assert len(clusters) == 1
+    assert clusters[0].instances == MIN_CLUSTER_INSTANCES - 1
+    assert lowered_report.findings["script"].min_cluster_instances == MIN_CLUSTER_INSTANCES - 1
 
 
 def test_value_variation_doesnt_split_cluster(db):

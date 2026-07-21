@@ -249,6 +249,13 @@ class ReuseFinding:
     confidence:        Literal["heuristic"] = "heuristic"
     # Populated in Mode 1 (capture.prompts off) to nudge the richer mode.
     hint:              str = ""
+    # The effective recurrence bar this run applied (config-overridable, see
+    # core.config.OptimizeConfig.min_reuse_repetitions) — carried on the
+    # finding so a renderer's empty-state message never hardcodes a number
+    # that could be stale against the user's own config. Mirrors
+    # analyzers.plan_reuse.MIN_REPETITIONS's default (kept as a literal here
+    # to avoid a types -> analyzers import).
+    min_repetitions:   int = 3
 
 
 @dataclass

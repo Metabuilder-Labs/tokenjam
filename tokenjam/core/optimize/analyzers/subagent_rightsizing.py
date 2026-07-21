@@ -114,15 +114,21 @@ class SubagentRightsizingFinding:
     estimated_recoverable_usd:    float | None = None
     estimated_recoverable_tokens: int | None   = None
     estimate_basis:               str          = SUBAGENT_ESTIMATE_BASIS
+    # The effective noise floor this run applied (config-overridable, see
+    # core.config.OptimizeConfig.min_flag_cost_usd) — carried on the finding
+    # so a renderer never hardcodes a number that could be stale against the
+    # user's own config.
+    min_flag_cost_usd:            float        = MIN_FLAG_COST_USD
     estimate_confidence:          str          = "heuristic"
 
 
 def _flags_for(
     *, model: str, output_tokens: int, tool_calls: int,
     input_tokens: int, cache_tokens: int, cost_usd: float,
+    min_flag_cost_usd: float = MIN_FLAG_COST_USD,
 ) -> list[str]:
     """Structural right-sizing flags for one subagent (candidate-only)."""
-    if cost_usd < MIN_FLAG_COST_USD:
+    if cost_usd < min_flag_cost_usd:
         return []
     flags: list[str] = []
     is_premium = is_premium_tier(model)
@@ -133,7 +139,10 @@ def _flags_for(
     return flags
 
 
-def _compute_rows(conn, since, until, agent_id: str | None) -> list[SubagentRow]:
+def _compute_rows(
+    conn, since, until, agent_id: str | None,
+    *, min_flag_cost_usd: float = MIN_FLAG_COST_USD,
+) -> list[SubagentRow]:
     """Aggregate per (session_id, sub_agent_id) for real subagents in window."""
     clauses = [
         "start_time >= $1", "start_time < $2",
@@ -174,6 +183,7 @@ def _compute_rows(conn, since, until, agent_id: str | None) -> list[SubagentRow]
         flags = _flags_for(
             model=model, output_tokens=out_tok, tool_calls=int(tool_calls or 0),
             input_tokens=in_tok, cache_tokens=cache_tok, cost_usd=cost,
+            min_flag_cost_usd=min_flag_cost_usd,
         )
         result.append(SubagentRow(
             session_id=str(sid),
@@ -251,7 +261,14 @@ def _over_powered_recoverable(rows: list[SubagentRow]) -> tuple[float, int]:
 @register("subagent")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches the finding to ctx.report.findings."""
-    rows = _compute_rows(ctx.conn, ctx.since, ctx.until, ctx.agent_id)
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_flag_cost_usd = getattr(
+        optimize_cfg, "min_flag_cost_usd", MIN_FLAG_COST_USD,
+    )
+    rows = _compute_rows(
+        ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        min_flag_cost_usd=min_flag_cost_usd,
+    )
     if not rows:
         return
 
@@ -287,4 +304,5 @@ def run(ctx: AnalyzerContext) -> None:
         flagged=flagged[:TOP_N],
         estimated_recoverable_usd=est_usd,
         estimated_recoverable_tokens=est_tokens,
+        min_flag_cost_usd=min_flag_cost_usd,
     )
