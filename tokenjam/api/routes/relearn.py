@@ -163,12 +163,16 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
             "computed_at": None,
             "finding": None,
         }
+    finding = cached.get("finding")
+    if isinstance(finding, dict):
+        # Re-stamp on read as well as on write, so a cache written before the
+        # proposal id or the advise-only reason existed still resolves without
+        # waiting for a recompute. Idempotent.
+        finding = relearn_proposals.stamp_proposal_ids(finding)
     return {
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
-        "finding": _with_example_resolvability(
-            cached.get("finding"), _conn(request)
-        ),
+        "finding": _with_example_resolvability(finding, _conn(request)),
     }
 
 

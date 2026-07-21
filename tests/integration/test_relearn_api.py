@@ -506,3 +506,46 @@ async def test_proposals_flag_example_sessions_that_resolve(config, db, client):
     assert flags == {"ingested-1": True, "transcript-only-1": False}
     # The evidence itself is never dropped, only its link.
     assert {e["snippet"] for e in examples} == {"a", "b"}
+
+
+# --- the advise / apply seam is stated, not merely enforced -------------------
+
+async def test_advise_only_proposals_carry_their_reason_in_the_payload(config, client):
+    """An advise-only cluster has no apply path because there is no workspace
+    to write into. The inbox must be able to say so: a card that silently
+    lacks an apply button reads as a bug, not as a documented seam."""
+    from tokenjam.core.optimize import relearn_store
+    from tokenjam.core.optimize.analyzers.relearn import (
+        RelearnCluster,
+        RelearnExample,
+        RelearnFinding,
+    )
+
+    advise = RelearnCluster(
+        signature="http_call:peer closed", family_key=None,
+        title="peer closed the connection", sessions=3, occurrences=9,
+        repos=["billing-svc"], rung=1, scope="project",
+        proposed_fix="Retry the upstream call with backoff.",
+        examples=[RelearnExample(session_id="s1", repo="billing-svc", ts=None, snippet="e")],
+        advise_only=True,
+    )
+    workspace = RelearnCluster(
+        signature="cwd_confusion", family_key="cwd_confusion",
+        title="cwd / relative-path confusion", sessions=4, occurrences=12,
+        repos=["demo"], rung=1, scope="project",
+        proposed_fix="Verify an absolute cwd before a relative Read.",
+    )
+    relearn_store.write_cache(RelearnFinding(clusters=[advise, workspace]), config=config)
+
+    resp = await client.get("/api/v1/relearn/proposals")
+    assert resp.status_code == 200
+    by_title = {c["title"]: c for c in resp.json()["finding"]["clusters"]}
+
+    advise_card = by_title["peer closed the connection"]
+    assert advise_card["advise_only"] is True
+    assert "no workspace" in advise_card["advise_only_reason"]
+    assert not advise_card["suggested_target"]
+
+    workspace_card = by_title["cwd / relative-path confusion"]
+    assert workspace_card["advise_only"] is False
+    assert workspace_card["advise_only_reason"] is None

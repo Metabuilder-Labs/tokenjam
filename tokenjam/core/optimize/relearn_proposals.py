@@ -73,6 +73,29 @@ def missing_apply_fields(cluster: dict[str, Any]) -> tuple[str, ...]:
     return tuple(f for f in required if not str(cluster.get(f) or "").strip())
 
 
+#: Why an advise-only proposal has no apply path, in one line the Review inbox
+#: and `tj relearn list` both show. The flag itself is computed by the detector
+#: (``analyzers.relearn.build_proposals``): every agent that contributed to the
+#: cluster is one tokenjam has no workspace for, so there is no file to write a
+#: fix into. Stated rather than merely enforced, because a card that silently
+#: lacks an apply button reads as a bug.
+ADVISE_ONLY_REASON = (
+    "advise-only: every agent in this cluster is a service tokenjam has no "
+    "workspace for, so there is no file to write a fix into. Apply the "
+    "recommendation yourself, then measure it with "
+    "`tj relearn verify --otel`."
+)
+
+
+def advise_only_reason(proposal: dict[str, Any]) -> str | None:
+    """The human reason a proposal cannot be applied, or ``None`` when it can.
+
+    One source of truth for the wording, so the CLI, the API payload and the
+    inbox row cannot drift into three different explanations of one flag.
+    """
+    return ADVISE_ONLY_REASON if proposal.get("advise_only") else None
+
+
 def proposal_id_for(signature: str) -> str:
     """The stable ID for a cluster signature. Deterministic across processes
     and recomputes: the same signature always yields the same ID."""
@@ -82,15 +105,25 @@ def proposal_id_for(signature: str) -> str:
 
 def stamp_proposal_ids(finding: dict[str, Any]) -> dict[str, Any]:
     """Return a COPY of a serialised finding whose clusters each carry a
-    ``proposal_id``. Pure: the input dict (and its cluster dicts) is never
-    mutated. A non-dict cluster is passed through untouched rather than
+    ``proposal_id`` and, when they cannot be applied, an
+    ``advise_only_reason``. Pure: the input dict (and its cluster dicts) is
+    never mutated. A non-dict cluster is passed through untouched rather than
     raising; this runs inside the detector's cache write, which must never
-    fail on odd input."""
+    fail on odd input.
+
+    Both fields are derived, not detected: stamping them here (on write, and
+    again on read) means a cache written before either existed still resolves
+    without a recompute.
+    """
     clusters = finding.get("clusters")
     if not isinstance(clusters, list):
         return dict(finding)
     stamped = [
-        {**c, "proposal_id": proposal_id_for(str(c.get("signature") or ""))}
+        {
+            **c,
+            "proposal_id": proposal_id_for(str(c.get("signature") or "")),
+            "advise_only_reason": advise_only_reason(c),
+        }
         if isinstance(c, dict) else c
         for c in clusters
     ]
