@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tokenjam.core.config import CaptureConfig, TjConfig
+from tokenjam.core.config import CaptureConfig, OptimizeConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.analyzers.prompt_bloat import (
@@ -73,6 +73,19 @@ def test_regions_all_low_significance():
     regions = _regions_from_scores(text, scores)
     # The trailing-flush branch should produce a single region covering the rest.
     assert len(regions) == 1
+
+
+def test_significance_threshold_override_flags_previously_significant_span():
+    """A 0.5-scored span isn't bloat at the default 0.40 threshold (0.5 is not
+    below 0.40); raising `significance_threshold` (what run() threads from
+    `[optimize] trim_significance_threshold`) makes the same span count."""
+    text = "important " + ("x" * 30) + " important"
+    scores = [("important", 0.9)] + [("x", 0.5)] * 30 + [("important", 0.9)]
+
+    assert _regions_from_scores(text, scores) == []
+    regions = _regions_from_scores(text, scores, significance_threshold=0.6)
+    assert len(regions) == 1
+    assert regions[0].char_length >= MIN_REGION_LENGTH
 
 
 # -- Integration tests via build_report --
@@ -163,6 +176,38 @@ def test_scores_prompts_and_finds_bloat(db, monkeypatch):
     assert p.bloat_chars > 0
     assert p.estimated_token_reduction > 0
     assert len(p.regions) >= 1
+
+
+def test_config_raises_significance_bar_surfaces_previously_hidden_bloat(db, monkeypatch):
+    """A prompt whose filler scores 0.5 isn't bloat at the default 0.40
+    threshold; raising [optimize] trim_significance_threshold to 0.6 flags it
+    on the identical seeded data."""
+    text = "important " + ("filler " * 40) + "important"
+    scores = (
+        [("important", 0.9)]
+        + [("filler", 0.5)] * 40
+        + [("important", 0.9)]
+    )
+    _install_fake_llmlingua(monkeypatch, scores)
+    _seed_prompt(db, text=text, count=3)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+
+    default_report = build_report(db=db, config=_config(prompts=True), since=since,
+                                  until=until, findings=["trim"])
+    default_finding = default_report.findings["trim"]
+    assert default_finding.per_prompt[0].bloat_chars == 0
+    assert default_finding.significance_threshold == 0.40
+
+    raised_config = TjConfig(
+        version="1", capture=CaptureConfig(prompts=True),
+        optimize=OptimizeConfig(trim_significance_threshold=0.6),
+    )
+    raised_report = build_report(db=db, config=raised_config, since=since,
+                                 until=until, findings=["trim"])
+    raised_finding = raised_report.findings["trim"]
+    assert raised_finding.per_prompt[0].bloat_chars > 0
+    assert raised_finding.significance_threshold == 0.6
 
 
 def test_skips_short_prompts(db, monkeypatch):

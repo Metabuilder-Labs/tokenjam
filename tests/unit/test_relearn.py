@@ -9,6 +9,7 @@ so nothing here shells out.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -304,6 +305,64 @@ def test_below_threshold_cluster_is_dropped(tmp_path):
 
     assert finding.clusters == []
     assert finding.failures_examined == MIN_RECURRING_SESSIONS - 1
+    assert finding.min_sessions == MIN_RECURRING_SESSIONS
+
+
+def test_config_lowers_recurrence_bar_surfaces_previously_hidden_cluster(tmp_path):
+    """The exact data from test_below_threshold_cluster_is_dropped clusters
+    nothing at the default bar; passing a lower min_sessions (what run()
+    threads from [optimize] min_recurring_sessions) surfaces it."""
+    for i in range(MIN_RECURRING_SESSIONS - 1):
+        _edit_before_read_session(tmp_path, f"-Users-test-repo{i}", f"ebr-{i}")
+    sessions = [(f"ebr-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS - 1)]
+
+    default_finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
+    assert default_finding.clusters == []
+
+    lowered_finding = analyze_relearns(
+        sessions, projects_root=tmp_path, distill_enabled=False,
+        min_sessions=MIN_RECURRING_SESSIONS - 1,
+    )
+    assert len(lowered_finding.clusters) == 1
+    assert lowered_finding.clusters[0].sessions == MIN_RECURRING_SESSIONS - 1
+    assert lowered_finding.min_sessions == MIN_RECURRING_SESSIONS - 1
+
+
+def test_run_reads_min_recurring_sessions_from_ctx_config(tmp_path, monkeypatch):
+    """The registered run(ctx) entry point reads
+    ctx.config.optimize.min_recurring_sessions (not just analyze_relearns's
+    direct min_sessions param)."""
+    from tokenjam.core.config import OptimizeConfig, TjConfig
+    from tokenjam.core.optimize.analyzers.relearn import run as run_relearn
+    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
+
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(tmp_path))
+    for i in range(MIN_RECURRING_SESSIONS - 1):
+        _edit_before_read_session(tmp_path, f"-Users-test-repo{i}", f"ebr-{i}")
+
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    summary = WindowSummary(
+        since=since, until=datetime.now(timezone.utc), days=1.0, sessions=0,
+        spans=0, total_tokens=0, total_cost_usd=0.0, thin_data=False,
+    )
+
+    def _ctx(config) -> AnalyzerContext:
+        return AnalyzerContext(
+            conn=None, config=config, since=since, until=datetime.now(timezone.utc),
+            agent_id=None, window_days=1.0, summary=summary,
+            report=OptimizeReport(window=summary),
+        )
+
+    default_ctx = _ctx(TjConfig(version="1"))
+    run_relearn(default_ctx)
+    assert default_ctx.report.findings["relearn"].clusters == []
+
+    lowered_ctx = _ctx(TjConfig(
+        version="1",
+        optimize=OptimizeConfig(min_recurring_sessions=MIN_RECURRING_SESSIONS - 1),
+    ))
+    run_relearn(lowered_ctx)
+    assert len(lowered_ctx.report.findings["relearn"].clusters) == 1
 
 
 def test_single_repo_cluster_scopes_to_project(tmp_path):

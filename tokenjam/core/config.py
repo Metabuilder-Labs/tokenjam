@@ -263,6 +263,79 @@ class SummarizeConfig:
 
 
 @dataclass
+class OptimizeConfig:
+    """`[optimize]` — sensitivity thresholds for `tj optimize` analyzers.
+
+    Every analyzer's "does this even fire" bar used to be a bare module-level
+    constant no user could see or change. A savings opportunity that exists in
+    a user's data but never clears the bar is a saving never surfaced — this
+    section exists so a user can trade "possible noise" for "possible visibility"
+    on their own data, without a code change or a fork.
+
+    Every field default matches the historical module-level constant it
+    replaces exactly, so an unset `[optimize]` section (or a config predating
+    this section entirely) reproduces today's behaviour byte-for-byte. Lowering
+    a field only ever makes an analyzer MORE willing to surface a finding on
+    the same data; raising it only makes it more conservative. See each
+    analyzer module's docstring/comment at the named constant for the
+    false-positive reasoning behind its default — this class does not repeat
+    that reasoning, only the wiring.
+    """
+    # script (analyzers/workflow_restructure.py MIN_CLUSTER_INSTANCES): a
+    # tool-call-signature cluster needs at least this many member sessions
+    # before it's recommended for script-replacement.
+    min_cluster_instances: int = 20
+    # deadweight (analyzers/deadweight.py MIN_SESSIONS_DEADWEIGHT): an MCP
+    # server needs to be configured-present in at least this many distinct
+    # sessions, with zero invocations across all of them, to be flagged dead.
+    min_sessions_deadweight: int = 10
+    # cache (analyzers/cache_efficacy.py MIN_INPUT_TOKENS): minimum
+    # (provider, model) input-token volume in the window before a low
+    # cache-efficacy ratio is even worth surfacing.
+    min_cache_input_tokens: int = 100_000
+    # cache (analyzers/cache_efficacy.py EFFICACY_THRESHOLD): a (provider,
+    # model) row is flagged when its cache-read efficacy falls below this.
+    cache_efficacy_threshold: float = 0.30
+    # cache (analyzers/cache_efficacy.py MIN_CALLS_FOR_ROOT_CAUSE): minimum
+    # call volume for one agent before the A1/A2/A3 root-cause classifiers
+    # (uncached / thrash / lookback-miss) consider it.
+    min_calls_for_root_cause: int = 20
+    # verbosity (analyzers/output_verbosity.py MIN_COHORT_SESSIONS): a
+    # task-shape cohort needs at least this many sessions before its output-
+    # token median is a meaningful baseline to flag outliers against.
+    min_cohort_sessions: int = 5
+    # cache-recommend (analyzers/cache_recommend.py MIN_PREFIX_OCCURRENCES):
+    # minimum occurrences of the same prompt prefix before a cache_control
+    # breakpoint is recommended for it.
+    min_prefix_occurrences: int = 3
+    # trim (analyzers/prompt_bloat.py SIGNIFICANCE_THRESHOLD): LLMLingua-2
+    # tokens scored below this are considered low-significance ("bloat").
+    trim_significance_threshold: float = 0.40
+    # reuse (analyzers/plan_reuse.py MIN_REPETITIONS): minimum sessions
+    # sharing a planning skeleton before the cluster is surfaced.
+    min_reuse_repetitions: int = 3
+    # downsize quota-audit (analyzers/model_downgrade.py MIN_STRETCH_TURNS):
+    # minimum contiguous cheap-shaped turns before a mid-session stretch
+    # counts toward the premium-quota-misallocation audit.
+    min_stretch_turns: int = 2
+    # subagent (analyzers/subagent_rightsizing.py MIN_FLAG_COST_USD): noise
+    # floor below which a subagent's spend isn't worth a right-sizing flag
+    # regardless of its shape.
+    min_flag_cost_usd: float = 0.05
+    # relearn (analyzers/relearn.py MIN_RECURRING_SESSIONS): minimum distinct
+    # sessions a failure signature must recur across before it's proposed.
+    min_recurring_sessions: int = 3
+    # placement (analyzers/batch_placement.py MIN_SESSIONS_FOR_CADENCE):
+    # minimum sessions in a workload group before its start-time cadence is
+    # even checked for regularity.
+    min_sessions_for_cadence: int = 5
+    # placement (analyzers/batch_placement.py MIN_GROUP_COST_USD): minimum
+    # window spend for a cadence-regular workload group before batch-lane
+    # placement is worth suggesting.
+    min_group_cost_usd: float = 1.0
+
+
+@dataclass
 class LoopConfig:
     """`[loop]` — the self-improve loop's workspace binding.
 
@@ -301,6 +374,7 @@ class TjConfig:
     proxy:    ProxyConfig             = field(default_factory=ProxyConfig)
     capture:  CaptureConfig           = field(default_factory=CaptureConfig)
     summarize: SummarizeConfig        = field(default_factory=SummarizeConfig)
+    optimize: OptimizeConfig          = field(default_factory=OptimizeConfig)
     loop:     LoopConfig              = field(default_factory=LoopConfig)
     budgets:  dict[str, ProviderBudget] = field(default_factory=dict)
     policies: list[PolicyConfig]      = field(default_factory=list)
@@ -554,6 +628,44 @@ def _parse(raw: dict) -> TjConfig:
         allow_outbound_run=bool(raw.get("summarize", {}).get("allow_outbound_run", False)),
     )
 
+    # [optimize] — analyzer sensitivity thresholds. Fall back to the
+    # OptimizeConfig defaults (not a hardcoded literal) so a config that
+    # predates this section, or a hand-authored one that omits a given key,
+    # picks up the current module-constant-equivalent default rather than
+    # being frozen at whatever value existed when the file was written —
+    # same discipline as the `capture` block above.
+    optimize_raw = raw.get("optimize", {})
+    optimize = OptimizeConfig(
+        min_cluster_instances=optimize_raw.get(
+            "min_cluster_instances", OptimizeConfig.min_cluster_instances),
+        min_sessions_deadweight=optimize_raw.get(
+            "min_sessions_deadweight", OptimizeConfig.min_sessions_deadweight),
+        min_cache_input_tokens=optimize_raw.get(
+            "min_cache_input_tokens", OptimizeConfig.min_cache_input_tokens),
+        cache_efficacy_threshold=optimize_raw.get(
+            "cache_efficacy_threshold", OptimizeConfig.cache_efficacy_threshold),
+        min_calls_for_root_cause=optimize_raw.get(
+            "min_calls_for_root_cause", OptimizeConfig.min_calls_for_root_cause),
+        min_cohort_sessions=optimize_raw.get(
+            "min_cohort_sessions", OptimizeConfig.min_cohort_sessions),
+        min_prefix_occurrences=optimize_raw.get(
+            "min_prefix_occurrences", OptimizeConfig.min_prefix_occurrences),
+        trim_significance_threshold=optimize_raw.get(
+            "trim_significance_threshold", OptimizeConfig.trim_significance_threshold),
+        min_reuse_repetitions=optimize_raw.get(
+            "min_reuse_repetitions", OptimizeConfig.min_reuse_repetitions),
+        min_stretch_turns=optimize_raw.get(
+            "min_stretch_turns", OptimizeConfig.min_stretch_turns),
+        min_flag_cost_usd=optimize_raw.get(
+            "min_flag_cost_usd", OptimizeConfig.min_flag_cost_usd),
+        min_recurring_sessions=optimize_raw.get(
+            "min_recurring_sessions", OptimizeConfig.min_recurring_sessions),
+        min_sessions_for_cadence=optimize_raw.get(
+            "min_sessions_for_cadence", OptimizeConfig.min_sessions_for_cadence),
+        min_group_cost_usd=optimize_raw.get(
+            "min_group_cost_usd", OptimizeConfig.min_group_cost_usd),
+    )
+
     defaults_raw = raw.get("defaults", {})
     defaults_budget_raw = defaults_raw.get("budget", {})
     defaults = DefaultsConfig(budget=BudgetConfig(**defaults_budget_raw))
@@ -601,6 +713,7 @@ def _parse(raw: dict) -> TjConfig:
         proxy=proxy,
         capture=capture,
         summarize=summarize,
+        optimize=optimize,
         loop=loop_cfg,
         budgets=budgets,
         policies=policies,

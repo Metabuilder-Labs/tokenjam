@@ -17,7 +17,7 @@ from tokenjam.utils.time_parse import utcnow
 from tests.factories import make_llm_span
 
 
-def _ctx(db: InMemoryBackend, window_cost_usd: float):
+def _ctx(db: InMemoryBackend, window_cost_usd: float, config=None):
     now = utcnow()
     since = now - timedelta(days=1)
     until = now + timedelta(minutes=5)
@@ -26,7 +26,7 @@ def _ctx(db: InMemoryBackend, window_cost_usd: float):
         total_tokens=0, total_cost_usd=window_cost_usd, thin_data=False,
     )
     ctx = AnalyzerContext(
-        conn=db.conn, config=None, since=since, until=until, agent_id=None,
+        conn=db.conn, config=config, since=since, until=until, agent_id=None,
         window_days=1.0, summary=summary, report=OptimizeReport(window=summary),
     )
     return ctx, now
@@ -72,6 +72,43 @@ def test_flags_over_powered_and_over_provisioned_subagents():
         # B is present in the breakdown but carries no flags.
         b = next(r for r in f.rows if r.sub_agent_id == "agentB")
         assert b.flags == []
+    finally:
+        db.close()
+
+
+def test_config_lowers_noise_floor_flags_previously_hidden_subagent():
+    """An over_powered-shaped subagent costing less than the default
+    MIN_FLAG_COST_USD is unflagged; lowering [optimize] min_flag_cost_usd
+    (threaded through ctx.config) flags the identical span."""
+    from tokenjam.core.config import OptimizeConfig, TjConfig
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        MIN_FLAG_COST_USD,
+    )
+
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=0.03)
+        # Opus-powered, tiny output, no tools -> over_powered shape, but
+        # costs less than the default noise floor.
+        db.insert_span(make_llm_span(
+            model="claude-opus-4-8", input_tokens=1000, output_tokens=100,
+            cost_usd=0.03, session_id="s1", sub_agent_id="agentC", start_time=now,
+        ))
+
+        run_subagent(ctx)
+        default_finding = ctx.report.findings["subagent"]
+        assert default_finding.flagged == []
+        assert default_finding.min_flag_cost_usd == MIN_FLAG_COST_USD
+
+        lowered_ctx, _ = _ctx(
+            db, window_cost_usd=0.03,
+            config=TjConfig(version="1", optimize=OptimizeConfig(min_flag_cost_usd=0.01)),
+        )
+        run_subagent(lowered_ctx)
+        lowered_finding = lowered_ctx.report.findings["subagent"]
+        assert len(lowered_finding.flagged) == 1
+        assert lowered_finding.flagged[0].sub_agent_id == "agentC"
+        assert lowered_finding.min_flag_cost_usd == 0.01
     finally:
         db.close()
 

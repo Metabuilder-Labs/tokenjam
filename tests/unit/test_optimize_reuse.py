@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.config import CaptureConfig, TjConfig
+from tokenjam.core.config import CaptureConfig, OptimizeConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.analyzers.plan_reuse import (
@@ -161,6 +161,31 @@ def test_below_repetition_threshold_dropped(db):
     finding = _run(db, _config(prompts=False))
     assert finding.clusters == []
     assert finding.estimated_recoverable_usd is None
+    assert finding.min_repetitions == MIN_REPETITIONS
+
+
+def test_config_lowers_repetition_bar_surfaces_previously_hidden_cluster(db):
+    """The exact data from test_below_repetition_threshold_dropped clusters
+    nothing at the default bar; lowering [optimize] min_reuse_repetitions to
+    MIN_REPETITIONS - 1 surfaces it."""
+    _seed_cluster(db, count=MIN_REPETITIONS - 1, tool_names=["read"])
+    since = datetime(2026, 5, 1, tzinfo=UTC)
+    until = datetime(2026, 5, 30, tzinfo=UTC)
+
+    default_report = build_report(db=db, config=_config(prompts=False),
+                                  since=since, until=until, findings=["reuse"])
+    assert default_report.findings["reuse"].clusters == []
+
+    lowered_config = TjConfig(
+        version="1", capture=CaptureConfig(prompts=False),
+        optimize=OptimizeConfig(min_reuse_repetitions=MIN_REPETITIONS - 1),
+    )
+    lowered_report = build_report(db=db, config=lowered_config,
+                                 since=since, until=until, findings=["reuse"])
+    lowered_finding = lowered_report.findings["reuse"]
+    assert len(lowered_finding.clusters) == 1
+    assert lowered_finding.clusters[0].repetitions == MIN_REPETITIONS - 1
+    assert lowered_finding.min_repetitions == MIN_REPETITIONS - 1
 
 
 def test_below_token_threshold_dropped(db):

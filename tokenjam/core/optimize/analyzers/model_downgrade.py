@@ -17,7 +17,11 @@ from tokenjam.core.context_diagnostic import (
     load_turn_compositions,
 )
 from tokenjam.core.model_tiers import is_premium_tier
-from tokenjam.core.optimize.analyzers.batch_placement import analyze_batch_placement
+from tokenjam.core.optimize.analyzers.batch_placement import (
+    MIN_GROUP_COST_USD,
+    MIN_SESSIONS_FOR_CADENCE,
+    analyze_batch_placement,
+)
 from tokenjam.core.optimize.analyzers.downsize_agents import (
     thinking_tokens_by_session,
     build_agent_price_rows,
@@ -386,9 +390,16 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
     )
+    optimize_cfg = getattr(ctx.config, "optimize", None)
     placement = analyze_batch_placement(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
         ctx.summary.total_cost_usd or 0.0,
+        min_sessions_for_cadence=getattr(
+            optimize_cfg, "min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE,
+        ),
+        min_group_cost_usd=getattr(
+            optimize_cfg, "min_group_cost_usd", MIN_GROUP_COST_USD,
+        ),
     )
     if placement is not None:
         ctx.report.findings["placement"] = placement
@@ -462,17 +473,20 @@ def _cheap_segments(
     return segments
 
 
-def _segment_counts(segment: list[TurnComposition], session_turn_count: int) -> bool:
+def _segment_counts(
+    segment: list[TurnComposition], session_turn_count: int,
+    *, min_stretch_turns: int = MIN_STRETCH_TURNS,
+) -> bool:
     """Whether a cheap segment is flagged (design §2.2 + the whole-session floor).
 
-    A stretch of at least ``MIN_STRETCH_TURNS`` counts; a shorter run counts only
+    A stretch of at least ``min_stretch_turns`` counts; a shorter run counts only
     when it spans the session's ENTIRE turn set (a session that was Sonnet-shaped
     end to end — the whole-session floor the old audit already flagged, and the
     reason a single-turn cheap session is still counted). This is what keeps a
     lone mechanical turn wedged between two hard turns from being flagged.
     """
     return (
-        len(segment) >= MIN_STRETCH_TURNS
+        len(segment) >= min_stretch_turns
         or len(segment) == session_turn_count
     )
 
@@ -513,8 +527,14 @@ def audit_opus_quota(
     until: datetime,
     agent_id: str | None,
     window_days: float,
+    config: Any | None = None,
 ) -> OpusQuotaAudit:
     """Retroactive segment-level premium-tier quota audit (issue #5).
+
+    ``config`` (a ``TjConfig``, optional) supplies ``config.optimize.
+    min_stretch_turns`` to override ``MIN_STRETCH_TURNS`` (config-overridable
+    via ``core.config.OptimizeConfig``); ``None`` (the default — every current
+    caller passes none) reproduces today's behaviour unchanged.
 
     Walks the window's assistant turns per session in ``start_time`` order and
     reports ONE honest figure (founder decision D1): the share of premium
@@ -533,6 +553,11 @@ def audit_opus_quota(
     content (#3). Always returns an :class:`OpusQuotaAudit` (never ``None``) so
     the renderer can show an honest empty state.
     """
+    optimize_cfg = getattr(config, "optimize", None)
+    min_stretch_turns = getattr(
+        optimize_cfg, "min_stretch_turns", MIN_STRETCH_TURNS,
+    )
+
     turns = load_turn_compositions(
         conn, since, until, agent_id,
         ordered=True, with_tool_activity=True,
@@ -563,7 +588,9 @@ def audit_opus_quota(
 
         session_flagged = False
         for segment in _cheap_segments(session_turns):
-            if not _segment_counts(segment, len(session_turns)):
+            if not _segment_counts(
+                segment, len(session_turns), min_stretch_turns=min_stretch_turns,
+            ):
                 continue
             seg_premium = [t for t in segment if is_premium_tier(t.model)]
             if not seg_premium:

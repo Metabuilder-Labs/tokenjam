@@ -635,10 +635,16 @@ def compute_deadweight_finding(
     *,
     projects_root: Path | str | None = None,
     window_days: float | None = None,
+    min_sessions: int = MIN_SESSIONS_DEADWEIGHT,
 ) -> DeadweightFinding:
     """Full pipeline over a window of Claude Code transcripts. Never raises —
     a missing projects root, an unreadable transcript, or a malformed config
     file is skipped, not fatal.
+
+    ``min_sessions`` overrides ``MIN_SESSIONS_DEADWEIGHT`` (config-overridable
+    via ``core.config.OptimizeConfig.min_sessions_deadweight``); the module
+    constant remains the default so a caller that omits it sees today's
+    behaviour unchanged.
     """
     finding = DeadweightFinding()
     root = resolve_projects_root(projects_root)
@@ -707,7 +713,7 @@ def compute_deadweight_finding(
             for model, count in signal.models.items():
                 model_counts[model] = model_counts.get(model, 0) + count
 
-        dead = sessions_present >= MIN_SESSIONS_DEADWEIGHT and invocations == 0
+        dead = sessions_present >= min_sessions and invocations == 0
         non_deferred = max(sessions_present - deferred_sessions, 0)
         tax_per_session = (
             round(
@@ -841,7 +847,9 @@ def compute_deadweight_finding(
     elif configured:
         finding.notes.append(
             f"No configured MCP server cleared the dead-weight bar "
-            f"(>= {MIN_SESSIONS_DEADWEIGHT} sessions present, 0 invocations)."
+            f"(>= {min_sessions} sessions present, 0 invocations). Lower "
+            f"[optimize] min_sessions_deadweight in tj.toml to see servers "
+            f"present in fewer sessions."
         )
 
     return finding
@@ -855,6 +863,11 @@ def run(ctx: AnalyzerContext) -> None:
     ``ctx.report.findings["deadweight"]``. Claude Code transcripts lane only
     — reads on-disk JSONL directly, never ``ctx.conn`` (no DB spans needed).
     """
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_sessions = getattr(
+        optimize_cfg, "min_sessions_deadweight", MIN_SESSIONS_DEADWEIGHT,
+    )
     ctx.report.findings["deadweight"] = compute_deadweight_finding(
         ctx.since, ctx.until, window_days=ctx.window_days,
+        min_sessions=min_sessions,
     )
