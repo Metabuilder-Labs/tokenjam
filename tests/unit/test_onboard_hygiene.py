@@ -26,12 +26,15 @@ def test_capture_block_has_all_four_toggles(tmp_path):
     # #15: onboard previously omitted tool_inputs (CLAUDE.md documents four).
     res, cfg = _run(tmp_path)
     assert res.exit_code == 0, res.output
-    for key in ("prompts", "completions", "tool_outputs"):
+    for key in ("completions", "tool_outputs"):
         assert f"{key} = false" in cfg, f"[capture] missing {key}"
     # tool_inputs defaults ON: it only captures file paths / search queries
     # (not message or tool-output content), which is what lets the recurring-
     # inclusion attribution (statusline / `tj context`) work out of the box.
     assert "tool_inputs = true" in cfg, "[capture] tool_inputs should default on"
+    # prompts defaults ON too (E33): without it, trim / cache-recommend / the
+    # sharper mode of reuse are dark for every onboarded user.
+    assert "prompts = true" in cfg, "[capture] prompts should default on"
 
 
 def test_no_stale_openclawwatch_url(tmp_path):

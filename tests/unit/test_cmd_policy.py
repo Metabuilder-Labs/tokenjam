@@ -127,6 +127,7 @@ def test_agent_rows_emitted_only_for_overrides():
 def test_capture_row_always_shown():
     # Capture is a policy choice even when all toggles are off (#71 fix).
     cfg = _empty_config()
+    cfg.capture = CaptureConfig(prompts=False)
     row = next(r for r in _collect_rows(cfg) if r.policy == "capture")
     assert "prompts=false" in row.setting
     cfg.capture = CaptureConfig(prompts=True)

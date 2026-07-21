@@ -2003,12 +2003,16 @@ class _StubProvider:
         return self._resp
 
 
-def test_validate_capture_off_fails_with_hint(runner, db, config):
-    """Capture is off by default -> actionable failure naming the config toggle,
-    and no provider client is ever constructed."""
-    _seed_validate_span(db)  # capture flag in `config` is off
+def test_validate_capture_off_fails_with_hint(runner, db):
+    """Capture explicitly off -> actionable failure naming the config toggle,
+    and no provider client is ever constructed. (`prompts` defaults on now —
+    E33 — so this builds an explicit capture-off config rather than relying
+    on the shared `config` fixture's default.)"""
+    from tokenjam.core.config import CaptureConfig
+    cfg = TjConfig(version="1", capture=CaptureConfig(prompts=False))
+    _seed_validate_span(db)
     with patch.dict("os.environ", {"TJ_ANTHROPIC_API_KEY": "sk-test"}):
-        result = _invoke(runner, db, config,
+        result = _invoke(runner, db, cfg,
                          ["optimize", "--validate", "downsize"])
     assert result.exit_code == 1
     assert "requires prompt" in result.output.lower()
