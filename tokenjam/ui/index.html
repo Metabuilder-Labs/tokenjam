@@ -7878,12 +7878,34 @@ function CopySnippetButton({ text }) {
 // way to mark it done). The badge below says which one this card is; a
 // snippet fix gets its own labeled block so the snippet reads as the
 // deliverable, not a footnote.
+// Per apply_kind, the section title, hint, and primary-button copy for
+// CostProposalCard's direct-edit apply flow — the write differs by what's
+// actually changing (a config entry removed vs a model id swapped), so the
+// card has to say which rather than a one-size "Apply the sizing note".
+const APPLY_KIND_COPY = {
+  model_swap:  { title: 'Apply the model swap', hint: 'writes the new model id at the registered source path; confirm the target first', button: 'Apply swap' },
+  agent_model: { title: "Apply the agent's model change", hint: "sets this subagent's definition-file model key directly; confirm the target first", button: 'Apply change' },
+  mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; confirm the target first", button: 'Remove entry' },
+};
+
 function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged }) {
   const usd = prop.estimated_recoverable_usd;
   const toks = prop.estimated_recoverable_tokens;
-  // Workspace-apply state (subagent, CC-origin only): a target path + a dry-run
-  // diff before the real, reversible write — routed through the same
-  // human-gated relearn apply path.
+  // Two apply-capable shapes, routed through two different endpoints:
+  //  - no apply_kind (subagent rubric / script / reuse / verbosity): the fix
+  //    is a workspace surface an orchestrator reads, not a value tokenjam can
+  //    edit outright -> /relearn/cost-proposals/apply-workspace (unchanged).
+  //  - an apply_kind (model_swap / agent_model / mcp_remove): a deterministic
+  //    edit of a value already written down -> /relearn/apply, the SAME
+  //    endpoint a relearn cluster's Approve uses. relearn_proposals.
+  //    cluster_for_apply already projects apply_kind/agent_name/source_path/
+  //    current_model/proposed_model off the stored cost proposal, so this
+  //    needs no server-side change.
+  const hasApplyKind = !!prop.apply_kind;
+
+  // Workspace-apply state (subagent rubric / script / reuse / verbosity): a
+  // target path + a dry-run diff before the real, reversible write — routed
+  // through the same human-gated relearn apply path.
   const [target, setTarget] = useState('');
   const [wbusy, setWbusy] = useState(false);
   const [werr, setWerr] = useState(null);
@@ -7901,13 +7923,47 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged })
     finally { setWbusy(false); }
   };
 
+  // Apply-kind state: the target pre-fills from the server-resolved
+  // prop.target_path (already the exact file the analyzer found) rather than
+  // asking the user to type/guess it, unlike the workspace-note flow above
+  // where the target genuinely is the human's call.
+  const [akTarget, setAkTarget] = useState(prop.target_path || '');
+  const [akBusy, setAkBusy] = useState(false);
+  const [akErr, setAkErr] = useState(null);
+  const [akWarning, setAkWarning] = useState(null);   // active-session 409 — offers "apply anyway"
+  const [akPreview, setAkPreview] = useState(null);
+
+  useEffect(() => { setAkTarget(prop.target_path || ''); }, [prop.proposal_id]);
+
+  const applyKindFix = async (go, force) => {
+    if (!akTarget.trim()) { setAkErr('enter a target path first'); return; }
+    setAkBusy(true); setAkErr(null);
+    try {
+      const r = await apiPostOrDetail('/relearn/apply', {
+        proposal_id: prop.proposal_id, scope: prop.scope || 'project',
+        target_path: akTarget.trim(), go, force: !!force,
+      });
+      if (go) { setAkWarning(null); onChanged && onChanged(); }
+      else { setAkPreview(r.diff || '(no changes)'); }
+    } catch (e) {
+      // Same active-session guard relearn's own Approve modal offers a retry
+      // for (SPEC §7: never apply mid-session unless the human insists).
+      if (e.status === 409 && /active session/.test(e.message || '')) { setAkWarning(e.message); }
+      else { setAkErr(e.message || String(e)); }
+    } finally { setAkBusy(false); }
+  };
+
+  const akCopy = APPLY_KIND_COPY[prop.apply_kind] || { title: 'Apply this fix', hint: 'confirm the target first', button: 'Apply' };
+
   // The badge names the fix modality, not a verdict on the proposal: a
   // snippet fix is a complete, concrete deliverable (the user pastes it
   // themselves) — never phrased as a lesser "advise-only" fallback. Plain
   // advise-only survives for the rare proposal with no pasteable snippet at
-  // all (prose advice only).
+  // all (prose advice only). An apply_kind fix skips the rung ladder
+  // entirely (see relearn_apply's _build_write_plan), so it never carries a
+  // rung — "rung 1" would be wrong here, unlike the workspace-note flow.
   const modalityLabel = prop.apply_capable
-    ? 'workspace fix · rung 1'
+    ? (hasApplyKind ? 'workspace fix · direct edit' : 'workspace fix · rung 1')
     : (prop.suggestion ? 'snippet fix · apply yourself' : 'advise-only');
 
   return html`
@@ -7932,7 +7988,21 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged })
       ` : null}
       <div class="opt-caveat" style="font-size:11.5px;margin-top:8px">${prop.caveat}</div>
 
-      ${prop.apply_capable ? html`
+      ${prop.apply_capable ? (hasApplyKind ? html`
+        <div class="opt-section" style="margin:10px 0 0">
+          <div class="opt-title" style="font-size:12.5px">${akCopy.title} <span class="dim" style="font-weight:400">· ${akCopy.hint}</span></div>
+          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+            <input class="rename-input" style="flex:1;min-width:280px" value=${akTarget}
+              placeholder="/absolute/path/to/target" onInput=${e => setAkTarget(e.target.value)} />
+            <button class="cur-btn" disabled=${akBusy} onClick=${() => applyKindFix(false)}>${akBusy ? 'working…' : 'Preview'}</button>
+            <button class="cur-btn primary" disabled=${akBusy} onClick=${() => applyKindFix(true)}>${akCopy.button} →</button>
+          </div>
+          ${akPreview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${akPreview}</pre>` : null}
+          ${akWarning ? html`<div class="opt-caveat" style="color:var(--warn)">${akWarning} <span class="sz-link" onClick=${() => applyKindFix(true, true)}>Apply anyway →</span></div>` : null}
+          ${akErr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${akErr}</div>` : null}
+          <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized cost delta after it.</div>
+        </div>
+      ` : html`
         <div class="opt-section" style="margin:10px 0 0">
           <div class="opt-title" style="font-size:12.5px">Apply the sizing note <span class="dim" style="font-weight:400">· writes a reversible rung-1 note; confirm the target first</span></div>
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
@@ -7945,7 +8015,7 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged })
           ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
           <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized fan-out cost delta after it.</div>
         </div>
-      ` : html`
+      `) : html`
         <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
           <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : (prop.suggestion ? 'I applied this →' : 'Mark applied →')}</button>
           <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
