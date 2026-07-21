@@ -29,15 +29,58 @@ Model handling:
   LLMLingua-2's BERT classifier (~110MB) downloads on first use and
   caches under `~/.cache/tokenjam/models/`. The cache directory is
   reused across runs; offline use after the first download works.
+
+Provenance (source-file attribution, read-only):
+  A bloat prompt's raw text carries no pointer back to disk — the DB span
+  only has `agent_id` and the captured prompt string. But some bloated
+  prompts are, verbatim, the content of a file the user owns and could edit
+  (CLAUDE.md, a subagent definition, a slash command) — `core/summarize/`'s
+  catalog (`agent_files.toml`) already knows the fixed/global locations and
+  the project-relative names/globs for that class of file. This module reads
+  that catalog (never writes it — see `core/summarize/` for the editor) and
+  attempts to attribute each scored prompt to the ONE catalog file, if any,
+  whose full content it verbatim-contains.
+
+  Matching rule (conservative by construction, not by tuning): a catalog
+  file is attributed to a prompt ONLY when the file's ENTIRE content — after
+  whitespace-only normalization (collapsed inline runs, stripped trailing
+  space per line; never reordering or dropping words) — appears as a
+  contiguous substring of the prompt's normalized text. This is verbatim
+  containment, not a similarity/fuzzy score: a prompt that merely resembles
+  a catalog file, or contains an edited/stale copy of one, does not match.
+  Files under MIN_PROVENANCE_CHARS (after normalization) are never used as
+  candidates, so a near-empty or boilerplate catalog file can't "match"
+  everything. The overwhelming majority of prompts are expected to end with
+  NO attribution — "provenance unknown" is the conservative, correct answer
+  for prompt text that isn't a verbatim file copy (a summarized excerpt, a
+  tool-result echo, hand-typed chat), not a shortfall of this pass.
+
+  Scope of what's honestly checkable: global catalog paths (absolute, no cwd
+  needed) are always candidates. Project-scoped catalog files (CLAUDE.md at
+  a repo root, `.claude/agents/*.md`, etc.) are only checked for the ONE
+  repo `tj optimize` is being run from (mirrors `summarize.candidates`'
+  own cwd-rooted default) — and only when the prompt's own `agent_id`
+  plausibly names that same repo (`claude-code-<basename>`, the convention
+  `backfill.py` uses for Claude Code sessions). A prompt captured from a
+  DIFFERENT repo than the one this run is scanning has no honestly-checkable
+  local file and is correctly left unattributed, never guessed at.
+
+  This pass establishes provenance ONLY. It has no apply path and writes
+  nothing — whether tokenjam should ever auto-edit an attributed source file
+  is a separate decision this module does not make.
 """
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.summarize.candidates import find_repo_root
+from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.otel.semconv import GenAIAttributes
 
 # Tokens with a predicted significance score below this threshold are
@@ -53,6 +96,16 @@ MIN_REGION_LENGTH = 20
 # scored prompt is ~100ms of CPU compute; capping keeps runs snappy.
 MAX_PROMPTS_PER_RUN = 50
 
+# A catalog file's (whitespace-normalized) content must be at least this many
+# chars before it's used as a provenance candidate. Guards against a tiny or
+# boilerplate catalog file (a near-empty CLAUDE.md, say) trivially "matching"
+# as a substring of nearly any long-enough prompt.
+MIN_PROVENANCE_CHARS = 200
+
+# Claude Code-sourced spans carry agent_id = "claude-code-<repo-basename>"
+# (backfill.py's `_agent_id_from_cwd`) — the only cwd hint a span carries.
+_CLAUDE_CODE_AGENT_PREFIX = "claude-code-"
+
 
 def _model_cache_dir() -> str:
     base = os.environ.get(
@@ -61,6 +114,130 @@ def _model_cache_dir() -> str:
     )
     os.makedirs(base, exist_ok=True)
     return base
+
+
+# --- Provenance: catalog-file attribution (read-only) ----------------------
+#
+# See the module docstring's "Provenance" section for the full rule and its
+# scope. Everything below only ever READS files (the catalog itself, and the
+# catalog-named files it points at) — never writes one.
+
+_WS_RUN_RE = re.compile(r"[ \t]+")
+
+
+def _normalize_for_match(text: str) -> str:
+    """Whitespace-only normalization for verbatim-containment matching:
+    collapse runs of spaces/tabs to one space and drop trailing space on each
+    line. Never reorders, drops, or fuzzes word content — a prompt that
+    differs from a catalog file by more than incidental whitespace (a stale
+    copy, a paraphrase, an excerpt) will NOT normalize to the same string and
+    so will not match."""
+    return "\n".join(_WS_RUN_RE.sub(" ", line).rstrip() for line in text.splitlines())
+
+
+def _agent_repo_basename(agent_id: str) -> str | None:
+    """The repo basename implied by a Claude Code-sourced `agent_id`
+    (`claude-code-<basename>`), or None for any other agent_id shape — SDK/
+    litellm-captured spans use a different convention and carry no cwd hint
+    at all, so they never qualify for project-scoped provenance candidates
+    (global-catalog candidates are still checked for them)."""
+    if not agent_id.startswith(_CLAUDE_CODE_AGENT_PREFIX):
+        return None
+    basename = agent_id[len(_CLAUDE_CODE_AGENT_PREFIX):]
+    return basename or None
+
+
+@dataclass
+class _ProvenanceIndex:
+    """Precomputed, whitespace-normalized catalog-file candidates for one
+    analyzer run — built once so per-prompt matching is a substring check,
+    not a re-read-and-renormalize of every catalog file per prompt.
+    ``global_candidates``/``project_candidates`` are ``(path, normalized
+    content)`` pairs, pre-filtered to ``>= MIN_PROVENANCE_CHARS``.
+    """
+    global_candidates:  list[tuple[str, str]] = field(default_factory=list)
+    project_candidates: list[tuple[str, str]] = field(default_factory=list)
+    project_root:        Path | None          = None
+
+
+def _catalog_global_files() -> list[Path]:
+    """Catalog global/system paths that exist on this machine ("~" expanded,
+    globs expanded) — always honestly checkable, no cwd needed."""
+    out: list[Path] = []
+    for raw in load_catalog().global_paths:
+        p = Path(os.path.expanduser(raw))
+        if p.is_file():
+            out.append(p)
+    return out
+
+
+def _catalog_project_files(project_root: Path) -> list[Path]:
+    """Catalog-known bare filenames + globs present at ``project_root``."""
+    cat = load_catalog()
+    out: list[Path] = []
+    for name in sorted(cat.project_files):
+        p = project_root / name
+        if p.is_file():
+            out.append(p)
+    for pattern in cat.project_globs:
+        out.extend(sorted(p for p in project_root.glob(pattern) if p.is_file()))
+    return out
+
+
+def _normalized_candidates(paths: list[Path]) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for path in paths:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        normalized = _normalize_for_match(content)
+        if len(normalized) >= MIN_PROVENANCE_CHARS:
+            out.append((str(path), normalized))
+    return out
+
+
+def build_provenance_index(project_root: Path | None) -> _ProvenanceIndex:
+    """Build the candidate set for one run. ``project_root`` is the repo
+    ``tj optimize`` is being run from (or None when it can't be resolved,
+    e.g. not inside a git repo) — see the module docstring for why
+    project-scoped candidates are limited to that ONE repo."""
+    return _ProvenanceIndex(
+        global_candidates=_normalized_candidates(_catalog_global_files()),
+        project_candidates=(
+            _normalized_candidates(_catalog_project_files(project_root))
+            if project_root is not None else []
+        ),
+        project_root=project_root,
+    )
+
+
+def attribute_provenance(
+    text: str, agent_id: str, index: _ProvenanceIndex,
+) -> tuple[str | None, str]:
+    """Attribute ``text`` to a catalog file, or (None, "") when nothing
+    clears the verbatim-containment bar (the common, and conservatively
+    correct, outcome — see the module docstring). Project-scoped candidates
+    are only considered when ``agent_id``'s implied repo basename matches
+    ``index.project_root`` — a prompt from a different repo has no
+    honestly-checkable local file here.
+    """
+    candidates = list(index.global_candidates)
+    if (
+        index.project_root is not None
+        and _agent_repo_basename(agent_id) == index.project_root.name.lower()
+    ):
+        candidates += index.project_candidates
+    if not candidates:
+        return None, ""
+    normalized_text = _normalize_for_match(text)
+    for path, normalized_file in candidates:
+        if normalized_file in normalized_text:
+            return path, (
+                f"verbatim match: prompt contains {path}'s full content "
+                f"unchanged (whitespace-normalized)."
+            )
+    return None, ""
 
 
 @dataclass
@@ -83,6 +260,12 @@ class BloatPrompt:
     bloat_chars:     int         # chars in flagged regions
     regions:         list[BloatRegion] = field(default_factory=list)
     estimated_token_reduction: int = 0
+    # Provenance (read-only, see module docstring): the catalog file this
+    # prompt's text verbatim-contains, or None when no catalog file cleared
+    # the bar — the expected outcome for most prompts, not a failure.
+    source_path:  str | None = None
+    #: One-line explanation of the match; "" when source_path is None.
+    source_basis: str = ""
 
 
 # Rough characters-per-token ratio for English prose. Used to convert the
@@ -101,6 +284,11 @@ class PromptBloatFinding:
     per_prompt:        list[BloatPrompt] = field(default_factory=list)
     confidence:        str = "structural"
     hint:              str | None = None
+    # Provenance coverage (read-only pass, no apply path — see module
+    # docstring): of `prompts_scored` prompts, how many were attributed to a
+    # catalog file. Counted over EVERY scored prompt, not just the top-10
+    # kept in `per_prompt`, so this fraction stays honest under truncation.
+    prompts_with_provenance: int = 0
     # Recoverable-savings contract (#111). See types.DowngradeFinding for field
     # semantics. None when the analyzer is not ready (capture off, extra
     # missing) or no bloat was found.
@@ -350,9 +538,15 @@ def run(ctx: AnalyzerContext) -> None:
         model_config={"cache_dir": _model_cache_dir()},
     )
 
+    # Provenance candidates, built once for the run (see module docstring):
+    # global catalog files always; project-scoped ones only for the repo
+    # this run is being invoked from.
+    provenance_index = build_provenance_index(find_repo_root(Path.cwd()))
+
     per_prompt: list[BloatPrompt] = []
     prompts_scored = 0
     prompts_skipped = 0
+    prompts_with_provenance = 0
     total_bloat = 0
     total_chars = 0
 
@@ -395,6 +589,12 @@ def run(ctx: AnalyzerContext) -> None:
         total_bloat += bloat_chars
         total_chars += len(text)
 
+        source_path, source_basis = attribute_provenance(
+            text, str(agent_id or ""), provenance_index,
+        )
+        if source_path is not None:
+            prompts_with_provenance += 1
+
         per_prompt.append(BloatPrompt(
             agent_id=str(agent_id),
             sample_chars=text[:120],
@@ -403,6 +603,8 @@ def run(ctx: AnalyzerContext) -> None:
             bloat_chars=bloat_chars,
             regions=regions,
             estimated_token_reduction=est_tokens,
+            source_path=source_path,
+            source_basis=source_basis,
         ))
         prompts_scored += 1
 
@@ -429,6 +631,7 @@ def run(ctx: AnalyzerContext) -> None:
         total_bloat_chars=total_bloat,
         total_chars=total_chars,
         per_prompt=per_prompt[:10],
+        prompts_with_provenance=prompts_with_provenance,
         estimated_recoverable_usd=rec_usd,
         estimated_recoverable_tokens=rec_tokens,
         significance_threshold=significance_threshold,
