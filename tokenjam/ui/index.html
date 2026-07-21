@@ -8028,13 +8028,13 @@ function ReviewInboxView({ params }) {
 
   return html`
     <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
-    <div class="sz-note">The recurring mistakes your agent keeps repeating land here so it can relearn them. Each row links its evidence (repro sessions) and the proposed fix. <b>Approve</b> writes the fix (git-committed, or backed up if the target isn't a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
+    <div class="sz-note">Every row here is waste you are paying for more than once: a mistake your agent repeated across sessions, priced in the tokens it burned. Each row links its evidence (the sessions it recurred in) and the fix that would stop it. <b>Approve</b> writes that fix (git-committed, or backed up if the target is not a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
 
     <${ReceiptsHeader} rollup=${costRollup} receiptsData=${receiptsData} rollupFraming=${rollupFraming} />
 
     <div class="cur-listhead">
       <span>
-        ${relearnCount} pending · <b style="color:var(--warn)">${relearnCount}</b> recurring mistakes · <b style="color:var(--accent)">0</b> strategies
+        <b style="color:var(--warn)">${relearnCount}</b> recurring mistakes${d.estTokens ? html` · <b style="color:var(--accent)">~${fmtTokens(d.estTokens)} tok</b> recoverable <span class="estimated-tag" title="occurrences x a conservative per-turn token cost, summed across the rows below — review before applying">est.</span>` : null}
         ${d.computedAt ? html` · <span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
         ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
       </span>
