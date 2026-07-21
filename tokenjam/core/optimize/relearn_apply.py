@@ -863,13 +863,6 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
     }
 
 
-def preview_relearn_fix(cluster: dict, *, target_path: str) -> dict:
-    """Dry-run: exactly what ``apply_relearn_fix(..., go=True)`` would write,
-    without touching disk. Raises ``RelearnApplyRefused`` on the same guards
-    the real apply enforces (unknown rung, no target, hostile overwrite)."""
-    return {"dry_run": True, **_build_write_plan(cluster, target_path)}
-
-
 def apply_relearn_fix(
     config: TjConfig,
     cluster: dict,

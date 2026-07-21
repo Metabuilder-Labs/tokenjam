@@ -241,12 +241,14 @@ def test_matcherless_family_refuses_rung_3_and_offers_rung_1(cfg, tmp_path):
 
 
 def test_matcherless_family_refuses_the_dry_run_too(cfg, tmp_path):
-    # The refusal has to land on the preview as well, or the card shows a diff
+    # The refusal has to land on the dry run as well, or the card shows a diff
     # for a hook the real apply will then reject.
     cluster = _cluster(signature="mystery", family_key="mystery_family", rung=3)
     target = tmp_path / ".claude" / "hooks" / "mystery.py"
     with pytest.raises(pa.RelearnApplyRefused):
-        pa.preview_relearn_fix(cluster, target_path=str(target))
+        pa.apply_relearn_fix(cfg, cluster, target_path=str(target),
+                             scope="project", go=False)
+    assert not target.exists()
 
 
 def test_matchered_families_are_exactly_the_hand_authored_ones(cfg, tmp_path):
