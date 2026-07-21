@@ -43,6 +43,6 @@ historical Codex sessions are now visible in the dashboard and analyzers just li
 with presets), but it is restricted to a fixed list of built-in item IDs (model, tokens, cost,
 git-branch, context usage, etc.) sourced from Codex's own internal state. There is no custom-command
 mechanism to inject an externally-computed line the way Claude Code's `statusLine: {type: "command"}`
-works — the upstream feature requests for one (`openai/codex#17827`, `#20244`) are still open/unresolved
+works — the upstream feature requests for one (`openai/codex#17827`, `openai/codex#20244`) are still open/unresolved
 as of this writing. Until Codex ships a command-backed status line item, tj has no hook to wire its
 zero-token re-read nudge into, and stays fully out-of-band (`tj tokenmaxx` / `tj traces` reads).

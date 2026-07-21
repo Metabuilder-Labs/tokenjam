@@ -546,8 +546,8 @@ def _check_mcp_wiring(config: object) -> dict:
             "level": "warning",
             "message": (
                 f"MCP server registered in {', '.join(found_locations)} — an "
-                "in-loop MCP is a per-turn quota tax on subscription users "
-                "(+36% measured, ticket #59), not the recommended surface for "
+                "in-loop MCP is a per-turn token tax on subscription users "
+                "(+36% measured), not the recommended surface for "
                 "Claude Code / Codex. Remove it: " + "; ".join(removal_hints) + ". "
                 "The MCP is meant for SDK / API integrations only."
             ),

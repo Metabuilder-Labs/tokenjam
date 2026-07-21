@@ -2248,8 +2248,9 @@ def _onboard_codex(
 
     # Codex gets tj purely out-of-band: the OTel telemetry export (below) that
     # tj ingests with zero per-turn model cost. We deliberately do NOT register
-    # the tj MCP server for Codex — an in-loop MCP is a per-turn quota burden on
-    # subscription power users (see the +36% A/B in ticket #59). Codex has no
+    # the tj MCP server for Codex — an in-loop MCP is a per-turn token burden on
+    # subscription power users (a measured A/B showed +36% model-weighted tokens
+    # vs a no-tj control). Codex has no
     # statusline / status-hook surface to carry tj's re-read line the way Claude
     # Code does, so out-of-band OTel + `tj` CLI reports is the whole surface. The
     # MCP is reserved for SDK / API users where tj sits in the request path.
@@ -2825,8 +2826,8 @@ def _codex_mcp_toml_block() -> str:
 
     Retained only to *recognize* a previously tj-written block so onboard can
     retire it (see ``_codex_strip_tj_mcp_from_content``). tj no longer registers
-    an MCP server for Codex — an in-loop MCP is a per-turn quota burden on
-    subscription users (ticket #59); tj is out-of-band for Codex via OTel.
+    an MCP server for Codex — an in-loop MCP is a per-turn token burden on
+    subscription users (+36% measured); tj is out-of-band for Codex via OTel.
     """
     return (
         "[mcp_servers.tj]\n"

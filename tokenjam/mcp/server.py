@@ -4,8 +4,8 @@ This is the one tj surface that sits *in the loop*: it exposes observability
 data over stdio and is meant for SDK / API integrations where tj is already in
 the request path (real-time enforcement, policy, budgets). It is NOT the
 recommended surface for Claude Code / Codex subscription users — an in-loop MCP
-is a per-turn quota burden on them (a measured A/B showed +36% model-weighted
-quota vs a no-tj control; ticket #59). Those users get tj out-of-band instead:
+is a per-turn token burden on them (a measured A/B showed +36% model-weighted
+tokens vs a no-tj control). Those users get tj out-of-band instead:
 the zero-token statusline (`tj statusline`) plus OTel telemetry ingest wired by
 `tj onboard --claude-code`. `tj mcp` still works for anyone who wants it.
 """

@@ -2,7 +2,7 @@
 
 The MCP is tj's in-request-path surface: it belongs in an SDK / API integration
 where tj already sits in the loop. Claude Code / Codex subscription users should
-NOT wire this — an in-loop MCP is a per-turn quota burden on them (ticket #59);
+NOT wire this — an in-loop MCP is a per-turn token burden on them (+36% measured);
 `tj onboard --claude-code` gives them the zero-token statusline instead.
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ def cmd_mcp(ctx: click.Context) -> None:
     The MCP puts tj in the request path — the right surface for SDK / API
     integrations. Claude Code / Codex subscription users get tj out-of-band via
     the zero-token statusline (`tj statusline`, wired by `tj onboard
-    --claude-code`) instead of paying the per-turn MCP quota burden (#59).
+    --claude-code`) instead of paying the per-turn MCP token burden.
     """
     from tokenjam.mcp.server import mcp, init
 
