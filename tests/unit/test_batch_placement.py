@@ -122,10 +122,78 @@ def test_too_few_sessions_to_call_a_cadence(db):
     assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
 
 
+def test_config_lowers_cadence_bar_surfaces_previously_hidden_group(db):
+    """The exact 4-session data from test_too_few_sessions_to_call_a_cadence
+    yields no candidate at the default MIN_SESSIONS_FOR_CADENCE; passing a
+    lower min_sessions_for_cadence (what run() threads from [optimize]
+    min_sessions_for_cadence) surfaces it."""
+    _cron_sessions(db, count=4)
+    since, until = _window()
+    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+
+    finding = analyze_batch_placement(
+        db.conn, since, until, None, 12.0, min_sessions_for_cadence=4,
+    )
+    assert finding is not None
+    assert len(finding.candidates) == 1
+    assert finding.candidates[0].sessions == 4
+    assert finding.min_sessions_for_cadence == 4
+
+
 def test_trivial_spend_is_not_worth_an_architectural_change(db):
     _cron_sessions(db, count=6, cost_usd=0.01)
     since, until = _window()
     assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+
+
+def test_config_lowers_group_cost_bar_surfaces_previously_hidden_group(db):
+    """The exact trivial-spend data above yields no candidate at the default
+    MIN_GROUP_COST_USD; passing a lower min_group_cost_usd (what run()
+    threads from [optimize] min_group_cost_usd) surfaces it."""
+    _cron_sessions(db, count=6, cost_usd=0.01)
+    since, until = _window()
+    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+
+    finding = analyze_batch_placement(
+        db.conn, since, until, None, 12.0, min_group_cost_usd=0.01,
+    )
+    assert finding is not None
+    assert len(finding.candidates) == 1
+    assert finding.min_group_cost_usd == 0.01
+
+
+def test_downsize_run_reads_placement_thresholds_from_ctx_config(db):
+    """The registered "downsize" run(ctx) entry point (the only caller of
+    analyze_batch_placement in the real pipeline) reads ctx.config.optimize's
+    placement thresholds, using the same 4-session data that yields no
+    candidate at the module defaults."""
+    from tokenjam.core.config import OptimizeConfig, TjConfig
+    from tokenjam.core.optimize.analyzers.model_downgrade import run as run_downsize
+    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
+
+    _cron_sessions(db, count=4)
+    since, until = _window()
+    summary = WindowSummary(
+        since=since, until=until, days=WINDOW_DAYS, sessions=4, spans=0,
+        total_tokens=0, total_cost_usd=12.0, thin_data=False,
+    )
+
+    def _ctx(config) -> AnalyzerContext:
+        return AnalyzerContext(
+            conn=db.conn, config=config, since=since, until=until, agent_id=None,
+            window_days=WINDOW_DAYS, summary=summary, report=OptimizeReport(window=summary),
+        )
+
+    default_ctx = _ctx(TjConfig(version="1"))
+    run_downsize(default_ctx)
+    assert "placement" not in default_ctx.report.findings
+
+    lowered_ctx = _ctx(TjConfig(
+        version="1", optimize=OptimizeConfig(min_sessions_for_cadence=4),
+    ))
+    run_downsize(lowered_ctx)
+    assert "placement" in lowered_ctx.report.findings
+    assert lowered_ctx.report.findings["placement"].min_sessions_for_cadence == 4
 
 
 # --------------------------------------------------------------------------- #

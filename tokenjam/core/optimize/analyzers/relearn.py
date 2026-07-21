@@ -796,6 +796,11 @@ class RelearnFinding:
     estimate_basis:        str = ESTIMATE_BASIS
     estimate_confidence:   str = "heuristic"
     caveat:                 str = HONESTY_CAVEAT
+    # The effective recurrence bar this run applied (config-overridable, see
+    # core.config.OptimizeConfig.min_recurring_sessions) — carried on the
+    # finding so a renderer's empty-state message never hardcodes a number
+    # that could be stale against the user's own config.
+    min_sessions:           int = MIN_RECURRING_SESSIONS
 
 
 def _snippet(failure: FailureEpisode) -> str:
@@ -958,6 +963,7 @@ def analyze_relearns(
         distilled_clusters=distilled_count,
         dropped_codified=dropped,
         estimated_recoverable_tokens=total_tokens if proposals else None,
+        min_sessions=min_sessions,
     )
 
 
@@ -1010,6 +1016,7 @@ def compute_relearn_finding(
     *,
     projects_root: Path | str | None = None,
     distill_enabled: bool = True,
+    min_sessions: int = MIN_RECURRING_SESSIONS,
 ) -> RelearnFinding:
     """Standalone entry point that doesn't need a full ``AnalyzerContext`` —
     used by the serve-time background cache job (``api/routes/relearn.py``)
@@ -1077,6 +1084,7 @@ def compute_relearn_finding(
         sessions, projects_root=root, codified_doc_text=doc_text,
         distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
         extra_failures=span_failures, advise_only_repos=advise_only_repos,
+        min_sessions=min_sessions,
     )
 
 
@@ -1086,4 +1094,10 @@ def run(ctx: AnalyzerContext) -> None:
     ``ctx.report.findings["relearn"]`` — see ``compute_relearn_finding`` for
     the full-corpus behaviour and performance note.
     """
-    ctx.report.findings["relearn"] = compute_relearn_finding(ctx.conn, ctx.since)
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_sessions = getattr(
+        optimize_cfg, "min_recurring_sessions", MIN_RECURRING_SESSIONS,
+    )
+    ctx.report.findings["relearn"] = compute_relearn_finding(
+        ctx.conn, ctx.since, min_sessions=min_sessions,
+    )

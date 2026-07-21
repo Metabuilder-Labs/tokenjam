@@ -128,6 +128,11 @@ class WorkflowRestructureFinding:
     estimated_recoverable_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
+    # The effective cluster-instance bar this run applied (config-overridable,
+    # see core.config.OptimizeConfig.min_cluster_instances) — carried on the
+    # finding so a renderer's empty-state message never hardcodes a number
+    # that could be stale against the user's own config.
+    min_cluster_instances:        int          = MIN_CLUSTER_INSTANCES
 
 
 def _extract_tool_input(attrs: Any) -> Any:
@@ -147,6 +152,10 @@ def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a WorkflowRestructureFinding to ctx.report.findings."""
     capture = getattr(ctx.config, "capture", None)
     has_tool_inputs = bool(capture and getattr(capture, "tool_inputs", False))
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_cluster_instances = getattr(
+        optimize_cfg, "min_cluster_instances", MIN_CLUSTER_INSTANCES,
+    )
 
     # Query tool spans within the window, ordered per-session by start_time
     # so we can reconstruct the call sequence in order.
@@ -169,6 +178,7 @@ def run(ctx: AnalyzerContext) -> None:
     if not rows:
         ctx.report.findings["script"] = WorkflowRestructureFinding(
             degraded=not has_tool_inputs,
+            min_cluster_instances=min_cluster_instances,
         )
         return
 
@@ -192,7 +202,7 @@ def run(ctx: AnalyzerContext) -> None:
     total_cluster_cost = 0.0   # recoverable USD: full cost of clustered sessions
     total_cluster_tokens = 0   # recoverable tokens: replacing the call frees them
     for signature, members in recurring(
-        cluster_members, min_members=MIN_CLUSTER_INSTANCES,
+        cluster_members, min_members=min_cluster_instances,
     ).items():
         # Aggregate session-level cost + tokens + duration for the cluster.
         placeholders = ",".join(f"${i + 1}" for i in range(len(members)))
@@ -245,6 +255,7 @@ def run(ctx: AnalyzerContext) -> None:
         clusters=interesting,
         sessions_examined=len(session_signatures),
         degraded=not has_tool_inputs,
+        min_cluster_instances=min_cluster_instances,
         estimated_recoverable_usd=(
             round(total_cluster_cost, 6) if has_clusters else None
         ),

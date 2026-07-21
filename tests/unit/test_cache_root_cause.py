@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.config import TjConfig
+from tokenjam.core.config import OptimizeConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
@@ -82,6 +82,43 @@ def test_a1_not_flagged_below_call_volume(db):
     since, until = _window()
     uncached, _, _ = _compute_root_cause_candidates(db.conn, since, until, None)
     assert uncached == []
+
+
+def test_min_calls_override_flags_below_default_call_volume(db):
+    """`_compute_root_cause_candidates`'s `min_calls` param (what run() threads
+    from `[optimize] min_calls_for_root_cause`) surfaces the exact data from
+    test_a1_not_flagged_below_call_volume once lowered."""
+    _seed_uncached(db, calls=MIN_CALLS_FOR_ROOT_CAUSE - 1, input_tokens=4000)
+    since, until = _window()
+    uncached, _, _ = _compute_root_cause_candidates(
+        db.conn, since, until, None, min_calls=MIN_CALLS_FOR_ROOT_CAUSE - 1,
+    )
+    assert len(uncached) == 1
+
+
+def test_run_reads_min_calls_for_root_cause_from_ctx_config(db):
+    """The registered run(ctx) entry point reads
+    `ctx.config.optimize.min_calls_for_root_cause`."""
+    _seed_uncached(db, calls=MIN_CALLS_FOR_ROOT_CAUSE - 1, input_tokens=4000)
+    since, until = _window()
+
+    default_report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["cache"],
+    )
+    assert default_report.findings["cache"].uncached_agents == []
+
+    lowered_config = TjConfig(
+        version="1",
+        optimize=OptimizeConfig(min_calls_for_root_cause=MIN_CALLS_FOR_ROOT_CAUSE - 1),
+    )
+    lowered_report = build_report(
+        db=db, config=lowered_config, since=since, until=until,
+        findings=["cache"],
+    )
+    lowered_finding = lowered_report.findings["cache"]
+    assert len(lowered_finding.uncached_agents) == 1
+    assert lowered_finding.min_calls_for_root_cause == MIN_CALLS_FOR_ROOT_CAUSE - 1
 
 
 def test_a1_not_flagged_when_prefix_too_small(db):

@@ -20,6 +20,7 @@ from tokenjam.core.optimize.analyzers.deadweight import (
     MIN_SESSIONS_DEADWEIGHT,
     compute_deadweight_finding,
     enumerate_configured_servers,
+    run as run_deadweight,
 )
 
 _NOW = datetime.now(timezone.utc)
@@ -238,6 +239,79 @@ def test_below_threshold_is_not_flagged_dead(tmp_path):
     assert finding.dead_servers == []
     assert finding.estimated_recoverable_tokens is None
     assert finding.notes  # the "no server cleared the bar" note fires
+
+
+def test_default_min_sessions_preserved_when_unspecified(tmp_path):
+    """compute_deadweight_finding's default `min_sessions` matches the module
+    constant unchanged — the config-thread contract for an unset [optimize]."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert finding.dead_servers == []
+
+
+def test_lower_min_sessions_flags_previously_hidden_server(tmp_path):
+    """The exact data from test_below_threshold_is_not_flagged_dead flags
+    nothing at the default bar; passing a lower min_sessions (what
+    [optimize] min_sessions_deadweight threads through to) flags the server."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    default_finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    assert default_finding.dead_servers == []
+
+    lowered_finding = compute_deadweight_finding(
+        _SINCE, _UNTIL, projects_root=root, min_sessions=MIN_SESSIONS_DEADWEIGHT - 1,
+    )
+    assert len(lowered_finding.dead_servers) == 1
+    assert lowered_finding.dead_servers[0].name == "apollo"
+    assert lowered_finding.dead_servers[0].sessions_present == MIN_SESSIONS_DEADWEIGHT - 1
+
+
+def test_run_reads_min_sessions_deadweight_from_ctx_config(tmp_path, monkeypatch):
+    """The registered `run(ctx)` entry point (not just compute_deadweight_finding
+    directly) reads `ctx.config.optimize.min_sessions_deadweight` — the actual
+    wiring `tj optimize` exercises."""
+    from tokenjam.core.config import OptimizeConfig, TjConfig
+    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(root))
+
+    summary = WindowSummary(
+        since=_SINCE, until=_UNTIL, days=7.0, sessions=0, spans=0,
+        total_tokens=0, total_cost_usd=0.0, thin_data=False,
+    )
+
+    def _ctx(config) -> AnalyzerContext:
+        return AnalyzerContext(
+            conn=None, config=config, since=_SINCE, until=_UNTIL, agent_id=None,
+            window_days=7.0, summary=summary, report=OptimizeReport(window=summary),
+        )
+
+    default_ctx = _ctx(TjConfig(version="1"))
+    run_deadweight(default_ctx)
+    assert default_ctx.report.findings["deadweight"].dead_servers == []
+
+    lowered_ctx = _ctx(TjConfig(
+        version="1",
+        optimize=OptimizeConfig(min_sessions_deadweight=MIN_SESSIONS_DEADWEIGHT - 1),
+    ))
+    run_deadweight(lowered_ctx)
+    lowered = lowered_ctx.report.findings["deadweight"]
+    assert len(lowered.dead_servers) == 1
+    assert lowered.dead_servers[0].name == "apollo"
 
 
 def test_invoked_server_is_never_flagged_dead(tmp_path):

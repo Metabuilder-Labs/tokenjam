@@ -90,6 +90,11 @@ class BatchPlacementFinding:
     estimate_basis:      str = BATCH_ESTIMATE_BASIS
     estimate_confidence: str = "estimated"
     friction:            str = BATCH_FRICTION_NOTE
+    # Effective thresholds this run applied (config-overridable, see
+    # core.config.OptimizeConfig) — carried on the finding so a renderer never
+    # hardcodes a number that could be stale against the user's own config.
+    min_sessions_for_cadence: int   = MIN_SESSIONS_FOR_CADENCE
+    min_group_cost_usd:       float = MIN_GROUP_COST_USD
 
 
 def gap_coefficient_of_variation(starts: list[datetime]) -> float | None:
@@ -168,11 +173,17 @@ def analyze_batch_placement(
     until: datetime,
     agent_id: str | None,
     window_cost_usd: float,
+    *,
+    min_sessions_for_cadence: int = MIN_SESSIONS_FOR_CADENCE,
+    min_group_cost_usd: float = MIN_GROUP_COST_USD,
 ) -> BatchPlacementFinding | None:
     """Workload groups whose shape allows a batch-lane discussion.
 
     Returns ``None`` when nothing qualifies, so the card is simply absent rather
-    than rendering an empty candidate list.
+    than rendering an empty candidate list. ``min_sessions_for_cadence`` and
+    ``min_group_cost_usd`` override the module constants of the same name
+    (config-overridable via ``core.config.OptimizeConfig``); the defaults
+    reproduce today's behaviour unchanged.
     """
     rows = _session_rows(conn, since, until, agent_id)
     if not rows:
@@ -196,7 +207,7 @@ def analyze_batch_placement(
 
     candidates: list[BatchCandidate] = []
     for agent, sessions in sorted(by_agent.items()):
-        if len(sessions) < MIN_SESSIONS_FOR_CADENCE:
+        if len(sessions) < min_sessions_for_cadence:
             continue
         if any(s["session_id"] in interactive for s in sessions):
             continue
@@ -205,7 +216,7 @@ def analyze_batch_placement(
         if cv is None or cv >= MAX_START_GAP_CV:
             continue
         cost = sum(s["cost_usd"] for s in sessions)
-        if cost < MIN_GROUP_COST_USD:
+        if cost < min_group_cost_usd:
             continue
         gaps = [
             (b - a).total_seconds()
@@ -236,4 +247,6 @@ def analyze_batch_placement(
         ),
         estimated_recoverable_usd=round(candidate_cost * BATCH_DISCOUNT, 6),
         estimated_recoverable_tokens=sum(c.tokens for c in candidates),
+        min_sessions_for_cadence=min_sessions_for_cadence,
+        min_group_cost_usd=min_group_cost_usd,
     )

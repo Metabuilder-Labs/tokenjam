@@ -142,6 +142,11 @@ class VerbosityFinding:
     estimated_recoverable_tokens: int | None = None
     estimate_basis: str = ""
     estimate_confidence: str = "heuristic"
+    # The effective cohort-size bar this run applied (config-overridable, see
+    # core.config.OptimizeConfig.min_cohort_sessions) — carried on the finding
+    # so a renderer's empty-state message never hardcodes a number that could
+    # be stale against the user's own config.
+    min_cohort_sessions: int = MIN_COHORT_SESSIONS
 
 
 def _extract_tool_input(attrs: Any) -> Any:
@@ -178,8 +183,15 @@ def run(ctx: AnalyzerContext) -> None:
     """
     capture = getattr(ctx.config, "capture", None)
     has_tool_inputs = bool(capture and getattr(capture, "tool_inputs", False))
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_cohort_sessions = getattr(
+        optimize_cfg, "min_cohort_sessions", MIN_COHORT_SESSIONS,
+    )
 
-    finding = VerbosityFinding(estimate_basis=VERBOSITY_ESTIMATE_BASIS)
+    finding = VerbosityFinding(
+        estimate_basis=VERBOSITY_ESTIMATE_BASIS,
+        min_cohort_sessions=min_cohort_sessions,
+    )
 
     # No calls in the window → nothing to attach a per-call figure to (mirrors
     # the empty-window contract every recoverable finding honours, #211).
@@ -272,7 +284,7 @@ def run(ctx: AnalyzerContext) -> None:
     cohorts_examined = 0
 
     for signature, members in cohorts.items():
-        if len(members) < MIN_COHORT_SESSIONS:
+        if len(members) < min_cohort_sessions:
             continue
         outputs = [m.output_tokens for m in members]
         median = statistics.median(outputs)

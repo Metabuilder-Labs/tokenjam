@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.config import CaptureConfig, TjConfig
+from tokenjam.core.config import CaptureConfig, OptimizeConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.analyzers.cache_recommend import (
@@ -137,7 +137,37 @@ def test_below_min_occurrences_not_flagged(db):
     until = datetime(2026, 5, 30, tzinfo=timezone.utc)
     report = build_report(db=db, config=config, since=since, until=until,
                           findings=["cache-recommend"])
-    assert report.findings["cache-recommend"].candidates == []
+    finding = report.findings["cache-recommend"]
+    assert finding.candidates == []
+    assert finding.min_prefix_occurrences == MIN_PREFIX_OCCURRENCES
+
+
+def test_config_lowers_occurrence_bar_surfaces_previously_hidden_candidate(db):
+    """The exact 2-call data from test_below_min_occurrences_not_flagged
+    produces nothing at the default bar; lowering [optimize]
+    min_prefix_occurrences to 2 surfaces it."""
+    _seed_with_prompt(db, prompt="x" * 3000, count=2)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+
+    default_report = build_report(
+        db=db, config=_config(capture_prompts=True), since=since, until=until,
+        findings=["cache-recommend"],
+    )
+    assert default_report.findings["cache-recommend"].candidates == []
+
+    lowered_config = TjConfig(
+        version="1", capture=CaptureConfig(prompts=True),
+        optimize=OptimizeConfig(min_prefix_occurrences=2),
+    )
+    lowered_report = build_report(
+        db=db, config=lowered_config, since=since, until=until,
+        findings=["cache-recommend"],
+    )
+    lowered_finding = lowered_report.findings["cache-recommend"]
+    assert len(lowered_finding.candidates) == 1
+    assert lowered_finding.candidates[0].occurrences == 2
+    assert lowered_finding.min_prefix_occurrences == 2
 
 
 def test_short_prompts_skipped(db):

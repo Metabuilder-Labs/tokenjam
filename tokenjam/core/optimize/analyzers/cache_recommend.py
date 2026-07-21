@@ -64,6 +64,11 @@ class CacheRecommendFinding:
     estimated_recoverable_usd:    float | None = None
     estimated_recoverable_tokens: int | None   = None
     estimate_basis:               str          = ""
+    # The effective occurrence bar this run applied (config-overridable, see
+    # core.config.OptimizeConfig.min_prefix_occurrences) — carried on the
+    # finding so a renderer's empty-state message never hardcodes a number
+    # that could be stale against the user's own config.
+    min_prefix_occurrences:       int          = MIN_PREFIX_OCCURRENCES
 
 
 def _stringify_prompt(value: Any) -> str:
@@ -140,10 +145,16 @@ def _estimate_candidate_recoverable(
 @register("cache-recommend")
 def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a CacheRecommendFinding to ctx.report.findings."""
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_prefix_occurrences = getattr(
+        optimize_cfg, "min_prefix_occurrences", MIN_PREFIX_OCCURRENCES,
+    )
+
     capture = getattr(ctx.config, "capture", None)
     if capture is None or not getattr(capture, "prompts", False):
         ctx.report.findings["cache-recommend"] = CacheRecommendFinding(
             enabled=False,
+            min_prefix_occurrences=min_prefix_occurrences,
             hint=(
                 "Enable `[capture] prompts = true` in tj.toml and let the "
                 "daemon collect a window of data before re-running this "
@@ -205,7 +216,7 @@ def run(ctx: AnalyzerContext) -> None:
 
     candidates: list[CachePrefixCandidate] = []
     for h, entry in prefix_counts.items():
-        if entry["count"] < MIN_PREFIX_OCCURRENCES:
+        if entry["count"] < min_prefix_occurrences:
             continue
         avg_in = entry["tokens_sum"] / entry["count"] if entry["count"] else 0.0
         # Rough estimate of cacheable tokens per call. A 2000-char prefix
@@ -258,4 +269,5 @@ def run(ctx: AnalyzerContext) -> None:
         estimated_recoverable_usd=finding_usd,
         estimated_recoverable_tokens=finding_tokens,
         estimate_basis=basis,
+        min_prefix_occurrences=min_prefix_occurrences,
     )

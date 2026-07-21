@@ -231,6 +231,28 @@ def test_min_stretch_of_one_flags_the_lone_turn(db, monkeypatch):
     assert audit.segment_count == 1
 
 
+def test_config_min_stretch_turns_flags_the_lone_turn(db):
+    """The same data as test_lone_cheap_turn_between_hard_turns_is_not_flagged
+    flags nothing when `config` is omitted (today's default, unchanged); a
+    TjConfig with [optimize] min_stretch_turns = 1 (what audit_opus_quota's
+    optional `config` param exists to carry) flags the lone turn instead."""
+    _new_session(db, "lone")
+    _turn(db, "lone", 0, input_tokens=8_000, output_tokens=1_000)  # hard
+    _turn(db, "lone", 1, input_tokens=500, output_tokens=100)       # lone cheap
+    _turn(db, "lone", 2, input_tokens=9_000, output_tokens=1_200)  # hard
+
+    default_audit = audit_opus_quota(db.conn, SINCE, UNTIL, agent_id=None, window_days=30.0)
+    assert default_audit.candidate_sessions == 0
+
+    from tokenjam.core.config import OptimizeConfig, TjConfig as _TjConfig
+    lowered_config = _TjConfig(version="1", optimize=OptimizeConfig(min_stretch_turns=1))
+    lowered_audit = audit_opus_quota(
+        db.conn, SINCE, UNTIL, agent_id=None, window_days=30.0, config=lowered_config,
+    )
+    assert lowered_audit.candidate_sessions == 1
+    assert lowered_audit.segment_count == 1
+
+
 def test_tool_fanout_breaks_the_cheap_shape(db):
     """A turn with more than TURN_SMALL_TOOL_CALLS tool calls is not cheap-shaped,
     so it breaks a stretch even with small input/output — the per-turn fan-out is

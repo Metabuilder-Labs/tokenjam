@@ -195,6 +195,10 @@ def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a ReuseFinding to ctx.report.findings."""
     capture = getattr(ctx.config, "capture", None)
     prompts_captured = bool(capture and getattr(capture, "prompts", False))
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_repetitions = getattr(
+        optimize_cfg, "min_reuse_repetitions", MIN_REPETITIONS,
+    )
     capture_mode: Literal["tool_sequence_only", "with_prompt_prefix"] = (
         "with_prompt_prefix" if prompts_captured else "tool_sequence_only"
     )
@@ -222,6 +226,7 @@ def run(ctx: AnalyzerContext) -> None:
     finding = ReuseFinding(
         capture_mode=capture_mode,
         hint="" if prompts_captured else _MODE1_HINT,
+        min_repetitions=min_repetitions,
     )
 
     if not rows:
@@ -257,7 +262,7 @@ def run(ctx: AnalyzerContext) -> None:
     surfaced: list[ReuseCluster] = []
     # Recurrence gate first (the shared threshold filter); the remaining
     # per-cluster gates (avg tokens, recoverable floor) stay analyzer-specific.
-    for cluster_id, members in recurring(clusters_raw, min_members=MIN_REPETITIONS).items():
+    for cluster_id, members in recurring(clusters_raw, min_members=min_repetitions).items():
         reps = len(members)
 
         avg_tokens = round(sum(m.planning_tokens for m in members) / reps)

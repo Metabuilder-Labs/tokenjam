@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.config import CaptureConfig, TjConfig
+from tokenjam.core.config import CaptureConfig, OptimizeConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import ANALYZER_REGISTRY, build_report
 from tokenjam.core.optimize.analyzers.output_verbosity import (
@@ -121,6 +121,32 @@ def test_cohort_below_min_size_is_not_a_baseline(db):
     finding = _run(db)
     assert finding.cohorts_examined == 0
     assert finding.candidates == []
+    assert finding.min_cohort_sessions == MIN_COHORT_SESSIONS
+
+
+def test_config_lowers_cohort_bar_surfaces_previously_hidden_candidate(db):
+    """A 3-session cohort (2 baseline + 1 outlier) is too small to be a
+    baseline at the default MIN_COHORT_SESSIONS=5, so nothing is flagged;
+    lowering [optimize] min_cohort_sessions to 3 makes the same data a usable
+    cohort and flags the outlier."""
+    _seed_session(db, "base-0", output_tokens=200, i=0)
+    _seed_session(db, "base-1", output_tokens=200, i=1)
+    over = int(200 * HIGH_VERBOSITY_MULTIPLE) + 1000
+    _seed_session(db, "verbose", output_tokens=over, i=2)
+
+    default_finding = _run(db)
+    assert default_finding.cohorts_examined == 0
+    assert default_finding.candidates == []
+
+    lowered_config = TjConfig(
+        version="1", capture=CaptureConfig(tool_inputs=True),
+        optimize=OptimizeConfig(min_cohort_sessions=3),
+    )
+    lowered_finding = _run(db, config=lowered_config)
+    assert lowered_finding.cohorts_examined == 1
+    assert lowered_finding.min_cohort_sessions == 3
+    ids = {c.session_id for c in lowered_finding.candidates}
+    assert "verbose" in ids
 
 
 def test_output_input_ratio_is_descriptive_not_the_flag(db):
