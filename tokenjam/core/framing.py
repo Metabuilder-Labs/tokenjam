@@ -391,9 +391,18 @@ def compute_framing(
             # /cost route now frames off the user's full session history (#177)
             # while the CLI / compare callers still pass a window-scoped mix —
             # the phrasing must read truthfully for both.
+            #
+            # It must also be true about HOW the dollars are derived. This used
+            # to claim they "reflect API traffic only", which no query in the
+            # product does: `plan_tier` lives on `sessions`, every cost
+            # aggregate reads `spans`, and nothing joins the two — so dollars
+            # price ALL traffic at API list rates. That is the right number
+            # (it is what the waste would cost at list price), but it is a
+            # list-price equivalent, not an amount anyone was billed.
             qualifier = (
-                f"{sub_pct:.1f}% of sessions are subscription-billed; "
-                f"dollar figures reflect API traffic only."
+                f"{sub_pct:.1f}% of sessions are subscription-billed. Dollar "
+                f"figures price all traffic at API list rates, so they are a "
+                f"list-price equivalent, not an amount billed."
             )
     elif mode == "local":
         display_rule = DISPLAY_TOKENS_ONLY

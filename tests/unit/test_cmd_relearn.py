@@ -100,3 +100,63 @@ def test_receipts_json_output_matches_summary_shape(runner, cfg):
     assert payload["relearn_tokens_saved"] == 1000
     assert payload["estimate_confidence"] == "measured"
     assert payload["verified_count"] == 1
+
+
+# --- the receipts line must not state a bare dollar figure it cannot back --- #
+# `verified_saved_usd` prices token deltas at API list rates across ALL traffic
+# (plan_tier lives on `sessions`, cost aggregates read `spans`, nothing joins
+# them), and it excludes relearn savings entirely because a relearn fix has no
+# single model to price against. Printed bare to a subscription user it reads
+# as money off a bill they never received.
+
+@pytest.fixture
+def sub_cfg(tmp_path):
+    from tokenjam.core.config import ProviderBudget
+    return TjConfig(
+        version="1",
+        storage=StorageConfig(path=str(tmp_path / "t.duckdb")),
+        budgets={"anthropic": ProviderBudget(plan="max_5x")},
+    )
+
+
+def _ledgers(cfg):
+    _write_relearn_ledger(cfg, [
+        {"state": "applied", "rung": 1,
+         "verify": {"verdict": "improved", "realized_tokens_saved": 1500}},
+    ])
+    _write_cost_ledger(cfg, [
+        {"state": "applied",
+         "verify": {"verdict": "improved", "realized_usd_delta": 0.75,
+                    "realized_tokens_delta": 400}},
+    ])
+
+
+def test_receipts_leads_with_tokens_on_a_subscription_plan(runner, sub_cfg):
+    _ledgers(sub_cfg)
+    result = _invoke(runner, sub_cfg, ["relearn", "receipts"])
+    assert result.exit_code == 0
+    out = " ".join(result.output.split())   # rich wraps; compare unwrapped
+    # Tokens are the headline, and the dollar figure never stands alone.
+    assert "1,900 tok verified saved to date" in out
+    assert "$0.75 verified saved to date" not in out
+    # Where the dollars do appear, they carry their basis.
+    assert "at API list rates across the cost ledger only" in out
+    assert "relearn fixes have no single model to price at" in out
+
+
+def test_receipts_dollar_line_is_unchanged_on_api_billing(runner, cfg):
+    _ledgers(cfg)
+    result = _invoke(runner, cfg, ["relearn", "receipts"])
+    assert result.exit_code == 0
+    out = " ".join(result.output.split())
+    assert "$0.75 verified saved to date" in out
+    assert "+ 1,900 tok saved" in out
+    # No list-price caveat is added for a user whose list price is the bill.
+    assert "at API list rates" not in out
+
+
+def test_receipts_never_claims_dollars_are_api_traffic_only(runner, sub_cfg, cfg):
+    for config in (sub_cfg, cfg):
+        _ledgers(config)
+        result = _invoke(runner, config, ["relearn", "receipts"])
+        assert "reflect API traffic only" not in result.output

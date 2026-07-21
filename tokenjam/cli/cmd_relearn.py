@@ -55,7 +55,7 @@ def cmd_relearn_receipts(ctx: click.Context, output_json: bool) -> None:
         click.echo(json.dumps(summary, indent=2))
         return
 
-    _render_receipts(summary)
+    _render_receipts(summary, _receipts_framing(config))
 
 
 @cmd_relearn.command("eval-case")
@@ -92,7 +92,38 @@ def cmd_relearn_eval_case(ctx: click.Context, proposal_id: str, out_path: str | 
     click.echo(payload)
 
 
-def _render_receipts(summary: dict[str, Any]) -> None:
+def _receipts_framing(config: TjConfig) -> Any:
+    """Plan-tier framing for the receipts line, without opening the database.
+
+    This command reads only the two on-disk ledgers; making it open DuckDB just
+    to count plan tiers would add a failure mode (missing / locked store) to a
+    command that does not otherwise need one. ``compute_framing`` with an empty
+    window falls back to the plan declared in config, which is the same no-DB
+    path ``/api/v1/budget`` already relies on. Returns None if anything is
+    unavailable, and the caller then renders exactly as it did before.
+    """
+    try:
+        from tokenjam.core.framing import WindowSummary, compute_framing
+        return compute_framing(config, WindowSummary())
+    except Exception:
+        return None
+
+
+def _dollars_suppressed(framing: Any) -> bool:
+    """Mirror of the UI's `dollarsSuppressed`: the server-side display rule
+    decides, not a re-derivation here."""
+    from tokenjam.core.framing import (
+        DISPLAY_SUPPRESS_SUBSCRIPTION,
+        DISPLAY_SUPPRESS_UNKNOWN,
+        DISPLAY_TOKENS_ONLY,
+    )
+    rule = getattr(framing, "display_rule", None)
+    return rule in {
+        DISPLAY_SUPPRESS_SUBSCRIPTION, DISPLAY_TOKENS_ONLY, DISPLAY_SUPPRESS_UNKNOWN,
+    }
+
+
+def _render_receipts(summary: dict[str, Any], framing: Any = None) -> None:
     if summary["verified_count"] == 0:
         console.print(
             "[dim]No fixes verified yet. Apply a relearn fix or mark a cost "
@@ -101,15 +132,33 @@ def _render_receipts(summary: dict[str, Any]) -> None:
         )
         return
 
-    console.print(
-        f"[bold]{format_cost(summary['verified_saved_usd'])}[/bold] verified saved to date "
-        f"[dim](measured · {summary['improved_count']} improved fix(es))[/dim]"
-    )
-    console.print(
-        f"[dim]+ {summary['verified_saved_tokens']:,} tok saved "
-        f"({summary['relearn_tokens_saved']:,} from relearn fixes, "
-        f"{summary['cost_tokens_saved']:,} from cost fixes)[/dim]"
-    )
+    # Under a suppressing plan the tokens lead and no dollar figure is stated:
+    # `verified_saved_usd` prices token deltas at API list rates across all
+    # traffic (nothing filters cost by plan tier), so printing it bare reads as
+    # money off a bill a subscription user never received.
+    if _dollars_suppressed(framing):
+        console.print(
+            f"[bold]{summary['verified_saved_tokens']:,} tok[/bold] verified saved to date "
+            f"[dim](measured · {summary['improved_count']} improved fix(es))[/dim]"
+        )
+        console.print(
+            f"[dim]{summary['relearn_tokens_saved']:,} from relearn fixes, "
+            f"{summary['cost_tokens_saved']:,} from cost fixes[/dim]"
+        )
+        console.print(
+            f"[dim]{format_cost(summary['verified_saved_usd'])} at API list rates across the "
+            f"cost ledger only; relearn fixes have no single model to price at.[/dim]"
+        )
+    else:
+        console.print(
+            f"[bold]{format_cost(summary['verified_saved_usd'])}[/bold] verified saved to date "
+            f"[dim](measured · {summary['improved_count']} improved fix(es))[/dim]"
+        )
+        console.print(
+            f"[dim]+ {summary['verified_saved_tokens']:,} tok saved "
+            f"({summary['relearn_tokens_saved']:,} from relearn fixes, "
+            f"{summary['cost_tokens_saved']:,} from cost fixes)[/dim]"
+        )
     console.print(
         f"[dim]{summary['verified_count']} checked · {summary['improved_count']} improved · "
         f"{summary['regressed_count']} regressed · {summary['no_change_count']} no change · "
