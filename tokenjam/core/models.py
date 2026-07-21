@@ -344,6 +344,9 @@ class CostRow:
     cache_tokens: int         = 0   # cache-READ tokens
     cache_write_tokens: int   = 0   # cache-CREATE tokens (the hidden cost driver, #17)
     cost_usd:     float       = 0.0
+    call_count:   int         = 0   # span count in this bucket — the only honest metric
+                                     # for `group_by="tool"`, whose spans carry no cost/tokens
+                                     # of their own (see get_cost_summary)
 
 
 # -- Enforcement-plane audit log + savings meter (#221) --

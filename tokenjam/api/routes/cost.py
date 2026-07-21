@@ -496,6 +496,7 @@ async def get_cost(
                 "cache_tokens": r.cache_tokens,
                 "cache_write_tokens": r.cache_write_tokens,
                 "cost_usd": r.cost_usd,
+                "call_count": r.call_count,
             }
             for r in rows
         ],
