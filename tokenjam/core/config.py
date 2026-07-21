@@ -193,13 +193,22 @@ class CaptureConfig:
     local-only (the user's own telemetry DB), which is why this defaults on
     rather than opt-in. ``completions`` and ``tool_outputs`` stay off by
     default — no analyzer needs them yet, and completion text is the
-    largest, least useful payload to store. ``tool_inputs`` stays off here
-    too; the onboarding templates explicitly enable it (Read/Grep/Glob file
-    paths, not content) for `tj context` / the statusline.
+    largest, least useful payload to store.
+
+    ``tool_inputs`` also defaults ON: without tool-call arguments, the
+    `script` (workflow-restructure) and `verbosity` analyzers fall back to
+    tool-names-only clustering — the same "dark by default" problem
+    ``prompts`` had. Claude Code's JSONL backfill is the persona that
+    actually populates this (Read/Grep/Glob file paths and search queries,
+    not their content), and it's also what `tj context` / the statusline
+    read from. SDK/API callers gain little from it today (no automatic
+    instrumentation records ``gen_ai.tool.input`` there yet), but the
+    default stays uniform across onboarding paths rather than carving out
+    an exception per persona.
     """
     prompts:      bool = True
     completions:  bool = False
-    tool_inputs:  bool = False
+    tool_inputs:  bool = True
     tool_outputs: bool = False
 
 
