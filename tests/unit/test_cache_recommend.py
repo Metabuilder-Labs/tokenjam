@@ -114,6 +114,31 @@ def test_identifies_repeated_prefix(db):
     assert "you are helpful" in c.sample_chars
 
 
+def test_candidate_carries_a_ready_cache_control_snippet(db):
+    """cache-recommend's whole job is placement advice, so a candidate must
+    ship a pasteable cache_control snippet, not just prose stats (issue: the
+    analyzer previously had no snippet field at all)."""
+    _seed_with_prompt(db, prompt="SYSTEM: " + "you are helpful. " * 200,
+                      count=5, input_tokens=2500, model="claude-sonnet-4-6")
+    config = _config(capture_prompts=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["cache-recommend"])
+    c = report.findings["cache-recommend"].candidates[0]
+    assert c.cache_control_snippet
+    assert "cache_control" in c.cache_control_snippet
+    assert "ephemeral" in c.cache_control_snippet
+    assert "claude-sonnet-4-6" in c.cache_control_snippet
+    assert "5 calls" in c.cache_control_snippet
+    # A placeholder `text` value, not the real captured prefix pasted in
+    # full: the snippet stays short (a short preview + boilerplate) even
+    # though the actual captured prompt repeats "you are helpful." 200
+    # times over.
+    assert "<the stable prefix" in c.cache_control_snippet
+    assert len(c.cache_control_snippet) < 500
+
+
 def test_skips_non_anthropic_providers(db):
     """OpenAI/Gemini spans are counted in skipped_provider_count and not as candidates."""
     _seed_with_prompt(db, prompt="x" * 3000, count=5, provider="openai")
