@@ -13,7 +13,7 @@ from click.testing import CliRunner
 from tokenjam.cli.main import cli
 from tokenjam.core.config import ApiConfig, ApiAuthConfig, ProviderBudget, TjConfig
 from tokenjam.core.db import InMemoryBackend
-from tests.factories import make_llm_span, make_session
+from tests.factories import make_llm_span, make_session, make_tool_span
 
 
 @pytest.fixture(autouse=True)
@@ -90,3 +90,28 @@ def test_unknown_plan_keeps_dollars_with_qualifier(db):
     assert result.exit_code == 0, result.output
     assert "$2,599" in result.output             # dollars still shown
     assert "may overstate" in result.output       # qualifier surfaced
+
+
+def test_group_by_tool_reports_per_tool_call_counts(db):
+    """`tj cost --group-by tool` must attribute call counts to each real tool
+    name, not collapse everything into one bogus `None` row.
+
+    Tool-call spans carry no `model` (a separate LLM-completion span does),
+    so a query that hardcoded `model IS NOT NULL` for every grouping silently
+    dropped every tool span, leaving one row labelled "None"."""
+    sess = make_session(agent_id="a", session_id="s1", plan_tier="api")
+    db.upsert_session(sess)
+    for _ in range(3):
+        db.insert_span(make_tool_span(agent_id="a", tool_name="Read", session_id="s1"))
+    db.insert_span(make_tool_span(agent_id="a", tool_name="Bash", session_id="s1"))
+    db.insert_span(make_llm_span(
+        agent_id="a", session_id="s1", model="claude-opus-4-8", cost_usd=1.0,
+    ))
+
+    result = _invoke(db, _config("api"), ["cost", "--since", "30d", "--group-by", "tool"])
+    assert result.exit_code == 0, result.output
+    assert "None" not in result.output
+    assert "Read" in result.output
+    assert "Bash" in result.output
+    assert "3" in result.output  # Read's call count
+    assert "carry no cost of their own" in result.output  # honesty note

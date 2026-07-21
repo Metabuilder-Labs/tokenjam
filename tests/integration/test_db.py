@@ -412,6 +412,36 @@ def test_get_cost_summary_by_model(db):
     assert abs(models.get("gpt-4o", 0) - 2.0) < 0.001
 
 
+def test_get_cost_summary_by_tool(db):
+    """`--group-by tool` must attribute call counts to each real tool name,
+    not collapse everything into one 'None' bucket.
+
+    Tool-call spans (``gen_ai.tool.call``) never carry a ``model`` — that
+    attribute lives on the LLM completion span, a separate row (see
+    otel/otlp_parsing.py). ``get_cost_summary`` used to hardcode
+    ``model IS NOT NULL`` for every grouping, which silently dropped every
+    tool span and left `tool` grouping with nothing but LLM spans (whose
+    tool_name is NULL) — one bogus `TOOL: None` row.
+    """
+    _insert_agent(db)
+    session = make_session()
+    db.upsert_session(session)
+
+    for _ in range(3):
+        db.insert_span(make_tool_span(tool_name="Read", session_id=session.session_id))
+    for _ in range(2):
+        db.insert_span(make_tool_span(tool_name="Bash", session_id=session.session_id))
+    # An LLM span alongside the tool spans must not leak into the tool
+    # grouping (and confirms the bug's "TOOL: None" bucket is gone).
+    db.insert_span(make_llm_span(model="claude-haiku-4-5", cost_usd=1.0,
+                                  session_id=session.session_id))
+
+    results = db.get_cost_summary(CostFilters(group_by="tool"))
+    groups = {r.group: r.call_count for r in results}
+    assert groups == {"Read": 3, "Bash": 2}
+    assert "None" not in groups
+
+
 # -- InMemoryBackend resets --
 
 def test_in_memory_backend_resets_between_tests():
