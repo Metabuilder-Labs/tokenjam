@@ -360,6 +360,71 @@ def test_no_placement_finding_means_no_placement_card(tmp_path):
     assert [p for p in props if p.analyzer == "placement"] == []
 
 
+def test_placement_card_suppresses_dollars_on_subscription(tmp_path):
+    """N42: the Batch API discount is an api-billed lever. Matches the CLI's
+    `_render_placement`, which already suppresses this dollar figure on
+    non-api plans (CLAUDE.md anti-pattern #22)."""
+    card = [
+        p for p in cp.cost_proposals_from_report(
+            _report(placement=_placement_finding()), config=_cfg(tmp_path),
+            pricing_mode="subscription",
+        )
+        if p.analyzer == "placement"
+    ][0]
+    assert card.estimated_recoverable_usd is None
+    assert "no dollar figure is shown for this plan" in card.advise_text
+    assert "$3.00" not in card.advise_text
+    # Token-level evidence (the workload shape) is still shown either way.
+    assert "no human turn" in card.evidence
+
+
+def test_placement_card_suppresses_dollars_on_local(tmp_path):
+    card = [
+        p for p in cp.cost_proposals_from_report(
+            _report(placement=_placement_finding()), config=_cfg(tmp_path),
+            pricing_mode="local",
+        )
+        if p.analyzer == "placement"
+    ][0]
+    assert card.estimated_recoverable_usd is None
+
+
+def test_recompute_cost_proposals_resolves_pricing_mode_from_sessions(tmp_path):
+    """N42 end to end: `recompute_cost_proposals` reads the window's dominant
+    plan tier off the `sessions` table and threads it through, so a
+    subscription install's Review inbox suppresses the same placement dollar
+    figure the CLI does — it isn't only reachable by passing the kwarg by
+    hand."""
+    from tokenjam.core.db import InMemoryBackend
+    from tokenjam.utils.time_parse import utcnow
+    from tests.factories import make_llm_span, make_session
+
+    db = InMemoryBackend()
+    try:
+        base = utcnow() - timedelta(days=10)
+        for i in range(6):
+            start = base + timedelta(hours=6 * i)
+            session_id = f"nightly-{i}"
+            db.insert_span(make_llm_span(
+                agent_id="nightly", model="claude-sonnet-4-6", provider="anthropic",
+                input_tokens=2_000, output_tokens=500, cache_tokens=100,
+                cache_write_tokens=50, cost_usd=1.0,
+                session_id=session_id, start_time=start,
+            ))
+            db.upsert_session(make_session(
+                agent_id="nightly", session_id=session_id, plan_tier="pro",
+                started_at=start, ended_at=start + timedelta(minutes=1),
+            ))
+
+        proposals = cp.recompute_cost_proposals(db, _cfg(tmp_path), window_days=30)
+        placement = [p for p in proposals if p.analyzer == "placement"]
+        assert placement, "expected a placement card from the cadence-regular sessions"
+        assert placement[0].estimated_recoverable_usd is None
+        assert "no dollar figure is shown for this plan" in placement[0].advise_text
+    finally:
+        db.close()
+
+
 # --------------------------------------------------------------------------- #
 # House rules on every string these cards can print
 # --------------------------------------------------------------------------- #
