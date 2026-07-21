@@ -785,7 +785,7 @@ def _render_report(
         return
 
     for note in report.notes:
-        console.print(f"  [yellow]![/yellow] {note}")
+        console.print(f"  [yellow]![/yellow] {_rich_escape(note)}")
     if report.notes:
         console.print()
 
@@ -1295,10 +1295,14 @@ def _render_cache_efficacy(
 
     flagged = list(finding.flagged) if finding.flagged else []
     if flagged:
+        # Effective thresholds, not the historical hardcoded 30%/100K: a user
+        # who has lowered [optimize] cache_efficacy_threshold / min_cache_input_tokens
+        # must see the bar they actually configured, not the old default.
         console.print(
             f"     • [bold]{len(flagged)}[/bold] (provider, model) "
             f"row{'s' if len(flagged) != 1 else ''} flagged below the "
-            f"30% efficacy threshold at ≥100K input tokens:"
+            f"{finding.efficacy_threshold * 100:.0f}% efficacy threshold at "
+            f"≥{format_tokens(finding.min_input_tokens)} input tokens:"
         )
         for r in flagged:
             console.print(
@@ -1358,13 +1362,19 @@ def _render_cache_recommend(
         return
 
     if not finding.candidates:
-        msg = "     [dim]No stable prefixes shared across ≥3 Anthropic calls"
+        msg = (
+            f"     [dim]No stable prefixes shared across "
+            f"≥{finding.min_prefix_occurrences} Anthropic calls"
+        )
         if finding.skipped_provider_count:
             msg += (
                 f". Skipped {finding.skipped_provider_count} non-Anthropic "
                 f"span(s) — multi-provider support is a future feature."
             )
-        msg += ".[/dim]"
+        msg += (
+            ". Lower [bold]\\[optimize] min_prefix_occurrences[/bold] in "
+            "tj.toml to see prefixes shared across fewer calls.[/dim]"
+        )
         console.print(msg)
         return
 
@@ -1441,8 +1451,10 @@ def _render_workflow_restructure(
             console.print(
                 f"     [dim]Examined {finding.sessions_examined} session"
                 f"{'s' if finding.sessions_examined != 1 else ''}; "
-                f"no clusters above threshold (≥20 identical signatures, "
-                f"zero branching).[/dim]"
+                f"no clusters above threshold (≥{finding.min_cluster_instances} "
+                f"identical signatures, zero branching). Lower "
+                f"\\[optimize] min_cluster_instances in tj.toml to see "
+                f"smaller clusters.[/dim]"
             )
         if finding.degraded:
             console.print(
@@ -1511,8 +1523,11 @@ def _render_prompt_bloat(
         console.print(
             f"     [dim]Scanned {finding.prompts_scored} prompt"
             f"{'s' if finding.prompts_scored != 1 else ''}; "
-            f"skipped {finding.prompts_skipped}. No bloat regions above "
-            f"the minimum-length threshold.[/dim]"
+            f"skipped {finding.prompts_skipped}. No region scored below the "
+            f"{finding.significance_threshold:.2f} significance threshold "
+            f"ran long enough to flag. Raise \\[optimize] "
+            f"trim_significance_threshold in tj.toml to flag more "
+            f"borderline text as bloat.[/dim]"
         )
         return
 
@@ -1556,8 +1571,10 @@ def _render_reuse(
     console.print(_finding_header(marker, "Reuse:"))
     if not finding.clusters:
         console.print(
-            "     [dim]No repeated planning detected above threshold "
-            "(≥3 sessions sharing a skeleton).[/dim]"
+            f"     [dim]No repeated planning detected above threshold "
+            f"(≥{finding.min_repetitions} sessions sharing a skeleton). "
+            f"Lower \\[optimize] min_reuse_repetitions in tj.toml to see "
+            f"smaller clusters.[/dim]"
         )
         if finding.hint:
             console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
@@ -1642,7 +1659,11 @@ def _render_subagent(
     flagged = list(finding.flagged) if finding.flagged else []
     if not flagged:
         console.print(
-            "     [dim]No right-sizing candidates above thresholds.[/dim]"
+            f"     [dim]No right-sizing candidates above thresholds "
+            f"(structural shape checks, plus a "
+            f"{format_cost(finding.min_flag_cost_usd)} minimum flagged spend). "
+            f"Lower \\[optimize] min_flag_cost_usd in tj.toml to flag "
+            f"cheaper subagents.[/dim]"
         )
     else:
         suffix = (
@@ -1704,7 +1725,9 @@ def _render_relearn(
             f"     [dim]Scanned {finding.sessions_scanned} session"
             f"{'s' if finding.sessions_scanned != 1 else ''}; "
             f"no recurring failure clusters above threshold "
-            f"(≥3 sessions sharing a signature).[/dim]"
+            f"(≥{finding.min_sessions} sessions sharing a signature). Lower "
+            f"\\[optimize] min_recurring_sessions in tj.toml to see smaller "
+            f"clusters.[/dim]"
         )
         return
 
@@ -1747,8 +1770,11 @@ def _render_verbosity(
                 f"     [dim]Examined {finding.sessions_examined} session"
                 f"{'s' if finding.sessions_examined != 1 else ''} across "
                 f"{finding.cohorts_examined} task-shape cohort"
-                f"{'s' if finding.cohorts_examined != 1 else ''}; no session's "
-                f"output ran high enough vs its cohort median to flag.[/dim]"
+                f"{'s' if finding.cohorts_examined != 1 else ''} (≥"
+                f"{finding.min_cohort_sessions} sessions each); no session's "
+                f"output ran high enough vs its cohort median to flag. Lower "
+                f"\\[optimize] min_cohort_sessions in tj.toml to consider "
+                f"smaller cohorts.[/dim]"
             )
         return
 
@@ -1858,8 +1884,12 @@ def _render_deadweight(
         return
 
     if not finding.dead_servers:
+        # _rich_escape: the analyzer's own note names the config key in
+        # bracket form ("Lower [optimize] min_sessions_deadweight..."), which
+        # Rich would otherwise parse as an unknown style tag and silently
+        # drop from the printed line.
         for note in finding.notes:
-            console.print(f"     [dim]{note}[/dim]")
+            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
         if not finding.notes:
             console.print(
                 f"     [dim]All {finding.configured_servers} configured MCP "
@@ -1957,8 +1987,12 @@ def _render_placement(
     console.print(_finding_header(marker, "Batch placement:"))
     if not finding.candidates:
         console.print(
-            "     [dim]No unattended, cadence-regular workloads in this "
-            "window.[/dim]"
+            f"     [dim]No unattended, cadence-regular workloads in this "
+            f"window (≥{finding.min_sessions_for_cadence} sessions on a "
+            f"regular cadence, ≥{format_cost(finding.min_group_cost_usd)} "
+            f"window spend). Lower \\[optimize] min_sessions_for_cadence / "
+            f"min_group_cost_usd in tj.toml to consider smaller "
+            f"workloads.[/dim]"
         )
         return
 
