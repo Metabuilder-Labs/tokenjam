@@ -891,6 +891,15 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--success); border: 1px solid var(--success);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
+/* Distinct from .estimated-tag (amber, "estimated recoverable") on purpose —
+   budget-projection is a forecast of exposure against a ceiling, never a
+   recoverable-waste estimate, and the two must never read as the same kind
+   of number (see budget-projection framing). */
+.forecast-tag {
+  font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--info); border: 1px solid var(--info);
+  border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
+}
 a.health-tile {
   display: block; text-decoration: none; color: inherit;
   background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
@@ -6544,8 +6553,12 @@ function OptimizeView({ params }) {
       ${st.cmp ? html`<div class="chart-card"><div class="chart-title">Window comparison (${compare})</div>
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
-      ${(st.opt.budgets || []).length ? html`<section class="opt-section"><div class="opt-title">Budget projection</div>
-        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ${b.over_budget ? html`<span style="color:var(--error)">— projected over by ${fmtFramedDollar(b.projected_overage_usd, framing)}</span>` : '— within budget'}</div>`)}
+      ${(st.opt.budgets || []).length ? html`<section class="opt-section" id="opt-budget-projection">
+        <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling — not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
+        ${st.opt.budgets.map(b => html`<div class="opt-line">${b.provider}: run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs ${fmtFramedDollar(b.budget_usd, framing)}/cycle ceiling ${b.over_budget ? html`<span style="color:var(--error)">— projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">— projected within ceiling</span>`}</div>`)}
+        <div class="opt-caveat">! This projects your current run rate forward against the ceiling — it identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the budget.</div>
+        ${st.opt.budgets.some(b => b.over_budget) && st.comp && st.comp.largest_recoverable_analyzer ? html`
+        <div class="opt-line" style="margin-top:6px">Biggest recoverable opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a> — the fastest way to bring the projection back under ceiling.</div>` : null}
       </section>` : null}
     ` : null}
   `;
