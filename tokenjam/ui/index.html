@@ -7744,17 +7744,27 @@ function fmtUsd(v) {
 }
 
 // One applied cost proposal's realized-delta receipt: verdict + the measured
-// dollar/token delta (shown only for a real "improved" verdict), reusing the
-// same VERDICT_LABELS the relearn lane uses. Correlational, never causal.
-function CostVerifyLine({ verify }) {
+// delta (shown only for a real "improved" verdict), reusing the same
+// VERDICT_LABELS the relearn lane uses. Correlational, never causal.
+//
+// Obeys the same framing as every other dollar on the page. Without it a
+// per-proposal "$0.42 lower" rendered while every sibling figure was
+// suppressed, which reads as money off a bill the user never received.
+function CostVerifyLine({ verify, framing }) {
   if (!verify) return null;
   const label = VERDICT_LABELS[verify.verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
   const usd = verify.realized_usd_delta;
   const toks = verify.realized_tokens_delta;
+  const suppressed = dollarsSuppressed(framing);
+  // Suppressed, the row leads with its token delta and states no dollars; with
+  // no token delta to fall back on there is nothing measurable left to show.
+  const measured = suppressed
+    ? (toks ? '~' + fmtTokens(toks) + ' tok lower' : null)
+    : (usd > 0 ? fmtUsd(usd) + ' lower' + (toks ? ' · ~' + fmtTokens(toks) + ' tok' : '') : null);
   return html`
     <div class="dim" style="font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <span style=${'color:' + label.color + ';font-weight:500'}>${label.text}</span>
-      ${usd > 0 ? html`<span style="color:var(--accent)">· ${fmtUsd(usd)} lower${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title="estimated / correlational with your change; not proof the advice caused it">est.</span></span>` : null}
+      ${measured ? html`<span style="color:var(--accent)">· ${measured} <span class="estimated-tag" title="estimated / correlational with your change; not proof the advice caused it">est.</span></span>` : null}
       ${verify.reason ? html`<span title=${verify.reason} style="cursor:help">ⓘ</span>` : null}
     </div>`;
 }
@@ -7844,7 +7854,7 @@ function CostProposalCard({ prop, busy, onMark, onDismiss, onChanged }) {
 }
 
 // One applied cost proposal, with its realized-delta receipt + one-step Revert.
-function CostAppliedRow({ rec, onChanged }) {
+function CostAppliedRow({ rec, onChanged, framing }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const revert = async () => {
@@ -7861,7 +7871,7 @@ function CostAppliedRow({ rec, onChanged }) {
         <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
       </div>
       <div class="dim" style="font-size:12px">marked applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}</div>
-      ${rec.state === 'applied' ? html`<${CostVerifyLine} verify=${rec.verify} />` : null}
+      ${rec.state === 'applied' ? html`<${CostVerifyLine} verify=${rec.verify} framing=${framing} />` : null}
       ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
       ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${revert}>${busy ? 'working…' : 'Revert'}</span>` : null}
     </div>`;
@@ -7876,12 +7886,17 @@ function CostAppliedRow({ rec, onChanged }) {
 // ledger's tokens AND dollars). Deliberately two SEPARATE, distinctly
 // labeled numbers — an estimate and a measurement never get added together.
 //
-// UNIT HIERARCHY is server-decided (`receiptsData.framing`, core/framing.py):
-// `verified_saved_usd` can only ever count the API-billed slice of the corpus,
-// so on a subscription-dominant one it is a small, misleading number while the
-// token figure is complete. When that framing suppresses dollars the TOKENS
-// take the headline slot and the dollars drop to a dim line explicitly scoped
-// to API-billed traffic; otherwise the dollars-first hierarchy is unchanged.
+// UNIT HIERARCHY is server-decided (`receiptsData.framing`, core/framing.py).
+// The two figures are not two views of one number: `verified_saved_tokens`
+// counts BOTH ledgers, while `verified_saved_usd` is the cost-verify ledger
+// alone, because a relearn fix has no single model to price against and the
+// product refuses to invent a rate for it (see receipts.py's RECEIPTS_BASIS).
+// The dollars are also a list-price equivalent, priced across all traffic, not
+// an amount billed — nothing anywhere filters cost by plan tier. So on a
+// subscription-dominant corpus the token figure is the complete and honest
+// headline: when the framing suppresses dollars the TOKENS take the hero slot
+// and the dollars give way to the server's qualifier; otherwise the
+// dollars-first hierarchy is unchanged.
 // The estimated tile's token headline is a FLOOR, not a total: only some
 // proposals carry a token estimate. Quote that coverage rather than letting
 // the reader assume the sum spans every open proposal.
@@ -8112,7 +8127,7 @@ function ReviewInboxView({ params }) {
       <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories <span class="dim" style="font-weight:400;font-size:12px">· the realized delta the loop measured after you marked each one</span></div>
       <${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />
       <div class="cur-listbox" style="margin-top:8px">
-        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} onChanged=${() => { loadCost(); loadReceipts(); }} />`)}
+        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} framing=${costFraming} onChanged=${() => { loadCost(); loadReceipts(); }} />`)}
       </div>
     ` : null}
 

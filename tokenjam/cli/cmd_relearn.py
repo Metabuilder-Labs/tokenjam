@@ -63,3 +63,14 @@ def cmd_relearn_eval_case(ctx: click.Context, proposal_id: str, out_path: str | 
 from tokenjam.cli.relearn_write_verbs import register_write_verbs  # noqa: E402
 
 register_write_verbs(cmd_relearn)
+
+# --------------------------------------------------------------------------- #
+# Cost-proposal verbs (cost-proposals / cost-apply / cost-mark-applied /
+# cost-revert) — the terminal view of the cost analyzers' proposals
+# (core.optimize.cost_proposals), a distinct `kind` from the relearn
+# proposals above but stored in the same cache and reviewed the same way.
+# --------------------------------------------------------------------------- #
+
+from tokenjam.cli.cost_proposal_verbs import register_cost_proposal_verbs  # noqa: E402
+
+register_cost_proposal_verbs(cmd_relearn)

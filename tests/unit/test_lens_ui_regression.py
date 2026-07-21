@@ -2382,3 +2382,38 @@ def test_select_all_adds_no_bulk_approve(html):
     assert "dismissChecked" in bar
     assert "onClick=${approveChecked}" not in html
     assert "Approve checked" not in html
+
+
+# --- no dollar figure escapes the framing, and no false basis in a comment -- #
+def test_cost_verify_line_obeys_the_shared_framing(html):
+    # A per-proposal "$0.42 lower" used to render even when every sibling
+    # figure on the page was suppressed, because the component took no framing.
+    start = html.index("function CostVerifyLine")
+    end = html.index("function CostProposalCard", start)
+    fn = html[start:end]
+    assert "function CostVerifyLine({ verify, framing })" in fn
+    assert "dollarsSuppressed(framing)" in fn
+    # Suppressed: the token delta leads and no dollars are stated.
+    assert "'~' + fmtTokens(toks) + ' tok lower'" in fn
+    # Not suppressed: the dollar-first rendering is retained.
+    assert "fmtUsd(usd) + ' lower'" in fn
+    # The framing actually reaches it through the row.
+    assert "<${CostVerifyLine} verify=${rec.verify} framing=${framing} />" in html
+    assert "function CostAppliedRow({ rec, onChanged, framing })" in html
+    assert "framing=${costFraming}" in html
+
+
+def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
+    # The false mechanism must not survive anywhere in the served UI, including
+    # in a comment where no test would otherwise look.
+    assert "can only ever count the API-billed slice" not in html
+    assert "reflect API traffic only" not in html
+    assert "of that is on API-billed traffic" not in html
+
+
+def test_receipts_comment_states_the_real_reason_the_units_differ(html):
+    start = html.index("// UNIT HIERARCHY is server-decided")
+    end = html.index("function ReceiptsHeader", start)
+    comment = html[start:end]
+    assert "no single model to price against" in comment
+    assert "list-price equivalent" in comment
