@@ -20,6 +20,7 @@ from tokenjam.core.optimize.analyzers.relearn import (
     analyze_relearns,
     classify_known_family,
     cluster_failures,
+    compute_relearn_finding,
     extract_failures_for_session,
     is_already_codified,
 )
@@ -363,6 +364,104 @@ def test_run_reads_min_recurring_sessions_from_ctx_config(tmp_path, monkeypatch)
     ))
     run_relearn(lowered_ctx)
     assert len(lowered_ctx.report.findings["relearn"].clusters) == 1
+
+
+def test_extract_failures_transcript_cache_dir_opt_in_matches_uncached(tmp_path):
+    """Passing `transcript_cache_dir` must not change what's extracted."""
+    _cwd_confusion_session(tmp_path, "-Users-test-cache", "sess-cache")
+
+    uncached = extract_failures_for_session("sess-cache", "repo-a", projects_root=tmp_path)
+    cached = extract_failures_for_session(
+        "sess-cache", "repo-a", projects_root=tmp_path,
+        transcript_cache_dir=tmp_path / "cache",
+    )
+    assert [f.tool_name for f in cached] == [f.tool_name for f in uncached]
+    assert [f.error_text for f in cached] == [f.error_text for f in uncached]
+
+
+def test_extract_failures_warm_cache_skips_reparsing(tmp_path, monkeypatch):
+    _cwd_confusion_session(tmp_path, "-Users-test-cache", "sess-cache")
+    cache_dir = tmp_path / "cache"
+
+    first = extract_failures_for_session(
+        "sess-cache", "repo-a", projects_root=tmp_path, transcript_cache_dir=cache_dir,
+    )
+    assert first  # sanity: a real failure, not an empty no-op
+
+    def _boom(path):
+        raise AssertionError(f"transcript.read_records reparsed {path} on a warm cache run")
+
+    monkeypatch.setattr("tokenjam.core.transcript._parse_records", _boom)
+
+    second = extract_failures_for_session(
+        "sess-cache", "repo-a", projects_root=tmp_path, transcript_cache_dir=cache_dir,
+    )
+    assert [f.tool_name for f in second] == [f.tool_name for f in first]
+
+
+def test_compute_relearn_finding_cache_invalidates_on_transcript_edit(tmp_path):
+    """A session rewritten between two cached scans (its failure resolved,
+    say) must be re-parsed, not served a stale extraction."""
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-inv{i}", f"inv-{i}")
+    cache_dir = tmp_path / "cache"
+
+    first = compute_relearn_finding(
+        projects_root=tmp_path, distill_enabled=False, transcript_cache_dir=cache_dir,
+    )
+    assert len(first.clusters) == 1  # the recurring cwd-confusion cluster
+
+    # Rewrite one session so it's clean (no more failure) — size + mtime both
+    # change, which must invalidate that session's cache entry and drop the
+    # cluster below the recurrence bar.
+    _clean_session(tmp_path, "-Users-test-inv0", "inv-0")
+
+    second = compute_relearn_finding(
+        projects_root=tmp_path, distill_enabled=False, transcript_cache_dir=cache_dir,
+    )
+    assert second.clusters == []
+
+
+def test_run_wires_the_persistent_transcript_cache(tmp_path, monkeypatch):
+    """The registered `run(ctx)` entry point (the path `tj optimize` and
+    `/cost/components` actually exercise) resolves and uses a real cache dir
+    from `ctx.config`, not just the standalone functions tested above."""
+    from tokenjam.core.config import TjConfig
+    from tokenjam.core.optimize.analyzers.relearn import run as run_relearn
+    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
+
+    monkeypatch.setenv("TJ_CLAUDE_PROJECTS_ROOT", str(tmp_path))
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-run{i}", f"run-{i}")
+
+    since = datetime.now(timezone.utc) - timedelta(days=1)
+    summary = WindowSummary(
+        since=since, until=datetime.now(timezone.utc), days=1.0, sessions=0,
+        spans=0, total_tokens=0, total_cost_usd=0.0, thin_data=False,
+    )
+    config = TjConfig(version="1")
+
+    def _ctx() -> AnalyzerContext:
+        return AnalyzerContext(
+            conn=None, config=config, since=since, until=datetime.now(timezone.utc),
+            agent_id=None, window_days=1.0, summary=summary,
+            report=OptimizeReport(window=summary),
+        )
+
+    first_ctx = _ctx()
+    run_relearn(first_ctx)
+    first = first_ctx.report.findings["relearn"]
+    assert len(first.clusters) == 1
+
+    def _boom(path):
+        raise AssertionError(f"transcript.read_records reparsed {path} on a warm cache run")
+
+    monkeypatch.setattr("tokenjam.core.transcript._parse_records", _boom)
+
+    second_ctx = _ctx()
+    run_relearn(second_ctx)
+    second = second_ctx.report.findings["relearn"]
+    assert len(second.clusters) == 1
 
 
 def test_single_repo_cluster_scopes_to_project(tmp_path):
