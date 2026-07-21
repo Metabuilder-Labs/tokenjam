@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.cli.cmd_optimize import _rank_findings
 from tokenjam.core.framing import (
     WindowSummary,
     agent_persona_mix,
@@ -101,6 +102,17 @@ def get_optimize(
 
     payload = report_to_dict(report)
     payload["skipped_analyzers"] = skipped
+
+    # Biggest-waste-first ranking (#97) — the same
+    # `_rank_findings` the CLI's text view already ranks by, so the web
+    # doesn't fall back to Object.keys() insertion order for its recoverable
+    # tiles. `share` is the estimated-recoverable-tokens fraction of the
+    # window; None means "no quantified estimate" (unranked), which is NOT
+    # the same as zero — the UI must not sort those away as de-minimis.
+    payload["finding_rank"] = [
+        {"name": name, "share": share}
+        for name, share in _rank_findings(report, run_findings)
+    ]
 
     # Plan-tier mix lets the CLI render subscription / local / unknown
     # framings correctly under daemon mode. Without this the CLI defaults

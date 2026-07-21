@@ -865,6 +865,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .tile-grid.compact .rec-tile { padding: 8px 10px; }
 .tile-grid.compact .rec-name { font-size: 12px; }
 .tile-grid.compact .rec-amount { font-size: 15px; }
+.tile-grid.compact .rec-hint { font-size: 10px; }
 .tile-grid.compact .health-tile { padding: 8px 10px; }
 .rec-tile {
   display: block; text-decoration: none; color: inherit;
@@ -876,6 +877,10 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .rec-name { font-family: 'Geist Mono', monospace; font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
 .rec-amount { font-family: 'Geist Mono', monospace; font-size: 20px; font-weight: 700; color: var(--accent); margin: 8px 0 6px; }
 .rec-amount.dim { color: var(--text-faint); font-size: 14px; font-weight: 500; }
+.rec-hint {
+  font-size: 11px; color: var(--text-faint); line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
 .estimated-tag {
   font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
@@ -6020,30 +6025,29 @@ function BudgetView({ params }) {
 // cache-recommend / budget-projection are intentionally absent from the savings
 // band (no estimated_recoverable_usd); they surface elsewhere.
 const ANALYZER_META = {
-  downsize: { title: 'Downsize', hint: 'Route candidate sessions to a cheaper model' },
-  cache:    { title: 'Cache',    hint: 'Raise cache-read efficacy toward the 80% ceiling' },
-  script:   { title: 'Script',   hint: 'Replace a deterministic call-pattern with a script' },
-  trim:     { title: 'Trim',     hint: 'Trim low-significance tokens from prompt templates' },
-  reuse:    { title: 'Reuse',    hint: 'Reuse a repeated planning skeleton instead of re-planning' },
+  downsize:   { title: 'Downsize',   hint: 'Route candidate sessions to a cheaper model' },
+  cache:      { title: 'Cache',      hint: 'Raise cache-read efficacy toward the 80% ceiling' },
+  script:     { title: 'Script',     hint: 'Replace a deterministic call-pattern with a script' },
+  trim:       { title: 'Trim',       hint: 'Trim low-significance tokens from prompt templates' },
+  reuse:      { title: 'Reuse',      hint: 'Reuse a repeated planning skeleton instead of re-planning' },
+  subagent:   { title: 'Subagent',   hint: 'Right-size an over-powered subagent to a cheaper same-family model' },
+  relearn:    { title: 'Relearn',    hint: 'Recurring failure clusters the self-improve loop tracks' },
+  verbosity:  { title: 'Verbosity',  hint: 'Sessions whose output runs high vs the per-task-shape median' },
+  deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
 
-// The Analytics slice each recoverable-waste analyzer opens into (#229). A
-// leaderboard (hbar) on the dimension the analyzer reasons over — so a Downsize
-// tile lands on "spend by model", Reuse/Trim on the per-agent view, Script on
-// per-tool. Unknown analyzers fall back to spend-by-model. Values are validated
-// by the Analytics route against ANALYTICS_METRICS / ANALYTICS_DIMENSIONS.
-const ANALYZER_ANALYTICS_SLICE = {
-  downsize: { metric: 'spend',    group_by: 'model', chart: 'hbar' },
-  cache:    { metric: 'tokens',   group_by: 'model', chart: 'hbar' },
-  script:   { metric: 'events',   group_by: 'tool',  chart: 'hbar' },
-  reuse:    { metric: 'sessions', group_by: 'agent', chart: 'hbar' },
-  trim:     { metric: 'tokens',   group_by: 'agent', chart: 'hbar' },
-};
-function analyzerSliceHref(name, since, route = 'analytics') {
-  const slice = ANALYZER_ANALYTICS_SLICE[name] || { metric: 'spend', group_by: 'model', chart: 'hbar' };
-  return analyticsHref({ ...slice, since }, route);
+// Deep-link a recoverable-waste tile straight to its own analyzer detail card
+// on the Optimize screen (#229) — not an Analytics chart slice. The
+// `finding` param drives OptimizeView's scroll-into-view + highlight of
+// #opt-<name> (see the focus effect below). `since` is passed through so the
+// destination shows the same window the tile was computed from.
+function optimizeFindingHref(name, since) {
+  const sp = new URLSearchParams();
+  if (since && since !== '30d') sp.set('since', since);
+  sp.set('finding', name);
+  return '#/optimize?' + sp.toString();
 }
 
 // Title-case a registry key for display. Centralizes capitalization so a tile
@@ -6167,7 +6171,25 @@ function recoverableTiles(opt) {
       out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' });
     }
   });
-  return out;
+  return rankTiles(out, opt.finding_rank);
+}
+
+// Order recoverable tiles biggest-waste-first, mirroring the CLI's ranking
+// (cmd_optimize.py's `_rank_findings`) instead of Object.keys() insertion
+// order (#229) — the server ships that same ranking as
+// `finding_rank` on the /optimize payload so the algorithm lives in one
+// place. `share` entries are ordered largest-first with unranked findings
+// (share === null — no quantified estimate, NOT zero) already sorted last by
+// the server; a tile whose name is missing from finding_rank (older server,
+// or a name the rank doesn't cover) keeps its original relative position at
+// the end via a stable sort.
+function rankTiles(tiles, findingRank) {
+  if (!findingRank || !findingRank.length) return tiles;
+  const order = new Map(findingRank.map((r, i) => [r.name, i]));
+  return tiles
+    .map((t, i) => ({ t, i, rank: order.has(t.name) ? order.get(t.name) : Infinity }))
+    .sort((a, b) => (a.rank - b.rank) || (a.i - b.i))
+    .map(x => x.t);
 }
 
 function HealthTile({ label, value, attention, href, sub }) {
@@ -6225,6 +6247,40 @@ function OptimizeFinding({ name, opt, framing }) {
           <table class="opt-table"><thead><tr><th>Agent</th><th>Bloat</th><th>~Tokens</th></tr></thead>
             <tbody>${fd.per_prompt.slice(0, 5).map(p => html`<tr><td class="mono">${p.agent_id}</td><td>${p.bloat_chars}/${p.prompt_chars}</td><td>~${p.estimated_token_reduction}</td></tr>`)}</tbody></table>`
         : html`<div class="opt-line dim">No bloat regions above threshold.</div>`;
+    } else if (name === 'reuse') {
+      body = (fd.clusters || []).length ? html`
+        <div class="opt-line">${fd.clusters.length} cluster${fd.clusters.length !== 1 ? 's' : ''} of repeated planning detected${fd.capture_mode === 'tool_sequence_only' ? ' (tool-sequence only: enable capture.prompts for finer clustering)' : ''}.</div>
+        <table class="opt-table"><thead><tr><th>Repeats</th><th>Signature</th><th>Reuse</th><th>Script</th></tr></thead>
+          <tbody>${fd.clusters.slice(0, 5).map(c => html`<tr><td>${c.repetitions}×</td><td class="mono">${(c.tool_signature || []).join(' → ').slice(0, 60)}</td><td>${fmtFramedSavings(c.cache_reuse_recoverable_usd, c.cache_reuse_recoverable_tokens, framing)}</td><td>${fmtFramedSavings(c.script_replacement_recoverable_usd, c.script_replacement_recoverable_tokens, framing)}</td></tr>`)}</tbody></table>
+        ${fd.clusters[0].caveat ? html`<div class="opt-caveat">! ${fd.clusters[0].caveat}</div>` : null}`
+        : html`<div class="opt-line dim">No repeated planning detected above threshold (≥3 sessions sharing a skeleton).</div>
+          ${fd.hint ? html`<div class="opt-line dim">${fd.hint}</div>` : null}`;
+    } else if (name === 'subagent') {
+      body = fd.total_subagents ? html`
+        <div class="opt-line">${fd.total_subagents} subagent${fd.total_subagents !== 1 ? 's' : ''} across ${fd.sessions_with_subagents} session${fd.sessions_with_subagents !== 1 ? 's' : ''}, ${(fd.percent_of_cost * 100).toFixed(0)}% of window cost (${fmtFramedSavings(fd.subagent_cost_usd, fd.subagent_tokens, framing)}).</div>
+        ${(fd.flagged || []).length ? html`
+          <table class="opt-table"><thead><tr><th>Session/Sub-agent</th><th>Model</th><th>Tools</th><th>Flags</th></tr></thead>
+            <tbody>${fd.flagged.slice(0, 10).map(r => html`<tr><td class="mono">${(r.session_id || '').slice(0, 8)}…/${(r.sub_agent_id || '').slice(0, 10)}</td><td class="mono">${r.model}</td><td>${r.tool_calls}</td><td>${(r.flags || []).join(', ')}</td></tr>`)}</tbody></table>`
+          : html`<div class="opt-line dim">No right-sizing candidates above thresholds.</div>`}
+        ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
+        : html`<div class="opt-line dim">No subagent (Task-tool) activity in this window.</div>`;
+    } else if (name === 'verbosity') {
+      body = (fd.candidates || []).length ? html`
+        <div class="opt-line">${fd.total_candidates || fd.candidates.length} high-verbosity candidate${(fd.total_candidates || fd.candidates.length) !== 1 ? 's' : ''} <span class="dim">(output well above the per-task-shape median)</span>.</div>
+        <table class="opt-table"><thead><tr><th>Session</th><th>Output</th><th>vs baseline</th><th>Recoverable</th></tr></thead>
+          <tbody>${fd.candidates.map(c => html`<tr><td class="mono">${(c.session_id || '').slice(0, 8)}…</td><td>${fmtTokens(c.output_tokens)}</td><td>${fmtTokens(c.baseline_output_tokens)} median, ${c.over_baseline_multiple}×</td><td>${fmtFramedSavings(c.recoverable_usd, c.over_baseline_tokens, framing)}</td></tr>`)}</tbody></table>
+        ${fd.suggested_max_tokens ? html`<div class="opt-line dim">Remedy to review (not applied): a terse system-prompt line and/or a max_tokens cap near ~${fmtTokens(fd.suggested_max_tokens)}.</div>` : null}
+        ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
+        : html`<div class="opt-line dim">${fd.sessions_examined === 0 ? 'No LLM spans in this window.' : `Examined ${fd.sessions_examined} session${fd.sessions_examined !== 1 ? 's' : ''} across ${fd.cohorts_examined} task-shape cohort${fd.cohorts_examined !== 1 ? 's' : ''}; no session's output ran high enough vs its cohort median to flag.`}</div>`;
+    } else if (name === 'deadweight') {
+      body = !fd.sessions_scanned ? html`<div class="opt-line dim">No Claude Code sessions in this window.</div>`
+        : !fd.configured_servers ? html`<div class="opt-line dim">Scanned ${fd.sessions_scanned} session${fd.sessions_scanned !== 1 ? 's' : ''}; no MCP server is configured, so nothing is being injected.</div>`
+        : !(fd.dead_servers || []).length ? html`<div class="opt-line dim">${(fd.notes && fd.notes.length) ? fd.notes.join(' ') : `All ${fd.configured_servers} configured MCP server${fd.configured_servers !== 1 ? 's' : ''} were invoked at least once in this window.`}</div>`
+        : html`
+          <div class="opt-line">${fd.dead_servers.length} dead MCP server${fd.dead_servers.length !== 1 ? 's' : ''} of ${fd.configured_servers} configured <span class="dim">(schemas injected every session, never called)</span>.</div>
+          <table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax / 90d</th></tr></thead>
+            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_90d != null ? fmtCost(s.estimated_tax_usd_90d) : ('~' + fmtTokens(s.estimated_tax_tokens_90d) + ' tokens')}</td></tr>`)}</tbody></table>
+          ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     }
   }
   // Recoverable estimate line (when present)
@@ -6315,7 +6371,11 @@ function OptimizeView({ params }) {
   }, [focus, st.loading, st.opt]);
 
   const framing = st.opt ? st.opt.framing : null;
-  const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim'];
+  // relearn and summarize are deliberately excluded here — relearn has its
+  // own full surface in the Review inbox, summarize its own bespoke box
+  // below and its own screen (SummarizeView); giving them a second,
+  // thinner card here would just duplicate that richer treatment.
+  const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight'];
   const compFraming = st.comp ? st.comp.framing : framing;
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const waste = buildComponentWaste(st.comp, useTokens);
@@ -6376,8 +6436,12 @@ function OptimizeView({ params }) {
           </div>
           <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} height=${220} />
           <div class="chart-foot">
-            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>estimated recoverable</b> waste, stacked by analyzer — a heuristic estimate to review before acting, not a realized cost reduction.</span>
+            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>estimated recoverable</b> waste, stacked by analyzer: a heuristic estimate to review before acting, not a realized cost reduction.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}</span>
           </div>
+          ${st.comp && st.comp.largest_recoverable_analyzer ? html`
+          <div class="chart-foot" style="margin-top:2px">
+            <span class="dim">Largest single opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
+          </div>` : null}
           ${waste.recSegs.length ? html`
             <div class="waste-list">
               ${waste.recSegs.map(r => html`
@@ -8214,18 +8278,25 @@ function DashboardView({ params }) {
                   ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
                     : tiles.map(t => {
                       const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
-                      // In-place drill-through: stays on #/dashboard and updates the
-                      // hero explorer's slice via URL state (#229 slice map) — never
-                      // navigates away to the standalone #/analytics screen.
-                      const href = analyzerSliceHref(t.name, since, 'dashboard');
+                      // Route straight to the analyzer's own detail card on
+                      // the Optimize screen — not an Analytics chart slice
+                      // (#229). The recoverable number's evidence
+                      // and next step live there, not in a chart.
+                      const href = optimizeFindingHref(t.name, since);
                       const amount = t.state === 'actionable' ? fmtFramedSavings(t.usd, t.tokens, framing)
                         : t.state === 'at_ceiling' ? ('✓ ' + t.metric)
                         : t.state === 'no_findings' ? 'No candidates' : 'Not ready';
                       const cls = t.state === 'actionable' ? 'rec-tile' : (t.state === 'at_ceiling' ? 'rec-tile ok' : 'rec-tile muted');
                       const amtCls = t.state === 'actionable' ? 'rec-amount' : (t.state === 'at_ceiling' ? 'rec-amount ok' : 'rec-amount dim');
+                      // Brief context so the tile says what the number means,
+                      // not just how big it is — the specific
+                      // not-ready reason when there is one, else what the
+                      // analyzer measures.
+                      const explain = t.state === 'not_ready' && t.hint ? t.hint : meta.hint;
                       return html`<a class=${cls} href=${href}>
                         <div class="rec-name">${meta.title}</div>
                         <div class=${amtCls}>${amount}</div>
+                        ${explain ? html`<div class="rec-hint">${explain}</div>` : null}
                       </a>`;
                     })}
                 </div>
