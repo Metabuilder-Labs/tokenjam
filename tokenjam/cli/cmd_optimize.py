@@ -826,8 +826,15 @@ def _render_report(
                 )
         elif name == "resend":
             # Persona-branched fix (compaction vs cache_control), same reason
-            # downsize gets `persona` above — see `_render_resend_fix`.
-            _FINDING_RENDERERS[name](
+            # downsize gets `persona` above — see `_render_resend_fix`. Called
+            # directly rather than through `_FINDING_RENDERERS[name]`, same as
+            # `_render_downgrade` above: that dict's value type is inferred
+            # from every renderer sharing it, so it only advertises the
+            # (finding, pricing_mode, marker) signature common to all of
+            # them — a call through it with `persona=` is a real mypy error
+            # (call-arg), not a false positive, since nothing in the dict's
+            # type says entry "resend" specifically accepts that kwarg.
+            _render_resend(
                 report.findings[name], pricing_mode=pricing_mode, marker=marker,
                 persona=persona,
             )
