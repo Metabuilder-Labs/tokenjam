@@ -174,6 +174,59 @@ async def test_components_recoverable_is_registry_driven_and_honest():
 
 
 @pytest.mark.asyncio
+async def test_components_recoverable_total_is_not_presented_as_achievable():
+    """A1 (analyzer-audit #482): the response must disclose that
+    `total_recoverable_usd` is a gross ceiling across overlapping analyzers,
+    not a simultaneously-achievable figure, while leaving the magnitude of
+    every individual analyzer's own estimate (and the gross sum) untouched."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed_downsize_and_cache(db)  # yields downsize + cache + reuse, all > 0
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost/components?since=30d")).json()
+    assert len(d["recoverable"]) >= 2
+    # Magnitude unchanged: still the flat sum of the individual figures.
+    expected_total = sum(r["estimated_recoverable_usd"] or 0.0 for r in d["recoverable"])
+    assert d["total_recoverable_usd"] == pytest.approx(expected_total)
+    # But it must no longer be presented as an achievable total.
+    assert d["recoverable_additive"] is False
+    assert d["recoverable_overlap_note"] != ""
+    assert str(len(d["recoverable"])) in d["recoverable_overlap_note"]
+
+
+@pytest.mark.asyncio
+async def test_components_largest_recoverable_is_the_top_ranked_entry():
+    """The 'largest single line' figure must match the biggest individual
+    analyzer estimate (an honest floor, since it isn't a sum of anything) and
+    the `recoverable` list itself must be sorted biggest-first."""
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    _seed_downsize_and_cache(db)
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost/components?since=30d")).json()
+    usds = [r["estimated_recoverable_usd"] or 0.0 for r in d["recoverable"]]
+    assert usds == sorted(usds, reverse=True)
+    assert d["largest_recoverable_usd"] == usds[0]
+    assert d["largest_recoverable_analyzer"] == d["recoverable"][0]["analyzer"]
+
+
+@pytest.mark.asyncio
+async def test_components_empty_recoverable_has_no_overlap_note_or_largest():
+    db = InMemoryBackend()
+    cfg = TjConfig(version="1")
+    transport = httpx.ASGITransport(app=_app(db, cfg))
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        d = (await c.get("/api/v1/cost/components?since=7d")).json()
+    assert d["recoverable"] == []
+    assert d["recoverable_overlap_note"] == ""
+    assert d["largest_recoverable_usd"] is None
+    assert d["largest_recoverable_analyzer"] is None
+    assert d["recoverable_additive"] is False
+
+
+@pytest.mark.asyncio
 async def test_components_subscription_framing_suppresses_dollars():
     db = InMemoryBackend()
     cfg = TjConfig(version="1", budgets={"anthropic": ProviderBudget(plan="max_20x")})
