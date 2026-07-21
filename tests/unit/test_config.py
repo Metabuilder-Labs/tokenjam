@@ -99,11 +99,12 @@ class TestParse:
         config = _parse({})
         assert config.version == "1"
         assert config.agents == {}
-        # prompts defaults on (needed by trim / cache-recommend / reuse);
-        # completions/tool_outputs/tool_inputs stay off.
+        # prompts (needed by trim / cache-recommend / reuse) and tool_inputs
+        # (needed by script / verbosity's argument-shape clustering) both
+        # default on; completions/tool_outputs stay off.
         assert config.capture.prompts is True
         assert config.capture.completions is False
-        assert config.capture.tool_inputs is False
+        assert config.capture.tool_inputs is True
         assert config.capture.tool_outputs is False
 
     def test_agents_parsed(self):

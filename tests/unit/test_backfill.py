@@ -862,17 +862,21 @@ def test_capture_off_leaves_attributes_unchanged(tmp_path):
     exactly {"source": ...} on both the LLM and tool span (#3 default-off)."""
     path = _content_session_file(tmp_path)
 
-    parsed = parse_claude_code_session(path, capture=CaptureConfig(prompts=False))
+    parsed = parse_claude_code_session(
+        path, capture=CaptureConfig(prompts=False, tool_inputs=False),
+    )
     assert parsed is not None
     llm, tool = _llm_and_tool(parsed)
     assert llm.attributes == {"source": "backfill.claude_code"}
     assert tool.attributes == {"source": "backfill.claude_code"}
 
 
-def test_capture_default_extracts_prompt_only(tmp_path):
-    """`prompts` defaults on (E33) so `capture=None` and a bare `CaptureConfig()`
-    both extract prompt content — needed for `trim` / `cache-recommend` / `reuse`
-    out of the box — while completions/tool_inputs/tool_outputs stay off."""
+def test_capture_default_extracts_prompt_and_tool_input(tmp_path):
+    """`prompts` and `tool_inputs` both default on (E33 / this fix) so
+    `capture=None` and a bare `CaptureConfig()` both extract prompt content
+    (needed for `trim` / `cache-recommend` / `reuse`) and tool_input (needed
+    for `script` / `verbosity`'s argument-shape clustering) out of the box,
+    while completions/tool_outputs stay off."""
     path = _content_session_file(tmp_path)
 
     for capture in (None, CaptureConfig()):
@@ -882,7 +886,8 @@ def test_capture_default_extracts_prompt_only(tmp_path):
         assert llm.attributes[GenAIAttributes.PROMPT_CONTENT] == \
             "please read the config"
         assert GenAIAttributes.COMPLETION_CONTENT not in llm.attributes
-        assert GenAIAttributes.TOOL_INPUT not in tool.attributes
+        assert tool.attributes[GenAIAttributes.TOOL_INPUT] == \
+            {"file_path": "/etc/app/config.toml"}
 
 
 def test_capture_on_populates_prompt_completion_and_tool_input(tmp_path):
@@ -908,9 +913,10 @@ def test_capture_on_populates_prompt_completion_and_tool_input(tmp_path):
 def test_capture_flags_are_independent(tmp_path):
     """Each toggle gates only its own field — flipping one never leaks another.
 
-    `prompts` is explicitly off in both cases below: it defaults on (E33), so
-    leaving it unset would leak PROMPT_CONTENT into a test about `tool_inputs`
-    / `completions` gating independently of it.
+    `prompts` and `tool_inputs` are both explicitly set in the cases below:
+    they default on (E33 / this fix), so leaving either unset would leak
+    PROMPT_CONTENT / TOOL_INPUT into a test about the other flags gating
+    independently of them.
     """
     path = _content_session_file(tmp_path)
 
@@ -923,7 +929,7 @@ def test_capture_flags_are_independent(tmp_path):
     assert GenAIAttributes.COMPLETION_CONTENT not in llm.attributes
 
     parsed = parse_claude_code_session(
-        path, capture=CaptureConfig(prompts=False, completions=True),
+        path, capture=CaptureConfig(prompts=False, completions=True, tool_inputs=False),
     )
     llm, tool = _llm_and_tool(parsed)
     assert GenAIAttributes.COMPLETION_CONTENT in llm.attributes
@@ -941,7 +947,7 @@ def test_ingest_persists_captured_content_when_config_enables_it(tmp_path):
 
     # Capture-all-off config -> no content persisted.
     off_cfg = TjConfig(version="1")
-    off_cfg.capture = CaptureConfig(prompts=False)
+    off_cfg.capture = CaptureConfig(prompts=False, tool_inputs=False)
     db = InMemoryBackend()
     try:
         ingest_claude_code(db, root=tmp_path, config=off_cfg)
@@ -1041,7 +1047,7 @@ def test_reingest_backfills_captured_content_onto_existing_spans(tmp_path):
         # 1. First ingest with capture explicitly OFF — spans land with NO
         #    content, exactly the pre-#10 already-ingested state.
         off_cfg = TjConfig(version="1")
-        off_cfg.capture = CaptureConfig(prompts=False)
+        off_cfg.capture = CaptureConfig(prompts=False, tool_inputs=False)
         ingest_claude_code(db, root=tmp_path, config=off_cfg)
 
         def _attrs(name: str) -> dict:
@@ -1103,7 +1109,8 @@ def test_reingest_capture_off_does_not_wipe_existing_content(tmp_path):
         cfg_on.capture = CaptureConfig(prompts=True, completions=True, tool_inputs=True)
         ingest_claude_code(db, root=tmp_path, config=cfg_on)
 
-        # Reingest with capture OFF (default config): content must survive.
+        # Reingest with a plain default config (prompts/tool_inputs on,
+        # completions off): existing content must survive the merge either way.
         ingest_claude_code(db, root=tmp_path, config=TjConfig(version="1"), reingest=True)
 
         raw = db.conn.execute(

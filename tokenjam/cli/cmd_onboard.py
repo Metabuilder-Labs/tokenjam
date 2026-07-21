@@ -314,26 +314,37 @@ def _print_matched_instrument_snippet(match: SdkMatch) -> None:
         console.print(f"[dim]     {escape(hint)}[/dim]")
 
 
-def _print_capture_disclosure(prompts_captured: bool) -> None:
-    """Disclose prompt-text capture state at the end of onboarding.
+def _print_capture_disclosure(prompts_captured: bool, tool_inputs_captured: bool = False) -> None:
+    """Disclose prompt-text / tool-input capture state at the end of onboarding.
 
-    `capture.prompts` defaults on (see `CaptureConfig` in `core/config.py`)
-    so `tj optimize trim` / `cache-recommend` and `reuse`'s sharper mode work
-    without extra setup. Storage stays local — the user's own telemetry DB —
-    but that doesn't make it exempt from disclosure: this is new data at
-    rest the user didn't have before, so every onboarding path says so
-    explicitly rather than leaving it to a comment in the config file.
+    `capture.prompts` and `capture.tool_inputs` both default on (see
+    `CaptureConfig` in `core/config.py`) so `tj optimize trim` /
+    `cache-recommend` / `reuse`'s sharper mode, and the `script` / `verbosity`
+    analyzers' argument-shape clustering, work without extra setup. Storage
+    stays local — the user's own telemetry DB — but that doesn't make it
+    exempt from disclosure: this is new data at rest the user didn't have
+    before, so every onboarding path says so explicitly rather than leaving
+    it to a comment in the config file.
     """
-    if not prompts_captured:
+    if not (prompts_captured or tool_inputs_captured):
         return
     # escape(): "[capture]" would otherwise be parsed as a Rich markup tag
     # and silently stripped — same class of bug as issue #157.
-    console.print(
-        "  Prompt capture:      [bold]on[/bold], prompt text is stored "
-        "locally in your telemetry DB (needed for trim / cache-recommend / "
-        "reuse). Set [bold]capture.prompts = false[/bold] under "
-        f"{escape('[capture]')} in your config to turn it off."
-    )
+    if prompts_captured:
+        console.print(
+            "  Prompt capture:      [bold]on[/bold], prompt text is stored "
+            "locally in your telemetry DB (needed for trim / cache-recommend / "
+            "reuse). Set [bold]capture.prompts = false[/bold] under "
+            f"{escape('[capture]')} in your config to turn it off."
+        )
+    if tool_inputs_captured:
+        console.print(
+            "  Tool-input capture:  [bold]on[/bold], tool call arguments are "
+            "stored locally in your telemetry DB (needed for script / "
+            "verbosity's argument-shape clustering). Set "
+            "[bold]capture.tool_inputs = false[/bold] under "
+            f"{escape('[capture]')} in your config to turn it off."
+        )
 
 
 def _print_instrument_agent_snippet() -> None:
@@ -577,11 +588,12 @@ ingest_secret = "{ingest_secret}"
 # is sent anywhere. Set this to false to turn it off.
 prompts = true
 completions = false
-# tool_inputs captures Read/Grep/Glob file paths + search queries (not their
-# content) so `tj context` / the statusline can name files or searches you
-# keep re-reading across sessions. completions/tool_outputs stay off by
-# default since those would persist actual completion/tool-output text; turn
-# them on for deeper analysis.
+# tool_inputs is on by default too: it captures the tool call arguments your
+# instrumentation records (e.g. via `record_tool_call`, or the declared tool
+# schema on an Anthropic/OpenAI/etc. request) so the `script` and `verbosity`
+# analyzers can cluster on argument shape instead of tool names alone.
+# completions/tool_outputs stay off by default since those would persist
+# actual completion/tool-output text; turn them on for deeper analysis.
 tool_inputs = true
 tool_outputs = false
 
@@ -641,7 +653,7 @@ retention_days = 90
                       f"[bold]{plan_tier}[/bold] (written to {plan_section})")
     if daemon_msg:
         console.print(f"[green]\u2713[/green] {daemon_msg}")
-    _print_capture_disclosure(plain_config.capture.prompts)
+    _print_capture_disclosure(plain_config.capture.prompts, plain_config.capture.tool_inputs)
 
     console.print()
     console.print("[bold]Next steps:[/bold]")
@@ -1671,15 +1683,16 @@ def _onboard_claude_code(
         if agent_id not in config.agents:
             config.agents[agent_id] = AgentConfig()
 
-        # A config written before prompt capture defaulted on has an explicit
-        # `prompts = false` baked in — don't skip a stale-value rewrite just
-        # because the key is already present (the same dotfile-managed-block
-        # stale-marker trap CLAUDE.md documents elsewhere). `--reconfigure` is
-        # a deliberate "redo my setup" action, so treat it as license to pick
-        # up the current default rather than leaving that stale value in
-        # place forever.
+        # A config written before prompt/tool-input capture defaulted on has
+        # an explicit `prompts = false` / `tool_inputs = false` baked in —
+        # don't skip a stale-value rewrite just because the key is already
+        # present (the same dotfile-managed-block stale-marker trap CLAUDE.md
+        # documents elsewhere). `--reconfigure` is a deliberate "redo my
+        # setup" action, so treat it as license to pick up the current
+        # defaults rather than leaving those stale values in place forever.
         if reconfigure:
             config.capture.prompts = True
+            config.capture.tool_inputs = True
 
         existing_plan = (
             config.budgets["anthropic"].plan
@@ -2031,7 +2044,7 @@ def _onboard_claude_code(
             f"  Lens (web UI):       http://127.0.0.1:{port}/ "
             "(the daemon keeps it running)"
         )
-    _print_capture_disclosure(config.capture.prompts)
+    _print_capture_disclosure(config.capture.prompts, config.capture.tool_inputs)
     console.print()
     # tj is out-of-band for Claude Code: the statusline (zero model tokens),
     # not an in-loop MCP server. Say so explicitly so users know where tj lives.
@@ -2178,10 +2191,12 @@ def _onboard_codex(
             config.agents[agent_id] = AgentConfig()
 
         # See the matching comment in `_onboard_claude_code`: `--reconfigure`
-        # is license to pick up the current capture default rather than
-        # leaving a stale pre-default `prompts = false` in place forever.
+        # is license to pick up the current capture defaults rather than
+        # leaving stale pre-default `prompts = false` / `tool_inputs = false`
+        # in place forever.
         if reconfigure:
             config.capture.prompts = True
+            config.capture.tool_inputs = True
 
         existing_plan = (
             config.budgets["openai"].plan
@@ -2401,7 +2416,7 @@ def _onboard_codex(
     console.print("  Integration:         out-of-band (OTel telemetry — zero token cost)")
     if codex_backfill_msg:
         console.print(f"  Backfilled:          {codex_backfill_msg}")
-    _print_capture_disclosure(config.capture.prompts)
+    _print_capture_disclosure(config.capture.prompts, config.capture.tool_inputs)
     if mcp_was_removed:
         # Plain echo: Rich would treat [mcp_servers.tj] as a markup tag and strip it.
         click.echo(
