@@ -57,8 +57,24 @@ from tokenjam.core.transcript import _SYSTEM_REMINDER_RE, read_records, resolve_
 
 #: A server must be configured-present in at least this many DISTINCT
 #: sessions, with zero invocations across all of them, before it's flagged
-#: dead weight (spec: "start N=10").
-MIN_SESSIONS_DEADWEIGHT = 10
+#: dead weight. Originally 10 (spec: "start N=10"); lowered to 5 after an
+#: audit of all twelve analyzers found this the single biggest one-shot fix
+#: for analyzers that rarely fire on a normal user's window — a server
+#: configured-but-never-called is unlikely to be a fluke even at a much
+#: lower bar. False-positive shape (modeling each session as an independent
+#: Bernoulli trial with per-session use probability p): a server actually
+#: needed 1-in-4 sessions has a (1-p)^N ~= 42% chance of a spurious
+#: zero-invocation read at N=3, vs ~24% at N=5, vs ~6% at N=10 -- N=5 keeps
+#: that chance in the same order of magnitude as the old default while
+#: needing HALF the silent evidence to surface, materially increasing how
+#: often this analyzer fires. N=3 was considered and rejected: it nearly
+#: doubles the false-positive rate over N=5 for the same occasional-use
+#: server, and this finding is apply-capable (see the removal machinery
+#: below), so a wrongly-flagged server costs a real (user-approved, but
+#: still avoidable) config edit, not just a noisy card. The module's own
+#: DEADWEIGHT_HONESTY_CAVEAT and review-before-apply gate remain the
+#: backstop for whatever residual false-positive risk N=5 still carries.
+MIN_SESSIONS_DEADWEIGHT = 5
 
 #: How many example session ids a dead server's card carries as evidence
 #: (mirrors relearn.py's MAX_EXAMPLE_SESSIONS convention).

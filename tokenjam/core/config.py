@@ -281,7 +281,9 @@ class OptimizeConfig:
     # deadweight (analyzers/deadweight.py MIN_SESSIONS_DEADWEIGHT): an MCP
     # server needs to be configured-present in at least this many distinct
     # sessions, with zero invocations across all of them, to be flagged dead.
-    min_sessions_deadweight: int = 10
+    # Default 5 (was 10) -- see MIN_SESSIONS_DEADWEIGHT's comment for the
+    # false-positive-rate reasoning behind the lowered bar.
+    min_sessions_deadweight: int = 5
     # cache (analyzers/cache_efficacy.py MIN_INPUT_TOKENS): minimum
     # (provider, model) input-token volume in the window before a low
     # cache-efficacy ratio is even worth surfacing.
