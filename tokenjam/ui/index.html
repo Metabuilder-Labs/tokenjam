@@ -6038,6 +6038,7 @@ const ANALYZER_META = {
   relearn:    { title: 'Relearn',    hint: 'Recurring failure clusters the self-improve loop tracks' },
   verbosity:  { title: 'Verbosity',  hint: 'Sessions whose output runs high vs the per-task-shape median' },
   deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
+  resend:     { title: 'Context resend', hint: 'How much of each turn re-sends context already sent in an earlier turn' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
@@ -6241,6 +6242,37 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         ${(fd.flagged || []).length ? html`<div class="opt-line">${fd.flagged.length} (provider, model) row(s) below the efficacy threshold.</div>` : null}
         <table class="opt-table"><thead><tr><th>Provider/Model</th><th>Efficacy</th><th>Input</th><th>Cache</th></tr></thead>
           <tbody>${(fd.rows || []).map(r => html`<tr class=${r.flagged ? 'flagged' : ''}><td class="mono">${r.provider}/${r.model}</td><td>${(r.efficacy * 100).toFixed(0)}%</td><td>${fmtTokens(r.input_tokens)}</td><td>${fmtTokens(r.cache_tokens)}</td></tr>`)}</tbody></table>`;
+    } else if (name === 'resend') {
+      // Structural context re-send: how much of each turn's prompt was
+      // already sent in a previous turn. Cross-persona (Claude Code + SDK
+      // alike) — only the fix differs, so both fixes always render, labeled
+      // by who acts on them. `repeat_share === null` is the below-threshold
+      // empty state; name the reason from `notes` rather than an empty card.
+      const usd = fd.estimated_recoverable_usd, tok = fd.estimated_recoverable_tokens;
+      const median = fd.repeat_share_median, p90 = fd.repeat_share_p90;
+      body = fd.repeat_share == null ? html`
+        <div class="opt-line dim">${(fd.notes && fd.notes[0]) || 'Not enough data in this window to measure a repeat share.'}</div>`
+        : html`
+        <div class="opt-line">${(fd.repeat_share * 100).toFixed(1)}% of prompt tokens in this window were already sent in an earlier turn of the same session <span class="dim">(token-weighted aggregate, ${fd.sessions_examined} session${fd.sessions_examined !== 1 ? 's' : ''} · ${fd.turns_examined} turns)</span>.</div>
+        ${median != null ? html`<div class="opt-line dim">Median session: ${(median * 100).toFixed(0)}%${p90 != null ? `, p90: ${(p90 * 100).toFixed(0)}%` : ''}. The aggregate above is token-weighted, so a handful of very long sessions can pull it well above what a typical session carries.</div>` : null}
+        ${(fd.examples || []).length ? html`<div class="opt-sub">Heaviest sessions</div>
+          <table class="opt-table"><thead><tr><th>Session</th><th>Turns</th><th>Repeat share</th><th>Repeat tokens</th><th>Provider/Model</th></tr></thead>
+            <tbody>${fd.examples.map((ex, i) => html`<tr key=${i}><td class="mono">${(ex.session_id || '').slice(0, 12)}</td><td>${ex.turns}</td><td>${(ex.repeat_share * 100).toFixed(0)}%</td><td>${fmtTokens(ex.repeat_tokens)}</td><td class="mono">${ex.provider}/${ex.model}</td></tr>`)}</tbody></table>` : null}
+        ${(fd.recurring_examples || []).length ? html`<div class="opt-sub">Why: recurring inclusions</div>
+          <table class="opt-table"><thead><tr><th>What's re-included</th><th>Sessions</th><th>Occurrences</th><th>Fix</th></tr></thead>
+            <tbody>${fd.recurring_examples.slice(0, 8).map((r, i) => html`<tr key=${i}><td class="mono">${r.label}</td><td>${r.sessions}</td><td>${r.occurrences}</td><td class="dim">${r.fix}</td></tr>`)}</tbody></table>`
+          : (fd.notes && fd.notes[0] ? html`<div class="opt-line dim">${fd.notes[0]}</div>` : null)}
+        <div class="opt-sub">Fixes</div>
+        <div class="opt-line">${fd.fix_compaction} <span class="dim">(agent-harness users, e.g. Claude Code)</span></div>
+        ${fd.fix_cache_control ? html`
+          <div style="margin-top:8px">
+            <div class="opt-title" style="font-size:12.5px"><span>cache_control snippet <span class="dim" style="font-weight:400">· SDK users, paste into your own call site</span></span>
+              <${CopySnippetButton} text=${fd.fix_cache_control} />
+            </div>
+            <div class="sz-copybox" style="margin-top:4px">${fd.fix_cache_control}</div>
+          </div>` : null}
+        ${(!dollarsSuppressed(framing) && usd == null && tok != null) ? html`<div class="opt-line dim">No dollar figure: no session in this window carries a priced, cache-capable model to estimate the cache_control-adoption saving from. The token estimate above still applies to the compaction lever, which is cache-agnostic.</div>` : null}
+        ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     } else if (name === 'cache-recommend') {
       body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled. Set [capture] prompts = true to run this analyzer.'}</div>`
         : (fd.candidates || []).length ? html`<div class="opt-line">${fd.candidates.length} prefix candidate(s) for cache_control:</div>
@@ -6394,7 +6426,7 @@ function OptimizeView({ params }) {
   // own full surface in the Review inbox, summarize its own bespoke box
   // below and its own screen (SummarizeView); giving them a second,
   // thinner card here would just duplicate that richer treatment.
-  const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight'];
+  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight'];
   const compFraming = st.comp ? st.comp.framing : framing;
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const waste = buildComponentWaste(st.comp, useTokens);

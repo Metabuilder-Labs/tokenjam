@@ -48,7 +48,7 @@ def test_downsize_section_always_renders(html):
 
 def test_downsize_is_first_in_optimize_order(html):
     assert (
-        "const order = ['downsize', 'cache', 'cache-recommend', 'script', "
+        "const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', "
         "'trim', 'reuse', 'subagent', 'verbosity', 'deadweight']"
     ) in html
 
