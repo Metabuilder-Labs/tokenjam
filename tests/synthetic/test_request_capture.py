@@ -168,7 +168,7 @@ class TestPipelineGating:
     def test_no_behavior_change_when_capture_off(self):
         # Acceptance #1: every toggle explicitly off -> nothing captured, and
         # the raw attributes are gone, exactly like message content.
-        pipeline, db = _pipeline(CaptureConfig(prompts=False))
+        pipeline, db = _pipeline(CaptureConfig(prompts=False, tool_inputs=False))
         pipeline.process(_request_span())
 
         stored = db.get_recent_spans("s1", 1)[0]
@@ -178,10 +178,10 @@ class TestPipelineGating:
         assert TjAttributes.REQUEST_TOOLS not in stored.attributes
         db.close()
 
-    def test_default_capture_captures_request_params_not_tools(self):
-        # `prompts` defaults on (E33) and gates request_params (sampling
-        # params ride with the prompt toggle); `tool_inputs` stays off, which
-        # gates request_tools.
+    def test_default_capture_captures_request_params_and_tools(self):
+        # `prompts` gates request_params (sampling params ride with the
+        # prompt toggle) and `tool_inputs` gates request_tools; both default
+        # on (E33 / this fix), so a bare CaptureConfig() captures both.
         pipeline, db = _pipeline(CaptureConfig())
         pipeline.process(_request_span())
 
@@ -191,7 +191,10 @@ class TestPipelineGating:
             "max_tokens": 1024,
             "stop_sequences": ["STOP"],
         }
-        assert stored.request_tools is None
+        assert stored.request_tools == {
+            "tools": [{"name": "get_weather"}],
+            "tool_choice": "auto",
+        }
         db.close()
 
     def test_params_captured_but_tools_gated_off(self):
