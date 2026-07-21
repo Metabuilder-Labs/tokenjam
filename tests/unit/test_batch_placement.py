@@ -225,3 +225,92 @@ def test_null_cache_columns_do_not_zero_a_candidates_tokens(db):
 
     assert finding is not None
     assert finding.candidates[0].tokens == 6 * (2_000 + 500)
+
+
+# --------------------------------------------------------------------------- #
+# CLI text-view rendering
+# --------------------------------------------------------------------------- #
+# Third finding of this shape to ship without a text-view renderer (relearn,
+# then deadweight): _rank_findings drops any finding name absent from
+# _FINDING_RENDERERS, so the card reached the web tab and --json while the CLI
+# printed its generic empty state.
+
+def test_placement_has_a_renderer_and_a_reachable_command(db):
+    from tokenjam.cli.cmd_optimize import (
+        _FINDING_COMMAND,
+        _FINDING_RENDERERS,
+        _MINOR_FINDING_LABELS,
+        cmd_optimize,
+    )
+
+    assert "placement" in _FINDING_RENDERERS
+    assert "placement" in _MINOR_FINDING_LABELS
+    # `placement` rides along with the downsize analyzer rather than being its
+    # own registered name, so the Minor-findings pointer must not tell the
+    # reader to run a command Click will reject.
+    findings_param = next(
+        p for p in cmd_optimize.params if getattr(p, "name", None) == "findings"
+    )
+    assert "placement" not in findings_param.type.choices
+    assert _FINDING_COMMAND["placement"] in findings_param.type.choices
+
+
+def test_render_placement_names_the_workload_and_its_cadence(db, capsys):
+    from tokenjam.cli.cmd_optimize import _render_placement
+
+    _cron_sessions(db, count=6, cost_usd=1.0)
+    since, until = _window()
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    assert finding is not None
+
+    for mode in ("api", "subscription", "local", "unknown"):
+        _render_placement(finding, pricing_mode=mode, marker="①")
+    out = capsys.readouterr().out
+
+    assert "nightly" in out
+    assert "6 sessions" in out
+    assert "~6.0h" in out                      # the cadence, readably
+    assert "No candidates flagged" not in out
+    assert "architectural change" in out       # the friction travels with it
+
+
+def test_render_placement_shows_no_dollars_off_the_api_plan(db, capsys):
+    """The Batch API's flat discount is an api-billed price lever. A
+    subscription or local plan cannot act on it, so a dollar figure there
+    would be a number the reader can never realise."""
+    from tokenjam.cli.cmd_optimize import _render_placement
+
+    _cron_sessions(db, count=6, cost_usd=1.0)
+    since, until = _window()
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+
+    _render_placement(finding, pricing_mode="subscription", marker="①")
+    out = capsys.readouterr().out
+
+    assert "$" not in out
+    assert "api-billed price lever" in out
+    # The workload size still renders: the shape is real on any plan.
+    assert "nightly" in out
+
+
+def test_render_report_surfaces_placement_instead_of_no_candidates(db, capsys):
+    from tokenjam.cli.cmd_optimize import _render_report
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    _cron_sessions(db, count=6, cost_usd=1.0)
+    since, until = _window()
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=since, until=until, days=WINDOW_DAYS, sessions=6, spans=6,
+            total_tokens=15_900, total_cost_usd=12.0, thin_data=False,
+        ),
+        downgrade=None,
+        findings={"placement": finding},
+    )
+    _render_report(report, agent=None, requested=None, pricing_mode="api")
+    out = capsys.readouterr().out
+
+    assert "No candidates flagged" not in out
+    assert "nightly" in out
