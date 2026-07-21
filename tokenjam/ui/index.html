@@ -6367,11 +6367,23 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
         : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
     } else if (name === 'trim') {
+      // Per-prompt block (not a flat table): each prompt carries its own
+      // provenance line (issue-tracked verbatim-catalog-file match) and its
+      // own flagged-region excerpts, neither of which fits a 3-column row.
+      // Mirrors the CLI's `_render_prompt_bloat` block-per-prompt layout so
+      // the web card and `tj optimize` agree on what "parity" looks like.
       body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled — needs [capture] prompts = true and tokenjam[bloat].'}</div>`
         : (fd.per_prompt || []).length ? html`
           <div class="opt-line">${fd.prompts_scored} prompt(s) scored; ${fd.total_bloat_chars} of ${fd.total_chars} chars flagged.</div>
-          <table class="opt-table"><thead><tr><th>Agent</th><th>Bloat</th><th>~Tokens</th></tr></thead>
-            <tbody>${fd.per_prompt.slice(0, 5).map(p => html`<tr><td class="mono">${p.agent_id}</td><td>${p.bloat_chars}/${p.prompt_chars}</td><td>~${p.estimated_token_reduction}</td></tr>`)}</tbody></table>`
+          ${fd.per_prompt.slice(0, 5).map((p, i) => html`
+            <div key=${i} style="margin-top:10px;padding-top:8px;border-top:1px solid var(--border)">
+              <div class="opt-line"><span class="mono">${p.agent_id}</span> · <b>${p.bloat_chars}</b>/${p.prompt_chars} chars flagged <span class="dim">(~${p.estimated_token_reduction} tokens trimmable)</span></div>
+              ${p.source_path ? html`
+                <div class="opt-line dim">Attributed to <span class="mono">${p.source_path}</span> (${p.source_basis}) <a class="sz-link" href="#/optimize/summarize">Review in Summarize -></a></div>`
+                : null}
+              ${(p.regions || []).slice(0, 3).map((r, j) => html`<div key=${j} class="ap-quote">${(r.sample_chars || '').replace(/\n/g, ' ').trim()}… <span class="dim" style="font-style:normal">(${r.char_length} chars)</span></div>`)}
+              ${(p.regions || []).length > 3 ? html`<div class="opt-line dim">… and ${p.regions.length - 3} more region(s).</div>` : null}
+            </div>`)}`
         : html`<div class="opt-line dim">No bloat regions above threshold.</div>`;
     } else if (name === 'reuse') {
       body = (fd.clusters || []).length ? html`
