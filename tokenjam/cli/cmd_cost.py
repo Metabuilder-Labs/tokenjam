@@ -95,7 +95,10 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
     framing = _cost_framing(ctx, db, since, since_dt, until_dt, agent,
                             total, total_in + total_out)
     note = _cost_note(framing)
-    if note:
+    # The tool table below has no COST column to explain (see the group_by ==
+    # "tool" branch) — the plan-tier qualifier would dangle with nothing to
+    # qualify, so it's skipped there.
+    if note and group_by != "tool":
         console.print(f"[dim]{note}[/dim]")
 
     def _cost(value: float) -> str:
@@ -142,11 +145,21 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                       format_tokens(cache_r), format_tokens(cache_w),
                       f"[bold]{_cost(total)}[/bold]")
     elif group_by == "tool":
-        # Tool grouping has no token dimension — cost only.
-        table = make_table("TOOL", "COST")
+        # Tool-call spans carry no cost or tokens of their own — cost is
+        # attributed to the LLM completion span the tool call accompanied,
+        # not the tool invocation itself. Showing a COST column here would
+        # print a uniform, misleading $0.00 for every tool; call count is the
+        # only honest per-tool metric available.
+        console.print(
+            "[dim]Tool-call spans carry no cost of their own; cost is "
+            "attributed to the LLM completion that used them. Showing call "
+            "counts.[/dim]"
+        )
+        table = make_table("TOOL", "CALLS")
         for r in rows:
-            table.add_row(r.group, _cost(r.cost_usd))
-        table.add_row("[bold]TOTAL[/bold]", f"[bold]{_cost(total)}[/bold]")
+            table.add_row(r.group, str(r.call_count))
+        table.add_row("[bold]TOTAL[/bold]",
+                      f"[bold]{sum(r.call_count for r in rows)}[/bold]")
 
     console.print(table)
 

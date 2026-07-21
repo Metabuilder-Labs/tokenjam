@@ -1702,7 +1702,17 @@ class DuckDBBackend:
         }
         group_expr = group_col_map.get(filters.group_by, "CAST(start_time AS DATE)")
 
-        clauses: list[str] = ["model IS NOT NULL"]
+        # gen_ai.tool.call spans are separate rows from the LLM completion
+        # spans that carry model/cost/tokens (otel/otlp_parsing.py) — a span
+        # has tool_name set XOR model set, never both. Filtering every
+        # grouping on `model IS NOT NULL` silently dropped every tool span, so
+        # `--group-by tool` collapsed to one bogus "TOOL: None" bucket built
+        # from LLM spans (whose tool_name is NULL). Tool grouping needs the
+        # presence predicate get_tool_calls() already uses below.
+        presence_clause = (
+            "tool_name IS NOT NULL" if filters.group_by == "tool" else "model IS NOT NULL"
+        )
+        clauses: list[str] = [presence_clause]
         params: list[object] = []
         idx = 1
         if filters.agent_id:
@@ -1721,13 +1731,18 @@ class DuckDBBackend:
 
         # Cache-read + cache-write are summed alongside in/out so callers can
         # show the full token picture (cache-write is often the dominant cost
-        # driver yet was invisible above the DB — issue #17).
+        # driver yet was invisible above the DB — issue #17). call_count is
+        # the only genuinely honest metric for the "tool" grouping: tool-call
+        # spans carry no cost/tokens of their own — cost is attributed to the
+        # LLM completion span the tool call accompanied, not the tool
+        # invocation itself.
         token_cols = (
             "COALESCE(SUM(input_tokens), 0), "
             "COALESCE(SUM(output_tokens), 0), "
             "COALESCE(SUM(cache_tokens), 0), "
             "COALESCE(SUM(cache_write_tokens), 0), "
-            "COALESCE(SUM(cost_usd), 0.0) "
+            "COALESCE(SUM(cost_usd), 0.0), "
+            "COUNT(*) "
         )
         if filters.group_by in ("agent", "model"):
             sql = (
@@ -1736,8 +1751,17 @@ class DuckDBBackend:
                 f"GROUP BY grp, agent_id, model "
                 f"ORDER BY grp DESC"
             )
+        elif filters.group_by == "tool":
+            # Busiest tool first — the grp-alphabetical order used for day
+            # buckets is meaningless once cost/tokens are uniformly zero.
+            sql = (
+                f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, " + token_cols
+                + f"FROM spans WHERE {where} "
+                f"GROUP BY grp "
+                f"ORDER BY COUNT(*) DESC"
+            )
         else:
-            # day / tool: group only by the primary expression to avoid cross-product
+            # day: group only by the primary expression to avoid cross-product
             sql = (
                 f"SELECT {group_expr} AS grp, NULL AS agent_id, NULL AS model, " + token_cols
                 + f"FROM spans WHERE {where} "
@@ -1750,7 +1774,7 @@ class DuckDBBackend:
                 group=str(r[0]), agent_id=r[1], model=r[2],
                 input_tokens=r[3] or 0, output_tokens=r[4] or 0,
                 cache_tokens=r[5] or 0, cache_write_tokens=r[6] or 0,
-                cost_usd=r[7] or 0.0,
+                cost_usd=r[7] or 0.0, call_count=r[8] or 0,
             )
             for r in rows
         ]
