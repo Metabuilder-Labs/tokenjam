@@ -20,11 +20,11 @@ exporter at `tj serve`'s `/api/v1/spans`, see [framework-support.md](framework-s
 | **Per-terminal / per-instance identity** | Yes — the installed `claude` shell wrapper sets a distinct `service.instance.id` per terminal so concurrent sessions render as separate dashboard tiles | No — Codex hardcodes `service.name="codex_exec"` in the binary regardless of `[otel.resource]`, so **all** Codex activity across every terminal collapses into one agent tile | N/A — caller sets `agent_id` explicitly per `@watch()` call, so this is under direct code control | Partial — possible if the agent sets distinct resource attributes itself; tj does not automate this for a tool it doesn't control |
 | **Dashboard (Lens web UI)** | Yes | Yes | Yes | Yes — dashboard and analyzers are ingestion-source-agnostic; they read from the DB, not from the persona |
 | **Analyzers (twelve: downsize / cache / cache-recommend / script / trim / reuse / subagent / summarize / verbosity / relearn / budget-projection / deadweight)** | Yes: all twelve | Partial, ten of twelve: `deadweight` reads Claude Code transcripts on disk, and `relearn`'s transcript lane is Claude Code only while its span lane deliberately skips coding agents so the same failure is never counted twice | Partial, eleven of twelve: no transcripts on disk, so no `deadweight`. `relearn` runs its span lane, which detects and advises but never applies (there is no workspace to write a fix into) | Partial, eleven of twelve, same as the SDK column |
-| **MCP server (in-request-path tools)** | No, by design — an in-loop MCP measured **+36%** model-weighted quota overhead on CC subscription users (ticket #59); the statusline is the zero-cost substitute | No, by design — same reasoning; Codex has no zero-cost substitute today (see Statusline row) | Yes — the primary intended use case, tj sits in the SDK's request path already | Yes, if the host agent supports MCP tool-calling — otherwise not applicable |
+| **MCP server (in-request-path tools)** | No, by design — an in-loop MCP measured **+36%** model-weighted token overhead on CC subscription users in tj's own A/B; the statusline is the zero-cost substitute | No, by design — same reasoning; Codex has no zero-cost substitute today (see Statusline row) | Yes — the primary intended use case, tj sits in the SDK's request path already | Yes, if the host agent supports MCP tool-calling — otherwise not applicable |
 
 ## Parity investigation: Codex backfill & statusline
 
-Filed as part of ticket #81 to decide whether the two Codex gaps above (backfill, statusline) are
+A Codex-parity investigation into whether the two Codex gaps above (backfill, statusline) are
 worth a follow-up or are structurally blocked.
 
 **Backfill — feasible, and now shipped.** Codex CLI writes local session transcripts to
@@ -45,4 +45,4 @@ git-branch, context usage, etc.) sourced from Codex's own internal state. There 
 mechanism to inject an externally-computed line the way Claude Code's `statusLine: {type: "command"}`
 works — the upstream feature requests for one (`openai/codex#17827`, `#20244`) are still open/unresolved
 as of this writing. Until Codex ships a command-backed status line item, tj has no hook to wire its
-zero-token re-read/quota nudge into, and stays fully out-of-band (`tj tokenmaxx` / `tj traces` reads).
+zero-token re-read nudge into, and stays fully out-of-band (`tj tokenmaxx` / `tj traces` reads).
