@@ -2146,3 +2146,58 @@ def test_sessions_nav_entry_present(html):
     )
     assert "case 'sessions':" in html
     assert "sessions: 'improve'" in html
+
+
+# --- receipts / cost-ledger unit hierarchy follows the server framing ------- #
+def test_receipts_tile_leads_with_tokens_when_dollars_are_suppressed(html):
+    # `verified_saved_usd` only ever counts the API-billed slice, so on a
+    # subscription-dominant corpus the tile shouted a tiny dollar figure and
+    # whispered the (complete) token one. The hierarchy is now conditional on
+    # the server's display_rule, exactly like every other cost surface.
+    start = html.index("function ReceiptsHeader")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "dollarsSuppressed(receiptsData.framing)" in tile
+    # Suppressed: the TOKEN figure holds the 22px hero slot...
+    assert (
+        'font-size:22px;font-weight:600;color:var(--success);margin-top:4px">'
+        "${fmtTokens(receiptsData.verified_saved_tokens)} tok"
+    ) in tile
+    # ...and the dollars drop to a dim line explicitly scoped to API billing.
+    assert "of that is on API-billed traffic" in tile
+    # Not suppressed: today's dollars-first hierarchy is untouched.
+    assert (
+        'font-size:22px;font-weight:600;color:var(--success);margin-top:4px">'
+        "${fmtUsd(receiptsData.verified_saved_usd)}"
+    ) in tile
+    # The MEASURED tag and the full breakdown (regressed included) stay put.
+    assert "measured" in tile
+    assert "${receiptsData.regressed_count} regressed" in tile
+
+
+def test_cost_ledger_summary_leads_with_tokens_when_dollars_are_suppressed(html):
+    # Same bug, same fix, in the "Applied cost advisories" ledger headline.
+    start = html.index("function CostLedgerSummary")
+    end = html.index("function CostProposalCard", start)
+    summary = html[start:end]
+    assert "dollarsSuppressed(framing)" in summary
+    assert (
+        "${suppressed ? fmtTokens(ledger.total_realized_tokens) + ' tok' "
+        ": fmtUsd(ledger.total_realized_usd)}"
+    ) in summary
+    assert "of that is on API-billed traffic" in summary
+    # The framing reaches it from the server payload, not a JS re-derivation.
+    assert "setCostFraming(r.framing || null)" in html
+    assert "<${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />" in html
+
+
+def test_dollars_suppressed_reads_the_server_display_rule(html):
+    # The suppress/show decision is server-side (core/framing.py); the UI reads
+    # display_rule rather than re-deriving the rule in JS.
+    assert "function dollarsSuppressed" in html
+    for rule in (
+        "'suppress_dollars_for_subscription_share'",
+        "'tokens_only'",
+        "'suppress_dollars_unknown'",
+    ):
+        assert rule in html, f"missing suppressing display_rule {rule}"
