@@ -1,9 +1,8 @@
-"""Adapt cost-analyzer findings into Review-inbox proposals ("advisories with
-receipts").
+"""Adapt cost-analyzer findings into Review-inbox proposals ("advisories").
 
 The self-improve loop's relearn detector already produces
 ``RelearnCluster`` proposals that the Lens Improve inbox renders and that a
-user can mark, apply, and verify. Three *cost* analyzers — ``downsize``
+user can mark and apply. Three *cost* analyzers — ``downsize``
 (model over-sizing), ``cache`` (cache efficacy), ``trim`` (prompt bloat) —
 produce findings of a different shape. This module adapts each finding into a
 ``CostProposal`` so the inbox can list them BESIDE the relearn proposals, typed
@@ -18,12 +17,10 @@ NOT optional here:
     exactly like an ``advise_only`` ``RelearnCluster`` (empty
     ``suggested_target``). The card carries a recommendation and, where
     sensible, a copyable config/code suggestion; the user applies it themselves.
-  * **Estimated / correlational, never causal.** Every saving figure a cost
-    finding carries is a heuristic ESTIMATE (house style, CLAUDE.md Rule 14).
-    The adapter preserves the finding's own ``estimate_basis`` and labels the
-    figure ``estimated``; the later realized delta (see ``cost_verify``) is
-    correlational with the user's change, never proof tokenjam's advice caused
-    it.
+  * **Estimated, never causal.** Every saving figure a cost finding carries is
+    a heuristic ESTIMATE (house style, CLAUDE.md Rule 14). The adapter
+    preserves the finding's own ``estimate_basis`` and labels the figure
+    ``estimated`` — never proof tokenjam's advice caused a savings change.
 
 The adapter is pure: it reads an already-built ``OptimizeReport`` and returns
 proposals. It never touches the DB, the store, or the network.
@@ -64,17 +61,15 @@ class CostProposal:
     """One cost analyzer's finding, shaped for the Review inbox.
 
     Mirrors the fields the inbox already reads off a ``RelearnCluster`` (title,
-    evidence, an estimate with its basis, ``advise_only``) plus the cost-
-    specific ``target_key`` the delta-verify pass re-measures against.
+    evidence, an estimate with its basis, ``advise_only``) plus a cost-specific
+    ``target_key``.
     """
     kind:      str                     # always "cost" — the inbox discriminator
     analyzer:  str                     # "downsize" | "cache" | "trim" | "subagent"
-    signature: str                     # stable identity for dedup + verify keying
+    signature: str                     # stable identity for dedup
     title:     str
-    # WHICH thing is flagged, machine-readable — the key ``cost_verify`` uses to
-    # re-measure a delta over spans after the user marks the proposal applied
-    # (downsize: the oversized model(s); cache: a provider/model; trim: an
-    # agent/step).
+    # WHICH thing is flagged, machine-readable (downsize: the oversized
+    # model(s); cache: a provider/model; trim: an agent/step).
     target_key: dict[str, Any]
     # Human-readable evidence line: which model/step/cache + the measured
     # baseline number.
@@ -512,9 +507,8 @@ def _cache_to_proposals(finding: Any) -> list[CostProposal]:
 def _cache_uncached_to_proposals(finding: Any) -> list[CostProposal]:
     """One proposal per A1 uncached-agent candidate (see
     ``analyzers.cache_efficacy``): an agent group making cacheable calls with
-    prompt caching never attempted. Verified through the same efficacy metric
-    as ``_cache_to_proposals`` (agent-scoped), so no ``cost_verify`` change
-    is needed for this check."""
+    prompt caching never attempted. Scored through the same efficacy metric
+    as ``_cache_to_proposals`` (agent-scoped)."""
     if finding is None:
         return []
     proposals: list[CostProposal] = []
@@ -1108,9 +1102,7 @@ def estimated_recoverable_rollup(
     ``proposal_count``, and say so against ``deduplicated_proposal_count`` when
     coverage is partial: the token sum is a floor, not a total.
 
-    Tagged ``estimated`` — see ``receipts.verified_saved_summary`` for the
-    measured twin (Component G1). The two figures are NEVER added together;
-    every caller must keep them as two clearly labeled numbers.
+    Tagged ``estimated`` — this is a heuristic figure, never a measured one.
     """
     seen: dict[str, dict[str, Any]] = {}
     for p in proposals:

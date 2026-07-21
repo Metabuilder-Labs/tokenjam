@@ -172,13 +172,12 @@ def server_still_configured(name: str, source: str) -> bool:
     """Read-only re-check: does ``name`` still appear in the ``mcpServers``
     block of its ORIGINAL detected config file (``source``)?
 
-    Used by ``cost_verify``'s deadweight branch after a mark-applied to tell
-    "still configured, nothing to measure yet" apart from "actually removed
-    or project-scoped, measure the token drop". A missing file and a
-    present-but-empty-of-this-entry file both read as "no longer
-    configured" — either way the tax stopped. Missing ``name``/``source``
-    can't be verified at all, so this conservatively reports "still
-    configured" rather than falsely claiming a removal.
+    Distinguishes "still configured" from "actually removed or
+    project-scoped". A missing file and a present-but-empty-of-this-entry
+    file both read as "no longer configured" — either way the tax stopped.
+    Missing ``name``/``source`` can't be verified at all, so this
+    conservatively reports "still configured" rather than falsely claiming a
+    removal.
     """
     if not name or not source:
         return True

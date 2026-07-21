@@ -16,7 +16,7 @@ from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConf
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.ingest import IngestPipeline
 from tokenjam.utils.time_parse import utcnow
-from tests.factories import make_llm_span, make_session
+from tests.factories import make_llm_span
 
 
 @pytest.fixture
@@ -117,9 +117,8 @@ async def test_mark_cost_applied_round_trip(app, client):
 
     applied = (await client.get("/api/v1/relearn/cost-applied")).json()
     assert len(applied["applied"]) == 1
-    assert "total_realized_usd" in applied["ledger"]
 
-    # Revert stops the ledger counting it.
+    # Revert flips it back.
     rev = await client.post(
         f"/api/v1/relearn/cost-applied/{rec['id']}/revert",
         headers={"X-TJ-Local-Token": token},
@@ -250,24 +249,12 @@ async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, 
     assert any(r["analyzer"] == "subagent" for r in applied["applied"])
 
 
-# --- the receipts / cost-ledger surfaces carry the plan-tier framing -------- #
-# `verified_saved_usd` and `total_realized_usd` can only ever count the
-# API-billed slice of a corpus. Without the framing block the UI has no way to
-# know that, and it renders a small, misleading dollar figure as the headline
-# while the (complete) token figure is demoted. Both payloads therefore carry
-# the same `framing` block every other cost surface emits.
-
-async def test_receipts_payload_carries_plan_tier_framing(client):
-    r = await client.get("/api/v1/relearn/receipts")
-    assert r.status_code == 200
-    payload = r.json()
-    framing = payload["framing"]
-    assert framing["display_rule"]
-    assert "pricing_mode" in framing
-    # The measured figures are still there, in both units.
-    assert "verified_saved_usd" in payload
-    assert "verified_saved_tokens" in payload
-
+# --- the cost-ledger surfaces carry the plan-tier framing ------------------- #
+# `total_realized_usd` can only ever count the API-billed slice of a corpus.
+# Without the framing block the UI has no way to know that, and it renders a
+# small, misleading dollar figure as the headline while the (complete) token
+# figure is demoted. The payload therefore carries the same `framing` block
+# every other cost surface emits.
 
 async def test_cost_applied_payload_carries_plan_tier_framing(client):
     r = await client.get("/api/v1/relearn/cost-applied")
@@ -275,33 +262,6 @@ async def test_cost_applied_payload_carries_plan_tier_framing(client):
     framing = r.json()["framing"]
     assert framing["display_rule"]
     assert "pricing_mode" in framing
-
-
-async def test_receipts_framing_suppresses_dollars_on_a_subscription_corpus(
-    app, client, db,
-):
-    """A Max-plan corpus is the founder's real case: dollars cover only the
-    API-billed minority, so the server must say so via display_rule and the UI
-    leads with tokens."""
-    from tokenjam.core.framing import DISPLAY_SUPPRESS_SUBSCRIPTION
-
-    for i in range(8):
-        db.upsert_session(make_session(session_id=f"sub-{i}", plan_tier="max_5x"))
-
-    payload = (await client.get("/api/v1/relearn/receipts")).json()
-    assert payload["framing"]["display_rule"] == DISPLAY_SUPPRESS_SUBSCRIPTION
-    assert payload["framing"]["pricing_mode"] == "subscription"
-
-
-async def test_receipts_framing_shows_dollars_on_an_api_corpus(app, client, db):
-    """The API-billed case is unchanged: dollars stay the headline unit."""
-    from tokenjam.core.framing import DISPLAY_SHOW_DOLLARS
-
-    for i in range(8):
-        db.upsert_session(make_session(session_id=f"api-{i}", plan_tier="api"))
-
-    payload = (await client.get("/api/v1/relearn/receipts")).json()
-    assert payload["framing"]["display_rule"] == DISPLAY_SHOW_DOLLARS
 
 
 async def test_cost_proposals_payload_carries_plan_tier_framing(client):

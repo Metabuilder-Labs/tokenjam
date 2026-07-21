@@ -204,7 +204,7 @@ async def test_apply_note_route_refuses_non_markdown_target(
     assert target.read_text() == "print('do not touch me')\n"
 
 
-# --- model-routing apply kinds: the write also opens a priced verify window ---
+# --- model-routing apply kinds: the write also opens a cost-apply marker ---
 
 _AGENT_FILE = """---
 name: explore
@@ -244,12 +244,12 @@ def stored_cost_proposal(config) -> str:
     return _store_cost_proposal(config)
 
 
-async def test_agent_model_apply_opens_a_cost_verify_window(
+async def test_agent_model_apply_opens_a_cost_apply_marker(
     app, client, config, monkeypatch, tmp_path, stored_cost_proposal,
 ):
     """A subagent model write is a cost fix with a file to edit, so the same
-    approval that rewrites the frontmatter must also start the exposure window
-    the priced receipt is measured over."""
+    approval that rewrites the frontmatter must also record the cost-apply
+    marker (``cost_apply.mark_applied``) for that proposal."""
     from tokenjam.core.optimize import cost_apply
 
     fake_home = tmp_path / "home"
@@ -271,7 +271,7 @@ async def test_agent_model_apply_opens_a_cost_verify_window(
     payload = r.json()
     assert payload["dry_run"] is False
     assert "model: claude-haiku-4-5" in target.read_text()
-    # The cost ledger carries the marker the dollar delta is measured from.
+    # The cost-apply ledger carries the marker recording what was approved.
     marker = payload["cost_marker"]
     assert marker["analyzer"] == "subagent"
     assert marker["target_key"]["models"] == ["claude-opus-4-8"]

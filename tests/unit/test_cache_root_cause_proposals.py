@@ -1,6 +1,5 @@
 """Unit tests for wiring the cache analyzer's root-caused per-agent findings
-(A1 uncached / A2 thrash / A3 lookback miss) into Review-inbox proposals and
-their delta-verify receipts.
+(A1 uncached / A2 thrash / A3 lookback miss) into Review-inbox proposals.
 
 Mirrors ``test_cost_proposals.py``'s fixtures/style: an ``InMemoryBackend``,
 storage under ``tmp_path``, nothing touching a real ``~/.tj``.
@@ -14,7 +13,7 @@ import pytest
 
 from tokenjam.core.config import TjConfig
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.optimize import build_report, cost_verify
+from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
     CacheEfficacyFinding,
     LookbackMissCandidate,
@@ -265,48 +264,3 @@ def test_generic_per_model_card_is_reduced_by_overlapping_per_agent_claim(db):
     )
     assert "double-count" in generic.estimate_basis
 
-
-# --- Delta-verify: cache_thrash receipts --------------------------------------
-
-def _seed(db, *, agent, model, when, cache_write, cache_read, count=30,
-          provider="anthropic"):
-    for i in range(count):
-        db.insert_span(make_llm_span(
-            agent_id=agent, provider=provider, model=model, billing_account=provider,
-            input_tokens=1000, output_tokens=200, cache_tokens=cache_read,
-            cache_write_tokens=cache_write,
-            session_id=f"{agent}-{when.isoformat()}-{i}",
-            start_time=when + timedelta(minutes=i),
-        ))
-
-
-def _record(target_key, agent_id="svc-thrash"):
-    return {
-        "id": "rec-1", "expectation_id": "exp-1", "signature": "cost:cache-thrash:svc-thrash",
-        "analyzer": "cache_thrash", "kind": "cost", "title": "t", "target_key": target_key,
-        "agent_id": agent_id, "applied_at": MARKER.isoformat(), "baseline": {},
-        "estimated_recoverable_usd": None, "estimated_recoverable_tokens": None,
-        "estimate_basis": "", "state": "applied", "verify": {},
-    }
-
-
-def test_cache_thrash_delta_improved_when_wasted_spend_drops(db):
-    # pre: heavy write, near-zero read (thrashing). post: writes drop, reads rise.
-    _seed(db, agent="svc-thrash", model="claude-sonnet-5", cache_write=5000,
-          cache_read=0, when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-thrash", model="claude-sonnet-5", cache_write=500,
-          cache_read=4500, when=MARKER + timedelta(hours=1))
-    rec = _record({"provider": "anthropic", "model": "claude-sonnet-5"})
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_usd_delta"] > 0
-
-
-def test_cache_thrash_delta_regressed_when_no_change(db):
-    _seed(db, agent="svc-thrash", model="claude-sonnet-5", cache_write=5000,
-          cache_read=0, when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-thrash", model="claude-sonnet-5", cache_write=5000,
-          cache_read=0, when=MARKER + timedelta(hours=1))
-    rec = _record({"provider": "anthropic", "model": "claude-sonnet-5"})
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "regressed"

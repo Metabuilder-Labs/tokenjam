@@ -254,42 +254,6 @@ def test_missing_agent_file_falls_back_to_the_guidance_block(tmp_path, monkeypat
     assert card.signature == "cost:subagent"
 
 
-def test_subagent_verify_receipt_is_a_priced_dollar_delta(db_backend):
-    # The measured receipt for a subagent model write has to be dollars priced
-    # per model over the fan-out spans, not a token count: the fix changes the
-    # rate, not the volume.
-    from tokenjam.core.optimize import cost_verify
-    from tests.factories import make_llm_span
-
-    marker = NOW - timedelta(days=5)
-    for label, when, model in (
-        ("pre", marker - timedelta(hours=40), "claude-opus-4-8"),
-        ("post", marker + timedelta(hours=1), "claude-haiku-4-5"),
-    ):
-        for i in range(30):
-            db_backend.insert_span(make_llm_span(
-                agent_id="orchestrator", provider="anthropic", model=model,
-                input_tokens=30_000, output_tokens=800,
-                cache_tokens=5_000, cache_write_tokens=1_000,
-                session_id=f"sess-{label}-{i}", sub_agent_id="explore",
-                start_time=when + timedelta(minutes=i),
-            ))
-
-    record = {
-        "id": "rec-1", "expectation_id": "exp-1",
-        "signature": "cost:subagent:explore", "analyzer": "subagent",
-        "kind": "cost", "title": "t",
-        "target_key": {"models": ["claude-opus-4-8"], "subagent": True,
-                       "agent_name": "explore"},
-        "agent_id": "", "applied_at": marker.isoformat(), "baseline": {},
-        "estimated_recoverable_usd": None, "estimated_recoverable_tokens": None,
-        "estimate_basis": "", "state": "applied", "verify": {},
-    }
-    verdict = cost_verify.measure_cost_delta(db_backend.conn, record, now=NOW)
-    assert verdict["verdict"] == "improved"
-    assert verdict["realized_usd_delta"] > 0
-
-
 # --------------------------------------------------------------------------- #
 # D1: the batch placement card
 # --------------------------------------------------------------------------- #
@@ -321,38 +285,6 @@ def test_placement_card_states_the_discount_and_the_friction(tmp_path):
     assert "architectural change" in card.advise_text
     assert "no human turn" in card.evidence
     assert card.estimate_basis
-
-
-def test_placement_verify_measures_a_spend_drop_on_the_workload(db_backend):
-    # Usage records carry no batch marker, so the receipt is the workload's own
-    # per-session spend before versus after the marker.
-    from tokenjam.core.optimize import cost_verify
-    from tests.factories import make_llm_span
-
-    marker = NOW - timedelta(days=5)
-    for label, when, model in (
-        ("pre", marker - timedelta(hours=40), "claude-opus-4-8"),
-        ("post", marker + timedelta(hours=1), "claude-haiku-4-5"),
-    ):
-        for i in range(30):
-            db_backend.insert_span(make_llm_span(
-                agent_id="nightly", provider="anthropic", model=model,
-                input_tokens=20_000, output_tokens=2_000,
-                session_id=f"nightly-{label}-{i}",
-                start_time=when + timedelta(minutes=i),
-            ))
-
-    record = {
-        "id": "rec-1", "expectation_id": "exp-1", "signature": "cost:placement:batch",
-        "analyzer": "placement", "kind": "cost", "title": "t",
-        "target_key": {"agents": ["nightly"], "placement": "batch"},
-        "agent_id": "nightly", "applied_at": marker.isoformat(), "baseline": {},
-        "estimated_recoverable_usd": None, "estimated_recoverable_tokens": None,
-        "estimate_basis": "", "state": "applied", "verify": {},
-    }
-    verdict = cost_verify.measure_cost_delta(db_backend.conn, record, now=NOW)
-    assert verdict["verdict"] == "improved"
-    assert verdict["realized_usd_delta"] > 0
 
 
 def test_no_placement_finding_means_no_placement_card(tmp_path):

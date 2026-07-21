@@ -2093,23 +2093,20 @@ def test_recommendations_panel_present_and_fetches_endpoint(html):
     assert "estimated_recoverable_tokens" in html
 
 
-# --- cost proposals in the Review inbox (advise-only, with receipts) ----- #
+# --- cost proposals in the Review inbox (advise-only) ---------------------- #
 def test_cost_proposals_wired_into_review_inbox(html):
     # The downsize/cache/trim analyzers surface as advise-only cost proposals in
     # the same Review inbox, fetched from the cost endpoints and rendered with a
-    # distinct `kind` badge, an estimate, and (after Mark applied) the realized
-    # delta receipt. Keep the fetch + render wiring present.
+    # distinct `kind` badge and an estimate. Keep the fetch + render wiring
+    # present.
     assert "function CostProposalCard" in html
     assert "function CostAppliedRow" in html
-    assert "function CostVerifyLine" in html
     assert "api('/relearn/cost-proposals')" in html
     assert "api('/relearn/cost-applied')" in html
     assert "'/relearn/cost-proposals/apply'" in html
     # The card is advise-only: a marker button, never an apply-to-code write.
     assert "Mark applied" in html
     assert "Cost advisories" in html
-    # Honesty discipline (Rule 14): the realized delta is estimated / correlational.
-    assert "realized_usd_delta" in html
 
 
 def test_subagent_cost_card_has_workspace_apply_flow(html):
@@ -2385,24 +2382,6 @@ def test_select_all_adds_no_bulk_approve(html):
 
 
 # --- no dollar figure escapes the framing, and no false basis in a comment -- #
-def test_cost_verify_line_obeys_the_shared_framing(html):
-    # A per-proposal "$0.42 lower" used to render even when every sibling
-    # figure on the page was suppressed, because the component took no framing.
-    start = html.index("function CostVerifyLine")
-    end = html.index("function CostProposalCard", start)
-    fn = html[start:end]
-    assert "function CostVerifyLine({ verify, framing })" in fn
-    assert "dollarsSuppressed(framing)" in fn
-    # Suppressed: the token delta leads and no dollars are stated.
-    assert "'~' + fmtTokens(toks) + ' tok lower'" in fn
-    # Not suppressed: the dollar-first rendering is retained.
-    assert "fmtUsd(usd) + ' lower'" in fn
-    # The framing actually reaches it through the row.
-    assert "<${CostVerifyLine} verify=${rec.verify} framing=${framing} />" in html
-    assert "function CostAppliedRow({ rec, onChanged, framing })" in html
-    assert "framing=${costFraming}" in html
-
-
 def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
     # The false mechanism must not survive anywhere in the served UI, including
     # in a comment where no test would otherwise look.

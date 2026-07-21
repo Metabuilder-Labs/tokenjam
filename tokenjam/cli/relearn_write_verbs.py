@@ -15,8 +15,7 @@ owning the other's file. ``cmd_relearn`` attaches them with::
 Thin by construction. Every command here is a wrapper over the SAME functions
 the API route calls (``core.optimize.relearn_proposals`` for the stored
 proposal, ``core.optimize.relearn_apply`` for the write, backup, git commit
-and revert, ``core.optimize.relearn_verify`` / ``cost_verify`` for the receipt
-recompute). No detection, no rung routing, no ledger logic lives in this file,
+and revert). No detection, no rung routing, no ledger logic lives in this file,
 so the CLI and the UI can never drift into two different meanings of "apply".
 
 The human gate is unchanged and unconditional:
@@ -47,7 +46,7 @@ def _config(ctx: click.Context):
 def _conn(ctx: click.Context):
     """The live DuckDB connection, or None when the daemon holds the lock and
     the CLI fell back to the HTTP backend. Everything here degrades gracefully
-    without it; only the active-session guard and the verify recompute read it.
+    without it; only the active-session guard reads it.
     """
     db = ctx.obj.get("db")
     return getattr(db, "conn", None) if db is not None else None
@@ -199,131 +198,12 @@ def revert_cmd(ctx, fix_id):
 
 
 # --------------------------------------------------------------------------- #
-# G2: on-demand verify. The verify pass otherwise runs only on the daemon's
-# six-hour schedule, so a fresh apply had no way to produce its receipt on
-# demand. This recomputes both ledgers now, against the same functions the
-# scheduled pass calls.
-# --------------------------------------------------------------------------- #
-
-def _verify_otel(ctx, proposal_id, expectation_id, *, record: bool) -> None:
-    """The OTel lane of verify: measure one advise-only proposal's failure
-    signature against stored spans, before and after the moment its fix went
-    live, and write the outcome into the same loop ledger the rest of the loop
-    reads.
-
-    Why an expectation supplies the marker: a workspace-less agent has no apply
-    path, so tokenjam never wrote the fix and cannot know when it shipped. The
-    expectation's created_at IS that declaration, and its agent_id scopes the
-    measurement. Create one first with `tj loop expect`.
-    """
-    from tokenjam.core.loop import get_expectation
-    from tokenjam.core.optimize.relearn_otel_verify import verify_otel_expectation
-
-    if not proposal_id or not expectation_id:
-        raise click.ClickException(
-            "--otel and --expectation go together: name the proposal to "
-            "measure and the expectation whose created_at marks when its fix "
-            "went live."
-        )
-    conn = _conn(ctx)
-    if conn is None:
-        raise click.ClickException(
-            "the span measurement needs the database, and the daemon is "
-            "holding it. Stop it with `tj stop` and re-run."
-        )
-    stored = relearn_proposals.get_proposal(proposal_id, config=_config(ctx))
-    if stored is None:
-        raise click.ClickException(
-            f"no stored proposal {proposal_id}. Run `tj relearn list` for the "
-            f"IDs the detector actually produced."
-        )
-    expectation = get_expectation(ctx.obj.get("db"), expectation_id)
-    if expectation is None:
-        raise click.ClickException(
-            f"no expectation {expectation_id}. Create one at the moment the "
-            f"fix goes live with `tj loop expect`."
-        )
-
-    result = verify_otel_expectation(
-        ctx.obj.get("db"), expectation,
-        signature=stored.get("signature"),
-        family_key=stored.get("family_key"),
-        record=record,
-    )
-    result["proposal_id"] = proposal_id
-    result["expectation_id"] = expectation_id
-    if _emit(ctx, result):
-        return
-
-    console.print(
-        f"[bold]{result.get('verdict', 'unknown')}[/bold] "
-        f"{stored.get('title') or stored.get('signature') or proposal_id}"
-    )
-    console.print(f"[dim]{result.get('reason', '')}[/dim]")
-    if result.get("fix_marker_at"):
-        console.print(
-            f"[dim]{result.get('pre_occurrences', 0)} occurrence(s) over "
-            f"{result.get('pre_sessions', 0)} session(s) before "
-            f"{result['fix_marker_at']}; "
-            f"{result.get('recurrence_since_apply', 0)} over "
-            f"{result.get('post_sessions_since_apply', 0)} after.[/dim]"
-        )
-    if result.get("run_ledger_id"):
-        console.print(f"[dim]recorded in the loop ledger as {result['run_ledger_id']}[/dim]")
-    elif record:
-        console.print(
-            "[dim]Nothing written to the ledger: only a measured drop or a "
-            "measured non-drop is decisive enough to record.[/dim]"
-        )
-    if result.get("estimate_basis"):
-        console.print(f"[dim]{result['estimate_basis']}[/dim]")
-
-
-@click.command("verify")
-@click.option("--otel", "otel_proposal_id", default=None,
-              help="Verify one advise-only proposal against stored spans "
-                   "instead of recomputing the on-disk receipts.")
-@click.option("--expectation", "expectation_id", default=None,
-              help="The expectation whose created_at marks when the fix went "
-                   "live. Required with --otel.")
-@click.option("--no-record", is_flag=True,
-              help="Measure without writing the outcome to the loop ledger.")
-@click.pass_context
-def verify_cmd(ctx, otel_proposal_id, expectation_id, no_record):
-    """Recompute the verify receipts now instead of waiting for the schedule."""
-    from tokenjam.core.optimize import cost_verify, relearn_verify
-
-    config = _config(ctx)
-    if otel_proposal_id or expectation_id:
-        _verify_otel(ctx, otel_proposal_id, expectation_id, record=not no_record)
-        return
-    conn = _conn(ctx)
-    fixes = relearn_verify.rescan_all(config, conn)
-    costs = {"checked": 0, "updated": 0}
-    if conn is not None:
-        costs = cost_verify.rescan_all(ctx.obj.get("db"), config)
-    payload = {"fixes": fixes, "cost_fixes": costs, "measured_against_db": conn is not None}
-    if _emit(ctx, payload):
-        return
-    console.print(
-        f"[green]verified[/] {fixes['updated']}/{fixes['checked']} applied fixes, "
-        f"{costs['updated']}/{costs['checked']} cost fixes."
-    )
-    if conn is None:
-        console.print(
-            "[dim]The daemon holds the database, so the cost receipts were "
-            "skipped. Stop it with `tj stop` and re-run for those.[/dim]"
-        )
-    console.print("[dim]Read the results with [bold]tj relearn list[/bold] or the Review inbox.[/dim]")
-
-
-# --------------------------------------------------------------------------- #
 # Registration
 # --------------------------------------------------------------------------- #
 
 #: Every verb this module contributes to the ``tj relearn`` group, in the order
 #: they should appear.
-WRITE_VERBS = (list_cmd, apply_cmd, enable_cmd, revert_cmd, verify_cmd)
+WRITE_VERBS = (list_cmd, apply_cmd, enable_cmd, revert_cmd)
 
 
 def register_write_verbs(group: click.Group) -> click.Group:

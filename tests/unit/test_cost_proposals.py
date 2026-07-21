@@ -1,5 +1,5 @@
 """Unit tests for wiring the cost analyzers (downsize/cache/trim) into the
-self-improve loop as advise-only proposals with delta-verify receipts.
+self-improve loop as advise-only proposals.
 
 Fully isolated: the DB is an ``InMemoryBackend`` and every JSON ledger/store
 write is routed under ``tmp_path`` via ``cfg.storage.path`` — nothing here
@@ -13,7 +13,7 @@ import pytest
 
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
-from tokenjam.core.optimize import cost_apply, cost_verify, relearn_store
+from tokenjam.core.optimize import cost_apply, relearn_store
 from tokenjam.core.optimize.analyzers.cache_efficacy import (
     CacheEfficacyFinding,
     CacheEfficacyRow,
@@ -157,222 +157,6 @@ def test_revert_flips_state_and_stops_counting(db, cfg):
 def test_mark_applied_refuses_empty_signature(db, cfg):
     with pytest.raises(cost_apply.CostApplyRefused):
         cost_apply.mark_applied(db, cfg, {"signature": ""})
-
-
-# --- Delta-verify: the receipts ----------------------------------------------
-
-def _seed(db, *, agent, model, input_tok, when, count=30, provider="anthropic",
-          cache_tok=0):
-    for i in range(count):
-        db.insert_span(make_llm_span(
-            agent_id=agent, provider=provider, model=model, billing_account=provider,
-            input_tokens=input_tok, output_tokens=200, cache_tokens=cache_tok,
-            session_id=f"{agent}-{when.isoformat()}-{i}",
-            start_time=when + timedelta(minutes=i),
-        ))
-
-
-def _record(analyzer, target_key, agent_id="svc-a"):
-    return {
-        "id": "rec-1", "expectation_id": "exp-1", "signature": f"cost:{analyzer}",
-        "analyzer": analyzer, "kind": "cost", "title": "t", "target_key": target_key,
-        "agent_id": agent_id, "applied_at": MARKER.isoformat(), "baseline": {},
-        "estimated_recoverable_usd": None, "estimated_recoverable_tokens": None,
-        "estimate_basis": "", "state": "applied", "verify": {},
-    }
-
-
-def test_trim_delta_improved_when_input_per_call_drops(db):
-    # pre: 10k input/call; post: 4k input/call — a real trim.
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=4_000,
-          when=MARKER + timedelta(hours=1))
-    v = cost_verify.measure_cost_delta(db.conn, _record("trim", {"agent_id": "svc-a"}), now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_tokens_delta"] > 0
-    assert v["realized_usd_delta"] > 0
-
-
-def test_trim_delta_regressed_when_no_improvement(db):
-    # pre and post identical — no movement -> regressed, not silently kept.
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=8_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=8_000,
-          when=MARKER + timedelta(hours=1))
-    v = cost_verify.measure_cost_delta(db.conn, _record("trim", {"agent_id": "svc-a"}), now=NOW)
-    assert v["verdict"] == "regressed"
-
-
-def test_cache_delta_improved_when_efficacy_rises(db):
-    # pre: mostly fresh input; post: mostly cache reads for the flagged model.
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=10_000, cache_tok=500,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=2_000, cache_tok=9_000,
-          when=MARKER + timedelta(hours=1))
-    rec = _record("cache", {"provider": "anthropic", "model": "claude-sonnet-5"})
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["post_value"] > v["pre_value"]        # efficacy rose
-
-
-def test_downsize_delta_improved_when_oversized_share_drops(db):
-    # pre: all calls on the oversized model; post: moved to the cheaper one.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=8_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=8_000,
-          when=MARKER + timedelta(hours=1))
-    rec = _record("downsize", {"models": ["claude-opus-4-8"]})
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_usd_delta"] > 0
-
-
-def test_insufficient_data_below_exposure_gate(db):
-    # Only a handful of post calls — no confident verdict.
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=4_000,
-          when=MARKER + timedelta(hours=1), count=3)
-    v = cost_verify.measure_cost_delta(db.conn, _record("trim", {"agent_id": "svc-a"}), now=NOW)
-    assert v["verdict"] == "insufficient_data"
-    assert v["realized_usd_delta"] is None
-
-
-# --- Delta-verify: deadweight (C1's "measured" receipt) -----------------------
-
-def _deadweight_target(tmp_path, *, still_present):
-    """A real on-disk config file the verify branch re-reads. ``still_present``
-    controls whether the ORIGINAL detected server entry is still there —
-    the exact still-configured re-check ``server_still_configured`` performs."""
-    import json
-    config_path = tmp_path / ".mcp.json"
-    servers = {"apollo": {}} if still_present else {}
-    config_path.write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
-    return {"server": "apollo", "scope": "project", "source": str(config_path)}
-
-
-def test_deadweight_delta_no_change_when_still_configured(db, tmp_path):
-    # Even with a real drop in the spans, a still-configured server must
-    # read as no_change -- the user hasn't actually removed it yet.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
-          when=MARKER + timedelta(hours=1))
-    target = _deadweight_target(tmp_path, still_present=True)
-    rec = _record("deadweight", target, agent_id="svc-a")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "no_change"
-    assert v["realized_usd_delta"] is None
-    assert v["realized_tokens_delta"] is None
-    assert "still appears in its configured set" in v["reason"]
-
-
-def test_deadweight_delta_measured_drop_when_removed(db, tmp_path):
-    # pre: 10k input tok/session; post (server removed): 2k input tok/session.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
-          when=MARKER + timedelta(hours=1))
-    target = _deadweight_target(tmp_path, still_present=False)
-    rec = _record("deadweight", target, agent_id="svc-a")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_tokens_delta"] > 0
-    assert v["realized_usd_delta"] > 0
-
-
-def test_deadweight_delta_regressed_when_removed_but_no_drop(db, tmp_path):
-    # Removed from config, but per-session input tokens didn't actually
-    # fall -- must surface as regressed, never silently kept as a win.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=8_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=8_000,
-          when=MARKER + timedelta(hours=1))
-    target = _deadweight_target(tmp_path, still_present=False)
-    rec = _record("deadweight", target, agent_id="svc-a")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "regressed"
-
-
-def test_deadweight_delta_insufficient_when_removed_but_thin_exposure(db, tmp_path):
-    # Removed from config, but too few post-marker calls for a confident verdict.
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-opus-4-8", input_tok=2_000,
-          when=MARKER + timedelta(hours=1), count=3)
-    target = _deadweight_target(tmp_path, still_present=False)
-    rec = _record("deadweight", target, agent_id="svc-a")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "insufficient_data"
-    assert v["realized_usd_delta"] is None
-    assert v["realized_tokens_delta"] is None
-
-
-def test_verify_record_writes_ledger_and_outcome(db, cfg):
-    from tokenjam.core.loop import create_expectation, list_expectation_runs
-
-    exp = create_expectation(db, name="trim svc-a", agent_id="svc-a")
-    rec = _record("trim", {"agent_id": "svc-a"})
-    rec["expectation_id"] = exp.expectation_id
-    # Persist the record so set_verify can find it.
-    from tokenjam.core.optimize.cost_apply import _write_ledger
-    _write_ledger(cfg, [rec])
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=10_000,
-          when=MARKER - timedelta(hours=40))
-    _seed(db, agent="svc-a", model="claude-sonnet-5", input_tok=4_000,
-          when=MARKER + timedelta(hours=1))
-
-    v = cost_verify.verify_record(db, cfg, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    # Outcome written to the loop's fix-history ledger.
-    runs = list_expectation_runs(db, exp.expectation_id)
-    assert len(runs) == 1
-    assert runs[0].outcome == "pass"
-    # And persisted onto the record.
-    stored = cost_apply.get_applied(cfg, "rec-1")
-    assert stored["verify"]["verdict"] == "improved"
-
-
-def test_cost_compound_ledger_sums_realized_dollars():
-    records = [
-        {"state": "applied", "verify": {"verdict": "improved",
-         "realized_usd_delta": 0.5, "realized_tokens_delta": 1000}},
-        {"state": "applied", "verify": {"verdict": "regressed",
-         "realized_usd_delta": 0.0}},
-        {"state": "reverted", "verify": {"verdict": "improved",
-         "realized_usd_delta": 9.9}},   # reverted never counts
-        {"state": "applied", "verify": {"verdict": "insufficient_data"}},
-    ]
-    ledger = cost_verify.cost_compound_ledger(records)
-    assert ledger["total_realized_usd"] == 0.5
-    assert ledger["improved_count"] == 1
-    assert ledger["regressed_count"] == 1
-    assert ledger["insufficient_data_count"] == 1
-    assert ledger["verified_count"] == 3
-
-
-def test_cost_compound_ledger_no_change_bucket_sums_to_verified():
-    # A no_change record (deadweight: server still configured) must land in
-    # its own named bucket, not just inflate verified_count with nowhere to
-    # go -- the named buckets must always add back up to verified_count.
-    records = [
-        {"state": "applied", "verify": {"verdict": "improved",
-         "realized_usd_delta": 0.5, "realized_tokens_delta": 1000}},
-        {"state": "applied", "verify": {"verdict": "no_change"}},
-        {"state": "applied", "verify": {"verdict": "no_change"}},
-        {"state": "applied", "verify": {"verdict": "regressed",
-         "realized_usd_delta": 0.0}},
-        {"state": "applied", "verify": {"verdict": "insufficient_data"}},
-    ]
-    ledger = cost_verify.cost_compound_ledger(records)
-    assert ledger["no_change_count"] == 2
-    assert ledger["verified_count"] == 5
-    assert (
-        ledger["improved_count"] + ledger["no_change_count"]
-        + ledger["regressed_count"] + ledger["insufficient_data_count"]
-        == ledger["verified_count"]
-    )
 
 
 # --- Store: cost proposals share the relearn cache file ----------------------
@@ -583,33 +367,6 @@ def test_deadweight_finding_survives_report_dict_round_trip():
     assert len(finding.tax_table) == 1
     assert finding.tax_table[0].source == "MCP schema: apollo"
 
-
-def _seed_sub(db, *, model, when, count=30, provider="anthropic"):
-    for i in range(count):
-        db.insert_span(make_llm_span(
-            agent_id="claude-code-x", provider=provider, model=model,
-            billing_account=provider, input_tokens=8000, output_tokens=200,
-            session_id=f"{model}-{when.isoformat()}-{i}", sub_agent_id="sa1",
-            start_time=when + timedelta(minutes=i),
-        ))
-
-
-def test_subagent_delta_improved_when_fanout_moves_off_oversized_model(db):
-    # pre: subagent fan-out on opus; post: moved to sonnet.
-    _seed_sub(db, model="claude-opus-4-8", when=MARKER - timedelta(hours=40))
-    _seed_sub(db, model="claude-sonnet-5", when=MARKER + timedelta(hours=1))
-    # main-thread opus post-marker must NOT count (subagent-scoped metric).
-    for i in range(10):
-        db.insert_span(make_llm_span(
-            agent_id="claude-code-x", model="claude-opus-4-8", input_tokens=8000,
-            output_tokens=200, session_id=f"main-{i}",
-            start_time=MARKER + timedelta(hours=1, minutes=i),
-        ))
-    rec = _record("subagent", {"models": ["claude-opus-4-8"], "subagent": True}, agent_id="")
-    v = cost_verify.measure_cost_delta(db.conn, rec, now=NOW)
-    assert v["verdict"] == "improved"
-    assert v["realized_usd_delta"] > 0
-    assert v["post_value"] == 0.0        # no post-marker subagent spend on opus
 
 
 # --- Component E: the estimated-recoverable rollup --------------------------
