@@ -249,6 +249,23 @@ def cmd_optimize(
         except Exception:
             pass
 
+        # Opportunistic cost-proposal refresh: until now the ONLY producer of
+        # the cost-proposal store (core.optimize.cost_proposals
+        # .recompute_cost_proposals) was the web Review inbox's manual
+        # refresh button — a pure-CLI user who never runs `tj serve` plus the
+        # web UI would never have a cost proposal computed at all, so `tj
+        # relearn cost-proposals` would sit permanently empty regardless of
+        # how good its renderer is. Piggyback the same recompute here so a
+        # plain `tj optimize` run keeps that store warm too.
+        # `recompute_cost_proposals` already never raises (it returns [] on
+        # failure), so a broken window here degrades to a stale/empty
+        # cost-proposals list, never a broken `tj optimize`.
+        try:
+            from tokenjam.core.optimize.cost_proposals import recompute_cost_proposals
+            recompute_cost_proposals(db, config, agent_id=agent)
+        except Exception:
+            pass
+
     dominant = dominant_plan(plan_mix)
     pricing_mode = pricing_mode_for(dominant)
     declared_plan = config_declared_plan(config)
@@ -305,6 +322,13 @@ def cmd_optimize(
             except ValueError as exc:
                 raise click.BadParameter(str(exc), param_hint="'--compare'") from exc
 
+    # Cost-proposal count (downsize/cache/trim/subagent/... fixes, each with a
+    # copy-pasteable snippet) — read regardless of output mode so both the
+    # JSON payload and the human footer below can point at `tj relearn
+    # cost-proposals` instead of leaving findings with nowhere to go.
+    from tokenjam.core.optimize import relearn_proposals
+    cost_proposal_count = len(relearn_proposals.list_cost_proposals(config))
+
     if output_json:
         payload = report_to_dict(report)
         payload["plan_tier_mix"] = plan_mix
@@ -312,6 +336,7 @@ def cmd_optimize(
         payload["pricing_mode"] = pricing_mode
         payload["agent_persona_mix"] = agent_mix
         payload["persona"] = persona
+        payload["cost_proposals_available"] = cost_proposal_count
         if cost_diff is not None:
             from tokenjam.cli.cmd_cost import _diff_to_dict
             payload["compare"] = _diff_to_dict(cost_diff)
@@ -347,6 +372,18 @@ def cmd_optimize(
         from tokenjam.cli.cmd_cost import _render_diff_dict
         console.print("\n[bold]Window comparison[/bold]")
         _render_diff_dict(cost_diff_dict)
+
+    # Findings above are diagnoses; this is where they go. Until now nothing
+    # in `tj optimize`'s output pointed anywhere — the fix for e.g. a `cache`
+    # or `deadweight` finding lived only in the web Review inbox's cost-proposal
+    # cards (core.optimize.cost_proposals), never named from the terminal.
+    if cost_proposal_count:
+        console.print(
+            f"[dim]{cost_proposal_count} cost fix"
+            f"{'es' if cost_proposal_count != 1 else ''} available, each with "
+            f"a copy-pasteable snippet: run [bold]tj relearn "
+            f"cost-proposals[/bold].[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
