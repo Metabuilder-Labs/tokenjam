@@ -838,6 +838,16 @@ def _render_report(
                 report.findings[name], pricing_mode=pricing_mode, marker=marker,
                 persona=persona,
             )
+        elif name == "cache-recommend":
+            # Persona-gated cache_control snippet, same reason resend/downsize
+            # get `persona` above — see `_render_cache_recommend`. Called
+            # directly for the same mypy reason documented on the `resend`
+            # branch: `_FINDING_RENDERERS`'s inferred call signature doesn't
+            # include `persona`.
+            _render_cache_recommend(
+                report.findings[name], pricing_mode=pricing_mode, marker=marker,
+                persona=persona,
+            )
         else:
             _FINDING_RENDERERS[name](
                 report.findings[name], pricing_mode=pricing_mode, marker=marker,
@@ -1527,12 +1537,22 @@ def _render_cache_root_causes(finding, *, pricing_mode: str) -> None:
 
 
 def _render_cache_recommend(
-    finding, *, pricing_mode: str = "api", marker: str = "",
+    finding, *, pricing_mode: str = "api", marker: str = "", persona: str = "unknown",
 ) -> None:
     """
     Render the cache-recommend finding — Anthropic-only v1 breakpoint
     candidates. When the analyzer is disabled (capture.prompts off), surface
     the hint instead of an empty table.
+
+    Each candidate's `cache_control_snippet` is an edit to the raw Anthropic
+    API request — a lever a Claude Code session never has, since the harness
+    constructs that request, not the user. Gated by the same rule
+    `cost_proposals._persona_gated_cache_fields` applies to the Review-inbox
+    proposal built from this same finding: `persona == "claude-code"` swaps
+    the snippet for the honest no-lever explanation (imported from
+    `cost_proposals` so the CLI never drifts from the web copy); every other
+    persona, including "unknown", still gets the snippet — for cache advice
+    the risky direction is under-offering a real fix, not over-offering one.
     """
     console.print(_finding_header(marker, "Cache recommend:"))
     if not finding.enabled:
@@ -1596,6 +1616,14 @@ def _render_cache_recommend(
                     f"for {c.model or 'this model'}[/dim]"
                 )
         console.print(f"           [dim italic]{sample}[/dim italic]")
+        if persona == "claude-code":
+            from tokenjam.core.optimize.cost_proposals import CACHE_NO_LEVER_TEXT
+            console.print(f"           [dim]{_rich_escape(CACHE_NO_LEVER_TEXT)}[/dim]")
+        else:
+            console.print("           [dim]cache_control:[/dim]")
+            console.print(
+                c.cache_control_snippet, markup=False, highlight=False, soft_wrap=True,
+            )
 
     if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
         console.print(
