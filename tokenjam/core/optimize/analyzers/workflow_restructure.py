@@ -99,6 +99,16 @@ class WorkflowCluster:
     # server-side (single compute path). Defaulted so older serialized reports
     # round-trip through WorkflowCluster(**c).
     avg_tokens:    int = 0
+    # Cluster-level totals (sum across every member session, not the per-
+    # instance mean above) — the denominator a cost-proposal adapter needs to
+    # price ONE cluster's recoverable amount without re-deriving it from
+    # avg_cost_usd * instances. Defaulted for the same round-trip reason.
+    total_cost_usd: float = 0.0
+    total_tokens:    int   = 0
+    # Up to 3 example session ids for this cluster (beyond the single
+    # `example_session_id` above), so a downstream apply artifact (a rung-2
+    # skill note) can cite more than one instance. Defaulted for round-trip.
+    example_session_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -221,6 +231,9 @@ def run(ctx: AnalyzerContext) -> None:
             avg_duration_seconds=round(avg_duration, 2) if avg_duration > 0 else None,
             example_session_id=members[0],
             avg_tokens=avg_tokens,
+            total_cost_usd=round(cluster_cost, 6),
+            total_tokens=cluster_tokens,
+            example_session_ids=list(members[:3]),
         ))
 
     # Sort by instance count desc — the most common deterministic patterns

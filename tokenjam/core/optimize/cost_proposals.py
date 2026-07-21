@@ -3,21 +3,30 @@ receipts").
 
 The self-improve loop's relearn detector already produces
 ``RelearnCluster`` proposals that the Lens Improve inbox renders and that a
-user can mark, apply, and verify. Three *cost* analyzers — ``downsize``
-(model over-sizing), ``cache`` (cache efficacy), ``trim`` (prompt bloat) —
-produce findings of a different shape. This module adapts each finding into a
-``CostProposal`` so the inbox can list them BESIDE the relearn proposals, typed
-by a distinct ``kind`` field.
+user can mark, apply, and verify. The *cost* analyzers (``downsize`` model
+over-sizing, ``cache`` efficacy, ``trim`` prompt bloat, ``subagent``
+right-sizing, ``deadweight`` dead MCP servers, ``script`` deterministic
+workflows, ``reuse`` repeated planning skeletons, ``verbosity`` high-output
+outliers) produce findings of a different shape. This module adapts each
+finding into a ``CostProposal`` so the inbox can list them BESIDE the relearn
+proposals, typed by a distinct ``kind`` field.
 
 Two structural facts carry over from the relearn ``advise_only`` lane and are
 NOT optional here:
 
-  * **Advise-only everywhere.** A cost fix lives in the user's own application
-    code (a model-routing decision, a cache-prefix change, a prompt edit), not
-    a workspace tokenjam may write into. So a cost proposal has NO apply path —
-    exactly like an ``advise_only`` ``RelearnCluster`` (empty
-    ``suggested_target``). The card carries a recommendation and, where
-    sensible, a copyable config/code suggestion; the user applies it themselves.
+  * **Advise-only by default, apply-capable where a real workspace surface
+    exists.** Most cost fixes live in the user's own application code (a
+    model-routing decision, a cache-prefix change, a prompt edit) that
+    tokenjam cannot write into — those cards have NO apply path, exactly like
+    an ``advise_only`` ``RelearnCluster`` (empty ``suggested_target``). A
+    minority (``subagent``, the per-agent slice of ``downsize``, ``script``,
+    ``reuse``, ``verbosity``) DO have a workspace surface an orchestrating
+    agent reads before acting (a CLAUDE.md rubric, a model-id key, a new
+    skill note) and route through the same rung-gated
+    ``relearn_apply.apply_relearn_fix`` machinery the relearn lane uses
+    (``apply_capable=True``, ``rung``, ``scope``, ``proposed_fix``). Every
+    other card carries a recommendation and, where sensible, a copyable
+    config/code suggestion; the user applies it themselves.
   * **Estimated / correlational, never causal.** Every saving figure a cost
     finding carries is a heuristic ESTIMATE (house style, CLAUDE.md Rule 14).
     The adapter preserves the finding's own ``estimate_basis`` and labels the
@@ -30,6 +39,8 @@ proposals. It never touches the DB, the store, or the network.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
@@ -45,7 +56,38 @@ COST_CORRELATIONAL_CAVEAT = (
 )
 
 #: The analyzers this wiring covers, by registration name.
-COST_ANALYZERS = ("downsize", "cache", "trim", "subagent", "deadweight")
+COST_ANALYZERS = (
+    "downsize", "cache", "trim", "subagent", "deadweight", "script", "reuse",
+    "verbosity",
+)
+
+# The rung-1/rung-2 apply notes below all route through the SAME workspace-note
+# machinery `subagent` already uses (`relearn_apply.apply_relearn_fix`, rung 1
+# = CLAUDE.md note, rung 2 = a new .claude/skills/<slug>/SKILL.md). None of
+# these three analyzers has a workspace file it can edit outright the way a
+# model-routing swap does — the fix is behavioral (an orchestrator or the model
+# itself reading guidance), same class of surface as the subagent rubric.
+
+# The rung-2 skill note a `script` proposal writes: the observed tool-call
+# pattern is deterministic enough that a script could run it directly instead
+# of dispatching a full agent turn.
+_SCRIPT_SKILL_INTRO = (
+    "This tool-call pattern repeated across many sessions with the same "
+    "structural shape (same tools, same argument types, different values). "
+    "Consider replacing it with a deterministic script that runs these calls "
+    "directly, and reserve the agent turn for the parts that actually need a "
+    "model's judgment."
+)
+
+# The rung-1 note a `reuse` proposal writes: the planning skeleton recurs.
+_REUSE_NOTE_INTRO = (
+    "This class of task shares a planning skeleton: the same tool sequence "
+    "follows the first planning call, session after session, with only the "
+    "argument values differing (dates, versions, paths). Consider templating "
+    "the plan for this shape instead of re-planning it from scratch each "
+    "time. Review before reusing: a skeleton match is a candidate, not proof "
+    "the plan is identical."
+)
 
 # The rung-1 sizing-rubric note a CC-origin subagent proposal writes into the
 # workspace CLAUDE.md when applied. A shape-based default, not a per-subagent
@@ -991,6 +1033,212 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     return proposals
 
 
+def _cluster_hash(value: Any) -> str:
+    """Stable 12-hex-char identity for a cluster's structural key. Deterministic
+    across runs over the same underlying signature (a JSON-serialisable
+    structure), used only where the analyzer itself doesn't already hand back
+    a cluster id (contrast ``ReuseCluster.cluster_id``, which does)."""
+    encoded = json.dumps(value, sort_keys=False, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]
+
+
+def _script_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per flagged deterministic-tool-call cluster.
+
+    Apply-capable at rung 2: a skill note naming the repeated call pattern and
+    recommending a script in its place. No agent-file/model-swap surface
+    exists here (this isn't a model-routing finding), so unlike ``subagent``
+    there is only the one apply shape. The skill's slug is derived from the
+    title, which embeds the cluster's own hash so two clusters never collide
+    on the same skill file (`relearn_apply`'s create-only guard would otherwise
+    let a second cluster's apply silently overwrite the first's skill note).
+    """
+    if finding is None:
+        return []
+    clusters = list(getattr(finding, "clusters", []) or [])
+    if not clusters:
+        return []
+    degraded = bool(getattr(finding, "degraded", False))
+    caveat = str(getattr(finding, "caveat", "") or "")
+
+    proposals: list[CostProposal] = []
+    for cluster in clusters:
+        if cluster.total_cost_usd <= 0 and cluster.total_tokens <= 0:
+            continue
+        cluster_hash = _cluster_hash(cluster.signature)
+        tool_names = [step.get("tool", "?") for step in cluster.signature]
+        tool_list = " -> ".join(tool_names) or "(no tools recorded)"
+        title = f"Deterministic tool pattern: {tool_list} ({cluster_hash})"
+        evidence = (
+            f"{cluster.instances} sessions ran the same tool-call structure "
+            f"({tool_list}), averaging {cluster.avg_tokens:,} input+output "
+            f"tokens and {_money(cluster.avg_cost_usd)} per session."
+        )
+        if degraded:
+            evidence += (
+                " Clustered on tool names only (enable [capture] tool_inputs "
+                "in tj.toml for the finer argument-shape signature)."
+            )
+        advise = (
+            _SCRIPT_SKILL_INTRO + " " + caveat
+        ).strip()
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="script",
+            signature=f"cost:script:{cluster_hash}",
+            title=title,
+            target_key={"signature": cluster.signature, "instances": cluster.instances},
+            evidence=evidence,
+            baseline={
+                "instances": cluster.instances,
+                "avg_cost_usd": cluster.avg_cost_usd,
+                "avg_tokens": cluster.avg_tokens,
+                "avg_duration_seconds": cluster.avg_duration_seconds,
+                "example_session_id": cluster.example_session_id,
+                "degraded": degraded,
+                "apply_sessions": cluster.instances,
+                "apply_examples": [
+                    {"session_id": sid, "repo": "", "snippet": tool_list[:160]}
+                    for sid in (cluster.example_session_ids or [])
+                ],
+            },
+            advise_text=advise,
+            estimated_recoverable_usd=cluster.total_cost_usd or None,
+            estimated_recoverable_tokens=cluster.total_tokens or None,
+            estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+            advise_only=False,
+            apply_capable=True,
+            rung=2,
+            scope="project",
+            proposed_fix=advise,
+        ))
+    return proposals
+
+
+def _reuse_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal per repeated planning-skeleton cluster.
+
+    Apply-capable at rung 1: a CLAUDE.md note naming the recurring skeleton.
+    Uses the finding's conservative ``cache_reuse_recoverable_*`` figure (you
+    already paid for the plan once), not the ``script_replacement_*`` upper
+    bound, matching ``ReuseFinding``'s own aggregate.
+    """
+    if finding is None:
+        return []
+    clusters = list(getattr(finding, "clusters", []) or [])
+    if not clusters:
+        return []
+
+    proposals: list[CostProposal] = []
+    for cluster in clusters:
+        if cluster.cache_reuse_recoverable_usd <= 0 and cluster.cache_reuse_recoverable_tokens <= 0:
+            continue
+        tool_list = ", ".join(cluster.tool_signature) or "(no tool calls after the plan)"
+        title = f"Repeated planning skeleton: {tool_list} ({cluster.cluster_id})"
+        evidence = (
+            f"{cluster.repetitions} sessions shared a planning-call skeleton "
+            f"(tool sequence after the plan: {tool_list}), averaging "
+            f"{cluster.avg_planning_tokens:,} planning tokens "
+            f"({_money(cluster.avg_planning_cost_usd)} per call)."
+        )
+        advise = (
+            _REUSE_NOTE_INTRO + " " + str(cluster.caveat or "")
+        ).strip()
+        proposals.append(CostProposal(
+            kind="cost",
+            analyzer="reuse",
+            signature=f"cost:reuse:{cluster.cluster_id}",
+            title=title,
+            target_key={
+                "cluster_id": cluster.cluster_id,
+                "tool_signature": list(cluster.tool_signature),
+            },
+            evidence=evidence,
+            baseline={
+                "repetitions": cluster.repetitions,
+                "avg_planning_tokens": cluster.avg_planning_tokens,
+                "avg_planning_cost_usd": cluster.avg_planning_cost_usd,
+                "skeleton_session_id": cluster.skeleton_session_id,
+                "apply_sessions": cluster.repetitions,
+                "apply_examples": [
+                    {"session_id": sid, "repo": "", "snippet": tool_list[:160]}
+                    for sid in (cluster.example_session_ids or [])
+                ],
+            },
+            advise_text=advise,
+            estimated_recoverable_usd=cluster.cache_reuse_recoverable_usd or None,
+            estimated_recoverable_tokens=cluster.cache_reuse_recoverable_tokens or None,
+            estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+            advise_only=False,
+            apply_capable=True,
+            rung=1,
+            scope="project",
+            proposed_fix=advise,
+        ))
+    return proposals
+
+
+def _verbosity_to_proposals(finding: Any) -> list[CostProposal]:
+    """One proposal for the whole verbosity finding (unlike ``script``/
+    ``reuse``, this is a single window-wide signal, not per-cluster).
+
+    Apply-capable at rung 1: a CLAUDE.md note carrying the finding's own
+    ``remedy_snippet`` plus its suggested ``max_tokens`` cap. This is the
+    least-grounded of the three analyzers by design (output length is not
+    waste), so the note leans on the finding's own honesty caveat rather than
+    asserting a saving. Left un-degraded to advise-only would strand the one
+    lever this analyzer already computes (the remedy snippet) with nowhere to
+    go; a workspace note is the same class of soft, orchestrator-read surface
+    the ``subagent`` rubric already uses, so this reuses that precedent
+    rather than inventing a new one.
+    """
+    if finding is None:
+        return []
+    total_candidates = int(getattr(finding, "total_candidates", 0) or 0)
+    if total_candidates <= 0:
+        return []
+    remedy = str(getattr(finding, "remedy_snippet", "") or "")
+    max_tokens = getattr(finding, "suggested_max_tokens", None)
+    caveat = str(getattr(finding, "caveat", "") or "")
+    evidence = (
+        f"{total_candidates} session(s) across "
+        f"{int(getattr(finding, 'cohorts_examined', 0) or 0)} task-shape "
+        f"cohort(s) ran output well above their cohort's median."
+    )
+    advise = remedy
+    if max_tokens:
+        advise += (
+            f" Suggested cap for this shape of task: keep responses under "
+            f"about {max_tokens:,} output tokens (the cohort baseline most "
+            f"sessions already sit under)."
+        )
+    advise = (advise + " " + caveat).strip()
+    return [CostProposal(
+        kind="cost",
+        analyzer="verbosity",
+        signature="cost:verbosity",
+        title="High-verbosity output vs cohort baseline",
+        target_key={"total_candidates": total_candidates},
+        evidence=evidence,
+        baseline={
+            "total_candidates": total_candidates,
+            "sessions_examined": int(getattr(finding, "sessions_examined", 0) or 0),
+            "cohorts_examined": int(getattr(finding, "cohorts_examined", 0) or 0),
+            "suggested_max_tokens": max_tokens,
+            "apply_sessions": total_candidates,
+        },
+        advise_text=advise,
+        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
+        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        advise_only=False,
+        apply_capable=True,
+        rung=1,
+        scope="project",
+        proposed_fix=advise,
+    )]
+
+
 #: Default look-back for the daemon/CLI cost-proposal recompute. Matches the
 #: monthly framing the cost analyzers project against.
 DEFAULT_COST_WINDOW_DAYS = 30
@@ -1040,10 +1288,11 @@ def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProp
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
     Reads the ``downsize`` finding off the typed ``report.downgrade`` slot and
-    the ``cache`` / ``trim`` / ``subagent`` / ``placement`` / ``deadweight``
-    findings off ``report.findings``. Missing findings (analyzer not run, no
-    candidates) contribute nothing. Never raises — a malformed finding is
-    skipped so one bad analyzer can't sink the inbox.
+    the ``cache`` / ``trim`` / ``subagent`` / ``placement`` / ``deadweight`` /
+    ``script`` / ``reuse`` / ``verbosity`` findings off ``report.findings``.
+    Missing findings (analyzer not run, no candidates) contribute nothing.
+    Never raises — a malformed finding is skipped so one bad analyzer can't
+    sink the inbox.
 
     ``config`` is optional and used for one thing: looking up the local source
     path a user registered for an agent, which decides whether the downsize card
@@ -1062,6 +1311,9 @@ def cost_proposals_from_report(report: Any, config: Any = None) -> list[CostProp
         (lambda f: _subagent_to_proposals(f, config), findings.get("subagent")),
         (_placement_to_proposals, findings.get("placement")),
         (_deadweight_to_proposals, findings.get("deadweight")),
+        (_script_to_proposals, findings.get("script")),
+        (_reuse_to_proposals, findings.get("reuse")),
+        (_verbosity_to_proposals, findings.get("verbosity")),
     )
     for adapter, finding in adapters:
         try:
