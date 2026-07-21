@@ -16,7 +16,7 @@ from tokenjam.utils.formatting import console, display_path
     "--repair",
     is_flag=True,
     help="Attempt to fix issues that have a known repair path (e.g. rebuild the "
-         "spans table when DuckDB column statistics are corrupt — see issue #56).",
+         "spans table when DuckDB column statistics are corrupt).",
 )
 @click.pass_context
 def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
@@ -282,8 +282,7 @@ def _check_spans_stats(db: object) -> dict:
             "message": "DuckDB column statistics on the spans table are corrupt "
                        "— trace-detail queries (`tj traces <id>`, dashboard "
                        "trace view) will return no spans. Run `tj doctor "
-                       "--repair` to rebuild the table (data is preserved). "
-                       "See issue #56.",
+                       "--repair` to rebuild the table (data is preserved).",
             "repair_action": "rebuild_spans",
         }
     return {"name": "Spans column statistics", "level": "ok",
@@ -324,7 +323,7 @@ def _check_schema_integrity(db: object) -> dict:
             "message": (
                 "Live schema is missing column(s) the code writes on ingest: "
                 f"{', '.join(missing)}. These were recorded as migrated but never "
-                "landed (see #55); ingest of affected rows fails with a DuckDB "
+                "landed; ingest of affected rows fails with a DuckDB "
                 "Binder Error and is silently dropped, surfacing as a blank/stale "
                 "Status page. Run `tj doctor --repair` to add them (idempotent, "
                 "data preserved)."
