@@ -33,6 +33,48 @@ def cfg(tmp_path):
     return TjConfig(version="1", storage=StorageConfig(path=str(tmp_path / "t.duckdb")))
 
 
+@pytest.fixture
+def otel_db():
+    """An in-memory backend holding a failure signature that recurs heavily
+    before a marker and goes silent after it, plus the expectation carrying
+    that marker. Mirrors tests/unit/test_relearn_otel_verify.py's fixture."""
+    from datetime import datetime, timedelta, timezone
+
+    from tokenjam.core.db import InMemoryBackend
+    from tokenjam.core.loop import create_expectation, get_expectation
+    from tests.factories import make_tool_span
+
+    marker = datetime(2026, 5, 15, tzinfo=timezone.utc)
+    backend = InMemoryBackend()
+
+    def _span(session_id, at, message):
+        span = make_tool_span(
+            agent_id="billing-svc", tool_name="http_call", status="error",
+            session_id=session_id, start_time=at,
+        )
+        span.status_message = message
+        backend.insert_span(span)
+
+    for s in range(5):
+        for k in range(2):
+            _span(f"pre{s}", marker - timedelta(minutes=60 * (s + 1) + k),
+                  "ConnectionResetError: peer closed")
+    # Post-marker sessions carry exposure but a DIFFERENT failure.
+    for s in range(6):
+        _span(f"post{s}", marker + timedelta(hours=s + 1), "TLS handshake failed")
+
+    exp = create_expectation(
+        backend, name="peer-closed retries", agent_id="billing-svc",
+        description="fix deployed", origin_session_id="pre0",
+    )
+    backend.conn.execute(
+        "UPDATE expectations SET created_at = $1 WHERE expectation_id = $2",
+        [marker, exp.expectation_id],
+    )
+    yield backend, get_expectation(backend, exp.expectation_id)
+    backend.close()
+
+
 def _cluster(**overrides) -> RelearnCluster:
     base = dict(
         signature="cwd_confusion", family_key="cwd_confusion",
@@ -285,6 +327,141 @@ def test_human_output_avoids_em_dashes_and_the_word_quota(cfg, tmp_path):
         _run(cfg, args).output
         for args in (["list"], ["apply", pid, "--target", str(target)],
                      ["apply", pid, "--go", "--target", str(target)], ["verify"])
+    )
+    assert "—" not in out
+    assert "quota" not in out.lower()
+
+
+# --- OTel lane: eval-case artifact + span-measured verify -----------------------
+# Both were shipped as library functions with no caller at all, so neither the
+# artifact nor the verify lane was reachable from any command.
+
+def _advise_cluster(**overrides) -> RelearnCluster:
+    """An advise-only cluster: a workspace-less agent tokenjam cannot apply
+    into, which is exactly the case the eval-case artifact exists for."""
+    base = dict(
+        signature="http_call:connectionreseterror: peer closed",
+        family_key=None,
+        title="peer closed the connection",
+        repos=["billing-svc"], advise_only=True, suggested_target="",
+        proposed_fix="Retry the upstream call with backoff.",
+    )
+    base.update(overrides)
+    return _cluster(**base)
+
+
+def _relearn_group() -> click.Group:
+    """The real `tj relearn` group, with the read-only verbs this file's
+    `_group()` helper does not carry."""
+    from tokenjam.cli.cmd_relearn import cmd_relearn
+    return cmd_relearn
+
+
+def test_eval_case_emits_the_clusters_evidence_as_json(cfg):
+    [pid] = _store(cfg, _advise_cluster())
+
+    result = CliRunner().invoke(
+        _relearn_group(), ["eval-case", pid], obj={"config": cfg, "db": None},
+    )
+
+    assert result.exit_code == 0, result.output
+    case = json.loads(result.output)
+    assert case["signature"] == "http_call:connectionreseterror: peer closed"
+    assert case["advise_only"] is True
+    assert case["agents"] == ["billing-svc"]
+    assert case["suggested_recommendation"] == "Retry the upstream call with backoff."
+    assert case["failure_examples"][0]["session_id"] == "s1"
+    assert case["note"]           # the caveat travels with the artifact
+
+
+def test_eval_case_writes_the_artifact_to_a_named_path(cfg, tmp_path):
+    [pid] = _store(cfg, _advise_cluster())
+    out = tmp_path / "case.json"
+
+    result = CliRunner().invoke(
+        _relearn_group(), ["eval-case", pid, "--out", str(out)],
+        obj={"config": cfg, "db": None},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(out.read_text(encoding="utf-8"))["title"] == "peer closed the connection"
+
+
+def test_eval_case_refuses_an_id_the_detector_never_produced(cfg):
+    result = CliRunner().invoke(
+        _relearn_group(), ["eval-case", "rp_nope"], obj={"config": cfg, "db": None},
+    )
+    assert result.exit_code != 0
+    assert "no stored proposal" in result.output
+
+
+def test_verify_otel_measures_spans_and_writes_the_loop_ledger(cfg, otel_db):
+    """The verify lane end to end: the expectation supplies the moment the fix
+    went live, the signature comes from the stored proposal, and a measured
+    drop is recorded as a pass in the loop's own ledger."""
+    from tokenjam.core.loop import list_expectation_runs
+
+    db, expectation = otel_db
+    [pid] = _store(cfg, _advise_cluster())
+
+    result = CliRunner().invoke(
+        _group(), ["verify", "--otel", pid, "--expectation", expectation.expectation_id],
+        obj={"config": cfg, "db": db, "output_json": True},
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["verdict"] == "improved"
+    assert payload["proposal_id"] == pid
+    assert payload["pre_occurrences"] > payload["recurrence_since_apply"]
+    runs = list_expectation_runs(db, expectation.expectation_id)
+    assert [r.outcome for r in runs] == ["pass"]
+
+
+def test_verify_otel_no_record_measures_without_touching_the_ledger(cfg, otel_db):
+    from tokenjam.core.loop import list_expectation_runs
+
+    db, expectation = otel_db
+    [pid] = _store(cfg, _advise_cluster())
+
+    result = CliRunner().invoke(
+        _group(),
+        ["verify", "--otel", pid, "--expectation", expectation.expectation_id,
+         "--no-record"],
+        obj={"config": cfg, "db": db, "output_json": False},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "improved" in result.output
+    assert list_expectation_runs(db, expectation.expectation_id) == []
+
+
+def test_verify_otel_needs_both_halves(cfg, otel_db):
+    db, expectation = otel_db
+    result = CliRunner().invoke(
+        _group(), ["verify", "--otel", "rp_whatever"],
+        obj={"config": cfg, "db": db},
+    )
+    assert result.exit_code != 0
+    assert "go together" in result.output
+
+
+def test_verify_otel_refuses_an_unknown_expectation(cfg, otel_db):
+    db, _ = otel_db
+    [pid] = _store(cfg, _advise_cluster())
+    result = CliRunner().invoke(
+        _group(), ["verify", "--otel", pid, "--expectation", "nope"],
+        obj={"config": cfg, "db": db},
+    )
+    assert result.exit_code != 0
+    assert "no expectation" in result.output
+
+
+def test_eval_case_surface_avoids_em_dashes_and_the_word_quota(cfg):
+    [pid] = _store(cfg, _advise_cluster())
+    out = "".join(
+        CliRunner().invoke(_relearn_group(), args, obj={"config": cfg, "db": None}).output
+        for args in (["eval-case", "--help"], ["eval-case", pid])
     )
     assert "—" not in out
     assert "quota" not in out.lower()
