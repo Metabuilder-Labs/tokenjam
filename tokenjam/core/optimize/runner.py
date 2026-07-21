@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from tokenjam.core.config import TjConfig
 from tokenjam.core.framing import agent_persona_mix, config_declared_plan, dominant_persona
@@ -98,6 +98,7 @@ def build_report(
     findings: list[str] | None = None,
     budget_provider_filter: str | None = None,
     budget_usd_override: float | None = None,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> OptimizeReport:
     """
     Build a complete OptimizeReport.
@@ -109,6 +110,12 @@ def build_report(
     Analyzers are executed in ANALYZER_ORDER, never in caller-supplied order,
     so dependent analyzers (e.g. budget-projection reading the downgrade
     finding) work correctly regardless of how the caller lists them.
+
+    `progress_cb`, if given, is called with each analyzer's registry name
+    right before it runs, so a long `tj optimize` run can show what's
+    happening instead of going silent. This module stays CLI-agnostic (no
+    click, no rich) and never renders anything itself — `cmd_optimize` turns
+    this into a labelled progress indicator.
     """
     until = until or _utcnow()
     if until <= since:
@@ -161,6 +168,8 @@ def build_report(
 
     for name in ANALYZER_ORDER:
         if name in selected and name in ANALYZER_REGISTRY:
+            if progress_cb is not None:
+                progress_cb(name)
             ANALYZER_REGISTRY[name](ctx)
 
     # Analyzers not in ANALYZER_ORDER (future ones, registered but not yet
@@ -168,6 +177,8 @@ def build_report(
     # new analyzers to ANALYZER_ORDER when they land.
     for name, analyzer in ANALYZER_REGISTRY.items():
         if name in selected and name not in ANALYZER_ORDER:
+            if progress_cb is not None:
+                progress_cb(name)
             analyzer(ctx)
 
     return report

@@ -22,12 +22,14 @@ if TYPE_CHECKING:
 @click.option("--json", "output_json", is_flag=True,
               help="Output machine-readable JSON")
 @click.option("--no-color", is_flag=True)
+@click.option("--no-progress", is_flag=True,
+              help="Suppress the progress spinner shown for slow commands.")
 @click.option("--db", "db_path", default=None, help="Database path override")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
 @click.option("-v", "--verbose", is_flag=True)
 @click.pass_context
 def cli(ctx: click.Context, config_path: str | None, output_json: bool,
-        no_color: bool, db_path: str | None, agent: str | None,
+        no_color: bool, no_progress: bool, db_path: str | None, agent: str | None,
         verbose: bool) -> None:
     """tj - a cost-saving utility for AI agents."""
     ctx.ensure_object(dict)
@@ -76,6 +78,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
         ctx.obj["db"] = None
         ctx.obj["output_json"] = output_json
         ctx.obj["no_color"] = no_color
+        ctx.obj["no_progress"] = no_progress
         ctx.obj["agent"] = agent
         ctx.obj["verbose"] = verbose
         if no_color:
@@ -106,6 +109,7 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     ctx.obj["db"] = db
     ctx.obj["output_json"] = output_json
     ctx.obj["no_color"] = no_color
+    ctx.obj["no_progress"] = no_progress
     ctx.obj["agent"] = agent
     ctx.obj["verbose"] = verbose
     if no_color:

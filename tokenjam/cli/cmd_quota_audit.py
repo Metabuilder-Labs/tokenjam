@@ -33,6 +33,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.progress import progress_disabled, progress_indicator
 from tokenjam.core.framing import Framing
 from tokenjam.core.model_tiers import PREMIUM_TIER_LABEL
 from tokenjam.core.optimize.types import (
@@ -76,7 +77,11 @@ def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
     # else the compute routed through the running `tj serve` (which holds the DB
     # write lock). No `hasattr(db, "conn")` sniffing — the seam owns that choice.
     data = resolve_data_access(ctx)
-    audit, framing = data.quota_audit(since=since, agent_id=agent)
+    progress_off = progress_disabled(
+        output_json=output_json, quiet=bool(ctx.obj.get("no_progress")),
+    )
+    with progress_indicator("Auditing premium quota usage...", disabled=progress_off):
+        audit, framing = data.quota_audit(since=since, agent_id=agent)
 
     if export_target:
         _export_snippet(audit, framing, target=export_target, agent_id=agent,

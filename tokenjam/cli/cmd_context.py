@@ -31,6 +31,7 @@ import click
 
 from tokenjam.cli.data_access import resolve_data_access
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.progress import progress_disabled, progress_indicator
 from tokenjam.core.context_diagnostic import (
     INCLUSION_FILE_READ,
     INCLUSION_PROMPT,
@@ -83,7 +84,11 @@ def cmd_context(ctx: click.Context, agent: str | None, since: str,
     # drives people to. No `hasattr(db, "conn")` sniffing here — the seam owns
     # the direct-vs-serve choice.
     data = resolve_data_access(ctx)
-    diag, framing = data.context_diagnostic(since=since, agent_id=agent)
+    progress_off = progress_disabled(
+        output_json=output_json, quiet=bool(ctx.obj.get("no_progress")),
+    )
+    with progress_indicator("Analyzing context usage...", disabled=progress_off):
+        diag, framing = data.context_diagnostic(since=since, agent_id=agent)
 
     if output_json:
         payload = diagnostic_to_dict(diag)

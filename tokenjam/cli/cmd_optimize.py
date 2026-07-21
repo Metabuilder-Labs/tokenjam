@@ -8,6 +8,7 @@ import click
 from rich.markup import escape as _rich_escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.cli.progress import progress_disabled, progress_indicator
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
     Framing,
@@ -62,6 +63,31 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 # downsize card the user didn't ask for — see `_rank_findings`.
 _PLACEMENT_FINDING_NAME = "placement"
 _PLACEMENT_ANALYZER = "downsize"
+
+# What to show while each analyzer runs, keyed by its ANALYZER_REGISTRY name
+# (runner.py stays CLI-agnostic and only tells us the name via `progress_cb`).
+# A user watching a 40-90s `tj optimize` run benefits far more from "Scanning
+# for repeated context..." than from an anonymous spinner. Falls back to a
+# generic label for any analyzer added here without a bespoke one.
+_ANALYZER_PROGRESS_LABELS: dict[str, str] = {
+    "downsize": "Checking model right-sizing...",
+    "budget-projection": "Projecting budget...",
+    "cache": "Checking cache efficacy...",
+    "cache-recommend": "Checking cache prefix opportunities...",
+    "resend": "Scanning for repeated context...",
+    "script": "Checking workflow scripting opportunities...",
+    "reuse": "Checking plan reuse...",
+    "trim": "Scanning prompts for bloat...",
+    "subagent": "Checking subagent sizing...",
+    "summarize": "Checking summarization opportunities...",
+    "relearn": "Distilling relearn signals...",
+    "verbosity": "Checking output verbosity...",
+    "deadweight": "Checking dead context...",
+}
+
+
+def _analyzer_progress_label(name: str) -> str:
+    return _ANALYZER_PROGRESS_LABELS.get(name, f"Running {name}...")
 
 
 def _resolve_analyzer_names(requested: list[str] | None) -> list[str] | None:
@@ -136,6 +162,13 @@ def cmd_optimize(
 ) -> None:
     """Analyze recent usage for cost-saving candidates and budget exposure."""
     output_json = resolve_output_json(ctx, output_json_flag)
+    # Computed once, up front: --json (either spelling), --no-progress, CI, or
+    # a non-TTY stderr all suppress the spinner. A full `tj optimize` run
+    # against real history takes 40-90s — without this it prints nothing the
+    # whole time, which reads as hung rather than working.
+    progress_off = progress_disabled(
+        output_json=output_json, quiet=bool(ctx.obj.get("no_progress")),
+    )
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     if db is None or config is None:
@@ -205,13 +238,14 @@ def cmd_optimize(
                 "running tj serve at the configured api.{host,port}."
             )
         try:
-            report_dict = db.fetch_optimize_report(
-                since=since,
-                agent_id=agent,
-                findings=analyzer_findings,
-                budget_provider=budget_provider,
-                budget_usd=budget_usd,
-            )
+            with progress_indicator("Fetching optimize report...", disabled=progress_off):
+                report_dict = db.fetch_optimize_report(
+                    since=since,
+                    agent_id=agent,
+                    findings=analyzer_findings,
+                    budget_provider=budget_provider,
+                    budget_usd=budget_usd,
+                )
         except Exception as exc:
             raise click.ClickException(
                 f"Failed to fetch optimize report from tj serve: {exc}"
@@ -258,16 +292,18 @@ def cmd_optimize(
                 )
             return
 
-        report = build_report(
-            db=db,
-            config=config,
-            since=since_dt,
-            until=until_dt,
-            agent_id=agent,
-            findings=analyzer_findings,
-            budget_provider_filter=budget_provider,
-            budget_usd_override=budget_usd,
-        )
+        with progress_indicator("Analyzing usage...", disabled=progress_off) as handle:
+            report = build_report(
+                db=db,
+                config=config,
+                since=since_dt,
+                until=until_dt,
+                agent_id=agent,
+                findings=analyzer_findings,
+                budget_provider_filter=budget_provider,
+                budget_usd_override=budget_usd,
+                progress_cb=lambda name: handle.update(_analyzer_progress_label(name)),
+            )
 
         plan_mix = plan_tier_mix(conn, since_dt, until_dt, agent)
         agent_mix = agent_persona_mix(conn, since_dt, until_dt, agent)
