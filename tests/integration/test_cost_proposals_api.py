@@ -260,14 +260,18 @@ async def test_cost_apply_workspace_writes_skill_for_script_and_reverts(
 
     # A deterministic tool-call cluster: >=20 sessions running the identical
     # single-tool structure, which is what MIN_CLUSTER_INSTANCES flags.
+    # `agent_id="claude-code-x"` so the window's dominant persona resolves to
+    # "claude-code" — the rung-2 skill write this test exercises is only
+    # offered for that persona (SDK/unknown windows get a snippet instead;
+    # see `cost_proposals._persona_gated_write_fields`).
     base = utcnow() - timedelta(days=2)
     for i in range(20):
         sid = f"det-{i}"
         db.upsert_session(make_session(
-            session_id=sid, plan_tier="api", duration_seconds=10.0,
-            total_cost_usd=0.02,
+            agent_id="claude-code-x", session_id=sid, plan_tier="api",
+            duration_seconds=10.0, total_cost_usd=0.02,
         ))
-        span = make_tool_span(tool_name="bash")
+        span = make_tool_span(agent_id="claude-code-x", tool_name="bash")
         span.session_id = sid
         span.start_time = base + timedelta(minutes=i)
         span.attributes = {GenAIAttributes.TOOL_INPUT: {"command": "git pull"}}

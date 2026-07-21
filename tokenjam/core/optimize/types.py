@@ -278,6 +278,13 @@ class OptimizeReport:
     # Existing analyzers (downsize, budget-projection) keep their
     # typed slots above for backwards-compat with cmd_optimize and mcp.
     findings:  dict = field(default_factory=dict)
+    # Dominant user persona for the window ("claude-code" | "sdk" | "mixed" |
+    # "unknown") — see `tokenjam.core.framing.dominant_persona`. Computed once
+    # by `runner.build_report` (mirrors `AnalyzerContext.persona` below) and
+    # carried on the report so a consumer working from the built report alone
+    # (e.g. `cost_proposals.cost_proposals_from_report`) never has to
+    # recompute it from a bare `conn`.
+    persona:   str = "unknown"
 
 
 @dataclass
@@ -302,6 +309,14 @@ class AnalyzerContext:
     # Budget-analyzer flow control:
     budget_provider_filter: str | None    = None
     budget_usd_override:    float | None  = None
+    # Dominant user persona for the window — see `OptimizeReport.persona`
+    # above. Computed once in `runner.build_report` via
+    # `tokenjam.core.framing.agent_persona_mix` / `dominant_persona` (the
+    # same functions the CLI's own persona-dependent CTA already uses), not
+    # a second classifier. Analyzers that need to know whether they're
+    # looking at an SDK caller (e.g. deciding fix modality) read it here
+    # instead of re-deriving it from `conn`.
+    persona:                str            = "unknown"
 
 
 # ---------------------------------------------------------------------------

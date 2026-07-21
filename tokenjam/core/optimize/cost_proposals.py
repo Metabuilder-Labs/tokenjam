@@ -1108,7 +1108,64 @@ def _cluster_hash(value: Any) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:12]
 
 
-def _script_to_proposals(finding: Any) -> list[CostProposal]:
+# --------------------------------------------------------------------------- #
+# Persona-gated fix modality — `script` / `reuse` / `verbosity` only.
+#
+# All three write the SAME class of artifact when apply-capable: a rung-1
+# CLAUDE.md note or rung-2 `.claude/skills/<slug>/SKILL.md` file (see
+# `relearn_apply.default_target_path`). Nothing in an SDK-only service's
+# request path ever reads a CLAUDE.md or a `.claude/skills/` note — those are
+# read by an interactive coding-agent harness. Offering that write to an SDK
+# caller is a write that visibly succeeds and changes nothing: a quiet lie in
+# the user's favour (CLAUDE.md anti-pattern #22). The finding underneath is
+# still true for an SDK caller; only the fix MODALITY is wrong, so this never
+# drops the recommendation — it demotes the card to advise-only and carries
+# the identical text as a copy-pasteable `suggestion` instead (the same
+# ``CostProposal.suggestion`` field every advise-only card already renders as
+# a first-class "the fix" block with a Copy button).
+# --------------------------------------------------------------------------- #
+
+def _persona_gated_write_fields(
+    persona: str, proposed_fix: str, rung: int, scope: str,
+) -> dict[str, Any]:
+    """Decide, from the window's dominant persona, whether the rung-1/rung-2
+    workspace write is offered — and fill in the ``CostProposal`` fields that
+    follow from that decision.
+
+    * ``"claude-code"`` — unchanged: the write is genuinely actionable, so it
+      stays offered exactly as before.
+    * ``"sdk"`` and ``"unknown"`` — no write offered. ``"unknown"`` means no
+      session in the window carries an identifiable agent_id and no declared
+      plan settles it either (`core.framing.dominant_persona`) — the exact
+      shape of a pure-SDK caller who never ran ``tj onboard``. Grouping it
+      with ``"sdk"`` here mirrors ``cmd_optimize._render_downgrade_cta``'s
+      CTA, and avoids the one failure mode called out for this fix: silently
+      offering a write to a persona that turns out to be SDK.
+    * ``"mixed"`` — both audiences are meaningfully represented (same
+      precedent as ``_render_downgrade_cta``, which renders both CTAs side
+      by side rather than picking one), and a script/reuse/verbosity finding
+      isn't attributable to one side of the mix or the other. The write
+      stays on offer for the claude-code share; the identical recommendation
+      is ALSO carried as ``suggestion`` so the sdk share of the mix isn't
+      left with a card that looks actionable but silently isn't, for them.
+    """
+    write_offered = persona in {"claude-code", "mixed"}
+    fields: dict[str, Any] = {
+        "advise_only": not write_offered,
+        "apply_capable": write_offered,
+        "rung": rung if write_offered else 0,
+        "scope": scope if write_offered else "",
+        "proposed_fix": proposed_fix if write_offered else "",
+    }
+    # Every persona except a clean claude-code window also gets the snippet
+    # fallback — "mixed" needs it alongside the write (see above), and
+    # "sdk"/"unknown" need it in place of the write.
+    if persona != "claude-code":
+        fields["suggestion"] = proposed_fix
+    return fields
+
+
+def _script_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
     """One proposal per flagged deterministic-tool-call cluster.
 
     Apply-capable at rung 2: a skill note naming the repeated call pattern and
@@ -1118,6 +1175,12 @@ def _script_to_proposals(finding: Any) -> list[CostProposal]:
     title, which embeds the cluster's own hash so two clusters never collide
     on the same skill file (`relearn_apply`'s create-only guard would otherwise
     let a second cluster's apply silently overwrite the first's skill note).
+
+    The write is only actually offered for a ``"claude-code"``/``"mixed"``
+    ``persona`` — see ``_persona_gated_write_fields``. An ``"sdk"``/
+    ``"unknown"`` window gets the identical recommendation as a
+    copy-pasteable snippet instead; the skill note would sit unread by any
+    SDK service's request path.
     """
     if finding is None:
         return []
@@ -1172,22 +1235,21 @@ def _script_to_proposals(finding: Any) -> list[CostProposal]:
             estimated_recoverable_usd=cluster.total_cost_usd or None,
             estimated_recoverable_tokens=cluster.total_tokens or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-            advise_only=False,
-            apply_capable=True,
-            rung=2,
-            scope="project",
-            proposed_fix=advise,
+            **_persona_gated_write_fields(persona, advise, rung=2, scope="project"),
         ))
     return proposals
 
 
-def _reuse_to_proposals(finding: Any) -> list[CostProposal]:
+def _reuse_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
     """One proposal per repeated planning-skeleton cluster.
 
     Apply-capable at rung 1: a CLAUDE.md note naming the recurring skeleton.
     Uses the finding's conservative ``cache_reuse_recoverable_*`` figure (you
     already paid for the plan once), not the ``script_replacement_*`` upper
     bound, matching ``ReuseFinding``'s own aggregate.
+
+    The write is only actually offered for a ``"claude-code"``/``"mixed"``
+    ``persona`` — see ``_persona_gated_write_fields``.
     """
     if finding is None:
         return []
@@ -1235,16 +1297,12 @@ def _reuse_to_proposals(finding: Any) -> list[CostProposal]:
             estimated_recoverable_usd=cluster.cache_reuse_recoverable_usd or None,
             estimated_recoverable_tokens=cluster.cache_reuse_recoverable_tokens or None,
             estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-            advise_only=False,
-            apply_capable=True,
-            rung=1,
-            scope="project",
-            proposed_fix=advise,
+            **_persona_gated_write_fields(persona, advise, rung=1, scope="project"),
         ))
     return proposals
 
 
-def _verbosity_to_proposals(finding: Any) -> list[CostProposal]:
+def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
     """One proposal for the whole verbosity finding (unlike ``script``/
     ``reuse``, this is a single window-wide signal, not per-cluster).
 
@@ -1257,6 +1315,13 @@ def _verbosity_to_proposals(finding: Any) -> list[CostProposal]:
     go; a workspace note is the same class of soft, orchestrator-read surface
     the ``subagent`` rubric already uses, so this reuses that precedent
     rather than inventing a new one.
+
+    The write is only actually offered for a ``"claude-code"``/``"mixed"``
+    ``persona`` — see ``_persona_gated_write_fields``. This is the sharpest
+    case of the three: the lever itself (``max_tokens``) is genuinely
+    SDK-actionable — an SDK caller can cap it in their own request — it is
+    only the CLAUDE.md *artifact* that is the wrong surface for them. Gating
+    still carries the cap as a ``suggestion`` so that lever isn't lost.
     """
     if finding is None:
         return []
@@ -1297,11 +1362,7 @@ def _verbosity_to_proposals(finding: Any) -> list[CostProposal]:
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-        advise_only=False,
-        apply_capable=True,
-        rung=1,
-        scope="project",
-        proposed_fix=advise,
+        **_persona_gated_write_fields(persona, advise, rung=1, scope="project"),
     )]
 
 
@@ -1382,8 +1443,16 @@ def cost_proposals_from_report(
     the advise text without a number, same as the CLI. Defaults to ``"api"``
     so existing callers that don't know their caller's plan keep today's
     behaviour.
+
+    ``script`` / ``reuse`` / ``verbosity`` read ``report.persona`` (set once
+    by ``runner.build_report`` — see ``AnalyzerContext.persona``) to decide
+    whether their rung-1/rung-2 workspace write is offered at all — see
+    ``_persona_gated_write_fields``. A report built without that field (e.g.
+    hand-constructed in a test) defaults to ``"unknown"``, which keeps the
+    write off rather than assuming ``"claude-code"``.
     """
     findings = getattr(report, "findings", {}) or {}
+    persona = str(getattr(report, "persona", "") or "unknown")
     proposals: list[CostProposal] = []
     adapters = (
         (lambda f: _downsize_to_proposal(f, config), getattr(report, "downgrade", None)),
@@ -1395,9 +1464,9 @@ def cost_proposals_from_report(
         (lambda f: _subagent_to_proposals(f, config), findings.get("subagent")),
         (lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode), findings.get("placement")),
         (_deadweight_to_proposals, findings.get("deadweight")),
-        (_script_to_proposals, findings.get("script")),
-        (_reuse_to_proposals, findings.get("reuse")),
-        (_verbosity_to_proposals, findings.get("verbosity")),
+        (lambda f: _script_to_proposals(f, persona=persona), findings.get("script")),
+        (lambda f: _reuse_to_proposals(f, persona=persona), findings.get("reuse")),
+        (lambda f: _verbosity_to_proposals(f, persona=persona), findings.get("verbosity")),
     )
     for adapter, finding in adapters:
         try:
