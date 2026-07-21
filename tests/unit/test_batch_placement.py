@@ -122,10 +122,78 @@ def test_too_few_sessions_to_call_a_cadence(db):
     assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
 
 
+def test_config_lowers_cadence_bar_surfaces_previously_hidden_group(db):
+    """The exact 4-session data from test_too_few_sessions_to_call_a_cadence
+    yields no candidate at the default MIN_SESSIONS_FOR_CADENCE; passing a
+    lower min_sessions_for_cadence (what run() threads from [optimize]
+    min_sessions_for_cadence) surfaces it."""
+    _cron_sessions(db, count=4)
+    since, until = _window()
+    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+
+    finding = analyze_batch_placement(
+        db.conn, since, until, None, 12.0, min_sessions_for_cadence=4,
+    )
+    assert finding is not None
+    assert len(finding.candidates) == 1
+    assert finding.candidates[0].sessions == 4
+    assert finding.min_sessions_for_cadence == 4
+
+
 def test_trivial_spend_is_not_worth_an_architectural_change(db):
     _cron_sessions(db, count=6, cost_usd=0.01)
     since, until = _window()
     assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+
+
+def test_config_lowers_group_cost_bar_surfaces_previously_hidden_group(db):
+    """The exact trivial-spend data above yields no candidate at the default
+    MIN_GROUP_COST_USD; passing a lower min_group_cost_usd (what run()
+    threads from [optimize] min_group_cost_usd) surfaces it."""
+    _cron_sessions(db, count=6, cost_usd=0.01)
+    since, until = _window()
+    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+
+    finding = analyze_batch_placement(
+        db.conn, since, until, None, 12.0, min_group_cost_usd=0.01,
+    )
+    assert finding is not None
+    assert len(finding.candidates) == 1
+    assert finding.min_group_cost_usd == 0.01
+
+
+def test_downsize_run_reads_placement_thresholds_from_ctx_config(db):
+    """The registered "downsize" run(ctx) entry point (the only caller of
+    analyze_batch_placement in the real pipeline) reads ctx.config.optimize's
+    placement thresholds, using the same 4-session data that yields no
+    candidate at the module defaults."""
+    from tokenjam.core.config import OptimizeConfig, TjConfig
+    from tokenjam.core.optimize.analyzers.model_downgrade import run as run_downsize
+    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
+
+    _cron_sessions(db, count=4)
+    since, until = _window()
+    summary = WindowSummary(
+        since=since, until=until, days=WINDOW_DAYS, sessions=4, spans=0,
+        total_tokens=0, total_cost_usd=12.0, thin_data=False,
+    )
+
+    def _ctx(config) -> AnalyzerContext:
+        return AnalyzerContext(
+            conn=db.conn, config=config, since=since, until=until, agent_id=None,
+            window_days=WINDOW_DAYS, summary=summary, report=OptimizeReport(window=summary),
+        )
+
+    default_ctx = _ctx(TjConfig(version="1"))
+    run_downsize(default_ctx)
+    assert "placement" not in default_ctx.report.findings
+
+    lowered_ctx = _ctx(TjConfig(
+        version="1", optimize=OptimizeConfig(min_sessions_for_cadence=4),
+    ))
+    run_downsize(lowered_ctx)
+    assert "placement" in lowered_ctx.report.findings
+    assert lowered_ctx.report.findings["placement"].min_sessions_for_cadence == 4
 
 
 # --------------------------------------------------------------------------- #
@@ -225,3 +293,125 @@ def test_null_cache_columns_do_not_zero_a_candidates_tokens(db):
 
     assert finding is not None
     assert finding.candidates[0].tokens == 6 * (2_000 + 500)
+
+
+# --------------------------------------------------------------------------- #
+# CLI text-view rendering
+# --------------------------------------------------------------------------- #
+# Third finding of this shape to ship without a text-view renderer (relearn,
+# then deadweight): _rank_findings drops any finding name absent from
+# _FINDING_RENDERERS, so the card reached the web tab and --json while the CLI
+# printed its generic empty state.
+
+def test_placement_has_a_renderer_and_a_reachable_command(db):
+    from tokenjam.cli.cmd_optimize import (
+        _FINDING_RENDERERS,
+        _MINOR_FINDING_LABELS,
+        _PLACEMENT_ANALYZER,
+        _resolve_analyzer_names,
+        cmd_optimize,
+    )
+
+    assert "placement" in _FINDING_RENDERERS
+    assert "placement" in _MINOR_FINDING_LABELS
+    # `placement` is now directly typeable — Click accepts it even though it
+    # rides along with the downsize analyzer rather than being its own
+    # registered name (see analyzers/batch_placement.py).
+    findings_param = next(
+        p for p in cmd_optimize.params if getattr(p, "name", None) == "findings"
+    )
+    assert "placement" in findings_param.type.choices
+    # Requesting it resolves to running the single analyzer that produces
+    # it, never a second standalone pass.
+    assert _resolve_analyzer_names(["placement"]) == [_PLACEMENT_ANALYZER]
+    assert _resolve_analyzer_names(["placement", "downsize"]) == [_PLACEMENT_ANALYZER]
+    assert _resolve_analyzer_names(["placement", "cache"]) == [_PLACEMENT_ANALYZER, "cache"]
+    assert _resolve_analyzer_names(None) is None
+
+
+def test_optimize_placement_runs_downsize_but_only_renders_placement(db, monkeypatch, tmp_path):
+    """`tj optimize placement` end-to-end: Click must accept the name, the
+    underlying downsize analyzer must actually run (it's the only producer of
+    the placement finding), and the report must show the placement card
+    without also surfacing the downsize card the user never asked for."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from tokenjam.cli.main import cli
+    from tokenjam.core.config import ApiAuthConfig, ApiConfig, TjConfig
+
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    _cron_sessions(db, count=6, cost_usd=1.0)
+
+    config = TjConfig(version="1", api=ApiConfig(auth=ApiAuthConfig(enabled=False)))
+
+    runner = CliRunner()
+    with patch("tokenjam.cli.main.load_config", return_value=config), \
+         patch("tokenjam.cli.main.open_db", return_value=db):
+        result = runner.invoke(cli, ["optimize", "placement", "--since", "30d"])
+
+    assert result.exit_code == 0, result.output
+    assert "Batch placement" in result.output
+    assert "Model downgrade" not in result.output
+
+
+def test_render_placement_names_the_workload_and_its_cadence(db, capsys):
+    from tokenjam.cli.cmd_optimize import _render_placement
+
+    _cron_sessions(db, count=6, cost_usd=1.0)
+    since, until = _window()
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    assert finding is not None
+
+    for mode in ("api", "subscription", "local", "unknown"):
+        _render_placement(finding, pricing_mode=mode, marker="①")
+    out = capsys.readouterr().out
+
+    assert "nightly" in out
+    assert "6 sessions" in out
+    assert "~6.0h" in out                      # the cadence, readably
+    assert "No candidates flagged" not in out
+    assert "architectural change" in out       # the friction travels with it
+
+
+def test_render_placement_shows_no_dollars_off_the_api_plan(db, capsys):
+    """The Batch API's flat discount is an api-billed price lever. A
+    subscription or local plan cannot act on it, so a dollar figure there
+    would be a number the reader can never realise."""
+    from tokenjam.cli.cmd_optimize import _render_placement
+
+    _cron_sessions(db, count=6, cost_usd=1.0)
+    since, until = _window()
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+
+    _render_placement(finding, pricing_mode="subscription", marker="①")
+    out = capsys.readouterr().out
+
+    assert "$" not in out
+    assert "api-billed price lever" in out
+    # The workload size still renders: the shape is real on any plan.
+    assert "nightly" in out
+
+
+def test_render_report_surfaces_placement_instead_of_no_candidates(db, capsys):
+    from tokenjam.cli.cmd_optimize import _render_report
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    _cron_sessions(db, count=6, cost_usd=1.0)
+    since, until = _window()
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+
+    report = OptimizeReport(
+        window=WindowSummary(
+            since=since, until=until, days=WINDOW_DAYS, sessions=6, spans=6,
+            total_tokens=15_900, total_cost_usd=12.0, thin_data=False,
+        ),
+        downgrade=None,
+        findings={"placement": finding},
+    )
+    _render_report(report, agent=None, requested=None, pricing_mode="api")
+    out = capsys.readouterr().out
+
+    assert "No candidates flagged" not in out
+    assert "nightly" in out
