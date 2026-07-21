@@ -16,6 +16,7 @@ mislead. Multi-provider support is a future research project.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -44,6 +45,13 @@ class CachePrefixCandidate:
     avg_input_tokens: float        # average input_tokens on calls that share this prefix
     estimated_cacheable_tokens: int
     model:          str = ""       # this prefix's dominant model, for pricing
+    # The one-paste fix (#128): a ready cache_control placement for this
+    # exact prefix, built by `_prefix_cache_control_snippet` below. This
+    # analyzer's whole job is WHERE to place a breakpoint, so leaving this
+    # empty and only printing prose stats (as v1 did) meant the one analyzer
+    # whose purpose is placement advice was the one that gave no placement
+    # code, while `cache`'s own A3 lookback-miss path already built one.
+    cache_control_snippet: str = ""
     # Recoverable-savings contract (#111), same field names as every other
     # analyzer. None when no priced rate was observed for `model` — never a
     # zero or a borrowed rate (CLAUDE.md anti-pattern #22).
@@ -111,6 +119,33 @@ def _prefix_hash(text: str) -> str:
     """SHA-256 of the first PREFIX_HASH_BYTES chars (UTF-8) of the prompt."""
     head = text[:PREFIX_HASH_BYTES].encode("utf-8", errors="replace")
     return hashlib.sha256(head).hexdigest()[:16]
+
+
+def _prefix_cache_control_snippet(
+    model: str, sample: str, occurrences: int, cacheable_tokens: int,
+) -> str:
+    """The one-paste fix for a recurring prefix. Modelled on
+    `cache_efficacy._uncached_snippet`: a comment identifying which prefix
+    (from the truncated preview already captured, never the full text) plus
+    a placeholder `text` block carrying the `cache_control` breakpoint.
+
+    A placeholder, not the real captured content: `sample` is only the first
+    ~120 characters kept for the UI preview, not the full prefix, and
+    pasting a partial prefix into a "snippet" would silently truncate the
+    user's actual boundary if copied as-is. The preview is enough to let the
+    user recognise WHICH of their own prefixes this is.
+    """
+    preview = sample[:80].replace("\n", " ").replace("\r", " ").strip()
+    model_label = model or "this model"
+    return (
+        f"# {model_label}: prefix seen in {occurrences} calls, starting "
+        f'"{preview}..."; ~{cacheable_tokens:,} tokens estimated cacheable\n'
+        + json.dumps({
+            "type": "text",
+            "text": "<the stable prefix that starts this way, same content every call>",
+            "cache_control": {"type": "ephemeral"},
+        }, indent=2)
+    )
 
 
 def _estimate_candidate_recoverable(
@@ -241,6 +276,9 @@ def run(ctx: AnalyzerContext) -> None:
             avg_input_tokens=round(avg_in, 1),
             estimated_cacheable_tokens=estimated_cacheable,
             model=dominant_model,
+            cache_control_snippet=_prefix_cache_control_snippet(
+                dominant_model, str(entry["sample"]), int(entry["count"]), estimated_cacheable,
+            ),
             estimated_recoverable_usd=usd,
             estimated_recoverable_tokens=tokens,
         ))
