@@ -6436,8 +6436,12 @@ function OptimizeView({ params }) {
           </div>
           <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} height=${220} />
           <div class="chart-foot">
-            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>estimated recoverable</b> waste, stacked by analyzer — a heuristic estimate to review before acting, not a realized cost reduction.</span>
+            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>estimated recoverable</b> waste, stacked by analyzer: a heuristic estimate to review before acting, not a realized cost reduction.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}</span>
           </div>
+          ${st.comp && st.comp.largest_recoverable_analyzer ? html`
+          <div class="chart-foot" style="margin-top:2px">
+            <span class="dim">Largest single opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
+          </div>` : null}
           ${waste.recSegs.length ? html`
             <div class="waste-list">
               ${waste.recSegs.map(r => html`
