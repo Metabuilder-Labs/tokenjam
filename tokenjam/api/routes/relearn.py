@@ -515,36 +515,44 @@ class ApplyWorkspaceCostRequest(BaseModel):
 
 @router.post("/relearn/cost-proposals/apply-workspace", dependencies=_WRITE_AUTH)
 def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest) -> dict[str, Any]:
-    """Apply a CC-origin subagent proposal's sizing-rubric note to the workspace.
+    """Apply an ``apply_capable`` cost proposal's workspace note/skill.
 
-    Unlike the three advise-only analyzers, a subagent right-sizing finding has a
-    writable surface (a rung-1 CLAUDE.md sizing rubric the orchestrating agent
-    reads before spawning subagents). This routes the actual write through the
-    EXISTING relearn apply path (``relearn_apply.apply_relearn_fix``) — same
-    reversible, git-committed, human-gated (dry-run first) discipline — then
-    records the cost marker so the delta-verify pass measures the fan-out
-    model-mix cost delta after it. ``go=false`` returns the dry-run diff; a
-    second call with ``go=true`` writes. 404 on an unknown ``proposal_id``;
-    403 outside home; 409 on a refusal.
+    Covers every analyzer whose fix is a workspace surface an orchestrating
+    agent (or the model itself) reads before acting, rather than a file this
+    proposal can edit outright: ``subagent`` (rung-1 sizing rubric),
+    ``script`` (rung-2 deterministic-workflow skill), ``reuse`` (rung-1
+    planning-skeleton note), ``verbosity`` (rung-1 output-brevity note). This
+    routes the actual write through the EXISTING relearn apply path
+    (``relearn_apply.apply_relearn_fix``) — same reversible, git-committed,
+    human-gated (dry-run first) discipline — then records the cost marker so
+    the delta-verify pass measures the realized delta after it. ``go=false``
+    returns the dry-run diff; a second call with ``go=true`` writes. 404 on an
+    unknown ``proposal_id``; 403 outside home; 409 on a refusal.
     """
     _reject_target_outside_home(body.target_path)
     config = _config(request)
     db = getattr(request.app.state, "db", None)
     stored = _stored_cost_proposal(request, body.proposal_id)
     signature = str(stored.get("signature") or "")
+    analyzer = str(stored.get("analyzer") or "")
     baseline = dict(stored.get("baseline") or {})
-    # The cluster shape relearn_apply renders a rung-1 note from, projected from
-    # the STORE: a caller-supplied proposed_fix would be arbitrary text written
-    # into the user's CLAUDE.md under a reviewed proposal's name.
+    # The cluster shape relearn_apply renders a rung-1/2 note/skill from,
+    # projected from the STORE: a caller-supplied proposed_fix would be
+    # arbitrary text written into the user's workspace under a reviewed
+    # proposal's name. `apply_sessions` falls back to the subagent analyzer's
+    # own baseline key (`flagged_subagents`) so this generalization doesn't
+    # change that analyzer's existing behavior.
     cluster = {
         "signature": signature,
-        "family_key": "subagent_rightsizing",
+        "family_key": f"cost_{analyzer}" if analyzer else "cost_proposal",
         "title": str(stored.get("title") or "") or signature,
         "proposed_fix": str(stored.get("proposed_fix") or ""),
         "rung": int(stored.get("rung") or 1),
-        "sessions": int(baseline.get("flagged_subagents", 0) or 0),
-        "repos": [],
-        "examples": [],
+        "sessions": int(
+            baseline.get("apply_sessions", baseline.get("flagged_subagents", 0)) or 0
+        ),
+        "repos": list(baseline.get("apply_repos") or []),
+        "examples": list(baseline.get("apply_examples") or []),
     }
     try:
         applied = relearn_apply.apply_relearn_fix(

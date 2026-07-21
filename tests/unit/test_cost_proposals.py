@@ -368,6 +368,208 @@ def test_deadweight_finding_survives_report_dict_round_trip():
     assert finding.tax_table[0].source == "MCP schema: apollo"
 
 
+# --- script / reuse / verbosity: findings that were previously advise-only
+# with no proposal at all, now on the same apply-capable rail as `subagent`. ---
+
+def _workflow_cluster(**overrides):
+    from tokenjam.core.optimize.analyzers.workflow_restructure import WorkflowCluster
+    fields = dict(
+        signature=[{"tool": "bash", "args": ["command_string"]}], instances=25,
+        avg_cost_usd=0.02, avg_duration_seconds=1.5, example_session_id="det-0",
+        avg_tokens=500, total_cost_usd=0.5, total_tokens=12_500,
+        example_session_ids=["det-0", "det-1", "det-2"],
+    )
+    fields.update(overrides)
+    return WorkflowCluster(**fields)
+
+
+def _workflow_finding(clusters=None, **overrides):
+    from tokenjam.core.optimize.analyzers.workflow_restructure import (
+        WorkflowRestructureFinding,
+    )
+    clusters = clusters if clusters is not None else [_workflow_cluster()]
+    fields = dict(
+        clusters=clusters, sessions_examined=25, degraded=False,
+        estimated_recoverable_usd=sum(c.total_cost_usd for c in clusters) or None,
+        estimated_recoverable_tokens=sum(c.total_tokens for c in clusters) or None,
+        estimate_basis="script basis",
+    )
+    fields.update(overrides)
+    return WorkflowRestructureFinding(**fields)
+
+
+def test_script_proposal_shape_and_apply_fields():
+    from tokenjam.core.optimize.cost_proposals import _script_to_proposals
+    props = _script_to_proposals(_workflow_finding())
+    assert len(props) == 1
+    p = props[0]
+    assert p.kind == "cost"
+    assert p.analyzer == "script"
+    assert p.signature.startswith("cost:script:")
+    assert "bash" in p.evidence
+    assert p.estimated_recoverable_usd == 0.5
+    assert p.estimated_recoverable_tokens == 12_500
+    assert p.estimate_basis == "script basis"
+    # Apply-capable: a rung-2 skill note, same class of surface as `subagent`.
+    assert p.advise_only is False
+    assert p.apply_capable is True
+    assert p.rung == 2
+    assert p.scope == "project"
+    assert p.proposed_fix
+    assert p.baseline["apply_sessions"] == 25
+    assert len(p.baseline["apply_examples"]) == 3
+
+
+def test_script_proposal_notes_degraded_clustering_in_evidence():
+    from tokenjam.core.optimize.cost_proposals import _script_to_proposals
+    p = _script_to_proposals(_workflow_finding(degraded=True))[0]
+    assert "tool_inputs" in p.evidence
+
+
+def test_script_proposal_two_clusters_get_distinct_signatures_and_slugs():
+    """Two clusters must never collide on the same skill-file slug — a
+    collision would let the second cluster's apply silently overwrite the
+    first's skill note (relearn_apply's create-only guard only checks for a
+    TokenJam marker, not identity)."""
+    c1 = _workflow_cluster(signature=[{"tool": "bash"}], example_session_id="a",
+                            total_cost_usd=0.2, total_tokens=2_000)
+    c2 = _workflow_cluster(signature=[{"tool": "grep"}], example_session_id="b",
+                            total_cost_usd=0.3, total_tokens=3_000)
+    from tokenjam.core.optimize.cost_proposals import _script_to_proposals
+    from tokenjam.core.optimize.relearn_apply import slugify
+    props = _script_to_proposals(_workflow_finding(clusters=[c1, c2]))
+    assert len({p.signature for p in props}) == 2
+    assert len({slugify(p.title) for p in props}) == 2
+
+
+def test_script_proposal_empty_for_zero_cost_cluster_and_no_finding():
+    from tokenjam.core.optimize.cost_proposals import _script_to_proposals
+    zero = _workflow_cluster(avg_cost_usd=0.0, avg_tokens=0, total_cost_usd=0.0,
+                              total_tokens=0)
+    assert _script_to_proposals(_workflow_finding(clusters=[zero])) == []
+    assert _script_to_proposals(None) == []
+    assert _script_to_proposals(_workflow_finding(clusters=[])) == []
+
+
+def _reuse_cluster(**overrides):
+    from tokenjam.core.optimize.types import ReuseCluster
+    fields = dict(
+        cluster_id="abc123456789", tool_signature=("bash", "read"),
+        prompt_prefix_hash=None, repetitions=4, avg_planning_tokens=300,
+        avg_planning_cost_usd=0.01, cache_reuse_recoverable_usd=0.03,
+        script_replacement_recoverable_usd=0.04, cache_reuse_recoverable_tokens=900,
+        script_replacement_recoverable_tokens=1_200,
+        example_session_ids=["s1", "s2", "s3"], skeleton_session_id="s1",
+    )
+    fields.update(overrides)
+    return ReuseCluster(**fields)
+
+
+def _reuse_finding(clusters=None, **overrides):
+    from tokenjam.core.optimize.types import ReuseFinding
+    clusters = clusters if clusters is not None else [_reuse_cluster()]
+    fields = dict(
+        clusters=clusters,
+        estimated_recoverable_usd=sum(c.cache_reuse_recoverable_usd for c in clusters) or None,
+        estimated_recoverable_tokens=sum(c.cache_reuse_recoverable_tokens for c in clusters) or None,
+        estimate_basis="reuse basis",
+    )
+    fields.update(overrides)
+    return ReuseFinding(**fields)
+
+
+def test_reuse_proposal_shape_and_apply_fields():
+    from tokenjam.core.optimize.cost_proposals import _reuse_to_proposals
+    props = _reuse_to_proposals(_reuse_finding())
+    assert len(props) == 1
+    p = props[0]
+    assert p.kind == "cost"
+    assert p.analyzer == "reuse"
+    assert p.signature == "cost:reuse:abc123456789"
+    assert "bash, read" in p.evidence
+    # Conservative cache-reuse figure, never the script-replacement upper bound.
+    assert p.estimated_recoverable_usd == 0.03
+    assert p.estimated_recoverable_tokens == 900
+    assert p.advise_only is False
+    assert p.apply_capable is True
+    assert p.rung == 1
+    assert p.scope == "project"
+    assert p.proposed_fix
+    assert p.baseline["apply_sessions"] == 4
+    assert len(p.baseline["apply_examples"]) == 3
+
+
+def test_reuse_proposal_uses_the_analyzers_own_cluster_id_for_dedup_identity():
+    """Unlike `script`, `reuse` already carries a deterministic cluster_id
+    (plan_reuse.py computes it); the adapter must reuse it, never re-hash."""
+    from tokenjam.core.optimize.cost_proposals import _reuse_to_proposals
+    p = _reuse_to_proposals(_reuse_finding(clusters=[_reuse_cluster(cluster_id="zzz999")]))[0]
+    assert p.signature == "cost:reuse:zzz999"
+
+
+def test_reuse_proposal_empty_for_zero_recoverable_and_no_finding():
+    from tokenjam.core.optimize.cost_proposals import _reuse_to_proposals
+    zero = _reuse_cluster(cache_reuse_recoverable_usd=0.0, cache_reuse_recoverable_tokens=0)
+    assert _reuse_to_proposals(_reuse_finding(clusters=[zero])) == []
+    assert _reuse_to_proposals(None) == []
+    assert _reuse_to_proposals(_reuse_finding(clusters=[])) == []
+
+
+def _verbosity_finding(**overrides):
+    from tokenjam.core.optimize.analyzers.output_verbosity import VerbosityFinding
+    fields = dict(
+        total_candidates=6, sessions_examined=40, cohorts_examined=3,
+        estimated_recoverable_usd=0.9, estimated_recoverable_tokens=9_000,
+        estimate_basis="verbosity basis", suggested_max_tokens=800,
+    )
+    fields.update(overrides)
+    return VerbosityFinding(**fields)
+
+
+def test_verbosity_proposal_shape_and_apply_fields():
+    from tokenjam.core.optimize.cost_proposals import _verbosity_to_proposals
+    props = _verbosity_to_proposals(_verbosity_finding())
+    assert len(props) == 1
+    p = props[0]
+    assert p.kind == "cost"
+    assert p.analyzer == "verbosity"
+    assert p.signature == "cost:verbosity"
+    assert "6 session" in p.evidence
+    assert p.estimated_recoverable_usd == 0.9
+    assert p.estimated_recoverable_tokens == 9_000
+    assert p.advise_only is False
+    assert p.apply_capable is True
+    assert p.rung == 1
+    assert p.scope == "project"
+    # The remedy snippet + the concrete suggested cap both land in the note.
+    assert "concise" in p.proposed_fix.lower()
+    assert "800" in p.proposed_fix
+    # The honesty caveat (output length is not waste) rides along, never a
+    # bare "you are wasting tokens" claim.
+    assert "not waste" in p.proposed_fix
+    assert p.baseline["apply_sessions"] == 6
+
+
+def test_verbosity_proposal_empty_for_no_candidates_and_no_finding():
+    from tokenjam.core.optimize.cost_proposals import _verbosity_to_proposals
+    assert _verbosity_to_proposals(_verbosity_finding(total_candidates=0)) == []
+    assert _verbosity_to_proposals(None) == []
+
+
+def test_script_reuse_verbosity_wired_into_cost_analyzers_and_report_adapter():
+    from tokenjam.core.optimize.cost_proposals import (
+        COST_ANALYZERS,
+        cost_proposals_from_report,
+    )
+    assert {"script", "reuse", "verbosity"} <= set(COST_ANALYZERS)
+
+    rep = _report()
+    rep.findings["script"] = _workflow_finding()
+    rep.findings["reuse"] = _reuse_finding()
+    rep.findings["verbosity"] = _verbosity_finding()
+    analyzers = {p.analyzer for p in cost_proposals_from_report(rep)}
+    assert {"script", "reuse", "verbosity"} <= analyzers
+
 
 # --- Component E: the estimated-recoverable rollup --------------------------
 
