@@ -733,17 +733,21 @@ def render_hook_content(cluster: dict, signature: str) -> str:
     family_key = cluster.get("family_key") or ""
     title = cluster.get("title", signature)
     rung = cluster.get("rung")
+    # `matchered_families()` answers "does a matcher exist at all", which is
+    # exactly the refusal question. Reading the two underlying tables here
+    # instead would make this the second registry that accessor exists to
+    # prevent; the dispatch below only picks WHICH renderer, once the family
+    # is already known to have one.
+    if family_key not in matchered_families():
+        raise RelearnApplyRefused(
+            f"no matcher exists for family '{family_key or 'unknown'}', so a rung "
+            f"{rung} hook for it would be written but never fire. Refusing to write "
+            f"a fix that looks applied and does nothing. Apply this at rung 1 "
+            f"instead: it writes the same guidance as a reversible note."
+        )
     if family_key in _GUARD_FAMILIES:
         return _render_guard_hook(title, rung, signature)
-    spec = _REACTIVE_SPECS.get(family_key)
-    if spec is not None:
-        return _render_reactive_hook(spec, title, rung, signature)
-    raise RelearnApplyRefused(
-        f"no matcher exists for family '{family_key or 'unknown'}', so a rung "
-        f"{rung} hook for it would be written but never fire. Refusing to write "
-        f"a fix that looks applied and does nothing. Apply this at rung 1 "
-        f"instead: it writes the same guidance as a reversible note."
-    )
+    return _render_reactive_hook(_REACTIVE_SPECS[family_key], title, rung, signature)
 
 
 def _enforcement_wiring(family_key: str) -> tuple[str, str]:
