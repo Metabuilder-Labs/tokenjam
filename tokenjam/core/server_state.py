@@ -96,7 +96,33 @@ def is_serve_process(pid: int) -> bool:
 
 
 def _looks_like_serve(cmdline: str) -> bool:
-    return any(marker in cmdline for marker in ("tokenjam.serve", "tj serve", "uv run tj serve"))
+    """Structural match: is this cmdline a `tj`/`tokenjam` `serve` invocation?
+
+    A plain substring check for `"tj serve"` misses the REAL installed
+    daemon: `_daemon_program_args()` (cmd_onboard.py) launches it as
+    `tj --config <config_path> serve`, i.e. with `--config <path>` sitting
+    between `tj` and `serve` -- no contiguous `"tj serve"` substring ever
+    appears in that cmdline. The old synthetic test (a `python -c ... tj
+    serve` argv) happened to satisfy the substring check, which is why CI
+    never caught this.
+
+    Tokenize instead and check the SHAPE: `serve` must appear as a bare
+    argv token (the subcommand, not part of a longer word/flag), and the
+    cmdline must otherwise look like a `tj`/`tokenjam` invocation -- either
+    the module form (`tokenjam.serve` appears anywhere, e.g. `python -m
+    tokenjam.serve`) or some token's basename is exactly `tj`/`tokenjam`
+    (covers a direct path to the binary, the plain `tj` program name, and
+    wrapper forms like `uv run tj serve` / `uvx --from tokenjam tj
+    --config <path> serve` / `pipx run --spec tokenjam tj --config <path>
+    serve`, since those all still carry a bare `tj` or `tokenjam` token
+    alongside `serve`).
+    """
+    if "tokenjam.serve" in cmdline:
+        return True
+    tokens = cmdline.split()
+    if "serve" not in tokens:
+        return False
+    return any(token.rsplit("/", 1)[-1] in ("tj", "tokenjam") for token in tokens)
 
 
 def find_own_serve_pid() -> int | None:
