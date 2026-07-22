@@ -343,6 +343,7 @@ def _build_finding_constructors() -> dict:
         MIN_SESSIONS_FOR_CADENCE,
     )
     from tokenjam.core.optimize.analyzers.cache_recommend import (
+        MIN_PREFIX_OCCURRENCES,
         CachePrefixCandidate,
         CacheRecommendFinding,
     )
@@ -419,6 +420,7 @@ def _build_finding_constructors() -> dict:
             estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
             estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
+            min_prefix_occurrences=int(d.get("min_prefix_occurrences", MIN_PREFIX_OCCURRENCES)),
         )
 
     def _workflow_restructure(d: dict) -> WorkflowRestructureFinding:

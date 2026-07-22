@@ -472,6 +472,94 @@ async def test_stored_proposals_are_listed_with_their_ids(client, stored_proposa
     assert [c["proposal_id"] for c in clusters] == [stored_proposal]
 
 
+# --- revert clears the linked cost-applied ledger record (signature match) ---
+
+async def test_revert_reverts_the_linked_cost_applied_record(
+    app, client, config, db, monkeypatch, tmp_path, stored_proposal,
+):
+    """The two ledgers (relearn's applied_fixes.json and cost_apply's
+    cost_applied.json) are linked only by matching `signature`. Reverting the
+    file change must also flip the matching cost-applied record to
+    `reverted`, or the savings ledger keeps counting a saving that was undone.
+    """
+    from tokenjam.core.optimize import cost_apply
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    token = app.state.relearn_write_token
+
+    inside = fake_home / "CLAUDE.md"
+    inside.write_text("# Repo\n", encoding="utf-8")
+    apply_r = await client.post(
+        "/api/v1/relearn/apply", json=_apply_body(str(inside), proposal_id=stored_proposal),
+        headers={"X-TJ-Local-Token": token},
+    )
+    assert apply_r.status_code == 200
+    fix_id = apply_r.json()["record"]["id"]
+    signature = apply_r.json()["record"]["signature"]
+    assert signature == "cwd_confusion"
+
+    # A cost-applied record with the SAME signature, created the way a real
+    # cost-proposal apply would (not through this relearn fix's own apply
+    # path, since a plain note fix opens no cost window) — this is the
+    # cross-ledger link under test.
+    cost_apply.mark_applied(db.conn, config, {
+        "signature": signature, "analyzer": "subagent", "title": "linked cost fix",
+        "agent_id": None, "advise_text": "", "target_key": {}, "baseline": {},
+        "estimated_recoverable_usd": None, "estimated_recoverable_tokens": None,
+        "estimate_basis": "",
+    })
+    [cost_rec] = cost_apply.list_applied(config)
+    assert cost_rec["state"] == "applied"
+
+    revert_r = await client.post(
+        f"/api/v1/relearn/{fix_id}/revert", headers={"X-TJ-Local-Token": token},
+    )
+    assert revert_r.status_code == 200
+    assert revert_r.json()["state"] == "reverted"
+    assert revert_r.json()["cost_record_reverted"]["id"] == cost_rec["id"]
+
+    [reverted_cost_rec] = cost_apply.list_applied(config)
+    assert reverted_cost_rec["state"] == "reverted"
+    assert reverted_cost_rec["reverted_at"]
+
+    # Idempotent: reverting again doesn't error and doesn't re-touch a record
+    # that's already reverted.
+    revert_again = await client.post(
+        f"/api/v1/relearn/{fix_id}/revert", headers={"X-TJ-Local-Token": token},
+    )
+    assert revert_again.status_code == 200
+    assert revert_again.json()["cost_record_reverted"] is None
+
+
+async def test_revert_degrades_when_no_linked_cost_record_exists(
+    app, client, monkeypatch, tmp_path, stored_proposal,
+):
+    """No cost-applied record shares this fix's signature (the common case,
+    since most relearn fixes have no priced cost window at all) — the file
+    revert must still succeed."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: fake_home))
+    token = app.state.relearn_write_token
+
+    inside = fake_home / "CLAUDE.md"
+    inside.write_text("# Repo\n", encoding="utf-8")
+    apply_r = await client.post(
+        "/api/v1/relearn/apply", json=_apply_body(str(inside), proposal_id=stored_proposal),
+        headers={"X-TJ-Local-Token": token},
+    )
+    fix_id = apply_r.json()["record"]["id"]
+
+    revert_r = await client.post(
+        f"/api/v1/relearn/{fix_id}/revert", headers={"X-TJ-Local-Token": token},
+    )
+    assert revert_r.status_code == 200
+    assert revert_r.json()["state"] == "reverted"
+    assert revert_r.json()["cost_record_reverted"] is None
+
+
 # --- example session ids: link only when the session actually resolves --------
 
 async def test_proposals_flag_example_sessions_that_resolve(config, db, client):
