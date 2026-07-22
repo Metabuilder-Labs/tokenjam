@@ -66,9 +66,24 @@ def is_serve_process(pid: int) -> bool:
     Guards against PID reuse: a stale state file's PID may since have been
     recycled by an unrelated process, and we must never signal that.
     """
+    proc_cmdline = Path(f"/proc/{pid}/cmdline")
+    if proc_cmdline.exists():
+        # Prefer /proc on Linux: it's the exact, NUL-separated argv, never
+        # truncated by a display width. GNU `ps`'s COMMAND column truncates
+        # long lines -- a long interpreter path (e.g. a hostedtoolcache
+        # Python) can push "tj serve" past the cut, a real miss on Linux CI.
+        try:
+            raw = proc_cmdline.read_bytes()
+        except OSError:
+            return False
+        cmdline = " ".join(part for part in raw.decode(errors="replace").split("\0") if part)
+        return _looks_like_serve(cmdline)
+
     try:
+        # `-ww`: unlimited width, so this fallback (macOS/BSD, no /proc)
+        # can't be truncated the same way the bare form was.
         result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
             capture_output=True, text=True,
         )
     except FileNotFoundError:
@@ -77,7 +92,10 @@ def is_serve_process(pid: int) -> bool:
         return True
     if result.returncode != 0:
         return False
-    cmdline = result.stdout.strip()
+    return _looks_like_serve(result.stdout.strip())
+
+
+def _looks_like_serve(cmdline: str) -> bool:
     return any(marker in cmdline for marker in ("tokenjam.serve", "tj serve", "uv run tj serve"))
 
 

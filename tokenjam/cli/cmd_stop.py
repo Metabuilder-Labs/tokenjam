@@ -21,6 +21,14 @@ _TERM_WAIT_S = 2.0
 _KILL_WAIT_S = 1.0
 _POLL_INTERVAL_S = 0.05
 
+# Before anything's been found+signaled, a single miss from `_find_serve_pid`
+# can just be racing a just-spawned child's execve (it hasn't written its
+# state file / become visible yet) rather than "nothing running". Retry a
+# bounded few times before concluding that. Once something HAS been found,
+# a miss means discovery is genuinely done -- see the loop below.
+_DISCOVERY_MAX_MISSES = 5
+_DISCOVERY_RETRY_S = 0.1
+
 
 def stop_tj_serve(*, quiet: bool = False) -> tuple[bool, list[str]]:
     """Stop tj serve (launchd/systemd + orphan foreground processes).
@@ -59,9 +67,18 @@ def stop_tj_serve(*, quiet: bool = False) -> tuple[bool, list[str]]:
     # This also catches a launchd/systemd-managed daemon that's slow to exit,
     # since it writes the same state file regardless of how it was launched.
     signaled: set[int] = set()
+    misses = 0
     for _ in range(20):
         pid = _find_serve_pid()
-        if not pid or pid in signaled:
+        if not pid:
+            if signaled:
+                break
+            misses += 1
+            if misses >= _DISCOVERY_MAX_MISSES:
+                break
+            time.sleep(_DISCOVERY_RETRY_S)
+            continue
+        if pid in signaled:
             break
         try:
             os.kill(pid, signal.SIGTERM)
