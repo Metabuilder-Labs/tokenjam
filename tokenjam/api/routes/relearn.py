@@ -366,15 +366,48 @@ def post_relearn_disable(request: Request, fix_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+def _revert_linked_cost_record(config: Any, reverted_fix: dict[str, Any]) -> dict[str, Any] | None:
+    """Revert the cost-applied ledger record (if any) linked to a just-reverted
+    relearn fix, so the savings ledger stops counting a fix that was undone.
+
+    The two ledgers (``relearn_apply``'s ``applied_fixes.json`` and
+    ``cost_apply``'s ``cost_applied.json``) have no cross-reference field —
+    they're linked solely by matching ``signature``. This is the only place
+    that link is walked, so a revert here is the only way a cost-applied
+    record ever gets un-counted for this path.
+
+    Best-effort and idempotent: a missing or already-reverted cost record (or
+    any lookup error) must never turn an already-successful file revert into
+    an error — this degrades to ``None`` rather than raising.
+    """
+    signature = str(reverted_fix.get("signature") or "")
+    if not signature:
+        return None
+    try:
+        for rec in cost_apply.list_applied(config):
+            if rec.get("signature") == signature and rec.get("state") != "reverted":
+                return cost_apply.revert_applied(config, str(rec.get("id")))
+    except Exception:
+        return None
+    return None
+
+
 @router.post("/relearn/{fix_id}/revert", dependencies=_WRITE_AUTH)
 def post_relearn_revert(request: Request, fix_id: str) -> dict[str, Any]:
     """One-step revert: disables enforcement first if live, restores the
     pre-image (or deletes a freshly-created file), commits the revert when
-    the target is git-tracked."""
+    the target is git-tracked.
+
+    Also closes out any cost-applied ledger record linked to this fix by
+    ``signature`` (see ``_revert_linked_cost_record``) — otherwise a reverted
+    file change leaves the savings ledger counting a saving that was undone.
+    """
     try:
-        return relearn_apply.revert_applied_fix(_config(request), fix_id)
+        result = relearn_apply.revert_applied_fix(_config(request), fix_id)
     except relearn_apply.RelearnApplyRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    result["cost_record_reverted"] = _revert_linked_cost_record(_config(request), result)
+    return result
 
 
 # --------------------------------------------------------------------------- #
