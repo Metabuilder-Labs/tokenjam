@@ -8131,7 +8131,7 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged })
   // entirely (see relearn_apply's _build_write_plan), so it never carries a
   // rung — "rung 1" would be wrong here, unlike the workspace-note flow.
   const modalityLabel = prop.apply_capable
-    ? (hasApplyKind ? 'workspace fix · direct edit' : 'workspace fix · rung 1')
+    ? (hasApplyKind ? 'workspace fix · direct edit' : `workspace fix · rung ${prop.rung || 1}`)
     : (prop.suggestion ? 'snippet fix · apply yourself' : 'advise-only');
 
   return html`
@@ -8366,7 +8366,7 @@ function ReviewInboxView({ params }) {
   // for this analyzer is handled per-card below (rev-focus).
   useEffect(() => {
     if (!analyzerFocus) return;
-    const el = document.querySelector(`[data-analyzer="${analyzerFocus}"]`);
+    const el = document.querySelector(`[data-analyzer="${CSS.escape(analyzerFocus)}"]`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [analyzerFocus, costProps]);
 
