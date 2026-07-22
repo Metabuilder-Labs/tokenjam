@@ -11,6 +11,13 @@ SESSION_STALE_THRESHOLD = timedelta(minutes=5)
 # "stale" (zombie). Overridable per-install via [sessions] idle_minutes, applied
 # at the status route — effective_status itself stays config-free.
 SESSION_IDLE_THRESHOLD = timedelta(hours=4)
+# Terminal session statuses: a session that will never produce another span.
+# 'closed' = explicitly ended (POST /sessions/close); 'completed' = wrapped by a
+# real session span (how backfilled Claude Code sessions land). status_at()
+# passes both through untouched, and both belong in the archive rather than the
+# live tiles. Any query that partitions sessions by lifecycle must use this
+# constant instead of spelling one literal into hand-written SQL.
+TERMINAL_STATUSES = ("closed", "completed")
 
 
 class Severity(str, Enum):
@@ -337,6 +344,9 @@ class CostRow:
     cache_tokens: int         = 0   # cache-READ tokens
     cache_write_tokens: int   = 0   # cache-CREATE tokens (the hidden cost driver, #17)
     cost_usd:     float       = 0.0
+    call_count:   int         = 0   # span count in this bucket — the only honest metric
+                                     # for `group_by="tool"`, whose spans carry no cost/tokens
+                                     # of their own (see get_cost_summary)
 
 
 # -- Enforcement-plane audit log + savings meter (#221) --

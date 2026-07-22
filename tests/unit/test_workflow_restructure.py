@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.config import CaptureConfig, TjConfig
+from tokenjam.core.config import CaptureConfig, OptimizeConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import build_report
 from tokenjam.core.optimize.analyzers.workflow_restructure import (
@@ -160,6 +160,48 @@ def test_below_threshold_not_flagged(db):
     assert report.findings["script"].clusters == []
 
 
+def test_below_threshold_finding_carries_default_min_cluster_instances(db):
+    """An unset [optimize] section reports the module constant on the finding
+    (config-thread contract: omitting the section preserves today's default)."""
+    _seed_deterministic_cluster(
+        db, count=MIN_CLUSTER_INSTANCES - 1,
+        tools=[("bash", {"command": "echo hi"})],
+    )
+    config = _config(tool_inputs=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["script"])
+    assert report.findings["script"].min_cluster_instances == MIN_CLUSTER_INSTANCES
+
+
+def test_config_lowers_bar_surfaces_previously_hidden_cluster(db):
+    """The exact data from test_below_threshold_not_flagged produces nothing at
+    the default bar; lowering [optimize] min_cluster_instances surfaces it."""
+    _seed_deterministic_cluster(
+        db, count=MIN_CLUSTER_INSTANCES - 1,
+        tools=[("bash", {"command": "echo hi"})],
+    )
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+
+    default_config = _config(tool_inputs=True)
+    default_report = build_report(db=db, config=default_config, since=since,
+                                  until=until, findings=["script"])
+    assert default_report.findings["script"].clusters == []
+
+    lowered_config = TjConfig(
+        version="1", capture=CaptureConfig(tool_inputs=True),
+        optimize=OptimizeConfig(min_cluster_instances=MIN_CLUSTER_INSTANCES - 1),
+    )
+    lowered_report = build_report(db=db, config=lowered_config, since=since,
+                                  until=until, findings=["script"])
+    clusters = lowered_report.findings["script"].clusters
+    assert len(clusters) == 1
+    assert clusters[0].instances == MIN_CLUSTER_INSTANCES - 1
+    assert lowered_report.findings["script"].min_cluster_instances == MIN_CLUSTER_INSTANCES - 1
+
+
 def test_value_variation_doesnt_split_cluster(db):
     """
     The signature is structural shape, not values. Sessions with different
@@ -247,7 +289,7 @@ def test_no_tool_spans_in_window(db):
 def test_cache_write_tokens_included_in_recoverable_total(db):
     """Regression: cache_write_tokens must be included in estimated_recoverable_tokens.
 
-    This verifies the fix for ticket #169 where cache_write_tokens was omitted
+    This verifies the fix for the bug where cache_write_tokens was omitted
     from the per-cluster token sum, causing cache-write-heavy workloads to
     underreport their recoverable savings.
     """
@@ -290,3 +332,76 @@ def test_cache_write_tokens_included_in_recoverable_total(db):
     # avg_tokens should be input+output only (per-instance UI framing),
     # not affected by the bug fix
     assert c.avg_tokens == 1200
+
+
+def test_cluster_carries_cluster_level_totals_and_examples(db):
+    """Each cluster carries its OWN total_cost_usd/total_tokens (the sum across
+    every member session, not the per-instance avg_cost_usd/avg_tokens above)
+    plus up to 3 example session ids — the denominator + evidence a cost-
+    proposal adapter needs without re-deriving them from the per-instance
+    means (avg_cost_usd * instances only approximates the real cluster sum
+    once rounding is involved)."""
+    base = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    for i in range(MIN_CLUSTER_INSTANCES):
+        sid = f"totals-{i}"
+        sess = make_session(session_id=sid, plan_tier="api", duration_seconds=30.0,
+                            input_tokens=1000, output_tokens=200, total_cost_usd=0.05)
+        db.upsert_session(sess)
+        span = make_tool_span(tool_name="bash")
+        span.session_id = sid
+        span.start_time = base + timedelta(minutes=i)
+        span.attributes = {GenAIAttributes.TOOL_INPUT: {"command": "git pull"}}
+        db.insert_span(span)
+
+    config = _config(tool_inputs=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["script"])
+    c = report.findings["script"].clusters[0]
+    assert c.total_cost_usd == pytest.approx(0.05 * MIN_CLUSTER_INSTANCES)
+    assert c.total_tokens == 1200 * MIN_CLUSTER_INSTANCES
+    assert len(c.example_session_ids) == 3
+    assert c.example_session_id in c.example_session_ids
+
+
+def test_cluster_totals_and_examples_survive_report_dict_round_trip():
+    """WorkflowCluster(**c) (runner.report_from_dict) must round-trip the new
+    fields, and default them for an OLDER serialized report missing the keys
+    entirely (the pre-existing avg_tokens round-trip guarantee, extended)."""
+    from tokenjam.core.optimize.analyzers.workflow_restructure import WorkflowCluster
+    from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    w = WindowSummary(since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                      until=datetime(2026, 5, 30, tzinfo=timezone.utc), days=29,
+                      sessions=20, spans=20, total_tokens=24000, total_cost_usd=1.0,
+                      thin_data=False)
+    cluster = WorkflowCluster(
+        signature=[{"tool": "bash", "args": ["command_string"]}], instances=20,
+        avg_cost_usd=0.05, avg_duration_seconds=1.5, example_session_id="det-0",
+        avg_tokens=1200, total_cost_usd=1.0, total_tokens=24000,
+        example_session_ids=["det-0", "det-1", "det-2"],
+    )
+    from tokenjam.core.optimize.analyzers.workflow_restructure import (
+        WorkflowRestructureFinding,
+    )
+    report = OptimizeReport(window=w, findings={
+        "script": WorkflowRestructureFinding(clusters=[cluster], sessions_examined=20),
+    })
+
+    rebuilt = report_from_dict(report_to_dict(report))
+    rc = rebuilt.findings["script"].clusters[0]
+    assert rc.total_cost_usd == 1.0
+    assert rc.total_tokens == 24000
+    assert rc.example_session_ids == ["det-0", "det-1", "det-2"]
+
+    # An older payload with neither key present still round-trips: defaults.
+    old_payload = {
+        "signature": [{"tool": "bash"}], "instances": 5, "avg_cost_usd": 0.01,
+        "avg_duration_seconds": None, "example_session_id": "old-0",
+    }
+    old_cluster = WorkflowCluster(**old_payload)
+    assert old_cluster.total_cost_usd == 0.0
+    assert old_cluster.total_tokens == 0
+    assert old_cluster.example_session_ids == []

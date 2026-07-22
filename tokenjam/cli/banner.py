@@ -23,7 +23,7 @@ _WORDMARK = r"""
 
 # One-line value prop. Must stay honest (Critical Rule 14) — describes what tj
 # is, never promises a specific saving.
-_TAGLINE = "cost-optimization for AI agents · local-first, OTel-native · no signup"
+_TAGLINE = "a cost-saving utility for AI agents · local-first, OTel-native · no signup"
 
 
 def print_welcome_banner() -> None:

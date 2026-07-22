@@ -153,9 +153,13 @@ def test_refresh_writes_top_driver_when_capture_on(db, tmp_path):
 
 
 def test_refresh_no_op_when_capture_off(db, tmp_path):
+    # prompts/tool_inputs both default on (E33 / this fix) — every toggle
+    # must be explicitly off here to exercise the actual all-off no-op path.
     _seed_recurring_file_read(db, path="CLAUDE.md")
     cache_path = tmp_path / "cache.json"
-    refresh_attribution_cache(db.conn, CaptureConfig(), path=cache_path)
+    refresh_attribution_cache(
+        db.conn, CaptureConfig(prompts=False, tool_inputs=False), path=cache_path
+    )
     assert not cache_path.exists()
 
 

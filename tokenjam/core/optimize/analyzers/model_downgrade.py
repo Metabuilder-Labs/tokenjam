@@ -17,6 +17,15 @@ from tokenjam.core.context_diagnostic import (
     load_turn_compositions,
 )
 from tokenjam.core.model_tiers import is_premium_tier
+from tokenjam.core.optimize.analyzers.batch_placement import (
+    MIN_GROUP_COST_USD,
+    MIN_SESSIONS_FOR_CADENCE,
+    analyze_batch_placement,
+)
+from tokenjam.core.optimize.analyzers.downsize_agents import (
+    thinking_tokens_by_session,
+    build_agent_price_rows,
+)
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.stats import bootstrap_ci
 from tokenjam.core.optimize.types import (
@@ -223,13 +232,18 @@ def analyze_model_downgrade(
     window_total_tokens = 0
     examples: list[DowngradeExample] = []
     suggestions: dict[str, str] = {}
+    # Per-candidate-session rows for the per-agent price arithmetic on the card
+    # (exact per-type tokens at both models' rates). Collected in this same pass
+    # so the card's agent breakdown and the finding's headline always describe
+    # the identical set of sessions.
+    price_candidates: list[dict[str, Any]] = []
     swaps: list[tuple[str, str, str]] = []
     # Per-candidate-session window savings, for the sampling-confidence interval
     # (#308). One value per candidate session = (actual cost − cheaper-model cost).
     per_session_savings: list[float] = []
 
     for row in llm_rows:
-        session_id, trace_id, _agent, start_time, end_time, provider, model, \
+        session_id, trace_id, agent, start_time, end_time, provider, model, \
             in_tok, out_tok, cache_tok, cache_write_tok, cost = row
         # Accumulate window-wide token totals (used for subscription-mode
         # token-share rendering even when the row isn't a candidate).
@@ -265,6 +279,17 @@ def analyze_model_downgrade(
         # This session's recoverable saving (clamped at 0 — a cheaper model
         # never costs more in our candidate set, but guard against pricing noise).
         per_session_savings.append(max(float(cost or 0.0) - alt_unit, 0.0))
+        price_candidates.append({
+            "session_id": str(session_id) if session_id else "",
+            "agent_id": str(agent) if agent else "unknown",
+            "provider": str(provider),
+            "model": str(model),
+            "alt_model": alt,
+            "input_tokens": int(in_tok or 0),
+            "output_tokens": int(out_tok or 0),
+            "cache_tokens": int(cache_tok or 0),
+            "cache_write_tokens": int(cache_write_tok or 0),
+        })
         suggestions[model] = alt
         if (provider, model, alt) not in swaps:
             swaps.append((provider, model, alt))
@@ -308,6 +333,15 @@ def analyze_model_downgrade(
         int(candidate_tokens / window_days * 30.0) if window_days > 0 else 0
     )
 
+    # Per-agent price arithmetic (one row per agent/model group). The thinking
+    # lookup is a separate, best-effort query: most runtimes never report a
+    # thinking token count, and a row without one omits the share rather than
+    # printing a zero.
+    per_agent = build_agent_price_rows(
+        price_candidates, window_days,
+        thinking_tokens_by_session(conn, since, until, agent_id),
+    )
+
     commands = [f"tjb run --original {p}:{orig} --candidate {p}:{alt}" for p, orig, alt in swaps]
     bench_command = "\n".join(commands) if commands else None
 
@@ -339,14 +373,40 @@ def analyze_model_downgrade(
         n_sessions=candidate_sessions,
         ci_low=ci_low,
         ci_high=ci_high,
+        per_agent=per_agent,
     )
 
 
 @register("downsize")
 def run(ctx: AnalyzerContext) -> None:
-    """Registry entry point. Mutates ctx.report.downgrade."""
+    """Registry entry point. Mutates ctx.report.downgrade.
+
+    Also runs the batch-placement check, a sibling module in this same lane
+    (both answer "is this work on the right lane for its price?"), and attaches
+    it under ``findings['placement']``. It stays a check rather than its own
+    registered analyzer so the placement card ships without a new analyzer name
+    on the CLI.
+
+    ``analyze_batch_placement`` always returns a finding (never ``None``), so
+    it is attached unconditionally — including a non-qualifying window, where
+    it carries an empty candidate list plus the effective thresholds applied.
+    That keeps ``findings['placement']`` reachable by ``_rank_findings`` /
+    ``_render_placement`` in every case, so the CLI's empty-state message
+    (with live threshold values) actually renders instead of being dead code.
+    """
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
+    )
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    ctx.report.findings["placement"] = analyze_batch_placement(
+        ctx.conn, ctx.since, ctx.until, ctx.agent_id,
+        ctx.summary.total_cost_usd or 0.0,
+        min_sessions_for_cadence=getattr(
+            optimize_cfg, "min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE,
+        ),
+        min_group_cost_usd=getattr(
+            optimize_cfg, "min_group_cost_usd", MIN_GROUP_COST_USD,
+        ),
     )
 
 
@@ -418,17 +478,20 @@ def _cheap_segments(
     return segments
 
 
-def _segment_counts(segment: list[TurnComposition], session_turn_count: int) -> bool:
+def _segment_counts(
+    segment: list[TurnComposition], session_turn_count: int,
+    *, min_stretch_turns: int = MIN_STRETCH_TURNS,
+) -> bool:
     """Whether a cheap segment is flagged (design §2.2 + the whole-session floor).
 
-    A stretch of at least ``MIN_STRETCH_TURNS`` counts; a shorter run counts only
+    A stretch of at least ``min_stretch_turns`` counts; a shorter run counts only
     when it spans the session's ENTIRE turn set (a session that was Sonnet-shaped
     end to end — the whole-session floor the old audit already flagged, and the
     reason a single-turn cheap session is still counted). This is what keeps a
     lone mechanical turn wedged between two hard turns from being flagged.
     """
     return (
-        len(segment) >= MIN_STRETCH_TURNS
+        len(segment) >= min_stretch_turns
         or len(segment) == session_turn_count
     )
 
@@ -469,8 +532,14 @@ def audit_opus_quota(
     until: datetime,
     agent_id: str | None,
     window_days: float,
+    config: Any | None = None,
 ) -> OpusQuotaAudit:
     """Retroactive segment-level premium-tier quota audit (issue #5).
+
+    ``config`` (a ``TjConfig``, optional) supplies ``config.optimize.
+    min_stretch_turns`` to override ``MIN_STRETCH_TURNS`` (config-overridable
+    via ``core.config.OptimizeConfig``); ``None`` (the default — every current
+    caller passes none) reproduces today's behaviour unchanged.
 
     Walks the window's assistant turns per session in ``start_time`` order and
     reports ONE honest figure (founder decision D1): the share of premium
@@ -489,6 +558,11 @@ def audit_opus_quota(
     content (#3). Always returns an :class:`OpusQuotaAudit` (never ``None``) so
     the renderer can show an honest empty state.
     """
+    optimize_cfg = getattr(config, "optimize", None)
+    min_stretch_turns = getattr(
+        optimize_cfg, "min_stretch_turns", MIN_STRETCH_TURNS,
+    )
+
     turns = load_turn_compositions(
         conn, since, until, agent_id,
         ordered=True, with_tool_activity=True,
@@ -519,7 +593,9 @@ def audit_opus_quota(
 
         session_flagged = False
         for segment in _cheap_segments(session_turns):
-            if not _segment_counts(segment, len(session_turns)):
+            if not _segment_counts(
+                segment, len(session_turns), min_stretch_turns=min_stretch_turns,
+            ):
                 continue
             seg_premium = [t for t in segment if is_premium_tier(t.model)]
             if not seg_premium:

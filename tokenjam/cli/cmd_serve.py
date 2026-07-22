@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import click
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import AsyncIterator
 
+from tokenjam.core.server_state import server_state_path
 from tokenjam.utils.formatting import console
 
 
@@ -49,6 +49,24 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         minute=0,
     )
 
+    # Self-improve loop: keep the relearn-detector cache warm on a schedule so
+    # the Review inbox never computes its (tens-of-seconds, full-corpus) scan
+    # inline on a request. Own DuckDB connection per run, same reasoning as
+    # the retention job above. A 6h cadence balances freshness against the
+    # distill-pass cost (bounded, but non-zero) of a full recompute.
+    from tokenjam.core.optimize import relearn_store
+    from tokenjam.core.db import DuckDBBackend as _DuckDBBackend
+
+    def _relearn_job() -> None:
+        relearn_store.trigger_background_recompute(
+            lambda: _DuckDBBackend(config.storage), config=config,
+        )
+
+    # The interval trigger's own first fire is ~6h out; the lifespan below
+    # kicks an immediate first pass so a fresh `tj serve` isn't stuck on
+    # "never_run" for up to 6h.
+    scheduler.add_job(_relearn_job, "interval", hours=6)
+
     # ~/.local/share/tj/server.state lets other subcommands (e.g. `tj onboard
     # --codex`) find the config this server is using regardless of CWD. We
     # write it from the lifespan so it only happens after uvicorn binds the
@@ -56,7 +74,7 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     # Same reasoning for `scheduler.start()`: don't fire off a background
     # thread for a server that's about to exit with EADDRINUSE.
     import json as _json
-    _state_path = Path.home() / ".local" / "share" / "tj" / "server.state"
+    _state_path = server_state_path()
 
     # Optional enforcement-plane proxy (#219) — a second in-process listener on
     # config.proxy.port, started/stopped with the server's lifespan. Suggest
@@ -77,6 +95,10 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         scheduler.start()
         if proxy_runner is not None:
             proxy_runner.start()
+        # Kick the relearn detector's first pass now (own connection, own
+        # thread — never blocks the bind/startup path) so a fresh `tj serve`
+        # doesn't sit on "never_run" for up to 6h waiting on the interval job.
+        _relearn_job()
         # Stamp unknown sessions from declared [budget.*].plan on startup so
         # historical/backfilled rows match config without a separate onboard pass.
         from tokenjam.core.framing import apply_declared_plans_to_sessions

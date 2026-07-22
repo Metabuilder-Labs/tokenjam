@@ -32,6 +32,7 @@ from typing import Any
 import click
 
 from tokenjam.cli.data_access import resolve_data_access
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.framing import Framing
 from tokenjam.core.model_tiers import PREMIUM_TIER_LABEL
 from tokenjam.core.optimize.types import (
@@ -52,12 +53,12 @@ from tokenjam.utils.time_parse import parse_since
               help="Write a tuned routing snippet (currently claude-code) under "
                    "the TokenJam config directory. Does not modify any external "
                    "config — you merge it manually.")
-@click.option("--json", "output_json", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
-                    export_target: str | None, output_json: bool) -> None:
+                    export_target: str | None, output_json_flag: bool) -> None:
     """Audit your Opus quota: which past Opus sessions were Sonnet-shaped?"""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     agent = agent or ctx.obj.get("agent")

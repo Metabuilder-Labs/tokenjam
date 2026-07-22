@@ -134,6 +134,7 @@ class ApiBackend:
                 cache_tokens=r.get("cache_tokens", 0),
                 cache_write_tokens=r.get("cache_write_tokens", 0),
                 cost_usd=r.get("cost_usd", 0.0),
+                call_count=r.get("call_count", 0),
             )
             for r in data.get("rows", [])
         ]

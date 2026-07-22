@@ -1,20 +1,31 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import click
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.models import Alert, AlertFilters
 from tokenjam.utils.formatting import console, format_cost, format_tokens, status_icon
 from tokenjam.utils.time_parse import utcnow
 
+#: Window the recoverable teaser looks back over, matching `tj optimize`'s
+#: own `--since` default so the figure means the same thing in both places.
+_TEASER_WINDOW_DAYS = 30
+
+#: Below this, "$X recoverable" reads as noise rather than a real pointer —
+#: stay silent instead of printing a sub-dollar figure.
+_TEASER_MIN_USD = 1.0
+
 
 @click.command("status")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
-@click.option("--json", "output_json", is_flag=True)
+@json_option
 @click.pass_context
-def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None:
+def cmd_status(ctx: click.Context, agent: str | None, output_json_flag: bool) -> None:
     """Show agent status overview."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     agent_filter = agent or ctx.obj.get("agent")
 
@@ -116,14 +127,80 @@ def cmd_status(ctx: click.Context, agent: str | None, output_json: bool) -> None
             "has_active_alerts": has_active_alerts,
             "unknown_plan_tier_sessions": unknown_count,
         }, default=str))
-    elif unknown_count > 0:
-        console.print(
-            f"[dim]Note: {unknown_count} session(s) have unknown plan tier. "
-            f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
-            f"(or [bold]--codex[/bold]) to set it.[/dim]"
-        )
+    else:
+        if unknown_count > 0:
+            console.print(
+                f"[dim]Note: {unknown_count} session(s) have unknown plan tier. "
+                f"Run [bold]tj onboard --claude-code --reconfigure[/bold] "
+                f"(or [bold]--codex[/bold]) to set it.[/dim]"
+            )
+        teaser = _recoverable_teaser(db, ctx.obj.get("config"))
+        if teaser:
+            console.print(teaser)
 
     ctx.exit(1 if has_active_alerts else 0)
+
+
+def _recoverable_teaser(db, config) -> str | None:
+    """One-line `tj optimize` pointer for `tj status` — nothing in status,
+    doctor, statusline or the banner ever mentioned optimize existed.
+
+    Reuses the same recoverable-savings contract every analyzer already
+    carries (`estimated_recoverable_usd`, #111) rather than inventing a new
+    figure, scoped to `COST_ANALYZERS` — the analyzers that actually feed the
+    cost/apply rail (`cost_proposals.py`).
+
+    Reports the LARGEST single analyzer's estimate rather than a sum across
+    analyzers — mirroring `largest_recoverable_usd` in `api/routes/cost.py`.
+    The analyzers price OVERLAPPING angles on the same spans (a cache fix and
+    a downsize swap can both price the same call's waste), so summing them
+    would double-count and print an inflated, non-additive headline; the
+    single largest entry is honest standalone because it isn't a sum of
+    anything (see `_recoverable_overlap_note` in `api/routes/cost.py` for the
+    full rationale). Silent (returns None) whenever the figure wouldn't mean
+    anything: no direct DB connection (daemon holds the lock), no usage, a
+    non-api pricing mode (a raw dollar figure misrepresents a flat-fee/local
+    plan), or a sub-$1 figure.
+    """
+    conn = getattr(db, "conn", None)
+    if conn is None or config is None:
+        return None
+    try:
+        from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
+        from tokenjam.core.optimize import build_report
+        from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+        since_dt = utcnow() - timedelta(days=_TEASER_WINDOW_DAYS)
+        until_dt = utcnow()
+
+        plan_mix = plan_tier_mix(conn, since_dt, until_dt, None)
+        if pricing_mode_for(dominant_plan(plan_mix)) != "api":
+            return None
+
+        report = build_report(
+            db=db, config=config, since=since_dt, until=until_dt,
+            findings=list(COST_ANALYZERS),
+        )
+        estimates: list[float] = []
+        if report.downgrade is not None:
+            usd = report.downgrade.estimated_recoverable_usd
+            if usd is not None:
+                estimates.append(usd)
+        for finding in (report.findings or {}).values():
+            usd = getattr(finding, "estimated_recoverable_usd", None)
+            if usd is not None:
+                estimates.append(usd)
+        largest = max(estimates, default=0.0)
+
+        if largest < _TEASER_MIN_USD:
+            return None
+        return (
+            f"[dim]{format_cost(largest)} recoverable (largest single fix): run "
+            f"[bold]tj optimize[/bold][/dim]"
+        )
+    except Exception:
+        # Never let a teaser computation break `tj status` itself.
+        return None
 
 
 def _fmt_dur(seconds: float | None, *, coarse: bool = False) -> str:

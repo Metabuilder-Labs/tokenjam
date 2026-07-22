@@ -18,6 +18,7 @@ from pathlib import Path
 import click
 from rich.markup import escape
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import TjConfig
 from tokenjam.core.summarize.apply import apply_staged, undo
 from tokenjam.core.summarize.candidates import list_candidates
@@ -98,8 +99,7 @@ def cmd_summarize() -> None:
 @click.option("--ext", "ext", default=None,
               help="Also scan these comma-separated extensions, e.g. txt,rst "
                    "(opens beyond the catalog).")
-@click.option("--json", "output_json_flag", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.option("--min-prose", "min_prose", default=None, type=int,
               help="Minimum prose words to flag a file (default 100).")
 @click.pass_context
@@ -109,7 +109,7 @@ def cmd_summarize_list(
 ) -> None:
     """List prompt files worth summarizing (bare = catalog; a PATH/--repo/--recursive/--ext opens to .md)."""
     config: TjConfig = ctx.obj["config"]
-    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    output_json = resolve_output_json(ctx, output_json_flag)
 
     if repo and recursive:
         raise click.UsageError("--repo and --recursive are mutually exclusive.")
@@ -190,7 +190,7 @@ def cmd_summarize_list(
                    "(needs [summarize] api_model). Omit it to rewrite the prompt yourself, then `check`.")
 @click.option("--ratio", default=DEFAULT_TARGET_RATIO, show_default=True, type=float,
               help="Target prose ratio (0.5 = keep ~half the prose words).")
-@click.option("--json", "output_json_flag", is_flag=True, help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_summarize_prep(
     ctx: click.Context, path: str, via: str | None, ratio: float, output_json_flag: bool,
@@ -198,7 +198,7 @@ def cmd_summarize_prep(
     """Wrap a prompt's structure. Bare: emit the wrapped prompt + rules + hash for you to rewrite,
     then `check`. With --via: TJ runs the rewrite, verifies, and stages it in one shot."""
     config: TjConfig = ctx.obj["config"]
-    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    output_json = resolve_output_json(ctx, output_json_flag)
 
     if via is not None:                             # automated: wrap → rewrite → check → stage
         on_progress = None if output_json else (
@@ -262,14 +262,14 @@ def cmd_summarize_prep(
               help="File holding the model's summary ('-' for stdin).")
 @click.option("--prepped-hash", "prepped_hash", required=True,
               help="The source_sha256 returned by `prep`.")
-@click.option("--json", "output_json_flag", is_flag=True, help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_summarize_check(
     ctx: click.Context, path: str, summary_path: str, prepped_hash: str, output_json_flag: bool,
 ) -> None:
     """Verify a summary (hash-guards the file) and stage it for review."""
     config: TjConfig = ctx.obj["config"]
-    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    output_json = resolve_output_json(ctx, output_json_flag)
     summary_text = (
         click.get_text_stream("stdin").read() if summary_path == "-"
         else Path(summary_path).expanduser().read_text(encoding="utf-8")
@@ -290,14 +290,14 @@ def cmd_summarize_check(
               help="Write the files (default is dry-run; can't combine with --dry-run).")
 @click.option("--dry-run", "dry_run", is_flag=True,
               help="Preview only; the default (can't combine with --go).")
-@click.option("--json", "output_json_flag", is_flag=True, help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_summarize_apply(
     ctx: click.Context, path: str | None, go: bool, dry_run: bool, output_json_flag: bool,
 ) -> None:
     """Apply staged results to their files — take-all, or one PATH. Default dry-run; --go writes."""
     config: TjConfig = ctx.obj["config"]
-    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    output_json = resolve_output_json(ctx, output_json_flag)
     if dry_run and go:
         raise click.UsageError("Choose one of --dry-run or --go (--dry-run is the default with neither).")
     if path is not None and Path(path).expanduser().is_dir():
@@ -328,14 +328,14 @@ def cmd_summarize_apply(
               help="Restore the file (default is dry-run; can't combine with --dry-run).")
 @click.option("--dry-run", "dry_run", is_flag=True,
               help="Preview only; the default (can't combine with --go).")
-@click.option("--json", "output_json_flag", is_flag=True, help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_summarize_undo(
     ctx: click.Context, path: str, go: bool, dry_run: bool, output_json_flag: bool,
 ) -> None:
     """Restore a file from its summarize backup. Default dry-run; --go writes. Refuses on drift."""
     config: TjConfig = ctx.obj["config"]
-    output_json: bool = output_json_flag or ctx.obj.get("output_json", False)
+    output_json = resolve_output_json(ctx, output_json_flag)
     if dry_run and go:
         raise click.UsageError("Choose one of --dry-run or --go (--dry-run is the default with neither).")
     if Path(path).expanduser().is_dir():

@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any
 
 from tokenjam.core.config import TjConfig
+from tokenjam.core.framing import agent_persona_mix, config_declared_plan, dominant_persona
 from tokenjam.utils.time_parse import utcnow
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
 from tokenjam.core.optimize.types import (
@@ -32,12 +33,15 @@ ANALYZER_ORDER: list[str] = [
     "budget-projection",
     "cache",
     "cache-recommend",
+    "resend",
     "script",
     "reuse",
     "trim",
     "subagent",
     "summarize",
+    "relearn",
     "verbosity",
+    "deadweight",
 ]
 
 THIN_DATA_DAYS = 7
@@ -117,7 +121,15 @@ def build_report(
     summary = summarize_window(conn, since, until, agent_id=agent_id)
     window_days = max(summary.days, 1.0 / 86400.0)
 
-    report = OptimizeReport(window=summary)
+    # Dominant persona for this window, computed exactly once — see
+    # `AnalyzerContext.persona` / `OptimizeReport.persona`. Same functions
+    # (`agent_persona_mix` / `dominant_persona`) the CLI uses for its own
+    # persona-dependent CTA (`cmd_optimize._render_downgrade_cta`); this is
+    # not a second classifier, just a second place that needed the answer.
+    agent_mix = agent_persona_mix(conn, since, until, agent_id=agent_id)
+    persona = dominant_persona(agent_mix, declared_plan=config_declared_plan(config))
+
+    report = OptimizeReport(window=summary, persona=persona)
     if summary.thin_data:
         report.notes.append(
             "Window contains less than ~1 week of activity — projections shown "
@@ -135,6 +147,7 @@ def build_report(
         report=report,
         budget_provider_filter=budget_provider_filter,
         budget_usd_override=budget_usd_override,
+        persona=persona,
     )
 
     selected = set(findings) if findings is not None else set(ANALYZER_REGISTRY.keys())
@@ -305,6 +318,7 @@ def report_from_dict(d: dict) -> OptimizeReport:
         budgets=budgets,
         notes=list(d.get("notes") or []),
         findings=findings,
+        persona=str(d.get("persona", "unknown")),
     )
 
 
@@ -316,8 +330,20 @@ def _build_finding_constructors() -> dict:
     from tokenjam.core.optimize.analyzers.cache_efficacy import (
         CacheEfficacyFinding,
         CacheEfficacyRow,
+        LookbackMissCandidate,
+        ThrashAgentCandidate,
+        UncachedAgentCandidate,
+    )
+    from tokenjam.core.optimize.analyzers.batch_placement import (
+        BATCH_ESTIMATE_BASIS,
+        BATCH_FRICTION_NOTE,
+        BatchCandidate,
+        BatchPlacementFinding,
+        MIN_GROUP_COST_USD,
+        MIN_SESSIONS_FOR_CADENCE,
     )
     from tokenjam.core.optimize.analyzers.cache_recommend import (
+        MIN_PREFIX_OCCURRENCES,
         CachePrefixCandidate,
         CacheRecommendFinding,
     )
@@ -339,16 +365,36 @@ def _build_finding_constructors() -> dict:
         SummarizeCandidate,
         SummarizeFinding,
     )
+    from tokenjam.core.optimize.analyzers.relearn import (
+        RelearnCluster,
+        RelearnExample,
+        RelearnFinding,
+    )
     from tokenjam.core.optimize.analyzers.output_verbosity import (
         VERBOSITY_HONESTY_CAVEAT,
         VerbosityCandidate,
         VerbosityFinding,
     )
+    from tokenjam.core.optimize.analyzers.deadweight import (
+        ContextTaxRow,
+        DEADWEIGHT_HONESTY_CAVEAT,
+        DeadweightFinding,
+        ServerDeadweight,
+    )
+    from tokenjam.core.optimize.analyzers.context_resend import (
+        RESEND_HONESTY_CAVEAT,
+        ResendFinding,
+        ResendSessionExample,
+    )
+    from tokenjam.core.context_diagnostic import RecurringInclusion
     from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
 
     def _cache_efficacy(d: dict) -> CacheEfficacyFinding:
         rows = [CacheEfficacyRow(**r) for r in d.get("rows") or []]
         flagged = [CacheEfficacyRow(**r) for r in d.get("flagged") or []]
+        uncached = [UncachedAgentCandidate(**c) for c in d.get("uncached_agents") or []]
+        thrash = [ThrashAgentCandidate(**c) for c in d.get("thrash_agents") or []]
+        lookback = [LookbackMissCandidate(**c) for c in d.get("lookback_miss_agents") or []]
         return CacheEfficacyFinding(
             rows=rows, flagged=flagged,
             confidence=d.get("confidence", "structural"),
@@ -357,6 +403,8 @@ def _build_finding_constructors() -> dict:
             estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
+            uncached_agents=uncached, thrash_agents=thrash,
+            lookback_miss_agents=lookback,
         )
 
     def _cache_recommend(d: dict) -> CacheRecommendFinding:
@@ -369,6 +417,10 @@ def _build_finding_constructors() -> dict:
             skipped_provider_count=int(d.get("skipped_provider_count", 0)),
             confidence=d.get("confidence", "structural"),
             hint=d.get("hint"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            min_prefix_occurrences=int(d.get("min_prefix_occurrences", MIN_PREFIX_OCCURRENCES)),
         )
 
     def _workflow_restructure(d: dict) -> WorkflowRestructureFinding:
@@ -460,6 +512,24 @@ def _build_finding_constructors() -> dict:
             avg_reduction_pct=d.get("avg_reduction_pct"),
         )
 
+    def _relearn(d: dict) -> RelearnFinding:
+        clusters = []
+        for c in d.get("clusters") or []:
+            cc = dict(c)
+            cc["examples"] = [RelearnExample(**e) for e in cc.get("examples") or []]
+            clusters.append(RelearnCluster(**cc))
+        return RelearnFinding(
+            clusters=clusters,
+            sessions_scanned=int(d.get("sessions_scanned", 0)),
+            failures_examined=int(d.get("failures_examined", 0)),
+            distilled_clusters=int(d.get("distilled_clusters", 0)),
+            dropped_codified=int(d.get("dropped_codified", 0)),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
+            caveat=d.get("caveat", ""),
+        )
+
     def _verbosity(d: dict) -> VerbosityFinding:
         cands = [VerbosityCandidate(**c) for c in d.get("candidates") or []]
         return VerbosityFinding(
@@ -477,6 +547,68 @@ def _build_finding_constructors() -> dict:
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
         )
 
+    def _deadweight(d: dict) -> DeadweightFinding:
+        servers = [ServerDeadweight(**s) for s in d.get("servers") or []]
+        dead_servers = [ServerDeadweight(**s) for s in d.get("dead_servers") or []]
+        tax_table = [ContextTaxRow(**r) for r in d.get("tax_table") or []]
+        return DeadweightFinding(
+            sessions_scanned=int(d.get("sessions_scanned", 0)),
+            configured_servers=int(d.get("configured_servers", 0)),
+            servers=servers,
+            dead_servers=dead_servers,
+            tax_table=tax_table,
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "estimated"),
+            caveat=d.get("caveat", DEADWEIGHT_HONESTY_CAVEAT),
+            notes=list(d.get("notes") or []),
+        )
+
+    def _resend(d: dict) -> ResendFinding:
+        examples = [ResendSessionExample(**e) for e in d.get("examples") or []]
+        recurring = [RecurringInclusion(**r) for r in d.get("recurring_examples") or []]
+        return ResendFinding(
+            sessions_examined=int(d.get("sessions_examined", 0)),
+            multi_turn_sessions=int(d.get("multi_turn_sessions", 0)),
+            turns_examined=int(d.get("turns_examined", 0)),
+            repeat_share=d.get("repeat_share"),
+            repeat_share_median=d.get("repeat_share_median"),
+            repeat_share_p90=d.get("repeat_share_p90"),
+            repeat_tokens=int(d.get("repeat_tokens", 0)),
+            prompt_tokens_total=int(d.get("prompt_tokens_total", 0)),
+            examples=examples,
+            recurring_examples=recurring,
+            fix_compaction=d.get("fix_compaction", ""),
+            fix_cache_control=d.get("fix_cache_control", ""),
+            caveat=d.get("caveat", RESEND_HONESTY_CAVEAT),
+            estimate_basis=d.get("estimate_basis", ""),
+            estimate_confidence=d.get("estimate_confidence", "heuristic"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            notes=list(d.get("notes") or []),
+        )
+
+    def _placement(d: dict) -> BatchPlacementFinding:
+        candidates = [BatchCandidate(**c) for c in d.get("candidates") or []]
+        return BatchPlacementFinding(
+            candidates=candidates,
+            window_cost_usd=float(d.get("window_cost_usd", 0.0)),
+            candidate_cost_usd=float(d.get("candidate_cost_usd", 0.0)),
+            percent_of_window_cost=float(d.get("percent_of_window_cost", 0.0)),
+            estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
+            estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            estimate_basis=d.get("estimate_basis", BATCH_ESTIMATE_BASIS),
+            estimate_confidence=d.get("estimate_confidence", "estimated"),
+            friction=d.get("friction", BATCH_FRICTION_NOTE),
+            min_sessions_for_cadence=int(
+                d.get("min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE)
+            ),
+            min_group_cost_usd=float(
+                d.get("min_group_cost_usd", MIN_GROUP_COST_USD)
+            ),
+        )
+
     return {
         "cache": _cache_efficacy,
         "cache-recommend": _cache_recommend,
@@ -485,7 +617,16 @@ def _build_finding_constructors() -> dict:
         "trim": _prompt_bloat,
         "subagent": _subagent,
         "summarize": _summarize,
+        "relearn": _relearn,
+        "deadweight": _deadweight,
         "verbosity": _verbosity,
+        "resend": _resend,
+        # Not a registered analyzer name of its own: the downsize analyzer
+        # attaches the batch-placement check under this key. It still needs a
+        # constructor, or the finding is dropped on the daemon path (the CLI
+        # deserialises the HTTP report through report_from_dict, which ignores
+        # any finding name absent from this table).
+        "placement": _placement,
     }
 
 

@@ -307,6 +307,56 @@ def test_build_report_returns_caveat_in_dict(db):
     assert report.downgrade.caveat == MODEL_DOWNGRADE_CAVEAT
 
 
+# --- Persona threading (AnalyzerContext.persona / OptimizeReport.persona) ---
+#
+# `build_report` used to leave persona classification entirely to callers
+# (the CLI recomputed it standalone after the fact) — nothing an analyzer or
+# `cost_proposals` ran during `build_report` itself could see it. These prove
+# it's computed exactly once, from the same `agent_persona_mix` /
+# `dominant_persona` functions the CLI's own CTA uses, and lands on the built
+# report.
+
+def test_build_report_persona_is_claude_code_when_sessions_are_cc(db):
+    from tests.factories import make_session
+
+    since = utcnow() - timedelta(days=30)
+    until = utcnow() + timedelta(hours=1)
+    for i in range(3):
+        db.upsert_session(make_session(
+            agent_id="claude-code-x", session_id=f"cc-{i}",
+            started_at=until - timedelta(hours=1),
+        ))
+    cfg = TjConfig(version="1")
+    report = build_report(db=db, config=cfg, since=since, until=until)
+    assert report.persona == "claude-code"
+
+
+def test_build_report_persona_is_sdk_when_sessions_are_not_cc(db):
+    from tests.factories import make_session
+
+    since = utcnow() - timedelta(days=30)
+    until = utcnow() + timedelta(hours=1)
+    for i in range(3):
+        db.upsert_session(make_session(
+            agent_id="my-production-service", session_id=f"svc-{i}",
+            started_at=until - timedelta(hours=1),
+        ))
+    cfg = TjConfig(version="1")
+    report = build_report(db=db, config=cfg, since=since, until=until)
+    assert report.persona == "sdk"
+
+
+def test_build_report_persona_defaults_to_unknown_with_no_session_rows(db):
+    """No `sessions` rows in the window and no declared plan on the config —
+    the fail-safe default, never a silent "claude-code" assumption."""
+    _insert_small_opus_session(db, session_id="a")  # spans only, no session row
+    cfg = TjConfig(version="1")
+    since = utcnow() - timedelta(days=30)
+    until = utcnow() + timedelta(hours=1)
+    report = build_report(db=db, config=cfg, since=since, until=until)
+    assert report.persona == "unknown"
+
+
 def test_cycle_bounds_handles_mid_month():
     from datetime import datetime, timezone
     now = datetime(2026, 5, 15, tzinfo=timezone.utc)

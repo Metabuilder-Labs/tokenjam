@@ -34,6 +34,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from tokenjam.core.optimize.accounting import four_type_token_sum_sql
+from tokenjam.core.optimize.clustering import group_by_key, recurring
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.otel.semconv import GenAIAttributes
@@ -97,6 +99,16 @@ class WorkflowCluster:
     # server-side (single compute path). Defaulted so older serialized reports
     # round-trip through WorkflowCluster(**c).
     avg_tokens:    int = 0
+    # Cluster-level totals (sum across every member session, not the per-
+    # instance mean above) — the denominator a cost-proposal adapter needs to
+    # price ONE cluster's recoverable amount without re-deriving it from
+    # avg_cost_usd * instances. Defaulted for the same round-trip reason.
+    total_cost_usd: float = 0.0
+    total_tokens:    int   = 0
+    # Up to 3 example session ids for this cluster (beyond the single
+    # `example_session_id` above), so a downstream apply artifact (a rung-2
+    # skill note) can cite more than one instance. Defaulted for round-trip.
+    example_session_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -116,6 +128,11 @@ class WorkflowRestructureFinding:
     estimated_recoverable_tokens: int | None   = None
     estimate_basis:               str          = ""
     estimate_confidence:          str          = "heuristic"
+    # The effective cluster-instance bar this run applied (config-overridable,
+    # see core.config.OptimizeConfig.min_cluster_instances) — carried on the
+    # finding so a renderer's empty-state message never hardcodes a number
+    # that could be stale against the user's own config.
+    min_cluster_instances:        int          = MIN_CLUSTER_INSTANCES
 
 
 def _extract_tool_input(attrs: Any) -> Any:
@@ -135,6 +152,10 @@ def run(ctx: AnalyzerContext) -> None:
     """Registry entry point. Attaches a WorkflowRestructureFinding to ctx.report.findings."""
     capture = getattr(ctx.config, "capture", None)
     has_tool_inputs = bool(capture and getattr(capture, "tool_inputs", False))
+    optimize_cfg = getattr(ctx.config, "optimize", None)
+    min_cluster_instances = getattr(
+        optimize_cfg, "min_cluster_instances", MIN_CLUSTER_INSTANCES,
+    )
 
     # Query tool spans within the window, ordered per-session by start_time
     # so we can reconstruct the call sequence in order.
@@ -157,6 +178,7 @@ def run(ctx: AnalyzerContext) -> None:
     if not rows:
         ctx.report.findings["script"] = WorkflowRestructureFinding(
             degraded=not has_tool_inputs,
+            min_cluster_instances=min_cluster_instances,
         )
         return
 
@@ -169,19 +191,19 @@ def run(ctx: AnalyzerContext) -> None:
         sig_seq.append((str(tool_name), arg_sig))
 
     # Cluster sessions by full signature (tuple of (tool, arg-shape)) tuples.
-    cluster_members: dict[tuple, list[str]] = {}
-    for session_id, seq in session_signatures.items():
-        key = tuple(seq)
-        cluster_members.setdefault(key, []).append(session_id)
+    cluster_members = group_by_key(
+        session_signatures.keys(),
+        key_fn=lambda sid: tuple(session_signatures[sid]),
+    )
 
-    # Build the report rows. Only clusters above the threshold are surfaced.
+    # Build the report rows. Only clusters above the recurrence threshold are
+    # surfaced (the shared filter); the per-cluster aggregation stays local.
     interesting: list[WorkflowCluster] = []
     total_cluster_cost = 0.0   # recoverable USD: full cost of clustered sessions
     total_cluster_tokens = 0   # recoverable tokens: replacing the call frees them
-    for signature, members in cluster_members.items():
-        if len(members) < MIN_CLUSTER_INSTANCES:
-            continue
-
+    for signature, members in recurring(
+        cluster_members, min_members=min_cluster_instances,
+    ).items():
         # Aggregate session-level cost + tokens + duration for the cluster.
         placeholders = ",".join(f"${i + 1}" for i in range(len(members)))
         agg = ctx.conn.execute(
@@ -189,7 +211,7 @@ def run(ctx: AnalyzerContext) -> None:
             f"COALESCE(AVG(total_cost_usd), 0.0), "
             f"COALESCE(AVG(EXTRACT(EPOCH FROM (ended_at - started_at))), 0.0), "
             f"COALESCE(SUM(total_cost_usd), 0.0), "
-            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0), "
+            f"{four_type_token_sum_sql()}, "
             f"COALESCE(AVG(input_tokens + output_tokens), 0) "
             f"FROM sessions WHERE session_id IN ({placeholders})",
             members,
@@ -219,6 +241,9 @@ def run(ctx: AnalyzerContext) -> None:
             avg_duration_seconds=round(avg_duration, 2) if avg_duration > 0 else None,
             example_session_id=members[0],
             avg_tokens=avg_tokens,
+            total_cost_usd=round(cluster_cost, 6),
+            total_tokens=cluster_tokens,
+            example_session_ids=list(members[:3]),
         ))
 
     # Sort by instance count desc — the most common deterministic patterns
@@ -230,6 +255,7 @@ def run(ctx: AnalyzerContext) -> None:
         clusters=interesting,
         sessions_examined=len(session_signatures),
         degraded=not has_tool_inputs,
+        min_cluster_instances=min_cluster_instances,
         estimated_recoverable_usd=(
             round(total_cluster_cost, 6) if has_clusters else None
         ),

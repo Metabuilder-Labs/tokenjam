@@ -118,6 +118,13 @@ class DowngradeFinding:
     n_sessions:                   int          = 0
     ci_low:                       float | None = None
     ci_high:                      float | None = None
+    # Per-agent price arithmetic for the proposed swap (one
+    # `analyzers.downsize_agents.AgentPriceRow` per agent/model group over the
+    # candidate sessions): exact per-type tokens at the current model's rates
+    # versus the proposed model's, over the window and projected to 30 days.
+    # Typed loosely to keep `types` free of an analyzer import; empty when no
+    # candidate group had pricing data for both sides.
+    per_agent:                    list[Any]    = field(default_factory=list)
 
 
 @dataclass
@@ -249,6 +256,13 @@ class ReuseFinding:
     confidence:        Literal["heuristic"] = "heuristic"
     # Populated in Mode 1 (capture.prompts off) to nudge the richer mode.
     hint:              str = ""
+    # The effective recurrence bar this run applied (config-overridable, see
+    # core.config.OptimizeConfig.min_reuse_repetitions) — carried on the
+    # finding so a renderer's empty-state message never hardcodes a number
+    # that could be stale against the user's own config. Mirrors
+    # analyzers.plan_reuse.MIN_REPETITIONS's default (kept as a literal here
+    # to avoid a types -> analyzers import).
+    min_repetitions:   int = 3
 
 
 @dataclass
@@ -264,6 +278,13 @@ class OptimizeReport:
     # Existing analyzers (downsize, budget-projection) keep their
     # typed slots above for backwards-compat with cmd_optimize and mcp.
     findings:  dict = field(default_factory=dict)
+    # Dominant user persona for the window ("claude-code" | "sdk" | "mixed" |
+    # "unknown") — see `tokenjam.core.framing.dominant_persona`. Computed once
+    # by `runner.build_report` (mirrors `AnalyzerContext.persona` below) and
+    # carried on the report so a consumer working from the built report alone
+    # (e.g. `cost_proposals.cost_proposals_from_report`) never has to
+    # recompute it from a bare `conn`.
+    persona:   str = "unknown"
 
 
 @dataclass
@@ -288,6 +309,14 @@ class AnalyzerContext:
     # Budget-analyzer flow control:
     budget_provider_filter: str | None    = None
     budget_usd_override:    float | None  = None
+    # Dominant user persona for the window — see `OptimizeReport.persona`
+    # above. Computed once in `runner.build_report` via
+    # `tokenjam.core.framing.agent_persona_mix` / `dominant_persona` (the
+    # same functions the CLI's own persona-dependent CTA already uses), not
+    # a second classifier. Analyzers that need to know whether they're
+    # looking at an SDK caller (e.g. deciding fix modality) read it here
+    # instead of re-deriving it from `conn`.
+    persona:                str            = "unknown"
 
 
 # ---------------------------------------------------------------------------

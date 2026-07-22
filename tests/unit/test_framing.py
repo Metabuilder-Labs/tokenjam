@@ -365,3 +365,53 @@ def test_dominant_persona_falls_back_to_declared_plan_when_mix_empty():
     assert dominant_persona({"claude_code": 0, "other": 0}, declared_plan="api") == "sdk"
     assert dominant_persona({"claude_code": 0, "other": 0}, declared_plan=None) == "unknown"
     assert dominant_persona({}, declared_plan="pro") == "claude-code"
+
+
+# --- the qualifier must describe how the dollars are actually derived ------- #
+# `plan_tier` exists only on the `sessions` table; every cost aggregate reads
+# `spans`, and no query joins the two. So no dollar figure in the product is
+# filtered to API-billed traffic. The qualifier used to claim it was.
+
+OLD_FALSE_QUALIFIER = "dollar figures reflect API traffic only"
+
+
+def test_subscription_qualifier_states_the_list_price_basis():
+    f = compute_framing(
+        _Config(),
+        WindowSummary(total_cost_usd=148.0, total_tokens=2_000_000, sessions=18,
+                      plan_tier_mix={"max_5x": 13, "api": 5}),
+    )
+    assert f.qualifier_text == (
+        "72.2% of sessions are subscription-billed. Dollar figures price all "
+        "traffic at API list rates, so they are a list-price equivalent, not "
+        "an amount billed."
+    )
+
+
+def test_no_framing_path_claims_dollars_are_scoped_to_api_traffic():
+    # The false sentence must not come back silently on any plan mix.
+    mixes = [
+        {"max_5x": 13, "api": 5}, {"pro": 4, "api": 1}, {"api": 9},
+        {"local": 3}, {"unknown": 6}, {"max_20x": 2, "api": 2, "unknown": 1},
+    ]
+    for mix in mixes:
+        f = compute_framing(
+            _Config(),
+            WindowSummary(total_cost_usd=10.0, total_tokens=100, sessions=sum(mix.values()),
+                          plan_tier_mix=mix),
+        )
+        assert OLD_FALSE_QUALIFIER not in (f.qualifier_text or ""), mix
+
+
+def test_qualifier_stays_scope_neutral_for_window_and_full_history_callers():
+    # The CLI/compare callers pass a window-scoped mix while /cost passes the
+    # full history. The wording must be true for both, so it says "of sessions"
+    # and never names a window.
+    f = compute_framing(
+        _Config(),
+        WindowSummary(total_cost_usd=1.0, total_tokens=10, sessions=4,
+                      plan_tier_mix={"max_5x": 3, "api": 1}),
+    )
+    assert "of sessions" in f.qualifier_text
+    for windowish in ("this window", "last 30", "today", "this month"):
+        assert windowish not in f.qualifier_text.lower()

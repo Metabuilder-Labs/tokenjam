@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -575,7 +576,11 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
         assert mcp_checks and mcp_checks[0]["level"] == "warning"
         assert "Codex" in mcp_checks[0]["message"]
-        assert "#59" in mcp_checks[0]["message"]
+        # Assert the DURABLE content, never the tracker id: this string is
+        # printed to users, so an id in it escapes into terminals and pasted
+        # bug reports, where it reads as a link to an unrelated public issue.
+        assert "+36% measured" in mcp_checks[0]["message"]
+        assert not re.search(r"#\d+", mcp_checks[0]["message"])
 
     # Clean up codex file
     codex_config.unlink()
@@ -1220,6 +1225,57 @@ def test_optimize_json_output_includes_caveat(runner, db, config):
     data = json.loads(result.output)
     assert data["downgrade"] is not None
     assert "Candidate-flagging heuristic" in data["downgrade"]["caveat"]
+
+
+def _seed_low_cache_efficacy_window(db, agent_id="test-agent"):
+    """12 sessions shaped to trip the `cache` analyzer -- the same fixture
+    ``test_cost_proposals_api.py`` uses to prove a cost proposal gets
+    produced from real spans."""
+    from datetime import timedelta
+    from tests.factories import make_llm_span
+    from tokenjam.utils.time_parse import utcnow
+
+    now = utcnow()
+    for i in range(12):
+        db.insert_span(make_llm_span(
+            agent_id=agent_id, provider="anthropic", model="claude-sonnet-5",
+            billing_account="anthropic", input_tokens=15_000, output_tokens=200,
+            cache_tokens=400, session_id=f"s-{i}",
+            start_time=now - timedelta(days=2, minutes=i),
+        ))
+
+
+def test_optimize_recomputes_cost_proposals_and_points_at_them(runner, db, config):
+    """Before this test, `recompute_cost_proposals` (core.optimize
+    .cost_proposals) was only ever called from the web Review inbox's manual
+    refresh button -- a pure-CLI user who never runs `tj serve` plus the web
+    UI would never have a cost proposal computed, and even if one existed,
+    `tj optimize` printed nothing pointing at `tj relearn cost-proposals`.
+    Both gaps are closed in the same direct-conn path this test exercises.
+    """
+    from tokenjam.core.optimize import relearn_store
+
+    _seed_low_cache_efficacy_window(db)
+
+    result = _invoke(runner, db, config, ["optimize"])
+    assert result.exit_code == 0, result.output
+
+    block = relearn_store.read_cost_proposals(config=config)
+    assert block is not None, "tj optimize never populated the cost-proposal store"
+    assert block["cost_proposals"], "expected at least one cost proposal from this window"
+    # Rich may soft-wrap this prose line at the test runner's terminal width
+    # (unlike a copy-pasteable snippet, wrapping here is fine) -- collapse all
+    # whitespace before checking for the pointer phrase.
+    assert "tj relearn cost-proposals" in " ".join(result.output.split())
+
+
+def test_optimize_json_reports_cost_proposals_available(runner, db, config):
+    _seed_low_cache_efficacy_window(db)
+
+    result = _invoke(runner, db, config, ["optimize", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["cost_proposals_available"] >= 1
 
 
 def _seed_optimize_window(db, *, plan_tier: str, sessions: int = 5,
@@ -1998,12 +2054,16 @@ class _StubProvider:
         return self._resp
 
 
-def test_validate_capture_off_fails_with_hint(runner, db, config):
-    """Capture is off by default -> actionable failure naming the config toggle,
-    and no provider client is ever constructed."""
-    _seed_validate_span(db)  # capture flag in `config` is off
+def test_validate_capture_off_fails_with_hint(runner, db):
+    """Capture explicitly off -> actionable failure naming the config toggle,
+    and no provider client is ever constructed. (`prompts` defaults on now —
+    E33 — so this builds an explicit capture-off config rather than relying
+    on the shared `config` fixture's default.)"""
+    from tokenjam.core.config import CaptureConfig
+    cfg = TjConfig(version="1", capture=CaptureConfig(prompts=False))
+    _seed_validate_span(db)
     with patch.dict("os.environ", {"TJ_ANTHROPIC_API_KEY": "sk-test"}):
-        result = _invoke(runner, db, config,
+        result = _invoke(runner, db, cfg,
                          ["optimize", "--validate", "downsize"])
     assert result.exit_code == 1
     assert "requires prompt" in result.output.lower()

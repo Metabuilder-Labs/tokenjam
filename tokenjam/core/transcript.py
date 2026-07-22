@@ -175,8 +175,33 @@ def _locate_transcript(session_id: str, projects_root: Path) -> Path | None:
     return Path(matches[0])
 
 
-def read_records(path: Path) -> list[dict[str, Any]]:
-    """Read a JSONL file into a list of dict records, tolerating bad lines."""
+def read_records(
+    path: Path, *, cache_dir: Path | None = None
+) -> list[dict[str, Any]]:
+    """Read a JSONL file into a list of dict records, tolerating bad lines.
+
+    ``cache_dir``, when given, transparently caches the parsed result on disk
+    keyed on ``(path, size, mtime)`` — see ``core.transcript_cache``. ``None``
+    (the default) preserves this function's original always-reparse behavior,
+    so every caller that doesn't opt in (session story rendering, resume-
+    brief, the API's session/status routes, and today's tests of this
+    function) is unaffected.
+    """
+    if cache_dir is not None:
+        from tokenjam.core.transcript_cache import cached_read_records
+
+        return cached_read_records(path, cache_dir)
+    return _parse_records(path)
+
+
+def _parse_records(path: Path) -> list[dict[str, Any]]:
+    """The actual (uncached) JSONL parse — ``read_records``'s cache-dispatch
+    ``if`` above delegates here, and ``core.transcript_cache.cached_read_records``
+    calls this directly on a cache miss. Factored out (rather than inlined in
+    ``read_records``) so it's the ONE place a cache miss pays for, distinct
+    from the dispatch wrapper itself — a cache-hit path never reaches this
+    function at all.
+    """
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -691,6 +716,7 @@ def build_session_story(
     session_id: str,
     projects_root: Path | str | None = None,
     include_subagents: bool = True,
+    cache_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Build a deterministic story for a Claude Code session, or None if absent.
 
@@ -720,6 +746,12 @@ def build_session_story(
 
     Returns None when no transcript file exists for the session id (SDK session,
     or transcript pruned) — callers translate that into ``available: false``.
+
+    ``cache_dir`` is forwarded to every ``read_records`` call this story (and
+    its recursively-expanded subagents) makes — see that function's docstring
+    and ``core.transcript_cache``. ``None`` (the default) is a no-op, so this
+    function's original always-reparse behavior is unchanged for callers that
+    don't opt in.
     """
     if projects_root is None:
         root = DEFAULT_PROJECTS_ROOT
@@ -734,12 +766,16 @@ def build_session_story(
     subagents_dir = path.parent / session_id / "subagents"
 
     if not include_subagents:
-        story = _build_story_from_path(path, None, None, _Budget(TOTAL_STEP_BUDGET), 0, set())
+        story = _build_story_from_path(
+            path, None, None, _Budget(TOTAL_STEP_BUDGET), 0, set(), cache_dir=cache_dir,
+        )
         return story
 
     budget = _Budget(TOTAL_STEP_BUDGET)
     seen: set[str] = {session_id}
-    return _build_story_from_path(path, subagents_dir, None, budget, 0, seen)
+    return _build_story_from_path(
+        path, subagents_dir, None, budget, 0, seen, cache_dir=cache_dir,
+    )
 
 
 def build_session_asks(
@@ -830,10 +866,11 @@ def _build_story_from_path(
     budget: _Budget,
     depth: int,
     seen: set[str],
+    cache_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Build one story from a located transcript ``path`` and (optionally) attach
     its subagents recursively, sharing ``budget`` / ``seen`` across the tree."""
-    records = read_records(path)
+    records = read_records(path, cache_dir=cache_dir)
 
     tool_status = _build_tool_status(records)
     # Mark ask boundaries on the main thread (depth 0) so the Timeline can show
@@ -855,7 +892,7 @@ def _build_story_from_path(
     outcome, _ = _trim(outcome_raw, MAX_TASK_OUTCOME_CHARS)
 
     if subagents_dir is not None:
-        _attach_subagents(steps, records, subagents_dir, budget, depth, seen)
+        _attach_subagents(steps, records, subagents_dir, budget, depth, seen, cache_dir=cache_dir)
     else:
         _strip_spawn_markers(steps)
 
@@ -886,6 +923,7 @@ def _attach_subagents(
     budget: _Budget,
     depth: int,
     seen: set[str],
+    cache_dir: Path | None = None,
 ) -> None:
     """For each Task/Agent step that spawned a child, attach its ``subagent``.
 
@@ -927,7 +965,9 @@ def _attach_subagents(
             resolved_id = id_map.get(tool_use_id)
             if resolved_id is None:
                 continue
-            sub = _build_subagent(resolved_id, fallback, subagents_dir, budget, depth, seen)
+            sub = _build_subagent(
+                resolved_id, fallback, subagents_dir, budget, depth, seen, cache_dir=cache_dir,
+            )
             if sub is not None:
                 attached.append(sub)
         if len(attached) == 1:
@@ -977,6 +1017,7 @@ def _build_subagent(
     budget: _Budget,
     depth: int,
     seen: set[str],
+    cache_dir: Path | None = None,
 ) -> dict[str, Any] | None:
     """Build one subagent reference, recursing into its own story.
 
@@ -1005,7 +1046,7 @@ def _build_subagent(
 
     seen.add(agent_id)
     child_story = _build_story_from_path(
-        child_path, subagents_dir, agent_id, budget, depth + 1, seen
+        child_path, subagents_dir, agent_id, budget, depth + 1, seen, cache_dir=cache_dir,
     )
     # Merge the recursive story onto the ref (keeps agent_id/name on top).
     child_story.pop("agent_id", None)
@@ -1065,12 +1106,35 @@ def resolve_projects_root(override: Path | str | None = None) -> Path:
     return DEFAULT_PROJECTS_ROOT
 
 
+def loop_transcript_root(config: object | None = None) -> Path:
+    """The transcript root the self-improve loop should scan.
+
+    Prefers `[loop].transcript_path` so a Claude Agent SDK app can point the
+    loop at wherever IT writes session transcripts; falls back to
+    ``resolve_projects_root`` (env, then ``~/.claude/projects``) when unset.
+
+    An agent with a transcript root here is a WORKSPACE agent: the loop can
+    propose and apply a fix into its repo. Agents that reach tokenjam only as
+    OTel spans have no root and take the advise-only lane instead (see
+    ``core/optimize/relearn_otel.py``). Never raises — a malformed config
+    degrades to the default root.
+    """
+    try:
+        configured = getattr(getattr(config, "loop", None), "transcript_path", None)
+    except Exception:
+        configured = None
+    if configured:
+        return Path(configured).expanduser()
+    return resolve_projects_root()
+
+
 __all__ = [
     "session_transcript_path",
     "session_transcript_mtime",
     "build_session_story",
     "build_session_asks",
     "resolve_projects_root",
+    "loop_transcript_root",
     "DEFAULT_PROJECTS_ROOT",
     "MAX_STORY_STEPS",
     "MAX_STEP_TEXT_CHARS",

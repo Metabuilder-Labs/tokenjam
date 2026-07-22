@@ -25,6 +25,7 @@ from tokenjam.core.framing import (
 from tokenjam.core.models import (
     SESSION_IDLE_THRESHOLD,
     SESSION_STALE_THRESHOLD,
+    TERMINAL_STATUSES,
     AlertFilters,
     SessionRecord,
 )
@@ -124,20 +125,24 @@ def _build_archive(
     agent_id: str | None,
     db_labels: dict[str, str] | None = None,
 ) -> list[dict]:
-    """Closed + stale sessions, most-recent first, capped at ARCHIVE_LIMIT.
+    """Terminal + stale sessions, most-recent first, capped at ARCHIVE_LIMIT.
 
-    Stale = an 'active' session whose last activity is older than the idle
-    window (a zombie that was never explicitly closed). Closed = a session
-    explicitly ended via /api/v1/sessions/close.
+    Terminal = TERMINAL_STATUSES: 'closed' (explicitly ended via
+    /api/v1/sessions/close) or 'completed' (wrapped by a real session span, how
+    backfilled Claude Code sessions land). Stale = an 'active' session whose
+    last activity is older than the idle window (a zombie that was never
+    explicitly closed).
     """
     if not hasattr(db, "conn"):
         return []
 
+    params: list = list(TERMINAL_STATUSES)
+    terminal_placeholders = ", ".join(f"${i}" for i in range(1, len(params) + 1))
+    params.append(cutoff)
     clause = (
-        "status = 'closed' "
-        "OR (status = 'active' AND COALESCE(ended_at, started_at) <= $1)"
+        f"status IN ({terminal_placeholders}) "
+        f"OR (status = 'active' AND COALESCE(ended_at, started_at) <= ${len(params)})"
     )
-    params: list = [cutoff]
     sql = f"SELECT * FROM sessions WHERE ({clause})"
     if agent_id:
         params.append(agent_id)

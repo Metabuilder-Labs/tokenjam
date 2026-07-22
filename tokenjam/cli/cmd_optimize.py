@@ -7,14 +7,17 @@ from typing import Any, NoReturn
 import click
 from rich.markup import escape as _rich_escape
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
+    Framing,
     agent_persona_mix,
     config_declared_plan,
     dominant_persona,
     dominant_plan,
     plan_tier_mix,
     pricing_mode_for,
+    render_savings,
 )
 from tokenjam.core.optimize import (
     ANALYZER_REGISTRY,
@@ -39,14 +42,49 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 # REST API. See issue #110. agent_persona_mix / dominant_persona (also
 # framing.py) classify the window's dominant user (Claude Code subscriber vs
 # SDK/API developer) so the downsize finding's call-to-action matches the
-# levers that persona actually has — see #97.
+# levers that persona actually has — see #97. Framing / render_savings are
+# the plan-tier-aware dollar-vs-token-share rendering rule itself; _render_resend
+# is the one renderer in this file that feeds its recoverable figure through
+# it instead of hand-branching on pricing_mode, so it can't silently drift
+# from the rule cost_proposal_verbs.py already applies to the same figures.
+
+# `placement` (batch-placement candidates) is a check that rides along inside
+# `downsize`'s registry entry rather than being its own registered analyzer
+# (see analyzers/batch_placement.py's module docstring and model_downgrade.py
+# `run()`) — there is deliberately only one execution path for it. Without an
+# alias here it had no typeable name at all: Click's Choice() only accepted
+# ANALYZER_REGISTRY keys, so `tj optimize placement` was rejected before
+# reaching the analyzer layer even though the finding already had a renderer
+# and reached --json and the web tab (anti-pattern #24 — a surface reachable
+# only as a side effect of another command isn't reachable at all). Typing
+# it now runs `downsize` under the hood (never a second, standalone pass) and
+# the rendered report shows the placement card without also surfacing the
+# downsize card the user didn't ask for — see `_rank_findings`.
+_PLACEMENT_FINDING_NAME = "placement"
+_PLACEMENT_ANALYZER = "downsize"
+
+
+def _resolve_analyzer_names(requested: list[str] | None) -> list[str] | None:
+    """Translate CLI-facing finding names to registry analyzer names.
+
+    `placement` isn't a registered analyzer — asking for it means "run the
+    analyzer that produces it" (`downsize`). Order-preserving de-dup so
+    `tj optimize placement downsize` (or the reverse) still runs `downsize`
+    exactly once.
+    """
+    if requested is None:
+        return None
+    return list(dict.fromkeys(
+        _PLACEMENT_ANALYZER if name == _PLACEMENT_FINDING_NAME else name
+        for name in requested
+    ))
 
 
 @click.command("optimize")
 @click.argument(
     "findings",
     nargs=-1,
-    type=click.Choice(sorted(ANALYZER_REGISTRY.keys())),
+    type=click.Choice(sorted({*ANALYZER_REGISTRY.keys(), _PLACEMENT_FINDING_NAME})),
 )
 @click.option("--agent", default=None, help="Scope to a specific agent_id.")
 @click.option("--since", default="30d", help="Window for analysis (default 30d).")
@@ -79,8 +117,7 @@ from tokenjam.utils.time_parse import parse_since, utcnow
                    "(default 5, max 20).")
 @click.option("--yes", "-y", "assume_yes", is_flag=True, default=False,
               help="Skip the --validate cost-estimate confirmation prompt.")
-@click.option("--json", "output_json", is_flag=True,
-              help="Emit machine-readable JSON.")
+@json_option
 @click.pass_context
 def cmd_optimize(
     ctx: click.Context,
@@ -95,9 +132,10 @@ def cmd_optimize(
     validate_finding: str | None,
     samples: int | None,
     assume_yes: bool,
-    output_json: bool,
+    output_json_flag: bool,
 ) -> None:
     """Analyze recent usage for cost-saving candidates and budget exposure."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")
     if db is None or config is None:
@@ -136,6 +174,14 @@ def cmd_optimize(
         since_dt = override_since_for_compare(compare, since_dt, until_dt)
         since = f"{(until_dt - since_dt).days}d"
 
+    # The names the user actually typed (kept for rendering/JSON below) vs the
+    # names the analyzer layer understands (`placement` resolved to `downsize`
+    # — see `_resolve_analyzer_names`). Both API-shim and local paths below
+    # must run against `analyzer_findings`: the server-side route validates
+    # against the same ANALYZER_REGISTRY and would reject a raw "placement".
+    requested = list(findings) if findings else None
+    analyzer_findings = _resolve_analyzer_names(requested)
+
     # Two paths depending on whether the daemon holds the DB lock.
     #
     # Local DB available (no daemon, or we got handed a real DuckDBBackend) →
@@ -162,7 +208,7 @@ def cmd_optimize(
             report_dict = db.fetch_optimize_report(
                 since=since,
                 agent_id=agent,
-                findings=list(findings) if findings else None,
+                findings=analyzer_findings,
                 budget_provider=budget_provider,
                 budget_usd=budget_usd,
             )
@@ -218,7 +264,7 @@ def cmd_optimize(
             since=since_dt,
             until=until_dt,
             agent_id=agent,
-            findings=list(findings) if findings else None,
+            findings=analyzer_findings,
             budget_provider_filter=budget_provider,
             budget_usd_override=budget_usd,
         )
@@ -246,6 +292,23 @@ def cmd_optimize(
             daemon_up = probe_api(config.api.host, config.api.port, api_key) is not None
             if not daemon_up:
                 detect_downsize_adoption(conn, config)
+        except Exception:
+            pass
+
+        # Opportunistic cost-proposal refresh: until now the ONLY producer of
+        # the cost-proposal store (core.optimize.cost_proposals
+        # .recompute_cost_proposals) was the web Review inbox's manual
+        # refresh button — a pure-CLI user who never runs `tj serve` plus the
+        # web UI would never have a cost proposal computed at all, so `tj
+        # relearn cost-proposals` would sit permanently empty regardless of
+        # how good its renderer is. Piggyback the same recompute here so a
+        # plain `tj optimize` run keeps that store warm too.
+        # `recompute_cost_proposals` already never raises (it returns [] on
+        # failure), so a broken window here degrades to a stale/empty
+        # cost-proposals list, never a broken `tj optimize`.
+        try:
+            from tokenjam.core.optimize.cost_proposals import recompute_cost_proposals
+            recompute_cost_proposals(db, config, agent_id=agent)
         except Exception:
             pass
 
@@ -305,6 +368,13 @@ def cmd_optimize(
             except ValueError as exc:
                 raise click.BadParameter(str(exc), param_hint="'--compare'") from exc
 
+    # Cost-proposal count (downsize/cache/trim/subagent/... fixes, each with a
+    # copy-pasteable snippet) — read regardless of output mode so both the
+    # JSON payload and the human footer below can point at `tj relearn
+    # cost-proposals` instead of leaving findings with nowhere to go.
+    from tokenjam.core.optimize import relearn_proposals
+    cost_proposal_count = len(relearn_proposals.list_cost_proposals(config))
+
     if output_json:
         payload = report_to_dict(report)
         payload["plan_tier_mix"] = plan_mix
@@ -312,6 +382,7 @@ def cmd_optimize(
         payload["pricing_mode"] = pricing_mode
         payload["agent_persona_mix"] = agent_mix
         payload["persona"] = persona
+        payload["cost_proposals_available"] = cost_proposal_count
         if cost_diff is not None:
             from tokenjam.cli.cmd_cost import _diff_to_dict
             payload["compare"] = _diff_to_dict(cost_diff)
@@ -336,7 +407,7 @@ def cmd_optimize(
         report, agent=agent, plan_mix=plan_mix,
         dominant_plan=dominant, pricing_mode=pricing_mode,
         declared_plan=declared_plan,
-        requested=list(findings) if findings else None,
+        requested=requested,
         persona=persona,
     )
     if cost_diff is not None:
@@ -347,6 +418,18 @@ def cmd_optimize(
         from tokenjam.cli.cmd_cost import _render_diff_dict
         console.print("\n[bold]Window comparison[/bold]")
         _render_diff_dict(cost_diff_dict)
+
+    # Findings above are diagnoses; this is where they go. Until now nothing
+    # in `tj optimize`'s output pointed anywhere — the fix for e.g. a `cache`
+    # or `deadweight` finding lived only in the web Review inbox's cost-proposal
+    # cards (core.optimize.cost_proposals), never named from the terminal.
+    if cost_proposal_count:
+        console.print(
+            f"[dim]{cost_proposal_count} cost fix"
+            f"{'es' if cost_proposal_count != 1 else ''} available, each with "
+            f"a copy-pasteable snippet: run [bold]tj relearn "
+            f"cost-proposals[/bold].[/dim]"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -362,17 +445,33 @@ def cmd_optimize(
 # list instead of a numbered slot.
 DE_MINIMIS_SHARE = 0.01
 
+# Findings that must NEVER be collapsed into the "Minor findings" pointer by
+# token share. `relearn` is a recurring-failure-cluster finding, not a
+# token-reclamation one — its `estimated_recoverable_tokens` is a soft
+# occurrence×heuristic estimate for the Lens inbox, not a real fraction of the
+# window. Ranking it by that share let a heavy `--since 365d` window (huge
+# denominator) push real clusters below DE_MINIMIS_SHARE and hide them behind a
+# "~0.0% of window tokens" pointer — the same "nothing found" failure as the
+# empty-state bug. These findings always render in full (the `unranked`
+# bucket): their own detail when populated, their own empty-state when not.
+_ALWAYS_FULL_FINDINGS = {"relearn"}
+
 # Display labels for the "Minor findings" collapsed pointer list — must match
 # the header text each renderer prints in its numbered form.
 _MINOR_FINDING_LABELS = {
     "downsize":        "Model downgrade",
     "cache":           "Cache efficacy",
     "cache-recommend": "Cache recommend",
+    "resend":          "Context resend",
     "script":          "Workflow restructure",
     "reuse":           "Reuse",
     "trim":            "Prompt bloat",
     "subagent":        "Subagent right-sizing",
+    "relearn":         "Relearn",
     "verbosity":       "Verbosity",
+    "deadweight":      "Deadweight",
+    "placement":       "Batch placement",
+    "summarize":       "Summarize",
 }
 
 
@@ -416,19 +515,32 @@ def _rank_findings(
     # Render an explicit "no candidates" empty state when the downsize
     # analyzer ran but found nothing — the Optimize web tab does this
     # (PR #130 / issue #126) and the CLI used to silently skip the section,
-    # which makes reviewers think the analyzer didn't run. Skip the empty
-    # state when the user asked for a different positional subset
-    # (`tj optimize cache` shouldn't mention downsize at all).
+    # which makes reviewers think the analyzer didn't run. Skip the section
+    # entirely (empty state or full) when the user asked for a different
+    # positional subset (`tj optimize cache` shouldn't mention downsize at
+    # all). This also covers `tj optimize placement`: that alias resolves to
+    # running the `downsize` analyzer (see `_resolve_analyzer_names`), so
+    # `report.downgrade` is populated even though the user never typed
+    # "downsize" — without this guard its card would leak into a report the
+    # user only asked to see `placement` in.
     downsize_was_requested = (not requested) or ("downsize" in requested)
-    if report.downgrade is not None:
-        items.append(("downsize", _reclaimable_share(report.downgrade, window_tokens)))
-    elif downsize_was_requested:
-        items.append(("downsize", None))
+    if downsize_was_requested:
+        if report.downgrade is not None:
+            items.append(("downsize", _reclaimable_share(report.downgrade, window_tokens)))
+        else:
+            items.append(("downsize", None))
 
     for name, finding in (report.findings or {}).items():
         if name not in _FINDING_RENDERERS:
             continue
-        items.append((name, _reclaimable_share(finding, window_tokens)))
+        # A non-token finding (e.g. relearn) is forced into the unranked bucket
+        # so its clusters always render in full — a large window denominator
+        # must not collapse them into the de-minimis pointer list.
+        share = (
+            None if name in _ALWAYS_FULL_FINDINGS
+            else _reclaimable_share(finding, window_tokens)
+        )
+        items.append((name, share))
 
     items.sort(key=lambda item: (
         item[1] is None,
@@ -491,13 +603,14 @@ def _run_validate(
             "while tj serve holds the lock. Stop the daemon (tj stop) and retry."
         )
 
-    # Gate 1: prompt capture must be on — off by default for privacy, so this is
-    # an opt-in power feature. Actionable message + the exact config hint.
+    # Gate 1: prompt capture must be on. Capture defaults on, so this only
+    # fires when it's been explicitly turned off. Actionable message + the
+    # exact config hint either way.
     if not getattr(config.capture, "prompts", False):
         _fail(
             "tj optimize --validate re-runs your recorded prompts, which requires "
-            "prompt capture. It is off by default (privacy). Enable it in your "
-            "config under [capture]:\n\n    [capture]\n    prompts = true\n\n"
+            "prompt capture. It is currently off in your config. Enable it "
+            "under [capture]:\n\n    [capture]\n    prompts = true\n\n"
             "then let a few captured calls accumulate and try again."
         )
 
@@ -673,7 +786,7 @@ def _render_report(
         return
 
     for note in report.notes:
-        console.print(f"  [yellow]![/yellow] {note}")
+        console.print(f"  [yellow]![/yellow] {_rich_escape(note)}")
     if report.notes:
         console.print()
 
@@ -712,6 +825,39 @@ def _render_report(
                     "the smaller-model shape (small input/output, few tool "
                     "calls).[/dim]"
                 )
+        elif name == "resend":
+            # Persona-branched fix (compaction vs cache_control), same reason
+            # downsize gets `persona` above — see `_render_resend_fix`. Called
+            # directly rather than through `_FINDING_RENDERERS[name]`, same as
+            # `_render_downgrade` above: that dict's value type is inferred
+            # from every renderer sharing it, so it only advertises the
+            # (finding, pricing_mode, marker) signature common to all of
+            # them — a call through it with `persona=` is a real mypy error
+            # (call-arg), not a false positive, since nothing in the dict's
+            # type says entry "resend" specifically accepts that kwarg.
+            _render_resend(
+                report.findings[name], pricing_mode=pricing_mode, marker=marker,
+                persona=persona,
+            )
+        elif name == "cache-recommend":
+            # Persona-gated cache_control snippet, same reason resend/downsize
+            # get `persona` above — see `_render_cache_recommend`. Called
+            # directly for the same mypy reason documented on the `resend`
+            # branch: `_FINDING_RENDERERS`'s inferred call signature doesn't
+            # include `persona`.
+            _render_cache_recommend(
+                report.findings[name], pricing_mode=pricing_mode, marker=marker,
+                persona=persona,
+            )
+        elif name == "cache":
+            # Same persona gate as `cache-recommend` just above, applied to
+            # the A1/A2/A3 root-caused candidates nested inside this finding
+            # — see `_render_cache_root_causes` / `_render_cache_control_or_
+            # no_lever`. Same mypy reason for the direct call.
+            _render_cache_efficacy(
+                report.findings[name], pricing_mode=pricing_mode, marker=marker,
+                persona=persona,
+            )
         else:
             _FINDING_RENDERERS[name](
                 report.findings[name], pricing_mode=pricing_mode, marker=marker,
@@ -1158,62 +1304,283 @@ def _finding_header(marker: str, label: str) -> str:
     return f"  [bold]{prefix}{label}[/bold]"
 
 
+def _render_cache_control_or_no_lever(snippet: str, persona: str) -> None:
+    """Persona-gated `cache_control` snippet render, shared by every
+    cache-family CLI renderer that prints one (`cache`'s A1/A2/A3
+    root-caused candidates below, `cache-recommend`'s prefix candidates).
+
+    A `cache_control` fix is an edit to the raw Anthropic API request, a
+    lever a Claude Code session never has — the harness constructs that
+    request, not the user. Mirrors
+    `cost_proposals._persona_gated_cache_fields`: `persona == "claude-code"`
+    swaps the snippet for the honest no-lever explanation (imported from
+    `cost_proposals` so the CLI never drifts from the web copy); every
+    other persona, including "unknown", keeps the actionable snippet — for
+    cache advice the risky direction is under-offering a real fix, not
+    over-offering one (the opposite default from `_persona_gated_write_fields`).
+    """
+    if persona == "claude-code":
+        from tokenjam.core.optimize.cost_proposals import CACHE_NO_LEVER_TEXT
+        console.print(f"           [dim]{_rich_escape(CACHE_NO_LEVER_TEXT)}[/dim]")
+        return
+    console.print("           [dim]cache_control:[/dim]")
+    console.print(snippet, markup=False, highlight=False, soft_wrap=True)
+
+
 def _render_cache_efficacy(
-    finding, *, pricing_mode: str = "api", marker: str = "",
+    finding, *, pricing_mode: str = "api", marker: str = "", persona: str = "unknown",
 ) -> None:
     """
     Render the cache finding — current caching-ratio table per
-    (provider, model). When any rows are flagged, surface them prominently;
-    otherwise show the full table dimmed so the user sees the underlying
-    data even when no recommendation is warranted.
+    (provider, model), followed by the root-caused per-agent candidates
+    behind it (A1 uncached / A2 thrash / A3 lookback miss, see
+    `_render_cache_root_causes`). When any ratio rows are flagged, surface
+    them prominently; otherwise show the full table dimmed so the user sees
+    the underlying data even when no recommendation is warranted. The ratio
+    table only measures the (provider, model) efficacy gap; the root-cause
+    section is what actually carries a ready cache_control_snippet.
     """
     console.print(_finding_header(marker, "Cache efficacy:"))
-    if not finding.rows:
+    has_root_cause = bool(
+        finding.uncached_agents or finding.thrash_agents or finding.lookback_miss_agents
+    )
+    if not finding.rows and not has_root_cause:
         console.print(
             "     [dim]No LLM spans with provider/model in this window.[/dim]"
         )
         return
 
-    flagged = list(finding.flagged) if finding.flagged else []
-    if flagged:
-        console.print(
-            f"     • [bold]{len(flagged)}[/bold] (provider, model) "
-            f"row{'s' if len(flagged) != 1 else ''} flagged below the "
-            f"30% efficacy threshold at ≥100K input tokens:"
-        )
-        for r in flagged:
+    if finding.rows:
+        flagged = list(finding.flagged) if finding.flagged else []
+        if flagged:
+            # Effective thresholds, not the historical hardcoded 30%/100K: a user
+            # who has lowered [optimize] cache_efficacy_threshold / min_cache_input_tokens
+            # must see the bar they actually configured, not the old default.
             console.print(
-                f"       [bold]{r.provider}/{r.model}[/bold]  "
-                f"{r.efficacy*100:.0f}% efficacy  "
-                f"({format_tokens(r.input_tokens)} input / "
-                f"{format_tokens(r.cache_tokens)} cache)"
+                f"     • [bold]{len(flagged)}[/bold] (provider, model) "
+                f"row{'s' if len(flagged) != 1 else ''} flagged below the "
+                f"{finding.efficacy_threshold * 100:.0f}% efficacy threshold at "
+                f"≥{format_tokens(finding.min_input_tokens)} input tokens:"
             )
-        console.print()
+            for r in flagged:
+                console.print(
+                    f"       [bold]{r.provider}/{r.model}[/bold]  "
+                    f"{r.efficacy*100:.0f}% efficacy  "
+                    f"({format_tokens(r.input_tokens)} input / "
+                    f"{format_tokens(r.cache_tokens)} cache)"
+                )
+            # Diagnosis and remedy live under two different finding keys — this
+            # renderer only measures the ratio; the actual cache_control breakpoint
+            # candidates come from `cache-recommend`. Point there explicitly so a
+            # user reading `cache` alone doesn't miss the fix.
+            console.print(
+                "     [yellow]→[/yellow] Run [bold]tj optimize cache-recommend[/bold] "
+                "for concrete cache_control breakpoint candidates."
+            )
+            console.print()
 
-    console.print("     [dim]All (provider, model) usage in window:[/dim]")
-    for r in finding.rows:
-        caveat = ""
-        if r.support == "best_effort":
-            caveat = " [dim](best-effort)[/dim]"
-        elif r.support == "unsupported":
-            caveat = " [dim](unsupported)[/dim]"
-        flag_marker = "[yellow]![/yellow] " if r.flagged else "  "
+        console.print("     [dim]All (provider, model) usage in window:[/dim]")
+        for r in finding.rows:
+            caveat = ""
+            if r.support == "best_effort":
+                caveat = " [dim](best-effort)[/dim]"
+            elif r.support == "unsupported":
+                caveat = " [dim](unsupported)[/dim]"
+            flag_marker = "[yellow]![/yellow] " if r.flagged else "  "
+            console.print(
+                f"     {flag_marker}{r.provider}/{r.model}  "
+                f"[dim]efficacy[/dim] {r.efficacy*100:.0f}%  "
+                f"[dim]input[/dim] {format_tokens(r.input_tokens)}  "
+                f"[dim]cache[/dim] {format_tokens(r.cache_tokens)}"
+                f"{caveat}"
+            )
+
+    console.print()
+    _render_cache_root_causes(finding, pricing_mode=pricing_mode, persona=persona)
+
+
+def _render_cache_root_causes(
+    finding, *, pricing_mode: str, persona: str = "unknown",
+) -> None:
+    """
+    Render the three root-caused per-agent candidates behind the ratio table
+    above (see `_classify_a1` / `_classify_a2` / `_classify_a3` in
+    analyzers/cache_efficacy.py):
+
+    - A1 uncached agents: caching never attempted at all (zero cache reads
+      AND zero cache writes on every call) despite a prefix large enough to
+      matter.
+    - A2 cache thrash: caching attempted regularly, but more was spent
+      writing the prefix than was ever recovered reading it back. The card
+      branches on cause — "ttl" (calls land more than five minutes apart, so
+      the default 5-minute write keeps expiring before reuse) versus
+      "instability" (calls land close together, so a TTL expiry doesn't
+      explain it — the prefix itself is likely changing between calls).
+    - A3 lookback miss: recurring cache misses that directly follow a long,
+      tool-heavy turn — the shape of Anthropic's 20-block breakpoint
+      lookback limit. Weakest-confidence of the three; an agent only lands
+      here when A1/A2 don't already explain its waste.
+
+    Classification is mutually exclusive per agent (uncached beats thrash
+    beats lookback — see `_compute_root_cause_candidates`). Unlike the ratio
+    table above, every candidate here carries a ready `cache_control_snippet`
+    — the same data `cost_proposals.py` turns into the A1/A2/A3 cost
+    proposals, gated by the same `persona` rule those proposals apply (see
+    `_render_cache_control_or_no_lever`): a claude-code window gets the
+    honest no-lever explanation instead of a request edit it can't make.
+    """
+    uncached = finding.uncached_agents
+    thrash = finding.thrash_agents
+    lookback = finding.lookback_miss_agents
+    if not uncached and not thrash and not lookback:
         console.print(
-            f"     {flag_marker}{r.provider}/{r.model}  "
-            f"[dim]efficacy[/dim] {r.efficacy*100:.0f}%  "
-            f"[dim]input[/dim] {format_tokens(r.input_tokens)}  "
-            f"[dim]cache[/dim] {format_tokens(r.cache_tokens)}"
-            f"{caveat}"
+            f"     [dim]No agent group cleared the "
+            f"≥{finding.min_calls_for_root_cause} calls threshold for "
+            f"root-cause classification. Lower "
+            f"\\[optimize] min_calls_for_root_cause in tj.toml to classify "
+            f"smaller agent groups.[/dim]"
+        )
+        return
+
+    console.print("     [dim]Root-caused agent candidates:[/dim]")
+
+    if uncached:
+        n = len(uncached)
+        console.print(
+            f"     • [bold]{n}[/bold] agent{'s' if n != 1 else ''} never "
+            f"attempt caching [dim](zero cache reads, zero cache writes, "
+            f"prefix large enough to matter)[/dim]:"
+        )
+        for c in uncached[:5]:
+            console.print(
+                f"       [bold]{c.agent_id}[/bold]  {c.provider}/{c.model}  "
+                f"{c.calls} call{'s' if c.calls != 1 else ''} / "
+                f"{c.sessions} session{'s' if c.sessions != 1 else ''}  "
+                f"[dim]~{format_tokens(c.assumed_prefix_tokens)} assumed prefix[/dim]"
+            )
+            if pricing_mode == "api":
+                if c.estimated_recoverable_usd is not None:
+                    console.print(
+                        f"           [dim]≈[/dim] "
+                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"estimated recoverable over this window"
+                    )
+                else:
+                    console.print(
+                        "           [dim]no dollar figure: no priced rate "
+                        f"observed for {c.model or 'this model'}[/dim]"
+                    )
+            _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
+        if n > 5:
+            console.print(f"       [dim]… and {n - 5} more.[/dim]")
+
+    if thrash:
+        n = len(thrash)
+        console.print(
+            f"     • [bold]{n}[/bold] agent{'s' if n != 1 else ''} "
+            f"thrashing the cache [dim](writing more than is ever read "
+            f"back)[/dim]:"
+        )
+        for c in thrash[:5]:
+            console.print(
+                f"       [bold]{c.agent_id}[/bold]  {c.provider}/{c.model}  "
+                f"read:write [bold]{c.read_write_ratio:.2f}[/bold]  "
+                f"[dim]({format_tokens(c.cache_read_tokens)} read / "
+                f"{format_tokens(c.cache_write_tokens)} write, {c.calls} "
+                f"calls, gap p50 {c.inter_call_gap_p50_minutes:.1f} min)[/dim]"
+            )
+            if c.cause == "ttl":
+                if c.ttl_worth_it:
+                    console.print(
+                        "           [dim]cause: calls land more than 5 min "
+                        "apart, so the default 5-minute cache write keeps "
+                        "expiring — the 1-hour TTL is estimated to pay off "
+                        "at this cadence[/dim]"
+                    )
+                else:
+                    console.print(
+                        "           [dim]cause: calls land more than 5 min "
+                        "apart, but the 1-hour TTL's write premium doesn't "
+                        "clear at this cadence — caching not worth it "
+                        "here[/dim]"
+                    )
+            else:
+                console.print(
+                    "           [dim]cause: calls land close enough "
+                    "together that TTL expiry doesn't explain it — the "
+                    "prefix itself is likely changing between calls[/dim]"
+                )
+            if pricing_mode == "api":
+                if c.estimated_recoverable_usd is not None:
+                    console.print(
+                        f"           [dim]≈[/dim] "
+                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"wasted writing this prefix over this window"
+                    )
+                else:
+                    console.print(
+                        "           [dim]no dollar figure: the recommended "
+                        "fix would not recover it[/dim]"
+                    )
+            _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
+        if n > 5:
+            console.print(f"       [dim]… and {n - 5} more.[/dim]")
+
+    if lookback:
+        n = len(lookback)
+        console.print(
+            f"     • [bold]{n}[/bold] agent{'s' if n != 1 else ''} hitting "
+            f"the 20-block lookback limit [dim](long tool-heavy turns "
+            f"pushing the prior breakpoint out of range)[/dim]:"
+        )
+        for c in lookback[:5]:
+            console.print(
+                f"       [bold]{c.agent_id}[/bold]  {c.provider}/{c.model}  "
+                f"{c.miss_count} miss{'es' if c.miss_count != 1 else ''}  "
+                f"[dim](avg {c.avg_prior_turn_blocks:.0f} blocks in the "
+                f"prior turn)[/dim]"
+            )
+            if pricing_mode == "api":
+                if c.estimated_recoverable_usd is not None:
+                    console.print(
+                        f"           [dim]≈[/dim] "
+                        f"[green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                        f"estimated recoverable over this window"
+                    )
+                else:
+                    console.print(
+                        "           [dim]no dollar figure: no priced rate "
+                        f"observed for {c.model or 'this model'}[/dim]"
+                    )
+            _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
+        if n > 5:
+            console.print(f"       [dim]… and {n - 5} more.[/dim]")
+
+    if pricing_mode != "api":
+        console.print(
+            "     [dim]This plan doesn't bill per token, so no dollar "
+            "figures are shown for these candidates; the counts above still "
+            "show the caching opportunity.[/dim]"
         )
 
 
 def _render_cache_recommend(
-    finding, *, pricing_mode: str = "api", marker: str = "",
+    finding, *, pricing_mode: str = "api", marker: str = "", persona: str = "unknown",
 ) -> None:
     """
     Render the cache-recommend finding — Anthropic-only v1 breakpoint
     candidates. When the analyzer is disabled (capture.prompts off), surface
     the hint instead of an empty table.
+
+    Each candidate's `cache_control_snippet` is an edit to the raw Anthropic
+    API request — a lever a Claude Code session never has, since the harness
+    constructs that request, not the user. Gated by the same rule
+    `cost_proposals._persona_gated_cache_fields` applies to the Review-inbox
+    proposal built from this same finding: `persona == "claude-code"` swaps
+    the snippet for the honest no-lever explanation (imported from
+    `cost_proposals` so the CLI never drifts from the web copy); every other
+    persona, including "unknown", still gets the snippet — for cache advice
+    the risky direction is under-offering a real fix, not over-offering one.
     """
     console.print(_finding_header(marker, "Cache recommend:"))
     if not finding.enabled:
@@ -1231,13 +1598,19 @@ def _render_cache_recommend(
         return
 
     if not finding.candidates:
-        msg = "     [dim]No stable prefixes shared across ≥3 Anthropic calls"
+        msg = (
+            f"     [dim]No stable prefixes shared across "
+            f"≥{finding.min_prefix_occurrences} Anthropic calls"
+        )
         if finding.skipped_provider_count:
             msg += (
                 f". Skipped {finding.skipped_provider_count} non-Anthropic "
                 f"span(s) — multi-provider support is a future feature."
             )
-        msg += ".[/dim]"
+        msg += (
+            ". Lower [bold]\\[optimize] min_prefix_occurrences[/bold] in "
+            "tj.toml to see prefixes shared across fewer calls.[/dim]"
+        )
         console.print(msg)
         return
 
@@ -1256,7 +1629,40 @@ def _render_cache_recommend(
             f"~{format_tokens(c.estimated_cacheable_tokens)} cacheable/call  "
             f"[dim]({format_tokens(int(c.avg_input_tokens))} avg input)[/dim]"
         )
+        # Subscription/local plans don't pay per token — no dollar lever to
+        # show. On api, a candidate can still have no priced rate for its
+        # model, in which case we say why rather than print a $0.00.
+        if pricing_mode == "api":
+            if c.estimated_recoverable_usd is not None:
+                console.print(
+                    f"           [dim]≈[/dim] [green]{format_cost(c.estimated_recoverable_usd)}[/green] "
+                    f"estimated over this window [dim](model {c.model})[/dim]"
+                )
+            else:
+                console.print(
+                    f"           [dim]no dollar figure: no priced rate observed "
+                    f"for {c.model or 'this model'}[/dim]"
+                )
         console.print(f"           [dim italic]{sample}[/dim italic]")
+        _render_cache_control_or_no_lever(c.cache_control_snippet, persona)
+
+    if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+        console.print(
+            f"     • [green]~{format_cost(finding.estimated_recoverable_usd)}[/green] "
+            f"estimated recoverable across these candidates [dim](reads after "
+            f"the first occurrence, minus one cache write per prefix)[/dim]"
+        )
+    elif pricing_mode != "api":
+        console.print(
+            "     [dim]This plan doesn't bill per token, so no dollar figure "
+            "is shown; the token counts above still show the caching "
+            "opportunity.[/dim]"
+        )
+    else:
+        console.print(
+            "     [dim]No dollar figure: no priced Anthropic model rate was "
+            "observed for these candidates.[/dim]"
+        )
 
     if finding.skipped_provider_count:
         console.print(
@@ -1282,8 +1688,10 @@ def _render_workflow_restructure(
             console.print(
                 f"     [dim]Examined {finding.sessions_examined} session"
                 f"{'s' if finding.sessions_examined != 1 else ''}; "
-                f"no clusters above threshold (≥20 identical signatures, "
-                f"zero branching).[/dim]"
+                f"no clusters above threshold (≥{finding.min_cluster_instances} "
+                f"identical signatures, zero branching). Lower "
+                f"\\[optimize] min_cluster_instances in tj.toml to see "
+                f"smaller clusters.[/dim]"
             )
         if finding.degraded:
             console.print(
@@ -1352,8 +1760,11 @@ def _render_prompt_bloat(
         console.print(
             f"     [dim]Scanned {finding.prompts_scored} prompt"
             f"{'s' if finding.prompts_scored != 1 else ''}; "
-            f"skipped {finding.prompts_skipped}. No bloat regions above "
-            f"the minimum-length threshold.[/dim]"
+            f"skipped {finding.prompts_skipped}. No region scored below the "
+            f"{finding.significance_threshold:.2f} significance threshold "
+            f"ran long enough to flag. Raise \\[optimize] "
+            f"trim_significance_threshold in tj.toml to flag more "
+            f"borderline text as bloat.[/dim]"
         )
         return
 
@@ -1378,7 +1789,44 @@ def _render_prompt_bloat(
             f"[bold]{p.bloat_chars}[/bold] bloat / {p.prompt_chars} chars  "
             f"[dim]~{p.estimated_token_reduction} tokens trimmable[/dim]"
         )
-        console.print(f"           [dim italic]{sample}[/dim italic]")
+        console.print(f"           [dim italic]{_rich_escape(sample)}[/dim italic]")
+        # Provenance (read-only, see prompt_bloat.py's module docstring): most
+        # prompts end unattributed — that's the conservative, expected outcome,
+        # not a gap — so this block only prints when a catalog file actually
+        # cleared the verbatim-containment bar. `trim` never edits the file; the
+        # pointer below is a navigation hint into `summarize`, which owns editing.
+        #
+        # This gate is also the deliberate persona split, not an accident of
+        # the provenance check: source_path is only ever set when the prompt
+        # verbatim-contains a catalog file (CLAUDE.md, AGENTS.md, ...), which
+        # by definition means a harness-shaped workspace `summarize` can act
+        # on. A pure-SDK caller (no catalog file in play) never gets a
+        # source_path and so never sees this pointer — the flagged-text
+        # section below is that caller's whole, complete answer: there's
+        # nothing degraded about it, it's the only thing to point at since
+        # they construct the prompt themselves rather than editing a file.
+        if p.source_path:
+            console.print(
+                f"           [dim]Attributed to [bold]{_rich_escape(p.source_path)}[/bold] "
+                f"({_rich_escape(p.source_basis)})[/dim]"
+            )
+            console.print(
+                f"           [dim]Review it: [bold]tj summarize list "
+                f"{_rich_escape(p.source_path)}[/bold][/dim]"
+            )
+        # The flagged text itself, not just the bloat percentage — a user
+        # can't act on "38% low-signal" alone; they need to see what to cut.
+        regions = p.regions[:3]
+        if regions:
+            console.print("           [dim]Flagged text:[/dim]")
+            for r in regions:
+                text = _rich_escape(r.sample_chars.replace("\n", " ").strip())
+                console.print(f"             [dim]·[/dim] [italic]{text}…[/italic] "
+                              f"[dim]({r.char_length} chars)[/dim]")
+            if len(p.regions) > 3:
+                console.print(
+                    f"             [dim]… and {len(p.regions) - 3} more region(s).[/dim]"
+                )
     console.print(
         "     [dim]For per-prompt highlights run: "
         "[bold]tj report --trim[/bold][/dim]"
@@ -1397,8 +1845,10 @@ def _render_reuse(
     console.print(_finding_header(marker, "Reuse:"))
     if not finding.clusters:
         console.print(
-            "     [dim]No repeated planning detected above threshold "
-            "(≥3 sessions sharing a skeleton).[/dim]"
+            f"     [dim]No repeated planning detected above threshold "
+            f"(≥{finding.min_repetitions} sessions sharing a skeleton). "
+            f"Lower \\[optimize] min_reuse_repetitions in tj.toml to see "
+            f"smaller clusters.[/dim]"
         )
         if finding.hint:
             console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
@@ -1483,7 +1933,11 @@ def _render_subagent(
     flagged = list(finding.flagged) if finding.flagged else []
     if not flagged:
         console.print(
-            "     [dim]No right-sizing candidates above thresholds.[/dim]"
+            f"     [dim]No right-sizing candidates above thresholds "
+            f"(structural shape checks, plus a "
+            f"{format_cost(finding.min_flag_cost_usd)} minimum flagged spend). "
+            f"Lower \\[optimize] min_flag_cost_usd in tj.toml to flag "
+            f"cheaper subagents.[/dim]"
         )
     else:
         suffix = (
@@ -1528,6 +1982,51 @@ def _render_subagent(
     console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
+def _render_relearn(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the relearn finding — recurring failure clusters the self-improve
+    loop tracks (blockers an agent silently re-hits across sessions). Was
+    missing from _FINDING_RENDERERS entirely: the text view fell
+    through to the generic "No candidates flagged" empty state even when
+    --json carried dozens of clusters, because _rank_findings drops any
+    finding name not present in this dispatch table.
+    """
+    console.print(_finding_header(marker, "Relearn:"))
+    if not finding.clusters:
+        console.print(
+            f"     [dim]Scanned {finding.sessions_scanned} session"
+            f"{'s' if finding.sessions_scanned != 1 else ''}; "
+            f"no recurring failure clusters above threshold "
+            f"(≥{finding.min_sessions} sessions sharing a signature). Lower "
+            f"\\[optimize] min_recurring_sessions in tj.toml to see smaller "
+            f"clusters.[/dim]"
+        )
+        return
+
+    console.print(
+        f"     • [bold]{len(finding.clusters)}[/bold] relearn "
+        f"cluster{'s' if len(finding.clusters) != 1 else ''} found — "
+        f"recurring blockers this agent silently re-hits"
+    )
+    for c in finding.clusters[:10]:
+        console.print(
+            f"       [bold]{c.signature}[/bold]  "
+            f"{c.occurrences} occurrence{'s' if c.occurrences != 1 else ''} / "
+            f"{c.sessions} session{'s' if c.sessions != 1 else ''}  "
+            f"[dim](rung {c.rung})[/dim]"
+        )
+    if len(finding.clusters) > 10:
+        console.print(f"       [dim]… and {len(finding.clusters) - 10} more.[/dim]")
+    console.print(
+        "     [dim]Review + apply fixes in the Lens Review inbox, or see "
+        "full detail with [bold]tj optimize relearn --json[/bold].[/dim]"
+    )
+    if finding.caveat:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
 def _render_verbosity(
     finding, *, pricing_mode: str = "api", marker: str = "",
 ) -> None:
@@ -1545,8 +2044,11 @@ def _render_verbosity(
                 f"     [dim]Examined {finding.sessions_examined} session"
                 f"{'s' if finding.sessions_examined != 1 else ''} across "
                 f"{finding.cohorts_examined} task-shape cohort"
-                f"{'s' if finding.cohorts_examined != 1 else ''}; no session's "
-                f"output ran high enough vs its cohort median to flag.[/dim]"
+                f"{'s' if finding.cohorts_examined != 1 else ''} (≥"
+                f"{finding.min_cohort_sessions} sessions each); no session's "
+                f"output ran high enough vs its cohort median to flag. Lower "
+                f"\\[optimize] min_cohort_sessions in tj.toml to consider "
+                f"smaller cohorts.[/dim]"
             )
         return
 
@@ -1586,13 +2088,396 @@ def _render_verbosity(
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
 
+def _render_summarize(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the summarize finding — catalog prompt files (CLAUDE.md / AGENTS.md /
+    globals) whose prose could be summarized. Registered and runs like every
+    other analyzer, but had no entry in `_FINDING_RENDERERS`, so it was
+    silently dropped from plain-text `tj optimize` output and only reachable
+    via `--json`.
+
+    Tokens-only by design (see core/optimize/analyzers/summarize.py):
+    `estimated_recoverable_usd` is intentionally None — there's no per-file
+    call telemetry to amortize a dollar figure over — so this renderer never
+    fabricates one, only the per-call token reduction.
+    """
+    console.print(_finding_header(marker, "Summarize:"))
+    if not finding.candidates:
+        console.print(
+            "     [dim]No catalog prompt files (CLAUDE.md / AGENTS.md / "
+            "globals) with summarizable prose found.[/dim]"
+        )
+        return
+
+    tokens = finding.estimated_recoverable_tokens or 0
+    console.print(
+        f"     • [bold]{finding.files}[/bold] file{'s' if finding.files != 1 else ''} "
+        f"summarizable, ~[bold]{format_tokens(tokens)}[/bold] per call "
+        f"[dim](aggregate {finding.reduction_pct}% prose reduction)[/dim]"
+    )
+    for c in finding.candidates[:5]:
+        console.print(
+            f"       [dim]{c.path}[/dim]  [dim]({c.scope})[/dim]  "
+            f"~{format_tokens(c.est_tokens_saved)} saved  "
+            f"[dim]{c.reduction_pct}% reduction[/dim]"
+        )
+    if len(finding.candidates) > 5:
+        console.print(f"       [dim]… and {len(finding.candidates) - 5} more.[/dim]")
+    console.print(
+        "     [yellow]→[/yellow] Run [bold]tj summarize list[/bold] to review, "
+        "then [bold]tj summarize prep <path>[/bold] to generate a rewrite."
+    )
+    if finding.caveat:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
+def _render_deadweight(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the deadweight finding — configured MCP servers whose schemas are
+    injected into every session and never invoked. Same class of bug as the
+    relearn renderer above: absent from _FINDING_RENDERERS, the text view fell
+    through to the generic empty state even when --json carried dead servers,
+    because _rank_findings drops any finding name missing from that table.
+    """
+    console.print(_finding_header(marker, "Deadweight:"))
+    if not finding.sessions_scanned:
+        console.print(
+            "     [dim]No Claude Code sessions in this window.[/dim]"
+        )
+        return
+    if not finding.configured_servers:
+        console.print(
+            f"     [dim]Scanned {finding.sessions_scanned} session"
+            f"{'s' if finding.sessions_scanned != 1 else ''}; no MCP server is "
+            f"configured, so nothing is being injected.[/dim]"
+        )
+        return
+
+    if not finding.dead_servers:
+        # _rich_escape: the analyzer's own note names the config key in
+        # bracket form ("Lower [optimize] min_sessions_deadweight..."), which
+        # Rich would otherwise parse as an unknown style tag and silently
+        # drop from the printed line.
+        for note in finding.notes:
+            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+        if not finding.notes:
+            console.print(
+                f"     [dim]All {finding.configured_servers} configured MCP "
+                f"server{'s' if finding.configured_servers != 1 else ''} were "
+                f"invoked at least once in this window.[/dim]"
+            )
+    else:
+        n = len(finding.dead_servers)
+        console.print(
+            f"     • [bold]{n}[/bold] dead MCP server{'s' if n != 1 else ''} of "
+            f"[bold]{finding.configured_servers}[/bold] configured "
+            f"[dim](schemas injected every session, never called)[/dim]"
+        )
+        for s in finding.dead_servers:
+            console.print(
+                f"       [bold]{s.name}[/bold] [dim]({s.scope} · {s.source})[/dim]  "
+                f"present in {s.sessions_present} session"
+                f"{'s' if s.sessions_present != 1 else ''}, "
+                f"[yellow]{s.invocations}[/yellow] invocations"
+            )
+            # Dollars only when a priced model was actually observed for this
+            # server. None means no rate was available, and printing $0.00
+            # there would read as "this costs nothing".
+            if pricing_mode == "api" and s.estimated_tax_usd_90d is not None:
+                tax = (
+                    f"~{format_tokens(s.estimated_tax_tokens_90d)} tokens / "
+                    f"{format_cost(s.estimated_tax_usd_90d)} over 90 days "
+                    f"[dim](estimated, priced at {s.priced_model})[/dim]"
+                )
+            else:
+                tax = (
+                    f"~{format_tokens(s.estimated_tax_tokens_90d)} tokens over "
+                    f"90 days [dim](estimated; no priced model observed for "
+                    f"this server, so no dollar figure)[/dim]"
+                )
+            console.print(f"          [dim]tax[/dim] {tax}")
+            if s.tax_construction:
+                console.print(f"          [dim]{s.tax_construction}[/dim]")
+            console.print(f"          [yellow]→[/yellow] {s.fix}")
+
+    # C2 context tax: every always-injected content source, dead or alive. Kept
+    # to the top rows so it stays a pointer rather than a second report.
+    if finding.tax_table:
+        console.print(
+            "     [dim]Always-injected context per session (estimated):[/dim]"
+        )
+        for row in finding.tax_table[:5]:
+            console.print(
+                f"       [dim]{row.source}[/dim]  "
+                f"~{format_tokens(row.avg_tokens_per_session)}/session "
+                f"[dim]× {row.sessions} session"
+                f"{'s' if row.sessions != 1 else ''} = "
+                f"{format_tokens(row.total_tokens_window)} "
+                f"({row.tag})[/dim]"
+            )
+        if len(finding.tax_table) > 5:
+            console.print(
+                f"       [dim]… and {len(finding.tax_table) - 5} more source(s). "
+                f"Full detail with [bold]tj optimize deadweight --json[/bold].[/dim]"
+            )
+
+    if finding.estimate_basis:
+        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.caveat:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+
+
+def _cadence_phrase(seconds: float) -> str:
+    """A median inter-start gap as something a person reads at a glance."""
+    if seconds >= 86400:
+        return f"~{seconds / 86400:.1f}d"
+    if seconds >= 3600:
+        return f"~{seconds / 3600:.1f}h"
+    if seconds >= 60:
+        return f"~{seconds / 60:.0f}m"
+    return f"~{seconds:.0f}s"
+
+
+def _render_placement(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the batch-placement finding — unattended, cadence-regular workloads
+    whose shape allows a Batch API discussion. Third finding of this shape to
+    ship without a text-view renderer (relearn, then deadweight): absent from
+    _FINDING_RENDERERS it reaches the web tab and --json but falls through to
+    the generic empty state in the CLI.
+
+    The estimate here is a PRICE difference on the same tokens, not tokens
+    freed, so the token figure is labelled as the size of the affected
+    workload and never as "recoverable". The Batch API's flat discount is an
+    api-billed lever, so subscription and local plans are told that plainly
+    rather than shown a dollar figure that cannot apply to them.
+    """
+    console.print(_finding_header(marker, "Batch placement:"))
+    if not finding.candidates:
+        console.print(
+            f"     [dim]No unattended, cadence-regular workloads in this "
+            f"window (≥{finding.min_sessions_for_cadence} sessions on a "
+            f"regular cadence, ≥{format_cost(finding.min_group_cost_usd)} "
+            f"window spend). Lower \\[optimize] min_sessions_for_cadence / "
+            f"min_group_cost_usd in tj.toml to consider smaller "
+            f"workloads.[/dim]"
+        )
+        return
+
+    n = len(finding.candidates)
+    console.print(
+        f"     • [bold]{n}[/bold] workload{'s' if n != 1 else ''} "
+        f"{'fit' if n != 1 else 'fits'} the batch "
+        f"shape [dim](regular cadence, no human turn after the first model "
+        f"call)[/dim]: [bold]{finding.percent_of_window_cost:.1f}%[/bold] of "
+        f"window cost"
+    )
+    for c in finding.candidates[:10]:
+        console.print(
+            f"       [bold]{c.agent_id}[/bold]  "
+            f"{c.sessions} session{'s' if c.sessions != 1 else ''} every "
+            f"{_cadence_phrase(c.median_gap_seconds)} "
+            f"[dim](cadence spread {c.gap_cv:.2f})[/dim]  "
+            f"{format_tokens(c.tokens)} tokens"
+        )
+        if pricing_mode == "api":
+            console.print(
+                f"          [dim]spend[/dim] {format_cost(c.cost_usd)} "
+                f"[dim]→ at the batch rate[/dim] "
+                f"[green]{format_cost(c.cost_usd - c.estimated_batch_saving_usd)}[/green] "
+                f"[dim](a difference of "
+                f"{format_cost(c.estimated_batch_saving_usd)}, estimated)[/dim]"
+            )
+    if len(finding.candidates) > 10:
+        console.print(
+            f"       [dim]… and {len(finding.candidates) - 10} more.[/dim]"
+        )
+
+    if pricing_mode == "api" and finding.estimated_recoverable_usd is not None:
+        console.print(
+            f"     • [green]~{format_cost(finding.estimated_recoverable_usd)}[/green] "
+            f"estimated price difference over this window "
+            f"[dim](the same work, billed at the Batch API's flat rate)[/dim]"
+        )
+    else:
+        console.print(
+            "     [dim]The Batch API's discount is an api-billed price lever, "
+            "so no dollar figure is shown for this plan. The workload sizes "
+            "above still say how much work fits the shape.[/dim]"
+        )
+
+    if finding.estimate_basis:
+        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.friction:
+        console.print(f"     [yellow]![/yellow] [italic]{finding.friction}[/italic]")
+
+
+def _render_resend(
+    finding, *, pricing_mode: str = "api", marker: str = "", persona: str = "unknown",
+) -> None:
+    """
+    Render the resend finding — structural context re-send: how much of each
+    turn's prompt was already sent, unchanged, in an earlier turn. Registered
+    and running since it landed (see analyzers/context_resend.py), but with no
+    renderer at all: `tj optimize` showed nothing for the product's headline
+    waste category (this repo's own HAL-corpus benchmark measured 93.8% of
+    prompt tokens re-sent) even though the finding already reached --json and
+    the web tab. Same class of gap as `relearn` and `deadweight` before their
+    renderers landed.
+
+    `repeat_share` is a measured token-share, not a savings claim (Rule 14 /
+    anti-pattern #22): it is shown even when `estimated_recoverable_*` is
+    suppressed below, and `finding.caveat` renders verbatim every time this
+    prints, never paraphrased.
+    """
+    console.print(_finding_header(marker, "Context resend:"))
+    if finding.repeat_share is None:
+        # Below the data threshold (too few sessions/turns) — empty-state
+        # discipline: never a bare "nothing found", always the reason.
+        for note in finding.notes:
+            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+        if not finding.notes:
+            console.print("     [dim]No LLM turns in this window.[/dim]")
+        return
+
+    console.print(
+        f"     • [bold]{finding.repeat_share * 100:.1f}%[/bold] of prompt "
+        f"tokens across [bold]{finding.sessions_examined}[/bold] session"
+        f"{'s' if finding.sessions_examined != 1 else ''} "
+        f"({finding.turns_examined} turns, "
+        f"{finding.multi_turn_sessions} multi-turn) were already sent in an "
+        f"earlier turn [dim](conservative lower bound)[/dim]"
+    )
+    if finding.repeat_share_median is not None and finding.repeat_share_p90 is not None:
+        console.print(
+            f"       [dim]per-session median[/dim] "
+            f"{finding.repeat_share_median * 100:.1f}%  [dim]p90[/dim] "
+            f"{finding.repeat_share_p90 * 100:.1f}%"
+        )
+    console.print(
+        f"       [dim]{format_tokens(finding.repeat_tokens)} repeat tokens "
+        f"of {format_tokens(finding.prompt_tokens_total)} total prompt "
+        f"tokens[/dim]"
+    )
+
+    if finding.examples:
+        console.print()
+        console.print("     [dim]Heaviest sessions:[/dim]")
+        for ex in finding.examples[:5]:
+            console.print(
+                f"       [dim]{ex.session_id[:12]}[/dim]  {ex.turns} turns  "
+                f"[bold]{ex.repeat_share * 100:.0f}%[/bold] repeat  "
+                f"{format_tokens(ex.repeat_tokens)} tokens  "
+                f"[dim]({ex.provider}/{ex.model})[/dim]"
+            )
+
+    # The "why": reuse `tj context`'s own recurring-inclusion rendering (the
+    # tag-per-kind lookup), rather than re-deriving a second copy of that
+    # translation table that could drift from the established card.
+    if finding.recurring_examples:
+        from tokenjam.cli.cmd_context import _INCLUSION_LABELS
+        console.print()
+        console.print("     [dim]Why (recurring inclusions):[/dim]")
+        for r in finding.recurring_examples[:5]:
+            tag = _INCLUSION_LABELS.get(r.inclusion_type, "repeat")
+            # `_rich_escape` around the bracketed tag itself: "[file]" reads
+            # as Rich markup (an unknown style tag) if left unescaped inside
+            # a string Rich otherwise parses, which silently ate the tag.
+            console.print(
+                f"       [cyan]{_rich_escape(f'[{tag}]')}[/cyan] "
+                f"[bold]{_rich_escape(r.target)}[/bold]  "
+                f"×{r.occurrences} ({r.sessions} sessions)"
+            )
+            console.print(f"          [green]→[/green] {_rich_escape(r.fix)}")
+    else:
+        for note in finding.notes:
+            console.print(f"     [dim]{_rich_escape(note)}[/dim]")
+
+    # Recoverable figure: fed through framing.render_savings rather than a
+    # hand-rolled pricing_mode branch, so it can't quietly disagree with the
+    # same rule cost_proposal_verbs.py applies to every other recoverable
+    # figure. Framed against this finding's OWN denominator (prompt_tokens_total,
+    # not the window's four-token-type total) since that's the basis
+    # repeat_share itself is measured against.
+    framing = Framing(pricing_mode=pricing_mode, window_total_tokens=finding.prompt_tokens_total)
+    recoverable = render_savings(
+        finding.estimated_recoverable_usd, finding.estimated_recoverable_tokens, framing,
+    )
+    console.print()
+    if recoverable != "—":
+        console.print(f"     • [green]~{recoverable}[/green] estimated recoverable")
+    elif pricing_mode == "api":
+        console.print(
+            "     [dim]No dollar figure: no priced example session for the "
+            "cache_control lever.[/dim]"
+        )
+    if finding.estimate_basis:
+        console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+
+    console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
+    _render_resend_fix(finding, persona)
+
+
+def _render_resend_fix(finding, persona: str) -> None:
+    """
+    Persona-aware fix for the resend finding, mirroring `_render_downgrade_cta`
+    (#97): `fix_compaction` is the agent-harness lever (a Claude Code
+    subscriber's actual lever — they can't set `cache_control` on someone
+    else's harness); `fix_cache_control` is the SDK-adoption lever, a
+    ready-to-paste snippet that is empty whenever no priced example produced
+    one. Unlike the downgrade CTA's `bench_command` (always present),
+    `fix_cache_control` can be empty, so the safe default for a "mixed" or
+    "unknown" window is compaction first (always non-empty, and its "start a
+    fresh session" clause is meaningful for any agent loop, not just Claude
+    Code) with the cache_control snippet offered second when one exists.
+    """
+    console.print()
+    if persona == "sdk" and finding.fix_cache_control:
+        console.print("     [bold]Fix (cache_control adoption):[/bold]")
+        console.print(
+            finding.fix_cache_control, markup=False, highlight=False, soft_wrap=True,
+        )
+    elif persona == "mixed":
+        console.print(
+            "     [bold]Fix — pick the lever that matches the traffic:[/bold]"
+        )
+        console.print("     [dim]Agent-harness sessions:[/dim]")
+        console.print(f"       {finding.fix_compaction}")
+        if finding.fix_cache_control:
+            console.print("     [dim]SDK sessions:[/dim]")
+            console.print(
+                finding.fix_cache_control, markup=False, highlight=False, soft_wrap=True,
+            )
+    else:  # persona in {"claude-code", "unknown"}, or "sdk" with no snippet
+        console.print(f"     [bold]Fix:[/bold] {finding.fix_compaction}")
+        if finding.fix_cache_control:
+            console.print(
+                "     [dim]If you also run SDK agents against these models, "
+                "the cache_control lever applies too:[/dim]"
+            )
+            console.print(
+                finding.fix_cache_control, markup=False, highlight=False, soft_wrap=True,
+            )
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
     "cache-recommend":      _render_cache_recommend,
+    "resend":      _render_resend,
     "script": _render_workflow_restructure,
     "reuse":        _render_reuse,
     "trim":         _render_prompt_bloat,
     "subagent":     _render_subagent,
+    "relearn":      _render_relearn,
     "verbosity":    _render_verbosity,
+    "deadweight":   _render_deadweight,
+    "placement":    _render_placement,
+    "summarize":    _render_summarize,
 }

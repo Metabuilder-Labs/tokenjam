@@ -6,21 +6,24 @@ import click
 import duckdb
 from rich.markup import escape
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import find_config_file, load_config
 from tokenjam.utils.formatting import console, display_path
 
 
 @click.command("doctor")
-@click.option("--json", "output_json", is_flag=True)
+@json_option
 @click.option(
     "--repair",
     is_flag=True,
     help="Attempt to fix issues that have a known repair path (e.g. rebuild the "
-         "spans table when DuckDB column statistics are corrupt — see issue #56).",
+         "spans table when DuckDB column statistics are corrupt: "
+         "https://github.com/Metabuilder-Labs/tokenjam/issues/56).",
 )
 @click.pass_context
-def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
+def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None:
     """Run health checks on tj configuration and environment."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     config = ctx.obj["config"]
     checks: list[dict] = []
 
@@ -41,6 +44,9 @@ def cmd_doctor(ctx: click.Context, output_json: bool, repair: bool) -> None:
 
     # 6. Drift configured but inactive
     checks.append(_check_drift_inactive(config, ctx.obj["db"]))
+
+    # 6b. Prompt capture off — trim / cache-recommend / reuse degraded
+    checks.append(_check_capture_prompts(config))
 
     # 7. Webhook URL security
     checks.extend(_check_webhook_security(config))
@@ -195,6 +201,25 @@ def _check_schema_vs_capture(config: object) -> dict:
             "message": "Schema and capture settings are consistent."}
 
 
+def _check_capture_prompts(config: object) -> dict:
+    """`capture.prompts` defaults on; flag when it's off so the user (running
+    a config that predates the default, or one that turned it off on
+    purpose) knows `trim` and `cache-recommend` produce no findings and
+    `reuse` never reaches its prompt-prefix mode without it — not that
+    they're broken."""
+    if getattr(config.capture, "prompts", False):
+        return {"name": "Prompt capture", "level": "ok",
+                "message": "capture.prompts is on: trim, cache-recommend, "
+                           "and reuse's prompt-prefix mode have data."}
+    return {"name": "Prompt capture", "level": "info",
+            "message": "capture.prompts is off. `tj optimize trim` and "
+                       "`cache-recommend` will produce no findings, and "
+                       "`reuse` stays on tool-sequence-only clustering. Set "
+                       "capture.prompts = true under [capture] in your "
+                       "config to enable them (stored locally in your "
+                       "telemetry DB, never sent anywhere)."}
+
+
 def _check_drift_inactive(config: object, db: object) -> dict:
     """Report drift-baseline progress for any agent that hasn't reached threshold yet.
 
@@ -283,7 +308,8 @@ def _check_spans_stats(db: object) -> dict:
                        "— trace-detail queries (`tj traces <id>`, dashboard "
                        "trace view) will return no spans. Run `tj doctor "
                        "--repair` to rebuild the table (data is preserved). "
-                       "See issue #56.",
+                       "Background: "
+                       "https://github.com/Metabuilder-Labs/tokenjam/issues/56.",
             "repair_action": "rebuild_spans",
         }
     return {"name": "Spans column statistics", "level": "ok",
@@ -324,7 +350,7 @@ def _check_schema_integrity(db: object) -> dict:
             "message": (
                 "Live schema is missing column(s) the code writes on ingest: "
                 f"{', '.join(missing)}. These were recorded as migrated but never "
-                "landed (see #55); ingest of affected rows fails with a DuckDB "
+                "landed; ingest of affected rows fails with a DuckDB "
                 "Binder Error and is silently dropped, surfacing as a blank/stale "
                 "Status page. Run `tj doctor --repair` to add them (idempotent, "
                 "data preserved)."
@@ -546,8 +572,8 @@ def _check_mcp_wiring(config: object) -> dict:
             "level": "warning",
             "message": (
                 f"MCP server registered in {', '.join(found_locations)} — an "
-                "in-loop MCP is a per-turn quota tax on subscription users "
-                "(+36% measured, ticket #59), not the recommended surface for "
+                "in-loop MCP is a per-turn token tax on subscription users "
+                "(+36% measured), not the recommended surface for "
                 "Claude Code / Codex. Remove it: " + "; ".join(removal_hints) + ". "
                 "The MCP is meant for SDK / API integrations only."
             ),

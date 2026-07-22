@@ -6,16 +6,18 @@ import json as json_mod
 import click
 from rich.table import Table
 
+from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.drift import evaluate_drift
 from tokenjam.utils.formatting import console
 
 
 @click.command("drift")
 @click.option("--agent", default=None, help="Filter to specific agent_id")
-@click.option("--json", "output_json", is_flag=True, help="JSON output")
+@json_option
 @click.pass_context
-def cmd_drift(ctx: click.Context, agent: str | None, output_json: bool) -> None:
+def cmd_drift(ctx: click.Context, agent: str | None, output_json_flag: bool) -> None:
     """Show drift baselines and Z-scores for recent sessions."""
+    output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     config = ctx.obj["config"]
     agent_filter = agent or ctx.obj.get("agent")

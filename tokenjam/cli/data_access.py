@@ -111,7 +111,9 @@ class DirectDataAccess:
         window_days = max(
             (until_dt - since_dt).total_seconds() / 86400.0, 1.0 / 86400.0
         )
-        audit = audit_opus_quota(conn, since_dt, until_dt, agent_id, window_days)
+        audit = audit_opus_quota(
+            conn, since_dt, until_dt, agent_id, window_days, config=self._config,
+        )
         framing = _direct_framing(
             conn, self._config, audit.actual_cost_usd, audit.opus_tokens,
             audit.opus_sessions, agent_id,

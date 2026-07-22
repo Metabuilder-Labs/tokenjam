@@ -857,7 +857,7 @@ def test_todowrite_malformed_payload_has_no_todos(tmp_path):
 
 
 def test_todowrite_step_preserves_todos_list_and_statuses(tmp_path):
-    """Ticket #67: a TodoWrite step must carry its real ``todos`` payload
+    """Regression: a TodoWrite step must carry its real ``todos`` payload
     (``{"todos": [{content, status}]}``), not read a nonexistent one-line key.
 
     This is the "where it left off / what's incomplete" signal the resume-brief

@@ -91,7 +91,10 @@ class OpenAIIntegration:
                 span.end()
                 raise
 
-        Completions.create = patched_create
+        # setattr, not attribute assignment: `create` is an overloaded method on
+        # a third-party class, and rebinding it directly is an error a type
+        # checker is right to flag. The monkeypatch itself is the point here.
+        setattr(Completions, "create", patched_create)
         self.installed = True
         logger.debug("OpenAI integration installed (provider=%s)", self._provider_name)
 
@@ -101,7 +104,7 @@ class OpenAIIntegration:
         try:
             from openai.resources.chat.completions import Completions
             if self._original_create:
-                Completions.create = self._original_create
+                setattr(Completions, "create", self._original_create)
         except ImportError:
             pass
         self.installed = False

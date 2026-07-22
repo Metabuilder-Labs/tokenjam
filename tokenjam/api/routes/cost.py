@@ -273,7 +273,11 @@ def _collect_recoverable(report) -> list[dict]:
     recoverable contract field, so a new analyzer appears with no code change
     here. Each entry keeps the analyzer's own caveat + estimate_basis verbatim
     (Rule 14) and the component its savings act on. Only positive estimates are
-    surfaced (a None/0 estimate is "nothing to recover", not an overlay bar)."""
+    surfaced (a None/0 estimate is "nothing to recover", not an overlay bar).
+
+    Returned biggest-first (by USD, then tokens) so a caller can render "largest
+    opportunity + N more" without re-deriving the order — and so index 0 is
+    always the entry `largest_recoverable_*` below is drawn from."""
     out: list[dict] = []
 
     def add(name: str, finding) -> None:
@@ -299,7 +303,34 @@ def _collect_recoverable(report) -> list[dict]:
             continue
         if hasattr(finding, "estimated_recoverable_usd"):
             add(name, finding)
+    out.sort(
+        key=lambda r: (r["estimated_recoverable_usd"] or 0.0, r["estimated_recoverable_tokens"] or 0),
+        reverse=True,
+    )
     return out
+
+
+# A1 (analyzer-audit #482, self-improve-loop): every analyzer above estimates
+# waste from its own angle over the SAME underlying spans — a `cache` fix and
+# a `downsize` swap can both price the same call's waste, a `reuse` hit can
+# double-count a `trim` hit's planning call, and so on. `total_recoverable_usd`
+# below is therefore a GROSS ceiling across N overlapping analyzers, not a
+# simultaneously-achievable total — summing the list's own figures would be
+# summing waste that was measured twice. This is a presentation fix only: no
+# individual analyzer's `estimated_recoverable_usd` is touched or reduced here
+# (house rule: never quietly deflate a figure the user can act on). The single
+# largest entry, in contrast, IS honest on its own — acting on it alone
+# recovers at least that much, because it isn't a sum of anything.
+def _recoverable_overlap_note(recoverable: list[dict]) -> str:
+    if len(recoverable) < 2:
+        return ""
+    return (
+        f"These {len(recoverable)} estimates are computed from overlapping angles on "
+        "the same sessions (for example, a cache fix and a model downsize can both "
+        "price the same call's waste), so they do not add up to an amount you could "
+        "actually recover. The figure above is a ceiling across every analyzer; the "
+        "largest single line is the safest number to act on first."
+    )
 
 
 @router.get("/cost/components")
@@ -335,11 +366,30 @@ async def get_cost_components(
     recoverable: list[dict] = []
     if conn is not None:
         try:
-            from tokenjam.core.optimize import build_report
+            from tokenjam.core.optimize import ANALYZER_REGISTRY, build_report
+
+            # `relearn` is a full-corpus scan the analyzer's OWN docstring
+            # says is too heavy for per-request HTTP use ("callers that serve
+            # this over HTTP MUST cache the result, not compute it per-
+            # request" — core/optimize/analyzers/relearn.py). Worse, its
+            # `RelearnFinding` never carries `estimated_recoverable_usd`, so
+            # `_collect_recoverable` below silently discards its result no
+            # matter what — running it here was guaranteed dead work on every
+            # request. Excluding it by name changes nothing about what this
+            # endpoint returns (verified: no output field ever came from it)
+            # while removing that tax; the Review inbox
+            # (api/routes/relearn.py) already serves relearn's finding from
+            # its own background-refreshed cache. `deadweight` DOES
+            # contribute (it has `estimated_recoverable_usd`) so it still
+            # runs here, but now via the persistent transcript parse cache
+            # (core.transcript_cache, wired into its `run(ctx)` entry point)
+            # so a warm cache makes repeat requests cheap instead of
+            # re-scanning every transcript from scratch each time.
+            findings = [name for name in ANALYZER_REGISTRY if name != "relearn"]
             report = build_report(
                 db=db, config=config,
                 since=since_dt or utcnow(), until=until_dt or utcnow(),
-                agent_id=agent_id,
+                agent_id=agent_id, findings=findings,
             )
             recoverable = _collect_recoverable(report)
         except Exception:
@@ -347,14 +397,24 @@ async def get_cost_components(
 
     total_rec_usd = sum(r["estimated_recoverable_usd"] or 0.0 for r in recoverable)
     total_rec_tokens = sum(r["estimated_recoverable_tokens"] or 0 for r in recoverable)
+    largest = recoverable[0] if recoverable else None
 
     return {
         "components": components,
         "total_cost_usd": round(total_cost, 8),
         "total_tokens": total_tokens,
         "recoverable": recoverable,
+        # Gross ceiling, magnitude unchanged (see _recoverable_overlap_note) —
+        # NOT a claim that this much is simultaneously recoverable.
         "total_recoverable_usd": round(total_rec_usd, 8),
         "total_recoverable_tokens": total_rec_tokens,
+        "recoverable_additive": False,
+        "recoverable_overlap_note": _recoverable_overlap_note(recoverable),
+        # The one entry in `recoverable` that is honest as a standalone claim:
+        # it isn't a sum of anything, so it's the floor a reader can act on.
+        "largest_recoverable_usd": largest["estimated_recoverable_usd"] if largest else None,
+        "largest_recoverable_tokens": largest["estimated_recoverable_tokens"] if largest else None,
+        "largest_recoverable_analyzer": largest["analyzer"] if largest else None,
         "framing": _framing_block(db, config, agent_id, total_cost, total_tokens),
     }
 
@@ -455,6 +515,7 @@ async def get_cost(
                 "cache_tokens": r.cache_tokens,
                 "cache_write_tokens": r.cache_write_tokens,
                 "cost_usd": r.cost_usd,
+                "call_count": r.call_count,
             }
             for r in rows
         ],

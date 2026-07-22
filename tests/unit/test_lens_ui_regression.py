@@ -47,7 +47,103 @@ def test_downsize_section_always_renders(html):
 
 
 def test_downsize_is_first_in_optimize_order(html):
-    assert "const order = ['downsize', 'cache', 'cache-recommend', 'script', 'trim']" in html
+    assert (
+        "const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', "
+        "'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement']"
+    ) in html
+
+
+# --- Batch placement card: advise-only, a price difference not recoverable tokens - #
+def _placement_branch(html: str) -> str:
+    start = html.index("} else if (name === 'placement') {")
+    end = html.index(
+        "  } else {\n    const fd = (opt.findings || {})[name];\n    if (!fd) return null;",
+        start,
+    )
+    return html[start:end]
+
+
+def test_placement_registered_in_analyzer_meta_and_order(html):
+    assert "placement:  { title: 'Batch placement'" in html
+    assert "'deadweight', 'placement']" in html
+
+
+def test_placement_section_always_renders_when_nothing_qualifies(html):
+    # Mirrors downsize's own null-slot handling (issue #126): the batch-placement
+    # analyzer drops the key from `findings` entirely rather than carrying a
+    # null-candidates finding when nothing qualifies, so the card must render its
+    # own explicit empty state instead of vanishing via the generic
+    # `if (!fd) return null` used by every other analyzer's card.
+    assert 'id="opt-placement"' in html
+    assert "No unattended, cadence-regular workloads in this window" in html
+
+
+def test_placement_never_uses_recoverable_wording(html):
+    # A batch-placement dollar figure is a PRICE difference on the SAME tokens
+    # (batch bills the same work at half rate, freeing nothing) — the card must
+    # never borrow the "estimated recoverable" wording every sibling analyzer
+    # legitimately uses (CLAUDE.md anti-pattern #22).
+    block = _placement_branch(html)
+    assert "estimated price difference" in block
+    # "estimated-tag" is the CSS class every other card's rendered "estimated
+    # recoverable" badge carries — assert on the class, not the prose string,
+    # since this branch's own explanatory comments legitimately mention the
+    # sibling wording by name.
+    assert "estimated-tag" not in block
+    assert 'class="price-diff-tag"' in block
+
+
+def test_placement_gates_dollar_figure_strictly_on_api_pricing_mode(html):
+    # The Batch API's flat discount is an api-billed lever a subscription,
+    # local, or even "unknown" plan cannot pull — gated strictly on
+    # pricing_mode === 'api' (mirroring the CLI and cost-proposals renderers),
+    # not the shared dollarsSuppressed() helper, which treats 'unknown' as
+    # NOT suppressed.
+    block = _placement_branch(html)
+    assert "framing && framing.pricing_mode === 'api'" in block
+    assert "api-billed price lever, so no dollar figure is shown for this plan" in block
+
+
+def test_placement_offers_no_apply_action(html):
+    # placement is advise-only by design (batch adoption is an architectural
+    # change in the user's own application, not a config flip) — its card
+    # renders no apply affordance of its own.
+    block = _placement_branch(html)
+    assert "<button" not in block
+
+
+# --- Component-waste chart/legend: placement is a price difference there too #
+def _waste_legend_override(html: str) -> str:
+    start = html.index("const WASTE_LEGEND_OVERRIDE")
+    end = html.index("function buildComponentWaste", start)
+    return html[start:end]
+
+
+def test_waste_legend_never_labels_placement_recoverable(html):
+    # The shared "Cost by component + recoverable waste" chart/legend used to
+    # render placement's segment with the same "estimated recoverable"
+    # wording every real recoverable-tokens analyzer gets, even though
+    # placement's figure is a PRICE difference on the SAME tokens (CLAUDE.md
+    # anti-pattern #22). The legend row must key off the stable `analyzer`
+    # registry name and swap in price-difference wording for placement only.
+    override = _waste_legend_override(html)
+    assert "placement:" in override
+    assert "estimated price difference" in override
+    assert "price-diff-tag" in override
+    assert "buildComponentWaste(resp, useTokens, isApi)" in html
+    assert "ov ? ov.tagClass : 'estimated-tag'" in html
+    assert "ov ? ov.tagText : 'estimated recoverable'" in html
+
+
+def test_waste_legend_gates_placement_on_api_pricing_mode(html):
+    # Off api pricing there is no dollar figure for placement at all (the
+    # Batch API's discount is an api-billed lever), and its token count means
+    # "size of the affected workload," not tokens freed — so the segment must
+    # drop out of the overlay entirely, not just get relabeled.
+    override = _waste_legend_override(html)
+    assert "apiOnly: true" in override
+    assert "compIsApi" in html
+    assert "!!compFraming && compFraming.pricing_mode === 'api'" in html
 
 
 # --- #127: four distinct recoverable-tile states --------------------------- #
@@ -233,7 +329,7 @@ def test_status_tile_shows_active_and_elapsed(html):
 # --- #162: Recoverable Waste tiles render consistently --------------------- #
 def test_reuse_tile_title_is_title_cased(html):
     # reuse was missing from ANALYZER_META and slipped through lowercase.
-    assert "reuse:    { title: 'Reuse'" in html
+    assert "reuse:      { title: 'Reuse'" in html
     # Capitalization is centralized so a future 6th analyzer auto-title-cases
     # instead of rendering its raw lowercase registry key.
     assert "function capitalize" in html
@@ -427,6 +523,44 @@ def test_component_waste_recoverable_routes_through_framing(html):
     assert "fmtFramedDollar(st.comp.total_cost_usd" in html
     # plan-tier toggle drives tokens-vs-dollars for the whole surface
     assert "compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local'" in html
+
+
+# --- trim card: provenance + flagged text on the web card, not just the CLI - #
+def _trim_branch(html: str) -> str:
+    start = html.index("} else if (name === 'trim') {")
+    end = html.index("} else if (name === 'reuse') {", start)
+    return html[start:end]
+
+
+def test_trim_card_shows_provenance_and_summarize_pointer(html):
+    # The CLI already prints `p.source_path`'s attribution + a `tj summarize
+    # list` pointer for prompts a catalog file cleared the verbatim-
+    # containment bar for; the web card must carry the same fields, gated
+    # identically on `p.source_path` being set.
+    block = _trim_branch(html)
+    assert "p.source_path" in block
+    assert "Attributed to" in block
+    assert "p.source_basis" in block
+    assert '#/optimize/summarize' in block
+    assert "Review in Summarize" in block
+
+
+def test_trim_card_shows_flagged_regions_unconditionally(html):
+    # The flagged text itself must render regardless of provenance — a pure
+    # SDK caller never gets a source_path, and the flagged-text block is
+    # their whole, complete answer, not a lesser version of the card (persona
+    # coherence: no message implying something is missing for them).
+    block = _trim_branch(html)
+    assert "p.regions" in block
+    assert "sample_chars" in block
+    assert "more region(s)" in block
+
+
+def test_trim_card_no_longer_a_flat_three_column_table(html):
+    # Provenance + flagged text is more than one line per prompt, so the flat
+    # <table> gave way to a per-prompt block.
+    block = _trim_branch(html)
+    assert "<table" not in block
 
 
 # --- #210: Analytics pivot explorer (subsumes #214 leaderboard + #216) ----- #
@@ -679,19 +813,21 @@ def test_colorfor_neutral_bucket_not_a_palette_hue(html):
     assert "if (s === 'other' || s === '(none)' || s === '') return cssVar('--text-dim')" in html
 
 
-# --- #229: Overview tiles/headline deep-link into Analytics (pre-filtered) --- #
-def test_overview_recoverable_tiles_deeplink_into_analytics(html):
-    # Each recoverable-waste analyzer maps to an Analytics slice, and the tiles
-    # render that deep-link via analyzerSliceHref (not the old Optimize finding
-    # link). The route honors metric/group_by/chart/since, so these are just
-    # well-formed Analytics URLs — no new state machine.
-    assert "const ANALYZER_ANALYTICS_SLICE = {" in html
-    for analyzer in ("downsize", "cache", "script", "reuse", "trim"):
-        assert f"{analyzer}:" in html  # each analyzer has a slice mapping
-    assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
-    # Dashboard tiles drill IN-PLACE (route='dashboard'), not to the Optimize screen.
-    assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
-    assert "'#/optimize?finding=' + t.name" not in html
+# --- #229: Overview tiles deep-link into the Optimize detail card ---------- #
+def test_overview_recoverable_tiles_deeplink_into_optimize(html):
+    # A tile's recoverable number has its evidence and next step on the
+    # Optimize screen's own analyzer card, not an Analytics chart slice — a
+    # tile used to open an Analytics leaderboard with no reuse section at all
+    # for some analyzers. optimizeFindingHref builds a
+    # `#/optimize?...finding=name` deep-link; OptimizeView's focus effect
+    # scrolls to and highlights #opt-<name>.
+    assert "function optimizeFindingHref(name, since)" in html
+    assert "sp.set('finding', name)" in html
+    assert "optimizeFindingHref(t.name, since)" in html
+    # The old Analytics-slice routing is gone — regression guard so a tile
+    # click can't silently land back on a page with no matching section.
+    assert "const ANALYZER_ANALYTICS_SLICE" not in html
+    assert "function analyzerSliceHref" not in html
 
 
 def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
@@ -701,12 +837,20 @@ def test_analytics_deeplink_helper_exists_and_builds_hash_urls(html):
     assert "return '#/' + route + (s ? '?' + s : '');" in html
 
 
-def test_dashboard_is_default_landing(html):
-    # Empty hash → dashboard, set via the PARSED default (no render-time
-    # location.hash redirect — #132 discipline).
-    assert "|| 'dashboard'" in html
+def test_review_inbox_is_default_landing(html):
+    # Two-lens IA (self-improve-loop SPEC.md §12): empty hash → the Review
+    # inbox, the Improve lens's home — set via the PARSED default (no
+    # render-time location.hash redirect — #132 discipline still applies).
+    # Dashboard remains a fully-reachable Improve-lens view, just no longer
+    # the landing route.
+    assert "|| 'review'" in html
+    assert "|| 'dashboard'" not in html
     assert "|| 'overview'" not in html
     assert "location.hash = '#/dashboard'" not in html  # no hash-assign redirect
+    assert "history.replaceState(null, '', '#/review')" in html
+    assert "function ReviewInboxView" in html
+    assert "case 'review': return html`<${ReviewInboxView}" in html
+    assert 'href="#/review"' in html
     assert "function DashboardView" in html
     assert "case 'dashboard': return html`<${DashboardView}" in html
     assert 'href="#/dashboard"' in html
@@ -754,11 +898,12 @@ def test_spend_tile_distinct_under_subscription(html):
     assert "spendSuppressed ? (fmtTokens(kpis.tokens) + ' tok')" not in html  # old dup gone
 
 
-def test_dashboard_triage_drills_in_place(html):
-    # Recoverable-waste tiles update the embedded explorer via #/dashboard URL
-    # state (not a jump to standalone #/analytics).
-    assert "analyzerSliceHref(t.name, since, 'dashboard')" in html
-    assert "function analyzerSliceHref(name, since, route = 'analytics')" in html
+def test_dashboard_triage_drills_into_optimize_card(html):
+    # Recoverable-waste tiles navigate to the Optimize screen's matching
+    # analyzer detail card — no longer an in-place Analytics explorer slice
+    # update.
+    assert "optimizeFindingHref(t.name, since)" in html
+    assert "function optimizeFindingHref(name, since)" in html
 # --- #306: Status screen is two content-defined zones (no view toggle) ------ #
 def test_status_screen_has_split_zones(html):
     # The #241/#263 Cards|List view toggle is retired: the Status screen now
@@ -1080,16 +1225,22 @@ def test_status_card_right_click_rename_wiring(html):
 
 
 # --- Work map: graphical "what did my agent do" tab ------------------------ #
-def test_work_map_tab_present_and_default(html):
-    # Map is the default session tab and renders before Timeline.
+def test_work_map_tab_present_and_demoted(html):
+    # Map/Approach/Timeline are drill-in evidence, not the landing session tab
+    # (self-improve-loop SPEC.md §12 — demoted from primary tabs). Map still
+    # renders before Timeline within that demoted group, and both still render
+    # after the primary tabs (Models & context leads, Map/Approach/Timeline
+    # trail behind the "Evidence" divider).
     assert "function WorkMapSection" in html
     assert "function WorkMapNode" in html
-    assert "useState('map')" in html
+    assert "useState('models')" in html
     assert "/sessions/' + sessionId + '/workmap'" in html
-    # Tab order: the Map button must appear before the Timeline button.
+    models_btn = html.index("setTab('models')")
     map_btn = html.index("setTab('map')")
     story_btn = html.index("setTab('story')")
+    assert models_btn < map_btn, "Models & context must lead the primary tabs"
     assert map_btn < story_btn, "Map tab must render before Timeline"
+    assert '<span class="tab-sep">Evidence</span>' in html
 
 
 def test_work_map_is_descriptive_not_evaluative(html):
@@ -2077,3 +2228,308 @@ def test_recommendations_panel_present_and_fetches_endpoint(html):
     # measured vs estimated fields straight from the endpoint payload.
     assert "measured_recovered_tokens" in html
     assert "estimated_recoverable_tokens" in html
+
+
+# --- cost proposals in the Review inbox (advise-only) ---------------------- #
+def test_cost_proposals_wired_into_review_inbox(html):
+    # The downsize/cache/trim analyzers surface as advise-only cost proposals in
+    # the same Review inbox, fetched from the cost endpoints and rendered with a
+    # distinct `kind` badge and an estimate. Keep the fetch + render wiring
+    # present.
+    assert "function CostProposalCard" in html
+    assert "function CostAppliedRow" in html
+    assert "api('/relearn/cost-proposals')" in html
+    assert "api('/relearn/cost-applied')" in html
+    assert "'/relearn/cost-proposals/apply'" in html
+    # The card is advise-only: a marker button, never an apply-to-code write.
+    assert "Mark applied" in html
+    assert "Cost advisories" in html
+
+
+def test_subagent_cost_card_has_workspace_apply_flow(html):
+    # The subagent (4th) analyzer is apply-capable: its CC-origin card routes a
+    # reversible rung-1 note through the apply-workspace endpoint (dry-run diff
+    # then write), unlike the three advise-only analyzers.
+    assert "'/relearn/cost-proposals/apply-workspace'" in html
+    assert "apply_capable" in html
+    assert "Apply note" in html
+    assert "subagent: 'subagent'" in html
+
+
+def test_relearn_example_session_links_only_when_resolvable(html):
+    # Relearn examples are sourced from transcript files on disk, so many name a
+    # session that was never ingested and 404s on the detail route. The inbox
+    # links only the resolvable ones and keeps the rest as plain evidence text.
+    assert "ex.session_resolvable" in html
+    assert (
+        "? html`<a class=\"sz-link\" href=${'#/sessions/' + ex.session_id}"
+        in html
+    )
+    # The snippet (the evidence itself) is rendered either way.
+    assert "${ex.snippet}" in html
+
+
+def test_sessions_nav_entry_present(html):
+    # The session views (Map / Approach / Timeline) were reachable only by
+    # following a link out of another screen. A sidebar entry makes them
+    # discoverable; the paramless route lands on the session list the Status
+    # view already renders, and the entry highlights while a session is open.
+    assert (
+        '<a href="#/sessions" class="nav-link" data-view="sessions" '
+        'data-lens="improve">' in html
+    )
+    assert "case 'sessions':" in html
+    assert "sessions: 'improve'" in html
+
+
+# --- receipts / cost-ledger unit hierarchy follows the server framing ------- #
+def test_receipts_tile_leads_with_tokens_when_dollars_are_suppressed(html):
+    # `verified_saved_usd` only ever counts the API-billed slice, so on a
+    # subscription-dominant corpus the tile shouted a tiny dollar figure and
+    # whispered the (complete) token one. The hierarchy is now conditional on
+    # the server's display_rule, exactly like every other cost surface.
+    start = html.index("function ReceiptsHeader")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "dollarsSuppressed(receiptsFraming || rollupFraming)" in tile
+    # Suppressed: the TOKEN figure holds the 22px hero slot...
+    assert (
+        'font-size:22px;font-weight:600;color:var(--success);margin-top:4px">'
+        "${fmtTokens(receiptsData.verified_saved_tokens)} tok"
+    ) in tile
+    # ...and the dollars drop out in favour of the server's own qualifier, the
+    # same `.qualifier` treatment the other suppressing surfaces use. We do NOT
+    # write a bespoke scoping sentence here: `verified_saved_usd` is token
+    # deltas priced at per-model list rates, not a figure scoped to API-billed
+    # sessions, so any such claim would be one the code does not support.
+    assert "${qualifier}" in tile
+    assert "of that is on API-billed traffic" not in tile
+    # Not suppressed: today's dollars-first hierarchy is untouched.
+    assert (
+        'font-size:22px;font-weight:600;color:var(--success);margin-top:4px">'
+        "${fmtUsd(receiptsData.verified_saved_usd)}"
+    ) in tile
+    # The MEASURED tag and the full breakdown (regressed included) stay put.
+    assert "measured" in tile
+    assert "${receiptsData.regressed_count} regressed" in tile
+
+
+def test_cost_ledger_summary_leads_with_tokens_when_dollars_are_suppressed(html):
+    # Same bug, same fix, in the "Applied cost advisories" ledger headline.
+    start = html.index("function CostLedgerSummary")
+    end = html.index("function CostProposalCard", start)
+    summary = html[start:end]
+    assert "dollarsSuppressed(framing)" in summary
+    assert (
+        "${suppressed ? fmtTokens(ledger.total_realized_tokens) + ' tok' "
+        ": fmtUsd(ledger.total_realized_usd)}"
+    ) in summary
+    assert "${framing.qualifier_text}" in summary
+    assert "of that is on API-billed traffic" not in summary
+    # The framing reaches it from the server payload, not a JS re-derivation.
+    assert "setCostFraming(r.framing || null)" in html
+    assert "<${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />" in html
+
+
+def test_dollars_suppressed_reads_the_server_display_rule(html):
+    # The suppress/show decision is server-side (core/framing.py); the UI reads
+    # display_rule rather than re-deriving the rule in JS.
+    assert "function dollarsSuppressed" in html
+    for rule in (
+        "'suppress_dollars_for_subscription_share'",
+        "'tokens_only'",
+        "'suppress_dollars_unknown'",
+    ):
+        assert rule in html, f"missing suppressing display_rule {rule}"
+
+
+# --- the estimated-recoverable tile: token hero + honest coverage ---------- #
+def test_estimated_recoverable_tile_leads_with_tokens_when_dollars_suppressed(html):
+    # The tile beside the measured one had the same dollars-first bug. Its token
+    # sum covers only the proposals carrying a token estimate, so the suffix
+    # must state that coverage rather than implying every open proposal.
+    start = html.index("function ReceiptsHeader")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "~${fmtTokens(rollup.estimated_recoverable_tokens)} tok" in tile
+    assert "rollupTokenScope(rollup)" in tile
+    # The estimated/measured visual distinction survives: est. chip + accent on
+    # the estimate, measured chip + success on the measurement.
+    assert 'class="estimated-tag" title=${rollup.estimate_basis}>est.' in tile
+    assert 'class="measured-tag" title=${receiptsData.estimate_basis}>measured' in tile
+    assert "color:var(--accent);margin-top:4px" in tile
+    assert "color:var(--success);margin-top:4px" in tile
+    # The framing reaches the tile from the server, not a JS re-derivation.
+    assert "setRollupFraming(r.framing || null)" in html
+    assert "rollupFraming=${rollupFraming}" in html
+
+
+def test_rollup_token_scope_states_partial_coverage(html):
+    # "M of N proposals carrying a token estimate" whenever coverage is partial;
+    # the bare count only when every deduplicated proposal contributes.
+    start = html.index("function rollupTokenScope")
+    end = html.index("function ReceiptsHeader", start)
+    fn = html[start:end]
+    assert "rollup.token_proposal_count" in fn
+    assert "rollup.deduplicated_proposal_count" in fn
+    assert "of ${total} proposals carrying a token estimate" in fn
+
+
+def test_estimated_tile_hides_when_suppressed_with_no_token_estimate(html):
+    # Dollars suppressed and no token estimate to lead with means there is
+    # nothing honest to render, so the tile hides instead of showing a zero.
+    start = html.index("function ReceiptsHeader")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert (
+        "suppressed ? (rollup.token_proposal_count || 0) > 0 "
+        ": rollup.proposal_count > 0"
+    ) in tile
+
+
+# --- Review inbox copy: cost-led, and no hardcoded zero -------------------- #
+def test_review_inbox_intro_leads_with_cost_not_the_loop(html):
+    intro = "Every row here is waste you are paying for more than once"
+    assert intro in html
+    # The loop-first phrasing is gone...
+    assert "land here so it can relearn them" not in html
+    # ...and every factual detail it carried is still stated.
+    assert "git-committed, or backed up if the target is not a git repo" in html
+    assert "you confirm the scope and target first" in html
+    assert "this browser only; it is not sent to the server" in html
+    # House style: no em dashes, and tokens are never called "quota".
+    assert "—" not in intro
+    assert "quota" not in intro.lower()
+
+
+def test_stat_line_shows_recoverable_tokens_and_drops_the_hardcoded_zero(html):
+    # The third segment was the literal `0` labelled "strategies", so it read
+    # zero for every user in every state. It now carries the recoverable-token
+    # estimate the view already fetches, tagged as an estimate.
+    assert '<b style="color:var(--accent)">0</b> strategies' not in html
+    assert "strategies" not in html
+    assert "~${fmtTokens(d.estTokens)} tok</b> recoverable" in html
+    # Sourced from the value load() already stores, not a second fetch.
+    assert "estTokens: f.estimated_recoverable_tokens" in html
+    # The duplicated pending segment (same variable as the mistake count) is gone.
+    assert "${relearnCount} pending ·" not in html
+
+
+def test_stat_line_drops_the_token_segment_when_there_is_no_estimate(html):
+    # The null path is the one nobody exercises: with no estimate the segment
+    # must disappear entirely rather than rendering "~0 tok recoverable".
+    start = html.index('<div class="cur-listhead">')
+    end = html.index("Rescan now", start)
+    head = html[start:end]
+    assert "${d.estTokens ? html`" in head
+    assert "` : null}" in head
+    assert "~0 tok" not in head
+
+
+# --- Review inbox select-all ----------------------------------------------- #
+def test_select_all_checkbox_sits_in_the_table_header_column(html):
+    # Same checkbox column and table styling as the rows it controls, not a new
+    # control bolted beside the table.
+    assert "function SelectAllCheckbox" in html
+    assert (
+        '<thead><tr><th style="width:26px"><${SelectAllCheckbox} '
+        "total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} />"
+    ) in html
+    # The per-row checkbox is untouched.
+    assert '<td><input type="checkbox" checked=${checked} onChange=${onToggle} /></td>' in html
+
+
+def test_select_all_reports_the_indeterminate_state_on_a_partial_selection(html):
+    # `indeterminate` is a DOM property with no HTML attribute, so it has to be
+    # assigned through a ref. A header box that shows plain "checked" over a
+    # partial selection invites accidental bulk actions.
+    start = html.index("function SelectAllCheckbox")
+    end = html.index("function RelearnRow", start)
+    fn = html[start:end]
+    assert "ref.current.indeterminate = selected > 0 && selected < total" in fn
+    # Fully checked only when every listed row is selected.
+    assert "const all = total > 0 && selected === total" in fn
+    assert "checked=${all}" in fn
+
+
+def test_select_all_toggles_off_when_everything_is_selected(html):
+    start = html.index("function nextSelectAllSelection")
+    end = html.index("// The table's select-all box.", start)
+    fn = html[start:end]
+    assert "if (all) next.delete(sig)" in fn
+    assert "else next.add(sig)" in fn
+    # The component delegates to it over the RENDERED row set.
+    assert (
+        "nextSelectAllSelection(visible.map(c => c.signature), prev)"
+    ) in html
+
+
+def test_select_all_applies_only_to_the_rendered_rows(html):
+    # THE load-bearing one. The list filters out locally-dismissed rows and rows
+    # approved in this session, so select-all must iterate `visible`, never the
+    # unfiltered d.clusters, or it would dismiss rows the user never saw.
+    start = html.index("const selectedVisible =")
+    end = html.index("const modalCluster =", start)
+    block = html[start:end]
+    assert "visible.filter(c => checked.has(c.signature))" in block
+    assert "visible.map(c => c.signature)" in block
+    assert "d.clusters" not in block
+    # The filter that makes `visible` a strict subset is still in place.
+    assert (
+        "const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) "
+        "&& !appliedSigs.has(c.signature))"
+    ) in html
+
+
+def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
+    # `checked` is not pruned when a row leaves the list, so dismissing the raw
+    # set would sweep along a signature that is no longer on screen.
+    start = html.index("const dismissChecked =")
+    end = html.index("const modalCluster =", start)
+    fn = html[start:end]
+    assert "visible.filter(c => checked.has(c.signature)).map(c => c.signature)" in fn
+    assert "...checked]" not in fn
+
+
+def test_dismiss_button_states_its_blast_radius(html):
+    # The action names how many rows it will act on before it fires, and counts
+    # the same scoped selection the header checkbox reports.
+    assert (
+        "disabled=${selectedCount === 0} onClick=${dismissChecked}>"
+        "${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}"
+    ) in html
+    # Not the raw, unscoped set that could overstate it.
+    assert "disabled=${checked.size === 0}" not in html
+
+
+def test_select_all_adds_no_bulk_approve(html):
+    # Dismiss is local and undone by a reload; Approve writes to disk. Exactly
+    # one bulk action exists on this table.
+    # Anchor inside ReviewInboxView: `cur-addbar` is used by other screens too.
+    view = html[html.index("function ReviewInboxView"):]
+    start = view.index('<div class="cur-addbar">')
+    end = view.index("visibleCost.length > 0", start)
+    bar = view[start:end]
+    # Exactly one button, and it is the Dismiss one. (The trailing hint text
+    # does mention Approve, pointing at the per-row flow, which is unchanged.)
+    assert bar.count("<button") == 1
+    assert "dismissChecked" in bar
+    assert "onClick=${approveChecked}" not in html
+    assert "Approve checked" not in html
+
+
+# --- no dollar figure escapes the framing, and no false basis in a comment -- #
+def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
+    # The false mechanism must not survive anywhere in the served UI, including
+    # in a comment where no test would otherwise look.
+    assert "can only ever count the API-billed slice" not in html
+    assert "reflect API traffic only" not in html
+    assert "of that is on API-billed traffic" not in html
+
+
+def test_receipts_comment_states_the_real_reason_the_units_differ(html):
+    start = html.index("// UNIT HIERARCHY is server-decided")
+    end = html.index("function ReceiptsHeader", start)
+    comment = html[start:end]
+    assert "no single model to price against" in comment
+    assert "list-price equivalent" in comment

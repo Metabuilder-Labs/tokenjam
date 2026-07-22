@@ -54,6 +54,7 @@ def _tj_isolated_home(tmp_path_factory):
         mp.setenv("USERPROFILE", str(fake_home))  # Windows Path.home()
 
         from tokenjam.core import config as cfg_mod
+        from tokenjam.core import transcript as transcript_mod
 
         mp.setattr(
             cfg_mod,
@@ -63,6 +64,20 @@ def _tj_isolated_home(tmp_path_factory):
                 Path(".tj/config.toml"),
                 fake_home / ".config" / "tj" / "config.toml",
             ],
+        )
+        # Same import-time-constant hazard as SEARCH_PATHS above, and the one
+        # with teeth: `transcript.DEFAULT_PROJECTS_ROOT` bakes the REAL
+        # `Path.home()` at import, so re-pointing HOME cannot move it
+        # afterwards. Left unpatched, anything that resolves the projects root
+        # (the self-improve loop's relearn detector, reached from the API
+        # routes) walks the developer's live ~/.claude/projects — thousands of
+        # transcripts parsed into Stories, and potentially a `claude` CLI
+        # distill shell-out — which stalls the suite for minutes instead of
+        # failing. Isolate it so tests only ever see a corpus they created.
+        mp.setattr(
+            transcript_mod,
+            "DEFAULT_PROJECTS_ROOT",
+            fake_home / ".claude" / "projects",
         )
         yield fake_home
 

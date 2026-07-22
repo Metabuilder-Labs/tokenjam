@@ -222,3 +222,45 @@ async def test_status_archive_filters_zero_signal_zombies(_db, _client):
     archived_ids = {a["agent_id"] for a in resp.json()["archived"]}
     assert "claude-code-real" in archived_ids
     assert "claude-code-zombie" not in archived_ids
+
+
+# ── lifecycle-status -> zone mapping (live tiles vs archive) ───────────────
+
+async def test_status_archives_completed_sessions(_db, _client):
+    # Backfilled Claude Code sessions land with status='completed'. It is a
+    # terminal status, so the session belongs in the archive — not dropped from
+    # both zones because the archive SQL only knew about 'closed'.
+    now = utcnow()
+    _db.upsert_session(make_session(
+        agent_id="claude-code-done", session_id="c-1", status="completed",
+        input_tokens=800, output_tokens=150, tool_call_count=4,
+        started_at=now - timedelta(hours=2), ended_at=now - timedelta(hours=1),
+    ))
+    data = (await _client.get("/api/v1/status")).json()
+    arch = [a for a in data["archived"] if a["session_id"] == "c-1"]
+    assert arch, data["archived"]
+    assert arch[0]["status"] == "completed"
+    # Terminal sessions never become a live tile.
+    assert not [a for a in data["agents"] if a["agent_id"] == "claude-code-done"]
+
+
+async def test_status_zone_split_by_lifecycle_status(_db, _client):
+    # Pin the whole mapping: 'active' + recent -> live tile; 'closed' and
+    # 'completed' -> archive only.
+    now = utcnow()
+    for sid, aid, status in (
+        ("live-1", "claude-code-live", "active"),
+        ("closed-1", "claude-code-closed", "closed"),
+        ("completed-1", "claude-code-completed", "completed"),
+    ):
+        _db.upsert_session(make_session(
+            agent_id=aid, session_id=sid, status=status,
+            input_tokens=500, output_tokens=100, tool_call_count=2,
+            started_at=now - timedelta(minutes=10), ended_at=now,
+        ))
+    data = (await _client.get("/api/v1/status")).json()
+    tile_agents = {a["agent_id"] for a in data["agents"]}
+    archived_ids = {a["session_id"] for a in data["archived"]}
+
+    assert tile_agents == {"claude-code-live"}
+    assert archived_ids == {"closed-1", "completed-1"}
