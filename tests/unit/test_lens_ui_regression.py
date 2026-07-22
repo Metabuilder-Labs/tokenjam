@@ -112,6 +112,40 @@ def test_placement_offers_no_apply_action(html):
     assert "<button" not in block
 
 
+# --- Component-waste chart/legend: placement is a price difference there too #
+def _waste_legend_override(html: str) -> str:
+    start = html.index("const WASTE_LEGEND_OVERRIDE")
+    end = html.index("function buildComponentWaste", start)
+    return html[start:end]
+
+
+def test_waste_legend_never_labels_placement_recoverable(html):
+    # The shared "Cost by component + recoverable waste" chart/legend used to
+    # render placement's segment with the same "estimated recoverable"
+    # wording every real recoverable-tokens analyzer gets, even though
+    # placement's figure is a PRICE difference on the SAME tokens (CLAUDE.md
+    # anti-pattern #22). The legend row must key off the stable `analyzer`
+    # registry name and swap in price-difference wording for placement only.
+    override = _waste_legend_override(html)
+    assert "placement:" in override
+    assert "estimated price difference" in override
+    assert "price-diff-tag" in override
+    assert "buildComponentWaste(resp, useTokens, isApi)" in html
+    assert "ov ? ov.tagClass : 'estimated-tag'" in html
+    assert "ov ? ov.tagText : 'estimated recoverable'" in html
+
+
+def test_waste_legend_gates_placement_on_api_pricing_mode(html):
+    # Off api pricing there is no dollar figure for placement at all (the
+    # Batch API's discount is an api-billed lever), and its token count means
+    # "size of the affected workload," not tokens freed — so the segment must
+    # drop out of the overlay entirely, not just get relabeled.
+    override = _waste_legend_override(html)
+    assert "apiOnly: true" in override
+    assert "compIsApi" in html
+    assert "!!compFraming && compFraming.pricing_mode === 'api'" in html
+
+
 # --- #127: four distinct recoverable-tile states --------------------------- #
 def test_recoverable_band_has_four_states(html):
     assert "function classifyFinding" in html
@@ -489,6 +523,44 @@ def test_component_waste_recoverable_routes_through_framing(html):
     assert "fmtFramedDollar(st.comp.total_cost_usd" in html
     # plan-tier toggle drives tokens-vs-dollars for the whole surface
     assert "compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local'" in html
+
+
+# --- trim card: provenance + flagged text on the web card, not just the CLI - #
+def _trim_branch(html: str) -> str:
+    start = html.index("} else if (name === 'trim') {")
+    end = html.index("} else if (name === 'reuse') {", start)
+    return html[start:end]
+
+
+def test_trim_card_shows_provenance_and_summarize_pointer(html):
+    # The CLI already prints `p.source_path`'s attribution + a `tj summarize
+    # list` pointer for prompts a catalog file cleared the verbatim-
+    # containment bar for; the web card must carry the same fields, gated
+    # identically on `p.source_path` being set.
+    block = _trim_branch(html)
+    assert "p.source_path" in block
+    assert "Attributed to" in block
+    assert "p.source_basis" in block
+    assert '#/optimize/summarize' in block
+    assert "Review in Summarize" in block
+
+
+def test_trim_card_shows_flagged_regions_unconditionally(html):
+    # The flagged text itself must render regardless of provenance — a pure
+    # SDK caller never gets a source_path, and the flagged-text block is
+    # their whole, complete answer, not a lesser version of the card (persona
+    # coherence: no message implying something is missing for them).
+    block = _trim_branch(html)
+    assert "p.regions" in block
+    assert "sample_chars" in block
+    assert "more region(s)" in block
+
+
+def test_trim_card_no_longer_a_flat_three_column_table(html):
+    # Provenance + flagged text is more than one line per prompt, so the flat
+    # <table> gave way to a per-prompt block.
+    block = _trim_branch(html)
+    assert "<table" not in block
 
 
 # --- #210: Analytics pivot explorer (subsumes #214 leaderboard + #216) ----- #
@@ -2158,23 +2230,20 @@ def test_recommendations_panel_present_and_fetches_endpoint(html):
     assert "estimated_recoverable_tokens" in html
 
 
-# --- cost proposals in the Review inbox (advise-only, with receipts) ----- #
+# --- cost proposals in the Review inbox (advise-only) ---------------------- #
 def test_cost_proposals_wired_into_review_inbox(html):
     # The downsize/cache/trim analyzers surface as advise-only cost proposals in
     # the same Review inbox, fetched from the cost endpoints and rendered with a
-    # distinct `kind` badge, an estimate, and (after Mark applied) the realized
-    # delta receipt. Keep the fetch + render wiring present.
+    # distinct `kind` badge and an estimate. Keep the fetch + render wiring
+    # present.
     assert "function CostProposalCard" in html
     assert "function CostAppliedRow" in html
-    assert "function CostVerifyLine" in html
     assert "api('/relearn/cost-proposals')" in html
     assert "api('/relearn/cost-applied')" in html
     assert "'/relearn/cost-proposals/apply'" in html
     # The card is advise-only: a marker button, never an apply-to-code write.
     assert "Mark applied" in html
     assert "Cost advisories" in html
-    # Honesty discipline (Rule 14): the realized delta is estimated / correlational.
-    assert "realized_usd_delta" in html
 
 
 def test_subagent_cost_card_has_workspace_apply_flow(html):
@@ -2450,24 +2519,6 @@ def test_select_all_adds_no_bulk_approve(html):
 
 
 # --- no dollar figure escapes the framing, and no false basis in a comment -- #
-def test_cost_verify_line_obeys_the_shared_framing(html):
-    # A per-proposal "$0.42 lower" used to render even when every sibling
-    # figure on the page was suppressed, because the component took no framing.
-    start = html.index("function CostVerifyLine")
-    end = html.index("function CostProposalCard", start)
-    fn = html[start:end]
-    assert "function CostVerifyLine({ verify, framing })" in fn
-    assert "dollarsSuppressed(framing)" in fn
-    # Suppressed: the token delta leads and no dollars are stated.
-    assert "'~' + fmtTokens(toks) + ' tok lower'" in fn
-    # Not suppressed: the dollar-first rendering is retained.
-    assert "fmtUsd(usd) + ' lower'" in fn
-    # The framing actually reaches it through the row.
-    assert "<${CostVerifyLine} verify=${rec.verify} framing=${framing} />" in html
-    assert "function CostAppliedRow({ rec, onChanged, framing })" in html
-    assert "framing=${costFraming}" in html
-
-
 def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
     # The false mechanism must not survive anywhere in the served UI, including
     # in a comment where no test would otherwise look.

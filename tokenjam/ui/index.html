@@ -2327,21 +2327,46 @@ function componentWasteTooltip(meta, fmtFn) {
   } };
 }
 
+// Per-analyzer legend-wording override for the component-waste chart/legend,
+// keyed by the API's stable `analyzer` registry name (never `title`, which is
+// display text). `placement` is the one entry today (CLAUDE.md anti-pattern
+// #22): its `estimated_recoverable_usd`/`_tokens` is a PRICE difference on
+// the SAME tokens (the Batch API bills the same work at half rate, freeing
+// nothing), so its legend row must never wear the "estimated recoverable"
+// wording/tag every sibling analyzer shares here — this mirrors the wording
+// already used on its own card in `OptimizeFinding`. `apiOnly: true` also
+// drops the segment from this overlay entirely off api pricing, matching
+// that same card's `pricing_mode === 'api'` gate: off that plan there is no
+// dollar figure to show at all (batch's discount is an api-billed lever the
+// plan can't pull), and in token framing its count means "size of the
+// affected workload," not tokens freed, so showing it as "recoverable"
+// tokens would be exactly as dishonest as showing the dollar figure.
+const WASTE_LEGEND_OVERRIDE = {
+  placement: { tagText: 'estimated price difference', tagClass: 'price-diff-tag', apiOnly: true },
+};
+
 // Build the cost-by-component + recoverable overlay from a /cost/components
 // response. `useTokens` (subscription/local) swaps measured cost $ → token
 // volume and recoverable $ → recoverable tokens, so the whole surface respects
-// plan-tier framing. Returns null when there's nothing to show.
-function buildComponentWaste(resp, useTokens) {
+// plan-tier framing. `isApi` gates `WASTE_LEGEND_OVERRIDE` entries marked
+// `apiOnly`. Returns null when there's nothing to show.
+function buildComponentWaste(resp, useTokens, isApi) {
   if (!resp || !resp.components) return null;
   const costSegs = resp.components.map(c => ({
     label: c.label, value: useTokens ? (c.tokens || 0) : (c.cost_usd || 0),
   }));
-  const recSegs = (resp.recoverable || []).map(r => ({
-    title: r.title, component: r.component,
-    value: useTokens ? (r.estimated_recoverable_tokens || 0) : (r.estimated_recoverable_usd || 0),
-    usd: r.estimated_recoverable_usd, tokens: r.estimated_recoverable_tokens,
-    basis: r.estimate_basis || '', caveat: r.caveat || '',
-  })).filter(r => r.value > 0);
+  const recSegs = (resp.recoverable || [])
+    .filter(r => {
+      const ov = WASTE_LEGEND_OVERRIDE[r.analyzer];
+      return !(ov && ov.apiOnly && !isApi);
+    })
+    .map(r => ({
+      title: r.title, component: r.component, analyzer: r.analyzer,
+      value: useTokens ? (r.estimated_recoverable_tokens || 0) : (r.estimated_recoverable_usd || 0),
+      usd: r.estimated_recoverable_usd, tokens: r.estimated_recoverable_tokens,
+      basis: r.estimate_basis || '', caveat: r.caveat || '',
+    }))
+    .filter(r => r.value > 0);
   const totalCost = costSegs.reduce((s, c) => s + c.value, 0);
   if (totalCost <= 0 && recSegs.length === 0) return null;
   return { costSegs, recSegs };
@@ -6367,11 +6392,30 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`
         : html`<div class="opt-line dim">No clusters above threshold (≥20 identical signatures).</div>`;
     } else if (name === 'trim') {
+      // Per-prompt block, not a flat table (web card parity with the
+      // CLI's `_render_trim`): each prompt can now carry a provenance line
+      // (only when `source_path` cleared the verbatim-containment bar, see
+      // prompt_bloat.py's module docstring) plus the flagged text itself —
+      // more than fits one table row. Provenance is a bonus for a
+      // harness-shaped workspace with a catalog file (CLAUDE.md, AGENTS.md,
+      // ...), never the baseline: a pure-SDK caller never gets a
+      // `source_path`, and for them the flagged-text block below is the
+      // whole, complete answer, not a lesser version of it — so that block
+      // renders unconditionally and the provenance line/Summarize pointer
+      // render only when `source_path` is actually set.
       body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled — needs [capture] prompts = true and tokenjam[bloat].'}</div>`
         : (fd.per_prompt || []).length ? html`
           <div class="opt-line">${fd.prompts_scored} prompt(s) scored; ${fd.total_bloat_chars} of ${fd.total_chars} chars flagged.</div>
-          <table class="opt-table"><thead><tr><th>Agent</th><th>Bloat</th><th>~Tokens</th></tr></thead>
-            <tbody>${fd.per_prompt.slice(0, 5).map(p => html`<tr><td class="mono">${p.agent_id}</td><td>${p.bloat_chars}/${p.prompt_chars}</td><td>~${p.estimated_token_reduction}</td></tr>`)}</tbody></table>`
+          ${fd.per_prompt.slice(0, 5).map((p, i) => html`
+            <div key=${i} style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+              <div class="opt-line"><span class="mono">${p.agent_id}</span> <span class="dim">${p.bloat_chars}/${p.prompt_chars} chars flagged, ~${p.estimated_token_reduction} tokens trimmable</span></div>
+              ${p.source_path ? html`
+                <div class="opt-line dim">Attributed to <span class="mono">${p.source_path}</span> (${p.source_basis}) <a class="sz-link" href="#/optimize/summarize">Review in Summarize →</a></div>` : null}
+              ${(p.regions || []).length ? html`
+                <div class="opt-line dim">Flagged text:</div>
+                ${p.regions.slice(0, 3).map((r, j) => html`<div key=${j} class="opt-line dim" style="font-style:italic;margin-left:8px">"${(r.sample_chars || '').replace(/\n/g, ' ').trim()}…" <span class="dim">(${r.char_length} chars)</span></div>`)}
+                ${p.regions.length > 3 ? html`<div class="opt-line dim" style="margin-left:8px">…and ${p.regions.length - 3} more region(s).</div>` : null}` : null}
+            </div>`)}`
         : html`<div class="opt-line dim">No bloat regions above threshold.</div>`;
     } else if (name === 'reuse') {
       body = (fd.clusters || []).length ? html`
@@ -6514,7 +6558,8 @@ function OptimizeView({ params }) {
   const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement'];
   const compFraming = st.comp ? st.comp.framing : framing;
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
-  const waste = buildComponentWaste(st.comp, useTokens);
+  const compIsApi = !!compFraming && compFraming.pricing_mode === 'api';
+  const waste = buildComponentWaste(st.comp, useTokens, compIsApi);
   const wasteFmtY = useTokens ? fmtTokens : fmtCost;
   const wasteDominant = waste ? dominantSplit(waste.costSegs) : null;
 
@@ -6580,15 +6625,17 @@ function OptimizeView({ params }) {
           </div>` : null}
           ${waste.recSegs.length ? html`
             <div class="waste-list">
-              ${waste.recSegs.map(r => html`
+              ${waste.recSegs.map(r => {
+                const ov = WASTE_LEGEND_OVERRIDE[r.analyzer];
+                return html`
                 <div class="waste-row">
                   <span class="waste-name">${r.title === 'Summarize'
                     ? html`<a class="sz-link" href="#/optimize/summarize">${r.title}</a>`
                     : r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
-                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)} <span class="estimated-tag" title=${r.caveat || r.basis}>estimated recoverable</span>${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
+                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)} <span class=${ov ? ov.tagClass : 'estimated-tag'} title=${r.caveat || r.basis}>${ov ? ov.tagText : 'estimated recoverable'}</span>${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
-              `)}
+              `;})}
             </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window — no estimated waste from any analyzer.</div>`}
           ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
         </div>` : null}
