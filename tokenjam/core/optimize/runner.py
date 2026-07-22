@@ -325,6 +325,8 @@ def _build_finding_constructors() -> dict:
         BATCH_FRICTION_NOTE,
         BatchCandidate,
         BatchPlacementFinding,
+        MIN_GROUP_COST_USD,
+        MIN_SESSIONS_FOR_CADENCE,
     )
     from tokenjam.core.optimize.analyzers.cache_recommend import (
         CachePrefixCandidate,
@@ -575,6 +577,12 @@ def _build_finding_constructors() -> dict:
             estimate_basis=d.get("estimate_basis", BATCH_ESTIMATE_BASIS),
             estimate_confidence=d.get("estimate_confidence", "estimated"),
             friction=d.get("friction", BATCH_FRICTION_NOTE),
+            min_sessions_for_cadence=int(
+                d.get("min_sessions_for_cadence", MIN_SESSIONS_FOR_CADENCE)
+            ),
+            min_group_cost_usd=float(
+                d.get("min_group_cost_usd", MIN_GROUP_COST_USD)
+            ),
         )
 
     return {

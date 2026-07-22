@@ -14,6 +14,8 @@ from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize.analyzers.batch_placement import (
     BATCH_DISCOUNT,
     MAX_START_GAP_CV,
+    MIN_GROUP_COST_USD,
+    MIN_SESSIONS_FOR_CADENCE,
     analyze_batch_placement,
     gap_coefficient_of_variation,
 )
@@ -102,7 +104,10 @@ def test_mid_run_human_turn_disqualifies_the_group(db):
         start_time=starts[0] + timedelta(minutes=5),
     ))
     since, until = _window()
-    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    # Always present now — never None — but empty: nothing qualified.
+    assert finding is not None
+    assert finding.candidates == []
 
 
 def test_irregular_start_times_are_not_a_candidate(db):
@@ -113,13 +118,17 @@ def test_irregular_start_times_are_not_a_candidate(db):
             session_id=f"adhoc-{i}", start_time=BASE + timedelta(hours=offset),
         ))
     since, until = _window()
-    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    assert finding is not None
+    assert finding.candidates == []
 
 
 def test_too_few_sessions_to_call_a_cadence(db):
     _cron_sessions(db, count=4)
     since, until = _window()
-    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    assert finding is not None
+    assert finding.candidates == []
 
 
 def test_config_lowers_cadence_bar_surfaces_previously_hidden_group(db):
@@ -129,7 +138,10 @@ def test_config_lowers_cadence_bar_surfaces_previously_hidden_group(db):
     min_sessions_for_cadence) surfaces it."""
     _cron_sessions(db, count=4)
     since, until = _window()
-    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+    empty = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    assert empty is not None
+    assert empty.candidates == []
+    assert empty.min_sessions_for_cadence == MIN_SESSIONS_FOR_CADENCE
 
     finding = analyze_batch_placement(
         db.conn, since, until, None, 12.0, min_sessions_for_cadence=4,
@@ -143,7 +155,9 @@ def test_config_lowers_cadence_bar_surfaces_previously_hidden_group(db):
 def test_trivial_spend_is_not_worth_an_architectural_change(db):
     _cron_sessions(db, count=6, cost_usd=0.01)
     since, until = _window()
-    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    assert finding is not None
+    assert finding.candidates == []
 
 
 def test_config_lowers_group_cost_bar_surfaces_previously_hidden_group(db):
@@ -152,7 +166,10 @@ def test_config_lowers_group_cost_bar_surfaces_previously_hidden_group(db):
     threads from [optimize] min_group_cost_usd) surfaces it."""
     _cron_sessions(db, count=6, cost_usd=0.01)
     since, until = _window()
-    assert analyze_batch_placement(db.conn, since, until, None, 12.0) is None
+    empty = analyze_batch_placement(db.conn, since, until, None, 12.0)
+    assert empty is not None
+    assert empty.candidates == []
+    assert empty.min_group_cost_usd == MIN_GROUP_COST_USD
 
     finding = analyze_batch_placement(
         db.conn, since, until, None, 12.0, min_group_cost_usd=0.01,
@@ -184,9 +201,14 @@ def test_downsize_run_reads_placement_thresholds_from_ctx_config(db):
             window_days=WINDOW_DAYS, summary=summary, report=OptimizeReport(window=summary),
         )
 
+    # The finding is always attached now — even below the cadence bar — but
+    # carries no candidates and the module default thresholds.
     default_ctx = _ctx(TjConfig(version="1"))
     run_downsize(default_ctx)
-    assert "placement" not in default_ctx.report.findings
+    assert "placement" in default_ctx.report.findings
+    assert default_ctx.report.findings["placement"].candidates == []
+    assert (default_ctx.report.findings["placement"].min_sessions_for_cadence
+            == MIN_SESSIONS_FOR_CADENCE)
 
     lowered_ctx = _ctx(TjConfig(
         version="1", optimize=OptimizeConfig(min_sessions_for_cadence=4),
@@ -194,6 +216,7 @@ def test_downsize_run_reads_placement_thresholds_from_ctx_config(db):
     run_downsize(lowered_ctx)
     assert "placement" in lowered_ctx.report.findings
     assert lowered_ctx.report.findings["placement"].min_sessions_for_cadence == 4
+    assert len(lowered_ctx.report.findings["placement"].candidates) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -256,6 +279,8 @@ def test_placement_survives_the_report_dict_round_trip(db):
     assert restored.estimated_recoverable_usd == finding.estimated_recoverable_usd
     assert restored.estimate_basis == finding.estimate_basis
     assert restored.friction == finding.friction
+    assert restored.min_sessions_for_cadence == finding.min_sessions_for_cadence
+    assert restored.min_group_cost_usd == finding.min_group_cost_usd
     # The nested candidates come back as dataclasses, not dicts.
     assert [c.agent_id for c in restored.candidates] == ["nightly"]
     original = finding.candidates[0]
@@ -415,3 +440,47 @@ def test_render_report_surfaces_placement_instead_of_no_candidates(db, capsys):
 
     assert "No candidates flagged" not in out
     assert "nightly" in out
+
+
+def test_empty_placement_finding_reaches_rank_findings_and_renders_live_thresholds(db, capsys):
+    """End-to-end chain, non-qualifying window: `downsize`'s run(ctx) always
+    attaches findings['placement'] now, so _rank_findings iterates it and
+    _render_report's dispatch reaches _render_placement's empty-state branch
+    with the finding's OWN (config-overridable) threshold values rather than
+    the message never rendering at all."""
+    from tokenjam.cli.cmd_optimize import _rank_findings, _render_report
+    from tokenjam.core.config import OptimizeConfig, TjConfig
+    from tokenjam.core.optimize.analyzers.model_downgrade import run as run_downsize
+    from tokenjam.core.optimize.types import AnalyzerContext, OptimizeReport, WindowSummary
+
+    _cron_sessions(db, count=4)  # below MIN_SESSIONS_FOR_CADENCE: no candidate
+    since, until = _window()
+    summary = WindowSummary(
+        since=since, until=until, days=WINDOW_DAYS, sessions=4, spans=4,
+        total_tokens=10_000, total_cost_usd=4.0, thin_data=False,
+    )
+    config = TjConfig(
+        version="1", optimize=OptimizeConfig(min_group_cost_usd=2.5),
+    )
+    report = OptimizeReport(window=summary)
+    ctx = AnalyzerContext(
+        conn=db.conn, config=config, since=since, until=until, agent_id=None,
+        window_days=WINDOW_DAYS, summary=summary, report=report,
+    )
+    run_downsize(ctx)
+
+    assert "placement" in report.findings
+    assert report.findings["placement"].candidates == []
+    assert report.findings["placement"].min_group_cost_usd == 2.5
+
+    ranked = _rank_findings(report, requested=None)
+    assert "placement" in dict(ranked)
+
+    _render_report(report, agent=None, requested=None, pricing_mode="api")
+    out = capsys.readouterr().out
+
+    assert "No unattended, cadence-regular workloads" in out
+    assert f"≥{MIN_SESSIONS_FOR_CADENCE} sessions" in out
+    assert "≥$2.50" in out
+    assert "min_sessions_for_cadence" in out
+    assert "min_group_cost_usd" in out

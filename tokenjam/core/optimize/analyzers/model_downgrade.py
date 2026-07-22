@@ -386,12 +386,19 @@ def run(ctx: AnalyzerContext) -> None:
     it under ``findings['placement']``. It stays a check rather than its own
     registered analyzer so the placement card ships without a new analyzer name
     on the CLI.
+
+    ``analyze_batch_placement`` always returns a finding (never ``None``), so
+    it is attached unconditionally — including a non-qualifying window, where
+    it carries an empty candidate list plus the effective thresholds applied.
+    That keeps ``findings['placement']`` reachable by ``_rank_findings`` /
+    ``_render_placement`` in every case, so the CLI's empty-state message
+    (with live threshold values) actually renders instead of being dead code.
     """
     ctx.report.downgrade = analyze_model_downgrade(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id, ctx.window_days,
     )
     optimize_cfg = getattr(ctx.config, "optimize", None)
-    placement = analyze_batch_placement(
+    ctx.report.findings["placement"] = analyze_batch_placement(
         ctx.conn, ctx.since, ctx.until, ctx.agent_id,
         ctx.summary.total_cost_usd or 0.0,
         min_sessions_for_cadence=getattr(
@@ -401,8 +408,6 @@ def run(ctx: AnalyzerContext) -> None:
             optimize_cfg, "min_group_cost_usd", MIN_GROUP_COST_USD,
         ),
     )
-    if placement is not None:
-        ctx.report.findings["placement"] = placement
 
 
 # ---------------------------------------------------------------------------
