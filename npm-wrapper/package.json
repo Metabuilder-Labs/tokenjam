@@ -1,6 +1,6 @@
 {
   "name": "tokenjam",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "description": "Zero-install launcher for TokenJam (tj): npx tokenjam runs the Python CLI via uvx/pipx and reports the recurring mistakes your AI agent keeps repeating, no setup required.",
   "keywords": ["claude-code", "ccusage", "tokens", "cost-optimization", "llm", "agents", "observability", "tokenjam", "anthropic", "claude", "token-usage", "agent-behavior", "cli", "statusline", "opentelemetry", "agent-observability"],
   "homepage": "https://tokenjam.dev",
