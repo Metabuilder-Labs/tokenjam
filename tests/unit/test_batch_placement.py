@@ -16,6 +16,7 @@ from tokenjam.core.optimize.analyzers.batch_placement import (
     MAX_START_GAP_CV,
     MIN_GROUP_COST_USD,
     MIN_SESSIONS_FOR_CADENCE,
+    _cluster_sessions_by_gap,
     analyze_batch_placement,
     gap_coefficient_of_variation,
 )
@@ -243,6 +244,100 @@ def test_jitter_either_side_of_the_cv_threshold(db):
     assert "tight" in names
     assert "loose" not in names
     assert finding.candidates[0].gap_cv < MAX_START_GAP_CV
+
+
+# --------------------------------------------------------------------------- #
+# Gap-magnitude clustering (one agent_id, more than one schedule)
+# --------------------------------------------------------------------------- #
+
+def test_two_distinct_cadences_under_one_agent_are_each_their_own_candidate(db):
+    """An hourly job and a nightly job sharing one agent_id used to be merged
+    into one irregular-looking timeline and hidden as a whole. Clustering by
+    gap magnitude first must recover both as independent, cadence-regular
+    candidates."""
+    agent_id = "mixed"
+    # Cluster A: 6 sessions an hour apart.
+    for i in range(6):
+        db.insert_span(make_llm_span(
+            agent_id=agent_id, model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=1_000, output_tokens=200, cost_usd=1.0,
+            session_id=f"{agent_id}-a{i}", start_time=BASE + timedelta(hours=i),
+        ))
+    # Cluster B: 6 sessions 8 hours apart, starting well after cluster A ends
+    # (a 45-hour jump — far past CLUSTER_GAP_RATIO of either cadence).
+    b_start = BASE + timedelta(hours=50)
+    for i in range(6):
+        db.insert_span(make_llm_span(
+            agent_id=agent_id, model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=1_000, output_tokens=200, cost_usd=1.0,
+            session_id=f"{agent_id}-b{i}", start_time=b_start + timedelta(hours=8 * i),
+        ))
+    since, until = _window()
+
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+
+    assert finding is not None
+    assert len(finding.candidates) == 2
+    assert [c.agent_id for c in finding.candidates] == [agent_id, agent_id]
+    sessions_seen = sorted(c.sessions for c in finding.candidates)
+    assert sessions_seen == [6, 6]
+    gaps_seen = sorted(c.median_gap_seconds for c in finding.candidates)
+    assert gaps_seen == [pytest.approx(3600.0), pytest.approx(28800.0)]
+    for c in finding.candidates:
+        assert c.gap_cv == pytest.approx(0.0)
+
+
+def test_cluster_too_small_to_judge_is_skipped_not_guessed(db):
+    """A short, differently-cadenced tail under the same agent_id must not be
+    forced into a candidate just because it clustered separately — below
+    ``min_sessions_for_cadence`` it is dropped, same as any other
+    too-few-sessions group."""
+    agent_id = "mixed-tail"
+    for i in range(6):
+        db.insert_span(make_llm_span(
+            agent_id=agent_id, model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=1_000, output_tokens=200, cost_usd=1.0,
+            session_id=f"{agent_id}-a{i}", start_time=BASE + timedelta(hours=i),
+        ))
+    # Only 3 sessions in the second cluster: enough to cluster apart from the
+    # first (huge gap jump) but not enough to call a cadence.
+    tail_start = BASE + timedelta(hours=50)
+    for i in range(3):
+        db.insert_span(make_llm_span(
+            agent_id=agent_id, model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=1_000, output_tokens=200, cost_usd=1.0,
+            session_id=f"{agent_id}-b{i}", start_time=tail_start + timedelta(hours=8 * i),
+        ))
+    since, until = _window()
+
+    finding = analyze_batch_placement(db.conn, since, until, None, 12.0)
+
+    assert finding is not None
+    assert len(finding.candidates) == 1
+    assert finding.candidates[0].sessions == 6
+
+
+def test_cluster_sessions_by_gap_splits_on_a_large_ratio_jump():
+    sessions = [
+        {"start": BASE + timedelta(hours=h)} for h in [0, 1, 2, 3, 4, 5]
+    ] + [
+        {"start": BASE + timedelta(hours=50 + 8 * i)} for i in range(6)
+    ]
+    clusters = _cluster_sessions_by_gap(sessions)
+    assert [len(c) for c in clusters] == [6, 6]
+
+
+def test_cluster_sessions_by_gap_keeps_one_cadence_with_ordinary_jitter():
+    # Gaps of 6h +/- 15 minutes: ordinary jitter within one cadence must not
+    # fragment into multiple clusters.
+    starts = [BASE]
+    for i in range(7):
+        drift = timedelta(minutes=15 if i % 2 == 0 else -15)
+        starts.append(starts[-1] + timedelta(hours=6) + drift)
+    sessions = [{"start": s} for s in starts]
+    clusters = _cluster_sessions_by_gap(sessions)
+    assert len(clusters) == 1
+    assert len(clusters[0]) == 8
 
 
 # --------------------------------------------------------------------------- #
