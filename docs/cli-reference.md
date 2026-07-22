@@ -212,7 +212,7 @@ tj optimize --export-config claude-code    # write advisory routing recommendati
 tj optimize --json                         # machine-readable report
 ```
 
-Analyzer names: `downsize`, `cache`, `cache-recommend`, `trim`, `reuse`, `script`, `subagent`, `summarize`, `verbosity`, `deadweight`, `relearn`, `budget-projection`.
+Analyzer names: `downsize`, `cache`, `cache-recommend`, `resend`, `trim`, `reuse`, `script`, `subagent`, `summarize`, `verbosity`, `deadweight`, `relearn`, `budget-projection`.
 
 `relearn` finds failure signatures that recur across three or more sessions, the blockers an agent silently re-hits. Act on what it finds with `tj relearn`.
 
