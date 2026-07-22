@@ -48,6 +48,17 @@ MAX_START_GAP_CV = 0.15
 #: A workload below this window spend is not worth an architectural change.
 MIN_GROUP_COST_USD = 1.0
 
+#: An agent_id is not a schedule. When a gap between consecutive session
+#: starts (in time order) is more than this many times the running median gap
+#: of the cluster it would join -- or less than its reciprocal -- it opens a
+#: new cluster instead. A genuine schedule change or a second, unrelated
+#: cadence sharing the same agent_id (an hourly job and a nightly job, say)
+#: differs by an order of magnitude or more; ordinary jitter within one
+#: cadence stays within a small multiple of its own median gap. Chosen wide
+#: (3x) on purpose: this only ever needs to catch a *different* cadence, never
+#: to fragment jitter within the same one -- see MAX_START_GAP_CV for that job.
+CLUSTER_GAP_RATIO = 3.0
+
 #: Construction footnote for the card's dollar figure.
 BATCH_ESTIMATE_BASIS = (
     "Window spend of the workloads whose session starts fit a regular cadence "
@@ -115,6 +126,48 @@ def gap_coefficient_of_variation(starts: list[datetime]) -> float | None:
     if mean_gap <= 0:
         return None
     return statistics.stdev(gaps) / mean_gap
+
+
+def _cluster_sessions_by_gap(
+    sessions: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Split one agent's sessions into contiguous groups that each look like a
+    single cadence, ordered by start time.
+
+    Grouping solely by ``agent_id`` conflates every schedule that agent ever
+    ran: an hourly job and a nightly job sharing one agent_id interleave into
+    a timeline whose overall gap spread hides both as irregular, and two
+    unrelated schedules can occasionally line up just well enough over a
+    short window to misread as one regular cadence. Walking the sorted starts
+    and cutting a new cluster whenever a gap jumps past ``CLUSTER_GAP_RATIO``
+    of the current cluster's own running median gap separates a real cadence
+    change (or a second cadence) from ordinary jitter within one cadence,
+    without ever inventing structure the gap sequence doesn't show. Each
+    resulting cluster is evaluated as its own candidate group; the caller is
+    responsible for skipping any cluster too small to judge (see
+    ``min_sessions_for_cadence`` at the call site) rather than guessing at it.
+    """
+    ordered = sorted(sessions, key=lambda s: s["start"])
+    if not ordered:
+        return []
+    clusters: list[list[dict[str, Any]]] = [[ordered[0]]]
+    current_gaps: list[float] = []
+    for prev, cur in zip(ordered, ordered[1:]):
+        gap = (cur["start"] - prev["start"]).total_seconds()
+        is_outlier = False
+        if current_gaps:
+            local_median = statistics.median(current_gaps)
+            is_outlier = local_median > 0 and (
+                gap > local_median * CLUSTER_GAP_RATIO
+                or gap < local_median / CLUSTER_GAP_RATIO
+            )
+        if is_outlier:
+            clusters.append([cur])
+            current_gaps = []
+        else:
+            clusters[-1].append(cur)
+            current_gaps.append(gap)
+    return clusters
 
 
 def _session_rows(
@@ -228,32 +281,38 @@ def analyze_batch_placement(
 
     candidates: list[BatchCandidate] = []
     for agent, sessions in sorted(by_agent.items()):
-        if len(sessions) < min_sessions_for_cadence:
-            continue
-        if any(s["session_id"] in interactive for s in sessions):
-            continue
-        starts = sorted(s["start"] for s in sessions)
-        cv = gap_coefficient_of_variation(starts)
-        if cv is None or cv >= MAX_START_GAP_CV:
-            continue
-        cost = sum(s["cost_usd"] for s in sessions)
-        if cost < min_group_cost_usd:
-            continue
-        gaps = [
-            (b - a).total_seconds()
-            for a, b in zip(starts, starts[1:], strict=False)
-        ]
-        candidates.append(BatchCandidate(
-            agent_id=agent,
-            sessions=len(sessions),
-            first_start=starts[0].isoformat(),
-            last_start=starts[-1].isoformat(),
-            median_gap_seconds=round(statistics.median(gaps), 1),
-            gap_cv=round(cv, 4),
-            cost_usd=round(cost, 6),
-            tokens=sum(s["tokens"] for s in sessions),
-            estimated_batch_saving_usd=round(cost * BATCH_DISCOUNT, 6),
-        ))
+        # An agent_id is not a schedule: cluster by inter-arrival gap
+        # magnitude first so a second, differently-cadenced workload sharing
+        # this agent_id is judged on its own rather than diluting (or
+        # coincidentally mimicking) a single cadence. See
+        # `_cluster_sessions_by_gap`.
+        for cluster in _cluster_sessions_by_gap(sessions):
+            if len(cluster) < min_sessions_for_cadence:
+                continue   # too small a cluster to judge a cadence: skip, don't guess
+            if any(s["session_id"] in interactive for s in cluster):
+                continue
+            starts = sorted(s["start"] for s in cluster)
+            cv = gap_coefficient_of_variation(starts)
+            if cv is None or cv >= MAX_START_GAP_CV:
+                continue
+            cost = sum(s["cost_usd"] for s in cluster)
+            if cost < min_group_cost_usd:
+                continue
+            gaps = [
+                (b - a).total_seconds()
+                for a, b in zip(starts, starts[1:], strict=False)
+            ]
+            candidates.append(BatchCandidate(
+                agent_id=agent,
+                sessions=len(cluster),
+                first_start=starts[0].isoformat(),
+                last_start=starts[-1].isoformat(),
+                median_gap_seconds=round(statistics.median(gaps), 1),
+                gap_cv=round(cv, 4),
+                cost_usd=round(cost, 6),
+                tokens=sum(s["tokens"] for s in cluster),
+                estimated_batch_saving_usd=round(cost * BATCH_DISCOUNT, 6),
+            ))
 
     if not candidates:
         return _empty_finding(window_cost_usd, min_sessions_for_cadence, min_group_cost_usd)

@@ -22,11 +22,16 @@ _KILL_WAIT_S = 1.0
 _POLL_INTERVAL_S = 0.05
 
 # Before anything's been found+signaled, a single miss from `_find_serve_pid`
-# can just be racing a just-spawned child's execve (it hasn't written its
-# state file / become visible yet) rather than "nothing running". Retry a
-# bounded few times before concluding that. Once something HAS been found,
-# a miss means discovery is genuinely done -- see the loop below.
-_DISCOVERY_MAX_MISSES = 5
+# can mean the daemon is still booting rather than "nothing running": the
+# state file (server_state.py) is written by cmd_serve.py's lifespan only
+# AFTER the scheduler starts, the optional proxy starts, and a DB call
+# (apply_declared_plans_to_sessions) runs -- well after uvicorn/FastAPI import
+# and port bind, easily more than a few hundred ms on a cold start. Retry
+# across a realistic serve-boot window before concluding "not running".
+# Once something HAS been found, a miss means discovery is genuinely done --
+# see the loop below -- so this only adds latency to the "nothing found yet"
+# path, never to the common already-found case.
+_DISCOVERY_MAX_MISSES = 30
 _DISCOVERY_RETRY_S = 0.1
 
 
@@ -68,7 +73,11 @@ def stop_tj_serve(*, quiet: bool = False) -> tuple[bool, list[str]]:
     # since it writes the same state file regardless of how it was launched.
     signaled: set[int] = set()
     misses = 0
-    for _ in range(20):
+    # Bounded by _DISCOVERY_MAX_MISSES (the pre-signal discovery retries) plus
+    # headroom for the post-signal existence checks below (multiple daemons
+    # signaled in turn -- e.g. a launchd/systemd one plus an orphan foreground
+    # process -- each needing its own iteration to confirm "nothing left").
+    for _ in range(_DISCOVERY_MAX_MISSES + 20):
         pid = _find_serve_pid()
         if not pid:
             if signaled:

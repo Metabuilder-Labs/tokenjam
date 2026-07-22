@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -55,6 +56,64 @@ def _git_repo(tmp_path):
 def test_slugify_never_empty():
     assert pa.slugify("") == "fix"
     assert pa.slugify("cwd / relative-path confusion!!") == "cwd-relative-path-confusion"
+
+
+def test_slugify_preserves_trailing_hash_short_prefix():
+    """No truncation pressure — the hash survives regardless, sanity check."""
+    slug = pa.slugify("Deterministic tool pattern: Bash -> Read (a1b2c3d4e5f6)")
+    assert slug.endswith("-a1b2c3d4e5f6")
+
+
+def test_slugify_two_clusters_sharing_a_long_tool_list_prefix_never_collide():
+    """FIX 1 (slug collision / skill-file overwrite): two DIFFERENT clusters
+    whose ``tool_list`` prefix is identical (and long enough that the naive
+    ``s[:60]`` truncation used to cut the disambiguating cluster_hash off
+    the end) must still slugify to two DIFFERENT slugs — otherwise they'd
+    resolve to the same ``default_target_path`` skill file and approving
+    the second proposal would silently overwrite the first cluster's file.
+    """
+    shared_prefix = " -> ".join(["Bash", "Read", "Write", "Edit", "Grep", "Glob"] * 4)
+    title_a = f"Deterministic tool pattern: {shared_prefix} (aaaaaaaaaaaa)"
+    title_b = f"Deterministic tool pattern: {shared_prefix} (bbbbbbbbbbbb)"
+
+    slug_a = pa.slugify(title_a)
+    slug_b = pa.slugify(title_b)
+
+    assert slug_a != slug_b
+    assert slug_a.endswith("-aaaaaaaaaaaa")
+    assert slug_b.endswith("-bbbbbbbbbbbb")
+    assert len(slug_a) <= 60 and len(slug_b) <= 60
+
+
+def test_slug_collision_regression_via_full_write_plan(cfg, tmp_path):
+    """End-to-end: applying two rung-2 clusters that previously collided on
+    one slug must now land at two DIFFERENT default_target_path locations,
+    so approving the second never overwrites the first cluster's skill
+    file."""
+    shared_prefix = " -> ".join(["Bash", "Read", "Write", "Edit", "Grep", "Glob"] * 4)
+    cluster_a = _cluster(
+        signature="script:aaaaaaaaaaaa", family_key=None, rung=2,
+        title=f"Deterministic tool pattern: {shared_prefix} (aaaaaaaaaaaa)",
+    )
+    cluster_b = _cluster(
+        signature="script:bbbbbbbbbbbb", family_key=None, rung=2,
+        title=f"Deterministic tool pattern: {shared_prefix} (bbbbbbbbbbbb)",
+    )
+    slug_a = pa.slugify(cluster_a["title"])
+    slug_b = pa.slugify(cluster_b["title"])
+    assert slug_a != slug_b
+
+    target_a = tmp_path / ".claude" / "skills" / slug_a / "SKILL.md"
+    target_b = tmp_path / ".claude" / "skills" / slug_b / "SKILL.md"
+    result_a = pa.apply_relearn_fix(cfg, cluster_a, target_path=str(target_a),
+                                     scope="project", go=True)
+    result_b = pa.apply_relearn_fix(cfg, cluster_b, target_path=str(target_b),
+                                     scope="project", go=True)
+
+    assert result_a["record"]["target_path"] != result_b["record"]["target_path"]
+    assert target_a.is_file() and target_b.is_file()
+    assert "aaaaaaaaaaaa" in target_a.read_text()
+    assert "bbbbbbbbbbbb" in target_b.read_text()
 
 
 def test_default_target_path_user_global(monkeypatch, tmp_path):
@@ -711,6 +770,79 @@ def test_revert_refuses_when_target_became_a_symlink(cfg, tmp_path):
     with pytest.raises(pa.RelearnApplyRefused, match="symlink"):
         pa.revert_applied_fix(cfg, fix_id)
     assert elsewhere.read_text() == "do not touch\n"   # untouched
+
+
+# --- FIX 2: ledger read-modify-write must be serialized (no lost updates) ----
+
+def test_concurrent_applies_do_not_lose_ledger_records(cfg, tmp_path):
+    """Unsynchronized ``_load_ledger``/``_write_ledger`` (read-JSON -> mutate
+    -> write-whole-file) races: two concurrent writers can both read the
+    same on-disk list, each append their own record to their own in-memory
+    copy, and whichever finishes ``_write_ledger`` last "wins", silently
+    dropping the other's record. This applies N concurrent ``apply``s (each
+    to its own target file, so there's no write-target collision — only the
+    shared ledger is contended) and asserts every one of them survived."""
+    n = 24
+    barrier = threading.Barrier(n)
+
+    def _apply_one(i: int) -> None:
+        target = tmp_path / f"note_{i}.md"
+        target.write_text(f"# note {i}\n", encoding="utf-8")
+        barrier.wait()   # maximize actual concurrent-write contention
+        pa.apply_relearn_fix(
+            cfg, _cluster(signature=f"sig-{i}", family_key=f"sig-{i}"),
+            target_path=str(target), scope="project", go=True,
+        )
+
+    threads = [threading.Thread(target=_apply_one, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    records = pa.list_applied(cfg)
+    assert len(records) == n, (
+        f"expected {n} ledger records, got {len(records)} — a concurrent "
+        f"_write_ledger race silently dropped {n - len(records)} apply(s)"
+    )
+    assert {r["signature"] for r in records} == {f"sig-{i}" for i in range(n)}
+
+
+def test_concurrent_updates_to_distinct_records_all_land(cfg, tmp_path):
+    """Same race, via ``_update_record`` (the enable/disable/revert path):
+    N pre-existing records each get an independent field update from a
+    separate thread; every update must be visible afterward, none lost."""
+    n = 16
+    fix_ids = []
+    for i in range(n):
+        target = tmp_path / f"note_{i}.md"
+        target.write_text(f"# note {i}\n", encoding="utf-8")
+        result = pa.apply_relearn_fix(
+            cfg, _cluster(signature=f"upd-{i}", family_key=f"upd-{i}"),
+            target_path=str(target), scope="project", go=True,
+        )
+        fix_ids.append(result["record"]["id"])
+
+    barrier = threading.Barrier(n)
+
+    def _update_one(fix_id: str, marker: str) -> None:
+        barrier.wait()
+        pa._update_record(cfg, fix_id, revert_commit=marker)
+
+    threads = [
+        threading.Thread(target=_update_one, args=(fid, f"marker-{i}"))
+        for i, fid in enumerate(fix_ids)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    records = {r["id"]: r for r in pa.list_applied(cfg)}
+    for i, fid in enumerate(fix_ids):
+        assert records[fid]["revert_commit"] == f"marker-{i}", (
+            f"update for {fid} was lost — concurrent _update_record race"
+        )
 
 
 # --- must-fix #4: :memory:/"" storage never falls back to the real ~/.tj ------

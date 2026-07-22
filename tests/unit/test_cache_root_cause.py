@@ -35,7 +35,14 @@ def db():
 
 
 def _window():
-    return BASE - timedelta(hours=1), BASE + timedelta(hours=6)
+    # Wide enough to comfortably contain every fixture in this file,
+    # including `_seed_thrash_pairs`'s default 15 sessions spaced one hour
+    # apart (max offset ~14h10m) — narrower bounds silently truncated the
+    # seeded call count below `MIN_CALLS_FOR_ROOT_CAUSE` once the min-calls
+    # floor started gating A2/A3 uniformly (previously it gated only A1),
+    # which made those tests pass for the wrong reason (an empty/undersized
+    # result, not a correctly-classified one).
+    return BASE - timedelta(hours=1), BASE + timedelta(hours=24)
 
 
 # --------------------------------------------------------------------------- #
@@ -195,11 +202,13 @@ def test_a2_instability_cause_when_gap_under_five_minutes(db):
     assert c.estimated_recoverable_usd is not None
 
 
-def _seed_thrash_chain(db, *, agent="agent-a2-chain", n_sessions=3, calls_per_session=6,
+def _seed_thrash_chain(db, *, agent="agent-a2-chain", n_sessions=4, calls_per_session=6,
                         gap_minutes=10.0):
     """n_sessions sessions, each with calls_per_session consecutive cache-write
     calls (no reads), spaced gap_minutes apart — many write-repeats per burst,
-    the shape where switching to a 1-hour TTL actually pays off."""
+    the shape where switching to a 1-hour TTL actually pays off. n_sessions=4
+    (24 total calls) clears MIN_CALLS_FOR_ROOT_CAUSE now that the min-calls
+    floor gates A2 (previously A1-only) — 3 sessions (18 calls) fell short."""
     for i in range(n_sessions):
         sid = f"chain-{i}"
         t0 = BASE + timedelta(hours=i)
@@ -279,11 +288,23 @@ def test_a2_not_flagged_when_caching_not_attempted_regularly(db):
 # --------------------------------------------------------------------------- #
 
 def _seed_lookback_agent(db, *, agent="agent-a3", tool_calls_before_miss=11,
-                          repeats=3):
+                          repeats=3, padding_calls=15, miss_cache_write_tokens=0):
     """One session per agent: a bootstrap cache write, then `repeats` rounds
     of [long tool-heavy turn -> miss -> hit]. write_events stays at 1 (well
     under the "attempted regularly" floor) so A2 never fires; A1 never fires
-    because the bootstrap call caches."""
+    because the bootstrap call caches.
+
+    `padding_calls` seeds extra cache-hit calls in a SEPARATE session so the
+    agent's total call volume clears MIN_CALLS_FOR_ROOT_CAUSE (now that the
+    min-calls floor gates A3 too, previously A1-only) without perturbing the
+    A3 pairing logic: each padding call has cache_tokens > 0, so it is
+    skipped as "not a miss" wherever it's evaluated, and it lives in its own
+    session so it is never paired against the real bootstrap/miss/hit calls.
+
+    `miss_cache_write_tokens` controls whether the "miss" call itself paid a
+    cache-write cost. 0 (the default) models a genuinely uncached call riding
+    along with the pattern -- it must still count toward `miss_count`, but
+    must NOT be priced into the dollar estimate."""
     sid = "a3-session"
     t = BASE
     db.insert_span(make_llm_span(
@@ -301,7 +322,8 @@ def _seed_lookback_agent(db, *, agent="agent-a3", tool_calls_before_miss=11,
         t += timedelta(seconds=20)
         db.insert_span(make_llm_span(  # the miss
             agent_id=agent, provider="anthropic", model="claude-sonnet-5",
-            input_tokens=3000, cache_tokens=0, cache_write_tokens=0,
+            input_tokens=3000, cache_tokens=0,
+            cache_write_tokens=miss_cache_write_tokens,
             session_id=sid, start_time=t,
         ))
         t += timedelta(seconds=10)
@@ -311,6 +333,14 @@ def _seed_lookback_agent(db, *, agent="agent-a3", tool_calls_before_miss=11,
             session_id=sid, start_time=t,
         ))
         t += timedelta(seconds=20)
+
+    padding_sid = "a3-padding"
+    for i in range(padding_calls):
+        db.insert_span(make_llm_span(
+            agent_id=agent, provider="anthropic", model="claude-sonnet-5",
+            input_tokens=200, cache_tokens=1800, cache_write_tokens=0,
+            session_id=padding_sid, start_time=t + timedelta(seconds=i),
+        ))
 
 
 def test_a3_flagged_on_recurring_post_long_turn_misses(db):
@@ -324,6 +354,50 @@ def test_a3_flagged_on_recurring_post_long_turn_misses(db):
     assert c.miss_count == MIN_LOOKBACK_MISS_RECURRENCE
     assert c.avg_prior_turn_blocks > 20
     assert "breakpoint" in c.cache_control_snippet.lower()
+    # Every "miss" call here has cache_write_tokens == 0 (a genuinely
+    # uncached call, not a rewritten cache prefix) -- it must still count
+    # toward miss_count (asserted above) but must NOT be priced as if the
+    # whole input_tokens were a rewritten prefix.
+    assert c.estimated_recoverable_usd == 0.0
+    assert c.estimated_recoverable_tokens == 0
+
+
+def test_a3_zero_cache_write_miss_excluded_from_dollar_estimate(db):
+    """A3's dollar estimate must only price misses that actually paid a
+    cache-write cost. With every miss call carrying cache_write_tokens=0,
+    the recoverable estimate must be exactly zero -- even though each miss's
+    input_tokens (3000) is well above zero and would inflate the estimate if
+    (incorrectly) folded in via `cache_write_tokens or input_tokens`."""
+    _seed_lookback_agent(
+        db, tool_calls_before_miss=11, repeats=MIN_LOOKBACK_MISS_RECURRENCE,
+        miss_cache_write_tokens=0,
+    )
+    since, until = _window()
+    _, _, lookback = _compute_root_cause_candidates(db.conn, since, until, None)
+    assert len(lookback) == 1
+    c = lookback[0]
+    assert c.miss_count == MIN_LOOKBACK_MISS_RECURRENCE
+    assert c.estimated_recoverable_usd == 0.0
+    assert c.estimated_recoverable_tokens == 0
+
+
+def test_a3_priced_only_over_misses_with_cache_write(db):
+    """Contrast case: when the miss calls DID pay a cache-write cost (a real
+    rewritten-prefix miss), the dollar estimate must be positive and priced
+    off the actual cache_write_tokens -- confirming the zero-dollar result
+    above comes from the cache_write_tokens gate, not from some other break."""
+    _seed_lookback_agent(
+        db, tool_calls_before_miss=11, repeats=MIN_LOOKBACK_MISS_RECURRENCE,
+        miss_cache_write_tokens=1500,
+    )
+    since, until = _window()
+    _, _, lookback = _compute_root_cause_candidates(db.conn, since, until, None)
+    assert len(lookback) == 1
+    c = lookback[0]
+    assert c.miss_count == MIN_LOOKBACK_MISS_RECURRENCE
+    assert c.estimated_recoverable_usd is not None
+    assert c.estimated_recoverable_usd > 0
+    assert c.estimated_recoverable_tokens == 1500 * MIN_LOOKBACK_MISS_RECURRENCE
 
 
 def test_a3_not_flagged_below_block_limit(db):
@@ -407,6 +481,76 @@ def test_thrash_shaped_agent_never_also_appears_as_lookback(db):
     ]
     assert len(props_for_agent) == 1
     assert props_for_agent[0].analyzer == "cache_thrash"
+
+
+# --------------------------------------------------------------------------- #
+# Sessionless calls must never collapse into one shared pseudo-session
+# --------------------------------------------------------------------------- #
+
+def test_sessionless_calls_get_unique_synthetic_session_ids(db):
+    """Calls lacking a session id must never collapse into a single shared
+    "" pseudo-session -- A2 keys by c.session_id and A3 keys by
+    (agent_id, session_id), so unrelated sessionless calls being merged would
+    corrupt gap-based TTL-vs-thrash decisions and A3 pairing. Each sessionless
+    row must get its own unique synthetic id that can't collide with a real
+    session id."""
+    from tokenjam.core.optimize.analyzers.cache_efficacy import _fetch_agent_calls
+
+    for i in range(5):
+        db.insert_span(make_llm_span(
+            agent_id="agent-sessionless", provider="anthropic", model="claude-sonnet-5",
+            input_tokens=1000, cache_tokens=0, cache_write_tokens=0,
+            session_id=None, start_time=BASE + timedelta(minutes=i),
+        ))
+    # One call with a real session id, seeded alongside, to confirm the
+    # synthetic ids never collide with it.
+    db.insert_span(make_llm_span(
+        agent_id="agent-sessionless", provider="anthropic", model="claude-sonnet-5",
+        input_tokens=1000, cache_tokens=0, cache_write_tokens=0,
+        session_id="s-real", start_time=BASE + timedelta(minutes=10),
+    ))
+    since, until = _window()
+    by_agent = _fetch_agent_calls(db.conn, since, until, None)
+    calls = by_agent["agent-sessionless"]
+    assert len(calls) == 6
+
+    sessionless_ids = [c.session_id for c in calls if c.session_id != "s-real"]
+    assert len(sessionless_ids) == 5
+    # Every sessionless call gets its own distinct, non-empty synthetic id.
+    assert all(sid for sid in sessionless_ids)
+    assert len(set(sessionless_ids)) == 5
+    # None of the synthetic ids collide with the real session id.
+    assert "s-real" not in sessionless_ids
+
+
+def test_sessionless_calls_never_thrash_paired_via_shared_gap(db):
+    """Regression for the shared-"" pseudo-session bug: before the fix, N
+    sessionless calls from one agent were grouped under the same session_id
+    key, so `_inter_call_gap_minutes` computed real (small) gaps between
+    otherwise-unrelated calls -- corrupting A2's TTL-vs-instability gap
+    classification. With unique synthetic ids, each sessionless call is its
+    own single-call "session", so no gap is ever computed between them."""
+    from tokenjam.core.optimize.analyzers.cache_efficacy import (
+        _fetch_agent_calls,
+        _inter_call_gap_minutes,
+    )
+
+    for i in range(6):
+        db.insert_span(make_llm_span(
+            agent_id="agent-sessionless-a2", provider="anthropic", model="claude-sonnet-5",
+            input_tokens=3000, cache_tokens=0, cache_write_tokens=5000,
+            session_id=None, start_time=BASE + timedelta(seconds=i * 30),
+        ))
+    since, until = _window()
+    by_agent = _fetch_agent_calls(db.conn, since, until, None)
+    calls = by_agent["agent-sessionless-a2"]
+    assert len(calls) == 6
+
+    # No gaps at all: every sessionless call is alone in its own synthetic
+    # session, so there's no "previous call in the same session" to pair
+    # against (the old shared-"" behavior would have produced five ~30s gaps
+    # here instead).
+    assert _inter_call_gap_minutes(calls) == []
 
 
 # --------------------------------------------------------------------------- #

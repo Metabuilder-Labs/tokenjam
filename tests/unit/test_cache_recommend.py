@@ -202,6 +202,35 @@ def test_config_lowers_occurrence_bar_surfaces_previously_hidden_candidate(db):
     assert lowered_finding.min_prefix_occurrences == 2
 
 
+def test_min_prefix_occurrences_survives_report_dict_round_trip():
+    """`CacheRecommendFinding(**c)` (runner._cache_recommend) must round-trip a
+    non-default `min_prefix_occurrences` — omitting it on reconstruction would
+    silently revert every re-loaded report back to the class default
+    regardless of what the user configured and what got serialized."""
+    from tokenjam.core.optimize.analyzers.cache_recommend import CacheRecommendFinding
+    from tokenjam.core.optimize.runner import report_from_dict, report_to_dict
+    from tokenjam.core.optimize.types import OptimizeReport, WindowSummary
+
+    assert MIN_PREFIX_OCCURRENCES != 7  # sanity: a genuinely non-default value
+
+    w = WindowSummary(since=datetime(2026, 5, 1, tzinfo=timezone.utc),
+                      until=datetime(2026, 5, 30, tzinfo=timezone.utc), days=29,
+                      sessions=20, spans=20, total_tokens=24000, total_cost_usd=1.0,
+                      thin_data=False)
+    report = OptimizeReport(window=w, findings={
+        "cache-recommend": CacheRecommendFinding(enabled=True, min_prefix_occurrences=7),
+    })
+
+    rebuilt = report_from_dict(report_to_dict(report))
+    assert rebuilt.findings["cache-recommend"].min_prefix_occurrences == 7
+
+    # An older payload with the key entirely absent still round-trips: default.
+    old_payload = report_to_dict(report)
+    del old_payload["findings"]["cache-recommend"]["min_prefix_occurrences"]
+    old_rebuilt = report_from_dict(old_payload)
+    assert old_rebuilt.findings["cache-recommend"].min_prefix_occurrences == MIN_PREFIX_OCCURRENCES
+
+
 def test_short_prompts_skipped(db):
     """Prompts under 200 chars are skipped — no caching opportunity worth flagging."""
     _seed_with_prompt(db, prompt="too short", count=10)

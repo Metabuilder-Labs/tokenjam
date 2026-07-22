@@ -26,6 +26,7 @@ caller (the API route) can warn or block *before* even calling apply.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import subprocess
@@ -37,6 +38,11 @@ from typing import Any
 
 from tokenjam.core.atomic_write import AtomicWriteRefused, atomic_write
 from tokenjam.core.config import TjConfig
+
+try:
+    import fcntl
+except ImportError:   # pragma: no cover - non-POSIX platform (e.g. Windows)
+    fcntl = None   # type: ignore[assignment]
 
 # --- Rungs (SPEC §6) -----------------------------------------------------------
 
@@ -51,10 +57,47 @@ class RelearnApplyRefused(Exception):
     """Refusing to apply/enable/revert (house-voice message) — callers map to a 409."""
 
 
+_MAX_SLUG_LEN = 60
+
+# A cluster title built by the proposal layer often ends in a disambiguating
+# hex hash in parens (e.g. ``cost_proposals._script_to_proposals``'s
+# ``f"Deterministic tool pattern: {tool_list} ({cluster_hash})"`` — the hash
+# is what keeps two DIFFERENT clusters that happen to share a tool_list
+# prefix from colliding on the same slug). A naive ``s[:60]`` truncation can
+# cut that hash off the end once the human-readable prefix is long enough,
+# silently re-uniting two distinct clusters onto the same slug — and
+# therefore the same ``default_target_path`` skill file, so approving the
+# second proposal overwrites the first cluster's file
+# (``_build_write_plan``'s create-vs-overwrite guard only checks for a
+# ``tokenjam:relearn:`` marker in the pre-image, not per-cluster identity,
+# so it can't catch this on its own). Fix: when the raw text ends in such a
+# hash, peel it off BEFORE truncating the human-readable part, budget the
+# truncation around it, then reattach it — so the hash always survives
+# regardless of how long the prefix is.
+_TRAILING_HASH_RE = re.compile(r"\(([0-9a-f]{6,64})\)\s*$", re.IGNORECASE)
+
+
 def slugify(text: str) -> str:
-    """A filesystem/skill-name-safe slug. Never empty (falls back to 'fix')."""
-    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
-    return s[:60] or "fix"
+    """A filesystem/skill-name-safe slug. Never empty (falls back to 'fix').
+
+    Preserves a trailing ``(<hex-hash>)`` disambiguator through truncation —
+    see ``_TRAILING_HASH_RE``'s comment for why that matters. Existing
+    already-applied fixes are unaffected by this: ``AppliedFix.target_path``
+    is recorded in the ledger at apply time and never recomputed from the
+    slug on revert/enable/disable, so changing this algorithm can't orphan a
+    fix that was already applied under the old (unpatched) slug.
+    """
+    text = text or ""
+    match = _TRAILING_HASH_RE.search(text)
+    if not match:
+        s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+        return s[:_MAX_SLUG_LEN] or "fix"
+
+    cluster_hash = match.group(1).lower()
+    prefix = re.sub(r"[^a-z0-9]+", "-", text[: match.start()].lower()).strip("-")
+    budget = max(0, _MAX_SLUG_LEN - len(cluster_hash) - 1)   # -1 for the joining dash
+    prefix = prefix[:budget].strip("-")
+    return f"{prefix}-{cluster_hash}" if prefix else cluster_hash
 
 
 # --- Storage roots ---------------------------------------------------------
@@ -300,6 +343,44 @@ class AppliedFix:
         return asdict(self)
 
 
+def _ledger_lock_path(config: TjConfig) -> Path:
+    return applied_fixes_path(config).with_suffix(".lock")
+
+
+@contextlib.contextmanager
+def _ledger_lock(config: TjConfig):
+    """Serialize the ledger's read-modify-write span (SPEC's "durable ledger"
+    contract, but ``_load_ledger``/``_write_ledger`` on their own are just a
+    read-JSON -> mutate-in-caller -> write-whole-file(tmp+replace) with no
+    coordination). The CLI and the ``tj serve`` API are separate OS
+    processes that can both call ``_save_record``/``_update_record`` at the
+    same time, so an in-process ``threading.Lock`` wouldn't help — two
+    concurrent callers each read the same on-disk list, each append/mutate
+    their own copy, and whichever finishes its ``_write_ledger`` last wins,
+    silently discarding the other's update.
+
+    An advisory ``fcntl.flock`` on a lockfile beside ``applied_fixes.json``
+    is dependency-free and works across processes; it's held for the whole
+    load+mutate+write span by every caller below. On a platform without
+    ``fcntl`` (e.g. Windows) this degrades to a best-effort no-op — a single
+    process is still internally serialized (CPython's GIL covers the
+    synchronous load/write pair), just not across processes; that's a
+    strictly-no-worse fallback, not a regression, since there was no lock at
+    all before this fix.
+    """
+    lock_path = _ledger_lock_path(config)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if fcntl is None:
+        yield
+        return
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _load_ledger(config: TjConfig) -> list[dict]:
     p = applied_fixes_path(config)
     if not p.is_file():
@@ -331,20 +412,22 @@ def get_applied(config: TjConfig, fix_id: str) -> dict | None:
 
 
 def _save_record(config: TjConfig, record: AppliedFix) -> dict:
-    records = _load_ledger(config)
-    records.append(record.to_dict())
-    _write_ledger(config, records)
+    with _ledger_lock(config):
+        records = _load_ledger(config)
+        records.append(record.to_dict())
+        _write_ledger(config, records)
     return record.to_dict()
 
 
 def _update_record(config: TjConfig, fix_id: str, **fields: Any) -> dict:
-    records = _load_ledger(config)
-    for rec in records:
-        if rec.get("id") == fix_id:
-            rec.update(fields)
-            _write_ledger(config, records)
-            return rec
-    raise RelearnApplyRefused(f"no applied_fixes record {fix_id}.")
+    with _ledger_lock(config):
+        records = _load_ledger(config)
+        for rec in records:
+            if rec.get("id") == fix_id:
+                rec.update(fields)
+                _write_ledger(config, records)
+                return rec
+        raise RelearnApplyRefused(f"no applied_fixes record {fix_id}.")
 
 
 # --- Active-session guard (SPEC §7 — never apply mid-session) ------------------
