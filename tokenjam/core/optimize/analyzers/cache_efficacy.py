@@ -330,9 +330,17 @@ def _fetch_agent_calls(
         params,
     ).fetchall()
     by_agent: dict[str, list[_AgentCallRow]] = {}
-    for aid, sid, start_time, provider, model, in_tok, cache_tok, cache_write in rows:
+    for idx, (aid, sid, start_time, provider, model, in_tok, cache_tok, cache_write) in enumerate(rows):
+        # Calls with no session id must never collapse into one shared ""
+        # pseudo-session: A2 keys by session_id and A3 keys by (agent_id,
+        # session_id), so unrelated sessionless calls from the same agent
+        # would otherwise be treated as a single session and corrupt
+        # gap-based TTL-vs-thrash decisions and A3 pairing. Give each such
+        # row a synthetic id, unique per row (the row's own position in the
+        # fetch), tagged with a prefix no real session id can produce.
+        session_id = str(sid) if sid else f"__no_session__{idx}"
         by_agent.setdefault(str(aid), []).append(_AgentCallRow(
-            session_id=str(sid or ""), start_time=start_time,
+            session_id=session_id, start_time=start_time,
             provider=str(provider), model=str(model),
             input_tokens=int(in_tok or 0), cache_tokens=int(cache_tok or 0),
             cache_write_tokens=int(cache_write or 0),
@@ -584,8 +592,19 @@ def _classify_a3(
     for c in calls:
         by_session.setdefault(c.session_id, []).append(c)
 
-    miss_tokens: list[int] = []
+    # `miss_count`/`miss_blocks` bookkeeping counts EVERY qualifying miss,
+    # regardless of whether that call actually paid to rewrite a cache
+    # prefix — detection behavior must stay unchanged. `priced_miss_tokens`
+    # is the separate, narrower list that feeds the dollar estimate: a call
+    # with zero `cache_write_tokens` never paid a rewrite cost, so folding
+    # its full `input_tokens` into the priced total would over-price the
+    # estimate as if the whole input were a rewritten cache prefix (it may
+    # simply be an uncached call, priced elsewhere or not at all). Only
+    # calls that actually incurred a cache-write cost belong in the money
+    # figure.
+    miss_count = 0
     miss_blocks: list[int] = []
+    priced_miss_tokens: list[int] = []
     for sid, session_calls in by_session.items():
         tool_times = sorted(tool_starts.get((agent_id, sid), []))
         for prev, cur in zip(session_calls, session_calls[1:]):
@@ -596,10 +615,12 @@ def _classify_a3(
             )
             est_blocks = prior_tool_calls * BLOCKS_PER_TOOL_CALL
             if est_blocks > LOOKBACK_BLOCK_LIMIT:
-                miss_tokens.append(cur.cache_write_tokens or cur.input_tokens)
+                miss_count += 1
                 miss_blocks.append(est_blocks)
+                if cur.cache_write_tokens > 0:
+                    priced_miss_tokens.append(cur.cache_write_tokens)
 
-    if len(miss_tokens) < MIN_LOOKBACK_MISS_RECURRENCE:
+    if miss_count < MIN_LOOKBACK_MISS_RECURRENCE:
         return None
 
     provider, model = _dominant_provider_model(calls)
@@ -608,15 +629,15 @@ def _classify_a3(
     tokens: int | None = None
     if rates is not None:
         usd = round(
-            sum(miss_tokens) / 1_000_000
+            sum(priced_miss_tokens) / 1_000_000
             * max(0.0, rates.cache_write_per_mtok - rates.cache_read_per_mtok),
             6,
         )
-        tokens = sum(miss_tokens)
+        tokens = sum(priced_miss_tokens)
 
     return LookbackMissCandidate(
         agent_id=agent_id, provider=provider, model=model,
-        miss_count=len(miss_tokens),
+        miss_count=miss_count,
         avg_prior_turn_blocks=round(sum(miss_blocks) / len(miss_blocks), 1),
         cache_control_snippet=_lookback_snippet(model),
         estimated_recoverable_usd=usd, estimated_recoverable_tokens=tokens,
@@ -626,7 +647,10 @@ def _classify_a3(
             f"LLM calls x {BLOCKS_PER_TOOL_CALL}, for the tool_use + "
             "tool_result blocks each contributes) flags turns that likely "
             "pushed the prior breakpoint out of range. Recoverable = "
-            "rewritten prefix tokens x (write rate - cache-read rate) per miss"
+            "rewritten prefix tokens x (write rate - cache-read rate) per "
+            "miss, priced only over misses that actually paid a cache-write "
+            "cost (cache_write_tokens > 0) — a miss with zero cache-write "
+            "tokens contributes to miss_count but not to the dollar estimate"
         ),
     )
 
@@ -647,6 +671,12 @@ def _compute_root_cause_candidates(
     thrash: list[ThrashAgentCandidate] = []
     lookback: list[LookbackMissCandidate] = []
     for aid, calls in by_agent.items():
+        # The call-volume floor gates A1/A2/A3 uniformly. Previously it was
+        # only threaded into `_classify_a1`, so raising
+        # `min_calls_for_root_cause` suppressed A1 candidates but left A2
+        # (and A3) candidates unaffected for agents below the floor.
+        if len(calls) < min_calls:
+            continue
         a1 = _classify_a1(aid, calls, min_calls=min_calls)
         if a1 is not None:
             uncached.append(a1)
