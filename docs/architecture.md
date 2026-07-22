@@ -305,7 +305,7 @@ The `TjConfig` dataclass tree in `tokenjam/core/config.py` defines the full hier
 
 ## MCP server (SDK / API integration)
 
-`tj mcp` is a stdio-based MCP (Model Context Protocol) server that gives an SDK / API integration direct access to TokenJam observability data. It exposes 23 tools. It is **not** wired up for Claude Code or Codex — an in-loop MCP is a per-turn quota tax on subscription users (+36% measured, ticket #59); those agents get tj out-of-band via the statusline + OTel capture instead. Wire it manually only for an SDK / API integration that already sits in the request path: `claude mcp add tj --scope user -- tj mcp`.
+`tj mcp` is a stdio-based MCP (Model Context Protocol) server that gives an SDK / API integration direct access to TokenJam observability data. It exposes 23 tools. It is **not** wired up for Claude Code or Codex — an in-loop MCP is a per-turn token tax on subscription users (+36% measured in an A/B against a no-tj control); those agents get tj out-of-band via the statusline + OTel capture instead. Wire it manually only for an SDK / API integration that already sits in the request path: `claude mcp add tj --scope user -- tj mcp`.
 
 ### Dual-mode operation
 
@@ -352,7 +352,7 @@ The `--claude-code` flag configures the full telemetry pipeline in one command:
 3. **Updates global Claude settings** (`~/.claude/settings.json`) with OTLP exporter env vars: `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `OTEL_LOGS_EXPORTER=otlp`, endpoint, protocol. On re-runs, always resyncs the `OTEL_EXPORTER_OTLP_HEADERS` auth header to fix 401s without manual setup.
 4. **Writes project settings** (`./.claude/settings.json`) with `OTEL_RESOURCE_ATTRIBUTES=service.name={agent_id}` so spans are tagged to the right agent
 5. **Updates shell env** (`~/.zshrc`) with Docker-compatible endpoint (`host.docker.internal:{port}`) for harness sessions that can't reach `127.0.0.1`
-6. **Wires the zero-token statusline** into `~/.claude/settings.json` (`"statusLine": {"type": "command", "command": "tj statusline"}`), non-destructively (an existing statusLine is left intact). It does **not** register the MCP server — that's an SDK / API surface, and an in-loop MCP is a per-turn quota burden on subscription users (#59)
+6. **Wires the zero-token statusline** into `~/.claude/settings.json` (`"statusLine": {"type": "command", "command": "tj statusline"}`), non-destructively (an existing statusLine is left intact). It does **not** register the MCP server — that's an SDK / API surface, and an in-loop MCP is a per-turn token burden on subscription users (+36% measured)
 7. **Installs daemon** by default (launchd on macOS, systemd on Linux) with `--config` baked into the unit file; skip with `--no-daemon`
 
 ### Log-to-span conversion
