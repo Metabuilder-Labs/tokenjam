@@ -148,12 +148,19 @@ def _recoverable_teaser(db, config) -> str | None:
     Reuses the same recoverable-savings contract every analyzer already
     carries (`estimated_recoverable_usd`, #111) rather than inventing a new
     figure, scoped to `COST_ANALYZERS` — the analyzers that actually feed the
-    cost/apply rail (`cost_proposals.py`) — so a one-line teaser doesn't add
-    to the cross-analyzer double-counting the full Optimize view already has.
-    Silent (returns None) whenever the figure wouldn't mean anything: no
-    direct DB connection (daemon holds the lock), no usage, a non-api pricing
-    mode (a raw dollar figure misrepresents a flat-fee/local plan), or a
-    sub-$1 total.
+    cost/apply rail (`cost_proposals.py`).
+
+    Reports the LARGEST single analyzer's estimate rather than a sum across
+    analyzers — mirroring `largest_recoverable_usd` in `api/routes/cost.py`.
+    The analyzers price OVERLAPPING angles on the same spans (a cache fix and
+    a downsize swap can both price the same call's waste), so summing them
+    would double-count and print an inflated, non-additive headline; the
+    single largest entry is honest standalone because it isn't a sum of
+    anything (see `_recoverable_overlap_note` in `api/routes/cost.py` for the
+    full rationale). Silent (returns None) whenever the figure wouldn't mean
+    anything: no direct DB connection (daemon holds the lock), no usage, a
+    non-api pricing mode (a raw dollar figure misrepresents a flat-fee/local
+    plan), or a sub-$1 figure.
     """
     conn = getattr(db, "conn", None)
     if conn is None or config is None:
@@ -174,14 +181,21 @@ def _recoverable_teaser(db, config) -> str | None:
             db=db, config=config, since=since_dt, until=until_dt,
             findings=list(COST_ANALYZERS),
         )
-        total = report.downgrade.estimated_recoverable_usd or 0.0 if report.downgrade else 0.0
+        estimates: list[float] = []
+        if report.downgrade is not None:
+            usd = report.downgrade.estimated_recoverable_usd
+            if usd is not None:
+                estimates.append(usd)
         for finding in (report.findings or {}).values():
-            total += getattr(finding, "estimated_recoverable_usd", None) or 0.0
+            usd = getattr(finding, "estimated_recoverable_usd", None)
+            if usd is not None:
+                estimates.append(usd)
+        largest = max(estimates, default=0.0)
 
-        if total < _TEASER_MIN_USD:
+        if largest < _TEASER_MIN_USD:
             return None
         return (
-            f"[dim]{format_cost(total)} recoverable: run "
+            f"[dim]{format_cost(largest)} recoverable (largest single fix): run "
             f"[bold]tj optimize[/bold][/dim]"
         )
     except Exception:

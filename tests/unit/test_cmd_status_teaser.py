@@ -30,7 +30,13 @@ def _report(*, downgrade_usd=None, finding_usd=None):
     return SimpleNamespace(downgrade=downgrade, findings=findings)
 
 
-def test_teaser_prints_dollar_figure_and_points_to_optimize(monkeypatch):
+def test_teaser_prints_largest_single_estimate_not_a_sum(monkeypatch):
+    """The teaser must mirror `largest_recoverable_usd` in api/routes/cost.py:
+    downsize and cache price OVERLAPPING angles on the same spans (#111), so
+    summing 2.0 + 3.5 into "$5.50" would print an inflated, non-additive
+    headline the product's own API disclaims via `recoverable_additive: False`
+    and `_recoverable_overlap_note`. The honest figure is the larger of the
+    two on its own: $3.50."""
     monkeypatch.setattr(
         "tokenjam.core.framing.plan_tier_mix", lambda conn, since, until, agent_id: {"api": 10},
     )
@@ -42,7 +48,8 @@ def test_teaser_prints_dollar_figure_and_points_to_optimize(monkeypatch):
     out = _recoverable_teaser(_FakeDB(conn=object()), config=object())
 
     assert out is not None
-    assert "$5.50" in out
+    assert "$3.50" in out
+    assert "$5.50" not in out
     assert "tj optimize" in out
 
 
