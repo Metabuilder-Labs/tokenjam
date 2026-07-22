@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam: token efficiency for AI agents. Reads your agent's telemetry, finds the waste, runs 100% local." width="830">
-
-TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out. It then shows it all in a local browser dashboard. Runs entirely on your machine.
+<img src="docs/brand/tokenjam-repo-header.png" alt="TokenJam cuts what your AI agents cost by ending the mistakes they keep repeating: it finds the failures your agent re-hits and fixes them, reversibly and human-gated. Runs 100% local." width="830">
 
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
@@ -14,44 +12,104 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 **No cloud · No signup · No vendor lock-in**
 
-
-<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="Your agents (Claude Code, Codex, Cursor) feed TokenJam, which breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
-<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Verbose output (getting 500-word answers to yes/no questions) → verbosity; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
-
-
-
 </div>
 
 ---
 
-## Get started
+# Your agents waste up to 42% of a bad session's tokens repeating known mistakes. TokenJam gets those tokens back.
 
-TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
+TokenJam cuts what your AI agents cost by ending their repeated mistakes. It mines your agents' own
+telemetry for the failures they keep re-hitting, and fixes them at the harness level (hooks, rules,
+config). Works with Claude Code and Claude Agent SDK apps today, and with any SDK agent over
+OpenTelemetry (detect, advise).
 
-One command sets up live capture, all six analyzers, Lens (the local dashboard), and the zero-token statusline:
+Finding and fixing repeated waste is the mechanism; a lower bill is the point. TokenJam doesn't just show you what
+your agents cost. It watches how your agent actually works, catches the blockers it silently re-hits
+session after session, and closes the loop: propose a fix, you approve it, it applies reversibly.
+
+### See it in 30 seconds, no install
+
+```bash
+npx tokenjam        # a read-only report of where your Claude Code quota goes. nothing installed, nothing kept
+```
+
+Bare `npx tokenjam` reads the Claude Code logs you already have and prints where your quota actually
+goes (re-reads vs. net-new work) plus a session timeline. When you want the loop that finds and fixes
+recurring mistakes, onboard:
 
 ```bash
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
 ```
 
-`tj onboard` asks how you use AI agents (Claude Code, Codex, or your own SDK/API agents) and wires the right path; under npx it first offers to make itself a permanent install. For Claude Code and Codex that means backfilling your recent history plus the statusline and hooks; restart and you're live. Then run:
+`tj onboard` asks how you run AI agents (Claude Code, Codex, or your own SDK / API agents) and wires
+the right path. For Claude Code and Codex it backfills your recent history, installs the statusline
+and hooks, and ends by showing the mistakes your agent keeps making, then offers to enable your first
+fix. Under `npx` it first offers to make itself a permanent install.
 
-```bash
-tj optimize          # cost-saving candidates from your actual usage
-tj serve             # open the dashboard at http://127.0.0.1:7391/
-```
-
-The statusline is **zero-token**; `tj statusline` runs out-of-band each turn (no model quota) and shows this session's re-read share with a `/compact` nudge: `◆ Opus 4.8  2.4M tok  🕳️ re-read 95%  → /compact to reclaim quota`. It does **not** add an in-loop MCP server (that's an SDK / API surface; an MCP would tax every turn).
-
-Run bare `tj` any time and it points you to the next best action (`tj status`, `tj tokenmaxx`, `tj optimize`, or `tj serve`).
-
-**Just looking?** `npx tokenjam` prints a 15-second read-only report over the logs you already have: no install, nothing kept.
-
-Building your own agent with the SDK: install *in your project* (`pip install tokenjam` + `tj onboard`); see the table below.
+TokenJam ingests agent telemetry from many sources (Claude Code sessions, any OTel source) into a
+local DuckDB. Local-first, no cloud, no signup.
 
 <sub>`npx tokenjam` and `uvx tokenjam` launch the Python CLI via `uvx`/`pipx` under the hood; see [docs/installation.md](docs/installation.md) for the runner requirements and the full install matrix.</sub>
 
-<div align="center"><img src="docs/assets/tokenjam-token-flow.png" alt="Token flow: telemetry from Claude Code, Codex, Google, AWS, the Python and TypeScript SDKs, LangChain/CrewAI, and OTLP/Langfuse flows into tokenjam, which decomposes where every token goes: 94% re-reads of history and context, 5.1% tool output, 0.9% net-new work, measured over a 61-session history" width="830"></div>
+---
+
+## How the loop works
+
+Four stages, human-gated where it counts.
+
+1. **Detect.** TokenJam reads your agents' own telemetry, session transcripts for workspace agents
+   and OTel spans for everything else, then clusters the blockers your agent silently re-hits across
+   sessions: wrong-directory reads, edit-before-read, blocked sleep loops, stale-read races,
+   domain-blocked fetches. A pattern has to recur across at least three distinct sessions before it
+   counts as a recurring mistake worth fixing.
+2. **Propose.** For each recurring mistake TokenJam drafts the lightest fix that could work, on a ladder:
+   a **note** appended to your `CLAUDE.md`, then a **skill** (`.claude/skills/<name>/SKILL.md`), then
+   a runtime **hook** (or wrapper / config) that catches the mistake as it happens.
+3. **Approve.** Nothing is written until you say so. You review the evidence (the repro sessions) and
+   the exact diff first.
+4. **Apply.** Every write is reversible: snapshotted first, and git-committed when the target is
+   tracked, so one revert undoes it. Enforcement rungs (hook / wrapper / config) ship **disabled by
+   default** and **fail open**, so a fix can never block a working call or break your loop on
+   TokenJam's own bug. Agents with no workspace to write into skip this stage entirely: they get the
+   recommendation to apply themselves, and an optional eval-case artifact for your own tooling.
+
+You drive this from three places, no new command to learn: `tj onboard` surfaces your first fix, the
+`tj serve` daemon keeps the detector warm and serves the **Review inbox** in Lens (where you approve
+and apply), and `tj optimize relearn` prints the current findings from the CLI. Want a record of
+whether a fix actually helped? `tj loop` lets you leave a manual note and verdict on later sessions
+(see [The Observe suite](#the-observe-suite)); TokenJam does not auto-verify recurrence for you today.
+
+---
+
+## What the loop is worth
+
+- **Up to 42% of a bad session's tokens** go to repeating known mistakes. TokenJam gets them back.
+  <br><sub>Worst measured session: 42.7% of its tokens (2.41M of 5.64M, replay-deduped) burned on recovery turns.</sub>
+- **About a dozen known-mistake re-hits a day** on a heavy multi-repo workspace.
+- **100% of measured sleep-chain busy-wait attempts blocked, deterministically.**
+- **Incident recovery 18.4% cheaper, measured on 90 days of real sessions.**
+- **On one workspace, TokenJam rediscovered 8 of 9 lessons the team had learned the hard way, plus 8
+  nobody had noticed.**
+
+---
+
+## Two surfaces, one product
+
+<div align="center"><img src="docs/assets/tokenjam-flow-band.svg" alt="TokenJam breaks into three stages: Observe (Lens), Optimize (Downsize, Cache, Trim, Script, Reuse), and Prove (Bench)." width="830"></div>
+
+The honest seam, so the pitch never lies:
+
+- **Workspace agents (Claude Code, Claude Agent SDK apps): the loop _applies_ the fix.** Detect,
+  propose, approve, apply. Fixes land as notes, skills, and hooks in that repo's own
+  `.claude/` config, reversibly and human-gated. This is where a recurring mistake actually stops
+  costing you.
+- **Workspace-less agents over OpenTelemetry: the loop _advises_.** Same detector,
+  pointed at your production agents' spans: it clusters the recurring failures and hands you a
+  recommendation (config, prompt, or code) with no auto-apply path. It never touches your production
+  request stream. Alongside it runs the read-only Observe suite: traces, real-time cost, drift
+  baselines, sensitive-action alerts, budgets, and the optimize analyzers.
+
+Point any OTLP exporter at `tj serve` and production agents flow in with zero code.
 
 ---
 
@@ -59,25 +117,38 @@ Building your own agent with the SDK: install *in your project* (`pip install to
 
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all seven analyzers + Lens |
+| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Backfills your last 30 days, wires a zero-token statusline, runs the loop plus all thirteen analyzers + Lens |
 | **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
-| **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
+| **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, plus the loop's detect and advise over your spans |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
 | **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone`, same flags) | One-time import of your existing traces into the local DB |
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion: no SDK, no patch |
 
-<sub>The `--claude-code` / `--codex` flags just pre-answer the wizard's first question; bare `tj onboard` asks.</sub>
+<sub>The `--claude-code` / `--codex` flags just pre-answer the wizard's first question; bare `tj onboard` asks. `pipx` (not `pip`) sidesteps PEP 668 on Homebrew / Debian / Ubuntu Python.</sub>
 
-LlamaIndex and the OpenAI Agents SDK ship their own native OTel support; point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
+LlamaIndex and the OpenAI Agents SDK ship their own native OTel support; point their exporter at
+`tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
 
 A single page walks every path, each ending with a verify step: see
 [docs/getting-started.md](docs/getting-started.md).
 
+The statusline is **zero-token**: `tj statusline` runs out-of-band each turn (it spends no model
+tokens) and shows this session's re-read share with a `/compact` nudge. It does **not** add an in-loop
+MCP server (that is an SDK / API surface; an in-loop MCP would tax every turn).
+
+Run bare `tj` any time and it points you to the next best action.
+
 ---
 
-## Seven analyzers + Lens. One install.
+## Thirteen analyzers + Lens. One install.
 
-TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces savings across seven areas. It then brings them together in a local browser dashboard.
+Cutting cost is the whole point, and repeated mistakes are only one source of it. From the same
+telemetry, TokenJam surfaces cost-savings advisories across twelve more areas: read-only
+recommendations today, with apply support extending to more of them over time. It reads the
+major agent runtimes, frameworks, providers, and observability tools, then brings them together in a
+local browser dashboard.
+
+<div align="center"><img src="docs/assets/tokenjam-waste-grid.svg" alt="Where your tokens go: Expensive model (using Opus for a Haiku-level task) → downsize; Uncached repeats (sending the same base prompt 100s of times) → cache; Bloated prompts (re-sending the same long context every call) → trim; Oversized subagents (a Task call running premium-model or over-contexted) → subagent; Repeated planning (re-planning the same task every day) → reuse; Don't need an LLM (paying a model to do what code could) → script." width="830"></div>
 
 <table>
 <tr>
@@ -152,30 +223,27 @@ Per-subagent cost breakdown; flags premium-model or over-contexted `Task` calls 
 
 </td>
 </tr>
-<tr>
-<td width="50%" valign="top">
-
-### Verbosity
-
-`tj optimize verbosity`
-
-Flags sessions whose output runs long against a per-(tool, task-shape) baseline. Predicted high-verbosity output — review before constraining a response.
-
-[Details →](docs/optimize/verbosity.md)
-
-</td>
-<td width="50%" valign="top">
-</td>
-</tr>
 </table>
 
-`tj optimize` (no args) runs every analyzer: the seven above, plus `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen) and `cache-recommend` (the Cache card's breakpoint-suggestion half, above). Run a subset with `tj optimize downsize cache reuse`. Lens brings it all together: see the dashboard below.
+`tj optimize` (no args) runs all thirteen analyzers: the six above, plus `relearn` (the loop's
+detector), `verbosity` (sessions whose output runs high versus the per-task-shape median),
+`summarize` (structure-aware prompt-file summarization candidates), `deadweight` (MCP servers whose
+schemas load into every session and are never called), `budget-projection` (projects your
+monthly run-rate against a configured `[budget.<provider>]` ceiling), `cache-recommend` (the Cache
+card's breakpoint-suggestion half), and `resend` (token-weighted repeat-context share across turns,
+a structural resend measure independent of whether caching is enabled). Each one is individually
+selectable; run a subset with `tj optimize downsize cache reuse`.
 
 ---
 
 ## Lens: the local dashboard
 
-`tj serve` runs Lens at `http://127.0.0.1:7391/`: a **Dashboard** that lands you on recoverable waste and current health, with an embedded explorer to slice your usage any way (metric × dimension × chart); plus Status, Traces, Cost, Analytics, Alerts, Drift, Optimize, and Budget screens. Plan-tier-aware, fully offline, no signup.
+`tj serve` runs Lens at `http://127.0.0.1:7391/`. It opens on the **Improve** lens: a **Review inbox**
+where the loop's proposed fixes land for your approval, a Dashboard that lands you on
+recurring mistakes and current health, and Status. The downsize, cache, and trim analyzers file
+advise-only proposals here too; marking one applied records when you made the change, for your own
+tracking. Flip to the **Observe** lens for Traces, Cost,
+Analytics, Alerts, Drift, Optimize, and Budget. Plan-tier-aware, fully offline, no signup.
 
 <table>
 <tr>
@@ -196,21 +264,29 @@ Flags sessions whose output runs long against a per-(tool, task-shape) baseline.
 
 ---
 
-## Beyond optimization
+## The Observe suite
 
-TokenJam is also a full observability stack. The seven analyzers and Lens ride on top.
+The loop applies fixes on workspace agents and advises everywhere else. Around it,
+TokenJam is also a full, local-first observability stack for every agent you run.
 
 - **Real-time cost tracking**: every LLM call priced as it happens
 - **Safety alerts**: 13 alert types, 6 channels (ntfy, Discord, Telegram, webhook, file, stdout)
 - **Behavioral drift detection**: Z-score baselines, no LLM required
 - **Schema validation**: declare or infer JSON Schema for tool outputs
-- **Context & quota audits**: `tj context` (re-read vs. net-new split) and `tj quota-audit` (retroactive Opus usage check) over your Claude Code sessions
-- **Close the loop**: `tj loop` annotates a run with a verdict, promotes a bad run into a stored expectation, and tracks whether later runs pass or regress against it
-- **Prompt summarization (advisory)**: `tj summarize` finds prompt files worth condensing and estimates the per-call saving
-- **Enforcement-plane proxy (suggest mode)**: `tj proxy` surfaces routing suggestions locally, without rewriting requests
+- **Context & premium-model audits**: `tj context` (re-read vs. net-new split) and `tj quota-audit`
+  (retroactive Opus-usage check) over your Claude Code sessions
+- **Close the loop**: `tj loop` annotates a run with a verdict, promotes a bad run into a stored
+  expectation, and tracks whether later runs pass or regress against it
+- **Prompt summarization (advisory)**: `tj summarize` finds prompt files worth condensing and
+  estimates the per-call saving
+- **Enforcement-plane proxy (suggest mode)**: `tj proxy` surfaces routing suggestions locally,
+  without rewriting requests
 - **OTel-native**: point any OTLP exporter at `tj serve` and you're done
-- **Statusline**: a zero-token Claude Code status line (`tj statusline`, wired by `tj onboard --claude-code`) showing this session's re-read share + a `/compact` nudge
-- **MCP server**: in-request-path tools for **SDK / API** users (not Claude Code / Codex subscription users, since an in-loop MCP would be a per-turn quota burden there; they get the out-of-band statusline instead)
+- **Statusline**: a zero-token Claude Code status line (`tj statusline`, wired by
+  `tj onboard --claude-code`) showing this session's re-read share + a `/compact` nudge
+- **MCP server**: in-request-path tools for **SDK / API** users (not Claude Code / Codex subscription
+  users, since an in-loop MCP would be a per-turn burden there; they get the out-of-band statusline
+  instead)
 
 ---
 
@@ -258,9 +334,10 @@ Bench reports measured pass-rate on a suite, never "certified" or "quality prese
 
 ## Roadmap
 
-**Shipped:** Downsize · Cache · Script · Trim · Reuse · Subagent right-sizing · Claude Code + Codex onboarding · MCP server · Lens web UI · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview · Context & quota audits · Close-the-loop annotations/expectations · Prompt summarization (advisory) · Enforcement-plane proxy (suggest mode)
+**Shipped:** The detect-propose-approve-apply loop on workspace agents, plus detect and advise for any OTel agent · Downsize · Cache · Script · Trim · Reuse · Subagent right-sizing · Claude Code + Codex onboarding · MCP server · Lens web UI (Improve + Observe lenses) · Backfill adapters (Langfuse, Helicone, OTLP) · Period comparison · Routing-config export · Read-only policy preview · Context & premium-model audits · Close-the-loop annotations/expectations · Prompt summarization (advisory) · Enforcement-plane proxy (suggest mode)
 
 **Up next** (roughly):
+- [ ] Auto-apply for Agent SDK app repos, on the same human-gated ladder
 - [ ] Continued Lens polish + per-product visual branding
 - [ ] `tj policy add | edit | apply`: unified rule surface (today: `tj policy list` / `tj policy decisions`)
 - [ ] `tj replay`: replay captured sessions against new model versions
@@ -286,7 +363,7 @@ TokenJam is MIT, and contributions are welcome: from a one-line pricing fix to a
 
 Setup and the full dev workflow are in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
-If TokenJam saves you tokens, **star it** and **watch for releases**; we ship often.
+If TokenJam stops your agents repeating mistakes, **star it** and **watch for releases**; we ship often.
 
 ---
 
