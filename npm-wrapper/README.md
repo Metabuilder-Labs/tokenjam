@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/Metabuilder-Labs/tokenjam/main/docs/brand/tokenjam-repo-header.png" alt="TokenJam cuts what your AI agents cost by ending the mistakes they keep repeating: it finds the failures your agent re-hits, fixes them, and verifies the waste stopped. Runs 100% local." width="760">
+<img src="https://raw.githubusercontent.com/Metabuilder-Labs/tokenjam/main/docs/brand/tokenjam-repo-header.png" alt="TokenJam cuts what your AI agents cost by ending the mistakes they keep repeating: it finds the failures your agent re-hits and fixes them, reversibly and human-gated. Runs 100% local." width="760">
 
 [![npm](https://img.shields.io/npm/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://www.npmjs.com/package/tokenjam)
 [![npm downloads](https://img.shields.io/npm/dm/tokenjam?color=3d8eff&labelColor=0d1117&label=downloads)](https://www.npmjs.com/package/tokenjam)
@@ -11,11 +11,11 @@
 
 </div>
 
-TokenJam cuts what your AI agents cost by ending their repeated mistakes: it finds the failures your agent keeps re-hitting, fixes them at the harness level, and verifies the waste stopped. It ingests agent telemetry from a multitude of sources (Claude Code sessions, Claude Agent SDK apps, any OTel source) into a local DuckDB, so you get the most out of the tokens you pay for. This package is the zero-install launcher: no pip environment, no manual config.
+TokenJam cuts what your AI agents cost by ending their repeated mistakes: it finds the failures your agent keeps re-hitting and fixes them at the harness level, reversibly and human-gated. It ingests agent telemetry from a multitude of sources (Claude Code sessions, Claude Agent SDK apps, any OTel source) into a local DuckDB, so you get the most out of the tokens you pay for. This package is the zero-install launcher: no pip environment, no manual config.
 
 ```bash
-npx tokenjam        # a read-only report of your agent's recurring mistakes, no install, nothing kept
-npx tokenjam onboard   # set up the loop that fixes them, or: pipx install tokenjam && tj onboard
+npx tokenjam        # a read-only report of where your Claude Code quota goes, no install, nothing kept
+npx tokenjam onboard   # set up the loop that finds and fixes recurring mistakes, or: pipx install tokenjam && tj onboard
 ```
 
 ## What you get
@@ -28,7 +28,7 @@ All arguments pass straight through to the Python CLI, so any `tj` subcommand an
 
 | Command | What it does |
 |---|---|
-| `npx tokenjam` | Zero-install report of the recurring mistakes your agent keeps repeating. Nothing installed, nothing kept. |
+| `npx tokenjam` | Zero-install report of where your Claude Code quota goes: re-reads vs. net-new work, plus a session timeline. Nothing installed, nothing kept. |
 | `npx tokenjam onboard` | Guided setup for the loop: writes a config, generates an ingest secret, and optionally installs the background daemon for live capture. |
 | `npx tokenjam context` | Where your tokens go: re-read vs. net-new share, recurring inclusions, `/compact` candidates. |
 | `npx tokenjam optimize` | Savings candidates: model downsizing, cache opportunities, prompt trimming, workflow reuse, subagent right-sizing. |
