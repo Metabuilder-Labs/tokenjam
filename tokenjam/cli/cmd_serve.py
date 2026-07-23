@@ -67,6 +67,21 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     # "never_run" for up to 6h.
     scheduler.add_job(_relearn_job, "interval", hours=6)
 
+    # Cost-advisories tab: same reasoning as the relearn job above, but for
+    # `recompute_cost_proposals()` (downsize/cache/trim/subagent/etc adapted
+    # into Review-inbox cards). Before this job existed, that recompute ran
+    # ONLY on the manual "Rescan now" refresh endpoint, so a fresh install's
+    # Cost-advisories tab stayed permanently `never_run` until a human clicked
+    # refresh — this keeps it warm the same way the relearn detector already is.
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+
+    def _cost_proposals_job() -> None:
+        cost_proposals_mod.trigger_background_cost_recompute(
+            lambda: DuckDBBackend(config.storage), config=config,
+        )
+
+    scheduler.add_job(_cost_proposals_job, "interval", hours=6)
+
     # ~/.local/share/tj/server.state lets other subcommands (e.g. `tj onboard
     # --codex`) find the config this server is using regardless of CWD. We
     # write it from the lifespan so it only happens after uvicorn binds the
@@ -99,6 +114,10 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         # thread — never blocks the bind/startup path) so a fresh `tj serve`
         # doesn't sit on "never_run" for up to 6h waiting on the interval job.
         _relearn_job()
+        # Same startup kick for the cost-proposals job (own connection, own
+        # thread via trigger_background_cost_recompute) — a fresh install's
+        # Cost-advisories tab shouldn't sit on "never_run" for up to 6h either.
+        _cost_proposals_job()
         # Stamp unknown sessions from declared [budget.*].plan on startup so
         # historical/backfilled rows match config without a separate onboard pass.
         from tokenjam.core.framing import apply_declared_plans_to_sessions

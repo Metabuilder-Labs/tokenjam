@@ -793,6 +793,22 @@ class RelearnCluster:
     # and Verify runs off spans instead of transcripts. See
     # `core/optimize/relearn_otel.py`.
     advise_only:                  bool = False
+    # Monthly-basis fields (Review inbox stat tiles). The window-basis field
+    # above (`estimated_recoverable_tokens`) is the raw full-corpus-scan
+    # total, not a monthly rate — relearn scans unbounded history, unlike a
+    # window-scoped cost analyzer, so there is no natural "the window IS a
+    # month" shortcut. These extrapolate occurrences-per-day (over the run's
+    # own observed timespan, `RelearnFinding.window_days`) to 30 days —
+    # mirrors `monthly_savings_usd` in model_downgrade.py, a NEW explicitly-
+    # named basis alongside the existing one (the Recoverable-savings
+    # contract there is unchanged; Overview/Optimize keep reading the window
+    # field). `estimated_monthly_usd` is populated only when a blended $/token
+    # rate could be derived from the cluster's own sessions' spans (see
+    # `_blended_dollar_rate`); `monthly_rate_basis` names the models that rate
+    # came from so it's never a silent number.
+    estimated_monthly_tokens:     int = 0
+    estimated_monthly_usd:        float | None = None
+    monthly_rate_basis:           str = ""
 
 
 @dataclass
@@ -811,6 +827,15 @@ class RelearnFinding:
     # finding so a renderer's empty-state message never hardcodes a number
     # that could be stale against the user's own config.
     min_sessions:           int = MIN_RECURRING_SESSIONS
+    # The observed span (days, earliest to latest timestamped occurrence
+    # across every failure this run examined) every cluster's monthly figure
+    # was extrapolated from. ``None`` when nothing in the run carried a
+    # parseable timestamp — callers then treat the scale as 1 (no
+    # extrapolation) rather than inventing a window. See `_corpus_window_days`.
+    window_days:             float | None = None
+    # Sum of every cluster's `estimated_monthly_tokens` — the Review inbox
+    # headline's token-basis total when it can't lead with dollars.
+    estimated_monthly_tokens: int | None = None
 
 
 def _snippet(failure: FailureEpisode) -> str:
@@ -823,6 +848,97 @@ def _scope_for(repos: set[str]) -> str:
     return "project" if len(repos) <= 1 else "user-global"
 
 
+def _parse_failure_ts(ts: str | None) -> Any:
+    """Best-effort ISO-8601 parse of a failure's timestamp. Returns ``None``
+    on anything unparseable — never raises; a bad/missing timestamp just
+    doesn't contribute to the window span."""
+    if not ts:
+        return None
+    from datetime import datetime as _dt
+
+    try:
+        return _dt.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _corpus_window_days(failures: list[FailureEpisode]) -> float | None:
+    """Span, in days, between the earliest and latest timestamped occurrence
+    across every failure this run examined — the shared basis every cluster's
+    monthly extrapolation scales against.
+
+    Relearn scans unbounded on-disk history (not a fixed window like a cost
+    analyzer's `since`/`until`), so there is no ready-made "the window is a
+    month" shortcut the way `model_downgrade.monthly_savings_usd` has. This
+    derives an equivalent window from the data itself: how far back the
+    observed occurrences actually span. Returns ``None`` (not a number) when
+    fewer than two occurrences carry a parseable timestamp — the caller then
+    applies a scale of 1 (no extrapolation) rather than inventing a window
+    from missing data. Clamped to a 1-day floor so a same-day burst of
+    occurrences doesn't get divided by a near-zero span into an absurd rate.
+    """
+    stamps = [t for t in (_parse_failure_ts(f.ts) for f in failures) if t is not None]
+    if len(stamps) < 2:
+        return None
+    span_days = (max(stamps) - min(stamps)).total_seconds() / 86400.0
+    return span_days if span_days >= 1.0 else 1.0
+
+
+def _monthly_scale(window_days: float | None) -> float:
+    """The occurrences-per-day -> per-30-days multiplier. 1.0 (no
+    extrapolation) when the window is unknown or degenerate — never invent a
+    multiplier from missing data (behavioral requirement #1)."""
+    if not window_days or window_days <= 0:
+        return 1.0
+    return 30.0 / window_days
+
+
+def _blended_dollar_rate(conn: Any, session_ids: set[str]) -> tuple[float | None, str]:
+    """Best-effort $/token blended rate observed across THIS cluster's own
+    sessions' LLM spans, weighted by tokens actually billed.
+
+    Returns ``(None, "")`` when there's no DB connection or no priced spans
+    for these sessions — this never invents a rate (CLAUDE.md anti-pattern
+    #22); the caller falls back to a tokens-only figure in that case. The
+    basis string names every (provider, model) that contributed so the
+    derivation is inspectable rather than a black box (behavioral requirement
+    #2's "never invent a rate silently").
+    """
+    if conn is None or not session_ids:
+        return None, ""
+    ids = sorted(session_ids)
+    placeholders = ", ".join(f"${i + 1}" for i in range(len(ids)))
+    try:
+        rows = conn.execute(
+            f"SELECT provider, model, "
+            f"COALESCE(SUM(cost_usd), 0.0), "
+            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0) "
+            f"FROM spans WHERE session_id IN ({placeholders}) AND model IS NOT NULL "
+            f"GROUP BY provider, model",
+            ids,
+        ).fetchall()
+    except Exception:
+        return None, ""
+    total_cost = 0.0
+    total_tokens = 0
+    models: list[str] = []
+    for provider, model, cost, tokens in rows:
+        tokens = int(tokens or 0)
+        if tokens <= 0:
+            continue
+        total_cost += float(cost or 0.0)
+        total_tokens += tokens
+        models.append(f"{provider}/{model}")
+    if total_tokens <= 0:
+        return None, ""
+    rate = total_cost / total_tokens
+    basis = (
+        f"blended ${rate * 1_000_000:.2f}/MTok observed across this cluster's "
+        f"own sessions: {', '.join(sorted(set(models)))}"
+    )
+    return rate, basis
+
+
 def build_proposals(
     clusters: list[_RawCluster],
     *,
@@ -830,6 +946,8 @@ def build_proposals(
     doc_text: str = "",
     repo_cwd_map: dict[str, str] | None = None,
     advise_only_repos: set[str] | None = None,
+    conn: Any | None = None,
+    window_days: float | None = None,
 ) -> tuple[list[RelearnCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
     ``(proposals, dropped_codified_count)``.
@@ -891,6 +1009,12 @@ def build_proposals(
             except Exception:
                 suggested_target = ""   # never let a bad path computation sink the proposal
 
+        recoverable_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
+        scale = _monthly_scale(window_days)
+        monthly_tokens = round(recoverable_tokens * scale)
+        rate, rate_basis = _blended_dollar_rate(conn, sessions)
+        monthly_usd = round(monthly_tokens * rate, 6) if rate is not None else None
+
         proposals.append(RelearnCluster(
             signature=cluster.signature,
             family_key=cluster.family_key,
@@ -902,11 +1026,14 @@ def build_proposals(
             scope=scope,
             proposed_fix=fix,
             examples=examples,
-            estimated_recoverable_tokens=occurrences * GROUNDED_TOKENS_PER_OCCURRENCE,
+            estimated_recoverable_tokens=recoverable_tokens,
             novel=True,
             repo_cwd=repo_cwd,
             suggested_target=suggested_target,
             advise_only=advise_only,
+            estimated_monthly_tokens=monthly_tokens,
+            estimated_monthly_usd=monthly_usd,
+            monthly_rate_basis=rate_basis,
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
@@ -927,6 +1054,7 @@ def analyze_relearns(
     repo_cwd_map: dict[str, str] | None = None,
     extra_failures: list[FailureEpisode] | None = None,
     advise_only_repos: set[str] | None = None,
+    conn: Any | None = None,
 ) -> RelearnFinding:
     """Full pipeline over an explicit session list — the pure core the
     registry entry point and the on-disk cache job both call. Never raises.
@@ -939,6 +1067,9 @@ def analyze_relearns(
     workspace-less clusters. ``transcript_cache_dir`` (distinct from
     ``distill_cache_dir``, the LLM-distill cache) is forwarded to every
     per-session transcript parse — see ``core.transcript_cache``.
+    ``conn`` (optional DuckDB connection) is forwarded to ``build_proposals``
+    for the per-cluster blended-dollar-rate lookup (Review inbox monthly-$
+    basis) — ``None`` keeps every cluster tokens-only, same as today.
     """
     all_failures: list[FailureEpisode] = []
     scanned = 0
@@ -965,11 +1096,18 @@ def analyze_relearns(
     )
     distilled_count = sum(1 for c in distilled if (c.family_key or "").startswith("distilled:"))
 
+    # The shared monthly-extrapolation basis (behavioral requirement #1): the
+    # observed span across every failure this run examined, not a fixed
+    # window — relearn scans unbounded history. See `_corpus_window_days`.
+    window_days = _corpus_window_days(all_failures)
+
     proposals, dropped = build_proposals(
         distilled, min_sessions=min_sessions, doc_text=codified_doc_text,
         repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
+        conn=conn, window_days=window_days,
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
+    total_monthly_tokens = sum(p.estimated_monthly_tokens for p in proposals) if proposals else None
 
     return RelearnFinding(
         clusters=proposals,
@@ -979,6 +1117,8 @@ def analyze_relearns(
         dropped_codified=dropped,
         estimated_recoverable_tokens=total_tokens if proposals else None,
         min_sessions=min_sessions,
+        window_days=window_days,
+        estimated_monthly_tokens=total_monthly_tokens,
     )
 
 
@@ -1115,6 +1255,7 @@ def compute_relearn_finding(
         distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
         extra_failures=span_failures, advise_only_repos=advise_only_repos,
         min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
+        conn=conn,
     )
 
 

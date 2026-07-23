@@ -51,6 +51,12 @@ APPLY_CLUSTER_FIELDS = (
     "signature", "family_key", "title", "proposed_fix", "rung",
     "sessions", "occurrences", "repos", "examples",
     "apply_kind", "agent_name", "current_model", "proposed_model", "source_path",
+    # Review inbox monthly-basis figures (behavioral requirement #1/#7):
+    # carried through to apply time so `apply_relearn_fix` can snapshot the
+    # human-reviewed estimate onto the applied-fix ledger record's `verify`
+    # dict for the Applied tab's `est.` figure — a bounded, single read, not
+    # a live re-measurement.
+    "estimated_monthly_usd", "estimated_monthly_tokens",
 )
 
 #: Per apply kind, the stored fields the write genuinely cannot be built

@@ -40,9 +40,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import asdict, dataclass, is_dataclass
+import threading
+from dataclasses import asdict, dataclass, is_dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 # House-style label strings. Kept verbatim on every cost proposal so no channel
 # can surface a savings figure without the honesty framing (Rule 14).
@@ -58,9 +59,20 @@ COST_CORRELATIONAL_CAVEAT = (
 #: returns an ``enabled=False`` finding with no candidates (same shape as
 #: ``trim``'s own disabled-state guard), so including it here unconditionally
 #: costs nothing when capture is off.
+#:
+#: ``resend`` (context re-send, the product's headline waste category — see
+#: ``analyzers/context_resend.py``) is included: it has real recoverable
+#: savings and previously had no adapter here, silently excluding it from the
+#: Review inbox's Cost-advisories tab.
+#:
+#: ``summarize`` (prompt summarization) is deliberately NOT here — it is the
+#: one cost analyzer with its own dedicated review surface (the curate/diff
+#: screen driven by ``core/summarize/``'s prepare/check/apply lifecycle,
+#: which needs a multi-step rewrite-and-verify flow this single-card adapter
+#: shape can't represent), not an oversight to fix later.
 COST_ANALYZERS = (
     "downsize", "cache", "cache-recommend", "trim", "subagent", "deadweight",
-    "script", "reuse", "verbosity",
+    "script", "reuse", "verbosity", "resend",
 )
 
 # The rung-1/rung-2 apply notes below all route through the SAME workspace-note
@@ -131,6 +143,16 @@ class CostProposal:
     # labeled. ``None`` when the finding produced no estimate for this item.
     estimated_recoverable_usd:    float | None = None
     estimated_recoverable_tokens: int | None   = None
+    # Monthly-basis fields (Review inbox stat tiles) — a SEPARATE, explicitly-
+    # named basis from the two window fields above; see the "Recoverable-
+    # savings contract" note in model_downgrade.py / CLAUDE.md. `downsize`
+    # copies its own `monthly_savings_usd`/`monthly_tokens_in_candidates`
+    # straight across (it already computes a 30-day projection); every other
+    # analyzer gets a generic `30/window_days` extrapolation of its window
+    # figure, applied once in `cost_proposals_from_report` so no adapter has
+    # to reimplement the arithmetic.
+    estimated_monthly_usd:        float | None = None
+    estimated_monthly_tokens:     int | None   = None
     estimate_basis:       str = ""
     estimate_confidence:  str = COST_ESTIMATE_CONFIDENCE
     correlational:        bool = True
@@ -234,6 +256,11 @@ def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        # `downsize` already computes its own 30-day projection (model_downgrade.
+        # py's `monthly_savings_usd`/`monthly_tokens_in_candidates`) — surface it
+        # directly rather than re-deriving from the window figure.
+        estimated_monthly_usd=getattr(finding, "monthly_savings_usd", None),
+        estimated_monthly_tokens=getattr(finding, "monthly_tokens_in_candidates", None),
     )]
 
 
@@ -409,6 +436,17 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
             estimated_recoverable_usd=row.delta_usd,
             estimated_recoverable_tokens=row.total_tokens,
             estimate_basis=row.estimate_basis,
+            # `projected_30d_delta_usd` is this row's own 30-day projection
+            # (mirrors the window-wide card's `monthly_savings_usd`). No
+            # per-row monthly-token figure exists, so tokens are extrapolated
+            # by the SAME window->30d ratio the dollar figure already carries
+            # (`projected_30d_delta_usd / delta_usd`) rather than duplicating
+            # a window_days parameter down through this helper.
+            estimated_monthly_usd=row.projected_30d_delta_usd,
+            estimated_monthly_tokens=(
+                round(row.total_tokens * (row.projected_30d_delta_usd / row.delta_usd))
+                if row.delta_usd > 0 else None
+            ),
             agent_id=row.agent_id if row.agent_id != "unknown" else "",
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
@@ -1523,9 +1561,73 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
     )]
 
 
+def _resend_to_proposals(finding: Any) -> list[CostProposal]:
+    """One window-wide card for the ``resend`` (context re-send) finding.
+
+    Advise-only: the fix is a workflow change (``/compact``, or an SDK-side
+    ``cache_control`` placement) the user makes in their own harness/code,
+    not a file tokenjam can write into — same class of surface as ``cache``/
+    ``trim``. ``ResendFinding.estimate_basis`` already documents the
+    discounted, doubly-conservative derivation (repeat-share lower bound x
+    the corpus-measured 68.3% avoidable fraction); this adapter carries it
+    verbatim rather than re-deriving or re-stating it.
+    """
+    if finding is None:
+        return []
+    repeat_share = getattr(finding, "repeat_share", None)
+    if repeat_share is None:
+        return []
+    sessions_examined = int(getattr(finding, "sessions_examined", 0) or 0)
+    repeat_tokens = int(getattr(finding, "repeat_tokens", 0) or 0)
+    evidence = (
+        f"{float(repeat_share) * 100:.0f}% of prompt tokens across "
+        f"{sessions_examined} session(s) were context already sent in an "
+        f"earlier turn (conservative lower bound; independent of whether "
+        f"caching is enabled)."
+    )
+    fix_compaction = str(getattr(finding, "fix_compaction", "") or "")
+    fix_cache_control = str(getattr(finding, "fix_cache_control", "") or "")
+    advise = " ".join(p for p in (fix_compaction, str(getattr(finding, "caveat", "") or "")) if p)
+    return [CostProposal(
+        kind="cost",
+        analyzer="resend",
+        signature="cost:resend",
+        title="Repeated context re-sent every turn",
+        target_key={"repeat_share": float(repeat_share)},
+        evidence=evidence,
+        baseline={
+            "sessions_examined": sessions_examined,
+            "repeat_tokens": repeat_tokens,
+            "repeat_share": float(repeat_share),
+            "repeat_share_median": getattr(finding, "repeat_share_median", None),
+            "repeat_share_p90": getattr(finding, "repeat_share_p90", None),
+        },
+        advise_text=advise.strip(),
+        suggestion=fix_cache_control,
+        one_paste_fix=fix_cache_control or fix_compaction,
+        estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
+        estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
+        caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
+    )]
+
+
 #: Default look-back for the daemon/CLI cost-proposal recompute. Matches the
 #: monthly framing the cost analyzers project against.
 DEFAULT_COST_WINDOW_DAYS = 30
+
+
+#: Mirrors ``relearn_store``'s own ``_LOCK``/``_COMPUTING`` pair, kept local to
+#: this module since a cost-proposals recompute and a relearn recompute are
+#: independent jobs that must each be able to run without waiting on the
+#: other — only two cost-proposals recomputes (a scheduled tick racing a
+#: manual "Rescan now") should ever serialize against each other.
+_COST_LOCK = threading.Lock()
+_COST_COMPUTING = threading.Event()
+
+
+def is_computing_cost_proposals() -> bool:
+    return _COST_COMPUTING.is_set()
 
 
 def recompute_cost_proposals(
@@ -1536,13 +1638,23 @@ def recompute_cost_proposals(
     agent_id: str | None = None,
 ) -> list[CostProposal]:
     """Build an ``OptimizeReport`` over the last ``window_days``, adapt the
-    three cost findings into proposals, and write them into the shared proposal
-    store. Returns the proposals. Never raises — a build failure yields ``[]``
-    (the inbox shows its empty state), never a crash on the refresh path.
+    cost findings into proposals, and write them into the shared proposal
+    store. Returns the proposals (``[]`` if a recompute is already in flight,
+    or on a build failure — the inbox shows its empty/degraded state, never a
+    crash on the refresh path).
 
     This is the "daemon path produces findings -> same proposal store" entry
     point the Review-inbox refresh calls; ``tj optimize`` can call it too so a
-    manual run also refreshes the inbox.
+    manual run also refreshes the inbox. Locked against concurrent recomputes
+    (the scheduled job and a manual "Rescan now" can otherwise overlap and
+    race each other's cache write) — a caller that hits the lock gets ``[]``
+    back rather than blocking, same as a build failure.
+
+    A failure is never silent: the exception is recorded via
+    ``relearn_store.write_cost_proposals_error`` (behavioral requirement #5)
+    so the Review inbox can show a "last refresh failed" warning instead of
+    reading a permanently-empty tab as "nothing to report." A SUCCESSFUL
+    recompute clears any previously-recorded error.
     """
     from datetime import timedelta
 
@@ -1551,35 +1663,90 @@ def recompute_cost_proposals(
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
 
-    try:
-        until = utcnow()
-        since = until - timedelta(days=max(1, window_days))
-        report = build_report(
-            db, config, since, until, agent_id=agent_id,
-            findings=list(COST_ANALYZERS),
-        )
-        # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so the
-        # web Review inbox suppresses the same dollar figures the CLI does
-        # (placement's batch-lever dollars, currently the only card this
-        # gates — see `_placement_to_proposals`).
-        conn = getattr(db, "conn", None)
-        plan_mix = plan_tier_mix(conn, since, until, agent_id) if conn is not None else {}
-        pricing_mode = pricing_mode_for(dominant_plan(plan_mix))
-        proposals = cost_proposals_from_report(
-            report, config=config, pricing_mode=pricing_mode,
-        )
-    except Exception:
+    if not _COST_LOCK.acquire(blocking=False):
         return []
-
+    _COST_COMPUTING.set()
     try:
-        relearn_store.write_cost_proposals(proposals, config=config)
-    except Exception:
-        pass
-    return proposals
+        try:
+            effective_window_days = max(1, window_days)
+            until = utcnow()
+            since = until - timedelta(days=effective_window_days)
+            report = build_report(
+                db, config, since, until, agent_id=agent_id,
+                findings=list(COST_ANALYZERS),
+            )
+            # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so
+            # the web Review inbox suppresses the same dollar figures the CLI
+            # does (placement's batch-lever dollars, currently the only card
+            # this gates — see `_placement_to_proposals`).
+            conn = getattr(db, "conn", None)
+            plan_mix = plan_tier_mix(conn, since, until, agent_id) if conn is not None else {}
+            pricing_mode = pricing_mode_for(dominant_plan(plan_mix))
+            proposals = cost_proposals_from_report(
+                report, config=config, pricing_mode=pricing_mode,
+                window_days=float(effective_window_days),
+            )
+        except Exception as exc:
+            try:
+                relearn_store.write_cost_proposals_error(str(exc), config=config)
+            except Exception:
+                pass
+            return []
+
+        try:
+            relearn_store.write_cost_proposals(proposals, config=config)
+            relearn_store.clear_cost_proposals_error(config=config)
+        except Exception:
+            pass
+        return proposals
+    finally:
+        _COST_COMPUTING.clear()
+        _COST_LOCK.release()
+
+
+def trigger_background_cost_recompute(
+    backend_factory: Callable[[], Any],
+    *,
+    config: Any | None = None,
+    window_days: int = DEFAULT_COST_WINDOW_DAYS,
+) -> bool:
+    """Fire-and-forget a cost-proposals recompute on a daemon thread — the
+    Cost-advisories-tab equivalent of ``relearn_store.
+    trigger_background_recompute``, so ``tj serve`` can keep this tab warm on
+    a schedule (behavioral requirement #5) without blocking startup or a
+    request thread on the analyzer run.
+
+    ``backend_factory`` builds a FRESH ``StorageBackend`` (e.g. ``lambda:
+    DuckDBBackend(config.storage)``) — never the caller's live request
+    connection. The backend is closed when the job finishes. Returns
+    ``False`` (no-op) if a recompute is already running.
+    """
+    if is_computing_cost_proposals():
+        return False
+
+    def _job() -> None:
+        backend = None
+        try:
+            backend = backend_factory()
+            recompute_cost_proposals(backend, config, window_days=window_days)
+        except Exception:
+            # Best-effort background job — never crash the scheduler/thread.
+            pass
+        finally:
+            close = getattr(backend, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=_job, name="cost-proposals-recompute", daemon=True).start()
+    return True
 
 
 def cost_proposals_from_report(
     report: Any, config: Any = None, *, pricing_mode: str = "api",
+    window_days: float = 30.0,
 ) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
@@ -1614,6 +1781,16 @@ def cost_proposals_from_report(
     helper's conservative default) while leaving the cache family's
     instruction on (that helper's conservative default runs the other way —
     see its own docstring) — neither ever assumes ``"claude-code"``.
+
+    ``window_days`` (default 30 — ``DEFAULT_COST_WINDOW_DAYS``, matching the
+    daemon's own default look-back) is the monthly-basis extrapolation factor
+    (behavioral requirement #1): every proposal's ``estimated_monthly_usd``/
+    ``estimated_monthly_tokens`` that an adapter didn't already populate
+    (only ``downsize`` does, from its own 30-day projection) is stamped here
+    as ``window_figure * (30 / window_days)`` — one generic pass so no
+    adapter has to reimplement the arithmetic. A caller building a report
+    over a non-30-day window (e.g. ``tj optimize --since 7d``) still gets an
+    honest monthly figure rather than a raw window total mislabeled "/ mo".
     """
     findings = getattr(report, "findings", {}) or {}
     persona = str(getattr(report, "persona", "") or "unknown")
@@ -1635,13 +1812,33 @@ def cost_proposals_from_report(
         (lambda f: _script_to_proposals(f, persona=persona), findings.get("script")),
         (lambda f: _reuse_to_proposals(f, persona=persona), findings.get("reuse")),
         (lambda f: _verbosity_to_proposals(f, persona=persona), findings.get("verbosity")),
+        (_resend_to_proposals, findings.get("resend")),
     )
     for adapter, finding in adapters:
         try:
             proposals.extend(adapter(finding))
         except Exception:
             continue
-    return proposals
+    return [_with_monthly_extrapolation(p, window_days) for p in proposals]
+
+
+def _with_monthly_extrapolation(proposal: CostProposal, window_days: float) -> CostProposal:
+    """Fill in ``estimated_monthly_usd``/``estimated_monthly_tokens`` from the
+    window figure when an adapter didn't already set one (see
+    ``cost_proposals_from_report``'s ``window_days`` docstring). Returns a NEW
+    ``CostProposal`` (``dataclasses.replace``) rather than mutating the one
+    the adapter built — every proposal here is otherwise treated as an
+    immutable, already-complete record."""
+    scale = (30.0 / window_days) if window_days and window_days > 0 else 1.0
+    updates: dict[str, Any] = {}
+    if proposal.estimated_monthly_usd is None and proposal.estimated_recoverable_usd is not None:
+        updates["estimated_monthly_usd"] = round(proposal.estimated_recoverable_usd * scale, 6)
+    if (
+        proposal.estimated_monthly_tokens is None
+        and proposal.estimated_recoverable_tokens is not None
+    ):
+        updates["estimated_monthly_tokens"] = round(proposal.estimated_recoverable_tokens * scale)
+    return replace(proposal, **updates) if updates else proposal
 
 
 # --------------------------------------------------------------------------- #
