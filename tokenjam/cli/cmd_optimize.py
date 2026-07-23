@@ -459,7 +459,7 @@ _ALWAYS_FULL_FINDINGS = {"relearn"}
 # Display labels for the "Minor findings" collapsed pointer list — must match
 # the header text each renderer prints in its numbered form.
 _MINOR_FINDING_LABELS = {
-    "downsize":        "Model downgrade",
+    "downsize":        "Downsize",
     "cache":           "Cache efficacy",
     "cache-recommend": "Cache recommend",
     "resend":          "Context resend",
@@ -820,7 +820,7 @@ def _render_report(
                 )
             else:
                 console.print(
-                    f"{_finding_header(marker, 'Model downgrade:')} "
+                    f"{_finding_header(marker, 'Downsize:')} "
                     "[dim]no candidates in this window — sessions don't match "
                     "the smaller-model shape (small input/output, few tool "
                     "calls).[/dim]"
@@ -971,7 +971,7 @@ def _render_downgrade(
     `_render_downgrade_cta`.
     """
     console.print(
-        f"  [bold]{marker} Model downgrade:[/bold] "
+        f"  [bold]{marker} Downsize:[/bold] "
         f"{d.percent_of_sessions:.0f}% of sessions match a smaller-model "
         f"candidate shape"
     )
