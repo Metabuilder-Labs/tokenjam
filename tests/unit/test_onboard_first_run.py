@@ -115,6 +115,10 @@ def test_home_when_configured_shows_next_best_actions(monkeypatch, capsys, tmp_p
     cfg = tmp_path / "config.toml"
     cfg.write_text("version = '1'\n")
     monkeypatch.setattr("tokenjam.cli.home.find_config_file", lambda *a, **k: cfg)
+    # Clear TJ_CONFIG so a stray env var on the runner can't short-circuit
+    # _is_set_up() via its env branch and bypass the patched find_config_file
+    # this test means to exercise.
+    monkeypatch.delenv("TJ_CONFIG", raising=False)
     print_home()
     out = capsys.readouterr().out
     assert "You're set up" in out
