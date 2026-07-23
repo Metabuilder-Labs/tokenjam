@@ -7723,56 +7723,14 @@ const RUNG_LABELS = {
 };
 const ENFORCEMENT_RUNGS = new Set([3, 4, 5]);
 
-// Phase 3 (Verify, self-improve-loop SPEC.md §4 step 6 / §10 / §11): the
-// verdict labels the Applied section shows per fix — correlational, never a
-// causal claim (see the ⓘ tooltip's `reason` string from the API).
-const VERDICT_LABELS = {
-  improved: { text: 'Improved', color: 'var(--success)' },
-  no_change: { text: 'No change', color: 'var(--warn)' },
-  regressed: { text: 'Regressed', color: 'var(--error)' },
-  insufficient_data: { text: 'Measuring…', color: 'var(--text-dim)' },
-  enforcement_disabled: { text: 'Not yet enforced', color: 'var(--text-dim)' },
-};
-const VERDICT_NUDGE = new Set(['no_change', 'regressed']);
-
-// One applied fix's recurrence-since-apply line: verdict, normalized
-// recurrence, realized savings (only ever shown for a real "improved"
-// verdict), and — for the `no_change`/`regressed` "codification != prevention"
-// signal — a nudge to escalate (rung 1 notes) or reconsider (any rung).
-function VerifyLine({ verify, rung }) {
-  if (!verify) return null;
-  const verdict = verify.verdict;
-  const label = VERDICT_LABELS[verdict] || { text: 'Not yet checked', color: 'var(--text-dim)' };
-  const hasRecurrence = verify.recurrence_since_apply != null && verify.post_sessions_since_apply != null;
-  const saved = verify.realized_tokens_saved;
-  const nudge = VERDICT_NUDGE.has(verdict);
-  return html`
-    <div class="dim" style="font-size:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span style=${'color:' + label.color + ';font-weight:500'}>${label.text}</span>
-      ${hasRecurrence ? html`<span>· ${verify.recurrence_since_apply} occurrence(s) in ${verify.post_sessions_since_apply} session(s) since apply</span>` : null}
-      ${saved > 0 ? html`<span style="color:var(--accent)">· ~${fmtTokens(saved)} tok saved <span class="estimated-tag" title="estimated / correlational — see the Compound ledger caveat">est.</span></span>` : null}
-      ${verify.last_checked_at ? html`<span title=${verify.reason || ''} style="cursor:help">ⓘ</span>` : null}
-      ${nudge ? html`<span style="color:var(--warn)">— not taking; consider ${rung === 1 ? 'escalating to a hook or ' : ''}reverting</span>` : null}
-    </div>`;
-}
-
-// The Compound ledger (SPEC §4 step 7): estimated savings summed across every
-// VERIFIED fix, at the top of the Applied section — the loop's evidence that
-// it correlates with fewer recurrences, not just that it wrote something.
-function CompoundLedgerSummary({ ledger }) {
-  if (!ledger) return null;
-  if (!ledger.verified_count) {
-    return html`<div class="sz-note" style="margin:8px 0 12px">No fixes verified yet — the loop checks back once enough post-apply sessions accumulate.</div>`;
-  }
-  return html`
-    <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
-        <span style="font-size:20px;font-weight:600;color:var(--accent)">~${fmtTokens(ledger.total_realized_tokens_saved)} tok</span>
-        <span class="dim" style="font-size:12px">estimated savings across ${ledger.improved_count} verified fix(es) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
-      </div>
-      <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} regressed · ${ledger.enforcement_disabled_count} awaiting enforcement · ${ledger.insufficient_data_count} still measuring</div>
-    </div>`;
-}
+// Verdict/recurrence-since-apply labels and the Compound-ledger summary that
+// used to render here were the frontend half of the perpetual verify/receipts
+// layer removed for making unsupportable realized-savings claims (see
+// relearn_apply.py's AppliedFix.verify docstring) — nothing has populated
+// them since, so they always rendered an inert "Not yet checked" placeholder.
+// Replaced by the Applied tab's honest `est.` figure (InboxStatTiles /
+// AppliedItemRow below), a bounded point-in-time snapshot taken at apply
+// time, never a live re-measurement.
 
 // The select-all state transition, kept pure and outside the component so it
 // can be exercised directly rather than only asserted against as markup.
@@ -7805,19 +7763,104 @@ function SelectAllCheckbox({ total, selected, onToggle }) {
     onChange=${onToggle} />`;
 }
 
-function RelearnRow({ cluster, checked, onToggle, onExpand }) {
-  const tokens = cluster.estimated_recoverable_tokens || 0;
+// --- Inbox redesign: sort + long-tail collapse, badges, est./mo formatting
+// (behavioral requirements #1-#4). Shared by both the Recurring-mistakes and
+// Cost-advisories tabs so the two never drift on what "biggest first" means.
+
+const INBOX_COLLAPSE_THRESHOLD = 8;
+
+// Rank by dollars when ANY item in the list carries one (unpriced items rank
+// last, at 0 — reviewing the priced decisions first is the right default);
+// otherwise rank by tokens. Never invented for display, only for order.
+function sortByEstMonthly(items) {
+  const anyUsd = items.some(i => i.estimated_monthly_usd != null);
+  const rank = i => anyUsd ? (i.estimated_monthly_usd ?? 0) : (i.estimated_monthly_tokens || 0);
+  return [...items].sort((a, b) => rank(b) - rank(a));
+}
+
+// Top N normally, the remainder folded into one collapsible row (behavioral
+// requirement #3) — a 42-tiny-fixes tail must read as one bundled decision,
+// not 42 peers.
+function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
+  if (sorted.length <= max) return { top: sorted, tail: [] };
+  return { top: sorted.slice(0, max), tail: sorted.slice(max) };
+}
+
+// A tail item's headline est./mo figure — dollars first when a rate exists
+// and the plan tier doesn't suppress dollars, tokens as fallback (requirement
+// #2). Works for both relearn clusters and cost proposals: both carry the
+// same `estimated_monthly_usd`/`estimated_monthly_tokens` field names.
+function estMonthlyLine(item, suppressed) {
+  const usd = item.estimated_monthly_usd;
+  const toks = item.estimated_monthly_tokens;
+  if (!suppressed && usd != null) {
+    return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
+  }
+  if (toks != null) return { big: '~' + fmtTokens(toks) + ' tok', sub: '' };
+  return { big: '—', sub: '' };
+}
+
+function combinedEstMonthly(items, suppressed) {
+  const anyUsd = !suppressed && items.some(i => i.estimated_monthly_usd != null);
+  if (anyUsd) return fmtUsd(items.reduce((s, i) => s + (i.estimated_monthly_usd || 0), 0));
+  return '~' + fmtTokens(items.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0)) + ' tok';
+}
+
+// The collapsed long-tail row: count + combined est./mo, an expand toggle,
+// and the bulk Dismiss all / (optional) Mark all applied actions (requirement
+// #3). `renderItem` renders one expanded tail row in the caller's own shape
+// (a RecurringMistakeRow or a CostProposalCard).
+function CollapsedTailRow({ tail, suppressed, itemLabel, onDismissAll, onMarkAllApplied, renderItem }) {
+  const [open, setOpen] = useState(false);
+  if (tail.length === 0) return null;
   return html`
-    <tr class="cur-row" key=${cluster.signature}>
-      <td><input type="checkbox" checked=${checked} onChange=${onToggle} /></td>
-      <td><span class="sz-link" onClick=${onExpand}>${cluster.title}</span>
-        ${cluster.family_key && cluster.family_key.startsWith('distilled:') ? html` <span class="dim" style="font-size:10.5px">· distilled</span>` : null}
-      </td>
-      <td class="mono">${cluster.sessions}</td>
-      <td><span class="dim" style="font-size:12px">${cluster.advise_only ? 'advise-only' : cluster.rung + ' · ' + (RUNG_LABELS[cluster.rung] || '')}</span></td>
-      <td class="mono" style="text-align:right;color:var(--accent)">~${fmtTokens(tokens)} tok <span class="estimated-tag" title="occurrences x a conservative per-turn token cost — review before applying">est.</span></td>
-      <td><span class="rev-state staged">pending</span></td>
-    </tr>`;
+    <div class="cur-row" style="padding:10px 14px;border-bottom:1px solid var(--border)">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <span class="sz-link" onClick=${() => setOpen(o => !o)}>
+          ${open ? '▾' : '▸'} ${tail.length} smaller ${itemLabel} · ~${combinedEstMonthly(tail, suppressed)} combined est./mo
+        </span>
+        <span style="margin-left:auto;display:flex;gap:14px">
+          ${onMarkAllApplied ? html`<span class="sz-link" onClick=${onMarkAllApplied}>Mark all applied</span>` : null}
+          <span class="sz-link" onClick=${onDismissAll}>Dismiss all</span>
+        </span>
+      </div>
+      ${open ? html`<div style="margin-top:6px">${tail.map(renderItem)}</div>` : null}
+    </div>`;
+}
+
+// Human-readable fix-type badge for a relearn cluster (requirement #4) —
+// user vocabulary, never internal jargon ("relearn", "rung 2") as the
+// primary label. `family_key`/`rung` stay available in the row's title
+// attribute for anyone who wants the internal detail.
+const RELEARN_BADGE_BY_RUNG = { 1: 'PROMPT TWEAK', 2: 'SNIPPET', 3: 'GUARDRAIL', 4: 'GUARDRAIL', 5: 'GUARDRAIL' };
+function relearnBadge(cluster) {
+  if (cluster.advise_only) return 'ADVISE ONLY';
+  const fam = (cluster.family_key || '').toLowerCase();
+  if (fam.includes('cache')) return 'CACHE BREAKPOINT';
+  return RELEARN_BADGE_BY_RUNG[cluster.rung] || 'FIX';
+}
+
+// Flat row for the Recurring-mistakes tab (mockup: title + amber fix-type
+// badge, a muted recurrence/last-seen line, savings at right). The checkbox
+// preserves the existing bulk-dismiss flow (requirement #9) — not in the
+// mockup's own sketch, but the bulk action it drives is explicitly required.
+function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed }) {
+  const est = estMonthlyLine(cluster, suppressed);
+  const lastSeenTs = (cluster.examples || []).map(e => e.ts).filter(Boolean).sort().pop();
+  return html`
+    <div class="cur-row" style="display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border)" key=${cluster.signature}>
+      <input type="checkbox" style="margin-top:3px" checked=${checked} onChange=${onToggle} />
+      <div style="flex:1;min-width:0">
+        <span class="sz-link" onClick=${onExpand} style="font-weight:500">${cluster.title}</span>
+        <span class="badge badge-warning" style="margin-left:6px" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
+        <div class="dim" style="font-size:12px;margin-top:3px">Recurred in ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0">
+        <div class="mono" style="color:var(--accent);font-weight:600">${est.big} <span class="estimated-tag" title=${cluster.monthly_rate_basis || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>est.</span></div>
+        ${est.sub ? html`<div class="dim" style="font-size:11px">${est.sub}</div>` : null}
+        <div class="dim" style="font-size:10px;text-transform:uppercase;letter-spacing:.03em">est. / mo</div>
+      </div>
+    </div>`;
 }
 
 // The card's Approve flow: preview -> (optional active-session warning ->
@@ -7940,9 +7983,42 @@ function RelearnApplyModal({ cluster, onClose, onApplied }) {
     </div>`;
 }
 
-// The Applied section: what Approve already wrote, plus its one-step Revert
-// and (enforcement rungs only) the explicit Enable/Disable toggle.
-function AppliedFixRow({ rec, onChanged }) {
+// The days-ago label the Applied tab's mockup uses ("Applied 3 days ago").
+function daysAgoLabel(iso) {
+  if (!iso) return '';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '';
+  const days = Math.floor((Date.now() - then) / 86400000);
+  if (days <= 0) return 'today';
+  return days === 1 ? '1 day ago' : days + ' days ago';
+}
+
+// A merged applied record's (`rec.kind`: 'relearn' | 'cost') own estimate, in
+// the same `estimated_monthly_usd`/`estimated_monthly_tokens` shape open
+// items carry — a bounded, point-in-time snapshot taken at the moment of
+// apply, NEVER a live re-measurement (behavioral requirement #7, REVISED:
+// the perpetual verify/receipts layer that would have produced a real
+// measured figure was removed in commit c0316aba for making unsupportable
+// realized-savings claims; see the note above InboxStatTiles). For relearn,
+// `verify.estimated_monthly_usd/tokens` (stamped once by relearn_apply.
+// apply_relearn_fix); for a cost marker, the proposal's own estimate, carried
+// straight onto the ledger record by cost_apply.mark_applied. Shared by
+// AppliedItemRow (per-row) and InboxStatTiles (summed across all applied).
+function appliedEstimate(rec) {
+  const isRelearn = rec.kind === 'relearn';
+  return {
+    estimated_monthly_usd: isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.estimated_recoverable_usd,
+    estimated_monthly_tokens: isRelearn ? (rec.verify && rec.verify.estimated_monthly_tokens) : rec.estimated_recoverable_tokens,
+  };
+}
+
+// The Applied tab's one row shape for BOTH ledgers (`rec.kind` discriminates
+// 'relearn' | 'cost' — stamped by ReviewInboxView when it merges the two
+// lists). Mockup: title, "Applied N days ago", a green delta figure — always
+// labeled `est.`, NEVER a "verified" claim or chip (behavioral requirement
+// #7, REVISED — see the note above `appliedEstimate` and InboxStatTiles).
+// Enforcement enable/disable (rung 3-5) only ever applies to relearn fixes.
+function AppliedItemRow({ rec, onChanged, suppressed }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [confirming, setConfirming] = useState(false);
@@ -7954,22 +8030,31 @@ function AppliedFixRow({ rec, onChanged }) {
     finally { setBusy(false); setConfirming(false); }
   };
 
+  const isRelearn = rec.kind === 'relearn';
   const enforcement = rec.enforcement;
-  const isEnforcement = ENFORCEMENT_RUNGS.has(rec.rung);
+  const isEnforcement = isRelearn && ENFORCEMENT_RUNGS.has(rec.rung);
+  const est = appliedEstimate(rec);
+  const usd = est.estimated_monthly_usd;
+  const toks = est.estimated_monthly_tokens;
+  const revertUrl = isRelearn ? `/relearn/${rec.id}/revert` : `/relearn/cost-applied/${rec.id}/revert`;
 
   return html`
     <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:8px;width:100%">
+      <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap">
         <span style="font-weight:500">${rec.title}</span>
-        <span class="dim" style="font-size:11px">rung ${rec.rung} · ${RUNG_LABELS[rec.rung] || rec.kind}</span>
+        ${!isRelearn ? html`<span class="badge badge-info">${(COST_BADGE_BY_ANALYZER[rec.analyzer] || rec.analyzer || '').toUpperCase()}</span>` : null}
         <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
         ${isEnforcement && rec.state === 'applied' ? html`<span class="dim" style="font-size:11px">· enforcement ${enforcement && enforcement.enabled ? 'ENABLED' : 'disabled'}</span>` : null}
+        ${(usd != null || toks != null) ? html`
+          <span class="mono" style="margin-left:auto;color:var(--success);font-weight:600">
+            +${(!suppressed && usd != null) ? fmtUsd(usd) : (toks != null ? '~' + fmtTokens(toks) + ' tok' : fmtUsd(usd))}
+            <span class="estimated-tag" title="a snapshot of the estimate at the moment this was applied — not a live re-measurement of what happened afterward">est.</span>
+          </span>` : null}
       </div>
-      <div class="dim" style="font-size:12px"><code>${rec.target_path}</code> · applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}${rec.git_commit ? html` · <code>${rec.git_commit.slice(0, 8)}</code>` : ''}</div>
-      ${rec.state === 'applied' ? html`<${VerifyLine} verify=${rec.verify} rung=${rec.rung} />` : null}
+      <div class="dim" style="font-size:12px">Applied ${daysAgoLabel(rec.applied_at)}${rec.target_path ? html` · <code>${rec.target_path}</code>` : ''}${rec.git_commit ? html` · <code>${rec.git_commit.slice(0, 8)}</code>` : ''}</div>
       ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
       <div style="display:flex;gap:10px;align-items:center">
-        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/relearn/${rec.id}/revert`, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
+        ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${() => call(() => apiPostOrDetail(revertUrl, {}))}>${busy ? 'working…' : 'Revert'}</span>` : null}
         ${isEnforcement && rec.state === 'applied' && !(enforcement && enforcement.enabled) ? (
           confirming
             ? html`<span style="color:var(--warn);font-size:12px">This intercepts your tool calls on every matching call. <span class="sz-link" onClick=${() => call(() => apiPostOrDetail(`/relearn/${rec.id}/enable`, { confirm: true }))}>Confirm enable →</span> <span class="sz-link" onClick=${() => setConfirming(false)}>cancel</span></span>`
@@ -7986,33 +8071,22 @@ function AppliedFixRow({ rec, onChanged }) {
 // GET /relearn/cost-proposals. They carry NO apply path — the fix lives in the
 // user's own application code — so "Mark applied" only drops a marker
 // recording what the user approved.
-const COST_ANALYZER_LABELS = { downsize: 'downsize', cache: 'cache', trim: 'trim', subagent: 'subagent' };
+// Human-readable, uppercase analyzer-category badges (requirement #4) — the
+// mockup's own vocabulary (DOWNSIZE / CACHE / TRIM / SUBAGENT / DEADWEIGHT /
+// SCRIPT / REUSE / VERBOSITY / PLACEMENT). `resend` (context re-send) maps to
+// TRIM: its lead fix is the same context-volume-reduction lever (/compact),
+// with cache_control as the secondary lever — no dedicated badge exists in
+// the mockup's vocabulary for it, and TRIM is the closest honest fit rather
+// than inventing a tenth category.
+const COST_BADGE_BY_ANALYZER = {
+  downsize: 'DOWNSIZE', cache: 'CACHE', 'cache-recommend': 'CACHE', trim: 'TRIM',
+  subagent: 'SUBAGENT', deadweight: 'DEADWEIGHT', script: 'SCRIPT', reuse: 'REUSE',
+  verbosity: 'VERBOSITY', placement: 'PLACEMENT', resend: 'TRIM',
+};
 
 function fmtUsd(v) {
   const n = Number(v || 0);
   return '$' + (Math.abs(n) < 1 ? n.toFixed(4) : n.toFixed(2));
-}
-
-// The cost ledger: realized savings summed across every VERIFIED, improved cost
-// fix — the sibling of CompoundLedgerSummary. Same server-decided unit
-// hierarchy as ReceiptsHeader: these dollars are token deltas priced at
-// per-model LIST rates, which is not what a subscription user paid, so a
-// suppressing framing leads with the ledger's realized TOKENS and drops the
-// dollars in favour of the server's qualifier. (Nothing currently populates
-// this ledger — see the ``verify`` field's removal note on the cost-apply
-// record — so this degrades to always hidden until a future redesign.)
-function CostLedgerSummary({ ledger, framing }) {
-  if (!ledger || !ledger.verified_count) return null;
-  const suppressed = dollarsSuppressed(framing);
-  return html`
-    <div class="opt-section" style="margin:8px 0 12px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">
-      <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:baseline">
-        <span style="font-size:20px;font-weight:600;color:var(--accent)">${suppressed ? fmtTokens(ledger.total_realized_tokens) + ' tok' : fmtUsd(ledger.total_realized_usd)}</span>
-        <span class="dim" style="font-size:12px">realized across ${ledger.improved_count} verified change(s) <span class="estimated-tag" title="estimated / correlational — never a hard causal claim">est.</span></span>
-      </div>
-      ${suppressed && framing && framing.qualifier_text ? html`<div class="qualifier" style="margin-top:6px">${framing.qualifier_text}</div>` : null}
-      <div class="dim" style="font-size:11.5px;margin-top:6px">${ledger.verified_count} checked · ${ledger.improved_count} improved · ${ledger.no_change_count} no change · ${ledger.regressed_count} no movement · ${ledger.insufficient_data_count} still measuring</div>
-    </div>`;
 }
 
 // Copy-to-clipboard for a snippet fix, same robust pattern as RestoreButton:
@@ -8056,9 +8130,11 @@ const APPLY_KIND_COPY = {
   mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; confirm the target first", button: 'Remove entry' },
 };
 
-function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged }) {
-  const usd = prop.estimated_recoverable_usd;
-  const toks = prop.estimated_recoverable_tokens;
+function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, suppressed }) {
+  // Headline figure is the MONTHLY basis (requirement #1 — this page always
+  // reads "/ mo", never a raw window total), suppressed to tokens-only per
+  // the plan-tier framing the same way every dollar figure on this page is.
+  const est = estMonthlyLine(prop, suppressed);
   // Two apply-capable shapes, routed through two different endpoints:
   //  - no apply_kind (subagent rubric / script / reuse / verbosity): the fix
   //    is a workspace surface an orchestrator reads, not a value tokenjam can
@@ -8137,10 +8213,13 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged })
   return html`
     <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[prop.analyzer] || prop.analyzer}</span>
         <span style="font-weight:500">${prop.title}</span>
+        <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
         <span class="dim" style="font-size:11px">${modalityLabel}</span>
-        ${(usd != null || toks != null) ? html`<span class="mono" style="margin-left:auto;color:var(--accent);font-size:12.5px">${usd != null ? '~' + fmtUsd(usd) : ''}${toks ? ' · ~' + fmtTokens(toks) + ' tok' : ''} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>` : null}
+        <span style="margin-left:auto;text-align:right">
+          <span class="mono" style="color:var(--accent);font-size:14px;font-weight:600">${est.big} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>
+          <div class="dim" style="font-size:10px;text-transform:uppercase;letter-spacing:.03em">est. / mo${est.sub ? ' · ' + est.sub : ''}</div>
+        </span>
       </div>
       <div class="sz-note" style="margin-top:8px">${prop.evidence} <a class="sz-link" style="font-size:11.5px" href=${optimizeFindingHref(prop.analyzer)}>See the evidence →</a></div>
       <div class="opt-title" style="font-size:12.5px;margin-top:10px">Recommendation</div>
@@ -8194,127 +8273,83 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged })
     </div>`;
 }
 
-// One applied cost proposal, with its realized-delta receipt + one-step Revert.
-function CostAppliedRow({ rec, onChanged, framing }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState(null);
-  const revert = async () => {
-    setBusy(true); setError(null);
-    try { await apiPostOrDetail(`/relearn/cost-applied/${rec.id}/revert`, {}); onChanged && onChanged(); }
-    catch (e) { setError(e.message || String(e)); }
-    finally { setBusy(false); }
-  };
-  return html`
-    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--border)">
-      <div style="display:flex;align-items:center;gap:8px;width:100%">
-        <span class="rev-state staged" style="background:var(--accent-soft,rgba(120,120,255,.15))">cost · ${COST_ANALYZER_LABELS[rec.analyzer] || rec.analyzer}</span>
-        <span style="font-weight:500">${rec.title}</span>
-        <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
-      </div>
-      <div class="dim" style="font-size:12px">marked applied ${(rec.applied_at || '').slice(0, 16).replace('T', ' ')}</div>
-      ${error ? html`<div style="color:var(--error);font-size:12px">${error}</div>` : null}
-      ${rec.state === 'applied' ? html`<span class="sz-link" onClick=${revert}>${busy ? 'working…' : 'Revert'}</span>` : null}
-    </div>`;
-}
-
-// Component E — the Review inbox entry tile: the estimated-recoverable
-// headline, summed server-side over the OPEN, not-yet-applied cost-proposal
-// cards (core/optimize/cost_proposals.py's estimated_recoverable_rollup).
-// ``ReceiptsHeader`` also renders a "verified saved" tile beside it when
-// ``receiptsData`` is present; nothing currently feeds that prop (the
-// receipts endpoint that used to is gone, pending a bounded-verify
-// redesign), so today only the estimated tile ever shows.
+// The two headline stat tiles (mockup): ESTIMATED RECOVERABLE / mo (blue,
+// combined across BOTH open tabs) and FIXES APPLIED (green).
 //
-// UNIT HIERARCHY is server-decided (`receiptsData.framing`, core/framing.py):
-// a relearn fix has no single model to price against and the product refuses
-// to invent a rate for it. The dollars are also a list-price equivalent,
-// priced across all traffic, not an amount billed — nothing anywhere filters
-// cost by plan tier. So on a subscription-dominant corpus the token figure is
-// the complete and honest headline: when the framing suppresses dollars the
-// TOKENS take the hero slot and the dollars give way to the server's
-// qualifier; otherwise the dollars-first hierarchy is unchanged.
-// The estimated tile's token headline is a FLOOR, not a total: only some
-// proposals carry a token estimate. Quote that coverage rather than letting
-// the reader assume the sum spans every open proposal.
-function rollupTokenScope(rollup) {
-  const covered = rollup.token_proposal_count || 0;
-  const total = rollup.deduplicated_proposal_count || covered;
-  return covered < total
-    ? `${covered} of ${total} proposals carrying a token estimate`
-    : `${covered} proposal${covered === 1 ? '' : 's'}`;
-}
+// Tile 1's dollars-vs-tokens choice is behavioral requirement #2's rule:
+// dollars first, with tokens in the sub-line, when at least half the open
+// items are priceable; else tokens (the mockup's own tokens variant).
+// `suppressed` (plan-tier framing) forces tokens regardless, same as every
+// other dollar figure on this page.
+//
+// Tile 2 (requirement #7, REVISED — supersedes an earlier "verified saved"
+// draft of this tile). This repo deliberately removed its post-hoc verify/
+// receipts measurement layer in commit c0316aba ("refactor: remove unbounded
+// verify/receipts layer") because it made unsupportable realized-savings
+// claims (perpetual ledger, ever-growing window, live re-pricing, no
+// confounder control). Do NOT reintroduce any after-the-fact measurement
+// here, and never render a "verified" claim or chip — this tile sums each
+// applied fix's ORIGINAL estimate (the same `est.` figure AppliedItemRow
+// shows per row), never a live re-measurement of what happened afterward. A
+// bounded verify redesign is a separate, later product decision — see
+// c0316aba before building one.
+function InboxStatTiles({ openItems, appliedEstimates, appliedCount, suppressed }) {
+  const priceable = openItems.filter(i => i.estimated_monthly_usd != null);
+  const leadWithUsd = !suppressed && openItems.length > 0 && priceable.length * 2 >= openItems.length;
+  const totalUsd = priceable.reduce((s, i) => s + i.estimated_monthly_usd, 0);
+  const totalToks = openItems.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0);
 
-function ReceiptsHeader({ rollup, receiptsData, rollupFraming }) {
-  const receiptsFraming = receiptsData && receiptsData.framing;
-  const suppressed = dollarsSuppressed(receiptsFraming || rollupFraming);
-  // Suppressed, the estimated tile leads with tokens — so it needs a token
-  // estimate to lead with. With neither unit available there is nothing
-  // honest left to render, and the tile hides rather than showing a zero.
-  const hasRollup = !!rollup && (
-    suppressed ? (rollup.token_proposal_count || 0) > 0 : rollup.proposal_count > 0
-  );
-  const hasReceipts = receiptsData && receiptsData.verified_count > 0;
-  if (!hasRollup && !hasReceipts) return null;
-  // The plan-tier caveat is the server's own words, rendered in the same
-  // `.qualifier` treatment every other suppressing surface uses. It is stated
-  // once for the row rather than duplicated into both tiles.
-  const qualifier = (receiptsFraming && receiptsFraming.qualifier_text)
-    || (rollupFraming && rollupFraming.qualifier_text);
+  const appliedPriceable = appliedEstimates.filter(i => i.estimated_monthly_usd != null);
+  const appliedLeadWithUsd = !suppressed && appliedEstimates.length > 0 && appliedPriceable.length * 2 >= appliedEstimates.length;
+  const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.estimated_monthly_usd, 0);
+  const appliedTokSum = appliedEstimates.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0);
+  // Falls back to the bare count when nothing applied carries an estimate —
+  // never a fabricated "$0"/"0 tok" standing in for "no data".
+  const appliedBig = appliedLeadWithUsd ? fmtUsd(appliedUsdSum)
+    : appliedTokSum > 0 ? '~' + fmtTokens(appliedTokSum) + ' tok'
+    : String(appliedCount);
+
+  if (openItems.length === 0 && appliedCount === 0) return null;
   return html`
-    <div style="margin:10px 0 18px">
-      <div style="display:flex;gap:14px;flex-wrap:wrap">
-        ${hasRollup ? html`
-          <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
-            <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="estimated-tag" title=${rollup.estimate_basis}>est.</span></div>
-            ${suppressed ? html`
-              <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">~${fmtTokens(rollup.estimated_recoverable_tokens)} tok
-                <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollupTokenScope(rollup)}</span>
-              </div>
-            ` : html`
-              <div style="font-size:22px;font-weight:600;color:var(--accent);margin-top:4px">${fmtUsd(rollup.estimated_recoverable_usd)}
-                <span class="dim" style="font-size:12px;font-weight:400">per ${rollup.window_days}d across ${rollup.proposal_count} proposal${rollup.proposal_count === 1 ? '' : 's'}</span>
-              </div>
-              ${(rollup.estimated_recoverable_tokens || 0) > 0 ? html`<div class="dim" style="font-size:12px;margin-top:2px">~${fmtTokens(rollup.estimated_recoverable_tokens)} tok across ${rollupTokenScope(rollup)}</div>` : null}
-            `}
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 18px">
+      ${openItems.length > 0 ? html`
+        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;border-color:rgba(var(--accent-rgb,120,120,255),0.35)">
+          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="dim" style="font-weight:400">/ mo</span></div>
+          <div style="font-size:24px;font-weight:600;color:var(--accent);margin-top:4px">
+            ${leadWithUsd ? fmtUsd(totalUsd) : '~' + fmtTokens(totalToks) + ' tok'}
+            <span class="estimated-tag" title="sum of each open item's est./mo figure — review before applying">est.</span>
           </div>
-        ` : null}
-        ${hasReceipts ? html`
-          <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
-            <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Verified saved to date <span class="measured-tag" title=${receiptsData.estimate_basis}>measured</span></div>
-            ${suppressed ? html`
-              <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtTokens(receiptsData.verified_saved_tokens)} tok</div>
-            ` : html`
-              <div style="font-size:22px;font-weight:600;color:var(--success);margin-top:4px">${fmtUsd(receiptsData.verified_saved_usd)}
-                <span class="dim" style="font-size:12px;font-weight:400">+ ${fmtTokens(receiptsData.verified_saved_tokens)} tok</span>
-              </div>
-            `}
-            <div class="dim" style="font-size:11px;margin-top:6px">${receiptsData.verified_count} checked · ${receiptsData.improved_count} improved · ${receiptsData.regressed_count} regressed · ${receiptsData.no_change_count} no change · ${receiptsData.insufficient_data_count} still measuring</div>
-          </div>
-        ` : null}
+          <div class="dim" style="font-size:12px;margin-top:2px">across ${openItems.length} open item${openItems.length === 1 ? '' : 's'} · review before applying</div>
+        </div>
+      ` : null}
+      <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+        <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--success)">Fixes applied</div>
+        <div style="font-size:24px;font-weight:600;color:var(--success);margin-top:4px">${appliedBig}${appliedCount > 0 ? html` <span class="estimated-tag" title="each fix's own estimate at the moment it was applied — never re-measured afterward">est.</span>` : null}</div>
+        <div class="dim" style="font-size:12px;margin-top:2px">${appliedCount} fix${appliedCount === 1 ? '' : 'es'} applied. estimates only, savings are not measured after the fact.</div>
       </div>
-      ${qualifier ? html`<div class="qualifier" style="margin-top:8px">${qualifier}</div>` : null}
     </div>`;
 }
 
 function ReviewInboxView({ params }) {
   // Deep-link from an Optimize detail card's "review it" link (reviewProposalHref)
-  // — scrolls to and highlights every open cost advisory from this analyzer.
+  // — switches to the Cost-advisories tab and highlights the matching card(s).
   const analyzerFocus = readParam(params, 'analyzer', '');
+  const [tab, setTab] = useState('mistakes');   // 'mistakes' | 'advisories' | 'applied'
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
+  const [relearnFraming, setRelearnFraming] = useState(null);
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
   const [modalSig, setModalSig] = useState(null);
   const [refreshing, setRefreshing] = useState(false);
   const [applied, setApplied] = useState([]);
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
-  const [ledger, setLedger] = useState(null);   // Phase 3 Compound ledger — realized savings across verified fixes
-  const [costProps, setCostProps] = useState([]);         // advise-only cost proposals (downsize/cache/trim)
-  const [costRollup, setCostRollup] = useState(null);      // Component E — estimated-recoverable headline
-  const [rollupFraming, setRollupFraming] = useState(null); // plan-tier framing for the rollup's units
-  const [costApplied, setCostApplied] = useState([]);     // marked-applied cost proposals + their realized deltas
-  const [costLedger, setCostLedger] = useState(null);     // realized savings across verified cost changes
-  const [costFraming, setCostFraming] = useState(null);   // plan-tier framing for the cost ledger's units
-  const [marking, setMarking] = useState(null);           // signature currently being marked applied
+  const [costProps, setCostProps] = useState([]);          // advise-only cost proposals
+  const [costStatus, setCostStatus] = useState('never_run');
+  const [costDegraded, setCostDegraded] = useState(false); // a recompute failed even though a good result still renders
+  const [costLastError, setCostLastError] = useState(null);
+  const [costFraming, setCostFraming] = useState(null);    // plan-tier framing for the cost-advisory dollars
+  const [costApplied, setCostApplied] = useState([]);      // marked-applied cost proposals
+  const [marking, setMarking] = useState(null);            // signature currently being marked applied
 
   const load = useCallback(async () => {
     try {
@@ -8323,8 +8358,9 @@ function ReviewInboxView({ params }) {
       setD({
         loading: false, error: null, status: r.status, computedAt: r.computed_at,
         clusters: f.clusters || [], sessionsScanned: f.sessions_scanned,
-        failuresExamined: f.failures_examined, estTokens: f.estimated_recoverable_tokens,
+        failuresExamined: f.failures_examined,
       });
+      setRelearnFraming(r.framing || null);
     } catch (e) {
       setD(s => ({ ...s, loading: false, error: e.message || String(e) }));
     }
@@ -8334,7 +8370,6 @@ function ReviewInboxView({ params }) {
     try {
       const r = await api('/relearn/applied');
       setApplied(r.applied || []);
-      setLedger(r.ledger || null);
     } catch (e) { /* the pending list is the load-bearing view; degrade quietly */ }
   }, []);
 
@@ -8342,14 +8377,14 @@ function ReviewInboxView({ params }) {
     try {
       const r = await api('/relearn/cost-proposals');
       setCostProps(r.proposals || []);
-      setCostRollup(r.rollup || null);   // Component E — server-computed, ignores local dismiss state
-      setRollupFraming(r.framing || null);
+      setCostStatus(r.status || 'never_run');
+      setCostDegraded(!!r.degraded);
+      setCostLastError(r.last_error || null);
+      setCostFraming(r.framing || null);
     } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {
       const r = await api('/relearn/cost-applied');
       setCostApplied(r.applied || []);
-      setCostLedger(r.ledger || null);
-      setCostFraming(r.framing || null);
     } catch (e) { /* degrade quietly */ }
   }, []);
 
@@ -8357,15 +8392,18 @@ function ReviewInboxView({ params }) {
     load(); loadApplied(); loadCost();
     // Light poll while a background pass may be computing (or right after a
     // manual refresh) so the empty/computing state resolves without a reload.
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') load(); }, 8000);
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') { load(); loadCost(); }
+    }, 8000);
     return () => clearInterval(timer);
   }, [load, loadApplied, loadCost]);
 
-  // Scroll the first matching advisory into view once the cost proposals have
-  // loaded (deep-link from an Optimize detail card). Highlighting every match
-  // for this analyzer is handled per-card below (rev-focus).
+  // Land on the Cost-advisories tab and scroll the matching card(s) into view
+  // once they've loaded (deep-link from an Optimize detail card). Highlighting
+  // every match for this analyzer is handled per-card below (rev-focus).
   useEffect(() => {
     if (!analyzerFocus) return;
+    setTab('advisories');
     const el = document.querySelector(`[data-analyzer="${CSS.escape(analyzerFocus)}"]`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [analyzerFocus, costProps]);
@@ -8390,7 +8428,6 @@ function ReviewInboxView({ params }) {
   }, [loadCost]);
 
   const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
-  const relearnCount = visible.length;
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
     // Only the selected rows that are actually listed: a stale signature left in
@@ -8399,6 +8436,22 @@ function ReviewInboxView({ params }) {
     setDismissed(next); saveDismissedRelearns(next);
     setChecked(new Set());
   };
+  const dismissMany = (sigs) => {
+    const next = new Set([...dismissed, ...sigs]);
+    setDismissed(next); saveDismissedRelearns(next);
+    setChecked(s => { const n = new Set(s); sigs.forEach(sig => n.delete(sig)); return n; });
+  };
+  // Bulk-mark-applied for a collapsed tail (requirement #3) only ever covers
+  // the plain "mark applied" cards (no apply_kind / not workspace apply_capable)
+  // — a proposal that needs its own target-path confirmation keeps that
+  // per-item human-gated step (requirement #9), so bulk never skips it.
+  const markManyApplied = async (props) => {
+    for (const p of props.filter(x => !x.apply_capable)) {
+      try { await apiPostOrDetail('/relearn/cost-proposals/apply', { proposal_id: p.proposal_id }); }
+      catch (e) { /* keep going; surfaced on next refresh */ }
+    }
+    await loadCost();
+  };
   // Selection is scoped to `visible` — the rows actually rendered — never to
   // d.clusters. The list filters out locally-dismissed rows and rows approved
   // in this session, and `checked` is not pruned when a row leaves the list, so
@@ -8406,7 +8459,6 @@ function ReviewInboxView({ params }) {
   // let select-all reach a row the user cannot see.
   const selectedVisible = visible.filter(c => checked.has(c.signature));
   const selectedCount = selectedVisible.length;
-  const allVisibleSelected = visible.length > 0 && selectedCount === visible.length;
   // Clicking a fully-selected box clears it; anything else selects the lot.
   const toggleAll = () => setChecked(
     prev => nextSelectAllSelection(visible.map(c => c.signature), prev));
@@ -8424,57 +8476,94 @@ function ReviewInboxView({ params }) {
     setDismissed(next); saveDismissedRelearns(next);
   };
 
+  // Plan-tier dollar suppression (requirement #9, core/framing.py): if EITHER
+  // surface's framing says suppress, suppress everywhere on this page — the
+  // two blocks are computed off the same account and should agree, but this
+  // never lets a stale/degraded one leak an un-suppressed dollar through.
+  const suppressed = dollarsSuppressed(relearnFraming) || dollarsSuppressed(costFraming);
+
+  // Sort + long-tail collapse (requirement #3), independently per tab. Deep-
+  // linking to a specific analyzer skips the collapse on the advisories tab —
+  // a highlighted card must never be hidden inside a folded tail.
+  const sortedRelearn = sortByEstMonthly(visible);
+  const { top: topRelearn, tail: tailRelearn } = splitTopAndTail(sortedRelearn);
+  const sortedCost = sortByEstMonthly(visibleCost);
+  const { top: topCost, tail: tailCost } = analyzerFocus
+    ? { top: sortedCost, tail: [] } : splitTopAndTail(sortedCost);
+
+  const openItems = [...visible, ...visibleCost];
+  const combinedApplied = [
+    ...(applied || []).map(r => ({ ...r, kind: 'relearn' })),
+    ...(costApplied || []).map(r => ({ ...r, kind: 'cost' })),
+  ].sort((a, b) => (b.applied_at || '').localeCompare(a.applied_at || ''));
+  const appliedOpenCount = combinedApplied.filter(r => r.state !== 'reverted').length;
+  // Each non-reverted applied item's own estimate (requirement #7's honest
+  // "Fixes applied" tile — never a live re-measurement).
+  const appliedEstimates = combinedApplied
+    .filter(r => r.state !== 'reverted')
+    .map(appliedEstimate);
+
   return html`
-    <div class="page-title">Review inbox <span class="sz-sub">· pending fixes</span></div>
-    <div class="sz-note">Every row here is waste you are paying for more than once: a mistake your agent repeated across sessions, priced in the tokens it burned. Each row links its evidence (the sessions it recurred in) and the fix that would stop it. <b>Approve</b> writes that fix (git-committed, or backed up if the target is not a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
-
-    <${ReceiptsHeader} rollup=${costRollup} receiptsData=${null} rollupFraming=${rollupFraming} />
-
-    <div class="cur-listhead">
-      <span>
-        <b style="color:var(--warn)">${relearnCount}</b> recurring mistakes${d.estTokens ? html` · <b style="color:var(--accent)">~${fmtTokens(d.estTokens)} tok</b> recoverable <span class="estimated-tag" title="occurrences x a conservative per-turn token cost, summed across the rows below — review before applying">est.</span>` : null}
-        ${d.computedAt ? html` · <span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
-        ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
-      </span>
-      <span class="sz-link" onClick=${doRefresh}>${refreshing || d.status === 'computing' ? 'scanning…' : 'Rescan now'}</span>
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div class="page-title" style="margin-bottom:0">Inbox</div>
+      <span class="sz-link" onClick=${doRefresh}>⟳ ${refreshing || d.status === 'computing' || costStatus === 'computing' ? 'scanning…' : 'Rescan now'}</span>
     </div>
-    <div class="cur-listbox">
-      <table class="cur-table">
-        <thead><tr><th style="width:26px"><${SelectAllCheckbox} total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} /></th><th>Signature</th><th>Sessions</th><th>Rung</th><th style="text-align:right">Est. savings</th><th>Status</th></tr></thead>
-        <tbody>
-          ${d.error ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</td></tr>` : null}
-          ${!d.error && d.loading ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">Loading…</td></tr>` : null}
-          ${!d.error && !d.loading && d.status === 'never_run' ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No scan has run yet — click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</td></tr>` : null}
-          ${!d.error && !d.loading && d.status !== 'never_run' && relearnCount === 0 ? html`<tr><td colspan="6" class="dim" style="padding:32px 16px;text-align:center">No pending fixes — the last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</td></tr>` : null}
-          ${!d.error && !d.loading ? visible.map(c => html`<${RelearnRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} />`) : null}
-        </tbody>
-      </table>
-    </div>
-    <div class="cur-addbar">
-      <button class="cur-btn" disabled=${selectedCount === 0} onClick=${dismissChecked}>${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}</button>
-      <span class="dim" style="font-size:12px">${relearnCount ? 'Click a row for its evidence, proposed fix, and to Approve.' : 'Nothing to review yet.'}</span>
+    <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
+
+    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} suppressed=${suppressed} />
+
+    <div class="tab-bar" role="tablist">
+      <button class="tab ${tab === 'mistakes' ? 'active' : ''}" role="tab" aria-selected=${tab === 'mistakes'} onClick=${() => setTab('mistakes')}>Recurring mistakes (${visible.length})</button>
+      <button class="tab ${tab === 'advisories' ? 'active' : ''}" role="tab" aria-selected=${tab === 'advisories'} onClick=${() => setTab('advisories')}>Cost advisories (${visibleCost.length})</button>
+      <button class="tab ${tab === 'applied' ? 'active' : ''}" role="tab" aria-selected=${tab === 'applied'} onClick=${() => setTab('applied')}>Applied (${appliedOpenCount})</button>
     </div>
 
-    ${visibleCost.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Cost advisories <span class="dim" style="font-weight:400;font-size:12px">· ${visibleCost.length} from the downsize, cache, trim, and subagent analyzers</span></div>
-      <div style="margin-top:8px">
-        ${visibleCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} />`)}
+    ${tab === 'mistakes' ? html`
+      <div class="cur-listhead">
+        <span>
+          ${d.computedAt ? html`<span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
+          ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
+        </span>
+        <span style="display:flex;align-items:center;gap:8px">
+          <${SelectAllCheckbox} total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} />
+          <button class="cur-btn" disabled=${selectedCount === 0} onClick=${dismissChecked}>${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}</button>
+        </span>
+      </div>
+      <div class="cur-listbox">
+        ${d.error ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>` : null}
+        ${!d.error && d.loading ? html`<div class="dim" style="padding:32px 16px;text-align:center">Loading…</div>` : null}
+        ${!d.error && !d.loading && d.status === 'never_run' ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
+        ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>` : null}
+        ${!d.error && !d.loading ? topRelearn.map(c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} suppressed=${suppressed} />`) : null}
+        <${CollapsedTailRow} tail=${tailRelearn} suppressed=${suppressed} itemLabel="recurring mistakes"
+          onDismissAll=${() => dismissMany(tailRelearn.map(c => c.signature))}
+          renderItem=${c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} suppressed=${suppressed} />`} />
+      </div>
+      <div class="sz-note" style="margin-top:8px">Click a row for its evidence, proposed fix, and to Approve. <b>Approve</b> writes that fix (git-committed, or backed up if the target is not a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
+    ` : null}
+
+    ${tab === 'advisories' ? html`
+      ${(costDegraded || costStatus === 'computing') ? html`
+        <div class="dim" style="font-size:12px;margin-bottom:8px">
+          ${costDegraded ? html`<span style="color:var(--warn)" title=${costLastError || ''}>⚠ the last refresh failed; showing the last good result</span>` : null}
+          ${costStatus === 'computing' ? html`<span style="color:var(--warn)">scanning…</span>` : null}
+        </div>` : null}
+      <div>
+        ${costStatus === 'never_run' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
+        ${costStatus === 'error' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>` : null}
+        ${costStatus === 'ready' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No open cost advisories right now.</div>` : null}
+        ${topCost.map(p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} />`)}
+        <${CollapsedTailRow} tail=${tailCost} suppressed=${suppressed} itemLabel="cost advisories"
+          onDismissAll=${() => dismissMany(tailCost.map(p => p.signature))}
+          onMarkAllApplied=${() => markManyApplied(tailCost)}
+          renderItem=${p => html`<${CostProposalCard} key=${p.signature} prop=${p} busy=${marking === p.signature} focused=${p.analyzer === analyzerFocus} onMark=${markCostApplied} onDismiss=${dismissCost} onChanged=${() => { loadCost(); loadApplied(); }} suppressed=${suppressed} />`} />
       </div>
     ` : null}
 
-    ${costApplied.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied cost advisories</div>
-      <${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />
-      <div class="cur-listbox" style="margin-top:8px">
-        ${costApplied.slice().reverse().map(rec => html`<${CostAppliedRow} key=${rec.id} rec=${rec} framing=${costFraming} onChanged=${() => { loadCost(); }} />`)}
-      </div>
-    ` : null}
-
-    ${applied.length > 0 ? html`
-      <div class="opt-title" style="font-size:14px;margin-top:24px">Applied <span class="dim" style="font-weight:400;font-size:12px">· what Approve has written so far — Revert undoes any row in one step</span></div>
-      <${CompoundLedgerSummary} ledger=${ledger} />
-      <div class="cur-listbox" style="margin-top:8px">
-        ${applied.slice().reverse().map(rec => html`<${AppliedFixRow} key=${rec.id} rec=${rec} onChanged=${() => { loadApplied(); }} />`)}
+    ${tab === 'applied' ? html`
+      <div class="cur-listbox">
+        ${combinedApplied.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing applied yet.</div>` : null}
+        ${combinedApplied.map(rec => html`<${AppliedItemRow} key=${rec.kind + ':' + rec.id} rec=${rec} suppressed=${suppressed} onChanged=${() => { loadApplied(); loadCost(); }} />`)}
       </div>
     ` : null}
 
