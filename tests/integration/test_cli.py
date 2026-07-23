@@ -1203,7 +1203,7 @@ def test_optimize_flags_downgrade_candidate(runner, db, config):
 
     result = _invoke(runner, db, config, ["optimize"])
     assert result.exit_code == 0
-    assert "Model downgrade" in result.output
+    assert "Downsize" in result.output
     # Mandatory caveat must appear in human output
     assert "Candidate-flagging heuristic" in result.output
 
@@ -1336,7 +1336,7 @@ def test_optimize_local_suppresses_dollar_figures(runner, db, config):
     assert "Local inference" in out
     assert "no marginal cost" in out
     # Token framing in downgrade body
-    if "Model downgrade" in out:
+    if "Downsize" in out:
         assert "Relevant for capacity planning" in out
 
 
@@ -1423,11 +1423,11 @@ def test_optimize_ranks_findings_by_reclaimable_share_not_registry_order(runner,
     # downsize always ran first in ANALYZER_ORDER.
     assert "① Workflow restructure" in out or "① Reuse" in out
     # ...and downsize no longer gets the fixed ① slot it always used to.
-    assert "① Model downgrade" not in out
+    assert "① Downsize" not in out
     # It's still surfaced — honesty discipline forbids a silent drop — just
     # collapsed into the de-minimis pointer list instead of a numbered slot.
     assert "Minor findings" in out
-    assert "Model downgrade" in out
+    assert "Downsize" in out
     assert "of window tokens" in out
 
 
