@@ -1,11 +1,30 @@
 from __future__ import annotations
 
 import click
+import socket
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from tokenjam.core.server_state import server_state_path
 from tokenjam.utils.formatting import console
+
+
+def _port_in_use(host: str, port: int) -> bool:
+    """Return True if *port* on *host* is already bound.
+
+    Pre-flight check so `tj serve` can fail fast with a clear message instead
+    of the confusing "Application startup complete" -> EADDRINUSE sequence
+    uvicorn prints when it can't bind the port (issue #509). We attempt the
+    bind ourselves and release it immediately; a subsequent uvicorn bind on
+    the same address is racy in theory but the window is negligible and the
+    goal here is a clear diagnostic, not a lock.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        try:
+            sock.bind((host, port))
+        except OSError:
+            return True
+    return False
 
 
 @click.command("serve")
@@ -19,6 +38,20 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
     config = ctx.obj["config"]
     bind_host = host or config.api.host
     bind_port = port or config.api.port
+
+    # Fail fast with a clear message if the port is already bound, rather than
+    # letting uvicorn print "Application startup complete" and THEN a bind
+    # error that reads like a crash-after-boot (issue #509).
+    if _port_in_use(bind_host, bind_port):
+        console.print(
+            f"[red]Port {bind_port} is already in use[/red] — is [bold]tj serve[/bold] "
+            f"already running?"
+        )
+        console.print(
+            "  Run [bold]tj stop[/bold] to stop it, or [bold]tj serve --port <n>[/bold] "
+            "to use a different port."
+        )
+        raise SystemExit(1)
 
     import uvicorn
     from fastapi import FastAPI
