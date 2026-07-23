@@ -1841,6 +1841,34 @@ def _with_monthly_extrapolation(proposal: CostProposal, window_days: float) -> C
     return replace(proposal, **updates) if updates else proposal
 
 
+def backfill_legacy_monthly_fields(proposal: dict[str, Any]) -> dict[str, Any]:
+    """Read-time backward compat for a cached cost-proposal dict written
+    before the monthly-basis fields existed on ``CostProposal``.
+
+    ``recompute_cost_proposals`` always runs every fresh proposal through
+    ``_with_monthly_extrapolation`` before it's written to disk, so a cache
+    produced by the CURRENT build already carries both
+    ``estimated_monthly_usd``/``estimated_monthly_tokens`` whenever a window
+    figure exists — this never touches those. It only fires for an entry that
+    predates those fields (the key is simply absent from the cached JSON, not
+    present-and-``None``), which otherwise renders a tokens-only headline for
+    an item that genuinely has a computable dollar rate, forever, until the
+    next successful recompute (up to the 6h scheduled interval away). The
+    window figure is used AS the monthly one (scale 1.0): the daemon's
+    recompute window has always defaulted to ``DEFAULT_COST_WINDOW_DAYS`` ==
+    30, so for a stale entry the window figure already approximates the
+    30-day rate closely enough for backward-compat display purposes, without
+    the exact ``window_days`` that produced it. Mirrors ``list_proposals``'s
+    defensive proposal-ID stamping: a stale cache resolves correctly without
+    forcing a recompute.
+    """
+    if "estimated_monthly_usd" not in proposal and proposal.get("estimated_recoverable_usd") is not None:
+        proposal = {**proposal, "estimated_monthly_usd": proposal["estimated_recoverable_usd"]}
+    if "estimated_monthly_tokens" not in proposal and proposal.get("estimated_recoverable_tokens") is not None:
+        proposal = {**proposal, "estimated_monthly_tokens": proposal["estimated_recoverable_tokens"]}
+    return proposal
+
+
 # --------------------------------------------------------------------------- #
 # Component E — the Review inbox's single "estimated recoverable" headline.
 # Pure arithmetic over whatever proposals the caller hands it (the API route

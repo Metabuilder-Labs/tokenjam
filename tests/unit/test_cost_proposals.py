@@ -1078,3 +1078,82 @@ def test_read_cost_proposals_reports_error_state_before_any_success(tmp_path):
     assert block is not None
     assert block["cost_proposals_error"] == "boom"
     assert block["cost_computed_at"] is None
+
+
+# --- Real-data validation follow-ups: dollar-first headline, sort, formatting -
+
+def test_downsize_agent_row_monthly_usd_matches_its_own_evidence_text():
+    # Reproduces the founder's real "Model over-sizing in claude-code
+    # (claude-opus-4-7 to claude-haiku-4-5)" card: a per-agent price row is
+    # the path that produced it (_downsize_agent_proposals, not the window-
+    # wide aggregate _report() fixture above exercises). estimated_monthly_usd
+    # and the evidence string's own "$X per 30 days" figure both come from
+    # the SAME row.projected_30d_delta_usd — assert they never diverge, so a
+    # dollar-computable downsize card can never render a tokens-only headline.
+    from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
+    from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
+
+    candidates = [{
+        "session_id": f"s{i}", "agent_id": "claude-code", "provider": "anthropic",
+        "model": "claude-opus-4-7", "alt_model": "claude-haiku-4-5",
+        "input_tokens": 1, "output_tokens": 48, "cache_tokens": 3142, "cache_write_tokens": 6716,
+    } for i in range(32)]
+    rows = build_agent_price_rows(candidates, window_days=30.0)
+    assert rows and rows[0].delta_usd > 0
+
+    class _Finding:
+        per_agent = rows
+        candidate_sessions = 32
+        suggestions: dict = {}
+
+    props = _downsize_agent_proposals(_Finding(), config=None)
+    assert len(props) == 1
+    prop = props[0]
+    assert prop.estimated_monthly_usd is not None
+    assert prop.estimated_monthly_usd > 0
+    assert prop.estimated_monthly_usd == rows[0].projected_30d_delta_usd
+    # The evidence paragraph's own "$X per 30 days" is the identical number.
+    assert f"{prop.estimated_monthly_usd:,.2f}" in prop.evidence or f"{prop.estimated_monthly_usd:.4f}" in prop.evidence
+
+
+def test_backfill_legacy_monthly_fields_fills_only_absent_keys():
+    from tokenjam.core.optimize.cost_proposals import backfill_legacy_monthly_fields
+
+    # A cache entry written before the monthly fields existed on
+    # `CostProposal`: the keys are simply absent from the dict, not
+    # present-and-None.
+    legacy = {
+        "signature": "cost:downsize:claude-code",
+        "estimated_recoverable_usd": 36.65,
+        "estimated_recoverable_tokens": 10_144_061,
+    }
+    out = backfill_legacy_monthly_fields(legacy)
+    assert out["estimated_monthly_usd"] == 36.65
+    assert out["estimated_monthly_tokens"] == 10_144_061
+    assert legacy == {  # the input dict itself is never mutated
+        "signature": "cost:downsize:claude-code",
+        "estimated_recoverable_usd": 36.65,
+        "estimated_recoverable_tokens": 10_144_061,
+    }
+
+
+def test_backfill_legacy_monthly_fields_never_overwrites_a_fresh_value():
+    from tokenjam.core.optimize.cost_proposals import backfill_legacy_monthly_fields
+
+    fresh = {
+        "estimated_recoverable_usd": 36.65, "estimated_monthly_usd": 36.65,
+        "estimated_recoverable_tokens": 0, "estimated_monthly_tokens": None,
+    }
+    out = backfill_legacy_monthly_fields(fresh)
+    assert out["estimated_monthly_usd"] == 36.65   # key was present -> untouched
+    assert out["estimated_monthly_tokens"] is None  # key was present (even as None) -> untouched
+
+
+def test_backfill_legacy_monthly_fields_no_op_when_no_window_figure_either():
+    # An advise-only analyzer with no dollar dimension at all (e.g. subagent
+    # rubric): both fields stay absent, never fabricated from nothing.
+    from tokenjam.core.optimize.cost_proposals import backfill_legacy_monthly_fields
+
+    out = backfill_legacy_monthly_fields({"signature": "cost:subagent:bar"})
+    assert "estimated_monthly_usd" not in out
+    assert "estimated_monthly_tokens" not in out
