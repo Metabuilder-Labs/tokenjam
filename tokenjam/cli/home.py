@@ -70,10 +70,14 @@ def print_home() -> None:
     if not _is_set_up():
         console.print("[bold]Not set up yet.[/bold] Get started:")
         console.print()
-        console.print("  [bold]tj onboard --claude-code[/bold]   "
-                      "[dim]capture Claude Code usage (recommended)[/dim]")
-        console.print("  [bold]tj onboard[/bold]                 "
-                      "[dim]generic setup for the Python SDK[/dim]")
+        console.print("  [bold]tj onboard[/bold]   "
+                      "[dim]interactive setup: asks how you use AI agents "
+                      "and wires the right path[/dim]")
+        console.print()
+        console.print(
+            "[dim]Run it once inside each project so sessions and "
+            "proposals group per project in the dashboard.[/dim]"
+        )
         console.print()
         console.print(
             "[dim]Docs: https://github.com/Metabuilder-Labs/tokenjam[/dim]"
