@@ -61,7 +61,18 @@ langchain = ["langchain>=0.2"]
 crewai    = ["crewai>=0.28"]
 autogen   = ["pyautogen>=0.2"]
 litellm   = ["litellm>=1.40"]
-dev       = ["pytest", "pytest-asyncio", "httpx", "ruff", "mypy"]
+# ruff<0.16: 0.16.0 expanded ruff's own DEFAULT lint rule set (this project
+# has no [tool.ruff.lint] select/ignore block, so it always runs whatever
+# ruff's defaults are for the installed version) — an unpinned `ruff` here
+# meant CI's `pip install -e ".[dev,mcp]"` silently picked up 0.16.0 the
+# moment it hit PyPI and started flagging ~470 pre-existing patterns across
+# the whole codebase that 0.15.x never checked, breaking every PR's Lint
+# step for a reason with zero relation to that PR's own diff. Pinned to the
+# 0.15.x line, which CI ran clean against as of the last verified-green run
+# on main. Bump this deliberately (and fix or explicitly re-suppress
+# whatever the new default set newly flags) rather than letting a ruff
+# release silently redefine what "lint-clean" means for every PR.
+dev       = ["pytest", "pytest-asyncio", "httpx", "ruff<0.16", "mypy"]
 # Kept as a no-op extra for back-compat — `pipx install 'tokenjam[mcp]'` still
 # works, just installs the same fastmcp that's now in the base dependencies.
 # Documented in `docs/installation.md` so users know they no longer need it.
