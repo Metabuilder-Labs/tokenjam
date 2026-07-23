@@ -100,7 +100,10 @@ def test_nudge_no_daemon_still_points_at_tj_serve(capsys):
 
 
 def test_home_when_not_configured_points_at_onboarding(monkeypatch, capsys):
-    monkeypatch.setattr("tokenjam.cli.home.find_config_file", lambda: None)
+    # No config discoverable AND no populated DB → truly a fresh user (#506).
+    monkeypatch.setattr("tokenjam.cli.home.find_config_file", lambda *a, **k: None)
+    monkeypatch.setattr("tokenjam.cli.home._db_has_data", lambda: False)
+    monkeypatch.delenv("TJ_CONFIG", raising=False)
     print_home()
     out = capsys.readouterr().out
     assert "TokenJam" in out                     # banner
@@ -111,7 +114,7 @@ def test_home_when_not_configured_points_at_onboarding(monkeypatch, capsys):
 def test_home_when_configured_shows_next_best_actions(monkeypatch, capsys, tmp_path):
     cfg = tmp_path / "config.toml"
     cfg.write_text("version = '1'\n")
-    monkeypatch.setattr("tokenjam.cli.home.find_config_file", lambda: cfg)
+    monkeypatch.setattr("tokenjam.cli.home.find_config_file", lambda *a, **k: cfg)
     print_home()
     out = capsys.readouterr().out
     assert "You're set up" in out
@@ -119,10 +122,29 @@ def test_home_when_configured_shows_next_best_actions(monkeypatch, capsys, tmp_p
         assert cmd in out, out
 
 
+def test_home_when_db_populated_but_no_config_is_set_up(monkeypatch, capsys, tmp_path):
+    """#506: a user who backfilled (populated DB) but never ran full `tj onboard`
+    has no config file, yet must NOT be told "Not set up yet"."""
+    # No config discoverable anywhere...
+    monkeypatch.setattr("tokenjam.cli.home.find_config_file", lambda *a, **k: None)
+    monkeypatch.delenv("TJ_CONFIG", raising=False)
+    # ...but a non-empty DB file exists at the default path.
+    db = tmp_path / ".tj" / "telemetry.duckdb"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"\x00" * 4096)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    print_home()
+    out = capsys.readouterr().out
+    assert "You're set up" in out, out
+    assert "Not set up yet" not in out
+
+
 def test_bare_tj_renders_home_without_opening_db(monkeypatch):
     """`tj` with no subcommand prints the home screen and must NOT open the DB
     (so it works while `tj serve` holds the write lock)."""
-    monkeypatch.setattr("tokenjam.cli.home.find_config_file", lambda: None)
+    monkeypatch.setattr("tokenjam.cli.home.find_config_file", lambda *a, **k: None)
+    monkeypatch.setattr("tokenjam.cli.home._db_has_data", lambda: False)
+    monkeypatch.delenv("TJ_CONFIG", raising=False)
     monkeypatch.setattr(
         "tokenjam.cli.main.open_db",
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("bare tj opened the DB")),
