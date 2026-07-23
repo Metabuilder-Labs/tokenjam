@@ -378,8 +378,23 @@ def _render(diag, timeline, *, since: str,
                   "zero-token statusline. No signup:", style="dim")
     console.print(deeper)
     console.print()
-    console.print(Text("  npx tokenjam onboard", style="bold cyan"))
+    console.print(Text(f"  {_go_deeper_command()}", style="bold cyan"))
     console.print()
+
+
+def _go_deeper_command() -> str:
+    """The "go deeper" footer CTA, context-aware about how quickstart was reached.
+
+    Bare ``npx tokenjam`` / ``uvx --from tokenjam tj`` runs quickstart from a
+    throwaway uvx/pipx-run cache (no persistent install), so the CTA is the
+    zero-install one (``npx tokenjam onboard``) — the user re-enters through the
+    same door. But when quickstart runs from an already-installed ``tj`` binary
+    the user obviously has it installed, so drop the ``npx tokenjam`` prefix and
+    point straight at ``tj onboard`` (issue #507).
+    """
+    from tokenjam.cli.cmd_onboard import _is_ephemeral_runner
+
+    return "npx tokenjam onboard" if _is_ephemeral_runner() else "tj onboard"
 
 
 def _bar(value: int, maximum: int, width: int = 16) -> str:

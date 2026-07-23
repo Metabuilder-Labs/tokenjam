@@ -24,8 +24,11 @@ from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.db import (
     DuckDBBackend,
     EXPECTED_ADDITIVE_COLUMNS,
+    EXPECTED_TABLES,
     ensure_expected_columns,
+    ensure_expected_tables,
     missing_expected_columns,
+    missing_expected_tables,
     run_migrations,
 )
 from tokenjam.core.ingest import IngestPipeline
@@ -68,6 +71,28 @@ def _simulate_unlanded_migration_7(conn) -> None:
     # explicit and independent of migration numbering.
     conn.execute("DELETE FROM schema_migrations WHERE version = 7")
     conn.execute("INSERT INTO schema_migrations VALUES (7, now())")
+
+
+def _live_tables(conn) -> set[str]:
+    return {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+        ).fetchall()
+    }
+
+
+def _simulate_unlanded_create_table(conn, table: str) -> None:
+    """Recreate the #382 failure state: a CREATE TABLE migration recorded applied,
+    the table gone.
+
+    Drops one code-depended table while leaving its migration version recorded,
+    exactly as a renumbered/recorded-under-older-definition version would leave the
+    live DB. The migration is already recorded by run_migrations; the drop alone
+    reproduces the state (the version stays in schema_migrations, so the
+    version-keyed loop never re-creates it).
+    """
+    conn.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def _spans_columns(conn) -> set[str]:
@@ -187,3 +212,92 @@ class TestIngestNoLongerDroppedOnMissingColumn:
                 "($1, $2, $3, $4, $5, now(), $6)",
                 ["s1", "t1", "n", "internal", "ok", "{}"],
             )
+
+
+# ---------------------------------------------------------------------------
+# CREATE TABLE self-heal (#382)
+# ---------------------------------------------------------------------------
+
+
+class TestMissingExpectedTables:
+    def test_healthy_db_reports_nothing_missing(self, conn):
+        assert missing_expected_tables(conn) == []
+
+    def test_detects_dropped_table(self, conn):
+        _simulate_unlanded_create_table(conn, "session_labels")
+        assert "session_labels" in missing_expected_tables(conn)
+
+    def test_reports_every_dropped_table(self, conn):
+        for table in EXPECTED_TABLES:
+            _simulate_unlanded_create_table(conn, table)
+        assert set(missing_expected_tables(conn)) == set(EXPECTED_TABLES)
+
+
+class TestEnsureExpectedTables:
+    def test_heals_dropped_table(self, conn):
+        _simulate_unlanded_create_table(conn, "session_labels")
+        assert "session_labels" not in _live_tables(conn)
+        created = ensure_expected_tables(conn)
+        assert created == ["session_labels"]
+        assert "session_labels" in _live_tables(conn)
+
+    def test_idempotent_on_healthy_db(self, conn):
+        assert ensure_expected_tables(conn) == []
+
+    def test_idempotent_when_called_twice(self, conn):
+        _simulate_unlanded_create_table(conn, "expectations")
+        ensure_expected_tables(conn)
+        assert ensure_expected_tables(conn) == []
+
+    def test_every_expected_table_ddl_is_valid_and_idempotent(self, conn):
+        """Guard: each EXPECTED_TABLES DDL must CREATE cleanly on a DB where the
+        table is absent — proving every stored CREATE statement is valid and
+        `IF NOT EXISTS`-guarded (no surprises on re-issue)."""
+        for table in EXPECTED_TABLES:
+            _simulate_unlanded_create_table(conn, table)
+        created = ensure_expected_tables(conn)
+        assert set(created) == set(EXPECTED_TABLES)
+        assert missing_expected_tables(conn) == []
+
+
+class TestRunMigrationsSelfHealsTables:
+    def test_recorded_but_unlanded_create_table_reruns_on_open(self, conn):
+        """The core #382 contract: a CREATE TABLE migration's version stays
+        recorded, the table dropped -> the NEXT run_migrations (i.e. next open)
+        recreates it without touching the recorded version set."""
+        _simulate_unlanded_create_table(conn, "session_story")
+        assert "session_story" not in _live_tables(conn)
+        # Version 15 is still recorded, so the version-keyed loop skips it.
+        recorded = {
+            row[0]
+            for row in conn.execute(
+                "SELECT version FROM schema_migrations"
+            ).fetchall()
+        }
+        assert 15 in recorded
+
+        run_migrations(conn)
+        assert "session_story" in _live_tables(conn)
+
+    def test_backend_self_heals_table_on_open(self, tmp_path):
+        db_path = tmp_path / "telemetry.duckdb"
+
+        # 1. Open once to migrate, then drop a code-depended table and close.
+        first = DuckDBBackend(StorageConfig(path=str(db_path)))
+        _simulate_unlanded_create_table(first.conn, "run_annotations")
+        assert "run_annotations" not in _live_tables(first.conn)
+        first.close()
+
+        # 2. Reopen: DuckDBBackend.__init__ runs migrations -> self-heals the table.
+        db = DuckDBBackend(StorageConfig(path=str(db_path)))
+        try:
+            assert "run_annotations" in _live_tables(db.conn)
+            # The recreated table is writable (the loop feature depends on it).
+            db.conn.execute(
+                "INSERT INTO run_annotations "
+                "(annotation_id, session_id, verdict, note, created_at) "
+                "VALUES ($1, $2, $3, $4, now())",
+                ["a1", "s1", "good", "healed"],
+            )
+        finally:
+            db.close()
