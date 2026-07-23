@@ -15,6 +15,7 @@ from rich.markup import escape
 from tokenjam.cli.banner import print_welcome_banner
 from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
 from tokenjam.core.config import find_config_file
+from tokenjam.core.ingest_adapters.codex import ingest_codex
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
 
@@ -915,29 +916,20 @@ def _prompt_usage_path() -> str:
 
 
 def _try_backfill_codex(config) -> tuple[str | None, bool, int]:
-    """Best-effort Codex backfill, called defensively (#448).
+    """Best-effort Codex backfill, called on the `--codex` / combination flows.
 
-    The Codex on-disk backfill adapter (`tj backfill codex`,
-    `core/ingest_adapters/codex.py`) parses `~/.codex/sessions/**/rollout-*.jsonl`.
-    It's resolved at runtime via a guarded import so the combination / --codex
-    flows degrade gracefully on any older tree where that adapter is absent. When
-    it's unavailable, returns forward-only framing so the caller can say "wired —
-    data flows as you use Codex" instead of claiming a backfill that didn't
-    happen (honesty discipline, Rule 14).
+    The Codex on-disk backfill adapter (`tj backfill codex`) is imported at
+    module scope, so a genuine import failure surfaces rather than being
+    swallowed. Runtime ingest errors (e.g. the daemon holding the DB write
+    lock) are still handled defensively so onboard never crashes — returning
+    forward-only framing ("wired — data flows as you use Codex") instead of
+    claiming a backfill that didn't happen (honesty discipline, Rule 14).
 
     Returns ``(message, has_data, sessions_total)``:
       * ``message`` — a human summary line, or None if nothing to report.
       * ``has_data`` — True only when at least one session was actually ingested.
       * ``sessions_total`` — distinct sessions ingested (0 when unavailable).
     """
-    try:
-        from tokenjam.core.ingest_adapters.codex import (  # type: ignore[import]
-            ingest_codex,
-        )
-    except Exception:
-        # Adapter not shipped yet (or import error) — forward-only, no claim.
-        return None, False, 0
-
     try:
         from tokenjam.core.db import open_db
         db = open_db(config.storage)
