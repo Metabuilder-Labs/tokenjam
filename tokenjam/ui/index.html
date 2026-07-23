@@ -7770,6 +7770,19 @@ function SelectAllCheckbox({ total, selected, onToggle }) {
 
 const INBOX_COLLAPSE_THRESHOLD = 8;
 
+// Founder-approved carve-out, scoped to the Review inbox ONLY: the resend
+// ("TRIM") card's own dollar figure is a structural token-share measurement,
+// not a savings claim (RESEND_HONESTY_CAVEAT in analyzers/context_resend.py
+// says so explicitly), so this page treats it as unpriced for every
+// dollar-first decision below even though estimated_monthly_usd carries a
+// real, non-null number for it. Every other analyzer's dollar figure is a
+// genuine recoverable estimate. dollarsSuppressed() itself is NOT touched by
+// this set — it still governs every other surface in the app unchanged.
+const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);
+function monthlyUsdForDisplay(item) {
+  return NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer) ? null : item.estimated_monthly_usd;
+}
+
 // Rank by tokens — the one figure every item on this page carries, priced or
 // not (a resend/deadweight/subagent/verbosity advisory has real recoverable
 // tokens but no dollar rate at all). Dollars stay a per-item DISPLAY
@@ -7796,8 +7809,11 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
 // and the plan tier doesn't suppress dollars, tokens as fallback (requirement
 // #2). Works for both relearn clusters and cost proposals: both carry the
 // same `estimated_monthly_usd`/`estimated_monthly_tokens` field names.
+// `suppressed` is always `false` on this page (the founder-approved
+// always-dollars carve-out above `sortByEstMonthly`); the parameter survives
+// so this function still degrades correctly if that ever changes.
 function estMonthlyLine(item, suppressed) {
-  const usd = item.estimated_monthly_usd;
+  const usd = monthlyUsdForDisplay(item);
   const toks = item.estimated_monthly_tokens;
   if (!suppressed && usd != null) {
     return { big: fmtUsd(usd), sub: toks ? '~' + fmtTokens(toks) + ' tok' : '' };
@@ -7811,9 +7827,9 @@ function estMonthlyLine(item, suppressed) {
 // tail of 7 tokens-only advisories plus 1 small-dollar one still reads in
 // tokens rather than understating itself as a tiny dollar sum.
 function combinedEstMonthly(items, suppressed) {
-  const priceable = items.filter(i => i.estimated_monthly_usd != null);
+  const priceable = items.filter(i => monthlyUsdForDisplay(i) != null);
   const leadWithUsd = !suppressed && items.length > 0 && priceable.length * 2 >= items.length;
-  if (leadWithUsd) return fmtUsd(priceable.reduce((s, i) => s + i.estimated_monthly_usd, 0));
+  if (leadWithUsd) return fmtUsd(priceable.reduce((s, i) => s + monthlyUsdForDisplay(i), 0));
   return '~' + fmtTokens(items.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0)) + ' tok';
 }
 
@@ -8015,10 +8031,15 @@ function daysAgoLabel(iso) {
 // apply_relearn_fix); for a cost marker, the proposal's own estimate, carried
 // straight onto the ledger record by cost_apply.mark_applied. Shared by
 // AppliedItemRow (per-row) and InboxStatTiles (summed across all applied).
+// Applies the same NOT_A_SAVINGS_CLAIM_ANALYZERS exclusion a resend/TRIM
+// marker needs here too — a cost applied record, unlike an open proposal,
+// has no `estimated_monthly_usd` field of its own to route through
+// monthlyUsdForDisplay, so the check is inlined instead.
 function appliedEstimate(rec) {
   const isRelearn = rec.kind === 'relearn';
+  const usd = isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.estimated_recoverable_usd;
   return {
-    estimated_monthly_usd: isRelearn ? (rec.verify && rec.verify.estimated_monthly_usd) : rec.estimated_recoverable_usd,
+    estimated_monthly_usd: NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer) ? null : usd,
     estimated_monthly_tokens: isRelearn ? (rec.verify && rec.verify.estimated_monthly_tokens) : rec.estimated_recoverable_tokens,
   };
 }
@@ -8210,41 +8231,33 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 
   const akCopy = APPLY_KIND_COPY[prop.apply_kind] || { title: 'Apply this fix', hint: 'confirm the target first', button: 'Apply' };
 
-  // The badge names the fix modality, not a verdict on the proposal: a
-  // snippet fix is a complete, concrete deliverable (the user pastes it
-  // themselves) — never phrased as a lesser "advise-only" fallback. Plain
-  // advise-only survives for the rare proposal with no pasteable snippet at
-  // all (prose advice only). An apply_kind fix skips the rung ladder
-  // entirely (see relearn_apply's _build_write_plan), so it never carries a
-  // rung — "rung 1" would be wrong here, unlike the workspace-note flow.
-  const modalityLabel = prop.apply_capable
-    ? (hasApplyKind ? 'workspace fix · direct edit' : `workspace fix · rung ${prop.rung || 1}`)
-    : (prop.suggestion ? 'snippet fix · apply yourself' : 'advise-only');
-
+  // The card deliberately carries only: title + badge, one description
+  // paragraph, the fix (snippet or apply control), the estimate, and the
+  // Mark applied / Dismiss actions. The fix modality is legible from the
+  // fix block itself, so it no longer gets its own sub-label.
   return html`
     <div class=${'opt-section' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
-        <span class="dim" style="font-size:11px">${modalityLabel}</span>
         <span style="margin-left:auto;text-align:right">
-          <span class="mono" style="color:var(--accent);font-size:14px;font-weight:600">${est.big} <span class="estimated-tag" title=${prop.estimate_basis || 'estimated / correlational'}>est.</span></span>
-          <div class="dim" style="font-size:10px;text-transform:uppercase;letter-spacing:.03em">est. / mo${est.sub ? ' · ' + est.sub : ''}</div>
+          <span class="mono" style="color:var(--accent);font-size:14px;font-weight:600" title=${prop.estimate_basis || 'estimated / correlational'}>${est.big}</span>
+          <div class="dim" style="font-size:10px">est. / mo${est.sub ? ' · ' + est.sub : ''}</div>
         </span>
       </div>
-      <div class="sz-note" style="margin-top:8px">${prop.evidence} <a class="sz-link" style="font-size:11.5px" href=${optimizeFindingHref(prop.analyzer)}>See the evidence →</a></div>
-      <div class="opt-title" style="font-size:12.5px;margin-top:10px">Recommendation</div>
-      <div class="sz-note" style="margin-top:2px">${prop.advise_text}</div>
+      ${/* One description paragraph: what we saw, what to do, and the honesty
+            caveat (Rule 14 — the caveat always renders, never a separate
+            heading-laden block). No section headings, no evidence link. */ ''}
+      <div class="sz-note" style="margin-top:8px">${[prop.evidence, prop.advise_text, prop.caveat].filter(Boolean).join(' ')}</div>
       ${prop.suggestion ? html`
         <div style="margin-top:10px">
           <div class="opt-title" style="font-size:12.5px">
-            <span>The fix ${prop.apply_capable ? '' : html`<span class="dim" style="font-weight:400">· paste this into your own code</span>`}</span>
+            <span>Fix</span>
             <${CopySnippetButton} text=${prop.suggestion} />
           </div>
           <div class="sz-copybox" style="margin-top:4px">${prop.suggestion}</div>
         </div>
       ` : null}
-      <div class="opt-caveat" style="font-size:11.5px;margin-top:8px">${prop.caveat}</div>
 
       ${prop.apply_capable ? (hasApplyKind ? html`
         <div class="opt-section" style="margin:10px 0 0">
@@ -8258,7 +8271,6 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
           ${akPreview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${akPreview}</pre>` : null}
           ${akWarning ? html`<div class="opt-caveat" style="color:var(--warn)">${akWarning} <span class="sz-link" onClick=${() => applyKindFix(true, true)}>Apply anyway →</span></div>` : null}
           ${akErr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${akErr}</div>` : null}
-          <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized cost delta after it.</div>
         </div>
       ` : html`
         <div class="opt-section" style="margin:10px 0 0">
@@ -8271,13 +8283,11 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
           </div>
           ${preview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${preview}</pre>` : null}
           ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}
-          <div class="dim" style="font-size:11.5px;margin-top:6px">Applying also records a checkpoint so the loop measures the realized fan-out cost delta after it.</div>
         </div>
       `) : html`
-        <div style="display:flex;gap:12px;align-items:center;margin-top:10px">
-          <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : (prop.suggestion ? 'I applied this →' : 'Mark applied →')}</button>
+        <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
+          <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied'}</button>
           <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
-          <span class="dim" style="font-size:11.5px">${prop.suggestion ? 'Copy the fix above, make the change, then mark it done. It also records a checkpoint; the loop then measures the realized delta over your later calls.' : 'Marking records a checkpoint; the loop then measures the realized delta over your later calls.'}</span>
         </div>
       `}
       ${prop.apply_capable ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
@@ -8290,8 +8300,11 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 // Tile 1's dollars-vs-tokens choice is behavioral requirement #2's rule:
 // dollars first, with tokens in the sub-line, when at least half the open
 // items are priceable; else tokens (the mockup's own tokens variant).
-// `suppressed` (plan-tier framing) forces tokens regardless, same as every
-// other dollar figure on this page.
+// `suppressed` is passed through for completeness but is always `false` on
+// this page — see the founder-approved always-dollars carve-out above
+// sortByEstMonthly: the Review inbox ignores dollarsSuppressed() and shows
+// dollars unconditionally wherever an item has a genuine one, unlike every
+// other dollar figure in the app.
 //
 // Tile 2 (requirement #7, REVISED — supersedes an earlier "verified saved"
 // draft of this tile). This repo deliberately removed its post-hoc verify/
@@ -8305,9 +8318,13 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 // bounded verify redesign is a separate, later product decision — see
 // c0316aba before building one.
 function InboxStatTiles({ openItems, appliedEstimates, appliedCount, suppressed }) {
-  const priceable = openItems.filter(i => i.estimated_monthly_usd != null);
+  // monthlyUsdForDisplay excludes resend/TRIM's structural (not-a-savings-
+  // claim) dollar figure from this tile the same way estMonthlyLine does for
+  // the individual rows. appliedEstimates needs no equivalent call here — its
+  // own producer, appliedEstimate(), already applies the exclusion.
+  const priceable = openItems.filter(i => monthlyUsdForDisplay(i) != null);
   const leadWithUsd = !suppressed && openItems.length > 0 && priceable.length * 2 >= openItems.length;
-  const totalUsd = priceable.reduce((s, i) => s + i.estimated_monthly_usd, 0);
+  const totalUsd = priceable.reduce((s, i) => s + monthlyUsdForDisplay(i), 0);
   const totalToks = openItems.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0);
 
   const appliedPriceable = appliedEstimates.filter(i => i.estimated_monthly_usd != null);
@@ -8347,6 +8364,10 @@ function ReviewInboxView({ params }) {
   const analyzerFocus = readParam(params, 'analyzer', '');
   const [tab, setTab] = useState('mistakes');   // 'mistakes' | 'advisories' | 'applied'
   const [d, setD] = useState({ loading: true, error: null, status: 'never_run', computedAt: null, clusters: [] });
+  // Fetched but no longer used to decide dollar-vs-tokens on this page — the
+  // founder-approved always-dollars carve-out (see `suppressed` below) means
+  // this page ignores dollarsSuppressed() entirely. Kept in case a future
+  // qualifier note wants the raw framing block.
   const [relearnFraming, setRelearnFraming] = useState(null);
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
@@ -8487,11 +8508,18 @@ function ReviewInboxView({ params }) {
     setDismissed(next); saveDismissedRelearns(next);
   };
 
-  // Plan-tier dollar suppression (requirement #9, core/framing.py): if EITHER
-  // surface's framing says suppress, suppress everywhere on this page — the
-  // two blocks are computed off the same account and should agree, but this
-  // never lets a stale/degraded one leak an un-suppressed dollar through.
-  const suppressed = dollarsSuppressed(relearnFraming) || dollarsSuppressed(costFraming);
+  // Founder-approved carve-out, scoped to THIS page only: the Review inbox's
+  // dollar figures are a savings/waste comparison ("what would this cost me
+  // to keep paying for"), not a billed-amount claim, so it shows them
+  // unconditionally rather than falling back to tokens for a
+  // subscription-dominant account the way every OTHER dollar figure in the
+  // app does (requirement #9, core/framing.py's dollarsSuppressed() — left
+  // completely untouched and still governs Overview/Optimize/etc). Genuinely
+  // unpriced items (no computable rate at all, or the resend/TRIM
+  // not-a-savings-claim exclusion above) still fall back to tokens on their
+  // own terms; this constant only removes the EXTRA plan-tier gate on top of
+  // that, it never invents a dollar figure where none exists.
+  const suppressed = false;
 
   // Sort + long-tail collapse (requirement #3), independently per tab. Deep-
   // linking to a specific analyzer skips the collapse on the advisories tab —

@@ -2298,20 +2298,75 @@ def test_sessions_nav_entry_present(html):
 # these tests checked never actually rendered for a real user. Replaced by
 # InboxStatTiles's "Fixes applied" tile (behavioral requirement #7, REVISED:
 # sums each applied item's own estimate, no "verified" claim or chip ever) and
-# AppliedItemRow (the same `est.`-labeled snapshot per row) — both still
-# respect the server's plan-tier dollar-suppression framing, which is what
-# these tests actually guard against regressing.
-def test_stat_tiles_lead_with_tokens_when_dollars_are_suppressed(html):
+# AppliedItemRow (the same `est.`-labeled snapshot per row).
+def test_stat_tiles_still_accept_a_suppressed_param_for_completeness(html):
+    # NOTE: ReviewInboxView always calls InboxStatTiles with suppressed=false
+    # on this page now (the founder-approved always-dollars carve-out — see
+    # test_review_inbox_ignores_dollar_suppression below). This only pins that
+    # the component itself still HONORS a truthy `suppressed` if ever passed
+    # one, i.e. the parameter isn't dead weight removed from the function.
     start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
     assert "suppressed" in tile
-    # Suppressed: both tiles lead with tokens...
     assert "'~' + fmtTokens(totalToks) + ' tok'" in tile
     assert "'~' + fmtTokens(appliedTokSum) + ' tok'" in tile
-    # ...not suppressed: both lead with dollars.
     assert "fmtUsd(totalUsd)" in tile
     assert "fmtUsd(appliedUsdSum)" in tile
+
+
+# --- Founder-approved carve-out: Review inbox ignores dollar suppression --- #
+def test_review_inbox_ignores_dollar_suppression(html):
+    # Founder decision: on the Review inbox ONLY, dollar figures render
+    # unconditionally — the subscription-share suppression rule
+    # (dollarsSuppressed(), core/framing.py's suppress_dollars_for_
+    # subscription_share) does not apply here, even though it still gates
+    # every other dollar figure in the app unchanged. Verified against the
+    # founder's real account (87% subscription-billed, Max 20x plan): the API
+    # payload correctly carries estimated_monthly_usd for every priced item,
+    # so once this page stops gating on dollarsSuppressed() those figures
+    # render regardless of plan tier.
+    view = html[html.index("function ReviewInboxView"):]
+    start = view.index("const suppressed = ")
+    end = view.index(";", start)
+    line = view[start:end]
+    assert line == "const suppressed = false"
+    # The old suppression computation must not survive a regression that
+    # silently re-adds the plan-tier gate this page deliberately ignores.
+    assert "dollarsSuppressed(relearnFraming)" not in view
+    assert "dollarsSuppressed(costFraming)" not in view
+    # dollarsSuppressed() itself is untouched and still used elsewhere in the
+    # app (e.g. the cache-recommend section) — the carve-out only stops THIS
+    # page from calling it, it doesn't remove or weaken the function.
+    assert "function dollarsSuppressed(framing)" in html
+    assert html.count("dollarsSuppressed(") >= 2   # at least one other caller survives
+
+
+def test_resend_dollar_figure_stays_tokens_only_as_a_structural_measurement(html):
+    # The resend/TRIM card is the one documented exception to "always
+    # dollars": its own evidence text discloses the figure is a structural
+    # token-share measurement, not a savings claim (RESEND_HONESTY_CAVEAT,
+    # analyzers/context_resend.py) — it stays tokens-only even though its
+    # estimated_monthly_usd is a real, non-null number in the real payload.
+    assert "const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);" in html
+    assert "function monthlyUsdForDisplay(item)" in html
+    fn_start = html.index("function monthlyUsdForDisplay(item)")
+    fn_end = html.index("\n}", fn_start) + 2
+    fn = html[fn_start:fn_end]
+    assert "NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer)" in fn
+    # Every dollar-first decision point on the page routes through it (or the
+    # equivalent inline check in appliedEstimate) rather than reading
+    # estimated_monthly_usd directly, so the exclusion can't be bypassed at
+    # one of the several call sites.
+    est_line_start = html.index("function estMonthlyLine(item, suppressed)")
+    est_line_end = html.index("\n}", est_line_start)
+    assert "monthlyUsdForDisplay(item)" in html[est_line_start:est_line_end]
+    combined_start = html.index("function combinedEstMonthly(items, suppressed)")
+    combined_end = html.index("\n}", combined_start)
+    assert "monthlyUsdForDisplay(i)" in html[combined_start:combined_end]
+    applied_est_start = html.index("function appliedEstimate(rec)")
+    applied_est_end = html.index("\n}", applied_est_start)
+    assert "NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer)" in html[applied_est_start:applied_est_end]
 
 
 def test_fixes_applied_tile_never_claims_verification(html):
@@ -2636,3 +2691,39 @@ def test_split_top_and_tail_slices_an_already_sorted_list(html):
     view = html[html.index("function ReviewInboxView"):]
     assert "splitTopAndTail(sortedRelearn)" in view
     assert "splitTopAndTail(sortedCost)" in view
+
+
+def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
+    # End-to-end contract test for the founder's real scenario: an account
+    # whose framing says suppress_dollars_for_subscription_share (87%
+    # subscription-billed, verified against the founder's own live store)
+    # still gets dollar headlines on the Review inbox for every priced item,
+    # tokens for the one documented exception (resend/TRIM), and tokens for
+    # a genuinely unpriced item (no computable rate at all). A Python
+    # reimplementation of estMonthlyLine's decision, pinned so a future
+    # divergence between this contract and the shipped JS fails loudly.
+    founder_framing = {
+        "pricing_mode": "subscription", "plan_tier": "max_20x",
+        "subscription_share_pct": 87.0,
+        "display_rule": "suppress_dollars_for_subscription_share",
+    }
+    not_a_savings_claim_analyzers = {"resend"}
+
+    def headline_unit(item, framing):
+        # This page's carve-out: `framing` is accepted but never consulted —
+        # unlike every other dollar figure in the app, which would check
+        # framing["display_rule"] here and fall back to tokens.
+        del framing
+        if item["analyzer"] in not_a_savings_claim_analyzers:
+            return "tokens"
+        return "dollars" if item.get("estimated_monthly_usd") is not None else "tokens"
+
+    priced_downsize = {"analyzer": "downsize", "estimated_monthly_usd": 0.87, "estimated_monthly_tokens": 520_324}
+    priced_deadweight = {"analyzer": "deadweight", "estimated_monthly_usd": 403.875, "estimated_monthly_tokens": 80_775_000}
+    resend_structural = {"analyzer": "resend", "estimated_monthly_usd": 186.357458, "estimated_monthly_tokens": 11_061_129_491}
+    unpriced_placement = {"analyzer": "placement", "estimated_monthly_usd": None, "estimated_monthly_tokens": 78_812_584}
+
+    assert headline_unit(priced_downsize, founder_framing) == "dollars"
+    assert headline_unit(priced_deadweight, founder_framing) == "dollars"
+    assert headline_unit(resend_structural, founder_framing) == "tokens"
+    assert headline_unit(unpriced_placement, founder_framing) == "tokens"
