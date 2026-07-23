@@ -1641,6 +1641,7 @@ function fmtCost(usd) {
 }
 function fmtTokens(n) {
   if (n == null) return '-';
+  if (n >= 1e9) return (n/1e9).toFixed(1) + 'B';
   if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
   if (n >= 1e3) return (n/1e3).toFixed(1) + 'k';
   return String(n);
@@ -7769,12 +7770,17 @@ function SelectAllCheckbox({ total, selected, onToggle }) {
 
 const INBOX_COLLAPSE_THRESHOLD = 8;
 
-// Rank by dollars when ANY item in the list carries one (unpriced items rank
-// last, at 0 — reviewing the priced decisions first is the right default);
-// otherwise rank by tokens. Never invented for display, only for order.
+// Rank by tokens — the one figure every item on this page carries, priced or
+// not (a resend/deadweight/subagent/verbosity advisory has real recoverable
+// tokens but no dollar rate at all). Dollars stay a per-item DISPLAY
+// preference (requirement #2, estMonthlyLine below) decoupled from ranking:
+// comparing a $-priced item against a tokens-only one would mean inventing a
+// $/token conversion rate to make them comparable, which the spec forbids
+// (never invent a rate silently). Sorting by tokens uniformly means the
+// rendered order is always monotonic even though some rows DISPLAY dollars —
+// the sort key and a token-only row's display value are the same number.
 function sortByEstMonthly(items) {
-  const anyUsd = items.some(i => i.estimated_monthly_usd != null);
-  const rank = i => anyUsd ? (i.estimated_monthly_usd ?? 0) : (i.estimated_monthly_tokens || 0);
+  const rank = i => i.estimated_monthly_tokens || 0;
   return [...items].sort((a, b) => rank(b) - rank(a));
 }
 
@@ -7800,9 +7806,14 @@ function estMonthlyLine(item, suppressed) {
   return { big: '—', sub: '' };
 }
 
+// Same priceable-majority rule as InboxStatTiles (requirement #2): dollars
+// only when at least half the collapsed items are themselves priceable, so a
+// tail of 7 tokens-only advisories plus 1 small-dollar one still reads in
+// tokens rather than understating itself as a tiny dollar sum.
 function combinedEstMonthly(items, suppressed) {
-  const anyUsd = !suppressed && items.some(i => i.estimated_monthly_usd != null);
-  if (anyUsd) return fmtUsd(items.reduce((s, i) => s + (i.estimated_monthly_usd || 0), 0));
+  const priceable = items.filter(i => i.estimated_monthly_usd != null);
+  const leadWithUsd = !suppressed && items.length > 0 && priceable.length * 2 >= items.length;
+  if (leadWithUsd) return fmtUsd(priceable.reduce((s, i) => s + i.estimated_monthly_usd, 0));
   return '~' + fmtTokens(items.reduce((s, i) => s + (i.estimated_monthly_tokens || 0), 0)) + ' tok';
 }
 

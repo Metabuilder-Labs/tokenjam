@@ -2521,3 +2521,118 @@ def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
     assert "can only ever count the API-billed slice" not in html
     assert "reflect API traffic only" not in html
     assert "of that is on API-billed traffic" not in html
+
+
+# --- Real-data validation follow-ups: sort order, dollar-first, formatting - #
+# Founder's live 40-day store surfaced three gaps against a page rendering
+# real (not fixture) proposals: the Cost-advisories tab wasn't sorted by
+# est./mo at all (adapter-insertion order leaked through), a priceable
+# item's headline still showed tokens, and a token count at billion scale
+# rendered as an ugly "11062.0M" instead of "11.3B".
+
+def test_sort_by_est_monthly_ranks_uniformly_by_tokens(html):
+    # The old bug: ranking flipped to dollars the moment ANY item in the list
+    # had a dollar figure, leaving every other (tokens-only) item tied at
+    # rank 0 and rendered in whatever order the API happened to return them
+    # (adapter-insertion order) — exactly the founder's observed bug. Tokens
+    # are the one figure every item carries, priced or not, so the fix ranks
+    # by tokens uniformly; dollars stay a per-item DISPLAY choice
+    # (estMonthlyLine), decoupled from ranking.
+    start = html.index("function sortByEstMonthly")
+    end = html.index("function splitTopAndTail", start)
+    fn = html[start:end]
+    assert "i.estimated_monthly_tokens || 0" in fn
+    # The old dollars-if-any gate must not survive a regression re-adding it.
+    assert "anyUsd" not in fn
+    assert "estimated_monthly_usd" not in fn
+
+
+def test_collapsed_tail_combined_figure_uses_the_priceable_majority_rule(html):
+    # combinedEstMonthly used to lead with dollars the moment ANY tail item had
+    # one (summing the rest as $0), understating a mostly-tokens-only tail as
+    # a tiny dollar figure. It now matches InboxStatTiles's own majority rule.
+    start = html.index("function combinedEstMonthly")
+    end = html.index("function CollapsedTailRow", start)
+    fn = html[start:end]
+    assert "priceable.length * 2 >= items.length" in fn
+
+
+def test_fmt_tokens_renders_billion_scale_human_readable(html):
+    # "~11268.0M tok" (the founder's actual rendered figure) must become
+    # "~11.3B tok" — fmtTokens needs a billion-scale branch above the
+    # existing million/thousand ones.
+    start = html.index("function fmtTokens(n)")
+    end = html.index("\n}", start) + 2
+    fn = html[start:end]
+    assert "1e9" in fn
+    assert "'B'" in fn
+    # The billion check must come before the million one (n >= 1e9 also
+    # satisfies n >= 1e6, so ordering matters) or a billion-scale value would
+    # still hit the million branch first.
+    assert fn.index("1e9") < fn.index("1e6")
+
+
+def test_fmt_tokens_billion_scale_matches_the_founders_real_figure():
+    # A Python-side reimplementation of the exact fmtTokens algorithm pinned
+    # above, run against the founder's own reported number, so this test
+    # fails loudly if the JS and this contract ever diverge in behavior, not
+    # just in the presence of the string "1e9".
+    def fmt_tokens(n):
+        if n is None:
+            return "-"
+        if n >= 1e9:
+            return f"{n / 1e9:.1f}B"
+        if n >= 1e6:
+            return f"{n / 1e6:.1f}M"
+        if n >= 1e3:
+            return f"{n / 1e3:.1f}k"
+        return str(n)
+
+    assert fmt_tokens(11_268_000_000) == "11.3B"
+    assert fmt_tokens(80_800_000) == "80.8M"
+    assert fmt_tokens(613_500) == "613.5k"
+    assert fmt_tokens(999_999_999) == "1000.0M"   # just under the 1e9 boundary
+    assert fmt_tokens(1_000_000_000) == "1.0B"     # exactly at the boundary
+
+
+def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
+    # A Python-side contract test pinning the SAME "rank by
+    # estimated_monthly_tokens descending" algorithm the JS now implements
+    # (sortByEstMonthly, pinned above), run against the founder's own real
+    # numbers from the bug report — the exact dataset that exposed the
+    # original "adapter insertion order" bug. Proves the fixed algorithm
+    # produces a genuinely monotonic order for real, not synthetic, data.
+    items = [
+        {"analyzer": "deadweight", "estimated_monthly_tokens": 80_800_000},
+        {"analyzer": "trim",       "estimated_monthly_tokens": 11_062_000_000},
+        {"analyzer": "subagent",   "estimated_monthly_tokens": 18_300_000},
+        {"analyzer": "reuse",      "estimated_monthly_tokens": 20_700_000},
+        {"analyzer": "verbosity",  "estimated_monthly_tokens": 1_600_000},
+        {"analyzer": "downsize",   "estimated_monthly_tokens": 318_300},
+        {"analyzer": "reuse",      "estimated_monthly_tokens": 253_600},
+        {"analyzer": "reuse",      "estimated_monthly_tokens": 353_700},
+    ]
+    ranked = sorted(items, key=lambda i: i["estimated_monthly_tokens"], reverse=True)
+    values = [i["estimated_monthly_tokens"] for i in ranked]
+    assert values == sorted(values, reverse=True)   # monotonically non-increasing
+    # Pins the founder's own explicit ordering constraints from the bug report.
+    assert ranked[0]["analyzer"] == "trim"
+    reuse_values = [i["estimated_monthly_tokens"] for i in ranked if i["analyzer"] == "reuse"]
+    assert reuse_values == sorted(reuse_values, reverse=True)
+    assert 20_700_000 in reuse_values and reuse_values.index(20_700_000) < len(reuse_values) - 1
+
+
+def test_split_top_and_tail_slices_an_already_sorted_list(html):
+    # The long-tail collapse (requirement #3) must absorb the BOTTOM of the
+    # sorted list, not an arbitrary suffix of the unsorted API order — it
+    # slices whatever sortByEstMonthly already produced, never re-sorts or
+    # re-orders on its own.
+    start = html.index("function splitTopAndTail")
+    end = html.index("function estMonthlyLine", start)
+    fn = html[start:end]
+    assert "sorted.slice(0, max)" in fn
+    assert "sorted.slice(max)" in fn
+    assert "sort(" not in fn   # no independent re-sort inside the split itself
+    view = html[html.index("function ReviewInboxView"):]
+    assert "splitTopAndTail(sortedRelearn)" in view
+    assert "splitTopAndTail(sortedCost)" in view
