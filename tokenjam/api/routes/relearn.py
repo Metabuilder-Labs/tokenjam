@@ -166,12 +166,19 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
     """Cached relearn-detector proposals for the Review inbox.
 
     Returns ``{"status": "ready"|"computing"|"never_run", "computed_at":
-    iso|null, "finding": <RelearnFinding dict>|null}``. A fresh install (no
-    background pass has completed yet, and none is running) reports
-    ``"never_run"`` — the inbox renders its empty state for that, not an
-    error. ``"computing"`` means a recompute is in flight right now; the
-    ``finding``/``computed_at`` fields (when present) are still the last
-    GOOD result, so the UI can keep showing it while a refresh runs.
+    iso|null, "finding": <RelearnFinding dict>|null, "framing": dict}``. A
+    fresh install (no background pass has completed yet, and none is
+    running) reports ``"never_run"`` — the inbox renders its empty state for
+    that, not an error. ``"computing"`` means a recompute is in flight right
+    now; the ``finding``/``computed_at`` fields (when present) are still the
+    last GOOD result, so the UI can keep showing it while a refresh runs.
+
+    ``framing`` is the same plan-tier dollar-suppression block the cost-
+    proposals endpoint carries (``core.framing.compute_framing``) — relearn
+    clusters now carry their own blended-rate ``estimated_monthly_usd``
+    (behavioral requirement #2), so this surface needs the same suppression
+    rule the cost-advisory dollars already respect rather than a second,
+    un-gated dollar figure on the page.
     """
     cached = relearn_store.read_cache(config=_config(request))
     computing = relearn_store.is_computing()
@@ -180,6 +187,7 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
             "status": "computing" if computing else "never_run",
             "computed_at": None,
             "finding": None,
+            "framing": _framing(request),
         }
     finding = cached.get("finding")
     if isinstance(finding, dict):
@@ -191,6 +199,7 @@ def get_relearn_proposals(request: Request) -> dict[str, Any]:
         "status": "computing" if computing else "ready",
         "computed_at": cached.get("computed_at"),
         "finding": _with_example_resolvability(finding, _conn(request)),
+        "framing": _framing(request),
     }
 
 
@@ -421,10 +430,23 @@ def post_relearn_revert(request: Request, fix_id: str) -> dict[str, Any]:
 def get_cost_proposals(request: Request) -> dict[str, Any]:
     """Cost proposals for the Review inbox, listed beside relearn proposals.
 
-    Returns ``{"status": "ready"|"never_run", "computed_at": iso|null,
-    "proposals": [dict, ...], "rollup": dict}``. A fresh install (no cost
-    recompute has run) reports ``never_run`` with an empty list — the inbox
-    renders its empty state, not an error.
+    Returns ``{"status": "ready"|"computing"|"never_run"|"error",
+    "computed_at": iso|null, "proposals": [dict, ...], "rollup": dict,
+    "degraded": bool, "last_error": str|null, "last_error_at": iso|null}``.
+
+    ``status`` is ``"computing"`` while a background recompute is in flight
+    (scheduled job or a manual "Rescan now" — see ``cost_proposals.
+    is_computing_cost_proposals``); the ``proposals``/``computed_at`` fields,
+    when present, are still the last GOOD result, exactly like the relearn
+    endpoint above. A fresh install with no recompute EVER completed and no
+    recorded failure reports ``"never_run"`` with an empty list. A fresh
+    install whose only recompute attempt(s) FAILED reports ``"error"`` — an
+    empty Cost-advisories tab must never read as "nothing to report" when the
+    real reason is "the scan never succeeded" (behavioral requirement #5).
+    ``degraded``/``last_error``/``last_error_at`` surface a failed recompute
+    even when a PRIOR good result still renders (``status`` stays
+    ``"ready"``/``"computing"`` in that case) — the inbox shows a small
+    inline warning rather than pretending the last refresh succeeded.
 
     ``rollup`` is Component E's single "estimated recoverable" headline
     (``cost_proposals.estimated_recoverable_rollup``): the sum of
@@ -436,10 +458,12 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     change what's actually still outstanding)."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
+    computing = cost_proposals_mod.is_computing_cost_proposals()
     # Listed WITH their proposal_ids: a model-routing card's Approve names an
     # ID and nothing else, so the ID has to travel with the card it belongs to.
     proposals: list[dict[str, Any]] = (
-        relearn_proposals.list_cost_proposals(config) if block is not None else []
+        relearn_proposals.list_cost_proposals(config)
+        if block is not None and block.get("cost_computed_at") else []
     )
     applied_sigs = {
         rec.get("signature") for rec in cost_apply.list_applied(config)
@@ -450,25 +474,41 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     # Same plan-tier framing the cost-applied payload carries, so a dollar
     # figure rendered here never disagrees with its sibling surfaces.
     framing = _framing(request)
-    if block is None:
-        return {
-            "status": "never_run", "computed_at": None, "proposals": [],
-            "rollup": rollup, "framing": framing,
-        }
+    last_error = block.get("cost_proposals_error") if block else None
+    last_error_at = block.get("cost_proposals_error_at") if block else None
+    has_good_result = bool(block and block.get("cost_computed_at"))
+    if computing:
+        status = "computing"
+    elif has_good_result:
+        status = "ready"
+    elif last_error:
+        status = "error"
+    else:
+        status = "never_run"
     return {
-        "status": "ready",
-        "computed_at": block.get("cost_computed_at"),
+        "status": status,
+        "computed_at": block.get("cost_computed_at") if block else None,
         "proposals": proposals,
         "rollup": rollup,
         "framing": framing,
+        "degraded": bool(last_error),
+        "last_error": last_error,
+        "last_error_at": last_error_at,
     }
 
 
 @router.post("/relearn/cost-proposals/refresh", dependencies=_WRITE_AUTH)
 def refresh_cost_proposals(request: Request) -> dict[str, Any]:
-    """Recompute cost proposals over the default window. Degrades to
-    ``{"status": "unavailable"}`` when the daemon has no direct DB connection
-    (e.g. a proxy) rather than erroring."""
+    """Recompute cost proposals over the default window, on the request
+    thread (unchanged, synchronous contract — the client awaits this before
+    reading the refreshed list). Degrades to ``{"status": "unavailable"}``
+    when the daemon has no direct DB connection (e.g. a proxy) rather than
+    erroring. Locked against the scheduled background job (``tj serve``'s
+    cost-proposals job, behavioral requirement #5) via ``cost_proposals.
+    recompute_cost_proposals``'s own lock — this request either runs the
+    recompute or, if the scheduled job already holds the lock, returns the
+    unchanged last-good proposals rather than the two racing each other's
+    cache write."""
     config = _config(request)
     db = getattr(request.app.state, "db", None)
     if db is None or getattr(db, "conn", None) is None:
