@@ -19,7 +19,11 @@ def _port_in_use(host: str, port: int) -> bool:
     the same address is racy in theory but the window is negligible and the
     goal here is a clear diagnostic, not a lock.
     """
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    # Pick the address family from the host so an IPv6 bind_host (e.g. "::" or
+    # "::1") doesn't raise a bogus "invalid argument" OSError against an IPv4
+    # socket and get misread as a port conflict.
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as sock:
         try:
             sock.bind((host, port))
         except OSError:

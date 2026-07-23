@@ -66,3 +66,20 @@ class TestPortInUseDetection:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         assert _port_in_use("127.0.0.1", port) is False
+
+    def test_ipv6_host_free_port_is_not_in_use(self):
+        """An IPv6 bind_host must not be misread as a conflict: the pre-check
+        picks AF_INET6 by host, so a free port on `::1` reads as free rather
+        than raising a bogus OSError against an IPv4 socket (Greptile P1)."""
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+            sock.bind(("::1", 0))
+            port = sock.getsockname()[1]
+        assert _port_in_use("::1", port) is False
+
+    def test_ipv6_host_detects_bound_port(self):
+        """A held IPv6 socket reads as in-use for that host/port."""
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as held:
+            held.bind(("::1", 0))
+            held.listen(1)
+            port = held.getsockname()[1]
+            assert _port_in_use("::1", port) is True
