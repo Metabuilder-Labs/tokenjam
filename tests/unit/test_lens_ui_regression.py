@@ -2324,9 +2324,12 @@ def test_fixes_applied_tile_never_claims_verification(html):
     tile = html[start:end]
     assert ">Fixes applied<" in tile
     assert "estimates only, savings are not measured after the fact" in tile
+    # The old tile label and the mockup's own VERIFIED chip never render (a
+    # rendered-text check, not a comment check — explanatory code comments
+    # pointing at c0316aba legitimately use the word "verified").
     assert "Verified saved" not in html
     assert "VERIFIED" not in html
-    assert "verified" not in html.lower().replace("unverified", "")
+    assert ">verified<" not in html.lower()
     # A falsy zero is never faked as the big number: it falls back to the
     # bare applied count when nothing applied carries an estimate.
     assert "String(appliedCount)" in tile

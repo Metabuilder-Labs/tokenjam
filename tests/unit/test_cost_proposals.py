@@ -29,7 +29,6 @@ from tokenjam.core.optimize.types import (
     OptimizeReport,
     WindowSummary,
 )
-from tests.factories import make_llm_span
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
 MARKER = NOW - timedelta(days=5)
@@ -907,3 +906,175 @@ def test_rollup_with_no_token_estimates_reports_zero_coverage():
     assert rollup["estimated_recoverable_tokens"] == 0
     assert rollup["token_proposal_count"] == 0
     assert "floor, not a total" not in rollup["estimate_basis"]
+
+
+# --- Review inbox monthly-basis fields (behavioral requirement #1) ----------- #
+
+def test_downsize_proposal_surfaces_its_own_monthly_projection():
+    # `downsize` already computes a 30-day projection (model_downgrade.py's
+    # `monthly_savings_usd`/`monthly_tokens_in_candidates`) — surfaced onto the
+    # proposal directly, never re-derived by the generic extrapolation below.
+    props = {p.analyzer: p for p in cost_proposals_from_report(_report())}
+    assert props["downsize"].estimated_monthly_usd == 3.0
+    assert props["downsize"].estimated_monthly_tokens == 0   # fixture's default
+
+
+def test_non_downsize_proposals_get_generic_monthly_extrapolation():
+    # cache/trim carry no monthly figure of their own, so a report built over
+    # a NON-30-day window gets a generic `30/window_days` extrapolation of
+    # the window figure, applied once in `cost_proposals_from_report`. Assert
+    # the SCALING RELATIONSHIP to the adapter's own window figure (its exact
+    # dollar value is computed from `estimate_cache_recoverable`/pricing.py
+    # internals, not the fixture's finding-level field, which `_cache_to_
+    # proposals` doesn't read) — the `cache` finding also fans out into
+    # several signature-distinct cards, so select by signature.
+    at_default = {p.signature: p for p in cost_proposals_from_report(_report())}
+    at_10d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=10.0)}
+    cache_default = at_default["cost:cache:anthropic:claude-sonnet-5"]
+    cache_10d = at_10d["cost:cache:anthropic:claude-sonnet-5"]
+    assert cache_default.estimated_monthly_usd == pytest.approx(cache_default.estimated_recoverable_usd)
+    assert cache_10d.estimated_monthly_usd == pytest.approx(cache_default.estimated_recoverable_usd * 3.0)
+    trim_default = at_default["cost:trim:svc-a"]
+    trim_10d = at_10d["cost:trim:svc-a"]
+    assert trim_10d.estimated_monthly_usd == pytest.approx(trim_default.estimated_recoverable_usd * 3.0)
+    assert trim_10d.estimated_monthly_tokens == round(trim_default.estimated_recoverable_tokens * 3.0)
+
+
+def test_default_window_is_already_the_monthly_basis_no_scaling():
+    # `cost_proposals_from_report`'s default `window_days` (30.0) matches the
+    # daemon's own default look-back, so an un-scoped call needs no scaling:
+    # the monthly figure equals the window figure exactly.
+    by_sig = {p.signature: p for p in cost_proposals_from_report(_report())}
+    cache = by_sig["cost:cache:anthropic:claude-sonnet-5"]
+    assert cache.estimated_monthly_usd == pytest.approx(cache.estimated_recoverable_usd)
+
+
+# --- resend adapter (behavioral requirement #6) ------------------------------ #
+
+def test_resend_finding_produces_an_advisory():
+    from tokenjam.core.optimize.analyzers.context_resend import ResendFinding
+    from tokenjam.core.optimize.cost_proposals import COST_ANALYZERS
+
+    assert "resend" in COST_ANALYZERS
+    assert "summarize" not in COST_ANALYZERS   # has its own curate/diff screen
+
+    finding = ResendFinding(
+        sessions_examined=5, repeat_share=0.6, repeat_tokens=10_000,
+        estimated_recoverable_tokens=6_830, estimated_recoverable_usd=0.5,
+        estimate_basis="resend basis", fix_compaction="Run /compact.",
+        caveat="conservative lower bound",
+    )
+    rep = _report()
+    rep.findings["resend"] = finding
+    props = {p.analyzer: p for p in cost_proposals_from_report(rep)}
+
+    assert "resend" in props
+    prop = props["resend"]
+    assert prop.kind == "cost"
+    assert prop.advise_only is True
+    assert prop.estimated_recoverable_usd == 0.5
+    assert prop.estimated_recoverable_tokens == 6_830
+    assert "60%" in prop.evidence
+    assert "5 session" in prop.evidence
+    assert prop.advise_text.startswith("Run /compact.")
+
+
+def test_resend_adapter_empty_without_a_repeat_share():
+    from tokenjam.core.optimize.analyzers.context_resend import ResendFinding
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    assert _resend_to_proposals(None) == []
+    assert _resend_to_proposals(ResendFinding()) == []   # never ran / no data
+
+
+# --- cost-proposals recompute: locking + error surfacing (requirement #5) --- #
+
+def test_recompute_cost_proposals_records_failure_without_wiping_the_last_good_result(
+    db, cfg, monkeypatch,
+):
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+
+    good = cost_proposals_mod.recompute_cost_proposals(db, cfg)
+    assert good == []
+    written = relearn_store.read_cost_proposals(config=cfg)
+    assert written is not None
+    assert written["cost_proposals_error"] is None
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("scan blew up")
+
+    monkeypatch.setattr("tokenjam.core.optimize.runner.build_report", _boom)
+    result = cost_proposals_mod.recompute_cost_proposals(db, cfg)
+    assert result == []
+
+    after = relearn_store.read_cost_proposals(config=cfg)
+    assert after["cost_proposals_error"] == "scan blew up"
+    assert after["cost_proposals_error_at"] is not None
+    # The prior good result is preserved — a failed refresh never wipes it.
+    assert after["cost_computed_at"] == written["cost_computed_at"]
+
+
+def test_recompute_cost_proposals_clears_a_prior_error_on_success(db, cfg, monkeypatch):
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.runner.build_report",
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    cost_proposals_mod.recompute_cost_proposals(db, cfg)
+    assert relearn_store.read_cost_proposals(config=cfg)["cost_proposals_error"] == "boom"
+
+    monkeypatch.undo()
+    cost_proposals_mod.recompute_cost_proposals(db, cfg)
+    after = relearn_store.read_cost_proposals(config=cfg)
+    assert after["cost_proposals_error"] is None
+    assert after["cost_proposals_error_at"] is None
+
+
+def test_recompute_cost_proposals_skips_when_already_locked(db, cfg):
+    # Guards the scheduled background job and a manual "Rescan now" from
+    # racing each other's cache write — the loser gets `[]` back, never a
+    # blocked wait or a corrupted write.
+    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
+
+    assert cost_proposals_mod._COST_LOCK.acquire(blocking=False)
+    try:
+        assert cost_proposals_mod.recompute_cost_proposals(db, cfg) == []
+    finally:
+        cost_proposals_mod._COST_LOCK.release()
+
+
+def test_write_and_clear_cost_proposals_error_round_trip(tmp_path):
+    from tokenjam.core.optimize import relearn_store as rs
+
+    path = tmp_path / "relearn_cache.json"
+    rs.write_cost_proposals([{"signature": "a", "analyzer": "cache"}], path)
+    rs.write_cost_proposals_error("boom", path)
+
+    block = rs.read_cost_proposals(path)
+    assert block["cost_proposals_error"] == "boom"
+    assert block["cost_proposals_error_at"] is not None
+    # The good proposals list from before the error survives untouched.
+    assert block["cost_proposals"] == [{"signature": "a", "analyzer": "cache"}]
+
+    rs.clear_cost_proposals_error(path)
+    cleared = rs.read_cost_proposals(path)
+    assert cleared["cost_proposals_error"] is None
+    assert cleared["cost_proposals_error_at"] is None
+    assert cleared["cost_proposals"] == [{"signature": "a", "analyzer": "cache"}]
+
+
+def test_read_cost_proposals_reports_error_state_before_any_success(tmp_path):
+    # A fresh install whose only recompute attempt(s) FAILED must be
+    # distinguishable from "never even tried" (api/routes/relearn.py's
+    # `never_run` vs `error` status split reads off this).
+    from tokenjam.core.optimize import relearn_store as rs
+
+    path = tmp_path / "relearn_cache.json"
+    assert rs.read_cost_proposals(path) is None   # truly fresh: nothing at all
+
+    rs.write_cost_proposals_error("boom", path)
+    block = rs.read_cost_proposals(path)
+    assert block is not None
+    assert block["cost_proposals_error"] == "boom"
+    assert block["cost_computed_at"] is None
