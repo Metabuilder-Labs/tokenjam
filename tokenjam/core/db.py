@@ -705,10 +705,15 @@ def missing_expected_tables(conn: duckdb.DuckDBPyConnection) -> list[str]:
     schema exists, and ``run_migrations`` recreates all of them idempotently, so a
     fresh DB simply reports the same set and is healed on the same open.
     """
+    # Restrict to base tables in the main schema: information_schema.tables
+    # also lists views, so a view sharing an expected table's name would
+    # otherwise be read as "table present" and suppress the heal, leaving
+    # writes to the real base table still failing.
     existing = {
         row[0]
         for row in conn.execute(
             "SELECT table_name FROM information_schema.tables"
+            " WHERE table_schema = 'main' AND table_type = 'BASE TABLE'"
         ).fetchall()
     }
     return [name for name in EXPECTED_TABLES if name not in existing]
