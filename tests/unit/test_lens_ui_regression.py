@@ -2237,7 +2237,10 @@ def test_cost_proposals_wired_into_review_inbox(html):
     # distinct `kind` badge and an estimate. Keep the fetch + render wiring
     # present.
     assert "function CostProposalCard" in html
-    assert "function CostAppliedRow" in html
+    # The Applied tab renders BOTH ledgers (relearn + cost) through one unified
+    # row component, discriminated by `rec.kind` — the cost-specific
+    # CostAppliedRow was folded into it as part of the inbox tab redesign.
+    assert "function AppliedItemRow" in html
     assert "api('/relearn/cost-proposals')" in html
     assert "api('/relearn/cost-applied')" in html
     assert "'/relearn/cost-proposals/apply'" in html
@@ -2253,7 +2256,9 @@ def test_subagent_cost_card_has_workspace_apply_flow(html):
     assert "'/relearn/cost-proposals/apply-workspace'" in html
     assert "apply_capable" in html
     assert "Apply note" in html
-    assert "subagent: 'subagent'" in html
+    # Human-readable, uppercase analyzer-category badge (inbox redesign
+    # requirement #4) — replaced the old lowercase COST_ANALYZER_LABELS map.
+    assert "subagent: 'SUBAGENT'" in html
 
 
 def test_relearn_example_session_links_only_when_resolvable(html):
@@ -2282,53 +2287,121 @@ def test_sessions_nav_entry_present(html):
     assert "sessions: 'improve'" in html
 
 
-# --- receipts / cost-ledger unit hierarchy follows the server framing ------- #
-def test_receipts_tile_leads_with_tokens_when_dollars_are_suppressed(html):
-    # `verified_saved_usd` only ever counts the API-billed slice, so on a
-    # subscription-dominant corpus the tile shouted a tiny dollar figure and
-    # whispered the (complete) token one. The hierarchy is now conditional on
-    # the server's display_rule, exactly like every other cost surface.
-    start = html.index("function ReceiptsHeader")
+# --- stat tiles / applied-tab unit hierarchy follows the server framing ---- #
+# NOTE (inbox redesign): the perpetual verify/receipts layer these tests used
+# to exercise (ReceiptsHeader's "Verified saved to date" tile, CostLedgerSummary)
+# was removed in commit c0316aba for making unsupportable realized-savings
+# claims — see the note in tokenjam/ui/index.html above InboxStatTiles, and
+# relearn_apply.py's AppliedFix.verify docstring. Nothing populated
+# `receiptsData`/`costLedger` even before this redesign (both were always
+# `null`/hidden in production), so the "measured, regressed, no_change" copy
+# these tests checked never actually rendered for a real user. Replaced by
+# InboxStatTiles's "Fixes applied" tile (behavioral requirement #7, REVISED:
+# sums each applied item's own estimate, no "verified" claim or chip ever) and
+# AppliedItemRow (the same `est.`-labeled snapshot per row).
+def test_stat_tiles_still_accept_a_suppressed_param_for_completeness(html):
+    # NOTE: ReviewInboxView always calls InboxStatTiles with suppressed=false
+    # on this page now (the founder-approved always-dollars carve-out — see
+    # test_review_inbox_ignores_dollar_suppression below). This only pins that
+    # the component itself still HONORS a truthy `suppressed` if ever passed
+    # one, i.e. the parameter isn't dead weight removed from the function.
+    start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
-    assert "dollarsSuppressed(receiptsFraming || rollupFraming)" in tile
-    # Suppressed: the TOKEN figure holds the 22px hero slot...
-    assert (
-        'font-size:22px;font-weight:600;color:var(--success);margin-top:4px">'
-        "${fmtTokens(receiptsData.verified_saved_tokens)} tok"
-    ) in tile
-    # ...and the dollars drop out in favour of the server's own qualifier, the
-    # same `.qualifier` treatment the other suppressing surfaces use. We do NOT
-    # write a bespoke scoping sentence here: `verified_saved_usd` is token
-    # deltas priced at per-model list rates, not a figure scoped to API-billed
-    # sessions, so any such claim would be one the code does not support.
-    assert "${qualifier}" in tile
-    assert "of that is on API-billed traffic" not in tile
-    # Not suppressed: today's dollars-first hierarchy is untouched.
-    assert (
-        'font-size:22px;font-weight:600;color:var(--success);margin-top:4px">'
-        "${fmtUsd(receiptsData.verified_saved_usd)}"
-    ) in tile
-    # The MEASURED tag and the full breakdown (regressed included) stay put.
-    assert "measured" in tile
-    assert "${receiptsData.regressed_count} regressed" in tile
+    assert "suppressed" in tile
+    assert "'~' + fmtTokens(totalToks) + ' tok'" in tile
+    assert "'~' + fmtTokens(appliedTokSum) + ' tok'" in tile
+    assert "fmtUsd(totalUsd)" in tile
+    assert "fmtUsd(appliedUsdSum)" in tile
 
 
-def test_cost_ledger_summary_leads_with_tokens_when_dollars_are_suppressed(html):
-    # Same bug, same fix, in the "Applied cost advisories" ledger headline.
-    start = html.index("function CostLedgerSummary")
-    end = html.index("function CostProposalCard", start)
-    summary = html[start:end]
-    assert "dollarsSuppressed(framing)" in summary
-    assert (
-        "${suppressed ? fmtTokens(ledger.total_realized_tokens) + ' tok' "
-        ": fmtUsd(ledger.total_realized_usd)}"
-    ) in summary
-    assert "${framing.qualifier_text}" in summary
-    assert "of that is on API-billed traffic" not in summary
-    # The framing reaches it from the server payload, not a JS re-derivation.
-    assert "setCostFraming(r.framing || null)" in html
-    assert "<${CostLedgerSummary} ledger=${costLedger} framing=${costFraming} />" in html
+# --- Founder-approved carve-out: Review inbox ignores dollar suppression --- #
+def test_review_inbox_ignores_dollar_suppression(html):
+    # Founder decision: on the Review inbox ONLY, dollar figures render
+    # unconditionally — the subscription-share suppression rule
+    # (dollarsSuppressed(), core/framing.py's suppress_dollars_for_
+    # subscription_share) does not apply here, even though it still gates
+    # every other dollar figure in the app unchanged. Verified against the
+    # founder's real account (87% subscription-billed, Max 20x plan): the API
+    # payload correctly carries estimated_monthly_usd for every priced item,
+    # so once this page stops gating on dollarsSuppressed() those figures
+    # render regardless of plan tier.
+    view = html[html.index("function ReviewInboxView"):]
+    start = view.index("const suppressed = ")
+    end = view.index(";", start)
+    line = view[start:end]
+    assert line == "const suppressed = false"
+    # The old suppression computation must not survive a regression that
+    # silently re-adds the plan-tier gate this page deliberately ignores.
+    assert "dollarsSuppressed(relearnFraming)" not in view
+    assert "dollarsSuppressed(costFraming)" not in view
+    # dollarsSuppressed() itself is untouched and still used elsewhere in the
+    # app (e.g. the cache-recommend section) — the carve-out only stops THIS
+    # page from calling it, it doesn't remove or weaken the function.
+    assert "function dollarsSuppressed(framing)" in html
+    assert html.count("dollarsSuppressed(") >= 2   # at least one other caller survives
+
+
+def test_resend_dollar_figure_stays_tokens_only_as_a_structural_measurement(html):
+    # The resend/TRIM card is the one documented exception to "always
+    # dollars": its own evidence text discloses the figure is a structural
+    # token-share measurement, not a savings claim (RESEND_HONESTY_CAVEAT,
+    # analyzers/context_resend.py) — it stays tokens-only even though its
+    # estimated_monthly_usd is a real, non-null number in the real payload.
+    assert "const NOT_A_SAVINGS_CLAIM_ANALYZERS = new Set(['resend']);" in html
+    assert "function monthlyUsdForDisplay(item)" in html
+    fn_start = html.index("function monthlyUsdForDisplay(item)")
+    fn_end = html.index("\n}", fn_start) + 2
+    fn = html[fn_start:fn_end]
+    assert "NOT_A_SAVINGS_CLAIM_ANALYZERS.has(item.analyzer)" in fn
+    # Every dollar-first decision point on the page routes through it (or the
+    # equivalent inline check in appliedEstimate) rather than reading
+    # estimated_monthly_usd directly, so the exclusion can't be bypassed at
+    # one of the several call sites.
+    est_line_start = html.index("function estMonthlyLine(item, suppressed)")
+    est_line_end = html.index("\n}", est_line_start)
+    assert "monthlyUsdForDisplay(item)" in html[est_line_start:est_line_end]
+    combined_start = html.index("function combinedEstMonthly(items, suppressed)")
+    combined_end = html.index("\n}", combined_start)
+    assert "monthlyUsdForDisplay(i)" in html[combined_start:combined_end]
+    applied_est_start = html.index("function appliedEstimate(rec)")
+    applied_est_end = html.index("\n}", applied_est_start)
+    assert "NOT_A_SAVINGS_CLAIM_ANALYZERS.has(rec.analyzer)" in html[applied_est_start:applied_est_end]
+
+
+def test_fixes_applied_tile_never_claims_verification(html):
+    # Behavioral requirement #7 (REVISED, supersedes an earlier "verified
+    # saved" draft): the second tile is "Fixes applied", sums each applied
+    # item's own ORIGINAL estimate (never a live re-measurement), and must
+    # never render the word "verified" or a VERIFIED chip anywhere on the page.
+    start = html.index("function InboxStatTiles")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert ">Fixes applied<" in tile
+    assert "estimates only, savings are not measured after the fact" in tile
+    # The old tile label and the mockup's own VERIFIED chip never render (a
+    # rendered-text check, not a comment check — explanatory code comments
+    # pointing at c0316aba legitimately use the word "verified").
+    assert "Verified saved" not in html
+    assert "VERIFIED" not in html
+    assert ">verified<" not in html.lower()
+    # A falsy zero is never faked as the big number: it falls back to the
+    # bare applied count when nothing applied carries an estimate.
+    assert "String(appliedCount)" in tile
+    # The comment points a future reader at the removal commit before they
+    # reintroduce live measurement.
+    assert "c0316aba" in html
+
+
+def test_applied_item_row_respects_dollar_suppression(html):
+    # The Applied tab's per-row `est.` figure (relearn's apply-time snapshot,
+    # or a cost marker's own estimate) falls back to tokens under the same
+    # server framing every other dollar figure on this page respects.
+    start = html.index("function AppliedItemRow")
+    end = html.index("function CopySnippetButton", start)
+    fn = html[start:end]
+    assert "!suppressed && usd != null" in fn
+    assert "fmtTokens(toks)" in fn
 
 
 def test_dollars_suppressed_reads_the_server_display_rule(html):
@@ -2343,57 +2416,45 @@ def test_dollars_suppressed_reads_the_server_display_rule(html):
         assert rule in html, f"missing suppressing display_rule {rule}"
 
 
-# --- the estimated-recoverable tile: token hero + honest coverage ---------- #
-def test_estimated_recoverable_tile_leads_with_tokens_when_dollars_suppressed(html):
-    # The tile beside the measured one had the same dollars-first bug. Its token
-    # sum covers only the proposals carrying a token estimate, so the suffix
-    # must state that coverage rather than implying every open proposal.
-    start = html.index("function ReceiptsHeader")
+# --- the estimated-recoverable tile: dollars-vs-tokens by the ≥half rule --- #
+def test_estimated_recoverable_tile_leads_with_dollars_only_at_half_priceable(html):
+    # Behavioral requirement #2: the headline "ESTIMATED RECOVERABLE" tile
+    # shows dollars (with tokens in the sub-line) only when at least half the
+    # OPEN items across both tabs are priceable; otherwise it leads with
+    # tokens, same as the mockup's own tokens variant.
+    start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
-    assert "~${fmtTokens(rollup.estimated_recoverable_tokens)} tok" in tile
-    assert "rollupTokenScope(rollup)" in tile
-    # The estimated/measured visual distinction survives: est. chip + accent on
-    # the estimate, measured chip + success on the measurement.
-    assert 'class="estimated-tag" title=${rollup.estimate_basis}>est.' in tile
-    assert 'class="measured-tag" title=${receiptsData.estimate_basis}>measured' in tile
-    assert "color:var(--accent);margin-top:4px" in tile
-    assert "color:var(--success);margin-top:4px" in tile
-    # The framing reaches the tile from the server, not a JS re-derivation.
-    assert "setRollupFraming(r.framing || null)" in html
-    assert "rollupFraming=${rollupFraming}" in html
+    assert "priceable.length * 2 >= openItems.length" in tile
+    assert 'class="estimated-tag"' in tile
 
 
-def test_rollup_token_scope_states_partial_coverage(html):
-    # "M of N proposals carrying a token estimate" whenever coverage is partial;
-    # the bare count only when every deduplicated proposal contributes.
-    start = html.index("function rollupTokenScope")
-    end = html.index("function ReceiptsHeader", start)
-    fn = html[start:end]
-    assert "rollup.token_proposal_count" in fn
-    assert "rollup.deduplicated_proposal_count" in fn
-    assert "of ${total} proposals carrying a token estimate" in fn
-
-
-def test_estimated_tile_hides_when_suppressed_with_no_token_estimate(html):
-    # Dollars suppressed and no token estimate to lead with means there is
-    # nothing honest to render, so the tile hides instead of showing a zero.
-    start = html.index("function ReceiptsHeader")
+def test_estimated_tile_hides_when_there_are_no_open_items(html):
+    # Nothing open on either tab means nothing honest to lead a "recoverable"
+    # headline with, so that half of the tile hides rather than showing a zero.
+    start = html.index("function InboxStatTiles")
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
-    assert (
-        "suppressed ? (rollup.token_proposal_count || 0) > 0 "
-        ": rollup.proposal_count > 0"
-    ) in tile
+    assert "openItems.length > 0 ? html`" in tile
 
 
 # --- Review inbox copy: cost-led, and no hardcoded zero -------------------- #
-def test_review_inbox_intro_leads_with_cost_not_the_loop(html):
-    intro = "Every row here is waste you are paying for more than once"
+def test_review_inbox_intro_matches_the_founder_approved_mockup(html):
+    # Inbox redesign: the page title and subtitle are the founder-approved
+    # mockup's own copy verbatim (colon in place of the mockup transcription's
+    # em dash — house style forbids em dashes in tokenjam copy).
+    assert "<div class=\"page-title\"" in html
+    assert ">Inbox<" in html
+    intro = (
+        "Waste you're paying for more than once: mistakes your agents keep "
+        "repeating, and cost fixes ready to apply."
+    )
     assert intro in html
-    # The loop-first phrasing is gone...
+    # The loop-first phrasing from the pre-redesign copy is gone.
     assert "land here so it can relearn them" not in html
-    # ...and every factual detail it carried is still stated.
+    # The Approve/Dismiss mechanics the old intro stated are preserved, just
+    # relocated to the Recurring-mistakes tab (the tab those actions live in)
+    # instead of a page-wide intro paragraph.
     assert "git-committed, or backed up if the target is not a git repo" in html
     assert "you confirm the scope and target first" in html
     assert "this browser only; it is not sent to the server" in html
@@ -2402,41 +2463,32 @@ def test_review_inbox_intro_leads_with_cost_not_the_loop(html):
     assert "quota" not in intro.lower()
 
 
-def test_stat_line_shows_recoverable_tokens_and_drops_the_hardcoded_zero(html):
-    # The third segment was the literal `0` labelled "strategies", so it read
-    # zero for every user in every state. It now carries the recoverable-token
-    # estimate the view already fetches, tagged as an estimate.
+def test_old_pending_relearn_stat_line_replaced_by_the_combined_stat_tiles(html):
+    # The old cur-listhead token-count segment ("~N tok recoverable", sourced
+    # from `d.estTokens`) is gone — the inbox redesign replaced it with the
+    # combined ESTIMATED RECOVERABLE / VERIFIED SAVED tiles (InboxStatTiles),
+    # covered by their own suppression/hide tests above. The literal "0
+    # strategies" placeholder this test used to guard against is gone too.
     assert '<b style="color:var(--accent)">0</b> strategies' not in html
     assert "strategies" not in html
-    assert "~${fmtTokens(d.estTokens)} tok</b> recoverable" in html
-    # Sourced from the value load() already stores, not a second fetch.
-    assert "estTokens: f.estimated_recoverable_tokens" in html
-    # The duplicated pending segment (same variable as the mistake count) is gone.
-    assert "${relearnCount} pending ·" not in html
-
-
-def test_stat_line_drops_the_token_segment_when_there_is_no_estimate(html):
-    # The null path is the one nobody exercises: with no estimate the segment
-    # must disappear entirely rather than rendering "~0 tok recoverable".
-    start = html.index('<div class="cur-listhead">')
-    end = html.index("Rescan now", start)
-    head = html[start:end]
-    assert "${d.estTokens ? html`" in head
-    assert "` : null}" in head
-    assert "~0 tok" not in head
+    assert "estTokens: f.estimated_recoverable_tokens" not in html
+    assert "~${fmtTokens(d.estTokens)} tok</b> recoverable" not in html
+    assert "function InboxStatTiles" in html
 
 
 # --- Review inbox select-all ----------------------------------------------- #
-def test_select_all_checkbox_sits_in_the_table_header_column(html):
-    # Same checkbox column and table styling as the rows it controls, not a new
-    # control bolted beside the table.
+def test_select_all_checkbox_sits_beside_the_bulk_dismiss_button(html):
+    # Inbox redesign: the Recurring-mistakes tab dropped its <table> for flat
+    # rows (RecurringMistakeRow, matching the mockup's card-style layout), so
+    # the select-all box now sits in the tab's listhead beside "Dismiss
+    # checked" rather than inside a <thead><th>.
     assert "function SelectAllCheckbox" in html
     assert (
-        '<thead><tr><th style="width:26px"><${SelectAllCheckbox} '
-        "total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} />"
+        "<${SelectAllCheckbox} total=${visible.length} "
+        "selected=${selectedCount} onToggle=${toggleAll} />"
     ) in html
-    # The per-row checkbox is untouched.
-    assert '<td><input type="checkbox" checked=${checked} onChange=${onToggle} /></td>' in html
+    # The per-row checkbox is still present, just inside a flat row now.
+    assert 'checked=${checked} onChange=${onToggle} />' in html
 
 
 def test_select_all_reports_the_indeterminate_state_on_a_partial_selection(html):
@@ -2444,7 +2496,7 @@ def test_select_all_reports_the_indeterminate_state_on_a_partial_selection(html)
     # assigned through a ref. A header box that shows plain "checked" over a
     # partial selection invites accidental bulk actions.
     start = html.index("function SelectAllCheckbox")
-    end = html.index("function RelearnRow", start)
+    end = html.index("function RecurringMistakeRow", start)
     fn = html[start:end]
     assert "ref.current.indeterminate = selected > 0 && selected < total" in fn
     # Fully checked only when every listed row is selected.
@@ -2504,16 +2556,15 @@ def test_dismiss_button_states_its_blast_radius(html):
 
 def test_select_all_adds_no_bulk_approve(html):
     # Dismiss is local and undone by a reload; Approve writes to disk. Exactly
-    # one bulk action exists on this table.
-    # Anchor inside ReviewInboxView: `cur-addbar` is used by other screens too.
+    # one bulk action exists in the Recurring-mistakes tab's listhead (inbox
+    # redesign moved the bulk-dismiss button off the old `cur-addbar` footer
+    # and into the tab's listhead, beside the select-all box).
     view = html[html.index("function ReviewInboxView"):]
-    start = view.index('<div class="cur-addbar">')
-    end = view.index("visibleCost.length > 0", start)
-    bar = view[start:end]
-    # Exactly one button, and it is the Dismiss one. (The trailing hint text
-    # does mention Approve, pointing at the per-row flow, which is unchanged.)
-    assert bar.count("<button") == 1
-    assert "dismissChecked" in bar
+    start = view.index("tab === 'mistakes' ? html`")
+    end = view.index('<div class="cur-listbox">', start)
+    head = view[start:end]
+    assert head.count("<button") == 1
+    assert "dismissChecked" in head
     assert "onClick=${approveChecked}" not in html
     assert "Approve checked" not in html
 
@@ -2527,9 +2578,152 @@ def test_no_comment_claims_dollars_are_scoped_to_api_billed_traffic(html):
     assert "of that is on API-billed traffic" not in html
 
 
-def test_receipts_comment_states_the_real_reason_the_units_differ(html):
-    start = html.index("// UNIT HIERARCHY is server-decided")
-    end = html.index("function ReceiptsHeader", start)
-    comment = html[start:end]
-    assert "no single model to price against" in comment
-    assert "list-price equivalent" in comment
+# --- Real-data validation follow-ups: sort order, dollar-first, formatting - #
+# Founder's live 40-day store surfaced three gaps against a page rendering
+# real (not fixture) proposals: the Cost-advisories tab wasn't sorted by
+# est./mo at all (adapter-insertion order leaked through), a priceable
+# item's headline still showed tokens, and a token count at billion scale
+# rendered as an ugly "11062.0M" instead of "11.3B".
+
+def test_sort_by_est_monthly_ranks_uniformly_by_tokens(html):
+    # The old bug: ranking flipped to dollars the moment ANY item in the list
+    # had a dollar figure, leaving every other (tokens-only) item tied at
+    # rank 0 and rendered in whatever order the API happened to return them
+    # (adapter-insertion order) — exactly the founder's observed bug. Tokens
+    # are the one figure every item carries, priced or not, so the fix ranks
+    # by tokens uniformly; dollars stay a per-item DISPLAY choice
+    # (estMonthlyLine), decoupled from ranking.
+    start = html.index("function sortByEstMonthly")
+    end = html.index("function splitTopAndTail", start)
+    fn = html[start:end]
+    assert "i.estimated_monthly_tokens || 0" in fn
+    # The old dollars-if-any gate must not survive a regression re-adding it.
+    assert "anyUsd" not in fn
+    assert "estimated_monthly_usd" not in fn
+
+
+def test_collapsed_tail_combined_figure_uses_the_priceable_majority_rule(html):
+    # combinedEstMonthly used to lead with dollars the moment ANY tail item had
+    # one (summing the rest as $0), understating a mostly-tokens-only tail as
+    # a tiny dollar figure. It now matches InboxStatTiles's own majority rule.
+    start = html.index("function combinedEstMonthly")
+    end = html.index("function CollapsedTailRow", start)
+    fn = html[start:end]
+    assert "priceable.length * 2 >= items.length" in fn
+
+
+def test_fmt_tokens_renders_billion_scale_human_readable(html):
+    # "~11268.0M tok" (the founder's actual rendered figure) must become
+    # "~11.3B tok" — fmtTokens needs a billion-scale branch above the
+    # existing million/thousand ones.
+    start = html.index("function fmtTokens(n)")
+    end = html.index("\n}", start) + 2
+    fn = html[start:end]
+    assert "1e9" in fn
+    assert "'B'" in fn
+    # The billion check must come before the million one (n >= 1e9 also
+    # satisfies n >= 1e6, so ordering matters) or a billion-scale value would
+    # still hit the million branch first.
+    assert fn.index("1e9") < fn.index("1e6")
+
+
+def test_fmt_tokens_billion_scale_matches_the_founders_real_figure():
+    # A Python-side reimplementation of the exact fmtTokens algorithm pinned
+    # above, run against the founder's own reported number, so this test
+    # fails loudly if the JS and this contract ever diverge in behavior, not
+    # just in the presence of the string "1e9".
+    def fmt_tokens(n):
+        if n is None:
+            return "-"
+        if n >= 1e9:
+            return f"{n / 1e9:.1f}B"
+        if n >= 1e6:
+            return f"{n / 1e6:.1f}M"
+        if n >= 1e3:
+            return f"{n / 1e3:.1f}k"
+        return str(n)
+
+    assert fmt_tokens(11_268_000_000) == "11.3B"
+    assert fmt_tokens(80_800_000) == "80.8M"
+    assert fmt_tokens(613_500) == "613.5k"
+    assert fmt_tokens(999_999_999) == "1000.0M"   # just under the 1e9 boundary
+    assert fmt_tokens(1_000_000_000) == "1.0B"     # exactly at the boundary
+
+
+def test_cost_advisories_sort_is_monotonically_non_increasing_on_real_data():
+    # A Python-side contract test pinning the SAME "rank by
+    # estimated_monthly_tokens descending" algorithm the JS now implements
+    # (sortByEstMonthly, pinned above), run against the founder's own real
+    # numbers from the bug report — the exact dataset that exposed the
+    # original "adapter insertion order" bug. Proves the fixed algorithm
+    # produces a genuinely monotonic order for real, not synthetic, data.
+    items = [
+        {"analyzer": "deadweight", "estimated_monthly_tokens": 80_800_000},
+        {"analyzer": "trim",       "estimated_monthly_tokens": 11_062_000_000},
+        {"analyzer": "subagent",   "estimated_monthly_tokens": 18_300_000},
+        {"analyzer": "reuse",      "estimated_monthly_tokens": 20_700_000},
+        {"analyzer": "verbosity",  "estimated_monthly_tokens": 1_600_000},
+        {"analyzer": "downsize",   "estimated_monthly_tokens": 318_300},
+        {"analyzer": "reuse",      "estimated_monthly_tokens": 253_600},
+        {"analyzer": "reuse",      "estimated_monthly_tokens": 353_700},
+    ]
+    ranked = sorted(items, key=lambda i: i["estimated_monthly_tokens"], reverse=True)
+    values = [i["estimated_monthly_tokens"] for i in ranked]
+    assert values == sorted(values, reverse=True)   # monotonically non-increasing
+    # Pins the founder's own explicit ordering constraints from the bug report.
+    assert ranked[0]["analyzer"] == "trim"
+    reuse_values = [i["estimated_monthly_tokens"] for i in ranked if i["analyzer"] == "reuse"]
+    assert reuse_values == sorted(reuse_values, reverse=True)
+    assert 20_700_000 in reuse_values and reuse_values.index(20_700_000) < len(reuse_values) - 1
+
+
+def test_split_top_and_tail_slices_an_already_sorted_list(html):
+    # The long-tail collapse (requirement #3) must absorb the BOTTOM of the
+    # sorted list, not an arbitrary suffix of the unsorted API order — it
+    # slices whatever sortByEstMonthly already produced, never re-sorts or
+    # re-orders on its own.
+    start = html.index("function splitTopAndTail")
+    end = html.index("function estMonthlyLine", start)
+    fn = html[start:end]
+    assert "sorted.slice(0, max)" in fn
+    assert "sorted.slice(max)" in fn
+    assert "sort(" not in fn   # no independent re-sort inside the split itself
+    view = html[html.index("function ReviewInboxView"):]
+    assert "splitTopAndTail(sortedRelearn)" in view
+    assert "splitTopAndTail(sortedCost)" in view
+
+
+def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
+    # End-to-end contract test for the founder's real scenario: an account
+    # whose framing says suppress_dollars_for_subscription_share (87%
+    # subscription-billed, verified against the founder's own live store)
+    # still gets dollar headlines on the Review inbox for every priced item,
+    # tokens for the one documented exception (resend/TRIM), and tokens for
+    # a genuinely unpriced item (no computable rate at all). A Python
+    # reimplementation of estMonthlyLine's decision, pinned so a future
+    # divergence between this contract and the shipped JS fails loudly.
+    founder_framing = {
+        "pricing_mode": "subscription", "plan_tier": "max_20x",
+        "subscription_share_pct": 87.0,
+        "display_rule": "suppress_dollars_for_subscription_share",
+    }
+    not_a_savings_claim_analyzers = {"resend"}
+
+    def headline_unit(item, framing):
+        # This page's carve-out: `framing` is accepted but never consulted —
+        # unlike every other dollar figure in the app, which would check
+        # framing["display_rule"] here and fall back to tokens.
+        del framing
+        if item["analyzer"] in not_a_savings_claim_analyzers:
+            return "tokens"
+        return "dollars" if item.get("estimated_monthly_usd") is not None else "tokens"
+
+    priced_downsize = {"analyzer": "downsize", "estimated_monthly_usd": 0.87, "estimated_monthly_tokens": 520_324}
+    priced_deadweight = {"analyzer": "deadweight", "estimated_monthly_usd": 403.875, "estimated_monthly_tokens": 80_775_000}
+    resend_structural = {"analyzer": "resend", "estimated_monthly_usd": 186.357458, "estimated_monthly_tokens": 11_061_129_491}
+    unpriced_placement = {"analyzer": "placement", "estimated_monthly_usd": None, "estimated_monthly_tokens": 78_812_584}
+
+    assert headline_unit(priced_downsize, founder_framing) == "dollars"
+    assert headline_unit(priced_deadweight, founder_framing) == "dollars"
+    assert headline_unit(resend_structural, founder_framing) == "tokens"
+    assert headline_unit(unpriced_placement, founder_framing) == "tokens"

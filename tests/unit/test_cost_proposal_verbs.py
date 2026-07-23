@@ -160,6 +160,28 @@ def test_list_json_carries_the_full_proposal_and_framing(cfg):
     assert "framing" in payload
 
 
+def test_list_backfills_monthly_fields_missing_from_a_pre_redesign_cache(cfg):
+    # A cache written by a build that predates the Review inbox's monthly-
+    # basis fields: the raw dict on disk simply doesn't have
+    # estimated_monthly_usd/estimated_monthly_tokens keys at all (unlike a
+    # CostProposal built fresh by this build, which always carries them via
+    # _with_monthly_extrapolation). Without a read-time backfill this renders
+    # a tokens-only headline forever for an item that's genuinely priceable,
+    # until the next successful scheduled recompute.
+    from tokenjam.core.optimize import relearn_proposals
+
+    legacy_dict = {
+        "kind": "cost", "analyzer": "downsize", "signature": "cost:downsize:claude-code",
+        "title": "Model over-sizing in claude-code (claude-opus-4-7 to claude-haiku-4-5)",
+        "estimated_recoverable_usd": 36.65, "estimated_recoverable_tokens": 10_144_061,
+        "advise_only": True, "apply_capable": False,
+    }
+    relearn_store.write_cost_proposals([legacy_dict], config=cfg)
+    [prop] = relearn_proposals.list_cost_proposals(cfg)
+    assert prop["estimated_monthly_usd"] == 36.65
+    assert prop["estimated_monthly_tokens"] == 10_144_061
+
+
 def test_list_shows_estimated_recoverable_rollup(cfg):
     _store(cfg, _advise_only())
     result = _run(cfg, ["cost-proposals"])

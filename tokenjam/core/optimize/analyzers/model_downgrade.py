@@ -362,8 +362,17 @@ def analyze_model_downgrade(
         # Recoverable-savings contract (#111). Use the WINDOW savings (not the
         # 30-day projection) so every analyzer's estimated_recoverable_usd shares
         # one time basis — "recoverable over the analyzed window" — and the
-        # Overview tiles are directly comparable (#122). monthly_savings_usd
-        # remains for the CLI's own projected-savings line.
+        # Overview/Optimize tiles are directly comparable (#122). This module's
+        # OWN `monthly_savings_usd` / `monthly_tokens_in_candidates` are a SECOND,
+        # separately-named basis (a 30-day linear projection) that the Review
+        # inbox's cost-advisories tab reads directly (surfaced onto
+        # `CostProposal.estimated_monthly_usd`/`estimated_monthly_tokens` — see
+        # `cost_proposals._downsize_to_proposal`); every other cost-advisory
+        # analyzer gets the same 30-day basis via a generic window-days
+        # extrapolation applied once in `cost_proposals_from_report`, since
+        # they don't compute their own monthly figure. Two bases, two
+        # explicitly-named surfaces: Overview/Optimize stay window-scoped,
+        # the Review inbox is always monthly. Never mix the two on one card.
         estimated_recoverable_usd=round(savings_window, 6),
         estimated_recoverable_tokens=candidate_tokens,
         estimate_basis=(
