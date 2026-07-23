@@ -430,10 +430,14 @@ def test_quickstart_cli_discloses_truncation(tmp_path, monkeypatch):
     result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
 
     assert result.exit_code == 0, result.output
-    # The disclosure names the cap and both escape hatches.
+    # The disclosure names the cap and points at the full-history escape hatch.
+    # Assert on stable, non-wrapping tokens only: Rich word-wraps the inline
+    # "npx tokenjam onboard" CTA across a line break at narrow widths (it lands
+    # as "npx tokenjam \nonboard"), so asserting that literal is flaky. The
+    # footer-CTA form is covered by the dedicated footer tests above.
     assert "most-recent" in result.output
-    assert "npx tokenjam onboard" in result.output
     assert "tj context" in result.output
+    assert "full history" in result.output
 
 
 def test_quickstart_cli_full_flag_lifts_cap(tmp_path, monkeypatch):
