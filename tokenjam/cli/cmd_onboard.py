@@ -442,11 +442,11 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 backfill_days: int | None, backfill_all: bool,
                 verify: bool, verify_only: bool, add_project: bool) -> None:
     """Interactive setup wizard for tj."""
-    # --add-project is the lightweight "register another repo" path (#265's
-    # add-project ticket): a fresh onboard run per repo re-prompts plan/budget/
-    # backfill scope and re-scans the entire Claude Code history just to set
-    # one config key (agents.<id>.project). Short-circuit before the banner,
-    # the ephemeral-runner guard, and every other prompt — this path writes
+    # --add-project is the lightweight "register another repo" path: a fresh
+    # onboard run per repo re-prompts plan/budget/backfill scope and re-scans
+    # the entire Claude Code history just to set one config key
+    # (agents.<id>.project). Short-circuit before the banner, the
+    # ephemeral-runner guard, and every other prompt — this path writes
     # nothing but the namespace mapping.
     if add_project:
         _onboard_add_project(ctx, project_override)
