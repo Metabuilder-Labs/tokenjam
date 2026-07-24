@@ -31,6 +31,18 @@ def _normalize_output(text):
     return " ".join(text.split())
 
 
+def _strip_ws(text):
+    """Strip all whitespace for matching tokens that Rich may wrap mid-token.
+
+    A path or agent id has no internal spaces, so Rich can break it across a
+    newline with no separator (e.g. "tj-config.\ntoml"). Collapsing whitespace to
+    a single space (as _normalize_output does) would leave "tj-config. toml" and
+    still miss the substring; removing whitespace entirely reunites the token.
+    Only safe for whitespace-free needles; do not use for multi-word phrases.
+    """
+    return "".join(text.split())
+
+
 def _write_config(path, *, agents=None, budgets=None):
     """Write a minimal already-onboarded config to `path`."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +111,7 @@ class TestAddProjectRegistersAgent:
         assert "claude-code-widgets-api" in cfg.agents
         assert cfg.agents["claude-code-widgets-api"].project == "widgets"
         assert "widgets" in res.output
-        assert "claude-code-widgets-api" in _normalize_output(res.output)
+        assert "claude-code-widgets-api" in _strip_ws(res.output)
 
     def test_no_plan_budget_or_backfill_prompt(self, tmp_path, monkeypatch):
         """The whole point: none of the heavy --claude-code prompts fire."""
@@ -258,7 +270,7 @@ class TestAddProjectHonorsTjConfig:
         assert cfg.agents["claude-code-widgets-api"].project == "widgets"
         # Rich may line-wrap the path, so normalize output to make matching
         # wrap-independent rather than relying on lucky console width.
-        assert "tj-config.toml" in _normalize_output(res.output)
+        assert "tj-config.toml" in _strip_ws(res.output)
 
     def test_fails_clearly_when_tj_config_points_nowhere(self, tmp_path, monkeypatch):
         repo = tmp_path / "repo"
