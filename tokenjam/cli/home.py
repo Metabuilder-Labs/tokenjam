@@ -63,6 +63,44 @@ def _is_set_up() -> bool:
     return _db_has_data()
 
 
+def _current_repo_unregistered() -> bool:
+    """True if this repo's Claude Code agent has no project namespace yet AND
+    the user already has at least one other Claude Code agent registered
+    elsewhere — i.e. a good moment to nudge `--add-project`.
+
+    The second condition matters: a Codex-only or SDK-only user has no
+    `claude-code-*` agent at all, and `--add-project` (which only ever writes
+    a `claude-code-*` entry) would not help them — nudging them anyway would
+    just nag forever with an irrelevant command.
+
+    Resolves the config the same way `tj onboard --add-project` and the rest
+    of the CLI do (TJ_CONFIG, then project-local, then global — see
+    `load_config`'s `config_path` resolution), so this reads the exact config
+    that would actually be written to / already governs this repo, not
+    always the default global path regardless of an active override.
+
+    Best-effort: any failure (no git, unreadable config, etc.) reads as "don't
+    nudge" rather than raising out of the home screen.
+    """
+    try:
+        from tokenjam.cli.cmd_onboard import _derive_project_name
+        from tokenjam.core.config import load_config
+
+        config = load_config()
+        if config.config_path is None:
+            return False
+        has_any_claude_code_agent = any(
+            aid.startswith("claude-code-") for aid in config.agents
+        )
+        if not has_any_claude_code_agent:
+            return False
+        agent_id = f"claude-code-{_derive_project_name()}"
+        agent = config.agents.get(agent_id)
+        return agent is None or not agent.project
+    except Exception:
+        return False
+
+
 def print_home() -> None:
     """Render the bare-``tj`` home screen."""
     print_welcome_banner()
@@ -70,10 +108,14 @@ def print_home() -> None:
     if not _is_set_up():
         console.print("[bold]Not set up yet.[/bold] Get started:")
         console.print()
-        console.print("  [bold]tj onboard --claude-code[/bold]   "
-                      "[dim]capture Claude Code usage (recommended)[/dim]")
-        console.print("  [bold]tj onboard[/bold]                 "
-                      "[dim]generic setup for the Python SDK[/dim]")
+        console.print("  [bold]tj onboard[/bold]   "
+                      "[dim]interactive setup: asks how you use AI agents "
+                      "and wires the right path[/dim]")
+        console.print()
+        console.print(
+            "[dim]Run it once inside each project so sessions and "
+            "proposals group per project in the dashboard.[/dim]"
+        )
         console.print()
         console.print(
             "[dim]Docs: https://github.com/Metabuilder-Labs/tokenjam[/dim]"
@@ -91,4 +133,10 @@ def print_home() -> None:
     console.print("  [bold]tj serve[/bold]       "
                   "[dim]open Lens (web UI) at http://127.0.0.1:7391/[/dim]")
     console.print()
+    if _current_repo_unregistered():
+        console.print(
+            "[dim]New repo? [/dim][bold]tj onboard --add-project[/bold]"
+            "[dim]   registers this one without repeating full setup[/dim]"
+        )
+        console.print()
     console.print("[dim]Full command list:[/dim]  tj --help")
