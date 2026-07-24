@@ -57,16 +57,23 @@ Building your own agent with the SDK: install *in your project* (`pip install to
 
 ## Which path are you?
 
+`pipx install tokenjam && tj onboard` is the entry point for everyone: it's an interactive wizard
+that asks how you use AI agents and wires the right path for you. `--claude-code` / `--codex` just
+pre-answer the wizard's first question (skip it in scripts/CI); they're shortcuts, not separate setups.
+
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all seven analyzers + Lens |
-| **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
-| **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
+| **Claude Code user** | `tj onboard` (or `tj onboard --claude-code` to skip the first question) | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all seven analyzers + Lens |
+| **Codex CLI user** | `tj onboard` (or `tj onboard --codex`) | Same onboarding flow, wired for Codex's session logs |
+| **Python SDK / API agent dev** | `tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
 | **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone`, same flags) | One-time import of your existing traces into the local DB |
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion: no SDK, no patch |
 
-<sub>The `--claude-code` / `--codex` flags just pre-answer the wizard's first question; bare `tj onboard` asks.</sub>
+**Working across multiple projects?** Run `tj onboard` once inside each one — sessions and cost
+proposals group per project in Lens, keyed on the project name each onboard run captures. Already
+onboarded elsewhere? `tj onboard --add-project` registers just the current repo's namespace against
+your existing setup, skipping the plan/budget prompts and backfill.
 
 LlamaIndex and the OpenAI Agents SDK ship their own native OTel support; point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
 
