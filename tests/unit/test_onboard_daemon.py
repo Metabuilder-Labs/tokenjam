@@ -65,6 +65,113 @@ class TestDaemonAlreadyRunning:
         assert _daemon_already_running() is False
 
 
+class TestRepeatOnboardDoesNotChurnDaemon:
+    """Regression: `_stop_serve_for_db_write` used to call `stop_tj_serve`,
+    which reported "stopped" whenever a plist FILE existed on disk, even if
+    launchd never had it loaded. That made `stopped_for_db` True on every
+    onboard run, which forced `need_restart` True in `_finish_onboard_serve`,
+    which meant the "already running -> skip reinstall" branch was
+    unreachable and the daemon reinstalled/restarted on every single
+    onboard -- not just when something genuinely changed."""
+
+    def _finish(self, config_path, **overrides):
+        from tokenjam.cli.cmd_onboard import _finish_onboard_serve
+
+        kwargs = dict(
+            want_daemon=True,
+            plan_changed=False,
+            stopped_for_db=False,
+            secret_rotated=False,
+            no_daemon=False,
+            force=False,
+        )
+        kwargs.update(overrides)
+        return _finish_onboard_serve(config_path, **kwargs)
+
+    def test_second_onboard_with_daemon_running_skips_reinstall(
+        self, tmp_path, monkeypatch,
+    ):
+        """Daemon genuinely running, nothing changed: `stop_tj_serve` must
+        report False (nothing was actually stopped), so the already-running
+        skip branch is taken instead of reinstalling."""
+        config = tmp_path / "config.toml"
+        config.write_text("[budget]\n")
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+
+        with patch("tokenjam.cli.cmd_onboard._daemon_already_running", return_value=True), \
+             patch("tokenjam.cli.cmd_onboard._install_daemon") as install_mock, \
+             patch("tokenjam.cli.cmd_stop.stop_tj_serve", return_value=(False, [])):
+            from tokenjam.cli.cmd_onboard import _stop_serve_for_db_write
+            stopped_for_db = _stop_serve_for_db_write()
+            restart_msg = self._finish(str(config), stopped_for_db=stopped_for_db)
+
+        assert stopped_for_db is False
+        install_mock.assert_not_called()
+        assert restart_msg == "daemon already running"
+
+    def test_second_onboard_with_daemon_not_running_does_not_restart(
+        self, tmp_path, monkeypatch,
+    ):
+        """Daemon not running at all (plist absent, or never loaded): no
+        restart should be triggered just because onboard ran again."""
+        config = tmp_path / "config.toml"
+        config.write_text("[budget]\n")
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+
+        with patch("tokenjam.cli.cmd_onboard._daemon_already_running", return_value=False), \
+             patch("tokenjam.cli.cmd_onboard._install_daemon", return_value="installed") as install_mock, \
+             patch("tokenjam.cli.cmd_stop.stop_tj_serve", return_value=(False, [])):
+            from tokenjam.cli.cmd_onboard import _stop_serve_for_db_write
+            stopped_for_db = _stop_serve_for_db_write()
+            self._finish(str(config), stopped_for_db=stopped_for_db)
+
+        assert stopped_for_db is False
+        # Not "already running", so the normal install path runs once --
+        # but crucially the restart path (`_restart_tj_server`) is not what
+        # ran; `_install_daemon` is the plain (re)install, called exactly
+        # once, not repeatedly forced by a false "stopped_for_db".
+        install_mock.assert_called_once()
+
+    def test_plan_change_still_forces_restart(self, tmp_path, monkeypatch):
+        """A genuine plan change must still restart the daemon even though
+        stop_tj_serve reports nothing was stopped."""
+        config = tmp_path / "config.toml"
+        config.write_text("[budget]\n")
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+
+        with patch("tokenjam.cli.cmd_onboard._daemon_already_running", return_value=True), \
+             patch("tokenjam.cli.cmd_onboard._restart_tj_server", return_value="restarted") as restart_mock, \
+             patch("tokenjam.cli.cmd_stop.stop_tj_serve", return_value=(False, [])):
+            from tokenjam.cli.cmd_onboard import _stop_serve_for_db_write
+            stopped_for_db = _stop_serve_for_db_write()
+            restart_msg = self._finish(
+                str(config), stopped_for_db=stopped_for_db, plan_changed=True,
+            )
+
+        assert stopped_for_db is False
+        restart_mock.assert_called_once()
+        assert restart_msg == "restarted"
+
+    def test_genuine_stop_for_db_write_still_forces_restart(self, tmp_path, monkeypatch):
+        """When a daemon really was running and really got stopped to allow
+        a DB write, the restart must still happen -- the fix must not
+        swallow genuine stops, only false-positive ones."""
+        config = tmp_path / "config.toml"
+        config.write_text("[budget]\n")
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: tmp_path)
+
+        with patch("tokenjam.cli.cmd_onboard._daemon_already_running", return_value=True), \
+             patch("tokenjam.cli.cmd_onboard._restart_tj_server", return_value="restarted") as restart_mock, \
+             patch("tokenjam.cli.cmd_stop.stop_tj_serve", return_value=(True, ["launchd daemon unloaded"])):
+            from tokenjam.cli.cmd_onboard import _stop_serve_for_db_write
+            stopped_for_db = _stop_serve_for_db_write()
+            restart_msg = self._finish(str(config), stopped_for_db=stopped_for_db)
+
+        assert stopped_for_db is True
+        restart_mock.assert_called_once()
+        assert restart_msg == "restarted"
+
+
 class TestLaunchdInstallUsesWFlag:
     """`_install_launchd` must pass -w to both unload and load so it clears
     the Disabled=true flag that `tj stop` writes (C1)."""
