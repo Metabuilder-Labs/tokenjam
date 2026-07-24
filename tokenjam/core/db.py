@@ -595,6 +595,156 @@ EXPECTED_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
 ]
 
 
+# Tables that a later `CREATE TABLE` migration adds and the code then reads/writes
+# on a non-ingest path (proxy/policy audit, session labels, session-story capture,
+# the close-the-loop feature). Single-sourced here as the schema the *code* depends
+# on so `ensure_expected_tables` can reconcile a live DB to it regardless of what
+# `schema_migrations` claims is applied (#382, follow-up to #55/#381). Each value is
+# a self-contained `CREATE TABLE IF NOT EXISTS` DDL — additive/idempotent, so
+# re-issuing it on every open is always a safe no-op. Keep in sync with the
+# CREATE TABLE statements in MIGRATIONS above; a table a migration creates and the
+# code depends on belongs here. (Indexes are optional performance hints, not a
+# correctness dependency, so they are intentionally out of scope here.)
+EXPECTED_TABLES: dict[str, str] = {
+    # migration 6
+    "policy_decisions": (
+        "CREATE TABLE IF NOT EXISTS policy_decisions (\n"
+        "    decision_id     TEXT PRIMARY KEY,\n"
+        "    ts              TIMESTAMPTZ NOT NULL,\n"
+        "    provider        TEXT,\n"
+        "    pricing_mode    TEXT,\n"
+        "    gate_decision   TEXT,\n"
+        "    path            TEXT,\n"
+        "    policy_name     TEXT,\n"
+        "    policy_kind     TEXT,\n"
+        "    would_action    TEXT,\n"
+        "    passthrough_tos BOOLEAN DEFAULT FALSE,\n"
+        "    label           TEXT,\n"
+        "    suggest_only    BOOLEAN DEFAULT TRUE,\n"
+        "    envelope        JSON\n"
+        ")"
+    ),
+    # migration 6
+    "savings_ledger": (
+        "CREATE TABLE IF NOT EXISTS savings_ledger (\n"
+        "    ledger_id                    TEXT PRIMARY KEY,\n"
+        "    decision_id                  TEXT NOT NULL,\n"
+        "    ts                           TIMESTAMPTZ NOT NULL,\n"
+        "    provider                     TEXT,\n"
+        "    pricing_mode                 TEXT,\n"
+        "    policy_name                  TEXT,\n"
+        "    would_action                 TEXT,\n"
+        "    estimated_recoverable_usd    DOUBLE DEFAULT 0.0,\n"
+        "    estimated_recoverable_tokens BIGINT DEFAULT 0,\n"
+        "    estimate_basis               TEXT,\n"
+        "    billing_period               TEXT,\n"
+        "    label                        TEXT,\n"
+        "    realized                     BOOLEAN DEFAULT FALSE\n"
+        ")"
+    ),
+    # migration 11
+    "session_labels": (
+        "CREATE TABLE IF NOT EXISTS session_labels (\n"
+        "    session_id  TEXT PRIMARY KEY,\n"
+        "    label       TEXT NOT NULL,\n"
+        "    updated_at  TIMESTAMPTZ NOT NULL\n"
+        ")"
+    ),
+    # migration 15
+    "session_story": (
+        "CREATE TABLE IF NOT EXISTS session_story (\n"
+        "    session_id     TEXT PRIMARY KEY,\n"
+        "    story_json     JSON NOT NULL,\n"
+        "    captured_at    TIMESTAMPTZ NOT NULL,\n"
+        "    source         TEXT NOT NULL,\n"
+        "    schema_version INTEGER NOT NULL DEFAULT 1\n"
+        ")"
+    ),
+    # migration 16
+    "run_annotations": (
+        "CREATE TABLE IF NOT EXISTS run_annotations (\n"
+        "    annotation_id TEXT PRIMARY KEY,\n"
+        "    session_id    TEXT NOT NULL,\n"
+        "    verdict       TEXT,\n"
+        "    note          TEXT,\n"
+        "    created_at    TIMESTAMPTZ NOT NULL\n"
+        ")"
+    ),
+    # migration 16
+    "expectations": (
+        "CREATE TABLE IF NOT EXISTS expectations (\n"
+        "    expectation_id    TEXT PRIMARY KEY,\n"
+        "    origin_session_id TEXT,\n"
+        "    agent_id          TEXT,\n"
+        "    name              TEXT NOT NULL,\n"
+        "    description       TEXT,\n"
+        "    created_at        TIMESTAMPTZ NOT NULL\n"
+        ")"
+    ),
+    # migration 16
+    "expectation_runs": (
+        "CREATE TABLE IF NOT EXISTS expectation_runs (\n"
+        "    run_ledger_id  TEXT PRIMARY KEY,\n"
+        "    expectation_id TEXT NOT NULL,\n"
+        "    session_id     TEXT,\n"
+        "    outcome        TEXT NOT NULL,\n"
+        "    note           TEXT,\n"
+        "    created_at     TIMESTAMPTZ NOT NULL\n"
+        ")"
+    ),
+}
+
+
+def missing_expected_tables(conn: duckdb.DuckDBPyConnection) -> list[str]:
+    """Return the ``EXPECTED_TABLES`` absent from the live schema (#382).
+
+    Read-only counterpart to :func:`ensure_expected_tables`; powers the
+    ``tj doctor`` schema-integrity check without mutating the DB. Unlike
+    :func:`missing_expected_columns` there is no "pre-migration empty DB" escape
+    hatch — a table that a code path depends on is missing whether or not the base
+    schema exists, and ``run_migrations`` recreates all of them idempotently, so a
+    fresh DB simply reports the same set and is healed on the same open.
+    """
+    # Restrict to base tables in the main schema: information_schema.tables
+    # also lists views, so a view sharing an expected table's name would
+    # otherwise be read as "table present" and suppress the heal, leaving
+    # writes to the real base table still failing.
+    existing = {
+        row[0]
+        for row in conn.execute(
+            "SELECT table_name FROM information_schema.tables"
+            " WHERE table_schema = 'main' AND table_type = 'BASE TABLE'"
+        ).fetchall()
+    }
+    return [name for name in EXPECTED_TABLES if name not in existing]
+
+
+def ensure_expected_tables(conn: duckdb.DuckDBPyConnection) -> list[str]:
+    """Idempotently reconcile the live schema to ``EXPECTED_TABLES`` (#382).
+
+    ``run_migrations`` keys purely on the version INTEGER, so a version recorded
+    applied under an older or renumbered definition (this repo renumbered
+    migrations during a merge — see PR #306) never re-runs, and its
+    ``CREATE TABLE`` silently never lands. Code that later writes to the missing
+    table then raises a DuckDB error on a peripheral path (proxy/policy audit,
+    session labels, session-story capture, the close-the-loop feature). This is
+    the ``CREATE TABLE`` counterpart to :func:`ensure_expected_columns` (#55/#381).
+
+    Re-issues ``CREATE TABLE IF NOT EXISTS`` for every code-depended table,
+    independent of the recorded version set, so a DB with a recorded-but-unlanded
+    migration self-heals on next open. Idempotent: a no-op on an already-correct DB
+    (every statement is guarded by ``IF NOT EXISTS`` *and* a pre-check). Returns the
+    table names it had to create (empty when healthy) so callers can log/report the
+    repair. DDL comes from the hardcoded ``EXPECTED_TABLES`` constant, never user
+    input, so there is no injection surface (Critical Rule 7 targets user SQL).
+    """
+    created: list[str] = []
+    for name in missing_expected_tables(conn):
+        conn.execute(EXPECTED_TABLES[name])
+        created.append(name)
+    return created
+
+
 def missing_expected_columns(conn: duckdb.DuckDBPyConnection) -> list[str]:
     """Return the ``EXPECTED_ADDITIVE_COLUMNS`` absent from the live schema (#55).
 
@@ -690,6 +840,20 @@ def run_migrations(conn: duckdb.DuckDBPyConnection) -> None:
             "but never landed. Ingest of affected rows would otherwise fail "
             "with a DuckDB Binder Error and be silently dropped.",
             ", ".join(healed),
+        )
+
+    # Self-heal (#382): the same version-keyed trust gap leaves a recorded-but-
+    # unlanded CREATE TABLE migration's table absent. Reconcile the code-depended
+    # tables regardless of recorded versions, so a mismatched DB is repaired on
+    # open instead of raising on a peripheral write (policy audit, session labels,
+    # session-story capture, the loop feature).
+    healed_tables = ensure_expected_tables(conn)
+    if healed_tables:
+        logger.warning(
+            "Schema self-heal: created missing table(s) %s recorded as migrated "
+            "but never landed. Code writing to them would otherwise raise a DuckDB "
+            "error on a non-ingest path.",
+            ", ".join(healed_tables),
         )
 
 

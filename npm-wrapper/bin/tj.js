@@ -12,8 +12,8 @@
  * command.
  *
  * Runner preference (first that exists wins):
- *   1. `uvx --from tokenjam tj …`  — fully ephemeral, downloads nothing global
- *   2. `pipx run --spec tokenjam tj …`
+ *   1. `uvx --from tokenjam==<own version> tj …`  — fully ephemeral, downloads nothing global
+ *   2. `pipx run --spec tokenjam==<own version> tj …`
  *   3. `tj …`                      — an already-installed CLI on PATH
  *
  * If none are present we print actionable install guidance and exit non-zero.
@@ -23,20 +23,27 @@
  * wrapper keeps the explicit `--from tokenjam tj` / `--spec tokenjam tj` form
  * below for back-compat with the 0.5.3 and earlier releases it also targets.
  *
- * Freshness (issue #111): `uv` reuses its cached tool environment and never
- * re-resolves on its own, so a machine that first ran this wrapper on an old
- * release keeps getting that release forever, even after newer ones hit
- * PyPI. To avoid pinning stale versions indefinitely, the `uvx` branch passes
- * `--refresh` at most once per 24h (tracked via a timestamp file — see
- * `shouldRefresh`/`markRefreshed` below). `pipx run` isn't touched: its own
- * cache already expires after ~14 days on its own. The installed-`tj` branch
- * has no cache to go stale.
+ * Version pinning: `uv`/`pipx` cache a resolved tool environment and reuse it
+ * forever unless the requested spec changes — an unpinned `--from tokenjam`
+ * silently keeps reusing whatever was resolved first (e.g. a prior `uv tool
+ * install tokenjam` at an old version), never re-resolving on its own, no
+ * matter how many newer releases hit PyPI since. Pinning `--from
+ * tokenjam==<version>` / `--spec tokenjam==<version>` to this wrapper's OWN
+ * version (kept in sync with the release tag by publish-npm.yml's `npm
+ * version ${GITHUB_REF_NAME#v}` step) forces the resolver past that shortcut,
+ * so `npx tokenjam` always runs the release it shipped with. If the pinned
+ * spec can't be resolved yet (this wrapper published slightly ahead of PyPI
+ * propagation), we fall back to the unpinned form rather than fail outright.
+ *
+ * Staleness note: pinning only fixes what THIS wrapper runs. A bare `tj`
+ * invoked directly (no `npx`) still runs whatever was separately installed
+ * via `uv tool install` / `pipx install` / `pip install` / Homebrew, which can
+ * sit on an old version indefinitely. See `warnIfShadowedByStaleInstall`
+ * below: detect-and-tell only, never mutates, never auto-upgrades.
  */
 "use strict";
 
 const { spawnSync } = require("child_process");
-const fs = require("fs");
-const os = require("os");
 const path = require("path");
 
 // PyPI package name vs. command name differ (`tokenjam` ships the `tj` script),
@@ -50,65 +57,177 @@ function has(bin) {
   return probe.status === 0 || probe.status === 1; // 1 = exists but no --version
 }
 
-function runners() {
-  return [
-    { bin: "uvx", prefix: ["--from", PACKAGE, COMMAND] },
-    { bin: "pipx", prefix: ["run", "--spec", PACKAGE, COMMAND] },
-    { bin: COMMAND, prefix: [] }, // already installed on PATH
-  ];
-}
-
-// --- uvx cache freshness (issue #111) -------------------------------------
-//
-// Only the `uvx` runner needs this: `uv` caches a resolved tool environment
-// and reuses it forever unless told to `--refresh`, so a returning user
-// silently keeps whatever version they first resolved. Tracked with a plain
-// timestamp file rather than anything fancier — this wrapper is intentionally
-// dependency-free (stdlib `fs`/`os`/`path` only).
-
-const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
-
-function refreshCacheDir() {
-  const xdgCacheHome = process.env.XDG_CACHE_HOME;
-  const base =
-    xdgCacheHome && xdgCacheHome.trim()
-      ? xdgCacheHome
-      : path.join(os.homedir(), ".cache");
-  return path.join(base, "tokenjam-npx");
-}
-
-function refreshTimestampPath() {
-  return path.join(refreshCacheDir(), "last-refresh");
-}
-
-// True if it's been >24h (or we've never refreshed / can't tell). Fails
-// open on any fs error — an unwritable/unreadable cache dir must never
-// break the wrapper, it just means we skip the freshness nudge this run.
-function shouldRefresh() {
+// This wrapper's own version. `publish-npm.yml`'s wrapper-publish job runs
+// `npm version ${GITHUB_REF_NAME#v}` against npm-wrapper/package.json before
+// `npm publish`, so whatever version this file ships inside always matches
+// the tokenjam release it was cut alongside — safe to read at runtime as the
+// version to pin the Python side to.
+function ownVersion() {
   try {
-    const stat = fs.statSync(refreshTimestampPath());
-    return Date.now() - stat.mtimeMs > REFRESH_INTERVAL_MS;
+    return require(path.join(__dirname, "..", "package.json")).version;
   } catch {
-    return true; // no timestamp yet (or unreadable) => treat as stale
+    return null;
   }
 }
 
-// Called only AFTER `uvx --refresh` has actually returned with a zero exit
-// status (not before we spawn it, and not on failure). If the refresh's
-// download is interrupted partway through (network drop, Ctrl-C, OOM kill),
-// spawnSync never returns normally, this never runs. If it returns but uv
-// exits non-zero (PyPI unreachable, partial download), the caller also
-// skips this call. Either way the *next* invocation still sees a
-// stale/missing timestamp and retries `--refresh`. Writing the timestamp up
-// front, or unconditionally on return, would mark the cache "fresh" even
-// though that refresh never completed, silently pinning a broken/partial
-// environment for a full 24h. Best-effort/fail-open: swallow fs errors.
-function markRefreshed() {
+function runners(version) {
+  const pinnedSpec = version ? `${PACKAGE}==${version}` : null;
+  return [
+    {
+      bin: "uvx",
+      pinnedPrefix: pinnedSpec ? ["--from", pinnedSpec, COMMAND] : null,
+      prefix: ["--from", PACKAGE, COMMAND],
+    },
+    {
+      bin: "pipx",
+      pinnedPrefix: pinnedSpec ? ["run", "--spec", pinnedSpec, COMMAND] : null,
+      prefix: ["run", "--spec", PACKAGE, COMMAND],
+    },
+    { bin: COMMAND, pinnedPrefix: null, prefix: [] }, // already installed on PATH, nothing to pin
+  ];
+}
+
+// Cheap, side-effect-free resolution probe: does `<bin> <args> --version`
+// succeed? Used to decide, before the real invocation, whether the pinned
+// package spec actually resolves on this runner — falls back to the
+// unpinned prefix when it doesn't (wrapper published ahead of PyPI
+// propagation). Unlike `has()`, this requires an exact status 0: `uv`
+// exits 1 both for "resolution failed" AND for "binary ran fine but
+// doesn't understand --version", so treating 1 as success here would
+// silently paper over real resolution failures (verified: `uvx --from
+// tokenjam==<bogus> tj --version` also exits 1, indistinguishable from the
+// unsupported-flag case `has()` is built around).
+function resolves(bin, args) {
+  const probe = spawnSync(bin, [...args, "--version"], { stdio: "ignore" });
+  return probe.status === 0;
+}
+
+// --- stale shadowing install detection ------------------------------------
+//
+// Detect-and-tell only, per design: this never mutates anything and never
+// upgrades on the user's behalf, in interactive or non-interactive/CI
+// contexts alike. It's a best-effort nudge — any detection failure (missing
+// binary, unexpected output, timeout) is swallowed and skipped silently; it
+// must never break or slow down the primary command above by much.
+
+const DETECT_TIMEOUT_MS = 2000;
+
+function safeSpawn(bin, args) {
   try {
-    fs.mkdirSync(refreshCacheDir(), { recursive: true });
-    fs.writeFileSync(refreshTimestampPath(), String(Date.now()));
+    return spawnSync(bin, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: DETECT_TIMEOUT_MS,
+      encoding: "utf8",
+    });
   } catch {
-    // fail open — worst case we just try to refresh again next run
+    return null;
+  }
+}
+
+function versionParts(v) {
+  return String(v)
+    .trim()
+    .split(".")
+    .map((n) => parseInt(n, 10) || 0);
+}
+
+function isOlder(a, b) {
+  const pa = versionParts(a);
+  const pb = versionParts(b);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x < y;
+  }
+  return false;
+}
+
+// Each detector below is skipped up front via `has()` when its own binary
+// isn't even on PATH, so a machine without e.g. Homebrew never pays for a
+// `brew list` spawn.
+
+function detectUvTool() {
+  if (!has("uv")) return null;
+  const result = safeSpawn("uv", ["tool", "list"]);
+  if (!result || result.status !== 0 || !result.stdout) return null;
+  const match = result.stdout.match(/^tokenjam\s+v?(\S+)/m);
+  if (!match) return null;
+  return {
+    method: "uv tool",
+    version: match[1],
+    upgradeCmd: "uv tool upgrade tokenjam",
+  };
+}
+
+function detectPipx() {
+  if (!has("pipx")) return null;
+  const result = safeSpawn("pipx", ["list", "--json"]);
+  if (!result || result.status !== 0 || !result.stdout) return null;
+  try {
+    const data = JSON.parse(result.stdout);
+    const venv = data.venvs && data.venvs[PACKAGE];
+    const version =
+      venv &&
+      venv.metadata &&
+      venv.metadata.main_package &&
+      venv.metadata.main_package.package_version;
+    if (!version) return null;
+    return { method: "pipx", version, upgradeCmd: "pipx upgrade tokenjam" };
+  } catch {
+    return null;
+  }
+}
+
+function detectPip() {
+  for (const pipBin of ["pip3", "pip"]) {
+    if (!has(pipBin)) continue;
+    const result = safeSpawn(pipBin, ["show", PACKAGE]);
+    if (!result || result.status !== 0 || !result.stdout) continue;
+    const match = result.stdout.match(/^Version:\s*(\S+)/m);
+    if (!match) continue;
+    // Covers both a plain `pip install` and `pip install --user` — pip
+    // doesn't distinguish the two in `pip show` output, and either way the
+    // fix command is the same.
+    return {
+      method: "pip",
+      version: match[1],
+      upgradeCmd: `${pipBin} install --upgrade ${PACKAGE}`,
+    };
+  }
+  return null;
+}
+
+function detectHomebrew() {
+  if (!has("brew")) return null;
+  const result = safeSpawn("brew", ["list", "--versions", PACKAGE]);
+  if (!result || result.status !== 0 || !result.stdout) return null;
+  const match = result.stdout.trim().match(/^tokenjam\s+(\S+)/);
+  if (!match) return null;
+  return {
+    method: "Homebrew",
+    version: match[1],
+    upgradeCmd: "brew upgrade tokenjam",
+  };
+}
+
+function warnIfShadowedByStaleInstall(wrapperVersion) {
+  if (!wrapperVersion) return;
+  const detectors = [detectUvTool, detectPipx, detectPip, detectHomebrew];
+  for (const detect of detectors) {
+    let found = null;
+    try {
+      found = detect();
+    } catch {
+      found = null;
+    }
+    if (!found || !isOlder(found.version, wrapperVersion)) continue;
+    process.stderr.write(
+      "\n" +
+        `Note: a ${found.method} install of tokenjam is at v${found.version}, older than v${wrapperVersion} run here.\n` +
+        `Upgrade it with: ${found.upgradeCmd}\n`
+    );
+    return; // one line is enough — first stale install found wins
   }
 }
 
@@ -127,17 +246,18 @@ function main() {
     ? process.env
     : { ...process.env, TJ_NPX_ZERO_INSTALL_REPORT: "1" };
 
-  for (const { bin, prefix } of runners()) {
+  const version = ownVersion();
+
+  for (const { bin, pinnedPrefix, prefix } of runners(version)) {
     if (!has(bin)) continue;
-    const isUvx = bin === "uvx";
-    const doRefresh = isUvx && shouldRefresh();
-    const args = doRefresh ? ["--refresh", ...prefix] : prefix;
+    const args =
+      pinnedPrefix && resolves(bin, pinnedPrefix) ? pinnedPrefix : prefix;
     const result = spawnSync(bin, [...args, ...passthrough], {
       stdio: "inherit",
       env: childEnv,
     });
     if (result.error) continue; // try the next runner on spawn failure
-    if (doRefresh && result.status === 0) markRefreshed();
+    warnIfShadowedByStaleInstall(version);
     process.exit(result.status === null ? 1 : result.status);
   }
 

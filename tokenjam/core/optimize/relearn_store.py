@@ -107,14 +107,62 @@ def read_cost_proposals(
     path: Path | None = None, *, config: TjConfig | None = None,
 ) -> dict[str, Any] | None:
     """The last-written cost-proposal block, or ``None`` if none has ever been
-    computed. Shape: ``{"cost_computed_at": iso, "cost_proposals": [dict, ...]}``."""
+    computed AND no recompute has ever failed either (a genuinely fresh
+    install). Shape: ``{"cost_computed_at": iso, "cost_proposals": [dict,
+    ...], "cost_proposals_error": str | None, "cost_proposals_error_at": iso |
+    None}``. ``cost_proposals_error`` is the last recompute failure's message
+    (behavioral requirement #5) — present alongside a GOOD ``cost_proposals``
+    list when a later recompute failed after an earlier one had already
+    succeeded, so a transient failure never hides the last good result."""
     raw = read_cache(path, config=config)
-    if raw is None or "cost_proposals" not in raw:
+    if raw is None:
+        return None
+    has_proposals = "cost_proposals" in raw
+    has_error = "cost_proposals_error" in raw
+    if not has_proposals and not has_error:
         return None
     return {
         "cost_computed_at": raw.get("cost_computed_at"),
         "cost_proposals": raw.get("cost_proposals") or [],
+        "cost_proposals_error": raw.get("cost_proposals_error"),
+        "cost_proposals_error_at": raw.get("cost_proposals_error_at"),
     }
+
+
+def write_cost_proposals_error(
+    message: str, path: Path | None = None, *, config: TjConfig | None = None,
+) -> dict[str, Any]:
+    """Record a cost-proposals recompute failure (behavioral requirement #5),
+    preserving whatever ``cost_proposals``/``finding`` block already exists —
+    a failed refresh must never wipe the last GOOD result, only annotate that
+    the most recent attempt didn't produce a fresher one. Atomic; best-effort
+    on I/O error (mirrors every other write in this module)."""
+    p = path or default_cache_path(config)
+    existing = read_cache(p, config=config) or {}
+    payload = dict(existing)
+    payload["cost_proposals_error"] = message
+    payload["cost_proposals_error_at"] = datetime.now(timezone.utc).isoformat()
+    _atomic_write(p, payload)
+    return payload
+
+
+def clear_cost_proposals_error(
+    path: Path | None = None, *, config: TjConfig | None = None,
+) -> dict[str, Any]:
+    """Clear a previously-recorded cost-proposals error after a SUCCESSFUL
+    recompute — called by ``cost_proposals.recompute_cost_proposals`` right
+    after it writes a fresh good result, so a one-off transient failure
+    doesn't keep flagging the tab as degraded once refreshes recover."""
+    p = path or default_cache_path(config)
+    existing = read_cache(p, config=config) or {}
+    if "cost_proposals_error" not in existing and "cost_proposals_error_at" not in existing:
+        return existing
+    payload = {
+        k: v for k, v in existing.items()
+        if k not in ("cost_proposals_error", "cost_proposals_error_at")
+    }
+    _atomic_write(p, payload)
+    return payload
 
 
 def write_cost_proposals(

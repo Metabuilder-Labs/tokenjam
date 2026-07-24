@@ -180,40 +180,18 @@ def test_flag_shortcut_skips_path_question(monkeypatch):
 
 
 class TestDefensiveCodexBackfill:
-    def test_missing_adapter_is_forward_only(self, monkeypatch):
-        """When the Codex backfill adapter hasn't shipped, we report nothing and
-        claim no data (honesty) — never crash."""
-        import builtins
-
-        real_import = builtins.__import__
-
-        def _no_codex(name, *a, **k):
-            if name == "tokenjam.core.ingest_adapters.codex":
-                raise ImportError("not shipped yet")
-            return real_import(name, *a, **k)
-
-        monkeypatch.setattr(builtins, "__import__", _no_codex)
-        msg, has_data, total = _try_backfill_codex(object())
-        assert msg is None
-        assert has_data is False
-        assert total == 0
-
     def test_reports_when_adapter_ingests(self, monkeypatch):
-        """When the adapter exists and ingests, we report the count and mark
+        """When the adapter ingests, we report the count and mark
         has_data True."""
-        import sys
-        import types
-
-        fake = types.ModuleType("tokenjam.core.ingest_adapters.codex")
 
         class _Result:
             sessions_total = 3
             sessions_new = 2
             total_cost_usd = 4.0
 
-        fake.ingest_codex = lambda db, config=None: _Result()  # type: ignore[attr-defined]
-        monkeypatch.setitem(
-            sys.modules, "tokenjam.core.ingest_adapters.codex", fake,
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard.ingest_codex",
+            lambda db, config=None: _Result(),
         )
 
         class _DB:

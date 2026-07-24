@@ -51,6 +51,12 @@ APPLY_CLUSTER_FIELDS = (
     "signature", "family_key", "title", "proposed_fix", "rung",
     "sessions", "occurrences", "repos", "examples",
     "apply_kind", "agent_name", "current_model", "proposed_model", "source_path",
+    # Review inbox monthly-basis figures (behavioral requirement #1/#7):
+    # carried through to apply time so `apply_relearn_fix` can snapshot the
+    # human-reviewed estimate onto the applied-fix ledger record's `verify`
+    # dict for the Applied tab's `est.` figure — a bounded, single read, not
+    # a live re-measurement.
+    "estimated_monthly_usd", "estimated_monthly_tokens",
 )
 
 #: Per apply kind, the stored fields the write genuinely cannot be built
@@ -142,12 +148,15 @@ def list_cost_proposals(
     resolve it from the store.
     """
     from tokenjam.core.optimize import relearn_store
+    from tokenjam.core.optimize.cost_proposals import backfill_legacy_monthly_fields
 
     block = relearn_store.read_cost_proposals(path, config=config)
     if not isinstance(block, dict):
         return []
     return [
-        {**pr, "proposal_id": proposal_id_for(str(pr.get("signature") or ""))}
+        backfill_legacy_monthly_fields(
+            {**pr, "proposal_id": proposal_id_for(str(pr.get("signature") or ""))}
+        )
         for pr in (block.get("cost_proposals") or []) if isinstance(pr, dict)
     ]
 

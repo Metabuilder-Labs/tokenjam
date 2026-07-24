@@ -149,17 +149,44 @@ def test_quickstart_renders_without_daemon_or_ondisk_db(tmp_path):
     # Both halves of the first-run value are present.
     assert "quota" in result.output.lower()
     assert "Session timeline" in result.output
-    # The opt-in "go deeper" pointer prints the one-paste CTA: the audience
-    # just ran `npx tokenjam`, so `npx tokenjam onboard` is the same tool they
-    # already have (#120) — the ephemeral-runner guard in `tj onboard` now
-    # makes this safe, unlike the earlier tool-switching `pipx install` CTA.
-    assert "npx tokenjam onboard" in result.output
+    # The opt-in "go deeper" pointer prints a CTA — see the two footer tests
+    # below for the ephemeral (`npx tokenjam onboard`) vs installed (`tj
+    # onboard`) forms (#507). Here we just assert an onboard CTA is present.
+    assert "onboard" in result.output
     # The outro sells the local dashboard (#120) exactly once — the most
     # product-looking asset shouldn't be invisible at the conversion moment,
     # but a second, redundant mention right under the CTA was dropped (#436
     # review) to keep the outro tight and consistent with the npx-form CTA.
     assert result.output.count("dashboard") == 1
     assert "Lens" in result.output
+
+
+# ── "Go deeper" footer CTA is context-aware (#507) ─────────────────────────
+#
+# Bare `npx tokenjam` / `uvx --from tokenjam tj` runs quickstart from a
+# throwaway uvx/pipx-run cache → the CTA is the zero-install `npx tokenjam
+# onboard`. But when quickstart runs from an already-installed `tj` binary the
+# user obviously has it installed → the CTA drops the `npx tokenjam` prefix and
+# points straight at `tj onboard`. `_go_deeper_command()` picks based on
+# `cmd_onboard._is_ephemeral_runner()`.
+
+
+def test_go_deeper_footer_ephemeral_runner_shows_npx_cta():
+    import unittest.mock as mock
+
+    from tokenjam.cli.cmd_quickstart import _go_deeper_command
+
+    with mock.patch("tokenjam.cli.cmd_onboard._is_ephemeral_runner", return_value=True):
+        assert _go_deeper_command() == "npx tokenjam onboard"
+
+
+def test_go_deeper_footer_installed_binary_shows_tj_cta():
+    import unittest.mock as mock
+
+    from tokenjam.cli.cmd_quickstart import _go_deeper_command
+
+    with mock.patch("tokenjam.cli.cmd_onboard._is_ephemeral_runner", return_value=False):
+        assert _go_deeper_command() == "tj onboard"
 
 
 # ── Quota-weighted headline + no named-session reclaim list (#119) ──────────
@@ -403,10 +430,14 @@ def test_quickstart_cli_discloses_truncation(tmp_path, monkeypatch):
     result = _invoke_quickstart(["--root", str(root), "--since", "90d"])
 
     assert result.exit_code == 0, result.output
-    # The disclosure names the cap and both escape hatches.
+    # The disclosure names the cap and points at the full-history escape hatch.
+    # Assert on stable, non-wrapping tokens only: Rich word-wraps the inline
+    # "npx tokenjam onboard" CTA across a line break at narrow widths (it lands
+    # as "npx tokenjam \nonboard"), so asserting that literal is flaky. The
+    # footer-CTA form is covered by the dedicated footer tests above.
     assert "most-recent" in result.output
-    assert "npx tokenjam onboard" in result.output
     assert "tj context" in result.output
+    assert "full history" in result.output
 
 
 def test_quickstart_cli_full_flag_lifts_cap(tmp_path, monkeypatch):

@@ -768,3 +768,128 @@ def test_render_report_surfaces_clusters_even_in_a_huge_token_window(tmp_path, c
     assert "Minor findings" not in out            # NOT collapsed to the pointer
     assert "of window tokens" not in out          # no de-minimis token framing
     assert "No candidates flagged" not in out
+
+
+# --- Review inbox monthly-basis fields (§1/§2) --------------------------------
+# Relearn scans unbounded on-disk history, so there's no "the window IS a
+# month" shortcut the way a fixed-window cost analyzer has. These fields
+# extrapolate the corpus's OWN observed timespan to 30 days instead — see
+# `_corpus_window_days`/`_monthly_scale` and the "Recoverable-savings
+# contract" note in model_downgrade.py. The window-basis
+# `estimated_recoverable_tokens` field (asserted elsewhere in this file) is
+# UNCHANGED by any of this — Overview/Optimize keep reading that field.
+
+def _cwd_confusion_session_at(root: Path, project: str, session_id: str, ts: str) -> None:
+    """Same fixture as `_cwd_confusion_session`, with a controllable
+    timestamp on the erroring turn so the corpus's observed window span is
+    something other than "everything at the same instant"."""
+    records = [
+        _user_prompt("run the build"),
+        _assistant("Running the build.", tools=[
+            {"id": "t1", "name": "Bash", "input": {"command": "cd orchestrator && make"}},
+        ], ts=ts),
+        _tool_error("t1", "(eval):cd:1: no such file or directory: orchestrator"),
+        _assistant("Let me check the path first.", tools=[
+            {"id": "t2", "name": "Bash", "input": {"command": "pwd"}},
+        ], ts=ts),
+        _tool_ok("t2"),
+    ]
+    _write_transcript(root, project, session_id, records)
+
+
+def test_monthly_fields_extrapolate_from_the_corpus_own_observed_window(tmp_path):
+    # Three occurrences spread across exactly 10 observed days -> a 3x
+    # (30/10) extrapolation to the monthly figure, not a raw multiply-by-30.
+    days = [0, 5, 10]
+    for i, day in enumerate(days):
+        ts = (datetime(2026, 6, 1, tzinfo=timezone.utc) + timedelta(days=day)).isoformat().replace("+00:00", "Z")
+        _cwd_confusion_session_at(tmp_path, f"-Users-test-mo{i}", f"mo-{i}", ts)
+    sessions = [(f"mo-{i}", f"repo{i}") for i in range(len(days))]
+
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
+
+    assert finding.window_days == pytest.approx(10.0)
+    cluster = finding.clusters[0]
+    assert cluster.estimated_monthly_tokens == round(cluster.estimated_recoverable_tokens * 3.0)
+    # The window-basis field is untouched — Overview/Optimize still read it.
+    assert cluster.estimated_recoverable_tokens == cluster.occurrences * 1_500
+    assert finding.estimated_monthly_tokens == cluster.estimated_monthly_tokens
+    # No DB connection was given, so there's no blended rate to derive a
+    # dollar figure from — tokens-only, exactly the mockup's fallback.
+    assert cluster.estimated_monthly_usd is None
+    assert cluster.monthly_rate_basis == ""
+
+
+def test_single_timestamp_corpus_floors_the_window_to_one_day(tmp_path):
+    # All three occurrences at the same instant (the default fixture
+    # behavior every other test in this file relies on) -> a degenerate
+    # zero-length span, clamped to a 1-day floor rather than an undefined or
+    # infinite scale (see `_corpus_window_days`'s floor).
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-flat{i}", f"flat-{i}")
+    sessions = [(f"flat-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
+
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False)
+
+    assert finding.window_days == 1.0
+    cluster = finding.clusters[0]
+    assert cluster.estimated_monthly_tokens == cluster.estimated_recoverable_tokens * 30
+
+
+class _FakeSpanConn:
+    """Minimal stand-in for a DuckDB connection: `_blended_dollar_rate` only
+    ever calls `.execute(sql, params).fetchall()` on it, so this returns
+    canned `(provider, model, cost, tokens)` rows regardless of the SQL text."""
+    def __init__(self, rows):
+        self._rows = rows
+
+    def execute(self, _sql, _params):
+        return self
+
+    def fetchall(self):
+        return self._rows
+
+
+def test_blended_dollar_rate_names_the_models_it_derived_from():
+    from tokenjam.core.optimize.analyzers.relearn import _blended_dollar_rate
+
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 3.0, 1_000_000)])
+    rate, basis = _blended_dollar_rate(conn, {"s1", "s2"})
+
+    assert rate == pytest.approx(3.0 / 1_000_000)
+    assert "anthropic/claude-sonnet-5" in basis
+    assert "blended" in basis
+
+
+def test_blended_dollar_rate_never_invents_a_rate_with_no_conn_or_sessions():
+    from tokenjam.core.optimize.analyzers.relearn import _blended_dollar_rate
+
+    assert _blended_dollar_rate(None, {"s1"}) == (None, "")
+    assert _blended_dollar_rate(_FakeSpanConn([]), set()) == (None, "")
+
+
+def test_blended_dollar_rate_degrades_on_query_failure_never_raises():
+    from tokenjam.core.optimize.analyzers.relearn import _blended_dollar_rate
+
+    class _RaisingConn:
+        def execute(self, _sql, _params):
+            raise RuntimeError("boom")
+
+    assert _blended_dollar_rate(_RaisingConn(), {"s1"}) == (None, "")
+
+
+def test_monthly_usd_derived_when_conn_has_priced_spans(tmp_path):
+    # End-to-end: analyze_relearns(conn=...) stamps a cluster's
+    # estimated_monthly_usd from the blended rate observed across its own
+    # sessions, not a hardcoded or invented one.
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-usd{i}", f"usd-{i}")
+    sessions = [(f"usd-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 3.0, 1_000_000)])
+
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False, conn=conn)
+
+    cluster = finding.clusters[0]
+    expected_rate = 3.0 / 1_000_000
+    assert cluster.estimated_monthly_usd == round(cluster.estimated_monthly_tokens * expected_rate, 6)
+    assert "claude-sonnet-5" in cluster.monthly_rate_basis
