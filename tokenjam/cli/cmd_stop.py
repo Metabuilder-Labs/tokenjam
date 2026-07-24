@@ -153,13 +153,22 @@ def _launchd_label_loaded(label: str) -> bool:
     return result.returncode == 0
 
 
+# `is-active` reports more than just "active"/"inactive" -- a unit mid-startup
+# or mid-reload is genuinely live (holding the daemon's DB lock, listening on
+# the port) but reports one of these transitional states instead. Treating
+# only "active" as live would make `stop_tj_serve` decline to stop a daemon
+# that's actually there, and report it as not-running.
+_SYSTEMD_LIVE_STATES = {"active", "activating", "reloading"}
+
+
 def _systemd_unit_active(unit: str) -> bool:
-    """True only if the systemd user unit is currently active."""
+    """True if the systemd user unit is active or in a live transitional
+    state (starting up, reloading) -- not just settled "active"."""
     result = subprocess.run(
         ["systemctl", "--user", "is-active", unit],
         capture_output=True, text=True,
     )
-    return result.stdout.strip() == "active"
+    return result.stdout.strip() in _SYSTEMD_LIVE_STATES
 
 
 def _find_serve_pid() -> int | None:
