@@ -154,9 +154,33 @@ def test_concurrent_writers_never_corrupt_the_cache_file(tmp_path):
     cache_dir = tmp_path / "cache"
     cache_path = cache_dir / tc._cache_key(src)
 
-    tc._store(cache_path, src, 100, 1.0, [{"a": 1}])
-    tc._store(cache_path, src, 100, 1.0, [{"a": 2}])
+    tc._store(cache_path, src, 100, 1.0, "fp", [{"a": 1}])
+    tc._store(cache_path, src, 100, 1.0, "fp", [{"a": 2}])
 
     loaded = tc._load(cache_path)
     assert loaded is not None
     assert loaded["records"] == [{"a": 2}]
+
+
+def test_cache_invalidates_on_equal_size_inplace_rewrite_same_mtime(tmp_path):
+    """Equal-size in-place rewrite that preserves mtime must not stay warm."""
+    import os
+
+    src = tmp_path / "session.jsonl"
+    _write(src, [{"type": "user", "message": {"content": "aaa"}}])
+    cache_dir = tmp_path / "cache"
+
+    first = tc.cached_read_records(src, cache_dir)
+    assert first[0]["message"]["content"] == "aaa"
+
+    st = src.stat()
+    _write(src, [{"type": "user", "message": {"content": "bbb"}}])
+    # Preserve the previous mtime so size+mtime alone would spuriously hit.
+    os.utime(src, (st.st_atime, st.st_mtime))
+    st2 = src.stat()
+    assert st.st_size == st2.st_size
+    assert st.st_mtime == st2.st_mtime
+
+    second = tc.cached_read_records(src, cache_dir)
+    assert second[0]["message"]["content"] == "bbb"
+    assert second != first
