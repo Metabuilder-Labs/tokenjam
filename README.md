@@ -71,7 +71,9 @@ pre-answer the wizard's first question (skip it in scripts/CI); they're shortcut
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion: no SDK, no patch |
 
 **Working across multiple projects?** Run `tj onboard` once inside each one — sessions and cost
-proposals group per project in Lens, keyed on the project name each onboard run captures.
+proposals group per project in Lens, keyed on the project name each onboard run captures. Already
+onboarded elsewhere? `tj onboard --add-project` registers just the current repo's namespace against
+your existing setup, skipping the plan/budget prompts and backfill.
 
 LlamaIndex and the OpenAI Agents SDK ship their own native OTel support; point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
 
