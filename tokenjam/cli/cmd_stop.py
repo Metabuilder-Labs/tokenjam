@@ -49,8 +49,11 @@ def stop_tj_serve(*, quiet: bool = False) -> tuple[bool, list[str]]:
     stopped_via: list[str] = []
     failed_via: list[str] = []
 
-    # Try launchd first (macOS).
-    if plist_path.exists():
+    # Try launchd first (macOS). `launchctl unload -w` returns 0 whenever the
+    # plist FILE exists, even if the label was never loaded -- it's a no-op
+    # against an already-unloaded job. Check the label is actually loaded
+    # first, so an unload of a never-loaded plist isn't misreported as a stop.
+    if plist_path.exists() and _launchd_label_loaded("com.tokenjam.serve"):
         result = subprocess.run(
             ["launchctl", "unload", "-w", str(plist_path)],
             capture_output=True, text=True,
@@ -58,8 +61,9 @@ def stop_tj_serve(*, quiet: bool = False) -> tuple[bool, list[str]]:
         if result.returncode == 0:
             stopped_via.append("launchd daemon unloaded")
 
-    # Try systemd (Linux).
-    if systemd_path.exists():
+    # Try systemd (Linux). Same story: `disable --now` returns 0 even against
+    # a unit that was never active, so check active state first.
+    if systemd_path.exists() and _systemd_unit_active("tokenjam"):
         result = subprocess.run(
             ["systemctl", "--user", "disable", "--now", "tokenjam"],
             capture_output=True, text=True,
@@ -133,6 +137,38 @@ def stop_tj_serve(*, quiet: bool = False) -> tuple[bool, list[str]]:
 def cmd_stop(ctx: click.Context) -> None:
     """Stop the tj serve daemon or background process."""
     stop_tj_serve()
+
+
+def _launchd_label_loaded(label: str) -> bool:
+    """True only if launchd currently has ``label`` loaded.
+
+    `launchctl list <label>` exits 0 iff the label is loaded, non-zero
+    otherwise -- unlike `launchctl unload -w <plist>`, which exits 0 whenever
+    the plist file merely exists, regardless of load state.
+    """
+    result = subprocess.run(
+        ["launchctl", "list", label],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0
+
+
+# `is-active` reports more than just "active"/"inactive" -- a unit mid-startup
+# or mid-reload is genuinely live (holding the daemon's DB lock, listening on
+# the port) but reports one of these transitional states instead. Treating
+# only "active" as live would make `stop_tj_serve` decline to stop a daemon
+# that's actually there, and report it as not-running.
+_SYSTEMD_LIVE_STATES = {"active", "activating", "reloading"}
+
+
+def _systemd_unit_active(unit: str) -> bool:
+    """True if the systemd user unit is active or in a live transitional
+    state (starting up, reloading) -- not just settled "active"."""
+    result = subprocess.run(
+        ["systemctl", "--user", "is-active", unit],
+        capture_output=True, text=True,
+    )
+    return result.stdout.strip() in _SYSTEMD_LIVE_STATES
 
 
 def _find_serve_pid() -> int | None:
