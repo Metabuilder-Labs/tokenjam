@@ -24,6 +24,15 @@ def _port_in_use(host: str, port: int) -> bool:
     # socket and get misread as a port conflict.
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
     with socket.socket(family, socket.SOCK_STREAM) as sock:
+        # Match uvicorn's own bind semantics, which set SO_REUSEADDR. Without
+        # it, a port left in TIME_WAIT by a just-Ctrl-C'd server reads as
+        # bound here even though uvicorn WOULD bind it — so the pre-flight
+        # check, added to give a CLEARER error (issue #509), was stricter than
+        # the real bind and manufactured a false "already in use" that blocked
+        # a legitimate quick restart. A genuinely live listener still fails to
+        # bind (SO_REUSEADDR does not let two sockets both LISTEN on one port),
+        # so real conflicts are still caught.
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind((host, port))
         except OSError:
