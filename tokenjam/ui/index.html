@@ -43,7 +43,7 @@
   --text-faint: rgba(237,237,237,0.4);
   --accent: #ededed;            /* monochrome intensity (active/hover/focus) */
   --accent-rgb: 255,255,255;     /* for rgba() tints */
-  --brand: #3d8eff;              /* brand blue — logo + LLM category fill only */
+  --brand: #3d8eff;              /* brand blue — logo, LLM category fill, primary buttons */
   --warn: #f5a623;
   --error: #ee0000;
   --success: #0ce490;
@@ -1478,7 +1478,11 @@ code.md-code {
 .cur-addbar { display:flex; align-items:center; gap:14px; margin-top:16px; flex-wrap:wrap; }
 .cur-btn { font-size:13px; padding:9px 16px; border-radius:6px; border:1px solid var(--border); background:var(--surface); color:var(--text); cursor:pointer; font-family:'Geist Mono',monospace; }
 .cur-btn:hover:not(:disabled) { border-color:var(--accent); }
-.cur-btn.primary { background:rgba(var(--accent-rgb),0.16); border-color:rgba(var(--accent-rgb),0.4); color:var(--accent); }
+/* The primary action is brand-blue on white text (inbox mockup). The rest of
+   the chrome stays monochrome, so this fill is what marks the ONE action a
+   surface wants you to take. */
+.cur-btn.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
+.cur-btn.primary:hover:not(:disabled) { background:#2f7ae8; border-color:#2f7ae8; }
 .cur-btn:disabled { opacity:.4; cursor:not-allowed; }
 .cur-tally { border:1px solid var(--border); border-radius:9px; background:var(--surface); padding:16px 18px; margin:0; cursor:pointer; transition:border-color .15s; }
 .cur-tally.empty { cursor:default; }
@@ -1504,6 +1508,8 @@ code.md-code {
 .cur-cwd { font-size:12px; color:var(--text-faint); margin:0 2px; line-height:1.5; }
 .cur-cwd code { color:var(--text-dim); }
 .cur-listbox { max-height:380px; overflow-y:auto; border:1px solid var(--border); border-radius:9px; background:var(--surface); }
+/* The last row's divider would otherwise double up against the box border. */
+.cur-listbox > .sz-runrow:last-child { border-bottom:none; }
 .rev-note { margin:0; }
 .rev-state { margin-left:auto; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; border-radius:4px; padding:3px 9px; border:1px solid var(--border); }
 .rev-state.staged { color:var(--warn); border-color:rgba(245,166,35,.4); }
@@ -7878,14 +7884,25 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed 
     <div class="cur-row" style="display:flex;align-items:flex-start;gap:10px;padding:12px 14px;border-bottom:1px solid var(--border)" key=${cluster.signature}>
       <input type="checkbox" style="margin-top:3px" checked=${checked} onChange=${onToggle} />
       <div style="flex:1;min-width:0">
-        <span class="sz-link" onClick=${onExpand} style="font-weight:500">${cluster.title}</span>
+        ${/* Still clickable (cursor + hover underline come from sz-link), but
+              rendered in body text: the row already names its action in the
+              "Review →" link, so blue on every title made the list read as a
+              wall of links. */ ''}
+        <span class="sz-link" onClick=${onExpand} style="font-weight:500;color:var(--text)">${cluster.title}</span>
         <span class="badge badge-warning" style="margin-left:6px" title=${(cluster.family_key || '') + ' · rung ' + cluster.rung}>${relearnBadge(cluster)}</span>
         <div class="dim" style="font-size:12px;margin-top:3px">Recurred in ${cluster.sessions} session${cluster.sessions === 1 ? '' : 's'}${lastSeenTs ? ' · last seen ' + lastSeenTs.slice(0, 16).replace('T', ' ') : ''}</div>
       </div>
       <div style="text-align:right;flex-shrink:0">
-        <div class="mono" style="color:var(--accent);font-weight:600">${est.big} <span class="estimated-tag" title=${cluster.monthly_rate_basis || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>est.</span></div>
-        ${est.sub ? html`<div class="dim" style="font-size:11px">${est.sub}</div>` : null}
-        <div class="dim" style="font-size:10px;text-transform:uppercase;letter-spacing:.03em">est. / mo</div>
+        ${/* One caption, not two: the `est.` pill and an "EST. / MO" line both
+              asserted "estimated", stacking four lines in this column. Matches
+              the cost cards' single "est. / mo · <tokens>" caption so both tabs
+              read alike. The basis stays on hover. */ ''}
+        <div class="mono" style="color:var(--accent);font-weight:600" title=${cluster.monthly_rate_basis || 'occurrences x a conservative per-turn token cost, extrapolated to a 30-day rate — review before applying'}>${est.big}</div>
+        <div class="dim" style="font-size:11px">est. / mo${est.sub ? ' · ' + est.sub : ''}</div>
+        ${/* The row's only affordance used to be the title styled as a link,
+              so the constructive action was invisible next to a prominent
+              bulk Dismiss. Name the verb. */ ''}
+        <div class="sz-link" style="font-size:12px;margin-top:6px" onClick=${onExpand}>Review →</div>
       </div>
     </div>`;
 }
@@ -7893,7 +7910,13 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, suppressed 
 // The card's Approve flow: preview -> (optional active-session warning ->
 // "apply anyway") -> write. Scope + target are ALWAYS human-editable before
 // Approve (§7 — repo-identity is noisy; never trust the suggestion blindly).
-function RelearnApplyModal({ cluster, onClose, onApplied }) {
+// `queuePos` ({ index, total }) and `onNext` are set only when the modal was
+// opened from the toolbar's "Review N checked" queue. Approving stays strictly
+// one-at-a-time even then — each fix needs its own scope/target confirmation
+// (requirement #9), so the queue only automates *getting to* the next card,
+// never the approval itself. onClose abandons the whole queue; onNext leaves
+// the current card untouched and opens the following one.
+function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
   const [scope, setScope] = useState('project');
   const [target, setTarget] = useState('');
   const [busy, setBusy] = useState(false);
@@ -7944,8 +7967,9 @@ function RelearnApplyModal({ cluster, onClose, onApplied }) {
       <div class="cur-modal" onClick=${e => e.stopPropagation()}>
         <div class="cur-modal-head">
           <span class="cur-modal-title">${cluster.title}</span>
+          ${queuePos ? html`<span class="dim" style="font-size:11.5px;margin-left:6px">${queuePos.index} of ${queuePos.total}</span>` : null}
           <span class=${'rev-state ' + (result ? 'applied' : 'staged')} style="margin-left:6px">${result ? 'applied' : 'pending'}</span>
-          <button class="cur-modal-x" onClick=${onClose} title="Close">✕</button>
+          <button class="cur-modal-x" onClick=${onClose} title=${queuePos ? 'Stop reviewing' : 'Close'}>✕</button>
         </div>
         <div class="cur-modal-body">
           <div style="font-size:12.5px;margin-bottom:10px">
@@ -8002,9 +8026,14 @@ function RelearnApplyModal({ cluster, onClose, onApplied }) {
         <div class="cur-modal-foot">
           ${cluster.advise_only ? html`<span class="dim" style="font-size:12px">Nothing to approve: this recommendation is yours to apply.</span>`
             : !result ? html`
-            <button class="cur-btn primary" disabled=${busy} onClick=${() => doApprove(false)}>${busy ? 'Applying…' : 'Approve →'}</button>
+            ${/* States the write's consequence BEFORE it happens. The body
+                  below only reports git-commit vs backup after the fact, and
+                  this is the last point at which the user can decline. */ ''}
+            <button class="cur-btn primary" disabled=${busy} onClick=${() => doApprove(false)}
+              title="Writes this fix at its rung: git-committed, or backed up if the target is not a git repo; you confirm the scope and target first">${busy ? 'Applying…' : 'Approve →'}</button>
           ` : html`<span class="dim" style="font-size:12px">Applied. Manage enforcement/revert from the Applied section below.</span>`}
-          <button class="cur-btn" style="margin-left:auto" onClick=${onClose}>Close</button>
+          ${queuePos && onNext ? html`<button class="cur-btn" style="margin-left:auto" onClick=${onNext} title="Leave this one as-is and open the next checked row">Next →</button>` : null}
+          <button class="cur-btn" style=${queuePos && onNext ? '' : 'margin-left:auto'} onClick=${onClose}>${queuePos ? 'Stop reviewing' : 'Close'}</button>
         </div>
       </div>
     </div>`;
@@ -8071,12 +8100,22 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
   const revertUrl = isRelearn ? `/relearn/${rec.id}/revert` : `/relearn/cost-applied/${rec.id}/revert`;
 
   return html`
-    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 0;border-bottom:1px solid var(--border)">
+    ${/* Horizontal padding matches the cost cards' 14px so the row's text and
+          its right-aligned state chip never sit flush against the panel edge. */ ''}
+    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 14px;border-bottom:1px solid var(--border)">
       <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap">
         <span style="font-weight:500">${rec.title}</span>
         ${!isRelearn ? html`<span class="badge badge-info">${(COST_BADGE_BY_ANALYZER[rec.analyzer] || rec.analyzer || '').toUpperCase()}</span>` : null}
-        <span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>
-        ${isEnforcement && rec.state === 'applied' ? html`<span class="dim" style="font-size:11px">· enforcement ${enforcement && enforcement.enabled ? 'ENABLED' : 'disabled'}</span>` : null}
+        ${/* The chip only earns its space when the state is NOT the tab's own
+              default: every row here is applied, so "APPLIED" is noise, while
+              "REVERTED" is the one thing that distinguishes a row. */ ''}
+        ${rec.state !== 'applied' ? html`<span class=${'rev-state ' + (rec.state === 'reverted' ? 'reverted' : 'applied')}>${rec.state}</span>` : null}
+        ${/* NOT a restatement of "applied": applied means the hook file was
+              written, enabled means it is wired into settings.json and actually
+              intercepting tool calls. An applied-but-disabled hook is inert,
+              and this label is the only place that surfaces it — so the
+              disabled case gets the warn colour, being the surprising one. */ ''}
+        ${isEnforcement && rec.state === 'applied' ? html`<span class="dim" style=${'font-size:11px;margin-left:auto' + (enforcement && enforcement.enabled ? '' : ';color:var(--warn)')} title=${enforcement && enforcement.enabled ? 'wired into settings.json; intercepts matching tool calls' : 'the hook file exists but is not wired into settings.json, so it does nothing yet'}>enforcement ${enforcement && enforcement.enabled ? 'ENABLED' : 'disabled'}</span>` : null}
         ${(usd != null || toks != null) ? html`
           <span class="mono" style="margin-left:auto;color:var(--success);font-weight:600">
             +${(!suppressed && usd != null) ? fmtUsd(usd) : (toks != null ? '~' + fmtTokens(toks) + ' tok' : fmtUsd(usd))}
@@ -8287,7 +8326,9 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
       `) : html`
         <div style="display:flex;gap:12px;align-items:center;margin-top:12px">
           <button class="cur-btn primary" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied'}</button>
-          <span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
+          ${/* Dismiss is the secondary, discarding action — plain text, so the
+                blue belongs to the one action the card is asking for. */ ''}
+          <span class="sz-link" style="color:var(--text)" onClick=${() => onDismiss(prop.signature)}>Dismiss</span>
         </div>
       `}
       ${prop.apply_capable ? html`<div style="margin-top:8px"><span class="sz-link" onClick=${() => onDismiss(prop.signature)}>Dismiss</span></div>` : null}
@@ -8317,7 +8358,7 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 // shows per row), never a live re-measurement of what happened afterward. A
 // bounded verify redesign is a separate, later product decision — see
 // c0316aba before building one.
-function InboxStatTiles({ openItems, appliedEstimates, appliedCount, suppressed }) {
+function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed }) {
   // monthlyUsdForDisplay excludes resend/TRIM's structural (not-a-savings-
   // claim) dollar figure from this tile the same way estMonthlyLine does for
   // the individual rows. appliedEstimates needs no equivalent call here — its
@@ -8343,17 +8384,27 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, suppressed 
       ${openItems.length > 0 ? html`
         <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;border-color:rgba(var(--accent-rgb,120,120,255),0.35)">
           <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="dim" style="font-weight:400">/ mo</span></div>
-          <div style="font-size:24px;font-weight:600;color:var(--accent);margin-top:4px">
+          <div style="font-size:24px;font-weight:600;color:var(--accent);margin-top:4px" title="sum of each open item's est./mo figure — review before applying">
             ${leadWithUsd ? fmtUsd(totalUsd) : '~' + fmtTokens(totalToks) + ' tok'}
-            <span class="estimated-tag" title="sum of each open item's est./mo figure — review before applying">est.</span>
           </div>
           <div class="dim" style="font-size:12px;margin-top:2px">across ${openItems.length} open item${openItems.length === 1 ? '' : 's'} · review before applying</div>
         </div>
       ` : null}
       <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
         <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--success)">Fixes applied</div>
-        <div style="font-size:24px;font-weight:600;color:var(--success);margin-top:4px">${appliedBig}${appliedCount > 0 ? html` <span class="estimated-tag" title="each fix's own estimate at the moment it was applied — never re-measured afterward">est.</span>` : null}</div>
-        <div class="dim" style="font-size:12px;margin-top:2px">${appliedCount} fix${appliedCount === 1 ? '' : 'es'} applied. estimates only, savings are not measured after the fact.</div>
+        ${/* The green belongs to the label, not the figure: the number reads as
+              a plain fact, matching the blue tile where the figure is also
+              body-coloured rather than tinted. */ ''}
+        <div style="font-size:24px;font-weight:600;margin-top:4px" title="each fix's own estimate at the moment it was applied — never re-measured afterward">${appliedBig}</div>
+        ${/* The sub-line never restates the number above it. When the big
+              figure is an estimate, the line dates it to apply time (the same
+              honesty the old "not re-measured" carried, without leading with a
+              negation). When the big figure is only the count fallback there is
+              no claim to qualify, so the line spends itself on recency instead
+              of apologising for a missing estimate. */ ''}
+        <div class="dim" style="font-size:12px;margin-top:2px">${appliedBig === String(appliedCount)
+          ? html`most recent ${daysAgoLabel(lastAppliedAt) || 'unknown'}`
+          : html`across ${appliedCount} applied fix${appliedCount === 1 ? '' : 'es'} · estimated when applied`}</div>
       </div>
     </div>`;
 }
@@ -8372,6 +8423,8 @@ function ReviewInboxView({ params }) {
   const [dismissed, setDismissed] = useState(() => loadDismissedRelearns());
   const [checked, setChecked] = useState(() => new Set());
   const [modalSig, setModalSig] = useState(null);
+  const [reviewQueue, setReviewQueue] = useState([]);
+  const [reviewTotal, setReviewTotal] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [applied, setApplied] = useState([]);
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
@@ -8459,7 +8512,19 @@ function ReviewInboxView({ params }) {
     finally { setMarking(null); }
   }, [loadCost]);
 
-  const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigs.has(c.signature));
+  // `appliedSigs` is session-local (it hides a row the instant you approve it,
+  // before the ledger refetches) and starts EMPTY on every page load, so on its
+  // own it let already-applied clusters return as open proposals after a
+  // reload. Approving one then tried to rewrite the hook its own earlier
+  // approval created, and only relearn_apply's file-ownership guard stopped the
+  // double write. Seed from the server ledger too, exactly as the cost side
+  // does with costAppliedSigs. A reverted fix is deliberately NOT filtered: it
+  // is open again by definition.
+  const appliedSigsAll = new Set([
+    ...appliedSigs,
+    ...(applied || []).filter(r => r.state !== 'reverted').map(r => r.signature),
+  ]);
+  const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) && !appliedSigsAll.has(c.signature));
   const toggle = sig => setChecked(s => { const n = new Set(s); n.has(sig) ? n.delete(sig) : n.add(sig); return n; });
   const dismissChecked = () => {
     // Only the selected rows that are actually listed: a stale signature left in
@@ -8495,6 +8560,23 @@ function ReviewInboxView({ params }) {
   const toggleAll = () => setChecked(
     prev => nextSelectAllSelection(visible.map(c => c.signature), prev));
   const modalCluster = modalSig ? (d.clusters || []).find(c => c.signature === modalSig) : null;
+  // Review queue: the signatures still to visit AFTER the open one. Opening a
+  // single row leaves it empty, so the modal shows no queue chrome.
+  const startReview = (sigs) => {
+    if (!sigs.length) return;
+    setModalSig(sigs[0]);
+    setReviewQueue(sigs.slice(1));
+    setReviewTotal(sigs.length);
+  };
+  const nextInReview = () => {
+    const [next, ...rest] = reviewQueue;
+    setModalSig(next || null);
+    setReviewQueue(rest);
+  };
+  const endReview = () => { setModalSig(null); setReviewQueue([]); };
+  const queuePos = reviewTotal > 1 && modalSig
+    ? { index: reviewTotal - reviewQueue.length, total: reviewTotal }
+    : null;
   const costAppliedSigs = new Set((costApplied || []).filter(r => r.state !== 'reverted').map(r => r.signature));
   const visibleCost = (costProps || []).filter(p => !dismissed.has(p.signature) && !costAppliedSigs.has(p.signature));
 
@@ -8538,18 +8620,25 @@ function ReviewInboxView({ params }) {
   const appliedOpenCount = combinedApplied.filter(r => r.state !== 'reverted').length;
   // Each non-reverted applied item's own estimate (requirement #7's honest
   // "Fixes applied" tile — never a live re-measurement).
-  const appliedEstimates = combinedApplied
-    .filter(r => r.state !== 'reverted')
-    .map(appliedEstimate);
+  const appliedOpen = combinedApplied.filter(r => r.state !== 'reverted');
+  const appliedEstimates = appliedOpen.map(appliedEstimate);
+  // combinedApplied is sorted newest-first, so the head is the most recent.
+  const lastAppliedAt = appliedOpen.length ? appliedOpen[0].applied_at : null;
 
   return html`
     <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
       <div class="page-title" style="margin-bottom:0">Inbox</div>
-      <span class="sz-link" onClick=${doRefresh}>⟳ ${refreshing || d.status === 'computing' || costStatus === 'computing' ? 'scanning…' : 'Rescan now'}</span>
+      ${/* Scan provenance belongs beside the control that re-runs it, not in a
+            per-tab header: it describes the whole inbox, and the Rescan link is
+            already the one place that reports scan state. */ ''}
+      <span style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap">
+        ${d.computedAt ? html`<span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
+        <span class="sz-link" onClick=${doRefresh}>⟳ ${refreshing || d.status === 'computing' || costStatus === 'computing' ? 'scanning…' : 'Rescan now'}</span>
+      </span>
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
 
-    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} suppressed=${suppressed} />
+    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} />
 
     <div class="tab-bar" role="tablist">
       <button class="tab ${tab === 'mistakes' ? 'active' : ''}" role="tab" aria-selected=${tab === 'mistakes'} onClick=${() => setTab('mistakes')}>Recurring mistakes (${visible.length})</button>
@@ -8558,34 +8647,47 @@ function ReviewInboxView({ params }) {
     </div>
 
     ${tab === 'mistakes' ? html`
-      <div class="cur-listhead">
-        <span>
-          ${d.computedAt ? html`<span class="dim" style="font-size:12px">last scanned ${d.computedAt.slice(0, 16).replace('T', ' ')} UTC${d.sessionsScanned != null ? ' · ' + d.sessionsScanned + ' sessions scanned' : ''}</span>` : null}
-          ${d.status === 'computing' ? html` · <span style="color:var(--warn)">scanning…</span>` : null}
-        </span>
-        <span style="display:flex;align-items:center;gap:8px">
-          <${SelectAllCheckbox} total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} />
-          <button class="cur-btn" disabled=${selectedCount === 0} onClick=${dismissChecked}>${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}</button>
-        </span>
-      </div>
+      ${/* Kept to one line. The rows name their own action ("Review →") and the
+            modal shows scope + target before anything is written, so the only
+            non-inferable facts are the two consequences: Approve writes to
+            disk, Dismiss is local. The detail that was here (rung, git-commit
+            vs backup) lives on the Approve step itself, where it applies. */ ''}
+      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes the fix to disk. <b>Dismiss</b> only hides a row in this browser.</div>
+      ${/* Select-all sits directly above the list it governs, labelled — an
+            unlabelled checkbox floating in the metadata line read as chrome.
+            The two bulk actions sit BELOW the scroll box, where you land after
+            reading the rows you are acting on. */ ''}
+      <label style="display:flex;align-items:center;gap:8px;margin:0 2px 6px;font-size:12.5px;cursor:pointer;width:fit-content">
+        <${SelectAllCheckbox} total=${visible.length} selected=${selectedCount} onToggle=${toggleAll} />
+        <span class="dim">Select all${selectedCount ? ` · ${selectedCount} selected` : ''}</span>
+      </label>
       <div class="cur-listbox">
         ${d.error ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>` : null}
         ${!d.error && d.loading ? html`<div class="dim" style="padding:32px 16px;text-align:center">Loading…</div>` : null}
         ${!d.error && !d.loading && d.status === 'never_run' ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
         ${!d.error && !d.loading && d.status !== 'never_run' && visible.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No pending fixes. The last scan found nothing recurring enough to propose (or you've dismissed/applied everything).</div>` : null}
-        ${!d.error && !d.loading ? topRelearn.map(c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} suppressed=${suppressed} />`) : null}
+        ${!d.error && !d.loading ? topRelearn.map(c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`) : null}
         <${CollapsedTailRow} tail=${tailRelearn} suppressed=${suppressed} itemLabel="recurring mistakes"
           onDismissAll=${() => dismissMany(tailRelearn.map(c => c.signature))}
-          renderItem=${c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => setModalSig(c.signature)} suppressed=${suppressed} />`} />
+          renderItem=${c => html`<${RecurringMistakeRow} key=${c.signature} cluster=${c} checked=${checked.has(c.signature)} onToggle=${() => toggle(c.signature)} onExpand=${() => startReview([c.signature])} suppressed=${suppressed} />`} />
       </div>
-      <div class="sz-note" style="margin-top:8px">Click a row for its evidence, proposed fix, and to Approve. <b>Approve</b> writes that fix (git-committed, or backed up if the target is not a git repo) at its rung; you confirm the scope and target first. <b>Dismiss</b> hides a row locally (this browser only; it is not sent to the server).</div>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+        <button class="cur-btn primary" disabled=${selectedCount === 0}
+          onClick=${() => startReview(selectedVisible.map(c => c.signature))}
+          title="Open each checked row in turn; you still approve them one at a time">${selectedCount ? `Review ${selectedCount} checked` : 'Review checked'}</button>
+        <button class="cur-btn" disabled=${selectedCount === 0} onClick=${dismissChecked}
+          title="Hides these rows locally: this browser only; it is not sent to the server, so clearing site data brings them back">${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}</button>
+      </div>
     ` : null}
 
     ${tab === 'advisories' ? html`
-      ${(costDegraded || costStatus === 'computing') ? html`
+      ${/* No "scanning…" here: the header's Rescan link already reports that
+            state for the whole inbox, and it read as two separate scans. The
+            degraded warning stays, being the one thing that link cannot say:
+            the last refresh FAILED and these rows are the last good result. */ ''}
+      ${costDegraded ? html`
         <div class="dim" style="font-size:12px;margin-bottom:8px">
-          ${costDegraded ? html`<span style="color:var(--warn)" title=${costLastError || ''}>⚠ the last refresh failed; showing the last good result</span>` : null}
-          ${costStatus === 'computing' ? html`<span style="color:var(--warn)">scanning…</span>` : null}
+          <span style="color:var(--warn)" title=${costLastError || ''}>⚠ the last refresh failed; showing the last good result</span>
         </div>` : null}
       <div>
         ${costStatus === 'never_run' && visibleCost.length === 0 ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>` : null}
@@ -8606,7 +8708,7 @@ function ReviewInboxView({ params }) {
       </div>
     ` : null}
 
-    <${RelearnApplyModal} cluster=${modalCluster} onClose=${() => setModalSig(null)} onApplied=${onApplied} />
+    <${RelearnApplyModal} cluster=${modalCluster} onClose=${endReview} onApplied=${onApplied} queuePos=${queuePos} onNext=${reviewQueue.length ? nextInReview : null} />
   `;
 }
 
