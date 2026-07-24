@@ -895,3 +895,59 @@ def test_memory_storage_apply_and_revert_round_trip_via_temp_root(tmp_path):
     reverted = pa.revert_applied_fix(cfg, fix_id)
     assert reverted["state"] == "reverted"
     assert target.read_text() == "# Repo\n"
+
+
+# --- Ownership markers survive the pothole -> relearn rename ------------------
+# Regression: the feature was renamed, and every artifact written by the older
+# versions carries `tokenjam:pothole:`. The three "is this file ours?" checks
+# keyed on the CURRENT marker only, so those live files read as strangers':
+# re-apply refused with "wasn't written by TokenJam" (observed on 4 installed
+# hooks), and a rung-1 note re-apply appended a duplicate block instead of
+# replacing it. Root CLAUDE.md anti-pattern #21.
+
+LEGACY_HOOK = (
+    '#!/usr/bin/env python3\n"""TokenJam self-improve hook.\n\n'
+    '# tokenjam:pothole:cwd_confusion\n"""\n'
+)
+
+
+def test_legacy_pothole_marker_is_recognised_as_tokenjams_own():
+    assert pa._carries_tokenjam_marker(LEGACY_HOOK) is True
+    assert pa._carries_tokenjam_marker("# tokenjam:relearn:sig") is True
+
+
+def test_a_foreign_file_is_still_not_ours():
+    # The guard must keep refusing genuinely foreign files; widening it to
+    # accept legacy markers must not widen it to accept everything.
+    assert pa._carries_tokenjam_marker("import os\nprint('hi')\n") is False
+    assert pa._carries_tokenjam_marker("") is False
+    assert pa._carries_tokenjam_marker(None) is False
+
+
+def test_every_known_marker_generation_is_listed():
+    # Append-only: dropping a prefix silently orphans that generation of files
+    # on every machine that still has them.
+    assert "tokenjam:relearn:" in pa.TOKENJAM_MARKER_PREFIXES
+    assert "tokenjam:pothole:" in pa.TOKENJAM_MARKER_PREFIXES
+
+
+def test_legacy_note_block_is_replaced_and_normalised_not_duplicated():
+    existing = (
+        "# Notes\n"
+        "<!-- tokenjam:pothole:sig1 -->\nOLD BODY\n<!-- /tokenjam:pothole:sig1 -->\n"
+        "tail\n"
+    )
+    out = pa.render_note_content(existing, {"title": "T", "signature": "sig1"}, "sig1")
+    assert "OLD BODY" not in out, "the pre-rename block must be replaced, not orphaned"
+    assert out.count("sig1 -->") == 2, "exactly one block for this signature"
+    # The rewrite normalises the file to the current marker, so a file only
+    # ever needs to survive one re-apply to stop being legacy.
+    assert "tokenjam:relearn:sig1" in out
+    assert "pothole" not in out
+
+
+def test_legacy_marked_file_is_an_allowed_note_target(tmp_path):
+    # A prior apply's file stays re-appliable even when it is not a .md.
+    target = tmp_path / "hook.py"
+    assert pa._is_allowed_note_target(target, LEGACY_HOOK) is True
+    assert pa._is_allowed_note_target(target, "import os\n") is False

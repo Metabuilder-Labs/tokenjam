@@ -987,6 +987,66 @@ def test_resend_adapter_empty_without_a_repeat_share():
     assert _resend_to_proposals(ResendFinding()) == []   # never ran / no data
 
 
+def _resend_finding():
+    from tokenjam.core.optimize.analyzers.context_resend import ResendFinding
+    return ResendFinding(
+        sessions_examined=5, repeat_share=0.6, repeat_tokens=10_000,
+        estimated_recoverable_tokens=6_830, estimated_recoverable_usd=0.5,
+        estimate_basis="resend basis", fix_compaction="Run /compact.",
+        fix_cache_control='{"cache_control": {"type": "ephemeral"}}',
+        caveat="conservative lower bound",
+    )
+
+
+def test_resend_suppresses_cache_control_snippet_for_claude_code():
+    # The cache_control snippet is the SDK lever. A Claude Code window never
+    # constructs the request, so it is not theirs to paste — the card must lead
+    # with /compact and show NO snippet, matching how the cache family gates.
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
+    assert prop.suggestion == "", "cache_control snippet must be suppressed for claude-code"
+    assert "cache_control" not in prop.suggestion
+    assert prop.advise_text.startswith("Run /compact.")
+    # The paste fallback is the compaction guidance, never the snippet.
+    assert prop.one_paste_fix == "Run /compact."
+
+
+def test_resend_keeps_cache_control_snippet_for_sdk():
+    # An SDK/API developer DOES author the request, so the snippet is a real
+    # lever for them and must survive. Suppressing it there would cost that
+    # persona a genuine fix.
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    for persona in ("sdk", "mixed", "unknown"):
+        prop = _resend_to_proposals(_resend_finding(), persona=persona)[0]
+        assert "cache_control" in prop.suggestion, f"snippet must survive for {persona}"
+
+
+def test_resend_caveat_is_not_duplicated():
+    # The caveat is carried once via `caveat=`, and must NOT also be folded into
+    # advise_text — doing both printed the same sentence twice on the card
+    # (description paragraph + caveat line render the joined fields).
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
+    assert prop.caveat == "conservative lower bound"
+    assert "conservative lower bound" not in prop.advise_text
+    assert prop.advise_text == "Run /compact."
+
+
+def test_resend_persona_flows_through_the_report_dispatch():
+    # End to end: cost_proposals_from_report must thread report.persona into the
+    # resend adapter (it was the one adapter that didn't take persona).
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    rep = _report()
+    rep.findings["resend"] = _resend_finding()
+    rep.persona = "claude-code"
+    prop = {p.analyzer: p for p in cost_proposals_from_report(rep)}["resend"]
+    assert prop.suggestion == "", "report persona must reach the resend adapter"
+
+
 # --- cost-proposals recompute: locking + error surfacing (requirement #5) --- #
 
 def test_recompute_cost_proposals_records_failure_without_wiping_the_last_good_result(

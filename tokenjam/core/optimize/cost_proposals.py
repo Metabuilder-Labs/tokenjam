@@ -1561,16 +1561,25 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
     )]
 
 
-def _resend_to_proposals(finding: Any) -> list[CostProposal]:
+def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
     """One window-wide card for the ``resend`` (context re-send) finding.
 
-    Advise-only: the fix is a workflow change (``/compact``, or an SDK-side
-    ``cache_control`` placement) the user makes in their own harness/code,
-    not a file tokenjam can write into — same class of surface as ``cache``/
-    ``trim``. ``ResendFinding.estimate_basis`` already documents the
-    discounted, doubly-conservative derivation (repeat-share lower bound x
-    the corpus-measured 68.3% avoidable fraction); this adapter carries it
-    verbatim rather than re-deriving or re-stating it.
+    Advise-only, and persona-gated like every other lever-bearing adapter (it
+    was the one that wasn't). Two levers exist and they are NOT interchangeable:
+
+    * ``/compact`` / a fresh session cuts the re-sent volume and is available
+      to EVERYONE — it is always the lead fix.
+    * an SDK-side ``cache_control`` breakpoint is the SDK/API developer's
+      ADDITIONAL lever. A Claude Code (or other agent-harness) window never
+      constructs the request itself, so that snippet is not theirs to paste —
+      showing it to them is the same wrong-audience defect the cache family
+      already avoids via ``_persona_gated_cache_fields``. Suppress it for a
+      ``claude-code`` persona and lead with ``/compact`` alone.
+
+    ``ResendFinding.estimate_basis`` documents the discounted derivation; this
+    adapter carries it verbatim. The caveat is carried ONCE via ``caveat=`` and
+    deliberately NOT folded into ``advise_text`` — doing both printed it twice
+    on the card (the description and the caveat line rendered the same sentence).
     """
     if finding is None:
         return []
@@ -1587,7 +1596,9 @@ def _resend_to_proposals(finding: Any) -> list[CostProposal]:
     )
     fix_compaction = str(getattr(finding, "fix_compaction", "") or "")
     fix_cache_control = str(getattr(finding, "fix_cache_control", "") or "")
-    advise = " ".join(p for p in (fix_compaction, str(getattr(finding, "caveat", "") or "")) if p)
+    # The cache_control snippet is the SDK lever only; a claude-code window
+    # can't paste it, so suppress it there and let /compact stand alone.
+    cache_snippet = "" if persona == "claude-code" else fix_cache_control
     return [CostProposal(
         kind="cost",
         analyzer="resend",
@@ -1602,9 +1613,9 @@ def _resend_to_proposals(finding: Any) -> list[CostProposal]:
             "repeat_share_median": getattr(finding, "repeat_share_median", None),
             "repeat_share_p90": getattr(finding, "repeat_share_p90", None),
         },
-        advise_text=advise.strip(),
-        suggestion=fix_cache_control,
-        one_paste_fix=fix_cache_control or fix_compaction,
+        advise_text=fix_compaction,
+        suggestion=cache_snippet,
+        one_paste_fix=cache_snippet or fix_compaction,
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
@@ -1812,7 +1823,7 @@ def cost_proposals_from_report(
         (lambda f: _script_to_proposals(f, persona=persona), findings.get("script")),
         (lambda f: _reuse_to_proposals(f, persona=persona), findings.get("reuse")),
         (lambda f: _verbosity_to_proposals(f, persona=persona), findings.get("verbosity")),
-        (_resend_to_proposals, findings.get("resend")),
+        (lambda f: _resend_to_proposals(f, persona=persona), findings.get("resend")),
     )
     for adapter, finding in adapters:
         try:

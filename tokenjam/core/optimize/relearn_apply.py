@@ -501,9 +501,15 @@ def render_note_content(existing: str, cluster: dict, signature: str) -> str:
     """Idempotent: replaces a prior block for this exact signature (re-apply),
     else appends one — creating the shared section header on first use."""
     block = _note_block(cluster, signature)
+    # Matches this signature's block in ANY marker generation, so a note
+    # written pre-rename is REPLACED here rather than left in place while a
+    # second block is appended below (anti-pattern #21: strip every legacy
+    # marker, write exactly one fresh block). `block` always carries the
+    # current marker, so a legacy file normalises itself on first re-apply.
+    any_marker = "|".join(re.escape(p) for p in TOKENJAM_MARKER_PREFIXES)
     marker_re = re.compile(
-        rf"<!-- tokenjam:relearn:{re.escape(signature)} -->.*?"
-        rf"<!-- /tokenjam:relearn:{re.escape(signature)} -->",
+        rf"<!-- (?:{any_marker}){re.escape(signature)} -->.*?"
+        rf"<!-- /(?:{any_marker}){re.escape(signature)} -->",
         re.DOTALL,
     )
     if marker_re.search(existing):
@@ -874,18 +880,46 @@ def _write_target(target: Path, content: str) -> None:
         target.write_text(content, encoding="utf-8")
 
 
+# --- Ownership markers ---------------------------------------------------------
+
+# Every artifact this module writes carries one of these, and "is this file
+# ours?" is asked in three places: the note-target allowlist, the overwrite
+# guard, and the note block's idempotency regex.
+#
+# ``pothole`` is the pre-rename spelling of the same feature. Files written by
+# those versions are still live on users' machines, and keying only on the
+# CURRENT marker made every one of them read as a stranger's file: re-apply
+# refused with "wasn't written by TokenJam", and a rung-1 note re-apply appended
+# a duplicate block instead of replacing the old one. Root CLAUDE.md
+# anti-pattern #21 is exactly this failure (the zshrc OTEL marker drifted at an
+# earlier rename with no migration) — match a STABLE set that includes every
+# legacy spelling, and let the write normalise the file to the current form.
+#
+# Append here, never replace: dropping an entry silently orphans that
+# generation of files all over again.
+TOKENJAM_MARKER_PREFIXES = ("tokenjam:relearn:", "tokenjam:pothole:")
+
+
+def _carries_tokenjam_marker(pre_image: str | None) -> bool:
+    """True when this file is a TokenJam artifact, in any marker generation."""
+    if pre_image is None:
+        return False
+    return any(prefix in pre_image for prefix in TOKENJAM_MARKER_PREFIXES)
+
+
 # --- Rung 1: note target allowlist (must-fix #2) -------------------------------
 
 def _is_allowed_note_target(target: Path, pre_image: str | None) -> bool:
     """A rung-1 note may only land on: (a) a ``*.md`` file (covers
     ``CLAUDE.md``, the intended target — any Markdown doc is a reasonable
-    note home), or (b) a file that ALREADY carries a ``tokenjam:relearn:``
-    marker (a prior legitimate apply — the same rung 2/3 re-apply allowance).
-    Anything else (a ``.py``, ``.zshrc``, etc.) is refused outright, closing
-    the "rung=1 + arbitrary target_path corrupts any file" gap."""
+    note home), or (b) a file that ALREADY carries a TokenJam marker in any
+    generation (a prior legitimate apply — the same rung 2/3 re-apply
+    allowance). Anything else (a ``.py``, ``.zshrc``, etc.) is refused
+    outright, closing the "rung=1 + arbitrary target_path corrupts any file"
+    gap."""
     if target.suffix.lower() == ".md":
         return True
-    return pre_image is not None and "tokenjam:relearn:" in pre_image
+    return _carries_tokenjam_marker(pre_image)
 
 
 # --- Write plan (shared by dry-run preview and the real apply) ----------------
@@ -949,7 +983,7 @@ def _build_write_plan(cluster: dict, target_path: str) -> dict[str, Any]:
             )
         new_content = render_note_content(pre_image or "", cluster, signature)
     else:
-        if pre_image is not None and "tokenjam:relearn:" not in pre_image:
+        if pre_image is not None and not _carries_tokenjam_marker(pre_image):
             raise RelearnApplyRefused(
                 f"{target} already exists and wasn't written by TokenJam — refusing to "
                 f"overwrite it. Choose a different target path."

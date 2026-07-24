@@ -2287,6 +2287,47 @@ def test_sessions_nav_entry_present(html):
     assert "sessions: 'improve'" in html
 
 
+def test_sizing_note_apply_explains_unregistered_project(html):
+    # A project-scoped sizing-note card whose target tokenjam couldn't resolve
+    # (prop.target_path empty, because the project was never onboarded
+    # per-project) must EXPLAIN the two exits instead of showing an empty box
+    # that only errors on Apply: paste the path, or run `tj onboard
+    # --add-project` from the repo so tokenjam learns it.
+    start = html.index("function CostProposalCard")
+    end = html.index("function InboxStatTiles", start)
+    row = html[start:end]
+    # The input pre-fills from the backend's resolved path when there is one.
+    assert "useState(prop.target_path || '')" in row
+    # The guidance is gated on there being no resolved path, and names both exits.
+    assert "!prop.target_path ? html`" in row
+    assert "paste the project's" in row
+    # The register-command is one-click copyable, not just prose.
+    assert '<${CopySnippetButton} text="tj onboard --add-project" />' in row
+    # Smarter UX: "no path yet" is not an error. The buttons are disabled until
+    # a path exists, so nothing can fire, and the empty-path guard NEVER sets a
+    # red validation line — the always-visible guidance block is the messaging.
+    assert "disabled=${wbusy || !target.trim()}" in row
+    assert "if (!target.trim()) return;" in row
+    assert "enter a CLAUDE.md path to write the note into" not in html
+    assert "Paste a project CLAUDE.md path above, or run" not in html
+
+
+def test_no_duplicate_status_nav_entry(html):
+    # Status and Sessions used to be two sidebar entries rendering the SAME
+    # StatusView for their bare route, so clicking between them changed nothing
+    # on screen. Exactly one of them survives (Sessions), and the Status nav
+    # link is gone. #/status stays a route-level alias for old bookmarks, so
+    # the `case 'status'` label must remain even though no link points at it.
+    assert 'data-view="status"' not in html, "the duplicate Status nav link must be gone"
+    assert "case 'status':" in html, "keep #/status as a silent route alias"
+    # The two labels must not both render the split-zone page title.
+    assert '<div class="page-title">Sessions</div>' in html
+    assert '<div class="page-title">Status</div>' not in html
+    # Exactly one nav-link resolves to the sessions/status surface (count the
+    # actual anchor, not raw string hits — a comment may mention the attribute).
+    assert html.count('class="nav-link" data-view="sessions"') == 1
+
+
 # --- stat tiles / applied-tab unit hierarchy follows the server framing ---- #
 # NOTE (inbox redesign): the perpetual verify/receipts layer these tests used
 # to exercise (ReceiptsHeader's "Verified saved to date" tile, CostLedgerSummary)
@@ -2378,7 +2419,18 @@ def test_fixes_applied_tile_never_claims_verification(html):
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
     assert ">Fixes applied<" in tile
-    assert "estimates only, savings are not measured after the fact" in tile
+    # The estimates-only qualifier lives in the tile's sub-line (the header
+    # "Fixes applied" doesn't itself say "estimate", so the sub-line carries
+    # the honesty). Wording was tightened when the tile adopted the mockup's
+    # denser styling; the claim it makes must not weaken.
+    # The figure must always be dated to apply time, so it can never be read as
+    # a live measurement of what actually happened afterward. Wording has moved
+    # (an earlier draft said "estimates only, not re-measured"); the claim must
+    # not weaken, and the bare-count fallback must say why it has no figure.
+    assert "estimated when applied" in tile
+    # The count fallback carries no figure, so it makes no savings claim to
+    # qualify — it must show recency, never a number dressed up as a saving.
+    assert "most recent ${daysAgoLabel(lastAppliedAt)" in tile
     # The old tile label and the mockup's own VERIFIED chip never render (a
     # rendered-text check, not a comment check — explanatory code comments
     # pointing at c0316aba legitimately use the word "verified").
@@ -2426,7 +2478,11 @@ def test_estimated_recoverable_tile_leads_with_dollars_only_at_half_priceable(ht
     end = html.index("function ReviewInboxView", start)
     tile = html[start:end]
     assert "priceable.length * 2 >= openItems.length" in tile
-    assert 'class="estimated-tag"' in tile
+    # The `est.` pill was dropped for the denser mockup styling, so the
+    # estimate framing has to survive in the tile's own label + hover title —
+    # the figure must never read as a measured number.
+    assert ">Estimated recoverable " in tile
+    assert "sum of each open item's est./mo figure" in tile
 
 
 def test_estimated_tile_hides_when_there_are_no_open_items(html):
@@ -2452,9 +2508,14 @@ def test_review_inbox_intro_matches_the_founder_approved_mockup(html):
     assert intro in html
     # The loop-first phrasing from the pre-redesign copy is gone.
     assert "land here so it can relearn them" not in html
-    # The Approve/Dismiss mechanics the old intro stated are preserved, just
-    # relocated to the Recurring-mistakes tab (the tab those actions live in)
-    # instead of a page-wide intro paragraph.
+    # The Approve/Dismiss mechanics the old intro stated are preserved. They
+    # have now moved a second time: off the tab's explainer paragraph (three
+    # dense lines above the list) and onto the two controls they describe, so
+    # each consequence is stated at the moment it can still be declined. The
+    # write disclosure sits on the modal's Approve button (the body only
+    # reports git-commit-vs-backup AFTER the write); the local-only disclosure
+    # sits on the bulk Dismiss button. The strings must survive wherever they
+    # live, which is what these assertions pin.
     assert "git-committed, or backed up if the target is not a git repo" in html
     assert "you confirm the scope and target first" in html
     assert "this browser only; it is not sent to the server" in html
@@ -2518,18 +2579,48 @@ def test_select_all_toggles_off_when_everything_is_selected(html):
 
 def test_select_all_applies_only_to_the_rendered_rows(html):
     # THE load-bearing one. The list filters out locally-dismissed rows and rows
-    # approved in this session, so select-all must iterate `visible`, never the
-    # unfiltered d.clusters, or it would dismiss rows the user never saw.
+    # already applied (in this session OR any earlier one), so select-all must
+    # iterate `visible`, never the unfiltered d.clusters, or it would dismiss
+    # rows the user never saw.
     start = html.index("const selectedVisible =")
     end = html.index("const modalCluster =", start)
     block = html[start:end]
     assert "visible.filter(c => checked.has(c.signature))" in block
     assert "visible.map(c => c.signature)" in block
     assert "d.clusters" not in block
-    # The filter that makes `visible` a strict subset is still in place.
+    # The filter that makes `visible` a strict subset is still in place. This
+    # previously pinned the `!appliedSigs.has(...)` form verbatim, which meant
+    # the suite was ENFORCING the session-local-only filter that re-offered
+    # already-applied fixes; see the dedicated ledger test above for why that
+    # was a defect rather than a design.
     assert (
         "const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) "
-        "&& !appliedSigs.has(c.signature))"
+        "&& !appliedSigsAll.has(c.signature))"
+    ) in html
+
+
+def test_open_mistakes_exclude_already_applied_fixes_from_the_ledger(html):
+    # An already-applied recurring mistake must not come back as an open
+    # proposal. `appliedSigs` is session-local and starts empty on every page
+    # load, so filtering on it alone re-offered every fix applied in an earlier
+    # session: approving one then attempted to rewrite the hook its own earlier
+    # approval had created, and only relearn_apply's file-ownership guard
+    # stopped the double write. It also inflated the tab count and the
+    # ESTIMATED RECOVERABLE tile with savings already banked.
+    assert "const appliedSigsAll = new Set([" in html
+    assert "...appliedSigs," in html
+    assert "...(applied || []).filter(r => r.state !== 'reverted').map(r => r.signature)," in html
+    assert (
+        "const visible = (d.clusters || []).filter(c => !dismissed.has(c.signature) "
+        "&& !appliedSigsAll.has(c.signature))"
+    ) in html
+    # The session-local set alone must never again be the whole filter.
+    assert "!appliedSigs.has(c.signature))" not in html
+    # Same rule on the cost half, which already read its ledger correctly — the
+    # two halves of this view drifted apart silently once.
+    assert (
+        "const costAppliedSigs = new Set((costApplied || [])"
+        ".filter(r => r.state !== 'reverted').map(r => r.signature))"
     ) in html
 
 
@@ -2546,27 +2637,46 @@ def test_dismiss_checked_cannot_reach_an_unlisted_row(html):
 def test_dismiss_button_states_its_blast_radius(html):
     # The action names how many rows it will act on before it fires, and counts
     # the same scoped selection the header checkbox reports.
+    # Asserted as separate facts rather than one contiguous string: the button
+    # now also carries a title, and a brittle exact-markup match would fail on
+    # any attribute added between the handler and the label without the guarded
+    # behaviour having changed at all.
+    assert "disabled=${selectedCount === 0} onClick=${dismissChecked}" in html
     assert (
-        "disabled=${selectedCount === 0} onClick=${dismissChecked}>"
         "${selectedCount ? `Dismiss ${selectedCount} checked` : 'Dismiss checked'}"
     ) in html
+    # And it states WHERE the dismissal lands, since "dismiss" reads like a
+    # server-side action when the intro no longer spells it out at length.
+    assert "Hides these rows locally" in html
     # Not the raw, unscoped set that could overstate it.
     assert "disabled=${checked.size === 0}" not in html
 
 
 def test_select_all_adds_no_bulk_approve(html):
-    # Dismiss is local and undone by a reload; Approve writes to disk. Exactly
-    # one bulk action exists in the Recurring-mistakes tab's listhead (inbox
-    # redesign moved the bulk-dismiss button off the old `cur-addbar` footer
-    # and into the tab's listhead, beside the select-all box).
+    # Dismiss is local and undone by a reload; Approve writes to disk. The
+    # listhead carries exactly TWO bulk actions — "Review N checked" (opens
+    # each checked row's modal in turn) and "Dismiss N checked" — and neither
+    # writes anything. The invariant this pin defends is that no bulk control
+    # can APPROVE; it is not a cap on the number of buttons, so a third
+    # non-writing control may be added, but a writing one may not.
+    # Scoped to the whole Recurring-mistakes tab block, not just its listhead:
+    # the two bulk buttons now sit BELOW the scroll box (they used to be in the
+    # head, beside select-all), so a head-only slice would miss them entirely
+    # and pass vacuously.
     view = html[html.index("function ReviewInboxView"):]
     start = view.index("tab === 'mistakes' ? html`")
-    end = view.index('<div class="cur-listbox">', start)
+    end = view.index("tab === 'advisories' ? html`", start)
     head = view[start:end]
-    assert head.count("<button") == 1
     assert "dismissChecked" in head
+    assert "startReview(selectedVisible.map(c => c.signature))" in head
     assert "onClick=${approveChecked}" not in html
     assert "Approve checked" not in html
+    # The queue only navigates. If startReview ever gains a POST, that is a
+    # bulk approve wearing a different name.
+    review_fn = html[html.index("const startReview = (sigs) =>"):]
+    review_fn = review_fn[: review_fn.index("\n  };")]
+    for writing_call in ("apiPost", "apiPostOrDetail", "doApprove", "/apply"):
+        assert writing_call not in review_fn, f"startReview must not write: {writing_call}"
 
 
 # --- no dollar figure escapes the framing, and no false basis in a comment -- #
