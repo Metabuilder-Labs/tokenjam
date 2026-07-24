@@ -40,10 +40,23 @@
  * via `uv tool install` / `pipx install` / `pip install` / Homebrew, which can
  * sit on an old version indefinitely. See `warnIfShadowedByStaleInstall`
  * below: detect-and-tell only, never mutates, never auto-upgrades.
+ *
+ * Two on-disk markers (under the cache dir from `cacheDir()`) keep both of
+ * the above cheap on repeat runs, since `npx tokenjam` is meant to be run
+ * often, not once:
+ *   - `pin-ok-<bin>-<version>`: once the pinned spec has been CONFIRMED to
+ *     resolve for a given runner+version (see `resolves()`), skip the
+ *     confirmation probe on later runs for that same exact version — see the
+ *     "second process" note above `resolves()` for why this exists.
+ *   - `last-stale-check`: throttles `warnIfShadowedByStaleInstall`'s four
+ *     subprocess probes (uv/pipx/pip/brew) to at most once per interval,
+ *     since it's a purely advisory nudge and doesn't need to run every time.
  */
 "use strict";
 
 const { spawnSync } = require("child_process");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
 
 // PyPI package name vs. command name differ (`tokenjam` ships the `tj` script),
@@ -87,20 +100,82 @@ function runners(version) {
   ];
 }
 
-// Cheap, side-effect-free resolution probe: does `<bin> <args> --version`
-// succeed? Used to decide, before the real invocation, whether the pinned
-// package spec actually resolves on this runner — falls back to the
-// unpinned prefix when it doesn't (wrapper published ahead of PyPI
+// Cheap(ish), side-effect-free resolution probe: does `<bin> <args>
+// --version` succeed? Used to decide, before the real invocation, whether
+// the pinned package spec actually resolves on this runner — falls back to
+// the unpinned prefix when it doesn't (wrapper published ahead of PyPI
 // propagation). Unlike `has()`, this requires an exact status 0: `uv`
 // exits 1 both for "resolution failed" AND for "binary ran fine but
 // doesn't understand --version", so treating 1 as success here would
 // silently paper over real resolution failures (verified: `uvx --from
 // tokenjam==<bogus> tj --version` also exits 1, indistinguishable from the
 // unsupported-flag case `has()` is built around).
+//
+// Cost tradeoff: this is a genuine second full `uvx`/`pipx` process, on top
+// of the real invocation below — for `uvx` specifically, an UNCACHED pinned
+// version means this probe pays the actual network resolve + ephemeral venv
+// build, and the real invocation right after it just reuses that now-warm
+// local cache (fast). We can't fold the probe into the real invocation
+// without either (a) risking running the user's real command twice — once
+// pinned, once unpinned on fallback, with real side effects/output printed
+// twice — or (b) buffering the real command's stdout/stderr to inspect it
+// for a resolution-failure signature first, which breaks live streaming for
+// anything interactive (e.g. `tj onboard`'s prompts). Given the pin's whole
+// point is correctness (never silently run a stale cached version), a
+// probe-first design that never double-runs the real command is kept
+// deliberately, and its cost is bounded to a one-time-per-version hit via
+// the `pin-ok-<bin>-<version>` cache marker in `main()` below — this
+// function itself is only ever called once per (runner, version) between
+// cache expiries, not on every invocation.
 function resolves(bin, args) {
   const probe = spawnSync(bin, [...args, "--version"], { stdio: "ignore" });
   return probe.status === 0;
 }
+
+// --- on-disk cache markers -------------------------------------------------
+
+function cacheDir() {
+  const xdgCacheHome = process.env.XDG_CACHE_HOME;
+  const base =
+    xdgCacheHome && xdgCacheHome.trim()
+      ? xdgCacheHome
+      : path.join(os.homedir(), ".cache");
+  return path.join(base, "tokenjam-npx");
+}
+
+// True if `name`'s marker was touched within the last `ttlMs`. Fails closed
+// (treats as NOT fresh) on any fs error — an unwritable/unreadable cache dir
+// must never break the wrapper, it just means we redo the check this run.
+function isFresh(name, ttlMs) {
+  try {
+    const stat = fs.statSync(path.join(cacheDir(), name));
+    return Date.now() - stat.mtimeMs < ttlMs;
+  } catch {
+    return false;
+  }
+}
+
+function touchMarker(name) {
+  try {
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    fs.writeFileSync(path.join(cacheDir(), name), String(Date.now()));
+  } catch {
+    // best-effort — worst case we just redo the check next run
+  }
+}
+
+// How long a confirmed pinned-resolve is trusted before re-probing. Bounds
+// the (rare) risk of a locally evicted uv/pipx cache silently going stale
+// between confirmation and use — 7 days is long enough that a `npx
+// tokenjam` run pays the double-invocation cost roughly once per version
+// per machine, not on every run, while still re-verifying periodically.
+const PIN_CONFIRM_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// How often the (purely advisory) stale-shadowing-install check runs. Unlike
+// the pin above, a stale window here can't cause incorrect behavior — worst
+// case is a delayed nudge — so the wider interval buys back the four
+// subprocess probes (uv/pipx/pip/brew) on every single invocation.
+const STALE_CHECK_TTL_MS = 24 * 60 * 60 * 1000;
 
 // --- stale shadowing install detection ------------------------------------
 //
@@ -250,14 +325,33 @@ function main() {
 
   for (const { bin, pinnedPrefix, prefix } of runners(version)) {
     if (!has(bin)) continue;
-    const args =
-      pinnedPrefix && resolves(bin, pinnedPrefix) ? pinnedPrefix : prefix;
+
+    let args = prefix;
+    if (pinnedPrefix) {
+      const pinMarker = `pin-ok-${bin}-${version}`;
+      if (isFresh(pinMarker, PIN_CONFIRM_TTL_MS)) {
+        args = pinnedPrefix; // previously confirmed — skip the probe
+      } else if (resolves(bin, pinnedPrefix)) {
+        touchMarker(pinMarker);
+        args = pinnedPrefix;
+      } // else: falls back to the unpinned `prefix` already assigned above
+    }
+
     const result = spawnSync(bin, [...args, ...passthrough], {
       stdio: "inherit",
       env: childEnv,
     });
     if (result.error) continue; // try the next runner on spawn failure
-    warnIfShadowedByStaleInstall(version);
+
+    // Only nudge about a stale shadowing install when the real command
+    // actually succeeded — a non-zero exit means the underlying CLI itself
+    // failed (bad args, etc.), which isn't the moment to pile on an
+    // unrelated advisory note.
+    if (result.status === 0 && !isFresh("last-stale-check", STALE_CHECK_TTL_MS)) {
+      warnIfShadowedByStaleInstall(version);
+      touchMarker("last-stale-check");
+    }
+
     process.exit(result.status === null ? 1 : result.status);
   }
 
