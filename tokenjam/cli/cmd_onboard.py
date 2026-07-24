@@ -389,6 +389,13 @@ def _print_instrument_agent_snippet() -> None:
               help="Configure Claude Code telemetry to flow into tj")
 @click.option("--codex", "codex", is_flag=True, default=False,
               help="Configure Codex CLI telemetry to flow into tj")
+@click.option("--add-project", "add_project", is_flag=True, default=False,
+              help="Register this repo under a project namespace in the "
+                   "existing global config, without re-running the full "
+                   "wizard (no plan/budget prompt, no backfill, no daemon "
+                   "restart). Requires `tj onboard` to have already run once "
+                   "(anywhere). Pair with --project to skip even the "
+                   "namespace prompt.")
 @click.option("--budget", type=float, default=None,
               help="Daily budget in USD per agent (0 = no limit)")
 @click.option("--install-daemon", "install_daemon", is_flag=True, default=False,
@@ -409,7 +416,8 @@ def _print_instrument_agent_snippet() -> None:
 @click.option("--project", "project_override", default=None,
               help="Project name to group this repo under in the dashboard "
                    "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
-                   "'aquanode'). Defaults to the git org. Used with --claude-code.")
+                   "'aquanode'). Defaults to the git org. Used with "
+                   "--claude-code or --add-project.")
 @click.option("--backfill-days", "backfill_days", type=int, default=None,
               help=f"Backfill only the last N days of Claude Code history "
                    f"(default {DEFAULT_BACKFILL_DAYS} when neither this nor "
@@ -432,8 +440,17 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 install_daemon: bool, no_daemon: bool, force: bool,
                 reconfigure: bool, plan: str | None, project_override: str | None,
                 backfill_days: int | None, backfill_all: bool,
-                verify: bool, verify_only: bool) -> None:
+                verify: bool, verify_only: bool, add_project: bool) -> None:
     """Interactive setup wizard for tj."""
+    # --add-project is the lightweight "register another repo" path: a fresh
+    # onboard run per repo re-prompts plan/budget/backfill scope and re-scans
+    # the entire Claude Code history just to set one config key
+    # (agents.<id>.project). Short-circuit before the banner, the
+    # ephemeral-runner guard, and every other prompt — this path writes
+    # nothing but the namespace mapping.
+    if add_project:
+        _onboard_add_project(ctx, project_override)
+        return
     # --verify-only is the documented post-restart re-check: config already
     # exists, the user just restarted the agent, and re-running the whole wizard
     # (config rewrite + full summary + restart banner) only to poll is wasteful
@@ -3311,6 +3328,74 @@ def _prompt_project_name(project_override: str | None, default: str) -> str:
         "Project name (groups related repos under one dashboard tile)",
         default=default, show_default=True,
     ).strip() or default
+
+
+def _onboard_add_project(ctx: click.Context, project_override: str | None) -> None:
+    """Register the current repo's Claude Code agent under a project
+    namespace, without running any of the rest of the onboarding wizard.
+
+    The dashboard groups sessions by `service.namespace`, which comes from
+    `config.agents[<agent_id>].project`. Registering the Nth repo previously
+    meant re-running the full `--claude-code` flow: plan prompt, budget
+    prompt, backfill-scope prompt, a full backfill pass over ALL of
+    `~/.claude/projects`, a relearn scan, and a daemon reinstall — none of
+    which is needed just to set one key. This writes only that key.
+
+    Resolves the config to write via `load_config()` — the same TJ_CONFIG /
+    project-local / global search order every other `tj` invocation uses
+    (`config.config_path`, set by `load_config` off of that same
+    resolution). This is deliberate: writing into whichever config
+    `tj otel-resource-attrs` (and hence the `claude` wrapper) will actually
+    load from this directory is what makes the mapping take effect, rather
+    than always targeting the default global path regardless of an active
+    override.
+
+    Requires an existing config (from a prior `tj onboard` run, anywhere) —
+    there is no ingest secret or default plan to invent here, so a missing
+    config is a hard error pointing at plain `tj onboard` rather than a
+    silently half-configured agent.
+    """
+    from tokenjam.core.config import AgentConfig, load_config, write_config
+
+    config = load_config()
+    config_path = config.config_path
+    if config_path is None:
+        console.print(
+            "[red]No tj config found — nothing to add a project to.[/red]"
+        )
+        console.print(
+            "Run [bold]tj onboard[/bold] first to set up Claude Code "
+            "telemetry, then use [bold]tj onboard --add-project[/bold] from "
+            "any other repo to register it."
+        )
+        ctx.exit(1)
+
+    project_name = _derive_project_name()
+    agent_id = f"claude-code-{project_name}"
+
+    if agent_id not in config.agents:
+        config.agents[agent_id] = AgentConfig()
+
+    namespace = _prompt_project_name(project_override, project_name)
+    config.agents[agent_id].project = namespace
+    write_config(config, config_path)
+
+    console.print(
+        f"[bold]{agent_id}[/bold] registered under project "
+        f"[bold]{namespace}[/bold] in {display_path(config_path)}."
+    )
+    console.print(
+        "New [bold]claude[/bold] launches in this directory will pick this "
+        "up immediately."
+    )
+    if _daemon_already_running():
+        console.print(
+            "[dim]Note: the running tj daemon reads this mapping only as a "
+            "server-side fallback for spans that arrive without "
+            "service.namespace already set — it won't pick up this change "
+            "until it restarts. New `claude` launches are unaffected since "
+            "they read the config fresh at launch.[/dim]"
+        )
 
 
 def _daemon_already_running() -> bool:

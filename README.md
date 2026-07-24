@@ -28,7 +28,7 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 TokenJam ingests telemetry data about your agents from a multitude of sources and provides you a quick and easy way to visualize and optimize cost so that you get the most out of the tokens you pay for.
 
-One command sets up live capture, all six analyzers, Lens (the local dashboard), and the zero-token statusline:
+One command sets up live capture, all thirteen analyzers, Lens (the local dashboard), and the zero-token statusline:
 
 ```bash
 npx tokenjam onboard   # or: pipx install tokenjam && tj onboard
@@ -57,16 +57,23 @@ Building your own agent with the SDK: install *in your project* (`pip install to
 
 ## Which path are you?
 
+`pipx install tokenjam && tj onboard` is the entry point for everyone: it's an interactive wizard
+that asks how you use AI agents and wires the right path for you. `--claude-code` / `--codex` just
+pre-answer the wizard's first question (skip it in scripts/CI); they're shortcuts, not separate setups.
+
 | You are | Run this | What you get |
 |---|---|---|
-| **Claude Code user** | `pipx install tokenjam && tj onboard --claude-code` | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all seven analyzers + Lens |
-| **Codex CLI user** | `pipx install tokenjam && tj onboard --codex` | Same onboarding flow, wired for Codex's session logs |
-| **Python SDK / API agent dev** | `pipx install tokenjam && tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
+| **Claude Code user** | `tj onboard` (or `tj onboard --claude-code` to skip the first question) | Auto-backfills your last 30 days, wires a zero-token statusline, unlocks all thirteen analyzers + Lens |
+| **Codex CLI user** | `tj onboard` (or `tj onboard --codex`) | Same onboarding flow, wired for Codex's session logs |
+| **Python SDK / API agent dev** | `tj onboard` + `@watch()` in your code ([Python SDK](docs/python-sdk.md)) | Live capture from your own agent process, no CLI-specific backfill |
 | **Framework user** (LangChain / CrewAI / AutoGen) | `pip install tokenjam[langchain]` (or `[crewai]` / `[autogen]`) + one `patch_*()` call | Framework-level spans with no manual instrumentation |
 | **Already on Langfuse / Helicone** | `tj backfill langfuse --source-url <url> --api-key <key>`<br>(swap `langfuse` → `helicone`, same flags) | One-time import of your existing traces into the local DB |
 | **Any OTel-emitting agent** | Point your OTLP exporter at `tj serve` (`http://127.0.0.1:7391/v1/traces`) | Zero-code ingestion: no SDK, no patch |
 
-<sub>The `--claude-code` / `--codex` flags just pre-answer the wizard's first question; bare `tj onboard` asks.</sub>
+**Working across multiple projects?** Run `tj onboard` once inside each one — sessions and cost
+proposals group per project in Lens, keyed on the project name each onboard run captures. Already
+onboarded elsewhere? `tj onboard --add-project` registers just the current repo's namespace against
+your existing setup, skipping the plan/budget prompts and backfill.
 
 LlamaIndex and the OpenAI Agents SDK ship their own native OTel support; point their exporter at `tj serve` rather than installing an extra. Full matrix: [docs/framework-support.md](docs/framework-support.md).
 
@@ -75,9 +82,9 @@ A single page walks every path, each ending with a verify step: see
 
 ---
 
-## Seven analyzers + Lens. One install.
+## Thirteen analyzers + Lens. One install.
 
-TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces savings across seven areas. It then brings them together in a local browser dashboard.
+TokenJam reads telemetry from the major agent runtimes, frameworks, providers, and observability tools and surfaces cost-savings advisories across thirteen areas, then brings them together in a local browser dashboard.
 
 <table>
 <tr>
@@ -169,7 +176,7 @@ Flags sessions whose output runs long against a per-(tool, task-shape) baseline.
 </tr>
 </table>
 
-`tj optimize` (no args) runs every analyzer: the seven above, plus `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen) and `cache-recommend` (the Cache card's breakpoint-suggestion half, above). Run a subset with `tj optimize downsize cache reuse`. Lens brings it all together: see the dashboard below.
+`tj optimize` (no args) runs all thirteen analyzers: the seven above, plus `relearn` (a blocker your agent keeps silently re-hitting across sessions), `budget-projection` (projects your monthly run-rate against a configured `[budget.<provider>]` ceiling; powers Lens's Budget screen), `cache-recommend` (the Cache card's breakpoint-suggestion half, above), `resend` (token-weighted repeat-context share across turns, independent of whether caching is enabled), `summarize` (prompt files worth summarizing, scanned from disk), and `deadweight` (MCP servers whose schemas load into every session and are never called). Run a subset with `tj optimize downsize cache reuse`. Lens brings it all together: see the dashboard below.
 
 ---
 
@@ -198,7 +205,7 @@ Flags sessions whose output runs long against a per-(tool, task-shape) baseline.
 
 ## Beyond optimization
 
-TokenJam is also a full observability stack. The seven analyzers and Lens ride on top.
+TokenJam is also a full observability stack. The thirteen analyzers and Lens ride on top.
 
 - **Real-time cost tracking**: every LLM call priced as it happens
 - **Safety alerts**: 13 alert types, 6 channels (ntfy, Discord, Telegram, webhook, file, stdout)

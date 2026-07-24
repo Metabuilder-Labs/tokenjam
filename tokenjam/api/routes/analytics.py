@@ -288,20 +288,29 @@ async def get_analytics(
             "sessions": int(row[3] or 0) if row else 0,
         }
 
-    kpis = _kpi_totals(kpi_where, kpi_params)
-
-    # Per-bucket series for ALL FOUR KPI metrics (the sparklines, #217). One
-    # query, server-side — the UI zero-fills across the window and never
-    # aggregates per-bucket in JS (single compute path).
-    kpi_series_sql = (
+    # KPI window totals AND the per-bucket KPI series (the sparklines, #217) in a
+    # SINGLE scan over the window, instead of two sequential scans over the same
+    # WHERE. `GROUP BY ROLLUP(b)` returns every per-bucket row PLUS one grand
+    # total super-aggregate row (bucket IS NULL) whose COUNT(DISTINCT session_id)
+    # is recomputed window-wide — so a session spanning buckets is counted once,
+    # byte-identical to the standalone totals query. start_time is NOT NULL
+    # (schema), so the only null-bucket row is the ROLLUP super-aggregate; on an
+    # empty window ROLLUP emits no rows and the zero default below stands (same
+    # as the ungrouped totals query returning zeros). The UI zero-fills across
+    # the window and never aggregates per-bucket in JS (single compute path).
+    kpi_rollup_sql = (
         "SELECT " + _bucket_expr(bucket) + " AS b, " + _kpi_cols
-        + " FROM spans WHERE " + kpi_where + " GROUP BY b ORDER BY b"
+        + " FROM spans WHERE " + kpi_where + " GROUP BY ROLLUP(b) ORDER BY b"
     )
-    kpi_series = [
-        {"bucket": int(r[0]), "spend": float(r[1] or 0.0), "tokens": int(r[2] or 0),
-         "events": int(r[3] or 0), "sessions": int(r[4] or 0)}
-        for r in conn.execute(kpi_series_sql, kpi_params).fetchall()
-    ]
+    kpis = {"spend": 0.0, "tokens": 0, "events": 0, "sessions": 0}
+    kpi_series: list[dict] = []
+    for r in conn.execute(kpi_rollup_sql, kpi_params).fetchall():
+        vals = {"spend": float(r[1] or 0.0), "tokens": int(r[2] or 0),
+                "events": int(r[3] or 0), "sessions": int(r[4] or 0)}
+        if r[0] is None:  # grand-total super-aggregate row
+            kpis = vals
+        else:
+            kpi_series.append({"bucket": int(r[0]), **vals})
 
     # Period-over-period delta vs the prior equal-length window (#217), same
     # convention as the Cost/Overview --compare headline. Computed server-side.

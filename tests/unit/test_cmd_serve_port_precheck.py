@@ -83,3 +83,23 @@ class TestPortInUseDetection:
             held.listen(1)
             port = held.getsockname()[1]
             assert _port_in_use("::1", port) is True
+
+    def test_probe_sets_so_reuseaddr_to_match_uvicorn(self):
+        """The probe must set SO_REUSEADDR, exactly as uvicorn's own bind does.
+
+        Without it, a port left in TIME_WAIT by a just-Ctrl-C'd server reads
+        as in-use even though uvicorn WOULD bind it, so the pre-flight check
+        manufactured a false "already in use" that blocked a legitimate quick
+        restart. TIME_WAIT is not deterministically reproducible across OSes,
+        so we spy the option on the probe socket instead of racing a real
+        connection close.
+        """
+        sock = MagicMock()
+        sock.__enter__.return_value = sock
+        sock.bind.return_value = None  # port reads as bindable
+        with patch("tokenjam.cli.cmd_serve.socket.socket", return_value=sock):
+            assert _port_in_use("127.0.0.1", 7391) is False
+
+        sock.setsockopt.assert_any_call(
+            socket.SOL_SOCKET, socket.SO_REUSEADDR, 1
+        )
