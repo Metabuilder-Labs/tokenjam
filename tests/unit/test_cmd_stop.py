@@ -124,6 +124,73 @@ class TestStopSweepsForegroundProcesses:
         assert any("is-active" in c for c in calls)
         assert not any("disable" in c for c in calls)
 
+    def test_stops_systemd_unit_that_is_activating(self, tmp_path, monkeypatch):
+        """`systemctl is-active` reports "activating" (and "reloading") for a
+        unit that is genuinely live but mid-transition -- not settled
+        "active" yet. Those states must still count as running, or
+        `stop_tj_serve` declines to stop a daemon that's actually there and
+        misreports it as not-running (the same class of bug as the
+        plist-exists-but-never-loaded case, just inverted: false negative
+        instead of false positive)."""
+        from tokenjam.cli.cmd_stop import stop_tj_serve
+
+        systemd_unit = tmp_path / ".config" / "systemd" / "user" / "tokenjam.service"
+        systemd_unit.parent.mkdir(parents=True)
+        systemd_unit.write_text("[Unit]\n")
+        monkeypatch.setattr("tokenjam.cli.cmd_stop.Path.home", lambda: tmp_path)
+
+        run_mock = MagicMock(side_effect=[
+            MagicMock(returncode=3, stdout="activating\n"),  # is-active
+            MagicMock(returncode=0, stdout=""),               # disable --now
+        ])
+
+        with patch("tokenjam.cli.cmd_stop.subprocess.run", run_mock), \
+             patch("tokenjam.cli.cmd_stop._find_serve_pid", return_value=None):
+            stopped, stopped_via = stop_tj_serve(quiet=True)
+
+        assert stopped is True
+        assert stopped_via == ["systemd service stopped"]
+        calls = [c.args[0] for c in run_mock.call_args_list]
+        assert any("is-active" in c for c in calls)
+        assert any("disable" in c for c in calls), (
+            f"an activating unit must still be disabled/stopped; calls were {calls}"
+        )
+
+
+class TestSystemdUnitActive:
+    """Direct tests of the live-state classifier used to gate the systemd
+    stop path."""
+
+    def test_treats_activating_as_live(self, monkeypatch):
+        from tokenjam.cli.cmd_stop import _systemd_unit_active
+        result_mock = MagicMock(returncode=3, stdout="activating\n")
+        with patch("tokenjam.cli.cmd_stop.subprocess.run", return_value=result_mock):
+            assert _systemd_unit_active("tokenjam") is True
+
+    def test_treats_reloading_as_live(self, monkeypatch):
+        from tokenjam.cli.cmd_stop import _systemd_unit_active
+        result_mock = MagicMock(returncode=0, stdout="reloading\n")
+        with patch("tokenjam.cli.cmd_stop.subprocess.run", return_value=result_mock):
+            assert _systemd_unit_active("tokenjam") is True
+
+    def test_treats_active_as_live(self, monkeypatch):
+        from tokenjam.cli.cmd_stop import _systemd_unit_active
+        result_mock = MagicMock(returncode=0, stdout="active\n")
+        with patch("tokenjam.cli.cmd_stop.subprocess.run", return_value=result_mock):
+            assert _systemd_unit_active("tokenjam") is True
+
+    def test_treats_inactive_as_not_live(self, monkeypatch):
+        from tokenjam.cli.cmd_stop import _systemd_unit_active
+        result_mock = MagicMock(returncode=3, stdout="inactive\n")
+        with patch("tokenjam.cli.cmd_stop.subprocess.run", return_value=result_mock):
+            assert _systemd_unit_active("tokenjam") is False
+
+    def test_treats_failed_as_not_live(self, monkeypatch):
+        from tokenjam.cli.cmd_stop import _systemd_unit_active
+        result_mock = MagicMock(returncode=3, stdout="failed\n")
+        with patch("tokenjam.cli.cmd_stop.subprocess.run", return_value=result_mock):
+            assert _systemd_unit_active("tokenjam") is False
+
 
 class TestStopVerifiesTermination:
     """`tj stop` must not claim success for a process that's still alive.
