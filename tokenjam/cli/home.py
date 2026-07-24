@@ -64,8 +64,20 @@ def _is_set_up() -> bool:
 
 
 def _current_repo_unregistered() -> bool:
-    """True if the global config exists but this repo's Claude Code agent has
-    no project namespace yet — i.e. a good moment to nudge `--add-project`.
+    """True if this repo's Claude Code agent has no project namespace yet AND
+    the user already has at least one other Claude Code agent registered
+    elsewhere — i.e. a good moment to nudge `--add-project`.
+
+    The second condition matters: a Codex-only or SDK-only user has no
+    `claude-code-*` agent at all, and `--add-project` (which only ever writes
+    a `claude-code-*` entry) would not help them — nudging them anyway would
+    just nag forever with an irrelevant command.
+
+    Resolves the config the same way `tj onboard --add-project` and the rest
+    of the CLI do (TJ_CONFIG, then project-local, then global — see
+    `load_config`'s `config_path` resolution), so this reads the exact config
+    that would actually be written to / already governs this repo, not
+    always the default global path regardless of an active override.
 
     Best-effort: any failure (no git, unreadable config, etc.) reads as "don't
     nudge" rather than raising out of the home screen.
@@ -74,11 +86,15 @@ def _current_repo_unregistered() -> bool:
         from tokenjam.cli.cmd_onboard import _derive_project_name
         from tokenjam.core.config import load_config
 
-        global_config_path = Path.home() / ".config" / "tj" / "config.toml"
-        if not global_config_path.is_file():
+        config = load_config()
+        if config.config_path is None:
+            return False
+        has_any_claude_code_agent = any(
+            aid.startswith("claude-code-") for aid in config.agents
+        )
+        if not has_any_claude_code_agent:
             return False
         agent_id = f"claude-code-{_derive_project_name()}"
-        config = load_config(str(global_config_path))
         agent = config.agents.get(agent_id)
         return agent is None or not agent.project
     except Exception:

@@ -3335,21 +3335,31 @@ def _onboard_add_project(ctx: click.Context, project_override: str | None) -> No
     namespace, without running any of the rest of the onboarding wizard.
 
     The dashboard groups sessions by `service.namespace`, which comes from
-    `config.agents[<agent_id>].project` in the global config. Registering the
-    Nth repo previously meant re-running the full `--claude-code` flow: plan
-    prompt, budget prompt, backfill-scope prompt, a full backfill pass over
-    ALL of `~/.claude/projects`, a relearn scan, and a daemon reinstall — none
-    of which is needed just to set one key. This writes only that key.
+    `config.agents[<agent_id>].project`. Registering the Nth repo previously
+    meant re-running the full `--claude-code` flow: plan prompt, budget
+    prompt, backfill-scope prompt, a full backfill pass over ALL of
+    `~/.claude/projects`, a relearn scan, and a daemon reinstall — none of
+    which is needed just to set one key. This writes only that key.
 
-    Requires an existing global config (from a prior `tj onboard` run,
-    anywhere) — there is no ingest secret or default plan to invent here, so a
-    missing config is a hard error pointing at plain `tj onboard` rather than
-    a silently half-configured agent.
+    Resolves the config to write via `load_config()` — the same TJ_CONFIG /
+    project-local / global search order every other `tj` invocation uses
+    (`config.config_path`, set by `load_config` off of that same
+    resolution). This is deliberate: writing into whichever config
+    `tj otel-resource-attrs` (and hence the `claude` wrapper) will actually
+    load from this directory is what makes the mapping take effect, rather
+    than always targeting the default global path regardless of an active
+    override.
+
+    Requires an existing config (from a prior `tj onboard` run, anywhere) —
+    there is no ingest secret or default plan to invent here, so a missing
+    config is a hard error pointing at plain `tj onboard` rather than a
+    silently half-configured agent.
     """
     from tokenjam.core.config import AgentConfig, load_config, write_config
 
-    global_config_path = Path.home() / ".config" / "tj" / "config.toml"
-    if not global_config_path.exists():
+    config = load_config()
+    config_path = config.config_path
+    if config_path is None:
         console.print(
             "[red]No tj config found — nothing to add a project to.[/red]"
         )
@@ -3359,9 +3369,7 @@ def _onboard_add_project(ctx: click.Context, project_override: str | None) -> No
             "any other repo to register it."
         )
         ctx.exit(1)
-        return
 
-    config = load_config(str(global_config_path))
     project_name = _derive_project_name()
     agent_id = f"claude-code-{project_name}"
 
@@ -3370,11 +3378,11 @@ def _onboard_add_project(ctx: click.Context, project_override: str | None) -> No
 
     namespace = _prompt_project_name(project_override, project_name)
     config.agents[agent_id].project = namespace
-    write_config(config, global_config_path)
+    write_config(config, config_path)
 
     console.print(
         f"[bold]{agent_id}[/bold] registered under project "
-        f"[bold]{namespace}[/bold] in {display_path(global_config_path)}."
+        f"[bold]{namespace}[/bold] in {display_path(config_path)}."
     )
     console.print(
         "New [bold]claude[/bold] launches in this directory will pick this "
