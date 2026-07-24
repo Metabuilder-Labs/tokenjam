@@ -1554,7 +1554,13 @@ code.md-code {
   </div>
   <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review inbox</a>
   <a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="improve"><span class="icon">&#9678;</span> Dashboard</a>
-  <a href="#/status" class="nav-link" data-view="status" data-lens="improve"><span class="icon">&bull;</span> Status</a>
+  <!-- One Sessions entry, not two. The old "Status" link (#/status) and this
+       one rendered the SAME StatusView for their bare route, so the sidebar
+       advertised two items that were one page. This #/sessions link is the one
+       kept: session rows deep-link to #/sessions/<id>, and the active-highlight
+       keys on data-view === route.view, so only data-view="sessions" lights up
+       while a session detail is open. #/status survives as a silent route alias
+       for old bookmarks. -->
   <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <a href="#/traces" class="nav-link" data-view="traces" data-lens="observe"><span class="icon">&diamond;</span> Traces</a>
   <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Cost</a>
@@ -2694,10 +2700,10 @@ function StatusView({ params }) {
   };
 
   return html`
-    <div class="page-title">Status</div>
+    <div class="page-title">Sessions</div>
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 18px;font-family:'Geist Mono',monospace">
       ${agentId
-        ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/status" style="color:var(--brand)">show all</a>`
+        ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a>`
         : 'Two zones — coding sessions (bounded work) and SDK services (unbounded telemetry).'}
     </div>
 
@@ -4497,7 +4503,7 @@ function SessionDetailView({ sessionId }) {
 
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
-  const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/status'}>← Back to status</button>`;
+  const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/sessions'}>← Back to sessions</button>`;
 
   if (error) return html`<div>${backBtn}<div class="empty">Session not found.<code>${sessionId}</code></div></div>`;
   if (!data) return html`<div>${backBtn}<div class="empty">Loading session...</div></div>`;
@@ -4886,7 +4892,7 @@ function RunDetailView({ runId }) {
 
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, [load]);
 
-  const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/status'}>← Back to status</button>`;
+  const backBtn = html`<button class="btn btn-back" onClick=${() => location.hash = '#/sessions'}>← Back to sessions</button>`;
 
   if (error) return html`<div>${backBtn}<div class="empty">Run not found.<code>${runId}</code></div></div>`;
   if (!data) return html`<div>${backBtn}<div class="empty">Loading run...</div></div>`;
@@ -8935,13 +8941,16 @@ function App() {
     // #/overview bookmarks/links fall through to the Dashboard.
     case 'overview':
     case 'dashboard': return html`<${DashboardView} params=${p} />`;
-    case 'status': return html`<${StatusView} params=${p} />`;
-    case 'traces':
-      if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;
-      return html`<${TracesListView} params=${p} />`;
+    // #/status is a legacy alias kept for old bookmarks — its sidebar entry was
+    // removed (it duplicated Sessions, which renders the same StatusView). New
+    // navigation uses #/sessions; do not re-add a Status nav link.
+    case 'status':
     case 'sessions':
       if (route.param) return html`<${SessionDetailView} sessionId=${route.param} />`;
       return html`<${StatusView} params=${p} />`;
+    case 'traces':
+      if (route.param) return html`<${TraceDetailView} traceId=${route.param} />`;
+      return html`<${TracesListView} params=${p} />`;
     case 'runs':
       if (route.param) return html`<${RunDetailView} runId=${route.param} />`;
       return html`<${StatusView} params=${p} />`;

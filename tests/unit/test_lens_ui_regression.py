@@ -2287,6 +2287,22 @@ def test_sessions_nav_entry_present(html):
     assert "sessions: 'improve'" in html
 
 
+def test_no_duplicate_status_nav_entry(html):
+    # Status and Sessions used to be two sidebar entries rendering the SAME
+    # StatusView for their bare route, so clicking between them changed nothing
+    # on screen. Exactly one of them survives (Sessions), and the Status nav
+    # link is gone. #/status stays a route-level alias for old bookmarks, so
+    # the `case 'status'` label must remain even though no link points at it.
+    assert 'data-view="status"' not in html, "the duplicate Status nav link must be gone"
+    assert "case 'status':" in html, "keep #/status as a silent route alias"
+    # The two labels must not both render the split-zone page title.
+    assert '<div class="page-title">Sessions</div>' in html
+    assert '<div class="page-title">Status</div>' not in html
+    # Exactly one nav-link resolves to the sessions/status surface (count the
+    # actual anchor, not raw string hits — a comment may mention the attribute).
+    assert html.count('class="nav-link" data-view="sessions"') == 1
+
+
 # --- stat tiles / applied-tab unit hierarchy follows the server framing ---- #
 # NOTE (inbox redesign): the perpetual verify/receipts layer these tests used
 # to exercise (ReceiptsHeader's "Verified saved to date" tile, CostLedgerSummary)
