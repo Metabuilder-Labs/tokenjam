@@ -72,7 +72,15 @@ litellm   = ["litellm>=1.40"]
 # on main. Bump this deliberately (and fix or explicitly re-suppress
 # whatever the new default set newly flags) rather than letting a ruff
 # release silently redefine what "lint-clean" means for every PR.
-dev       = ["pytest", "pytest-asyncio", "httpx", "ruff>=0.15.12,<0.16", "mypy"]
+# mypy>=2.3,<2.4: same rationale as the ruff pin above — an unpinned `mypy`
+# here means CI's `pip install -e ".[dev,mcp]"` picks up whatever release is
+# newest at job run time, and a new mypy version can start flagging
+# pre-existing code the same way ruff 0.16.0 did. Pinned to the 2.3.x line,
+# which `mypy tokenjam/` runs clean against as of this pin (2.3.0 verified
+# clean, 217 source files, zero errors). Bump this deliberately (and fix or
+# explicitly re-suppress whatever a new release newly flags) rather than
+# letting a mypy release silently redefine what "type-clean" means for every PR.
+dev       = ["pytest", "pytest-asyncio", "httpx", "ruff>=0.15.12,<0.16", "mypy>=2.3,<2.4"]
 # Kept as a no-op extra for back-compat — `pipx install 'tokenjam[mcp]'` still
 # works, just installs the same fastmcp that's now in the base dependencies.
 # Documented in `docs/installation.md` so users know they no longer need it.
