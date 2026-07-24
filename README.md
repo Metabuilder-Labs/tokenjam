@@ -4,6 +4,8 @@
 
 TokenJam reads your agent's telemetry and tells you when to downsize, when to trim prompts, what to cache, what to script, and what plans you've already paid to figure out. It then shows it all in a local browser dashboard. Runs entirely on your machine.
 
+**Your agents can burn up to 42% of a bad session's tokens repeating mistakes they already made. TokenJam finds those loops and gets the tokens back.**
+
 [![CI](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml/badge.svg)](https://github.com/Metabuilder-Labs/tokenjam/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/tokenjam?color=3d8eff&labelColor=0d1117)](https://pypi.org/project/tokenjam/)
 [![Downloads](https://img.shields.io/pypi/dm/tokenjam?color=3d8eff&labelColor=0d1117&label=downloads)](https://pypi.org/project/tokenjam/)
@@ -21,6 +23,17 @@ TokenJam reads your agent's telemetry and tells you when to downsize, when to tr
 
 
 </div>
+
+---
+
+## What it's worth
+
+- **Up to 42% of a bad session's tokens** go to repeating known mistakes. TokenJam gets them back.
+  <br><sub>Worst measured session: 42.7% of its tokens (2.41M of 5.64M, replay-deduped) burned on recovery turns.</sub>
+- **Incident recovery 18.4% cheaper**, measured over 90 days of real sessions.
+- **About a dozen known-mistake re-hits a day** on a heavy multi-repo workspace.
+- **100% of measured sleep-chain busy-wait attempts blocked**, deterministically.
+- **8 of 9 lessons a team had learned the hard way, rediscovered automatically**, plus 8 nobody had noticed.
 
 ---
 
