@@ -8236,7 +8236,11 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
   const [preview, setPreview] = useState(null);
 
   const applyWorkspace = async (go) => {
-    if (!target.trim()) { setWerr('Paste a project CLAUDE.md path above, or run `tj onboard --add-project` from that repo so tokenjam can fill it in.'); return; }
+    // The buttons are disabled while the path is empty, so this is only a
+    // defensive guard — it never sets a red error, because "no path yet" is
+    // not a mistake the user made. The always-visible guidance block explains
+    // what to do; a red line after a click would just repeat it, alarmingly.
+    if (!target.trim()) return;
     setWbusy(true); setWerr(null);
     try {
       const r = await apiPostOrDetail('/relearn/cost-proposals/apply-workspace',
@@ -8330,16 +8334,21 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
                 an empty box that only errors on Apply. */ ''}
           ${!prop.target_path ? html`
             <div class="sz-note" style="margin-top:6px;font-size:12px">
-              tokenjam doesn't know this project's path, so it can't choose the <code>CLAUDE.md</code> for you. Two ways forward:
+              tokenjam doesn't know this project's path yet, so it can't choose the <code>CLAUDE.md</code> for you. Two ways forward:
               <div style="margin-top:4px">1. paste the project's <code>CLAUDE.md</code> path below and apply it directly, or</div>
-              <div style="margin-top:2px">2. run <code>tj onboard --add-project</code> from that repo to register it; tokenjam then knows the path and can target it for you.</div>
+              <div style="margin-top:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <span>2. register the project once so tokenjam fills it in for you: run this from that repo</span>
+                <span style="display:inline-flex;align-items:center;gap:6px">
+                  <code>tj onboard --add-project</code><${CopySnippetButton} text="tj onboard --add-project" />
+                </span>
+              </div>
             </div>
           ` : null}
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
             <input class="rename-input" style="flex:1;min-width:280px" value=${target}
               placeholder="/absolute/path/to/project/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
-            <button class="cur-btn" disabled=${wbusy} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
-            <button class="cur-btn primary" disabled=${wbusy} onClick=${() => applyWorkspace(true)}>Apply note →</button>
+            <button class="cur-btn" disabled=${wbusy || !target.trim()} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
+            <button class="cur-btn primary" disabled=${wbusy || !target.trim()} onClick=${() => applyWorkspace(true)}>Apply note →</button>
           </div>
           ${preview ? html`<pre class="rev-diff" style="margin:8px 0 0;white-space:pre-wrap;font-size:11.5px">${preview}</pre>` : null}
           ${werr ? html`<div style="color:var(--error);font-size:12px;margin-top:6px">${werr}</div>` : null}

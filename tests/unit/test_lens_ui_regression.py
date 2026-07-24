@@ -2300,12 +2300,16 @@ def test_sizing_note_apply_explains_unregistered_project(html):
     assert "useState(prop.target_path || '')" in row
     # The guidance is gated on there being no resolved path, and names both exits.
     assert "!prop.target_path ? html`" in row
-    assert "tj onboard --add-project" in row
     assert "paste the project's" in row
-    # The Apply-time validation points at the same two exits, not a bare
-    # "enter a path".
-    assert "run `tj onboard --add-project` from that repo" in row
+    # The register-command is one-click copyable, not just prose.
+    assert '<${CopySnippetButton} text="tj onboard --add-project" />' in row
+    # Smarter UX: "no path yet" is not an error. The buttons are disabled until
+    # a path exists, so nothing can fire, and the empty-path guard NEVER sets a
+    # red validation line — the always-visible guidance block is the messaging.
+    assert "disabled=${wbusy || !target.trim()}" in row
+    assert "if (!target.trim()) return;" in row
     assert "enter a CLAUDE.md path to write the note into" not in html
+    assert "Paste a project CLAUDE.md path above, or run" not in html
 
 
 def test_no_duplicate_status_nav_entry(html):
