@@ -22,6 +22,15 @@ from tokenjam.cli.home import print_home
 from tokenjam.core.config import AgentConfig, ProviderBudget, TjConfig, load_config, write_config
 
 
+def _normalize_output(text):
+    """Normalize output for wrap-independent matching.
+
+    Rich wraps long lines at console width, breaking strings across newlines.
+    This collapses whitespace to match substrings regardless of where wrapping occurs.
+    """
+    return " ".join(text.split())
+
+
 def _write_config(path, *, agents=None, budgets=None):
     """Write a minimal already-onboarded config to `path`."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,7 +99,7 @@ class TestAddProjectRegistersAgent:
         assert "claude-code-widgets-api" in cfg.agents
         assert cfg.agents["claude-code-widgets-api"].project == "widgets"
         assert "widgets" in res.output
-        assert "claude-code-widgets-api" in res.output
+        assert "claude-code-widgets-api" in _normalize_output(res.output)
 
     def test_no_plan_budget_or_backfill_prompt(self, tmp_path, monkeypatch):
         """The whole point: none of the heavy --claude-code prompts fire."""
@@ -106,11 +115,12 @@ class TestAddProjectRegistersAgent:
         res = _run(repo, ["--add-project", "--project", "widgets"])
 
         assert res.exit_code == 0, res.output
+        normalized_output = _normalize_output(res.output)
         for banned in (
             "Daily budget", "Monthly Anthropic API spend ceiling",
             "backfill", "Backfill", "How do you pay",
         ):
-            assert banned not in res.output, f"unexpected prompt text: {banned!r}"
+            assert banned not in normalized_output, f"unexpected prompt text: {banned!r}"
 
     def test_does_not_touch_backfill_or_relearn(self, tmp_path, monkeypatch):
         """Belt-and-suspenders: patch the heavy paths so a call would explode
@@ -246,9 +256,9 @@ class TestAddProjectHonorsTjConfig:
         assert res.exit_code == 0, res.output
         cfg = load_config(str(custom_config))
         assert cfg.agents["claude-code-widgets-api"].project == "widgets"
-        # Rich may line-wrap the full path, so check the filename fragment
-        # rather than the whole absolute path as one substring.
-        assert "tj-config.toml" in res.output
+        # Rich may line-wrap the path, so normalize output to make matching
+        # wrap-independent rather than relying on lucky console width.
+        assert "tj-config.toml" in _normalize_output(res.output)
 
     def test_fails_clearly_when_tj_config_points_nowhere(self, tmp_path, monkeypatch):
         repo = tmp_path / "repo"
