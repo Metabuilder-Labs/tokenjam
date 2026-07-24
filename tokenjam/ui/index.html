@@ -8227,13 +8227,16 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
   // Workspace-apply state (subagent rubric / script / reuse / verbosity): a
   // target path + a dry-run diff before the real, reversible write — routed
   // through the same human-gated relearn apply path.
-  const [target, setTarget] = useState('');
+  // Pre-fill from the backend's resolved path when it has one (a registered
+  // project); empty means the project was never onboarded per-project, and the
+  // block below explains the two exits rather than just erroring on Apply.
+  const [target, setTarget] = useState(prop.target_path || '');
   const [wbusy, setWbusy] = useState(false);
   const [werr, setWerr] = useState(null);
   const [preview, setPreview] = useState(null);
 
   const applyWorkspace = async (go) => {
-    if (!target.trim()) { setWerr('enter a CLAUDE.md path to write the note into'); return; }
+    if (!target.trim()) { setWerr('Paste a project CLAUDE.md path above, or run `tj onboard --add-project` from that repo so tokenjam can fill it in.'); return; }
     setWbusy(true); setWerr(null);
     try {
       const r = await apiPostOrDetail('/relearn/cost-proposals/apply-workspace',
@@ -8320,9 +8323,21 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
       ` : html`
         <div class="opt-section" style="margin:10px 0 0">
           <div class="opt-title" style="font-size:12.5px">Apply the sizing note <span class="dim" style="font-weight:400">· writes a reversible rung-1 note; confirm the target first</span></div>
+          ${/* The sizing rubric is project-scoped, so it needs a specific
+                project CLAUDE.md. When tokenjam couldn't resolve one
+                (prop.target_path empty), the project was never registered
+                per-project, so say so and give the two real exits instead of
+                an empty box that only errors on Apply. */ ''}
+          ${!prop.target_path ? html`
+            <div class="sz-note" style="margin-top:6px;font-size:12px">
+              tokenjam doesn't know this project's path, so it can't choose the <code>CLAUDE.md</code> for you. Two ways forward:
+              <div style="margin-top:4px">1. paste the project's <code>CLAUDE.md</code> path below and apply it directly, or</div>
+              <div style="margin-top:2px">2. run <code>tj onboard --add-project</code> from that repo to register it; tokenjam then knows the path and can target it for you.</div>
+            </div>
+          ` : null}
           <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
             <input class="rename-input" style="flex:1;min-width:280px" value=${target}
-              placeholder="/absolute/path/to/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
+              placeholder="/absolute/path/to/project/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
             <button class="cur-btn" disabled=${wbusy} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
             <button class="cur-btn primary" disabled=${wbusy} onClick=${() => applyWorkspace(true)}>Apply note →</button>
           </div>

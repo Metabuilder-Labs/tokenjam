@@ -2287,6 +2287,27 @@ def test_sessions_nav_entry_present(html):
     assert "sessions: 'improve'" in html
 
 
+def test_sizing_note_apply_explains_unregistered_project(html):
+    # A project-scoped sizing-note card whose target tokenjam couldn't resolve
+    # (prop.target_path empty, because the project was never onboarded
+    # per-project) must EXPLAIN the two exits instead of showing an empty box
+    # that only errors on Apply: paste the path, or run `tj onboard
+    # --add-project` from the repo so tokenjam learns it.
+    start = html.index("function CostProposalCard")
+    end = html.index("function InboxStatTiles", start)
+    row = html[start:end]
+    # The input pre-fills from the backend's resolved path when there is one.
+    assert "useState(prop.target_path || '')" in row
+    # The guidance is gated on there being no resolved path, and names both exits.
+    assert "!prop.target_path ? html`" in row
+    assert "tj onboard --add-project" in row
+    assert "paste the project's" in row
+    # The Apply-time validation points at the same two exits, not a bare
+    # "enter a path".
+    assert "run `tj onboard --add-project` from that repo" in row
+    assert "enter a CLAUDE.md path to write the note into" not in html
+
+
 def test_no_duplicate_status_nav_entry(html):
     # Status and Sessions used to be two sidebar entries rendering the SAME
     # StatusView for their bare route, so clicking between them changed nothing
