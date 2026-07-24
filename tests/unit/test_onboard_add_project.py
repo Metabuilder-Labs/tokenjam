@@ -38,7 +38,7 @@ def _write_config(path, *, agents=None, budgets=None):
 
 def _patch_search_paths(monkeypatch, global_config_path):
     """`SEARCH_PATHS` is a module-level constant built at import time from the
-    REAL home dir, so patching `Path.home` has no effect on it (#536 review).
+    REAL home dir, so patching `Path.home` has no effect on it.
     Patch it directly, same pattern as `tests/unit/test_config.py`, keeping
     the relative project-local candidates so `.tj/config.toml` /
     `tokenjam.toml` in the isolated cwd still take priority when present.
