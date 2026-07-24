@@ -108,7 +108,9 @@ def test_home_when_not_configured_points_at_onboarding(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "TokenJam" in out                     # banner
     assert "Not set up yet" in out
-    assert "tj onboard --claude-code" in out
+    assert "tj onboard" in out
+    # No longer implies `--claude-code` is a separate/recommended setup.
+    assert "tj onboard --claude-code" not in out
 
 
 def test_home_when_configured_shows_next_best_actions(monkeypatch, capsys, tmp_path):
