@@ -12,6 +12,7 @@ from __future__ import annotations
 from click.testing import CliRunner
 
 from tokenjam.cli.cmd_onboard import cmd_onboard
+from tokenjam.cli.home import print_home
 from tokenjam.core.config import AgentConfig, ProviderBudget, TjConfig, load_config, write_config
 
 
@@ -201,3 +202,63 @@ class TestAddProjectPromptsOnlyForNamespace:
 
         res = _run(home, repo, ["--add-project", "--project", "widgets"])
         assert res.exit_code == 0, res.output
+
+
+class TestHomeScreenNudge:
+    """The bare `tj` home screen (already-configured branch) nudges
+    `--add-project` when the CURRENT repo's agent has no namespace yet — the
+    exact moment a user has cd'd into a new, unregistered repo."""
+
+    def test_nudges_when_current_repo_unregistered(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / "home"
+        _existing_global_config(home)  # global config exists, but no agents
+        monkeypatch.setattr("tokenjam.cli.home.Path.home", lambda: home)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard._derive_project_name", lambda: "new-repo",
+        )
+        monkeypatch.setattr(
+            "tokenjam.cli.home.find_config_file",
+            lambda *a, **k: home / ".config" / "tj" / "config.toml",
+        )
+        monkeypatch.delenv("TJ_CONFIG", raising=False)
+
+        print_home()
+        out = capsys.readouterr().out
+        assert "tj onboard --add-project" in out
+
+    def test_no_nudge_when_current_repo_already_registered(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        home = tmp_path / "home"
+        _existing_global_config(
+            home,
+            agents={"claude-code-new-repo": AgentConfig(project="already-set")},
+        )
+        monkeypatch.setattr("tokenjam.cli.home.Path.home", lambda: home)
+        monkeypatch.setattr("tokenjam.cli.cmd_onboard.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "tokenjam.cli.cmd_onboard._derive_project_name", lambda: "new-repo",
+        )
+        monkeypatch.setattr(
+            "tokenjam.cli.home.find_config_file",
+            lambda *a, **k: home / ".config" / "tj" / "config.toml",
+        )
+        monkeypatch.delenv("TJ_CONFIG", raising=False)
+
+        print_home()
+        out = capsys.readouterr().out
+        assert "tj onboard --add-project" not in out
+
+    def test_no_nudge_when_no_global_config(self, tmp_path, monkeypatch, capsys):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setattr("tokenjam.cli.home.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "tokenjam.cli.home.find_config_file", lambda *a, **k: None,
+        )
+        monkeypatch.delenv("TJ_CONFIG", raising=False)
+
+        print_home()
+        out = capsys.readouterr().out
+        assert "tj onboard --add-project" not in out

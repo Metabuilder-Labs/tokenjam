@@ -63,6 +63,28 @@ def _is_set_up() -> bool:
     return _db_has_data()
 
 
+def _current_repo_unregistered() -> bool:
+    """True if the global config exists but this repo's Claude Code agent has
+    no project namespace yet — i.e. a good moment to nudge `--add-project`.
+
+    Best-effort: any failure (no git, unreadable config, etc.) reads as "don't
+    nudge" rather than raising out of the home screen.
+    """
+    try:
+        from tokenjam.cli.cmd_onboard import _derive_project_name
+        from tokenjam.core.config import load_config
+
+        global_config_path = Path.home() / ".config" / "tj" / "config.toml"
+        if not global_config_path.is_file():
+            return False
+        agent_id = f"claude-code-{_derive_project_name()}"
+        config = load_config(str(global_config_path))
+        agent = config.agents.get(agent_id)
+        return agent is None or not agent.project
+    except Exception:
+        return False
+
+
 def print_home() -> None:
     """Render the bare-``tj`` home screen."""
     print_welcome_banner()
@@ -91,4 +113,10 @@ def print_home() -> None:
     console.print("  [bold]tj serve[/bold]       "
                   "[dim]open Lens (web UI) at http://127.0.0.1:7391/[/dim]")
     console.print()
+    if _current_repo_unregistered():
+        console.print(
+            "[dim]New repo? [/dim][bold]tj onboard --add-project[/bold]"
+            "[dim]   registers this one without repeating full setup[/dim]"
+        )
+        console.print()
     console.print("[dim]Full command list:[/dim]  tj --help")
