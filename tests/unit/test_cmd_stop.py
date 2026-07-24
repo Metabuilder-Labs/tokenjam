@@ -68,6 +68,62 @@ class TestStopSweepsForegroundProcesses:
         assert result.exit_code == 0
         assert "not running" in result.output
 
+    def test_does_not_claim_stop_when_plist_exists_but_not_loaded(
+        self, tmp_path, monkeypatch,
+    ):
+        """A plist FILE existing on disk (e.g. left over from a prior
+        install) must not be reported as "stopped" unless launchd actually
+        had the label loaded — otherwise onboard's already-running skip
+        (which keys off a truthful stop signal) is unreachable (regression
+        for the daemon restarting on every onboard run)."""
+        from tokenjam.cli.cmd_stop import stop_tj_serve
+
+        plist = tmp_path / "Library" / "LaunchAgents" / "com.tokenjam.serve.plist"
+        plist.parent.mkdir(parents=True)
+        plist.write_text("<plist/>")
+        monkeypatch.setattr("tokenjam.cli.cmd_stop.Path.home", lambda: tmp_path)
+
+        # `launchctl list com.tokenjam.serve` fails (not loaded); no
+        # `unload` call should ever be issued as a result.
+        run_mock = MagicMock(return_value=MagicMock(returncode=1))
+
+        with patch("tokenjam.cli.cmd_stop.subprocess.run", run_mock), \
+             patch("tokenjam.cli.cmd_stop._find_serve_pid", return_value=None):
+            stopped, stopped_via = stop_tj_serve(quiet=True)
+
+        assert stopped is False
+        assert stopped_via == []
+        calls = [c.args[0] for c in run_mock.call_args_list]
+        assert any("list" in c for c in calls), "must check load state first"
+        assert not any("unload" in c for c in calls), (
+            f"must not unload a plist that was never loaded; calls were {calls}"
+        )
+
+
+    def test_does_not_claim_stop_when_systemd_unit_exists_but_inactive(
+        self, tmp_path, monkeypatch,
+    ):
+        """Same story as the launchd case, for the systemd (Linux) path:
+        a unit file existing is not evidence the daemon was ever active."""
+        from tokenjam.cli.cmd_stop import stop_tj_serve
+
+        systemd_unit = tmp_path / ".config" / "systemd" / "user" / "tokenjam.service"
+        systemd_unit.parent.mkdir(parents=True)
+        systemd_unit.write_text("[Unit]\n")
+        monkeypatch.setattr("tokenjam.cli.cmd_stop.Path.home", lambda: tmp_path)
+
+        run_mock = MagicMock(return_value=MagicMock(returncode=3, stdout="inactive\n"))
+
+        with patch("tokenjam.cli.cmd_stop.subprocess.run", run_mock), \
+             patch("tokenjam.cli.cmd_stop._find_serve_pid", return_value=None):
+            stopped, stopped_via = stop_tj_serve(quiet=True)
+
+        assert stopped is False
+        assert stopped_via == []
+        calls = [c.args[0] for c in run_mock.call_args_list]
+        assert any("is-active" in c for c in calls)
+        assert not any("disable" in c for c in calls)
+
 
 class TestStopVerifiesTermination:
     """`tj stop` must not claim success for a process that's still alive.
