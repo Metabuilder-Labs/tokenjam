@@ -2,8 +2,11 @@
 
 The analyzer reasons over the summarize scan (filesystem), not telemetry, so the
 scan is monkeypatched to a controlled ScanResult. Asserts the #111 recoverable
-contract: tokens summed from candidates, usd deliberately None (tokens-only), an
-explicit basis, and a clean report_to_dict/report_from_dict round-trip.
+contract: `estimated_recoverable_tokens` and `estimated_recoverable_usd` are on
+the SAME window-priced basis — both None when no loading session is
+observed, both populated together when one is — while the one-time per-call
+aggregate lives in `file_reduction_tokens`. Also checks an explicit basis and a
+clean report_to_dict/report_from_dict round-trip.
 """
 from __future__ import annotations
 
@@ -73,11 +76,14 @@ def test_sums_per_call_tokens_drops_zero_saving(db, monkeypatch):
     ])
     f = _run(db)
     assert f.files == 2
-    assert f.estimated_recoverable_tokens == 710
+    # One-time, per-call aggregate — always available regardless of session
+    # evidence; feeds the curate/diff UI and reduction_pct.
+    assert f.file_reduction_tokens == 710
     # No session in this window is observed loading a repo-scoped "./CLAUDE.md"
-    # (its ancestor names match no agent_id-derived repo), so no dollar figure
-    # is attached — never a zero, never a rate borrowed from a file that did
-    # resolve.
+    # (its ancestor names match no agent_id-derived repo), so NEITHER window
+    # figure is attached — tokens and dollars are on the same basis:
+    # never a zero, never a rate borrowed from a file that did resolve.
+    assert f.estimated_recoverable_tokens is None
     assert f.estimated_recoverable_usd is None
     assert f.estimate_confidence == "heuristic"
     assert f.estimate_basis                          # explicit basis required by contract
@@ -217,6 +223,50 @@ def test_global_scope_file_is_priced_across_every_session_in_the_window(
     assert f.estimated_recoverable_usd > 1_000 * rates.input_per_mtok / 1_000_000
 
 
+def test_token_and_dollar_aggregates_describe_the_same_quantity(db, monkeypatch):
+    """Basis-coherence guard: dividing the dollar aggregate by the token
+    aggregate must land on the blended per-token rate the basis advertises.
+
+    Before the fix `estimated_recoverable_tokens` was the un-multiplied one-time
+    file reduction while `estimated_recoverable_usd` was per-call-multiplied, so
+    the implied rate came out orders of magnitude above any real price — a card
+    whose own tokens and dollars described different quantities. Both fields are
+    now the same event count (reduction x reads x loading sessions), one counted
+    and one priced.
+    """
+    from tokenjam.core.pricing import get_rates
+
+    for sid in ("s1", "s2"):
+        db.upsert_session(make_session(session_id=sid))
+        for _ in range(3):
+            db.insert_span(make_llm_span(
+                session_id=sid, provider="anthropic", model="claude-haiku-4-5",
+                input_tokens=100, output_tokens=10,
+                start_time=utcnow() - timedelta(days=1),
+            ))
+    _patch_scan(monkeypatch, [_cand("~/.claude/CLAUDE.md", 1_000, scope="global")])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"),
+                     since=since, until=until, findings=["summarize"]).findings["summarize"]
+
+    # 1,000 tokens x 3 reads per session (one send + two re-reads) x 2 sessions.
+    assert f.estimated_recoverable_tokens == 6_000
+    # The one-time per-call reduction keeps its own field and its own basis.
+    assert f.file_reduction_tokens == 1_000
+
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    input_per_token = rates.input_per_mtok / 1_000_000
+    cache_read_per_token = rates.cache_read_per_mtok / 1_000_000
+    implied = f.estimated_recoverable_usd / f.estimated_recoverable_tokens
+    # One send at the input rate + two re-reads at the cache-read rate, over 3
+    # token-events: the exact blend the basis string states.
+    assert implied == pytest.approx((input_per_token + 2 * cache_read_per_token) / 3)
+    # And it stays inside the real price band — the property that fails loudly if
+    # either field ever drifts back onto its own basis.
+    assert cache_read_per_token <= implied <= input_per_token
+
+
 def test_project_scope_file_is_priced_against_its_own_repos_calls_per_session(
     db, monkeypatch,
 ):
@@ -335,13 +385,17 @@ def test_finding_round_trips(db, monkeypatch):
                           since=since, until=until, findings=["summarize"])
     payload = report_to_dict(report)
     sd = payload["findings"]["summarize"]
-    assert sd["estimated_recoverable_tokens"] == 410
+    # No session in this window loads a repo-scoped "./CLAUDE.md", so neither
+    # window figure resolves; the one-time aggregate still does.
+    assert sd["file_reduction_tokens"] == 410
+    assert sd["estimated_recoverable_tokens"] is None
     assert sd["estimated_recoverable_usd"] is None
     assert "meaning may change" in sd["caveat"]       # caveat survives serialization
     assert sd["reduction_pct"] == 33 and sd["avg_reduction_pct"] == 33
     back = report_from_dict(payload).findings["summarize"]
     assert back.files == 1
-    assert back.estimated_recoverable_tokens == 410
+    assert back.file_reduction_tokens == 410
+    assert back.estimated_recoverable_tokens is None
     assert back.candidates[0].path == "./CLAUDE.md"
     assert back.candidates[0].reduction_pct == 33     # per-file % survives the round-trip
     assert "meaning may change" in back.caveat        # and the caveat survives the ctor

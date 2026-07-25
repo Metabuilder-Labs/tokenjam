@@ -3,9 +3,11 @@ Summarize analyzer — surfaces static prompt files worth summarizing (Track A).
 
 Unlike the other analyzers, this one reasons over the **filesystem**, not
 telemetry: it runs the read-only, catalog-default summarize scan
-(`core/summarize/candidates.list_candidates`) and reports the per-call
-prompt-token reduction available by summarizing those files' prose. It carries
-the #111 recoverable-savings contract so the Overview waste band and the
+(`core/summarize/candidates.list_candidates`) and reports the prompt-token
+reduction available by summarizing those files' prose, priced over the
+analyzed window (see below) so `estimated_recoverable_tokens` and
+`estimated_recoverable_usd` are on the same basis. It carries the #111
+recoverable-savings contract so the Overview waste band and the
 `/cost/components` overlay pick it up with no UI change (registry-driven).
 
 Window-guarded: like every other recoverable finding, it contributes nothing on
@@ -30,14 +32,16 @@ shrinks the always-loaded footprint that the rule-writing analyzers (`relearn`,
 reads this finding as the denominator of their write budget, which is why
 `summarize` is deliberately not a `COST_ANALYZERS` member — see the note there.
 
-Honesty discipline (Critical Rule 14 + `core/summarize/estimate.py`): a dollar
-figure is only attached where the load count is OBSERVED. A global-scope file
-(`~/.claude/...`) is loaded by every session in the window, which telemetry
-counts directly; a project-scope file is loaded only by its own repo's
-sessions, matched through the same `agent_id` -> repo derivation
-`analyzers/relearn.py` uses. A file whose loading sessions cannot be identified
-contributes tokens only and NO dollars — never a zero, never a rate borrowed
-from a file that did resolve (anti-pattern #22). Every user-visible string says
+Honesty discipline (Critical Rule 14 + `core/summarize/estimate.py`): a window
+figure — tokens or dollars — is only attached where the load count is
+OBSERVED. A global-scope file (`~/.claude/...`) is loaded by every session in
+the window, which telemetry counts directly; a project-scope file is loaded
+only by its own repo's sessions, matched through the same `agent_id` -> repo
+derivation `analyzers/relearn.py` uses. A file whose loading sessions cannot be
+identified contributes NEITHER window figure — never a zero, never a rate
+borrowed from a file that did resolve (anti-pattern #22) — but its one-time
+per-call reduction still surfaces via `file_reduction_tokens` and each
+candidate's own `est_tokens_saved`. Every user-visible string says
 "estimated" / "review before applying" — never "saves you"; the mandatory
 `caveat` names summary's one risk (meaning may change, structure won't).
 """
@@ -61,20 +65,24 @@ logger = logging.getLogger(__name__)
 _CC_AGENT_PREFIX = "claude-code-"
 
 # Surfaced verbatim next to the recoverable figure (contract requires an explicit
-# basis; states the filesystem/per-call basis so it isn't mistaken for a
-# telemetry-window figure like the other analyzers).
+# basis). States the basis of BOTH aggregate fields — tokens as well as dollars —
+# so no consumer has to guess that they describe the same quantity, and names
+# where the one-time per-call reduction lives instead.
 SUMMARIZE_ESTIMATE_BASIS = (
-    "Per-call prompt-token reduction from a read-only filesystem scan of catalog "
-    "prompt files (CLAUDE.md / AGENTS.md / globals); prose is summarized, structure "
-    "kept verbatim. These files are ALWAYS-ON context, so the reduction is "
-    "realized repeatedly, not once: it is priced over the analyzed window as "
-    "reduction x (sessions that load the file) x (first call at the input rate + "
-    "each later call in that session at the cache-read rate), on the same window "
-    "basis as the other cost analyzers. Load counts are observed from telemetry "
-    "— a global-scope file against every session in the window, a project-scope "
-    "file against its own repo's sessions only. A file whose loading sessions "
-    "cannot be identified carries tokens and no dollars. Advisory; review each "
-    "rewrite before applying."
+    "Read-only filesystem scan of catalog prompt files (CLAUDE.md / AGENTS.md / "
+    "globals); prose is summarized, structure kept verbatim. These files are "
+    "ALWAYS-ON context, so the reduction is realized repeatedly, not once: "
+    "`estimated_recoverable_tokens` and `estimated_recoverable_usd` are on the "
+    "SAME basis — both price reduction x (sessions that load the file) x (first "
+    "call at the input rate + each later call in that session at the cache-read "
+    "rate), on the same window basis as the other cost analyzers; the tokens "
+    "field reports that event count in tokens, the dollars field prices it. "
+    "Load counts are observed from telemetry — a global-scope file against "
+    "every session in the window, a project-scope file against its own repo's "
+    "sessions only. A file whose loading sessions cannot be identified carries "
+    "neither figure here; its one-time per-call reduction still appears in "
+    "`file_reduction_tokens` and each candidate's own `est_tokens_saved`. "
+    "Advisory; review each rewrite before applying."
 )
 
 # Mandatory caveat (Rule 14) — carried as the dataclass default like the other
@@ -102,20 +110,39 @@ class SummarizeCandidate:
     #: zero would read as "compressing this file is worth nothing".
     sessions_loading: int = 0
     est_usd_saved: float | None = None
+    #: The actual token volume ``est_tokens_saved`` is worth over the analyzed
+    #: window: removed on every read (first send + every re-read) across every
+    #: loading session — the SAME event count ``est_usd_saved`` prices in
+    #: dollars. ``None`` on the same "no loading session observed"
+    #: condition ``est_usd_saved`` uses; the one-time per-call reduction stays
+    #: available as ``est_tokens_saved``.
+    est_tokens_saved_window: int | None = None
 
 
 @dataclass
 class SummarizeFinding:
     """Filesystem-derived summarize opportunity, on the #111 recoverable contract.
 
-    Tokens-only by design (see module docstring): `estimated_recoverable_usd`
-    stays None until a usage-ranked (telemetry) path lands.
+    ``estimated_recoverable_tokens`` and ``estimated_recoverable_usd`` are on
+    the SAME basis: both price the reduction over the analyzed window
+    (removed on every read, across every loading session), so a rollup that
+    sums tokens across analyzers and one that sums dollars across analyzers
+    describe the same underlying quantity. The one-time, per-call file
+    reduction the curate/diff UI cares about lives separately in
+    ``file_reduction_tokens`` and each candidate's own ``est_tokens_saved`` —
+    it is never the aggregate field's basis.
     """
 
     candidates: list[SummarizeCandidate] = field(default_factory=list)
     files: int = 0
     estimated_recoverable_usd: float | None = None
     estimated_recoverable_tokens: int | None = None
+    #: One-time sum of every candidate's ``est_tokens_saved`` — the aggregate
+    #: per-call prose reduction, independent of how many sessions/calls
+    #: actually reread it. Feeds the curate/diff UI and ``reduction_pct``;
+    #: NOT summed into cross-analyzer token rollups (``estimated_recoverable_
+    #: tokens`` is the window-priced figure that belongs there).
+    file_reduction_tokens: int | None = None
     estimate_basis: str = ""
     estimate_confidence: str = "heuristic"
     caveat: str = SUMMARIZE_HONESTY_CAVEAT
@@ -266,6 +293,14 @@ def _repo_calls_per_session(path: str, scope: str, profile: _LoadProfile) -> flo
     return matched_calls / matched_sessions
 
 
+def _reads_per_session(calls_per_session: float) -> int:
+    """Total times one session reads an always-on file: the first send plus
+    every later re-read in that session — at least 1. Shared by
+    ``_price_reduction`` and ``_tokens_saved_over_window`` so the dollar and
+    token figures price the exact same event count."""
+    return max(round(calls_per_session), 1)
+
+
 def _price_reduction(
     tokens_saved: int, sessions: int, calls_per_session: float, rates: RateProfile,
 ) -> float | None:
@@ -283,8 +318,24 @@ def _price_reduction(
     """
     if sessions <= 0 or tokens_saved <= 0:
         return None
-    rereads = max(round(calls_per_session) - 1, 0)
+    rereads = _reads_per_session(calls_per_session) - 1
     return rates.cost_of(float(tokens_saved), rereads) * sessions
+
+
+def _tokens_saved_over_window(
+    tokens_saved: int, sessions: int, calls_per_session: float,
+) -> int | None:
+    """Actual token volume ``tokens_saved`` is worth across the window: removed
+    once per read (first send + every re-read), on every one of ``sessions``
+    loading sessions — the exact event count ``_price_reduction`` prices in
+    dollars, so the two fields stay on the same basis.
+
+    ``None`` on the same "no evidence" condition ``_price_reduction`` returns
+    ``None`` for: no session in the window was observed loading this file.
+    """
+    if sessions <= 0 or tokens_saved <= 0:
+        return None
+    return round(tokens_saved * _reads_per_session(calls_per_session) * sessions)
 
 
 @register("summarize")
@@ -329,6 +380,9 @@ def run(ctx: AnalyzerContext) -> None:
         if c.est_tokens_saved <= 0:
             continue
         sessions = _sessions_loading(c.path, c.scope, profile) if profile else 0
+        calls_per_session = (
+            _repo_calls_per_session(c.path, c.scope, profile) if profile else 0.0
+        )
         candidates.append(SummarizeCandidate(
             path=c.path,
             kind="prompt" if c.is_prompt else "other",
@@ -339,34 +393,48 @@ def run(ctx: AnalyzerContext) -> None:
             sessions_loading=sessions,
             est_usd_saved=(
                 _price_reduction(
-                    c.est_tokens_saved, sessions,
-                    _repo_calls_per_session(c.path, c.scope, profile), profile.rates,
+                    c.est_tokens_saved, sessions, calls_per_session, profile.rates,
                 )
+                if profile else None
+            ),
+            est_tokens_saved_window=(
+                _tokens_saved_over_window(c.est_tokens_saved, sessions, calls_per_session)
                 if profile else None
             ),
         ))
     finding.candidates = candidates
     finding.files = len(finding.candidates)
     if finding.candidates:
-        finding.estimated_recoverable_tokens = sum(
+        # One-time aggregate (curate/diff basis) — always available regardless
+        # of whether any loading session was observed.
+        finding.file_reduction_tokens = sum(
             c.est_tokens_saved for c in finding.candidates
         )
+        window_tokens = [
+            c.est_tokens_saved_window for c in finding.candidates
+            if c.est_tokens_saved_window is not None
+        ]
         priced = [c.est_usd_saved for c in finding.candidates if c.est_usd_saved is not None]
-        # None, not 0.0, when nothing resolved: "no session in this window was
+        # None, not 0, when nothing resolved: "no session in this window was
         # observed loading these files" is a different statement from
-        # "compressing them is worth nothing" (anti-pattern #22).
+        # "compressing them is worth nothing" (anti-pattern #22). Applies
+        # symmetrically to tokens and dollars now that both are window-priced
+        # — a candidate contributes to either both sums or neither.
+        finding.estimated_recoverable_tokens = sum(window_tokens) if window_tokens else None
         finding.estimated_recoverable_usd = round(sum(priced), 6) if priced else None
         if profile is not None:
             finding.sessions_examined = profile.sessions_total
             finding.calls_per_session = round(profile.calls_per_session, 2)
             finding.rate_basis = profile.rates.basis
-        # Prose-reduction %s, computed here so the UI has a single compute path:
+        # Prose-reduction %s, computed here so the UI has a single compute path,
+        # on the one-time file_reduction_tokens basis (a window-priced numerator
+        # here would read as >100% reduction once sessions/calls multiply in):
         #   reduction_pct     = token-weighted aggregate (saved ÷ source tokens)
         #   avg_reduction_pct = mean of the per-file reduction %s
         total_src = sum(_src_tokens(c.total_chars) for c in finding.candidates)
         if total_src > 0:
             finding.reduction_pct = round(
-                finding.estimated_recoverable_tokens / total_src * 100
+                finding.file_reduction_tokens / total_src * 100
             )
         finding.avg_reduction_pct = round(
             sum(c.reduction_pct for c in finding.candidates) / len(finding.candidates)

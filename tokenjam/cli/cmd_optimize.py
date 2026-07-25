@@ -2124,13 +2124,15 @@ def _render_summarize(
     silently dropped from plain-text `tj optimize` output and only reachable
     via `--json`.
 
-    The token figure is per CALL; the dollar figure is per WINDOW, because
-    these files are always-on context and the reduction is realized on every
-    session that loads them (see core/optimize/analyzers/summarize.py). The
-    dollar line only appears when the analyzer could observe how many sessions
-    actually load the files — it is never fabricated from a default rate — and
-    it goes through `render_savings` so a subscription/local plan sees the same
-    framing every other analyzer gives it.
+    The per-file line is the one-time, per-CALL reduction (`file_reduction_
+    tokens`); `estimated_recoverable_tokens` and `estimated_recoverable_usd`
+    are both per-WINDOW, because these files are always-on context and the
+    reduction is realized on every session that loads them (see
+    core/optimize/analyzers/summarize.py). The window line only appears
+    when the analyzer could observe how many sessions actually load the files
+    — it is never fabricated from a default rate — and it goes through
+    `render_savings` so a subscription/local plan sees the same framing every
+    other analyzer gives it.
     """
     console.print(_finding_header(marker, "Summarize:"))
     if not finding.candidates:
@@ -2140,16 +2142,17 @@ def _render_summarize(
         )
         return
 
-    tokens = finding.estimated_recoverable_tokens or 0
+    file_reduction_tokens = getattr(finding, "file_reduction_tokens", None) or 0
     console.print(
         f"     • [bold]{finding.files}[/bold] file{'s' if finding.files != 1 else ''} "
-        f"summarizable, ~[bold]{format_tokens(tokens)}[/bold] per call "
+        f"summarizable, ~[bold]{format_tokens(file_reduction_tokens)}[/bold] per call "
         f"[dim](aggregate {finding.reduction_pct}% prose reduction)[/dim]"
     )
     recoverable_usd = getattr(finding, "estimated_recoverable_usd", None)
+    window_tokens = finding.estimated_recoverable_tokens or 0
     if recoverable_usd:
         savings = render_savings(
-            recoverable_usd, tokens, Framing(pricing_mode=pricing_mode),
+            recoverable_usd, window_tokens, Framing(pricing_mode=pricing_mode),
         )
         if savings != "—":
             console.print(
