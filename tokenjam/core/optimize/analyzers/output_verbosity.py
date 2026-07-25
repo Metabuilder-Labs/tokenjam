@@ -85,11 +85,20 @@ VERBOSITY_ESTIMATE_BASIS = (
     "net-negative once its own overhead is counted, so measure before claiming"
 )
 
-# Surfaced remedy (not applied). A terse system-prompt snippet the user can add,
-# paired with a max_tokens cap suggestion computed per candidate cohort.
+# Surfaced remedy (not applied, and never written into a workspace file — see
+# `cost_proposals._verbosity_to_proposals`). Deliberately SOFT: the flag is
+# cohort-scoped (this task shape, vs its own like-shaped peers) but a blanket
+# "be concise" instruction pasted into CLAUDE.md would apply GLOBAL terseness
+# pressure to every future task, including legitimately-verbose ones — the
+# analyzer's own honesty caveat above says output length is not waste. So this
+# names the cohort instead of asserting a rule, and states the tradeoff rather
+# than commanding brevity.
 VERBOSITY_REMEDY_SNIPPET = (
-    "Be concise. Answer in the fewest words that fully address the request; "
-    "omit restatement, preamble, and filler. Prefer lists over prose."
+    "This shape of task ran noticeably longer, output-wise, than similar "
+    "sessions recently. Worth a look: if a shorter answer would serve this "
+    "shape of task just as well, prefer it — but only when brevity doesn't "
+    "cost completeness, correctness, or clarity. A longer answer is often "
+    "the right one; this is a candidate to review, not a rule to enforce."
 )
 
 

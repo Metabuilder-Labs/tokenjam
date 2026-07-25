@@ -250,20 +250,29 @@ async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, 
     assert any(r["analyzer"] == "subagent" for r in applied["applied"])
 
 
-async def test_cost_apply_workspace_writes_skill_for_script_and_reverts(
-    app, client, db, monkeypatch, tmp_path,
+async def test_cost_apply_workspace_writes_skill_for_a_rung2_proposal_and_reverts(
+    app, client, config, db, monkeypatch, tmp_path,
 ):
     """`apply-workspace` is generic across analyzers, not special-cased to
-    `subagent`: a `script` proposal (rung 2 skill note, not rung 1) routes
-    through the SAME path, writes, and reverts cleanly."""
-    from tokenjam.core.optimize import relearn_apply as pa
+    `subagent`: a rung-2 skill-note proposal routes through the SAME path,
+    writes, and reverts cleanly.
+
+    Two facts are pinned here. First, a deterministic tool-call cluster on a
+    claude-code window produces NO `script` card any more: the analyzer has no
+    fix that survives for that persona and is skipped before it runs. Second,
+    the generic rung-2 write/revert route still works, exercised by seeding the
+    proposal the adapter builds directly into the store."""
+    from tokenjam.core.optimize import relearn_apply as pa, relearn_store
+    from tokenjam.core.optimize.analyzers.workflow_restructure import (
+        WorkflowCluster,
+        WorkflowRestructureFinding,
+    )
+    from tokenjam.core.optimize.cost_proposals import _script_to_proposals
 
     # A deterministic tool-call cluster: >=20 sessions running the identical
     # single-tool structure, which is what MIN_CLUSTER_INSTANCES flags.
     # `agent_id="claude-code-x"` so the window's dominant persona resolves to
-    # "claude-code" — the rung-2 skill write this test exercises is only
-    # offered for that persona (SDK/unknown windows get a snippet instead;
-    # see `cost_proposals._persona_gated_write_fields`).
+    # "claude-code".
     base = utcnow() - timedelta(days=2)
     for i in range(20):
         sid = f"det-{i}"
@@ -285,6 +294,25 @@ async def test_cost_apply_workspace_writes_skill_for_script_and_reverts(
     token = app.state.relearn_write_token
     hdr = {"X-TJ-Local-Token": token}
     await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    assert [p for p in proposals if p["analyzer"] == "script"] == []
+
+    seeded = _script_to_proposals(
+        WorkflowRestructureFinding(
+            clusters=[WorkflowCluster(
+                signature=[{"tool": "bash", "args": ["command_string"]}], instances=25,
+                avg_cost_usd=0.02, avg_duration_seconds=1.5, example_session_id="det-0",
+                avg_tokens=500, total_cost_usd=0.5, total_tokens=12_500,
+                example_session_ids=["det-0", "det-1", "det-2"],
+            )],
+            sessions_examined=25, degraded=False,
+            estimated_recoverable_usd=0.5, estimated_recoverable_tokens=12_500,
+            estimate_basis="script basis",
+        ),
+        persona="claude-code",
+    )
+    relearn_store.write_cost_proposals(seeded, config=config)
+
     proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
     script_props = [p for p in proposals if p["analyzer"] == "script"]
     assert script_props, proposals

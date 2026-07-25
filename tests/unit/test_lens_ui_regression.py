@@ -2509,6 +2509,42 @@ def test_estimated_tile_hides_when_there_are_no_open_items(html):
     assert "openItems.length > 0 ? html`" in tile
 
 
+# --- #326: excluded waste (summarize) is stated + linked, never summed ----- #
+def test_inbox_stat_tiles_renders_the_excluded_cross_reference(html):
+    start = html.index("function ExcludedWasteNote")
+    end = html.index("function ReviewInboxView", start)
+    block = html[start:end]
+    # Rendered inside InboxStatTiles, not just defined standalone.
+    assert "<${ExcludedWasteNote} excluded=${excluded} />" in block
+    assert block.count("<${ExcludedWasteNote} excluded=${excluded} />") == 2
+    # Never folded into the blue tile's own dollar figure — only ever a
+    # separate stated line with a link out.
+    assert "not summed above" in block
+    assert "Review it" in block
+    assert "#/optimize/summarize" in block
+
+
+def test_review_inbox_view_fetches_and_threads_excluded_from_the_rollup(html):
+    view = html[html.index("function ReviewInboxView"):]
+    end = view.index("function ", len("function ReviewInboxView"))
+    view = view[:end]
+    assert "setCostExcluded((r.rollup && r.rollup.excluded) || {})" in view
+    assert "excluded=${costExcluded}" in view
+
+
+def test_estimated_tile_still_renders_with_only_excluded_waste_and_no_open_items(html):
+    # Summarize can be the ONLY recoverable figure in a given scan (no cost
+    # advisories, no recurring mistakes yet) — the tile must still surface it
+    # rather than disappearing the way the pre-#326 empty state did (issue
+    # #326: "the product's largest recoverable figure invisible from the
+    # headline a user reads").
+    start = html.index("function InboxStatTiles")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "hasExcluded" in tile
+    assert "openItems.length === 0 && appliedCount === 0 && !hasExcluded" in tile
+
+
 # --- Review inbox copy: cost-led, and no hardcoded zero -------------------- #
 def test_review_inbox_intro_matches_the_founder_approved_mockup(html):
     # Inbox redesign: the page title and subtitle are the founder-approved
@@ -2852,3 +2888,35 @@ def test_review_inbox_dollar_headline_ignores_framing_even_when_suppressed():
     assert headline_unit(priced_deadweight, founder_framing) == "dollars"
     assert headline_unit(resend_structural, founder_framing) == "tokens"
     assert headline_unit(unpriced_placement, founder_framing) == "tokens"
+
+
+# --- Recoverable-waste band drops no-lever analyzers for claude-code -------- #
+# core/optimize/runner.py's PERSONA_DISABLED_ANALYZERS is the single source of
+# truth for which analyzers a persona has no lever for (#308). The dashboard
+# must derive its gate solely from the `/optimize` payload's
+# `persona_disabled_analyzers` field — never duplicate the map as a JS literal,
+# which would silently desync the first time the Python map changes.
+def test_dashboard_has_no_hardcoded_persona_disabled_analyzer_list(html):
+    assert "PERSONA_DISABLED_ANALYZERS" not in html
+    assert "'claude-code': new Set(" not in html
+
+
+def test_recoverable_tiles_filters_by_persona_before_ranking(html):
+    fn_start = html.index("function recoverableTiles(opt)")
+    fn_end = html.index("\nfunction ", fn_start + 1)
+    fn = html[fn_start:fn_end]
+    assert "new Set(opt.persona_disabled_analyzers || [])" in fn
+    assert "disabled.has(k)" in fn
+    # Downsize + wave-2 findings + the not-ready fallback must all respect the
+    # gate (three separate call sites build `out`) so a persona-disabled
+    # analyzer never sneaks in through any of them.
+    assert fn.count("disabled.has(") >= 3
+
+
+def test_optimize_view_and_recoverable_tiles_read_same_payload_field(html):
+    # Both call sites (the Optimize screen's order filter and the Overview
+    # band's recoverableTiles) must key off the same server-published field —
+    # not one payload read and one hardcoded literal — so they can never
+    # disagree about which analyzers a persona can act on.
+    assert html.count("persona_disabled_analyzers") >= 2
+    assert "const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);" in html

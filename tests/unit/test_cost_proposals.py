@@ -231,7 +231,7 @@ def _dead_server(**overrides):
     fields = dict(
         name="apollo", scope="project", source="/repo/.mcp.json",
         sessions_present=10, invocations=0, deferred_sessions=0, dead=True,
-        estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_90d=225_000,
+        estimated_tax_tokens_per_session=25_000, estimated_tax_tokens_window=225_000,
         tax_construction="25,000 tok/session (full schema injection), cited estimate.",
         fix="Remove or project-scope the `apollo` MCP server (/repo/.mcp.json); "
             "zero tool calls across 10 session(s) in this window.",
@@ -251,8 +251,9 @@ def _deadweight_finding(dead_servers=None, tax_table=None):
     return DeadweightFinding(
         sessions_scanned=10, configured_servers=1,
         servers=dead_servers, dead_servers=dead_servers, tax_table=tax_table,
-        estimated_recoverable_tokens=sum(s.estimated_tax_tokens_90d for s in dead_servers) or None,
-        estimate_basis="dead-server 90d tax sum",
+        estimated_recoverable_tokens=sum(s.estimated_tax_tokens_window for s in dead_servers) or None,
+        estimate_basis="sum of each dead server's schema-injection tax "
+                       "observed over this window",
     )
 
 
@@ -286,7 +287,7 @@ def test_deadweight_proposal_carries_priced_usd_from_server():
     server = _dead_server(
         priced_model="claude-opus-4-8",
         estimated_tax_usd_per_session=0.125,
-        estimated_tax_usd_90d=1.40625,
+        estimated_tax_usd_window=1.40625,
     )
     p = _deadweight_to_proposals(_deadweight_finding(dead_servers=[server]))[0]
     assert p.estimated_recoverable_usd == 1.40625
@@ -320,12 +321,12 @@ def test_deadweight_wired_into_cost_analyzers_and_report_adapter():
 def test_deadweight_tax_table_never_becomes_a_second_proposal():
     """Dedup guarantee: a live (non-dead) server sits in the tax table for
     visibility but must never itself spawn a proposal, and a dead server's
-    proposal total must equal exactly its OWN 90d tax -- never the tax
+    proposal total must equal exactly its OWN window tax -- never the tax
     table's (possibly multi-row) sum."""
     from tokenjam.core.optimize.analyzers.deadweight import ContextTaxRow
     from tokenjam.core.optimize.cost_proposals import _deadweight_to_proposals
 
-    dead = _dead_server(name="apollo", estimated_tax_tokens_90d=225_000)
+    dead = _dead_server(name="apollo", estimated_tax_tokens_window=225_000)
     finding = _deadweight_finding(
         dead_servers=[dead],
         tax_table=[
@@ -526,6 +527,10 @@ def _verbosity_finding(**overrides):
 
 
 def test_verbosity_proposal_shape_and_apply_fields():
+    """Unlike script/reuse, verbosity NEVER offers a write — for any persona,
+    including claude-code (see `_verbosity_to_proposals`'s docstring): a
+    cohort-scoped flag written as a global CLAUDE.md rule fails the
+    no-quality-tax gate outright, regardless of who would read it."""
     from tokenjam.core.optimize.cost_proposals import _verbosity_to_proposals
     props = _verbosity_to_proposals(_verbosity_finding(), persona="claude-code")
     assert len(props) == 1
@@ -536,16 +541,20 @@ def test_verbosity_proposal_shape_and_apply_fields():
     assert "6 session" in p.evidence
     assert p.estimated_recoverable_usd == 0.9
     assert p.estimated_recoverable_tokens == 9_000
-    assert p.advise_only is False
-    assert p.apply_capable is True
-    assert p.rung == 1
-    assert p.scope == "project"
-    # The remedy snippet + the concrete suggested cap both land in the note.
-    assert "concise" in p.proposed_fix.lower()
-    assert "800" in p.proposed_fix
+    assert p.advise_only is True
+    assert p.apply_capable is False
+    assert p.rung == 0
+    assert p.scope == ""
+    assert p.proposed_fix == ""
+    # The remedy snippet + the concrete suggested cap both land in the
+    # copy-pasteable suggestion, worded as a data point, never an
+    # enforceable cap.
+    assert "800" in p.suggestion
+    assert "not a limit to enforce" in p.suggestion
     # The honesty caveat (output length is not waste) rides along, never a
     # bare "you are wasting tokens" claim.
-    assert "not waste" in p.proposed_fix
+    assert "not waste" in p.suggestion
+    assert p.suggestion == p.advise_text
     assert p.baseline["apply_sessions"] == 6
 
 
@@ -570,14 +579,18 @@ def test_script_reuse_verbosity_wired_into_cost_analyzers_and_report_adapter():
     assert {"script", "reuse", "verbosity"} <= analyzers
 
 
-# --- Persona-gated fix modality (script / reuse / verbosity only) -----------
+# --- Persona-gated fix modality (script / reuse / verbosity) ----------------
 #
-# These three analyzers' only apply path is a rung-1 CLAUDE.md note or rung-2
+# script/reuse's apply path is a rung-1 CLAUDE.md note or rung-2
 # .claude/skills/<slug>/SKILL.md — an artifact nothing in an SDK service's
 # request path ever reads. An "sdk"/"unknown" persona must never see
 # apply_capable=True for them; the identical recommendation must still reach
 # them as a copy-pasteable `suggestion`. A "claude-code" window must be
 # byte-identical to before this gating existed.
+#
+# verbosity shares the sdk/unknown no-write behavior (parametrized in below)
+# but NEVER offers the write, for ANY persona including claude-code/mixed —
+# see the dedicated tests after the parametrized block.
 
 def _script_finding_for_persona_tests():
     return _workflow_finding()
@@ -644,7 +657,6 @@ def test_unknown_persona_is_gated_same_as_sdk(adapter_name, finder):
 @pytest.mark.parametrize("adapter_name,finder", [
     ("_script_to_proposals", _script_finding_for_persona_tests),
     ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
-    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
 ])
 def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name, finder):
     """The exact fields these analyzers produced before persona gating
@@ -666,7 +678,6 @@ def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name,
 @pytest.mark.parametrize("adapter_name,finder", [
     ("_script_to_proposals", _script_finding_for_persona_tests),
     ("_reuse_to_proposals", _reuse_finding_for_persona_tests),
-    ("_verbosity_to_proposals", _verbosity_finding_for_persona_tests),
 ])
 def test_mixed_persona_offers_the_write_and_the_snippet(adapter_name, finder):
     """"mixed": both audiences are meaningfully represented and a single
@@ -686,6 +697,23 @@ def test_mixed_persona_offers_the_write_and_the_snippet(adapter_name, finder):
     assert p.suggestion == p.advise_text
 
 
+@pytest.mark.parametrize("persona", ["claude-code", "mixed", "sdk", "unknown"])
+def test_verbosity_never_offers_the_write_for_any_persona(persona):
+    """verbosity's write path is disabled outright, not persona-gated: the
+    finding's cohort-scoped flag would become a global CLAUDE.md rule if
+    written, for EVERY persona — see `_verbosity_to_proposals`."""
+    from tokenjam.core.optimize.cost_proposals import _verbosity_to_proposals
+    props = _verbosity_to_proposals(_verbosity_finding_for_persona_tests(), persona=persona)
+    assert len(props) == 1
+    p = props[0]
+    assert p.apply_capable is False
+    assert p.advise_only is True
+    assert p.rung == 0
+    assert p.scope == ""
+    assert p.proposed_fix == ""
+    assert p.suggestion == p.advise_text  # the recommendation still reaches everyone
+
+
 def test_cost_proposals_from_report_reads_persona_off_the_report():
     """`cost_proposals_from_report` must never take the caller's word for the
     persona out-of-band — it reads `report.persona`, the single field
@@ -694,7 +722,16 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep = _report()
     rep.findings["script"] = _workflow_finding()
-    rep.findings["reuse"] = _reuse_finding()
+    # A saving big enough to clear the write budget's net-of-standing-cost
+    # gate, so this test measures ONLY the persona decision. The shared
+    # `_reuse_cluster` default (900 tokens over a 10-session window) is
+    # deliberately smaller than the CLAUDE.md rule it would write costs to
+    # keep, which is a net-negative write the budget is right to suppress —
+    # see `test_write_budget_suppresses_net_negative_cost_write`.
+    rep.findings["reuse"] = _reuse_finding(
+        clusters=[_reuse_cluster(cache_reuse_recoverable_tokens=900_000,
+                                 cache_reuse_recoverable_usd=30.0)],
+    )
     rep.findings["verbosity"] = _verbosity_finding()
 
     rep.persona = "sdk"
@@ -705,8 +742,16 @@ def test_cost_proposals_from_report_reads_persona_off_the_report():
 
     rep.persona = "claude-code"
     by_analyzer = {p.analyzer: p for p in cost_proposals_from_report(rep)}
-    for name in ("script", "reuse", "verbosity"):
-        assert by_analyzer[name].apply_capable is True
+    # `reuse` keeps its workspace write for this persona. `script` and
+    # `verbosity` are skipped for it entirely by the pre-dispatch persona gate
+    # (script's cluster signature can't match heterogeneous coding work;
+    # verbosity's only remedy is a global be-terser rule), so no card is built
+    # for them at all. Independently of that gate, verbosity never offers the
+    # write for ANY persona it IS run for — see
+    # test_verbosity_never_offers_the_write_for_any_persona.
+    assert by_analyzer["reuse"].apply_capable is True
+    assert "script" not in by_analyzer
+    assert "verbosity" not in by_analyzer
 
     # A report with no persona set at all (e.g. hand-built, pre-gating test
     # code) defaults to "unknown" -> the fail-safe, not "claude-code".
@@ -908,42 +953,148 @@ def test_rollup_with_no_token_estimates_reports_zero_coverage():
     assert "floor, not a total" not in rollup["estimate_basis"]
 
 
-# --- Review inbox monthly-basis fields (behavioral requirement #1) ----------- #
+# --- #326: relearn clusters fold into the SAME headline, and the excluded
+# (summarize) total is carried through rather than silently dropped -------- #
 
-def test_downsize_proposal_surfaces_its_own_monthly_projection():
-    # `downsize` already computes a 30-day projection (model_downgrade.py's
-    # `monthly_savings_usd`/`monthly_tokens_in_candidates`) — surfaced onto the
-    # proposal directly, never re-derived by the generic extrapolation below.
+def test_rollup_folds_relearn_monthly_usd_into_projected_only():
+    proposals = [
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0},
+    ]
+    relearn_clusters = [
+        {"signature": "relearn:a", "estimated_monthly_usd": 5.0,
+         "estimated_monthly_tokens": 1000},
+        {"signature": "relearn:b", "estimated_monthly_usd": 2.5,
+         "estimated_monthly_tokens": 500},
+    ]
+    rollup = estimated_recoverable_rollup(proposals, relearn_clusters=relearn_clusters)
+    # The window-observed field is UNCHANGED by relearn — different time
+    # basis, never mixed in.
+    assert rollup["estimated_recoverable_usd"] == 3.0
+    # Relearn's own contribution is broken out...
+    assert rollup["relearn_monthly_usd"] == 7.5
+    assert rollup["relearn_monthly_tokens"] == 1500
+    assert rollup["relearn_cluster_count"] == 2
+    assert rollup["relearn_priced_cluster_count"] == 2
+    # ...and folded into the 30-day projected total alongside the cost
+    # proposals' own (unscaled here — the guardrails block projection with
+    # no active_days/n_sessions given, so cost proposals' window figure
+    # passes through as-is at scale 1.0).
+    assert rollup["projected_usd_30d"] == pytest.approx(3.0 + 7.5)
+    assert rollup["projected_tokens_30d"] == 1500
+
+
+def test_rollup_dedupes_relearn_clusters_by_signature():
+    relearn_clusters = [
+        {"signature": "relearn:a", "estimated_monthly_usd": 5.0},
+        {"signature": "relearn:a", "estimated_monthly_usd": 5.0},
+    ]
+    rollup = estimated_recoverable_rollup([], relearn_clusters=relearn_clusters)
+    assert rollup["relearn_monthly_usd"] == 5.0
+    assert rollup["relearn_cluster_count"] == 1
+
+
+def test_rollup_skips_relearn_clusters_with_no_dollar_estimate():
+    relearn_clusters = [
+        {"signature": "relearn:a", "estimated_monthly_usd": None,
+         "estimated_monthly_tokens": 400},
+    ]
+    rollup = estimated_recoverable_rollup([], relearn_clusters=relearn_clusters)
+    assert rollup["relearn_monthly_usd"] == 0.0
+    assert rollup["relearn_priced_cluster_count"] == 0
+    assert rollup["relearn_cluster_count"] == 1
+    # Tokens are still counted independently of the dollar estimate, same
+    # rule as the cost-proposal loop above.
+    assert rollup["relearn_monthly_tokens"] == 400
+    assert rollup["projected_tokens_30d"] == 400
+
+
+def test_rollup_excluded_is_carried_through_never_summed():
+    excluded = {"summarize": {"estimated_monthly_usd": 4135.35, "href": "#/optimize"}}
+    rollup = estimated_recoverable_rollup([], excluded=excluded)
+    assert rollup["excluded"] == excluded
+    assert rollup["estimated_recoverable_usd"] == 0.0
+    assert rollup["projected_usd_30d"] == 0.0
+
+
+def test_rollup_excluded_defaults_to_empty_dict_not_none():
+    rollup = estimated_recoverable_rollup([])
+    assert rollup["excluded"] == {}
+
+
+def test_rollup_empty_relearn_clusters_untouched_baseline():
+    # No relearn_clusters passed at all — the new fields exist but are inert,
+    # so an existing caller unaware of #326 keeps seeing the same totals.
+    proposals = [
+        {"signature": "cost:downsize", "analyzer": "downsize", "title": "t1",
+         "estimated_recoverable_usd": 3.0},
+    ]
+    rollup = estimated_recoverable_rollup(proposals)
+    assert rollup["relearn_monthly_usd"] == 0.0
+    assert rollup["relearn_cluster_count"] == 0
+    assert rollup["projected_usd_30d"] == 3.0
+
+
+# --- Review inbox monthly-basis fields (#273: single central projection) ---- #
+
+def test_downsize_monthly_uses_the_same_central_projection_as_everyone_else():
+    # #273: downsize no longer self-projects into the shared monthly field
+    # (model_downgrade.py's own `monthly_savings_usd` used to be copied
+    # straight onto the proposal) — its estimated_monthly_usd now comes from
+    # the SAME central ratio every other analyzer's does, applied uniformly
+    # in `cost_proposals_from_report`.
     props = {p.analyzer: p for p in cost_proposals_from_report(_report())}
-    assert props["downsize"].estimated_monthly_usd == 3.0
-    assert props["downsize"].estimated_monthly_tokens == 0   # fixture's default
+    dsz = props["downsize"]
+    # `_report()`'s window (5 days, 10 sessions) is far below the projection
+    # guardrails (>=14 window days, >=8 active days, >=20 sessions), so no
+    # projection applies: the monthly figure equals the observed one.
+    assert dsz.estimated_monthly_usd == pytest.approx(dsz.estimated_recoverable_usd)
+    # The window-wide downsize card never sets a token estimate, so there is
+    # nothing to project a monthly token figure from either — no more
+    # silently claiming "0 monthly tokens" for an unmeasured quantity.
+    assert dsz.estimated_recoverable_tokens is None
+    assert dsz.estimated_monthly_tokens is None
 
 
-def test_non_downsize_proposals_get_generic_monthly_extrapolation():
-    # cache/trim carry no monthly figure of their own, so a report built over
-    # a NON-30-day window gets a generic `30/window_days` extrapolation of
-    # the window figure, applied once in `cost_proposals_from_report`. Assert
-    # the SCALING RELATIONSHIP to the adapter's own window figure (its exact
-    # dollar value is computed from `estimate_cache_recoverable`/pricing.py
-    # internals, not the fixture's finding-level field, which `_cache_to_
-    # proposals` doesn't read) — the `cache` finding also fans out into
-    # several signature-distinct cards, so select by signature.
-    at_default = {p.signature: p for p in cost_proposals_from_report(_report())}
+def test_thin_window_reports_observed_not_a_fabricated_projection():
+    # Below the guardrails (here: 10 window days < the 14-day floor), every
+    # analyzer's monthly figure is left AT its window figure — never scaled
+    # by a ratio computed from too little data.
     at_10d = {p.signature: p for p in cost_proposals_from_report(_report(), window_days=10.0)}
-    cache_default = at_default["cost:cache:anthropic:claude-sonnet-5"]
     cache_10d = at_10d["cost:cache:anthropic:claude-sonnet-5"]
-    assert cache_default.estimated_monthly_usd == pytest.approx(cache_default.estimated_recoverable_usd)
-    assert cache_10d.estimated_monthly_usd == pytest.approx(cache_default.estimated_recoverable_usd * 3.0)
-    trim_default = at_default["cost:trim:svc-a"]
-    trim_10d = at_10d["cost:trim:svc-a"]
-    assert trim_10d.estimated_monthly_usd == pytest.approx(trim_default.estimated_recoverable_usd * 3.0)
-    assert trim_10d.estimated_monthly_tokens == round(trim_default.estimated_recoverable_tokens * 3.0)
+    assert cache_10d.estimated_monthly_usd == pytest.approx(cache_10d.estimated_recoverable_usd)
+
+
+def test_projection_ratio_scales_every_cost_analyzer_the_same_way():
+    # A window that clears every guardrail (>=14 window days, >=8 active
+    # days, >=20 sessions): 10 active days over a 30-day window ->
+    # ratio = min(30/10, 3.0) = 3.0, floored no further since window_days<=30
+    # already yields 3.0. Every analyzer — including downsize — gets scaled
+    # by this SAME ratio; #273's whole point is that there is no longer a
+    # per-analyzer special case here.
+    rep = _report()
+    rep.window = WindowSummary(
+        since=MARKER, until=NOW, days=30, sessions=25, spans=100,
+        total_tokens=1, total_cost_usd=5.0, thin_data=False, active_days=10,
+    )
+    scaled = {p.signature: p for p in cost_proposals_from_report(rep, window_days=30.0)}
+
+    cache = scaled["cost:cache:anthropic:claude-sonnet-5"]
+    assert cache.estimated_monthly_usd == pytest.approx(cache.estimated_recoverable_usd * 3.0)
+
+    trim = scaled["cost:trim:svc-a"]
+    assert trim.estimated_monthly_usd == pytest.approx(trim.estimated_recoverable_usd * 3.0)
+    assert trim.estimated_monthly_tokens == round(trim.estimated_recoverable_tokens * 3.0)
+
+    downsize = scaled["cost:downsize"]
+    assert downsize.estimated_monthly_usd == pytest.approx(downsize.estimated_recoverable_usd * 3.0)
 
 
 def test_default_window_is_already_the_monthly_basis_no_scaling():
-    # `cost_proposals_from_report`'s default `window_days` (30.0) matches the
-    # daemon's own default look-back, so an un-scoped call needs no scaling:
-    # the monthly figure equals the window figure exactly.
+    # `cost_proposals_from_report`'s default `window_days` (30.0) still falls
+    # below `_report()`'s thin fixture window's guardrails, so an un-scoped
+    # call needs no scaling: the monthly figure equals the window figure
+    # exactly (the observed-only state, not a coincidental ratio of 1.0).
     by_sig = {p.signature: p for p in cost_proposals_from_report(_report())}
     cache = by_sig["cost:cache:anthropic:claude-sonnet-5"]
     assert cache.estimated_monthly_usd == pytest.approx(cache.estimated_recoverable_usd)
@@ -1000,16 +1151,94 @@ def _resend_finding():
 
 def test_resend_suppresses_cache_control_snippet_for_claude_code():
     # The cache_control snippet is the SDK lever. A Claude Code window never
-    # constructs the request, so it is not theirs to paste — the card must lead
-    # with /compact and show NO snippet, matching how the cache family gates.
+    # constructs the request, so it is not theirs to paste — show NO snippet,
+    # matching how the cache family gates.
+    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
     from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
 
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     assert prop.suggestion == "", "cache_control snippet must be suppressed for claude-code"
     assert "cache_control" not in prop.suggestion
-    assert prop.advise_text.startswith("Run /compact.")
-    # The paste fallback is the compaction guidance, never the snippet.
-    assert prop.one_paste_fix == "Run /compact."
+    # The durable subagent-offload rule leads, not /compact.
+    assert prop.advise_text.startswith(SUBAGENT_OFFLOAD_FIX)
+    assert "Run /compact." in prop.advise_text   # kept, but only as secondary relief
+    # The one-paste artifact is the SECOND half of the compound fix: the agent
+    # file's model + reasoning-effort pin. The offload rule is a WRITE, carried
+    # on `proposed_fix` and applied rather than pasted.
+    assert "model:" in prop.one_paste_fix
+    assert "reasoning_effort:" in prop.one_paste_fix
+
+
+def test_resend_claude_code_offers_apply_capable_compound_write():
+    # Durable claude-code lever: a rung-1 CLAUDE.md rule, apply-capable via the
+    # same `_persona_gated_write_fields` machinery script/reuse/verbosity use.
+    # ONE card carries BOTH halves of the lever — offload the context-heavy
+    # work, and right-size what you offload it to — so this consolidates the
+    # resend and subagent recommendations instead of adding a card.
+    from tokenjam.core.optimize.analyzers.context_resend import (
+        RIGHTSIZE_FIX_TEMPLATE,
+        SUBAGENT_OFFLOAD_FIX,
+    )
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
+    assert prop.advise_only is False
+    assert prop.apply_capable is True
+    assert prop.rung == 1
+    assert prop.scope == "project"
+    assert SUBAGENT_OFFLOAD_FIX in prop.proposed_fix
+    assert RIGHTSIZE_FIX_TEMPLATE in prop.proposed_fix
+
+
+def test_resend_cost_of_waste_is_carried_but_never_the_recoverable_figure():
+    # The gross observation rides its own fields and must never be confused
+    # with — or summed into — what the fix returns.
+    from tokenjam.core.optimize.cost_proposals import (
+        _resend_to_proposals,
+        estimated_recoverable_rollup,
+    )
+
+    finding = _resend_finding()
+    finding.cost_of_waste_usd = 4_200.0
+    finding.cost_of_waste_tokens = 9_800_000_000
+    prop = _resend_to_proposals(finding, persona="claude-code")[0]
+
+    assert prop.cost_of_waste_usd == 4_200.0
+    assert prop.estimated_recoverable_usd == 0.5
+    # The Review inbox headline reads only the recoverable fields.
+    rollup = estimated_recoverable_rollup([prop])
+    assert rollup["estimated_recoverable_usd"] == 0.5
+    assert rollup["estimated_recoverable_tokens"] == 6_830
+
+
+def test_resend_sdk_persona_gets_no_write_and_leads_with_compact():
+    # The SDK branch is unchanged: no coding-agent harness reads a CLAUDE.md
+    # note there, so no write is offered and /compact remains the lead fix.
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    for persona in ("sdk", "unknown"):
+        prop = _resend_to_proposals(_resend_finding(), persona=persona)[0]
+        assert prop.advise_only is True
+        assert prop.apply_capable is False
+        assert prop.advise_text == "Run /compact."
+
+
+def test_resend_mixed_persona_offers_write_and_keeps_snippet():
+    # "mixed" carries both audiences: the claude-code share gets the write,
+    # the sdk share still gets its cache_control snippet (unchanged).
+    from tokenjam.core.optimize.analyzers.context_resend import SUBAGENT_OFFLOAD_FIX
+    from tokenjam.core.optimize.cost_proposals import _resend_to_proposals
+
+    prop = _resend_to_proposals(_resend_finding(), persona="mixed")[0]
+    assert prop.apply_capable is True
+    assert SUBAGENT_OFFLOAD_FIX in prop.proposed_fix
+    assert "cache_control" in prop.suggestion
+    # Both sides of the mixed branch are pinned so neither can drift silently:
+    # the SDK share keeps its cache_control snippet on `suggestion`, while the
+    # one-paste slot carries the claude-code share's right-sizing frontmatter
+    # (the offload rule itself is a WRITE on `proposed_fix`, applied not pasted).
+    assert "reasoning_effort:" in prop.one_paste_fix
+    assert "cache_control" not in prop.one_paste_fix
 
 
 def test_resend_keeps_cache_control_snippet_for_sdk():
@@ -1032,7 +1261,9 @@ def test_resend_caveat_is_not_duplicated():
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     assert prop.caveat == "conservative lower bound"
     assert "conservative lower bound" not in prop.advise_text
-    assert prop.advise_text == "Run /compact."
+    assert prop.advise_text == (
+        prop.proposed_fix + " Immediate relief in an already-full session: Run /compact."
+    )
 
 
 def test_resend_persona_flows_through_the_report_dispatch():
@@ -1142,14 +1373,19 @@ def test_read_cost_proposals_reports_error_state_before_any_success(tmp_path):
 
 # --- Real-data validation follow-ups: dollar-first headline, sort, formatting -
 
-def test_downsize_agent_row_monthly_usd_matches_its_own_evidence_text():
+def test_downsize_agent_row_leaves_monthly_to_the_central_projection():
     # Reproduces the founder's real "Model over-sizing in claude-code
     # (claude-opus-4-7 to claude-haiku-4-5)" card: a per-agent price row is
     # the path that produced it (_downsize_agent_proposals, not the window-
-    # wide aggregate _report() fixture above exercises). estimated_monthly_usd
-    # and the evidence string's own "$X per 30 days" figure both come from
-    # the SAME row.projected_30d_delta_usd — assert they never diverge, so a
-    # dollar-computable downsize card can never render a tokens-only headline.
+    # wide aggregate _report() fixture above exercises). #273: the adapter no
+    # longer self-projects `row.projected_30d_delta_usd` onto
+    # estimated_monthly_usd (that figure is `window_days`-based, computed
+    # inside model_downgrade.py — exactly the per-analyzer self-projection
+    # the approved design forbids for the shared field) — calling the
+    # adapter directly (bypassing `cost_proposals_from_report`'s central
+    # pass) leaves it unset. The evidence paragraph's own "$X per 30 days"
+    # arithmetic disclosure is untouched; it's a plain string built from the
+    # row, independent of this field.
     from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
     from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
 
@@ -1169,11 +1405,146 @@ def test_downsize_agent_row_monthly_usd_matches_its_own_evidence_text():
     props = _downsize_agent_proposals(_Finding(), config=None)
     assert len(props) == 1
     prop = props[0]
-    assert prop.estimated_monthly_usd is not None
-    assert prop.estimated_monthly_usd > 0
-    assert prop.estimated_monthly_usd == rows[0].projected_30d_delta_usd
-    # The evidence paragraph's own "$X per 30 days" is the identical number.
-    assert f"{prop.estimated_monthly_usd:,.2f}" in prop.evidence or f"{prop.estimated_monthly_usd:.4f}" in prop.evidence
+    assert prop.estimated_monthly_usd is None
+    assert prop.estimated_recoverable_usd == rows[0].delta_usd
+    # The evidence paragraph's own "$X per 30 days" arithmetic line still
+    # cites the row's own projection, unaffected by the CostProposal field.
+    monthly = rows[0].projected_30d_delta_usd
+    assert f"{monthly:,.2f}" in prop.evidence or f"{monthly:.4f}" in prop.evidence
+
+
+# --- Persona gating: downsize (window-wide + per-agent) ---------------------
+
+def _downsize_finding():
+    return DowngradeFinding(
+        candidate_sessions=4, total_sessions=10, actual_cost_usd=5.0,
+        alternative_cost_usd=2.0, monthly_savings_usd=3.0, percent_of_sessions=40.0,
+        examples=[], suggestions={"claude-opus-4-8": "claude-sonnet-5"},
+        estimated_recoverable_usd=3.0, percent_of_tokens=35.0,
+        estimate_basis="downsize basis",
+    )
+
+
+def test_downsize_window_wide_card_gives_claude_code_the_cc_lever_not_a_raw_swap():
+    """A claude-code window can't switch its own interactive model mid-
+    session, so the window-wide fallback card must not hand it the raw
+    "route to a cheaper model" instruction an SDK caller gets."""
+    from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
+
+    props = _downsize_to_proposal(_downsize_finding(), persona="claude-code")
+    assert len(props) == 1
+    p = props[0]
+    assert "switch your own interactive model" in p.advise_text
+    assert "route to a cheaper" not in p.advise_text.lower()
+    assert "tj route export" in p.advise_text
+    assert p.suggestion == ""  # the unusable model-swap snippet is dropped
+
+
+def test_downsize_window_wide_card_unchanged_for_sdk_and_unknown():
+    from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
+
+    for persona in ("sdk", "unknown"):
+        props = _downsize_to_proposal(_downsize_finding(), persona=persona)
+        p = props[0]
+        assert "Route the flagged structural-shaped work" in p.advise_text
+        assert p.suggestion  # the swap snippet is still there for a caller who can act on it
+
+
+def test_downsize_window_wide_card_mixed_gets_both():
+    from tokenjam.core.optimize.cost_proposals import _downsize_to_proposal
+
+    props = _downsize_to_proposal(_downsize_finding(), persona="mixed")
+    p = props[0]
+    assert "Route the flagged structural-shaped work" in p.advise_text  # sdk share
+    assert "switch your own interactive model" in p.advise_text          # cc share
+
+
+def test_downsize_agent_card_apply_blocked_gets_cc_lever_for_claude_code():
+    """A per-agent card with no registered source path (apply blocked) is
+    just as unreachable for a claude-code window as the window-wide card —
+    it must get the same CC-actionable lever appended."""
+    from tokenjam.core.optimize.analyzers.downsize_agents import build_agent_price_rows
+    from tokenjam.core.optimize.cost_proposals import _downsize_agent_proposals
+
+    candidates = [{
+        "session_id": f"s{i}", "agent_id": "claude-code", "provider": "anthropic",
+        "model": "claude-opus-4-7", "alt_model": "claude-haiku-4-5",
+        "input_tokens": 1, "output_tokens": 48, "cache_tokens": 3142, "cache_write_tokens": 6716,
+    } for i in range(32)]
+    rows = build_agent_price_rows(candidates, window_days=30.0)
+
+    class _Finding:
+        per_agent = rows
+        candidate_sessions = 32
+        suggestions: dict = {}
+
+    props = _downsize_agent_proposals(_Finding(), config=None, persona="claude-code")
+    assert len(props) == 1
+    p = props[0]
+    assert "Applying it here is not on offer" in p.advise_text
+    assert "switch your own interactive model" in p.advise_text
+
+    # sdk/unknown never get the CC lever appended.
+    for persona in ("sdk", "unknown"):
+        p2 = _downsize_agent_proposals(_Finding(), config=None, persona=persona)[0]
+        assert "switch your own interactive model" not in p2.advise_text
+
+
+# --- Persona gating: placement (batch) ---------------------------------------
+
+def _placement_finding():
+    from tokenjam.core.optimize.analyzers.batch_placement import (
+        BatchCandidate,
+        BatchPlacementFinding,
+    )
+
+    candidate = BatchCandidate(
+        agent_id="worker-svc", sessions=8, first_start="2026-07-01T00:00:00Z",
+        last_start="2026-07-15T00:00:00Z", median_gap_seconds=3600.0, gap_cv=0.1,
+        cost_usd=4.0, tokens=200_000, estimated_batch_saving_usd=2.0,
+    )
+    return BatchPlacementFinding(
+        candidates=[candidate], window_cost_usd=10.0, candidate_cost_usd=4.0,
+        percent_of_window_cost=40.0, estimated_recoverable_usd=2.0,
+        estimated_recoverable_tokens=200_000, estimate_basis="placement basis",
+    )
+
+
+def test_placement_suppressed_outright_for_claude_code_persona():
+    """Batch API is structurally unreachable from an interactive coding-agent
+    session (there's no application code of its own to move to a batch
+    lane) — the whole card must be gone, not just the dollar figure,
+    regardless of pricing_mode."""
+    from tokenjam.core.optimize.cost_proposals import _placement_to_proposals
+
+    for pricing_mode in ("api", "subscription"):
+        assert _placement_to_proposals(
+            _placement_finding(), pricing_mode=pricing_mode, persona="claude-code",
+        ) == []
+
+
+@pytest.mark.parametrize("persona", ["sdk", "mixed", "unknown"])
+def test_placement_unaffected_for_non_claude_code_personas(persona):
+    from tokenjam.core.optimize.cost_proposals import _placement_to_proposals
+
+    props = _placement_to_proposals(_placement_finding(), persona=persona)
+    assert len(props) == 1
+    assert props[0].analyzer == "placement"
+
+
+def test_placement_gated_by_report_persona_through_the_dispatcher():
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    rep = _report()
+    rep.findings["placement"] = _placement_finding()
+
+    rep.persona = "claude-code"
+    analyzers = {p.analyzer for p in cost_proposals_from_report(rep)}
+    assert "placement" not in analyzers
+
+    rep.persona = "sdk"
+    analyzers = {p.analyzer for p in cost_proposals_from_report(rep)}
+    assert "placement" in analyzers
 
 
 def test_backfill_legacy_monthly_fields_fills_only_absent_keys():

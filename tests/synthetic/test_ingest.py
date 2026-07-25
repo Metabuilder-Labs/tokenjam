@@ -14,7 +14,7 @@ from tokenjam.core.ingest import (
     strip_captured_content,
 )
 from tokenjam.core.models import NormalizedSpan, SessionRecord, SpanStatus
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tests.factories import (
     make_invoke_agent_span,
     make_llm_span,
@@ -340,6 +340,33 @@ class TestCaptureStripping:
 
         stored_span = db.spans[-1]
         assert stored_span.attributes[GenAIAttributes.PROMPT_CONTENT] == "kept prompt"
+
+    def test_system_prefix_content_stripped_when_prompts_capture_off(self):
+        # The recovered system prefix is a project's CLAUDE.md text, stamped
+        # onto backfilled spans. It is prompt content and must ride the same
+        # `prompts` toggle -- the gate's contract covers ALL content keyed to
+        # a [capture] toggle, not just the keys that existed when it was
+        # written.
+        pipeline, db = _make_pipeline(capture=CaptureConfig(prompts=False))
+
+        span = make_llm_span(extra_attributes={
+            TjAttributes.SYSTEM_PREFIX_CONTENT: "# CLAUDE.md\nsecret project rules",
+        })
+        pipeline.process(span)
+
+        assert TjAttributes.SYSTEM_PREFIX_CONTENT not in db.spans[-1].attributes
+
+    def test_system_prefix_content_kept_when_prompts_capture_on(self):
+        pipeline, db = _make_pipeline(capture=CaptureConfig(prompts=True))
+
+        span = make_llm_span(extra_attributes={
+            TjAttributes.SYSTEM_PREFIX_CONTENT: "# CLAUDE.md\nkept rules",
+        })
+        pipeline.process(span)
+
+        assert db.spans[-1].attributes[TjAttributes.SYSTEM_PREFIX_CONTENT] == (
+            "# CLAUDE.md\nkept rules"
+        )
 
     def test_tool_output_stripped_when_capture_off(self):
         pipeline, db = _make_pipeline(capture=CaptureConfig(tool_outputs=False))

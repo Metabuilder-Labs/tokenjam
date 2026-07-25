@@ -98,7 +98,17 @@ def advise_only_reason(proposal: dict[str, Any]) -> str | None:
 
     One source of truth for the wording, so the CLI, the API payload and the
     inbox row cannot drift into three different explanations of one flag.
+
+    Two distinct reasons land on the same flag. The workspace-less (OTel) lane
+    has no file to write into at all; the write budget
+    (``core/optimize/write_budget.py``) declines a write that is a placeholder,
+    that costs more to keep than it recovers, or that the window's rule budget
+    cannot afford. The budget's own sentence wins when it set one, because
+    "there is no workspace" would be plainly false for a cluster that has one.
     """
+    blocked = str(proposal.get("write_blocked_reason") or "").strip()
+    if blocked and not proposal.get("write_offered", True):
+        return blocked
     return ADVISE_ONLY_REASON if proposal.get("advise_only") else None
 
 

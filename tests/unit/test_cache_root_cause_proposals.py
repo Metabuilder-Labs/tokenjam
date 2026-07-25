@@ -334,17 +334,17 @@ def test_non_claude_code_personas_keep_the_instruction(adapter_name, persona):
     assert default_props[0].advise_text != CACHE_NO_LEVER_TEXT
 
 
-def test_cost_proposals_from_report_gates_the_whole_cache_family_on_persona():
+def test_cost_proposals_from_report_drops_the_whole_cache_family_for_claude_code():
+    """The cache family has no lever inside an interactive coding-agent session
+    (the harness builds the request), so for that persona the cards are not
+    shown with a "nothing you can do" caption — they are not built at all.
+    The adapter-level `CACHE_NO_LEVER_TEXT` gating above still applies to any
+    caller that reaches an adapter directly."""
     report = OptimizeReport(
         window=_window(), findings={"cache": _cache_finding_for_persona_tests()},
     )
     report.persona = "claude-code"
-    by_sig = {p.signature: p for p in cost_proposals_from_report(report)}
-    generic = by_sig["cost:cache:anthropic:claude-sonnet-5"]
-    assert generic.advise_text == CACHE_NO_LEVER_TEXT
-    uncached = by_sig["cost:cache-uncached:svc-uncached"]
-    assert uncached.advise_text == CACHE_NO_LEVER_TEXT
-    assert uncached.suggestion == ""
+    assert cost_proposals_from_report(report) == []
 
     report.persona = "sdk"
     by_sig = {p.signature: p for p in cost_proposals_from_report(report)}

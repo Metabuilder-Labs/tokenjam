@@ -168,9 +168,13 @@ def test_over_powered_subagent_carries_quantified_estimate():
 
 def test_over_provisioned_only_subagent_has_no_estimate():
     """A subagent flagged only over_provisioned (a NON-premium model handed a
-    large context) contributes nothing to the estimate — its recoverable is a
-    prompt-size cut we don't size — so the finding stays unranked (estimate
-    None), honestly, rather than inventing a number (#101)."""
+    large context) contributes nothing to the estimate when its dispatch
+    cohort (same calling agent + model) is too small to have a meaningful
+    median baseline — one subagent is a cohort of one, well under
+    MIN_COHORT_SESSIONS — so the finding stays unranked (estimate None),
+    honestly, rather than inventing a baseline (#101). See
+    test_over_provisioned_estimate_prices_context_excess_over_cohort_median
+    for the case where a real cohort baseline exists."""
     db = InMemoryBackend()
     try:
         ctx, now = _ctx(db, window_cost_usd=1.0)
@@ -186,6 +190,53 @@ def test_over_provisioned_only_subagent_has_no_estimate():
         assert f.flagged[0].flags == ["over_provisioned"]
         assert f.estimated_recoverable_usd is None
         assert f.estimated_recoverable_tokens is None
+    finally:
+        db.close()
+
+
+def test_over_provisioned_estimate_prices_context_excess_over_cohort_median():
+    """With a real dispatch cohort (>= MIN_COHORT_SESSIONS same-agent,
+    same-model subagents), an over_provisioned outlier's context excess over
+    the cohort's own median is priced at the cache-read rate (context arrives
+    overwhelmingly as cache reads) -- never against zero context, never a
+    made-up target size."""
+    from tokenjam.core.pricing import get_rates
+
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=1.0)
+        # 4 ordinary same-shape dispatches: modest context, well under the
+        # over_provisioned threshold -> form the cohort's baseline.
+        for i in range(4):
+            db.insert_span(make_llm_span(
+                model="claude-sonnet-4-6", provider="anthropic",
+                input_tokens=10_000, output_tokens=500, cost_usd=0.05,
+                session_id=f"s-peer-{i}", sub_agent_id=f"peer{i}", start_time=now,
+            ))
+        # The outlier: same agent + model, huge context, tiny output ->
+        # over_provisioned, with 4 like-shaped peers to baseline against.
+        db.insert_span(make_llm_span(
+            model="claude-sonnet-4-6", provider="anthropic",
+            input_tokens=80_000, output_tokens=100, cost_usd=0.30,
+            session_id="s-outlier", sub_agent_id="outlier", start_time=now,
+        ))
+
+        run_subagent(ctx)
+        f = ctx.report.findings["subagent"]
+
+        outlier = next(r for r in f.flagged if r.sub_agent_id == "outlier")
+        assert outlier.flags == ["over_provisioned"]
+
+        # Cohort contexts: [10_000, 10_000, 10_000, 10_000, 80_000] -> median
+        # 10_000. Excess = 80_000 - 10_000 = 70_000, priced at the cache-read
+        # rate (never the fresh-input rate).
+        rates = get_rates("anthropic", "claude-sonnet-4-6")
+        expected_tokens = 70_000
+        expected_usd = expected_tokens / 1_000_000 * rates.cache_read_per_mtok
+
+        assert f.estimated_recoverable_tokens == expected_tokens
+        assert f.estimated_recoverable_usd == pytest.approx(expected_usd, abs=1e-9)
+        assert "cohort" in f.estimate_basis.lower()
     finally:
         db.close()
 

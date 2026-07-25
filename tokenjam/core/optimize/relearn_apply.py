@@ -552,6 +552,30 @@ def render_skill_content(cluster: dict, signature: str, slug: str) -> str:
     )
 
 
+def artifact_for_rung(cluster: dict, signature: str, rung: int, slug: str = "") -> str:
+    """The EXACT text this cluster's apply would write, for a rung, without
+    writing anything.
+
+    The write budget (``core/optimize/write_budget.py``) has to price an
+    artifact before offering it, and pricing the ``proposed_fix`` alone would
+    undercount: the real block also carries a marker, a heading and an evidence
+    line that are re-sent on every future session just the same. Rendering the
+    same functions the apply path renders keeps the price and the artifact from
+    drifting apart.
+
+    Rungs 3 to 5 return ``""``: a hook, a wrapper or a config edit is executed,
+    never sent to the model as prompt text, so it has no standing cost to
+    price. That is a real zero, not a missing implementation.
+    """
+    if rung <= 1:
+        return _note_block(cluster, signature)
+    if rung == 2:
+        return render_skill_content(
+            cluster, signature, slug or slugify(str(cluster.get("title") or signature)),
+        )
+    return ""
+
+
 # --- Rungs 3-5: enforcement artifact (disabled by default) ---------------------
 #
 # SPEC §6/§10 mandate: precision over coverage. A false positive on normal

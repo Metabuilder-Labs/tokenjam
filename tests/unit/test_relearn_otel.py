@@ -201,8 +201,14 @@ def test_workspace_cluster_is_not_advise_only(db):
         for sid in ("s1", "s2", "s3")
     ]
 
+    # persona="claude-code": isolates the workspace-vs-OTel seam under test
+    # from the SEPARATE persona write-gate (see test_relearn.py) — the write
+    # is only ever offered for a claude-code/mixed window regardless of
+    # workspace, so this test's default "unknown" persona would otherwise
+    # mask the very thing it's checking.
     proposals, _ = build_proposals(
         _raw_clusters(failures), advise_only_repos={"billing-svc"},
+        persona="claude-code",
     )
 
     assert len(proposals) == 1
@@ -230,8 +236,11 @@ def test_mixed_cluster_keeps_the_apply_path(db):
         ),
     ]
 
+    # persona="claude-code" — see the comment on test_workspace_cluster_is_
+    # not_advise_only above.
     proposals, _ = build_proposals(
         _raw_clusters(failures), advise_only_repos={"billing-svc"},
+        persona="claude-code",
     )
 
     assert proposals[0].advise_only is False

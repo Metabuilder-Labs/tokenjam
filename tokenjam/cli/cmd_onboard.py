@@ -1038,8 +1038,14 @@ def _run_relearn_first_fix(config: TjConfig, *, port: int, want_daemon: bool) ->
         # (`tj serve`'s relearn job) already runs the full distill-enabled
         # scan and will surface those in the Lens Review inbox on its own
         # schedule.
+        # persona="claude-code": `tj onboard` scanning the Claude Code
+        # transcript root is itself the claude-code persona's own onboarding
+        # flow (there is no window/conn here to classify from), so the write
+        # gate (see `build_proposals`) should stay open the way it always
+        # has for this call site.
         finding = compute_relearn_finding(
             projects_root=CLAUDE_CODE_PROJECTS_ROOT, distill_enabled=False,
+            persona="claude-code",
         )
     except Exception:
         return

@@ -20,13 +20,16 @@ NOT optional here:
     tokenjam cannot write into — those cards have NO apply path, exactly like
     an ``advise_only`` ``RelearnCluster`` (empty ``suggested_target``). A
     minority (``subagent``, the per-agent slice of ``downsize``, ``script``,
-    ``reuse``, ``verbosity``) DO have a workspace surface an orchestrating
-    agent reads before acting (a CLAUDE.md rubric, a model-id key, a new
-    skill note) and route through the same rung-gated
-    ``relearn_apply.apply_relearn_fix`` machinery the relearn lane uses
-    (``apply_capable=True``, ``rung``, ``scope``, ``proposed_fix``). Every
-    other card carries a recommendation and, where sensible, a copyable
-    config/code suggestion; the user applies it themselves.
+    ``reuse``) DO have a workspace surface an orchestrating agent reads
+    before acting (a CLAUDE.md rubric, a model-id key, a new skill note) and
+    route through the same rung-gated ``relearn_apply.apply_relearn_fix``
+    machinery the relearn lane uses (``apply_capable=True``, ``rung``,
+    ``scope``, ``proposed_fix``). ``verbosity`` shares that same class of
+    surface in principle but is deliberately kept advise-only for every
+    persona (see ``_verbosity_to_proposals``) — the finding is cohort-scoped
+    but the artifact would be global, which fails the no-quality-tax gate.
+    Every other card carries a recommendation and, where sensible, a
+    copyable config/code suggestion; the user applies it themselves.
   * **Estimated, never causal.** Every saving figure a cost finding carries is
     a heuristic ESTIMATE (house style, CLAUDE.md Rule 14). The adapter
     preserves the finding's own ``estimate_basis`` and labels the figure
@@ -65,15 +68,53 @@ COST_CORRELATIONAL_CAVEAT = (
 #: savings and previously had no adapter here, silently excluding it from the
 #: Review inbox's Cost-advisories tab.
 #:
-#: ``summarize`` (prompt summarization) is deliberately NOT here — it is the
-#: one cost analyzer with its own dedicated review surface (the curate/diff
-#: screen driven by ``core/summarize/``'s prepare/check/apply lifecycle,
-#: which needs a multi-step rewrite-and-verify flow this single-card adapter
-#: shape can't represent), not an oversight to fix later.
+#: ``summarize`` (prompt summarization) is deliberately NOT here, and stays out
+#: now that it carries a dollar figure of its own. Three reasons, decided
+#: rather than inherited:
+#:
+#:   1. It has its own dedicated review surface — the curate/diff screen driven
+#:      by ``core/summarize/``'s prepare/check/apply lifecycle, a multi-step
+#:      rewrite-and-verify flow this single-card adapter shape cannot represent.
+#:      An inbox card would either duplicate that surface or link away from the
+#:      inbox to it, and neither is a card.
+#:   2. It is the BUDGET, not a peer. ``write_budget.measured_agent_file_tokens``
+#:      reads the summarize finding to size how much permanent rule-writing every
+#:      OTHER analyzer in this table is allowed to propose. Listing it here would
+#:      make the analyzer that sets the budget also compete for it, and a user who
+#:      dismissed the card would silently be dismissing the counterweight that
+#:      stops the rule-writers from growing the files it wants compressed.
+#:   3. The standing product constraint is to consolidate cards, not add them.
+#:      Its saving is already visible in the Overview waste band (registry-driven
+#:      off the presence of ``estimated_recoverable_usd``), so it is not hidden —
+#:      only absent from this one surface.
 COST_ANALYZERS = (
     "downsize", "cache", "cache-recommend", "trim", "subagent", "deadweight",
     "script", "reuse", "verbosity", "resend",
 )
+
+
+def _disabled_analyzers(persona: str) -> frozenset[str]:
+    """The persona skip-gate set, imported lazily.
+
+    Deferred import: ``runner`` reaches this module through the analyzer
+    registry, so a module-level import would cycle.
+    """
+    from tokenjam.core.optimize.runner import disabled_analyzers_for_persona
+
+    return disabled_analyzers_for_persona(persona)
+
+
+def cost_analyzers_for_persona(persona: str) -> tuple[str, ...]:
+    """``COST_ANALYZERS`` minus the ones with no fix this persona can apply.
+
+    ``COST_ANALYZERS`` is an INDEPENDENT second analyzer-selection surface
+    (the Review inbox's recompute selects from it, not from
+    ``ANALYZER_ORDER``), so the persona skip gate has to be mirrored here or a
+    disabled analyzer's findings still reach the inbox as apply-able cards.
+    Same map, same reasons — see ``runner.PERSONA_DISABLED_ANALYZERS``.
+    """
+    disabled = _disabled_analyzers(persona)
+    return tuple(name for name in COST_ANALYZERS if name not in disabled)
 
 # The rung-1/rung-2 apply notes below all route through the SAME workspace-note
 # machinery `subagent` already uses (`relearn_apply.apply_relearn_fix`, rung 1
@@ -114,6 +155,31 @@ SUBAGENT_RUBRIC_INTRO = (
     "the premium tier."
 )
 
+# The downsize card's claude-code CTA. Mirrors `cmd_optimize._render_downgrade_
+# cta`'s claude-code branch: an interactive CC session can't pass `--original`/
+# `--candidate` to swap its own model mid-turn, so "route to a cheaper model"
+# is not a fix this persona can act on. Used wherever the card would otherwise
+# hand a CC window the same generic model-swap text an SDK caller gets (see
+# ticket-level "no CC user gets a raw-model-swap CTA" requirement).
+_DOWNSIZE_CC_LEVER = (
+    "You can't switch your own interactive model mid-session, so this is not a "
+    "fix to paste into your own request the way an SDK caller would. The "
+    "actionable levers instead: `tj route export --target ccr` (or --target "
+    "litellm) to route future calls through a cheaper model, `tj optimize "
+    "subagent` to right-size subagent models and context, `/compact` to trim "
+    "context mid-session, or a CLAUDE.md/subagent directive telling this agent "
+    "to dispatch cheaper subagents for this shape of work."
+)
+
+# Appended (not substituted) for a "mixed" window: the swap text above already
+# applies to the sdk share, this just adds the claude-code share's own lever —
+# same "both, labeled" precedent as `_render_downgrade_cta`'s mixed branch.
+_DOWNSIZE_MIXED_CC_NOTE = (
+    " For the Claude Code sessions in this window: you can't switch your own "
+    "interactive model mid-session — use `tj route export`, `tj optimize "
+    "subagent`, or `/compact` instead."
+)
+
 
 @dataclass
 class CostProposal:
@@ -143,6 +209,17 @@ class CostProposal:
     # labeled. ``None`` when the finding produced no estimate for this item.
     estimated_recoverable_usd:    float | None = None
     estimated_recoverable_tokens: int | None   = None
+    # COST OF WASTE — what the flagged behaviour actually COST over the window,
+    # fully observed. Structurally separate from every `estimated_*` field
+    # above and MUST NEVER be summed with them, on any surface: those answer
+    # "what does the fix return", this answers "what did this cost me", and the
+    # second is legitimately much larger than the first (a floor of zero is not
+    # achievable — see `analyzers/context_resend.py`'s module docstring).
+    # `estimated_recoverable_rollup` reads only the `estimated_*` fields, so
+    # this never leaks into the Review inbox headline.
+    cost_of_waste_usd:            float | None = None
+    cost_of_waste_tokens:         int | None   = None
+    cost_of_waste_basis:          str          = ""
     # Monthly-basis fields (Review inbox stat tiles) — a SEPARATE, explicitly-
     # named basis from the two window fields above; see the "Recoverable-
     # savings contract" note in model_downgrade.py / CLAUDE.md. `downsize`
@@ -153,6 +230,26 @@ class CostProposal:
     # to reimplement the arithmetic.
     estimated_monthly_usd:        float | None = None
     estimated_monthly_tokens:     int | None   = None
+    # Whether this proposal's waste RECURS at the user's own session pace
+    # (`"per_session"` — the shared, centrally-computed 30-day-pace ratio
+    # rescales it) or is a `"one_time"` fixed-occurrence / delete-this-
+    # artifact saving (never rescaled; its monthly figure always equals its
+    # window figure). See `compute_projection_ratio` and #273's approved
+    # design ("each analyzer declares scaling ... state the choice
+    # explicitly"). Defaulted here rather than repeated at every adapter's
+    # `CostProposal(...)` call site because EVERY current analyzer is
+    # `"per_session"`: downsize/cache/cache-recommend/resend/trim/subagent/
+    # script/reuse/verbosity/placement/deadweight's waste all recur every
+    # session (or call) the underlying condition persists — including the
+    # deadweight MCP tax, which keeps accruing every session the server stays
+    # configured even though ITS fix is a one-time config edit; the SAVING is
+    # what recurs, not the fix. `"one_time"` is reserved for a future
+    # analyzer whose estimate is a genuinely single fixed occurrence, which
+    # must set it explicitly at its own call site when it's added.
+    # (relearn's `RelearnCluster` estimates are a SEPARATE, unbounded-history
+    # system with no fixed window — not adapted into a `CostProposal` at all,
+    # so it carries no `scaling` field and is out of scope here.)
+    scaling:               str = "per_session"
     estimate_basis:       str = ""
     estimate_confidence:  str = COST_ESTIMATE_CONFIDENCE
     correlational:        bool = True
@@ -191,6 +288,28 @@ class CostProposal:
     # The exact fix, with this agent's own measured values already substituted
     # in. Every advise-only card carries one.
     one_paste_fix:        str  = ""
+    # Net-of-standing-cost accounting (`core/optimize/write_budget.py`), filled
+    # for every card whose fix is a PERMANENT artifact the user keeps: a rung-1
+    # CLAUDE.md rule or a rung-2 skill note. Those are re-sent on every future
+    # session, so the four `estimated_*` fields above are reported NET of that
+    # standing cost and the pre-net figures are parked here, inspectable. A
+    # card with no write to offer (every advise-only cost card) writes nothing,
+    # therefore stands nothing, and passes through untouched.
+    gross_recoverable_usd:    float | None = None
+    gross_recoverable_tokens: int | None   = None
+    standing_cost_tokens_per_session: int = 0
+    standing_cost_tokens:     int          = 0
+    standing_cost_usd:        float | None = None
+    standing_cost_basis:      str          = ""
+    #: gross / standing. Below 1.0 the rule costs more to keep than it saves.
+    payback_ratio:            float | None = None
+    net_negative:             bool         = False
+    # Whether the permanent write is actually on offer after the budget pass,
+    # and why not when it isn't. A suppressed write degrades exactly the way
+    # the persona gate already degrades one: advise-only, with the identical
+    # text still carried as a copyable `suggestion`.
+    write_offered:            bool         = False
+    write_blocked_reason:     str          = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -198,7 +317,9 @@ class CostProposal:
 # proposals. All tolerate a None/empty finding (returns []).
 # --------------------------------------------------------------------------- #
 
-def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal]:
+def _downsize_to_proposal(
+    finding: Any, config: Any = None, persona: str = "unknown",
+) -> list[CostProposal]:
     """The model-over-sizing card(s).
 
     When the finding carries per-agent price rows, each agent gets its own card
@@ -212,10 +333,15 @@ def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal
     maps each oversized model to its cheaper same-family alternative, and the
     delta-verify pass measures the model-mix cost delta across ALL flagged
     models, so one proposal listing them keeps that aggregate estimate coherent.
+
+    ``persona`` gates the CTA exactly like ``cmd_optimize._render_downgrade_
+    cta`` gates the CLI's: a ``"claude-code"`` window can't switch its own
+    interactive model, so it never gets the raw "route to a cheaper model"
+    instruction — see ``_DOWNSIZE_CC_LEVER``.
     """
     if finding is None or getattr(finding, "candidate_sessions", 0) <= 0:
         return []
-    per_agent = _downsize_agent_proposals(finding, config)
+    per_agent = _downsize_agent_proposals(finding, config, persona)
     if per_agent:
         return per_agent
     suggestions: dict[str, str] = dict(getattr(finding, "suggestions", {}) or {})
@@ -229,13 +355,20 @@ def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal
         f"({model_list}); candidate sessions are {finding.percent_of_tokens:.0f}% "
         f"of the window's tokens."
     )
-    advise = (
-        "Route the flagged structural-shaped work to the cheaper same-family "
-        "model before it runs. Suggested swaps: "
-        + "; ".join(f"{m} → {alt}" for m, alt in sorted(suggestions.items()))
-        + ". " + str(getattr(finding, "caveat", "") or "")
-    ).strip()
+    caveat = str(getattr(finding, "caveat", "") or "")
     suggestion = "\n".join(f"{m} -> {alt}" for m, alt in sorted(suggestions.items()))
+    if persona == "claude-code":
+        advise = (_DOWNSIZE_CC_LEVER + " " + caveat).strip()
+        suggestion = ""
+    else:
+        advise = (
+            "Route the flagged structural-shaped work to the cheaper same-family "
+            "model before it runs. Suggested swaps: "
+            + "; ".join(f"{m} → {alt}" for m, alt in sorted(suggestions.items()))
+            + ". " + caveat
+        ).strip()
+        if persona == "mixed":
+            advise += _DOWNSIZE_MIXED_CC_NOTE
     return [CostProposal(
         kind="cost",
         analyzer="downsize",
@@ -256,11 +389,17 @@ def _downsize_to_proposal(finding: Any, config: Any = None) -> list[CostProposal
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-        # `downsize` already computes its own 30-day projection (model_downgrade.
-        # py's `monthly_savings_usd`/`monthly_tokens_in_candidates`) — surface it
-        # directly rather than re-deriving from the window figure.
-        estimated_monthly_usd=getattr(finding, "monthly_savings_usd", None),
-        estimated_monthly_tokens=getattr(finding, "monthly_tokens_in_candidates", None),
+        # `estimated_monthly_usd`/`estimated_monthly_tokens` are intentionally
+        # left unset here (#273): `model_downgrade.py`'s own
+        # `monthly_savings_usd`/`monthly_tokens_in_candidates` is a
+        # `30/window_days` projection computed inside the analyzer, which is
+        # exactly the per-analyzer self-projection the approved design
+        # forbids for the SHARED monthly basis — every analyzer's Review-inbox
+        # monthly figure must come from the ONE central ratio
+        # (`compute_projection_ratio`), applied uniformly in
+        # `cost_proposals_from_report`, or two analyzers' "monthly" figures
+        # are silently on different bases again. `monthly_savings_usd` itself
+        # is untouched and still backs the CLI's own `tj optimize` line.
     )]
 
 
@@ -360,12 +499,20 @@ def _model_swap_plumbing(row: Any, config: Any) -> dict[str, Any]:
     }
 
 
-def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
+def _downsize_agent_proposals(
+    finding: Any, config: Any, persona: str = "unknown",
+) -> list[CostProposal]:
     """One card per agent, carrying that agent's own price arithmetic.
 
     Replaces the window-wide card when per-agent rows exist, so one source of
     over-sized spend produces exactly one card rather than an aggregate plus its
     own parts.
+
+    When the direct model-id swap is ``apply_capable`` (a registered, git-clean
+    source path — see ``_model_swap_plumbing``), the fix is a real write to
+    that agent's own config, not "switch your interactive model": it stays
+    persona-agnostic. Only the NON-apply-capable fallback text needs the
+    claude-code CTA, same reasoning as the window-wide card above.
     """
     proposals: list[CostProposal] = []
     for row in getattr(finding, "per_agent", []) or []:
@@ -402,6 +549,10 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
             )
         elif plumbing.get("apply_blocked_reason"):
             advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
+            if persona == "claude-code":
+                advise += " " + _DOWNSIZE_CC_LEVER
+            elif persona == "mixed":
+                advise += _DOWNSIZE_MIXED_CC_NOTE
         proposals.append(CostProposal(
             kind="cost",
             analyzer="downsize",
@@ -436,17 +587,11 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
             estimated_recoverable_usd=row.delta_usd,
             estimated_recoverable_tokens=row.total_tokens,
             estimate_basis=row.estimate_basis,
-            # `projected_30d_delta_usd` is this row's own 30-day projection
-            # (mirrors the window-wide card's `monthly_savings_usd`). No
-            # per-row monthly-token figure exists, so tokens are extrapolated
-            # by the SAME window->30d ratio the dollar figure already carries
-            # (`projected_30d_delta_usd / delta_usd`) rather than duplicating
-            # a window_days parameter down through this helper.
-            estimated_monthly_usd=row.projected_30d_delta_usd,
-            estimated_monthly_tokens=(
-                round(row.total_tokens * (row.projected_30d_delta_usd / row.delta_usd))
-                if row.delta_usd > 0 else None
-            ),
+            # `estimated_monthly_usd`/`estimated_monthly_tokens` are left
+            # unset here for the same reason as the window-wide downsize card
+            # above (#273): `row.projected_30d_delta_usd` is this row's own
+            # `window_days`-based self-projection, not the shared central
+            # ratio. The central function fills these in uniformly.
             agent_id=row.agent_id if row.agent_id != "unknown" else "",
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
@@ -461,7 +606,7 @@ def _downsize_agent_proposals(finding: Any, config: Any) -> list[CostProposal]:
 
 
 def _placement_to_proposals(
-    finding: Any, *, pricing_mode: str = "api",
+    finding: Any, *, pricing_mode: str = "api", persona: str = "unknown",
 ) -> list[CostProposal]:
     """One card for the batch-placement candidates (advise-only).
 
@@ -475,8 +620,17 @@ def _placement_to_proposals(
     (CLAUDE.md anti-pattern #22: never show a figure the reader can't act
     on). Without this the web Review inbox showed a batch-placement dollar
     figure the CLI deliberately suppresses for the same finding.
+
+    ``persona`` gates the WHOLE card, not just the dollar figure: the Batch
+    API is a synchronous-endpoint replacement in the user's own APPLICATION
+    code, and an interactive Claude Code session has no application code of
+    its own to move to a batch lane — the lever is structurally unreachable
+    for that persona regardless of ``pricing_mode``. A ``"claude-code"``
+    window gets nothing here (not even the advise-only/no-dollar branch);
+    ``"mixed"``/``"sdk"``/``"unknown"`` are unaffected — the sdk share of a
+    mixed window can still act on it.
     """
-    if finding is None:
+    if finding is None or persona == "claude-code":
         return []
     candidates = list(getattr(finding, "candidates", []) or [])
     if not candidates:
@@ -1212,7 +1366,10 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
     ``estimated_recoverable_tokens`` / ``estimated_recoverable_usd``).
 
     ``estimated_recoverable_usd`` is carried straight off the analyzer's own
-    ``ServerDeadweight.estimated_tax_usd_90d`` — the analyzer already prices
+    ``ServerDeadweight.estimated_tax_usd_window`` — a WINDOW-scoped figure
+    with no projection folded in (#273: this used to be a fixed 90-day
+    projection, which made it incomparable to every other analyzer's window
+    figure and corrupted any sum across them). The analyzer already prices
     the token tax through ``core/pricing.py`` at the dominant model observed
     in that server's sessions (never a hardcoded rate; see
     ``deadweight._pricing_note``). Stays ``None`` when no priced model was
@@ -1276,12 +1433,9 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             },
             advise_text=advise,
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
-            estimated_recoverable_tokens=server.estimated_tax_tokens_90d or None,
-            estimated_recoverable_usd=server.estimated_tax_usd_90d,
-            estimate_basis=(
-                server.tax_construction
-                + " Projected over a 90-day window from the sessions observed."
-            ),
+            estimated_recoverable_tokens=server.estimated_tax_tokens_window or None,
+            estimated_recoverable_usd=server.estimated_tax_usd_window,
+            estimate_basis=server.tax_construction,
             advise_only=not plumbing.get("apply_capable", False),
             apply_capable=bool(plumbing.get("apply_capable")),
             apply_kind=str(plumbing.get("apply_kind", "")),
@@ -1304,9 +1458,13 @@ def _cluster_hash(value: Any) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Persona-gated fix modality — `script` / `reuse` / `verbosity` only.
+# Persona-gated fix modality — `script` / `reuse` only. (`verbosity` shares
+# the same write SURFACE — see its own module comment above `_verbosity_to_
+# proposals` — but never offers the write at all, for any persona: its
+# cohort-scoped flag would become a global CLAUDE.md rule if written, which
+# fails the no-quality-tax gate outright regardless of who reads it.)
 #
-# All three write the SAME class of artifact when apply-capable: a rung-1
+# Both write the SAME class of artifact when apply-capable: a rung-1
 # CLAUDE.md note or rung-2 `.claude/skills/<slug>/SKILL.md` file (see
 # `relearn_apply.default_target_path`). Nothing in an SDK-only service's
 # request path ever reads a CLAUDE.md or a `.claude/skills/` note — those are
@@ -1501,22 +1659,18 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
     """One proposal for the whole verbosity finding (unlike ``script``/
     ``reuse``, this is a single window-wide signal, not per-cluster).
 
-    Apply-capable at rung 1: a CLAUDE.md note carrying the finding's own
-    ``remedy_snippet`` plus its suggested ``max_tokens`` cap. This is the
-    least-grounded of the three analyzers by design (output length is not
-    waste), so the note leans on the finding's own honesty caveat rather than
-    asserting a saving. Left un-degraded to advise-only would strand the one
-    lever this analyzer already computes (the remedy snippet) with nowhere to
-    go; a workspace note is the same class of soft, orchestrator-read surface
-    the ``subagent`` rubric already uses, so this reuses that precedent
-    rather than inventing a new one.
-
-    The write is only actually offered for a ``"claude-code"``/``"mixed"``
-    ``persona`` — see ``_persona_gated_write_fields``. This is the sharpest
-    case of the three: the lever itself (``max_tokens``) is genuinely
-    SDK-actionable — an SDK caller can cap it in their own request — it is
-    only the CLAUDE.md *artifact* that is the wrong surface for them. Gating
-    still carries the cap as a ``suggestion`` so that lever isn't lost.
+    ALWAYS advise-only, regardless of ``persona`` — no rung-1 CLAUDE.md write
+    is ever offered here, unlike ``script``/``reuse`` which share the same
+    write machinery. A cohort-scoped flag (this task shape ran long vs its
+    OWN like-shaped peers) written as a global CLAUDE.md note would apply
+    blanket terseness pressure to every future task, including legitimately
+    verbose ones — the analyzer's own honesty caveat says output length is
+    not waste, so an enforced-looking file note fails that gate outright.
+    The recommendation is still carried as a copy-pasteable ``suggestion``
+    for every persona (never silently dropped), it just never becomes a
+    write. ``persona`` is accepted (and kept in the dispatcher's uniform
+    ``(f, persona=persona)`` call shape) but intentionally unused — see
+    above.
     """
     if finding is None:
         return []
@@ -1533,10 +1687,13 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
     )
     advise = remedy
     if max_tokens:
+        # A DATA POINT, not an enforceable cap — "keep responses under N
+        # tokens" reads as a rule once pasted anywhere; this states what
+        # similar sessions happened to do instead.
         advise += (
-            f" Suggested cap for this shape of task: keep responses under "
-            f"about {max_tokens:,} output tokens (the cohort baseline most "
-            f"sessions already sit under)."
+            f" For reference, similar sessions in this cohort typically "
+            f"finished under about {max_tokens:,} output tokens — a data "
+            f"point to weigh, not a limit to enforce."
         )
     advise = (advise + " " + caveat).strip()
     return [CostProposal(
@@ -1554,27 +1711,110 @@ def _verbosity_to_proposals(finding: Any, persona: str = "unknown") -> list[Cost
             "apply_sessions": total_candidates,
         },
         advise_text=advise,
+        suggestion=advise,
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
-        **_persona_gated_write_fields(persona, advise, rung=1, scope="project"),
     )]
 
 
-def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostProposal]:
+def _rightsize_target(subagent_finding: Any, config: Any) -> dict[str, Any]:
+    """The concrete agent file the compound offload card should name, if one
+    exists: the most expensive over-powered subagent that has its own
+    definition file, plus the cheaper model to pin in it.
+
+    Reuses ``_agent_model_plumbing`` — the same resolver the ``subagent`` card
+    already uses — rather than re-deriving a path, so the two cards can never
+    name different files for the same agent. Empty dict when the subagent
+    analyzer didn't run, nothing was flagged, or no flagged subagent has a
+    definition file; the card then states the right-sizing lever generically
+    instead of inventing an agent name.
+    """
+    if subagent_finding is None:
+        return {}
+    flagged = list(getattr(subagent_finding, "flagged", []) or [])
+    over_powered = [r for r in flagged if "over_powered" in (getattr(r, "flags", []) or [])]
+    if not over_powered:
+        return {}
+    try:
+        return _agent_model_plumbing(over_powered, config)
+    except Exception:
+        return {}
+
+
+def _compound_offload_fix(rightsize: dict[str, Any], fix_offload: str, fix_rightsize: str) -> str:
+    """The single rung-1 rule that carries BOTH halves of the compound lever.
+
+    One artifact, not two: the offload directive decides where context-heavy
+    work runs, the right-sizing directive decides what it runs on, and they
+    compound. Writing them as one block is what keeps this a consolidation of
+    the resend / subagent / downsize recommendations rather than a third card
+    on top of them.
+    """
+    parts = [fix_offload, fix_rightsize]
+    if rightsize:
+        parts.append(
+            f"Concretely: {rightsize['agent_name']} already runs oversized for "
+            f"the work it does — pin `model: {rightsize['proposed_model']}` in "
+            f"{rightsize['target_path']} and set its reasoning effort to match "
+            f"the task rather than inheriting the parent's."
+        )
+    return "\n\n".join(p for p in parts if p)
+
+
+def _rightsize_frontmatter_snippet(rightsize: dict[str, Any]) -> str:
+    """The copyable agent-file frontmatter for the right-sizing half.
+
+    Both keys live in the same ``.claude/agents/<name>.md`` frontmatter block,
+    so the second half of the compound fix is one paste, not two.
+    """
+    name = rightsize.get("agent_name") or "<subagent-name>"
+    model = rightsize.get("proposed_model") or "<cheaper-same-family-model>"
+    path = rightsize.get("target_path") or f".claude/agents/{name}.md"
+    return (
+        f"# {path} — frontmatter\n"
+        f"---\n"
+        f"name: {name}\n"
+        f"model: {model}\n"
+        f"reasoning_effort: low\n"
+        f"---"
+    )
+
+
+def _resend_to_proposals(
+    finding: Any, persona: str = "unknown",
+    subagent_finding: Any = None, config: Any = None,
+) -> list[CostProposal]:
     """One window-wide card for the ``resend`` (context re-send) finding.
 
-    Advise-only, and persona-gated like every other lever-bearing adapter (it
-    was the one that wasn't). Two levers exist and they are NOT interchangeable:
+    This card is COMPOUND by design: it consolidates what resend and subagent
+    right-sizing would otherwise say on separate cards, because the two are one
+    behavioural change (offload context-heavy work to a subagent, and size that
+    subagent to the work) applied through one rung-1 rule. Consolidating rather
+    than adding is deliberate — the Review inbox does not grow.
 
-    * ``/compact`` / a fresh session cuts the re-sent volume and is available
-      to EVERYONE — it is always the lead fix.
+    Persona-gated like every other lever-bearing adapter. Three levers exist
+    and they are NOT interchangeable:
+
+    * a rung-1 CLAUDE.md rule instructing offload of context-heavy sub-tasks
+      to subagents (``fix_subagent_offload``) is the DURABLE claude-code
+      lever: it persists across sessions and stops the repeated volume from
+      accumulating on the main thread in the first place. Apply-capable via
+      the same ``_persona_gated_write_fields`` machinery ``script`` /
+      ``reuse`` / ``verbosity`` already use, for a ``claude-code``/``mixed``
+      persona — see that helper.
+    * ``/compact`` / a fresh session is a MANUAL, per-session, transient
+      action available to everyone, but it fixes nothing going forward (a
+      real CC user who feels a session getting too full typically abandons
+      it and starts fresh anyway rather than compacting). It is carried only
+      as a secondary, immediate-relief note for an already-full session —
+      never the headline fix.
     * an SDK-side ``cache_control`` breakpoint is the SDK/API developer's
       ADDITIONAL lever. A Claude Code (or other agent-harness) window never
       constructs the request itself, so that snippet is not theirs to paste —
       showing it to them is the same wrong-audience defect the cache family
-      already avoids via ``_persona_gated_cache_fields``. Suppress it for a
-      ``claude-code`` persona and lead with ``/compact`` alone.
+      already avoids via ``_persona_gated_cache_fields``. Suppressed for a
+      ``claude-code`` persona, unchanged from before.
 
     ``ResendFinding.estimate_basis`` documents the discounted derivation; this
     adapter carries it verbatim. The caveat is carried ONCE via ``caveat=`` and
@@ -1594,11 +1834,47 @@ def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
         f"earlier turn (conservative lower bound; independent of whether "
         f"caching is enabled)."
     )
+    cost_of_waste_usd = getattr(finding, "cost_of_waste_usd", None)
+    if cost_of_waste_usd is not None:
+        evidence += (
+            f" That re-sent volume cost {_money(float(cost_of_waste_usd))} over "
+            f"the window — an observation, not a recoverable amount; the fix "
+            f"below returns a much smaller figure."
+        )
     fix_compaction = str(getattr(finding, "fix_compaction", "") or "")
     fix_cache_control = str(getattr(finding, "fix_cache_control", "") or "")
+    fix_subagent_offload = str(getattr(finding, "fix_subagent_offload", "") or "")
+    fix_rightsize = str(getattr(finding, "fix_rightsize", "") or "")
     # The cache_control snippet is the SDK lever only; a claude-code window
-    # can't paste it, so suppress it there and let /compact stand alone.
+    # can't paste it, so suppress it there — unchanged from before.
     cache_snippet = "" if persona == "claude-code" else fix_cache_control
+    rightsize = _rightsize_target(subagent_finding, config)
+
+    if persona in {"claude-code", "mixed"} and fix_subagent_offload:
+        compound_fix = _compound_offload_fix(rightsize, fix_subagent_offload, fix_rightsize)
+        advise = compound_fix
+        if fix_compaction:
+            advise = advise + " Immediate relief in an already-full session: " + fix_compaction
+        write_fields = _persona_gated_write_fields(
+            persona, compound_fix, rung=1, scope=rightsize.get("scope") or "project",
+        )
+        # resend's `suggestion` slot is reserved for the SDK cache_control
+        # snippet above, not the write-fallback text the helper would add
+        # for a "mixed" persona — drop it so the two don't collide.
+        write_fields.pop("suggestion", None)
+        # The second half of the compound fix: the agent-file frontmatter that
+        # pins model AND reasoning effort. Carried as the one-paste artifact
+        # because the rung-1 write lands in CLAUDE.md, and the apply machinery
+        # writes exactly one target per apply.
+        one_paste_fix = _rightsize_frontmatter_snippet(rightsize)
+    else:
+        advise = fix_compaction
+        write_fields = {
+            "advise_only": True, "apply_capable": False,
+            "rung": 0, "scope": "", "proposed_fix": "",
+        }
+        one_paste_fix = cache_snippet or fix_compaction
+
     return [CostProposal(
         kind="cost",
         analyzer="resend",
@@ -1612,14 +1888,23 @@ def _resend_to_proposals(finding: Any, persona: str = "unknown") -> list[CostPro
             "repeat_share": float(repeat_share),
             "repeat_share_median": getattr(finding, "repeat_share_median", None),
             "repeat_share_p90": getattr(finding, "repeat_share_p90", None),
+            "offloadable_share": getattr(finding, "offloadable_share", None),
+            "offload_recoverable_usd": getattr(finding, "offload_recoverable_usd", None),
+            "rightsize_recoverable_usd": getattr(finding, "rightsize_recoverable_usd", None),
+            "rightsize_agent_name": rightsize.get("agent_name", ""),
+            "rightsize_target_path": rightsize.get("target_path", ""),
         },
-        advise_text=fix_compaction,
+        advise_text=advise,
         suggestion=cache_snippet,
-        one_paste_fix=cache_snippet or fix_compaction,
+        one_paste_fix=one_paste_fix,
         estimated_recoverable_usd=getattr(finding, "estimated_recoverable_usd", None),
         estimated_recoverable_tokens=getattr(finding, "estimated_recoverable_tokens", None),
+        cost_of_waste_usd=cost_of_waste_usd,
+        cost_of_waste_tokens=getattr(finding, "cost_of_waste_tokens", None) or None,
+        cost_of_waste_basis=str(getattr(finding, "cost_of_waste_basis", "") or ""),
         estimate_basis=str(getattr(finding, "estimate_basis", "") or ""),
         caveat=str(getattr(finding, "caveat", "") or COST_CORRELATIONAL_CAVEAT),
+        **write_fields,
     )]
 
 
@@ -1639,6 +1924,46 @@ _COST_COMPUTING = threading.Event()
 
 def is_computing_cost_proposals() -> bool:
     return _COST_COMPUTING.is_set()
+
+
+#: The Review inbox's cross-reference for waste this rollup deliberately does
+#: NOT sum as a peer card (issue #326) — currently only ``summarize``, whose
+#: own three reasons for staying out of ``COST_ANALYZERS`` live on that
+#: constant's docstring. This dict is what ties those two together: the
+#: reasons stay valid, but the CONSEQUENCE (its dollars invisible from the
+#: Review inbox entirely) is fixed by stating the total and linking to its
+#: own surface, exactly like a "N proposals hidden, see X" footnote.
+EXCLUDED_HREF_SUMMARIZE = "#/optimize/summarize"
+
+
+def _excluded_summarize_block(
+    report: Any, *, ratio: float | None,
+) -> dict[str, Any] | None:
+    """The ``summarize`` finding's own recoverable total, on the SAME 30-day
+    basis every other proposal here is projected onto (issue #326's "keep
+    the time bases identical" requirement) — ``None`` when the analyzer
+    didn't run or found nothing, so an empty/absent finding never renders a
+    fabricated "$0 available" line."""
+    finding = (getattr(report, "findings", None) or {}).get("summarize")
+    usd = getattr(finding, "estimated_recoverable_usd", None) if finding is not None else None
+    tokens = getattr(finding, "estimated_recoverable_tokens", None) if finding is not None else None
+    if usd is None and tokens is None:
+        return None
+    scale = _effective_ratio("per_session", ratio)
+    return {
+        "estimated_recoverable_usd": usd,
+        "estimated_recoverable_tokens": tokens,
+        "estimated_monthly_usd": round(usd * scale, 6) if usd is not None else None,
+        "estimated_monthly_tokens": round(tokens * scale) if tokens is not None else None,
+        "estimate_basis": str(getattr(finding, "estimate_basis", "") or ""),
+        "href": EXCLUDED_HREF_SUMMARIZE,
+        "label": "Summarize",
+        "reason": (
+            "has its own review surface (curate -> diff -> apply) this "
+            "single-card rollup can't represent; not summed in, but not "
+            "hidden either"
+        ),
+    }
 
 
 def recompute_cost_proposals(
@@ -1669,7 +1994,14 @@ def recompute_cost_proposals(
     """
     from datetime import timedelta
 
-    from tokenjam.core.framing import dominant_plan, plan_tier_mix, pricing_mode_for
+    from tokenjam.core.framing import (
+        agent_persona_mix,
+        config_declared_plan,
+        dominant_persona,
+        dominant_plan,
+        plan_tier_mix,
+        pricing_mode_for,
+    )
     from tokenjam.core.optimize import relearn_store
     from tokenjam.core.optimize.runner import build_report
     from tokenjam.utils.time_parse import utcnow
@@ -1682,21 +2014,48 @@ def recompute_cost_proposals(
             effective_window_days = max(1, window_days)
             until = utcnow()
             since = until - timedelta(days=effective_window_days)
+            conn = getattr(db, "conn", None)
+            # Persona decides which cost analyzers are worth running at all —
+            # one with no fix this persona can apply is dropped BEFORE the
+            # report is built, so it never queries and never reaches the
+            # inbox. `build_report` applies the same gate internally (it is
+            # the choke point); selecting the persona-scoped list here keeps
+            # this surface honest on its own terms rather than relying on the
+            # callee to undo an over-broad request.
+            persona = dominant_persona(
+                agent_persona_mix(conn, since, until, agent_id=agent_id) if conn is not None else {},
+                declared_plan=config_declared_plan(config),
+            )
             report = build_report(
                 db, config, since, until, agent_id=agent_id,
-                findings=list(COST_ANALYZERS),
+                # `summarize` is deliberately NOT a COST_ANALYZER (it owns its
+                # own curate/diff surface and has no adapter here, so it
+                # contributes no card), but it IS built: it is the only
+                # analyzer that measures how much standing context the agent
+                # files already carry, and the write budget spends against
+                # that measurement. Without it the two halves of the loop stay
+                # blind to each other and the inbox can offer new permanent
+                # rules for a file the same report says to compress. It is
+                # appended to the PERSONA-SCOPED cost list, not the raw one:
+                # the skip gate still decides which cost analyzers run.
+                findings=[*cost_analyzers_for_persona(persona), "summarize"],
             )
             # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so
             # the web Review inbox suppresses the same dollar figures the CLI
             # does (placement's batch-lever dollars, currently the only card
             # this gates — see `_placement_to_proposals`).
-            conn = getattr(db, "conn", None)
             plan_mix = plan_tier_mix(conn, since, until, agent_id) if conn is not None else {}
             pricing_mode = pricing_mode_for(dominant_plan(plan_mix))
             proposals = cost_proposals_from_report(
                 report, config=config, pricing_mode=pricing_mode,
                 window_days=float(effective_window_days),
             )
+            active_days = int(getattr(report.window, "active_days", 0) or 0)
+            n_sessions = int(getattr(report.window, "sessions", 0) or 0)
+            ratio, _label = compute_projection_ratio(
+                float(effective_window_days), active_days, n_sessions,
+            )
+            excluded_summarize = _excluded_summarize_block(report, ratio=ratio)
         except Exception as exc:
             try:
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
@@ -1705,7 +2064,15 @@ def recompute_cost_proposals(
             return []
 
         try:
-            relearn_store.write_cost_proposals(proposals, config=config)
+            relearn_store.write_cost_proposals(
+                proposals, config=config,
+                window_days=effective_window_days,
+                active_days=active_days,
+                n_sessions=n_sessions,
+                excluded=(
+                    {"summarize": excluded_summarize} if excluded_summarize else {}
+                ),
+            )
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
             pass
@@ -1755,6 +2122,88 @@ def trigger_background_cost_recompute(
     return True
 
 
+# --------------------------------------------------------------------------- #
+# The ONE central 30-day-pace projection (#273's approved design). Deleted
+# every per-analyzer self-projection (deadweight's old fixed 90-day factor,
+# downsize's own `monthly_savings_usd` feeding the shared field) in favor of
+# this single function, applied once here and again in
+# `estimated_recoverable_rollup` — never inside an analyzer — so every cost
+# analyzer's "monthly" figure is on the SAME basis and a sum across them
+# never silently mixes bases again.
+# --------------------------------------------------------------------------- #
+
+#: Guardrails: below any of these, the window's data is too thin to trust a
+#: forward projection from — show the observed figure, unscaled, instead.
+#: (Below this many days the window itself is barely wider than the ratio's
+#: own 30-day target, so a projection would mostly be noise.)
+MIN_WINDOW_DAYS_FOR_PROJECTION = 14
+#: Below this many distinct active days, the "sessions per active day" pace
+#: is estimated from too few data points to extrapolate honestly.
+MIN_ACTIVE_DAYS_FOR_PROJECTION = 8
+#: Below this many total sessions, there isn't enough volume for a pace
+#: figure to mean anything.
+MIN_SESSIONS_FOR_PROJECTION = 20
+#: Upper bound on the ratio — never claim more than 3x the observed window
+#: figure, however sparse the user's active days were.
+MAX_PROJECTION_RATIO = 3.0
+
+OBSERVED_LABEL = "observed"
+PROJECTED_LABEL = "per 30 days"
+
+
+def compute_projection_ratio(
+    window_days: float, active_days: int, n_sessions: int,
+) -> tuple[float | None, str]:
+    """The single ratio every cost analyzer's window figure is multiplied by
+    to get its 30-day-pace projection, and the label to render beside it.
+
+    ``r = clamp(30 / active_days, floor, MAX_PROJECTION_RATIO)`` where
+    ``active_days`` is the count of distinct calendar days in the window with
+    >=1 session (``WindowSummary.active_days``) — projecting on the user's
+    OWN observed pace, not a fixed multiplier on the window length (the bug
+    this replaces: a shrinking window inflated a fixed-days-over-window_days
+    ratio unboundedly). ``floor`` is ``1.0`` only when ``window_days <= 30``
+    (a real month's worth of pace can't be claimed to be LESS than what was
+    already observed over a sub-month window); a window LONGER than 30 days
+    may legitimately normalize DOWN below 1.0 — that's not a bug, it's
+    averaging a longer observation back down to a 30-day figure.
+
+    Returns ``(None, "observed")`` — no projection at all — when the window
+    is too thin to trust one: fewer than ``MIN_WINDOW_DAYS_FOR_PROJECTION``
+    days, fewer than ``MIN_ACTIVE_DAYS_FOR_PROJECTION`` active days, or fewer
+    than ``MIN_SESSIONS_FOR_PROJECTION`` sessions. A caller sees ``None`` and
+    renders the observed (window) figure labeled "observed in the last W
+    days" instead of "per 30 days" — never silently substitutes 1.0 for the
+    ratio and pretends that's a projection.
+
+    Deliberately NOT provided as an alternative basis: peak-single-day or a
+    p90-daily rate. Either cherry-picks the user's single worst day/week,
+    which is the first thing a skeptic attacks (#273's explicit prohibition)
+    — the mean pace over ALL active days is the only basis used here.
+    """
+    if (
+        window_days < MIN_WINDOW_DAYS_FOR_PROJECTION
+        or active_days < MIN_ACTIVE_DAYS_FOR_PROJECTION
+        or n_sessions < MIN_SESSIONS_FOR_PROJECTION
+    ):
+        return None, OBSERVED_LABEL
+    raw = 30.0 / active_days
+    ratio = min(raw, MAX_PROJECTION_RATIO)
+    if window_days <= 30:
+        ratio = max(ratio, 1.0)
+    return ratio, PROJECTED_LABEL
+
+
+def _effective_ratio(scaling: str, ratio: float | None) -> float:
+    """The ratio actually applied to ONE proposal: a `"one_time"` finding is
+    never rescaled regardless of the window's pace (its monthly figure always
+    equals its window figure), and a `None` ratio (guardrails blocked the
+    projection) means nothing is scaled either."""
+    if scaling == "one_time" or ratio is None:
+        return 1.0
+    return ratio
+
+
 def cost_proposals_from_report(
     report: Any, config: Any = None, *, pricing_mode: str = "api",
     window_days: float = 30.0,
@@ -1779,68 +2228,223 @@ def cost_proposals_from_report(
     so existing callers that don't know their caller's plan keep today's
     behaviour.
 
-    ``script`` / ``reuse`` / ``verbosity`` read ``report.persona`` (set once
-    by ``runner.build_report`` — see ``AnalyzerContext.persona``) to decide
-    whether their rung-1/rung-2 workspace write is offered at all — see
-    ``_persona_gated_write_fields``. The whole ``cache`` family (``cache`` /
-    ``cache_thrash`` / ``cache-recommend``) reads the same ``persona`` to
-    decide whether their cache_control instruction is shown at all — see
-    ``_persona_gated_cache_fields``; unlike script/reuse/verbosity there is no
-    write to gate, only the instruction text. A report built without a
+    ``script`` / ``reuse`` read ``report.persona`` (set once by ``runner.
+    build_report`` — see ``AnalyzerContext.persona``) to decide whether their
+    rung-1/rung-2 workspace write is offered at all — see
+    ``_persona_gated_write_fields``. ``verbosity`` reads the same finding
+    shape but never offers a write for ANY persona (see ``_verbosity_to_
+    proposals``) — a cohort-scoped flag written as a global CLAUDE.md rule
+    fails the no-quality-tax gate regardless of who would read it. The whole
+    ``cache`` family (``cache`` / ``cache_thrash`` / ``cache-recommend``)
+    reads the same ``persona`` to decide whether their cache_control
+    instruction is shown at all — see ``_persona_gated_cache_fields``; unlike
+    script/reuse there is no write to gate, only the instruction text.
+    ``downsize`` reads the same ``persona`` to swap its CTA for the
+    claude-code-actionable levers (``tj route export`` / ``tj optimize
+    subagent`` / ``/compact``) instead of a raw model-swap instruction that
+    persona can't act on — see ``_DOWNSIZE_CC_LEVER``. ``placement`` reads it
+    to suppress the card outright for a ``"claude-code"`` window: the Batch
+    API is a lever in the user's own application code, which an interactive
+    session doesn't have. A report built without a
     ``persona`` field (e.g. hand-constructed in a test) defaults to
-    ``"unknown"``, which keeps the script/reuse/verbosity write off (that
-    helper's conservative default) while leaving the cache family's
-    instruction on (that helper's conservative default runs the other way —
-    see its own docstring) — neither ever assumes ``"claude-code"``.
+    ``"unknown"``, which keeps the script/reuse write off (that helper's
+    conservative default) while leaving the cache family's instruction on
+    (that helper's conservative default runs the other way — see its own
+    docstring) — neither ever assumes ``"claude-code"``.
 
     ``window_days`` (default 30 — ``DEFAULT_COST_WINDOW_DAYS``, matching the
-    daemon's own default look-back) is the monthly-basis extrapolation factor
-    (behavioral requirement #1): every proposal's ``estimated_monthly_usd``/
-    ``estimated_monthly_tokens`` that an adapter didn't already populate
-    (only ``downsize`` does, from its own 30-day projection) is stamped here
-    as ``window_figure * (30 / window_days)`` — one generic pass so no
-    adapter has to reimplement the arithmetic. A caller building a report
-    over a non-30-day window (e.g. ``tj optimize --since 7d``) still gets an
-    honest monthly figure rather than a raw window total mislabeled "/ mo".
+    daemon's own default look-back) feeds ``compute_projection_ratio`` along
+    with ``report.window.active_days``/``report.window.sessions`` (#273):
+    every proposal's ``estimated_monthly_usd``/``estimated_monthly_tokens``
+    is stamped here as ``window_figure * ratio`` — the SAME ratio for every
+    proposal, computed ONCE, respecting each proposal's own ``scaling``
+    (``"one_time"`` is never rescaled). No adapter sets these fields itself
+    any more (``downsize`` used to; #273 removed that self-projection so a
+    later scan over a non-default window can't leave it on a different basis
+    than everyone else). A caller building a report over a non-30-day window
+    (e.g. ``tj optimize --since 7d``) still gets an honest monthly figure
+    rather than a raw window total mislabeled "/ mo" — or, when the window is
+    too thin to trust a projection from (see ``compute_projection_ratio``'s
+    guardrails), the unscaled observed figure instead of an invented one.
     """
     findings = getattr(report, "findings", {}) or {}
     persona = str(getattr(report, "persona", "") or "unknown")
+    window = getattr(report, "window", None)
+    active_days = int(getattr(window, "active_days", 0) or 0)
+    n_sessions = int(getattr(window, "sessions", 0) or 0)
+    ratio, _label = compute_projection_ratio(window_days, active_days, n_sessions)
     proposals: list[CostProposal] = []
+
+    # Second half of the persona skip gate. `build_report` already refuses to
+    # RUN an analyzer with no fix for this persona, so on the live path these
+    # findings are absent anyway; `_pick` makes the inbox correct by its own
+    # construction rather than by trusting how the report was built — a report
+    # assembled elsewhere (a cached payload, a wider selection, a test) can
+    # still carry the finding, and a card the user cannot apply must not
+    # appear in Review either way. A `None` finding contributes nothing.
+    disabled = _disabled_analyzers(persona)
+
+    def _pick(name: str) -> Any:
+        return None if name in disabled else findings.get(name)
+
     adapters = (
-        (lambda f: _downsize_to_proposal(f, config), getattr(report, "downgrade", None)),
-        (lambda f: _cache_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_uncached_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_thrash_to_proposals(f, persona=persona), findings.get("cache")),
-        (lambda f: _cache_lookback_to_proposals(f, persona=persona), findings.get("cache")),
         (
-            lambda f: _cache_recommend_to_proposals(f, findings.get("cache"), persona=persona),
-            findings.get("cache-recommend"),
+            lambda f: _downsize_to_proposal(f, config, persona=persona),
+            getattr(report, "downgrade", None),
         ),
-        (_trim_to_proposals, findings.get("trim")),
-        (lambda f: _subagent_to_proposals(f, config), findings.get("subagent")),
-        (lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode), findings.get("placement")),
-        (_deadweight_to_proposals, findings.get("deadweight")),
-        (lambda f: _script_to_proposals(f, persona=persona), findings.get("script")),
-        (lambda f: _reuse_to_proposals(f, persona=persona), findings.get("reuse")),
-        (lambda f: _verbosity_to_proposals(f, persona=persona), findings.get("verbosity")),
-        (lambda f: _resend_to_proposals(f, persona=persona), findings.get("resend")),
+        (lambda f: _cache_to_proposals(f, persona=persona), _pick("cache")),
+        (lambda f: _cache_uncached_to_proposals(f, persona=persona), _pick("cache")),
+        (lambda f: _cache_thrash_to_proposals(f, persona=persona), _pick("cache")),
+        (lambda f: _cache_lookback_to_proposals(f, persona=persona), _pick("cache")),
+        (
+            lambda f: _cache_recommend_to_proposals(f, _pick("cache"), persona=persona),
+            _pick("cache-recommend"),
+        ),
+        (_trim_to_proposals, _pick("trim")),
+        (lambda f: _subagent_to_proposals(f, config), _pick("subagent")),
+        (
+            lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode, persona=persona),
+            _pick("placement"),
+        ),
+        (_deadweight_to_proposals, _pick("deadweight")),
+        (lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
+        (lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
+        (lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),
+        (
+            # The resend card is compound: it names the concrete over-powered
+            # subagent (from the `subagent` finding) that the offload rule
+            # should also right-size, so the two levers land as one card rather
+            # than two. Reading the sibling finding here, not in the analyzer,
+            # keeps `context_resend.py` free of a cross-analyzer dependency.
+            lambda f: _resend_to_proposals(
+                f, persona=persona, subagent_finding=_pick("subagent"), config=config,
+            ),
+            _pick("resend"),
+        ),
     )
     for adapter, finding in adapters:
         try:
             proposals.extend(adapter(finding))
         except Exception:
             continue
-    return [_with_monthly_extrapolation(p, window_days) for p in proposals]
+    proposals = _apply_write_budget(proposals, report, window_days)
+    return [_with_rollup_projection(p, ratio) for p in proposals]
 
 
-def _with_monthly_extrapolation(proposal: CostProposal, window_days: float) -> CostProposal:
+def _write_budget_basis(report: Any, window_days: float) -> Any:
+    """The shared 30-day projection basis for this report's window.
+
+    Reads ``active_days``/``sessions`` off the window summary the runner already
+    computed. A hand-constructed report (a test, an older cached one) carries
+    neither, which resolves to an unprojected basis with a zero session count:
+    the netting then charges a rule nothing and only the quality floor and the
+    write cap apply. Degrading toward "claim no standing cost" is the only safe
+    direction, since the alternative would invent one.
+    """
+    from tokenjam.core.optimize.projection import build_projection_basis
+
+    window = getattr(report, "window", None)
+    return build_projection_basis(
+        float(getattr(window, "days", 0.0) or window_days or 0.0),
+        int(getattr(window, "active_days", 0) or 0),
+        int(getattr(window, "sessions", 0) or 0),
+    )
+
+
+def _apply_write_budget(
+    proposals: list[CostProposal], report: Any, window_days: float,
+) -> list[CostProposal]:
+    """Net every write-bearing card against what its rule costs to KEEP, and
+    bound how many permanent rules the window may offer.
+
+    Only cards that actually write something enter the budget: ``apply_capable``
+    with a rung-1/rung-2 ``proposed_fix``. Everything else (the advise-only
+    majority, the model-id swaps, the MCP-server removals) writes no standing
+    prompt text and passes through with its figures untouched.
+
+    Candidates are grouped by ``(analyzer, rung)`` because that is genuinely one
+    block: every ``reuse`` cluster writes the same skeleton note, every
+    ``script`` cluster the same script note. Nine clusters used to mean nine
+    identical appended blocks; now the family's largest carries the write and
+    its siblings say they are covered by it. A suppressed write degrades the
+    same way the persona gate already degrades one: advise-only, with the
+    identical text still carried as a copyable ``suggestion``.
+    """
+    from tokenjam.core.optimize import write_budget as wb
+
+    basis = _write_budget_basis(report, window_days)
+    findings = getattr(report, "findings", {}) or {}
+    budget = wb.build_write_budget(
+        lane_budget_tokens=wb.COST_WRITE_BUDGET_TOKENS,
+        lane_max_writes=wb.COST_MAX_OFFERED_WRITES,
+        # The summarize analyzer's own measurement of the files these rules
+        # append to. Absent (it is deliberately not a COST_ANALYZER, so a
+        # caller must ask for it) leaves the lane cap standing alone.
+        existing_agent_file_tokens=wb.measured_agent_file_tokens(
+            findings.get("summarize"),
+        ),
+    )
+
+    candidates = [
+        wb.WriteCandidate(
+            key=p.signature,
+            family=f"{p.analyzer}:rung{p.rung}",
+            rung=p.rung,
+            artifact_text=p.proposed_fix,
+            gross_tokens=int(p.estimated_recoverable_tokens or 0),
+            gross_usd=p.estimated_recoverable_usd,
+        )
+        for p in proposals
+        if p.apply_capable and p.rung >= 1 and p.proposed_fix
+    ]
+    if not candidates:
+        return proposals
+    decisions = wb.allocate_writes(candidates, budget, basis)
+
+    out: list[CostProposal] = []
+    for p in proposals:
+        decision = decisions.get(p.signature)
+        if decision is None or not (p.apply_capable and p.rung >= 1 and p.proposed_fix):
+            out.append(p)
+            continue
+        updates: dict[str, Any] = {
+            "gross_recoverable_usd": p.estimated_recoverable_usd,
+            "gross_recoverable_tokens": p.estimated_recoverable_tokens,
+            "estimated_recoverable_tokens": (
+                decision.claimed_tokens if p.estimated_recoverable_tokens is not None else None
+            ),
+            "estimated_recoverable_usd": decision.claimed_usd,
+            "standing_cost_tokens_per_session": decision.standing_tokens_per_session,
+            "standing_cost_tokens": decision.standing_tokens,
+            "standing_cost_usd": decision.standing_usd,
+            "standing_cost_basis": decision.basis,
+            "payback_ratio": decision.payback_ratio,
+            "net_negative": decision.net_negative,
+            "write_offered": decision.offered,
+            "write_blocked_reason": decision.reason,
+        }
+        if not decision.offered:
+            updates.update(
+                apply_capable=False, advise_only=True, rung=0, scope="",
+                proposed_fix="", suggestion=p.suggestion or p.proposed_fix,
+                apply_blocked_reason=decision.reason,
+            )
+        out.append(replace(p, **updates))
+    return out
+
+
+def _with_rollup_projection(proposal: CostProposal, ratio: float | None) -> CostProposal:
     """Fill in ``estimated_monthly_usd``/``estimated_monthly_tokens`` from the
-    window figure when an adapter didn't already set one (see
-    ``cost_proposals_from_report``'s ``window_days`` docstring). Returns a NEW
-    ``CostProposal`` (``dataclasses.replace``) rather than mutating the one
-    the adapter built — every proposal here is otherwise treated as an
-    immutable, already-complete record."""
-    scale = (30.0 / window_days) if window_days and window_days > 0 else 1.0
+    window figure using the one shared ``ratio`` (``None`` when
+    ``compute_projection_ratio``'s guardrails blocked projection, in which
+    case the monthly figure equals the observed window figure unscaled).
+    Respects the proposal's own ``scaling`` — a ``"one_time"`` finding is
+    never rescaled regardless of ``ratio``. Returns a NEW ``CostProposal``
+    (``dataclasses.replace``) rather than mutating the one the adapter built
+    — every proposal here is otherwise treated as an immutable,
+    already-complete record. Only fills a field an adapter left ``None``; no
+    current adapter sets these itself (#273), but a future one may."""
+    scale = _effective_ratio(proposal.scaling, ratio)
     updates: dict[str, Any] = {}
     if proposal.estimated_monthly_usd is None and proposal.estimated_recoverable_usd is not None:
         updates["estimated_monthly_usd"] = round(proposal.estimated_recoverable_usd * scale, 6)
@@ -1856,8 +2460,10 @@ def backfill_legacy_monthly_fields(proposal: dict[str, Any]) -> dict[str, Any]:
     """Read-time backward compat for a cached cost-proposal dict written
     before the monthly-basis fields existed on ``CostProposal``.
 
-    ``recompute_cost_proposals`` always runs every fresh proposal through
-    ``_with_monthly_extrapolation`` before it's written to disk, so a cache
+    ``recompute_cost_proposals`` always runs every fresh proposal through the
+    central projection pass (``cost_proposals_from_report`` applies the one
+    ``compute_projection_ratio`` via ``_with_rollup_projection``) before it's
+    written to disk, so a cache
     produced by the CURRENT build already carries both
     ``estimated_monthly_usd``/``estimated_monthly_tokens`` whenever a window
     figure exists — this never touches those. It only fires for an entry that
@@ -1892,6 +2498,10 @@ def estimated_recoverable_rollup(
     proposals: list[Any],
     *,
     window_days: int = DEFAULT_COST_WINDOW_DAYS,
+    active_days: int = 0,
+    n_sessions: int = 0,
+    relearn_clusters: list[Any] | None = None,
+    excluded: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Sum ``estimated_recoverable_usd`` across ``proposals``, deduplicated by
     ``signature`` (a proposal's stable identity — see the ``CostProposal``
@@ -1917,7 +2527,48 @@ def estimated_recoverable_rollup(
     ``proposal_count``, and say so against ``deduplicated_proposal_count`` when
     coverage is partial: the token sum is a floor, not a total.
 
+    Both ``estimated_recoverable_usd``/``estimated_recoverable_tokens`` stay
+    the raw OBSERVED (window-scoped) sums — unchanged contract, so an
+    existing caller reading these two keys keeps seeing exactly what it saw
+    before. #273 adds a SEPARATE, single-basis 30-day projection alongside
+    them (never folded into the same field the window figure lives in, per
+    the Recoverable-savings contract): ``projected_usd_30d``/
+    ``projected_tokens_30d`` are each proposal's window figure multiplied by
+    the ONE ratio ``compute_projection_ratio(window_days, active_days,
+    n_sessions)`` computes (respecting each proposal's own ``scaling`` —
+    ``"one_time"`` is never rescaled), summed the same way. ``active_days``/
+    ``n_sessions`` default to 0 (guardrails always block the projection),
+    so a caller that doesn't yet know them gets the honest "observed" state
+    rather than a fabricated ratio.
+
     Tagged ``estimated`` — this is a heuristic figure, never a measured one.
+
+    ``relearn_clusters`` (issue #326) folds the relearn detector's proposals
+    into the SAME headline, on the same 30-day basis — the only basis relearn
+    has (it scans unbounded history, so it has no fixed window to report an
+    ``estimated_recoverable_usd`` against; see ``RelearnCluster``'s own
+    docstring). Deduplicated by ``signature`` exactly like a cost proposal.
+    Each cluster's ``estimated_monthly_usd``/``estimated_monthly_tokens`` is
+    ALREADY a 30-day-pace figure, so it is added straight into
+    ``projected_usd_30d``/``projected_tokens_30d`` with no further scaling —
+    and deliberately NEVER into ``estimated_recoverable_usd``/
+    ``estimated_recoverable_tokens``, which would silently mix a monthly
+    figure into a window-observed sum (the two analyzers are not on the same
+    time basis, and the window fields' contract is unchanged, per above).
+    ``relearn_monthly_usd``/``relearn_monthly_tokens`` carry relearn's own
+    contribution separately so a caller can render "cost advisories: $X + N
+    recurring fixes: $Y" without re-deriving the split from the combined
+    total.
+
+    ``excluded`` (issue #326) is a passthrough for waste this rollup
+    deliberately does NOT sum in — currently ``summarize``, which has its own
+    review surface (see ``COST_ANALYZERS``'s docstring for why) and would
+    double-count the write budget if folded in as a peer card. Never summed
+    into any total here; carried on the result unchanged so the Review inbox
+    can render "$X more available in Summarize -> review it" instead of
+    silently omitting the product's largest recoverable figure. ``None``
+    becomes ``{}`` — "nothing known to be excluded", not "excluded total is
+    zero".
     """
     seen: dict[str, dict[str, Any]] = {}
     for p in proposals:
@@ -1927,12 +2578,18 @@ def estimated_recoverable_rollup(
             continue  # empty/duplicate signature never counts twice
         seen[sig] = row
 
+    ratio, label = compute_projection_ratio(window_days, active_days, n_sessions)
+
     contributing: list[dict[str, Any]] = []
     by_analyzer: dict[str, dict[str, Any]] = {}
     total_usd = 0.0
     total_tokens = 0
     token_proposal_count = 0
+    projected_usd = 0.0
+    projected_tokens = 0
     for row in seen.values():
+        scale = _effective_ratio(str(row.get("scaling") or "per_session"), ratio)
+
         # The token sum is counted INDEPENDENTLY of the dollar sum: the two
         # estimates are populated by different analyzers and a proposal can
         # carry either one alone. Folding tokens in only where a dollar
@@ -1941,6 +2598,7 @@ def estimated_recoverable_rollup(
         tokens = row.get("estimated_recoverable_tokens")
         if tokens is not None:
             total_tokens += int(tokens)
+            projected_tokens += round(int(tokens) * scale)
             token_proposal_count += 1
 
         usd = row.get("estimated_recoverable_usd")
@@ -1948,6 +2606,7 @@ def estimated_recoverable_rollup(
             continue
         usd = float(usd)
         total_usd += usd
+        projected_usd += usd * scale
         analyzer = str(row.get("analyzer") or "unknown")
         entry = by_analyzer.setdefault(analyzer, {"analyzer": analyzer, "count": 0, "usd": 0.0})
         entry["count"] += 1
@@ -1956,6 +2615,34 @@ def estimated_recoverable_rollup(
             "signature": row.get("signature"), "analyzer": analyzer,
             "title": row.get("title"), "usd": round(usd, 6),
         })
+
+    # Fold the relearn detector's OWN 30-day-basis figures into the projected
+    # total (never into the window-observed one — see the docstring). Deduped
+    # by signature the same way cost proposals are, independently of them
+    # (relearn and cost-proposal signatures live in different namespaces, so
+    # there is no cross-set collision to guard against).
+    relearn_seen: dict[str, dict[str, Any]] = {}
+    for c in relearn_clusters or []:
+        row = asdict(c) if is_dataclass(c) and not isinstance(c, type) else dict(c)
+        sig = str(row.get("signature") or "")
+        if not sig or sig in relearn_seen:
+            continue
+        relearn_seen[sig] = row
+    relearn_monthly_usd = 0.0
+    relearn_monthly_tokens = 0
+    relearn_priced_count = 0
+    for row in relearn_seen.values():
+        toks = row.get("estimated_monthly_tokens")
+        if toks is not None:
+            relearn_monthly_tokens += int(toks)
+        usd = row.get("estimated_monthly_usd")
+        if usd is None:
+            continue
+        usd = float(usd)
+        relearn_monthly_usd += usd
+        relearn_priced_count += 1
+    projected_usd += relearn_monthly_usd
+    projected_tokens += relearn_monthly_tokens
 
     proposal_count = len(contributing)
     # Denominator for BOTH coverage claims: every open, deduplicated proposal,
@@ -1988,6 +2675,29 @@ def estimated_recoverable_rollup(
             f"proposal(s); the rest carry no token estimate, so it is a "
             f"floor, not a total."
         )
+    if ratio is not None:
+        disclosure = (
+            f"Projected to a 30-day month at your own pace: "
+            f"{n_sessions / active_days:.1f} sessions per active coding day, "
+            f"measured from {n_sessions} sessions across {active_days} active "
+            f"days in the last {window_days} days."
+        )
+    else:
+        disclosure = (
+            f"Observed in the last {window_days} days ({n_sessions} sessions "
+            f"across {active_days} active days) — not enough data to project "
+            f"a 30-day pace yet (needs >= {MIN_WINDOW_DAYS_FOR_PROJECTION} "
+            f"days, >= {MIN_ACTIVE_DAYS_FOR_PROJECTION} active days, and "
+            f">= {MIN_SESSIONS_FOR_PROJECTION} sessions)."
+        )
+    if relearn_priced_count:
+        disclosure += (
+            f" Recurring-mistake fixes add ${round(relearn_monthly_usd, 2)}/mo "
+            f"across {relearn_priced_count} of {len(relearn_seen)} open, "
+            f"deduplicated cluster(s) (already a 30-day-pace figure — the "
+            f"detector scans unbounded history, so it has no window to "
+            f"observe a figure over); included in projected_usd_30d only."
+        )
 
     return {
         "estimated_recoverable_usd": round(total_usd, 6),
@@ -1996,6 +2706,18 @@ def estimated_recoverable_rollup(
         "token_proposal_count": token_proposal_count,
         "deduplicated_proposal_count": deduplicated_proposal_count,
         "window_days": window_days,
+        "active_days": active_days,
+        "n_sessions": n_sessions,
+        "projection_ratio": ratio,
+        "projection_label": label,
+        "projected_usd_30d": round(projected_usd, 6),
+        "projected_tokens_30d": projected_tokens,
+        "relearn_monthly_usd": round(relearn_monthly_usd, 6),
+        "relearn_monthly_tokens": relearn_monthly_tokens,
+        "relearn_cluster_count": len(relearn_seen),
+        "relearn_priced_cluster_count": relearn_priced_count,
+        "excluded": excluded or {},
+        "disclosure": disclosure,
         "by_analyzer": sorted(by_analyzer.values(), key=lambda x: x["analyzer"]),
         "contributing": contributing,
         "estimate_confidence": COST_ESTIMATE_CONFIDENCE,

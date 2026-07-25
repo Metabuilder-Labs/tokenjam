@@ -37,7 +37,7 @@ from tokenjam.core.models import (
 )
 from tokenjam.core.transcript import _block_text
 from tokenjam.core.usage import assistant_message_key, parse_usage
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +209,26 @@ def _user_prompt_text(record: dict) -> str:
     return _block_text(msg.get("content"))
 
 
+def _read_project_claude_md(cwd: str | None) -> str:
+    """Best-effort read of `<cwd>/CLAUDE.md` — the one piece of Claude Code's
+    actual system prompt that's recoverable on this machine (#272). The
+    on-disk session transcript never records the system block CC sends the
+    API (verified: it appears nowhere in a real transcript, even the first
+    turn), so there is no captured field to source it from; CLAUDE.md is read
+    straight off disk instead. It's genuinely resent unchanged on every call
+    for this project — the chat-completions API is stateless, so the full
+    system prompt goes out with every request — which is exactly the
+    stable, repeated prefix cache-recommend looks for. Returns "" when cwd is
+    unknown or the file is missing/unreadable; never raises.
+    """
+    if not cwd:
+        return ""
+    try:
+        return (Path(cwd) / "CLAUDE.md").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _provider_for_model(model: str) -> str:
     """Best-effort provider inference from a Claude Code model name."""
     if model.startswith("claude"):
@@ -238,7 +258,11 @@ def parse_claude_code_session(
     leaves every span's ``attributes`` exactly as before — content extraction
     is strictly opt-in and stays 100% local:
       - ``capture.prompts``     -> ``gen_ai.prompt.content`` (the triggering
-                                   human prompt) on the assistant LLM span.
+                                   human prompt) on the assistant LLM span,
+                                   plus ``tokenjam.system_prefix.content`` (the
+                                   project's ``CLAUDE.md``, read straight off
+                                   disk — the actually-reused cacheable prefix
+                                   CC resends every call; #272) when found.
       - ``capture.completions`` -> ``gen_ai.completion.content`` (the agent's
                                    narration text) on the assistant LLM span.
       - ``capture.tool_inputs`` -> ``gen_ai.tool.input`` (the raw tool args)
@@ -262,6 +286,11 @@ def parse_claude_code_session(
     # these to one span; `last-wins` keeps the finalized usage (early snapshots
     # carry partial output_tokens; the last record has the complete generation).
     spans_by_id: dict[str, NormalizedSpan] = {}
+
+    # Lazy-loaded once cwd is known (#272): the project's CLAUDE.md content,
+    # captured as `TjAttributes.SYSTEM_PREFIX_CONTENT` below. `None` = not yet
+    # attempted; `""` is a legitimate resolved outcome (no CLAUDE.md found).
+    claude_md_text: str | None = None
 
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -367,6 +396,14 @@ def parse_claude_code_session(
         llm_attrs: dict = {"source": _CLAUDE_CODE_SOURCE}
         if capture.prompts and pending_prompt.strip():
             llm_attrs[GenAIAttributes.PROMPT_CONTENT] = pending_prompt
+        if capture.prompts:
+            # Only commit the sentinel once a real lookup happened. A record
+            # without `cwd` can't resolve anything, so leaving the sentinel at
+            # None lets a later record that DOES carry cwd try again.
+            if claude_md_text is None and cwd is not None:
+                claude_md_text = _read_project_claude_md(cwd)
+            if claude_md_text:
+                llm_attrs[TjAttributes.SYSTEM_PREFIX_CONTENT] = claude_md_text
         if capture.completions:
             completion_text = _block_text(msg.get("content"))
             if completion_text.strip():

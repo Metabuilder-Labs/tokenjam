@@ -51,6 +51,8 @@ from typing import Any, Iterable
 from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
+from tokenjam.core.optimize.projection import build_projection_basis
+from tokenjam.core.optimize.rate_profile import RateProfile, blended_rate_profile
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
@@ -74,10 +76,48 @@ MAX_DISTILL_CLUSTERS = 20
 MIN_DISTILL_CLUSTER_SESSIONS = MIN_RECURRING_SESSIONS
 DISTILL_MODEL = "haiku"
 
+# --- Per-occurrence re-read tail ---------------------------------------------
+# A failure does not cost one turn's tokens once. Its text lands in the
+# conversation and is re-sent on every LATER call that still carries it, so an
+# occurrence at call index k of a session whose context survives `tail` more
+# calls actually bills
+#
+#     GROUNDED_TOKENS_PER_OCCURRENCE x input_rate
+#   + GROUNDED_TOKENS_PER_OCCURRENCE x tail x cache_read_rate
+#
+# Everything below is expressed in INPUT-TOKEN EQUIVALENTS so the token figure
+# and the dollar figure stay proportional to one another (the existing
+# recoverable contract prices one against the other, and the write budget nets
+# a rule's standing cost against the token side). A re-read token bills at the
+# cache-read rate — exactly 0.100 x the input rate for every Anthropic model in
+# pricing/models.toml — so one occurrence is worth
+#
+#     1 + cache_read_ratio x tail
+#
+# input-token equivalents rather than 1. That ratio is measured from the
+# cluster's own models, never assumed.
+
+#: A prompt whose size falls to at most this share of the previous turn's has
+#: had its context window reset — a `/compact`, a resume, or a fresh window.
+#: The tail STOPS there: the failure text is no longer in what gets re-sent.
+#: Without this the multiplier assumes a failure is re-read for the rest of the
+#: session, which is measurably wrong on long automated-harness sessions (the
+#: ones that dominate a corpus by call count) and inflates the aggregate.
+COMPACTION_PROMPT_DROP_RATIO = 0.5
+
 ESTIMATE_BASIS = (
     "occurrences x a conservative per-turn token cost (one re-issued tool "
-    "call + re-narration) — never the inflated whole-session footprint; "
-    "review the example sessions before applying a fix"
+    "call + re-narration) — never the inflated whole-session footprint — "
+    "then x the occurrence's own re-read tail: a failure's text is re-sent on "
+    "every later call that still carries it, billed at the cache-read rate, so "
+    "one occurrence is worth 1 + cache_read_ratio x tail input-token "
+    "equivalents. The tail is truncated at the first compaction (a prompt-size "
+    "collapse), not run to end-of-session, and the cluster takes the MEDIAN of "
+    "its occurrences' multipliers rather than the mean — a handful of very long "
+    "uncompacted sessions otherwise dominate. Reported NET of what the proposed "
+    "fix costs to keep (a CLAUDE.md rule is re-sent on every future session, a "
+    "hook is not); a cluster with no derived fix claims nothing at all. Review "
+    "the example sessions before applying a fix"
 )
 HONESTY_CAVEAT = (
     "Structural failure-signature clustering, not a quality judgment. "
@@ -809,6 +849,41 @@ class RelearnCluster:
     estimated_monthly_tokens:     int = 0
     estimated_monthly_usd:        float | None = None
     monthly_rate_basis:           str = ""
+    #: The measured re-read tail behind the figures above: the MEDIAN number of
+    #: later calls that still carried one of this cluster's occurrences before
+    #: the context was compacted away, and the input-token-equivalent
+    #: multiplier that follows from it (`1 + cache_read_ratio x tail`). Carried
+    #: so a reader can see WHY an occurrence is worth more than its 1,500
+    #: tokens; 0 / 1.0 when no tail could be measured.
+    tail_calls_median:            int = 0
+    tail_multiplier:              float = 1.0
+    # Net-of-standing-cost accounting (`core/optimize/write_budget.py`). The
+    # four `estimated_*` fields above are reported NET of what the proposed
+    # artifact costs to KEEP: a rung-1 CLAUDE.md rule is re-sent on every
+    # future session forever, so its block is priced against the same session
+    # pace the saving is projected on and subtracted. The pre-net figures stay
+    # here, inspectable, so the derivation is never hidden — but no surface may
+    # claim a saving larger than the net one. Rung 3+ (hook / wrapper / config)
+    # is never sent to the model as prompt text, so its standing cost is a
+    # genuine zero and net == gross.
+    gross_recoverable_tokens:         int = 0
+    gross_monthly_tokens:             int = 0
+    gross_monthly_usd:                float | None = None
+    standing_cost_tokens_per_session: int = 0
+    standing_cost_tokens:             int = 0
+    standing_cost_basis:              str = ""
+    #: gross / standing. Below 1.0 the rule costs more to keep than it saves.
+    #: A ratio, not a break-even call count: unlike summarize's one-time
+    #: rewrite cost, this cost recurs, so the session count cancels out.
+    payback_ratio:                    float | None = None
+    net_negative:                     bool = False
+    # Whether a PERMANENT artifact is actually on offer for this cluster, and
+    # why not when it isn't (placeholder fix, net-negative payback, budget
+    # exhausted, or merged into the family's single block). A suppressed write
+    # also sets `advise_only`, so the Review inbox's existing no-apply-path
+    # lane renders it with this reason in place of the generic OTel one.
+    write_offered:                    bool = True
+    write_blocked_reason:             str = ""
 
 
 @dataclass
@@ -836,6 +911,12 @@ class RelearnFinding:
     # Sum of every cluster's `estimated_monthly_tokens` — the Review inbox
     # headline's token-basis total when it can't lead with dollars.
     estimated_monthly_tokens: int | None = None
+    # Sum of every cluster's `estimated_monthly_usd`. ``None`` when no cluster
+    # could be priced at all (no DB connection, no priced spans, no model with
+    # pricing data) — a zero would read as "this waste is free", which it is
+    # not (CLAUDE.md anti-pattern #22). Clusters with no derived fix contribute
+    # nothing here by construction: they claim zero on every basis.
+    estimated_monthly_usd: float | None = None
 
 
 def _snippet(failure: FailureEpisode) -> str:
@@ -884,6 +965,20 @@ def _corpus_window_days(failures: list[FailureEpisode]) -> float | None:
     return span_days if span_days >= 1.0 else 1.0
 
 
+def _corpus_active_days(failures: list[FailureEpisode]) -> int:
+    """Distinct calendar days on which this run observed any occurrence.
+
+    ``D_active`` for the shared projection basis (``core/optimize/
+    projection.py``). Relearn has no session table to count active days off,
+    so it counts the days its own evidence actually landed on, which is the
+    same quantity measured from the data relearn does hold. Zero when nothing
+    carried a parseable timestamp; the basis then suppresses the projection
+    rather than inventing one.
+    """
+    stamps = [t for t in (_parse_failure_ts(f.ts) for f in failures) if t is not None]
+    return len({t.date() for t in stamps})
+
+
 def _monthly_scale(window_days: float | None) -> float:
     """The occurrences-per-day -> per-30-days multiplier. 1.0 (no
     extrapolation) when the window is unknown or degenerate — never invent a
@@ -893,50 +988,89 @@ def _monthly_scale(window_days: float | None) -> float:
     return 30.0 / window_days
 
 
-def _blended_dollar_rate(conn: Any, session_ids: set[str]) -> tuple[float | None, str]:
-    """Best-effort $/token blended rate observed across THIS cluster's own
-    sessions' LLM spans, weighted by tokens actually billed.
+def _prompt_timelines(conn: Any, session_ids: set[str]) -> dict[str, list[tuple[Any, int]]]:
+    """``session_id -> [(start_time, prompt_size), ...]`` in wall-clock order.
 
-    Returns ``(None, "")`` when there's no DB connection or no priced spans
-    for these sessions — this never invents a rate (CLAUDE.md anti-pattern
-    #22); the caller falls back to a tokens-only figure in that case. The
-    basis string names every (provider, model) that contributed so the
-    derivation is inspectable rather than a black box (behavioral requirement
-    #2's "never invent a rate silently").
+    ``prompt_size`` is ``input_tokens + cache_tokens``, the same per-turn
+    quantity ``analyzers/context_resend.py`` measures repeat share on. It is
+    what a compaction collapses, which is how the tail knows where to stop.
+    Best-effort: an unavailable DB just means no timeline and no tail.
     """
     if conn is None or not session_ids:
-        return None, ""
+        return {}
     ids = sorted(session_ids)
     placeholders = ", ".join(f"${i + 1}" for i in range(len(ids)))
     try:
         rows = conn.execute(
-            f"SELECT provider, model, "
-            f"COALESCE(SUM(cost_usd), 0.0), "
-            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0) "
-            f"FROM spans WHERE session_id IN ({placeholders}) AND model IS NOT NULL "
-            f"GROUP BY provider, model",
+            f"SELECT session_id, start_time, "
+            f"COALESCE(input_tokens, 0) + COALESCE(cache_tokens, 0) "
+            f"FROM spans WHERE session_id IN ({placeholders}) "
+            f"AND name = 'gen_ai.llm.call' AND start_time IS NOT NULL "
+            f"ORDER BY session_id, start_time",
             ids,
         ).fetchall()
     except Exception:
-        return None, ""
-    total_cost = 0.0
-    total_tokens = 0
-    models: list[str] = []
-    for provider, model, cost, tokens in rows:
-        tokens = int(tokens or 0)
-        if tokens <= 0:
+        return {}
+    out: dict[str, list[tuple[Any, int]]] = {}
+    for session_id, start_time, prompt_size in rows:
+        out.setdefault(str(session_id), []).append((start_time, int(prompt_size or 0)))
+    return out
+
+
+def _tail_calls(timeline: list[tuple[Any, int]], failure_ts: Any) -> int:
+    """How many later calls still re-read a failure that landed at ``failure_ts``.
+
+    Walks forward from the first call after the failure and stops at the first
+    COMPACTION boundary — a turn whose prompt collapses to at most
+    ``COMPACTION_PROMPT_DROP_RATIO`` of the previous turn's. Past that point the
+    failure text is no longer in the window being re-sent, so counting those
+    calls would claim a cost the user never paid.
+    """
+    if failure_ts is None or not timeline:
+        return 0
+    tail = 0
+    previous_size: int | None = None
+    for start_time, prompt_size in timeline:
+        if start_time is None or start_time <= failure_ts:
+            previous_size = prompt_size
             continue
-        total_cost += float(cost or 0.0)
-        total_tokens += tokens
-        models.append(f"{provider}/{model}")
-    if total_tokens <= 0:
-        return None, ""
-    rate = total_cost / total_tokens
-    basis = (
-        f"blended ${rate * 1_000_000:.2f}/MTok observed across this cluster's "
-        f"own sessions: {', '.join(sorted(set(models)))}"
-    )
-    return rate, basis
+        if (
+            previous_size is not None
+            and previous_size > 0
+            and prompt_size <= previous_size * COMPACTION_PROMPT_DROP_RATIO
+        ):
+            break
+        tail += 1
+        previous_size = prompt_size
+    return tail
+
+
+def _tail_multiplier(
+    failures: list[FailureEpisode],
+    timelines: dict[str, list[tuple[Any, int]]],
+    profile: RateProfile | None,
+) -> tuple[float, int]:
+    """``(multiplier, median_tail_calls)`` in input-token equivalents.
+
+    The MEDIAN of the per-occurrence multipliers, not the mean: a corpus's call
+    volume is dominated by long automated-harness sessions, whose uncompacted
+    tails drag a mean far above what a typical occurrence actually costs.
+    Returns ``(1.0, 0)`` — one occurrence, no tail — whenever the tail cannot be
+    measured, which is the conservative direction (never invent a multiplier).
+    """
+    if profile is None or not timelines:
+        return 1.0, 0
+    tails = [
+        _tail_calls(timelines.get(f.session_id, []), _parse_failure_ts(f.ts))
+        for f in failures
+    ]
+    tails = [t for t in tails if t > 0]
+    if not tails:
+        return 1.0, 0
+    import statistics
+
+    median_tail = int(statistics.median(tails))
+    return 1.0 + profile.cache_read_ratio * median_tail, median_tail
 
 
 def build_proposals(
@@ -948,9 +1082,21 @@ def build_proposals(
     advise_only_repos: set[str] | None = None,
     conn: Any | None = None,
     window_days: float | None = None,
+    persona: str = "unknown",
+    projection: Any | None = None,
+    existing_agent_file_tokens: int | None = None,
+    sessions_by_repo: dict[str, int] | None = None,
 ) -> tuple[list[RelearnCluster], int]:
     """Turn surviving raw clusters into ranked proposals. Returns
     ``(proposals, dropped_codified_count)``.
+
+    ``projection`` (a ``core.optimize.projection.ProjectionBasis``) and
+    ``existing_agent_file_tokens`` drive the write budget: how many permanent
+    rules may be offered at all, and what each one costs to keep. Omitting
+    ``projection`` leaves the netting inert (a zero session count charges a
+    rule nothing) while the quality floor and the write count cap still apply,
+    so a caller that only wants clustering is never silently given a budget it
+    did not ask for.
 
     ``repo_cwd_map`` (repo label -> a representative cwd) is optional,
     best-effort enrichment used only to pre-fill the Apply stage's suggested
@@ -960,10 +1106,24 @@ def build_proposals(
     OTel lane — see ``core/optimize/relearn_otel.py``). A cluster whose repos are
     all in that set is marked ``advise_only`` and gets NO suggested target: there
     is nothing to apply into, so the card must not imply an apply path exists.
+
+    ``persona`` gates the rung-1/rung-2 CLAUDE.md/skill write exactly like
+    ``cost_proposals._persona_gated_write_fields`` gates the script/reuse/
+    resend cards it shares that same write surface with (``verbosity`` is NOT
+    a peer here — it no longer routes through that helper and is
+    unconditionally advise-only for every persona): only a
+    ``"claude-code"``/``"mixed"`` window is offered the write. An
+    ``"sdk"``/``"unknown"`` window (the conservative default) never gets one
+    — nothing in an SDK-only service's request path reads a CLAUDE.md or a
+    ``.claude/skills/`` note, so offering it there is a write that visibly
+    succeeds and changes nothing. ``proposed_fix`` (the recommendation text)
+    is unaffected either way — only the apply path is.
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
+    from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER, is_placeholder_fix
 
     repo_cwd_map = repo_cwd_map or {}
+    write_offered = persona in {"claude-code", "mixed"}
     proposals: list[RelearnCluster] = []
     dropped = 0
     for cluster in clusters:
@@ -993,9 +1153,12 @@ def build_proposals(
         # `bool(advise_only_repos) and ...` defeats mypy's None-narrowing since
         # it's wrapped in a call; guarding on the name itself narrows it to
         # `set[str]` inside the genexpr while keeping identical truthiness.
+        # `not write_offered` folds in the persona gate above: even a
+        # workspace-having cluster gets no apply path for an sdk/unknown
+        # window.
         advise_only = bool(
             advise_only_repos and all(r in advise_only_repos for r in repos)
-        )
+        ) or not write_offered
         repo_cwd = "" if advise_only else (
             repo_cwd_map.get(repos[0], "") if len(repos) == 1 else ""
         )
@@ -1009,11 +1172,43 @@ def build_proposals(
             except Exception:
                 suggested_target = ""   # never let a bad path computation sink the proposal
 
-        recoverable_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
+        # A cluster with no derived fix claims NOTHING, on any basis. 1387 of
+        # 2311 occurrences in a real corpus match no known family and fall back
+        # to the generic "review examples" text — attaching a dollar figure to
+        # those would put a number on a card whose fix the user cannot apply,
+        # which is the "would this be a quiet lie in the user's favour?" test
+        # (CLAUDE.md anti-pattern #22) failing outright. The write budget
+        # already refuses to WRITE a placeholder; this is the same verdict
+        # applied to the CLAIM, so it holds for every persona rather than only
+        # for the windows that reach the write path at all.
+        has_real_fix = not is_placeholder_fix(fix)
+
+        # A placeholder cluster is priced at the bare per-occurrence cost with
+        # no tail — the raw observation stays inspectable on the `gross_*`
+        # fields, and the two round-trip queries the tail needs are skipped for
+        # a cluster that will claim nothing anyway.
+        profile = blended_rate_profile(conn, session_ids=sessions) if has_real_fix else None
+        timelines = _prompt_timelines(conn, sessions) if profile is not None else {}
+        multiplier, median_tail = _tail_multiplier(cluster.failures, timelines, profile)
+
+        # Input-token EQUIVALENTS: the head token at the input rate plus each
+        # re-read at the cache-read rate, expressed on the head's basis so the
+        # token and dollar figures stay proportional. See the constants above.
         scale = _monthly_scale(window_days)
-        monthly_tokens = round(recoverable_tokens * scale)
-        rate, rate_basis = _blended_dollar_rate(conn, sessions)
-        monthly_usd = round(monthly_tokens * rate, 6) if rate is not None else None
+        gross_tokens = round(occurrences * GROUNDED_TOKENS_PER_OCCURRENCE * multiplier)
+        gross_monthly_tokens = round(gross_tokens * scale)
+        gross_monthly_usd = (
+            round(gross_monthly_tokens * profile.input_rate_per_token, 6)
+            if profile is not None else None
+        )
+        # The CLAIM, as distinct from the observation above.
+        recoverable_tokens = gross_tokens if has_real_fix else 0
+        monthly_tokens = gross_monthly_tokens if has_real_fix else 0
+        monthly_usd = gross_monthly_usd if has_real_fix else None
+        rate_basis = "" if profile is None else (
+            f"{profile.basis}; x{multiplier:.2f} for a median re-read tail of "
+            f"{median_tail} later call(s) per occurrence"
+        )
 
         proposals.append(RelearnCluster(
             signature=cluster.signature,
@@ -1034,10 +1229,161 @@ def build_proposals(
             estimated_monthly_tokens=monthly_tokens,
             estimated_monthly_usd=monthly_usd,
             monthly_rate_basis=rate_basis,
+            tail_calls_median=median_tail,
+            tail_multiplier=round(multiplier, 4),
+            # Pre-net figures, kept inspectable. `_apply_write_budget` nets the
+            # four `estimated_*` fields above in place, so nothing downstream
+            # can read a gross figure by accident.
+            gross_recoverable_tokens=gross_tokens,
+            gross_monthly_tokens=gross_monthly_tokens,
+            gross_monthly_usd=gross_monthly_usd,
+            write_offered=has_real_fix,
+            write_blocked_reason="" if has_real_fix else REASON_PLACEHOLDER,
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
+    proposals = _apply_write_budget(
+        proposals, projection=projection,
+        existing_agent_file_tokens=existing_agent_file_tokens,
+        sessions_by_repo=sessions_by_repo,
+    )
     return proposals, dropped
+
+
+def _write_exposure_sessions(
+    proposal: RelearnCluster, sessions_by_repo: dict[str, int] | None, total: int,
+) -> int | None:
+    """How many of the run's sessions would actually re-send this cluster's
+    artifact.
+
+    A ``user-global`` rule lands in ``~/.claude/CLAUDE.md`` and is paid on
+    every session. A ``project`` rule lands in one repo's file and is paid only
+    on that repo's sessions. Charging a project rule against the whole corpus
+    would net a cluster-scoped saving against a corpus-scoped cost, which is
+    the same time-basis mistake this accounting exists to remove, just wearing
+    a different hat. ``None`` (no per-repo counts available) falls back to the
+    projection basis's own session count.
+    """
+    if proposal.scope != "project" or sessions_by_repo is None:
+        return None
+    scoped = sum(sessions_by_repo.get(repo, 0) for repo in proposal.repos)
+    # A repo we have no count for must not silently price the rule at zero.
+    return min(scoped, total) if scoped > 0 else None
+
+
+def _apply_write_budget(
+    proposals: list[RelearnCluster],
+    *,
+    projection: Any | None,
+    existing_agent_file_tokens: int | None,
+    sessions_by_repo: dict[str, int] | None = None,
+) -> list[RelearnCluster]:
+    """Net every proposal's saving against what its fix costs to KEEP, and cap
+    how many permanent rules are offered at all.
+
+    Three things happen here and nowhere else:
+
+    * A cluster whose fix is the generic "Review examples" placeholder never
+      becomes a permanent rule, and claims nothing. There is no fix to claim.
+    * Same-family clusters collapse onto ONE block. They share a single fix
+      template, so N clusters used to mean N identical CLAUDE.md blocks; now
+      the family's largest cluster carries the write and its siblings say so.
+    * What survives is ranked by net value and offered until the budget runs
+      out. Anything past that is deferred, not deleted: its recommendation is
+      still on the card, so its net claim stands.
+
+    A cluster with no apply path at all (the workspace-less OTel lane) is
+    skipped entirely: nothing is written for it, so it has no standing cost and
+    its figures pass through untouched.
+    """
+    from dataclasses import asdict, replace
+
+    from tokenjam.core.optimize import write_budget as wb
+    from tokenjam.core.optimize.projection import build_projection_basis
+    from tokenjam.core.optimize.relearn_apply import artifact_for_rung, slugify
+
+    basis = projection or build_projection_basis(0.0, 0, 0)
+    candidates: list[wb.WriteCandidate] = []
+    for p in proposals:
+        if p.advise_only or not p.suggested_target:
+            continue
+        try:
+            artifact = artifact_for_rung(asdict(p), p.signature, p.rung, slugify(p.title))
+        except Exception:
+            artifact = p.proposed_fix     # never let a render hiccup sink a proposal
+        candidates.append(wb.WriteCandidate(
+            key=p.signature,
+            # Family-unmatched clusters have no family_key; keying them on
+            # their own signature keeps each a family of one rather than
+            # collapsing every unrelated residual into a single bucket.
+            family=p.family_key or f"signature:{p.signature}",
+            rung=p.rung,
+            artifact_text=artifact or p.proposed_fix,
+            gross_tokens=p.gross_recoverable_tokens,
+            exposure_sessions=_write_exposure_sessions(
+                p, sessions_by_repo, basis.sessions,
+            ),
+        ))
+
+    budget = wb.build_write_budget(
+        lane_budget_tokens=wb.RELEARN_WRITE_BUDGET_TOKENS,
+        lane_max_writes=wb.RELEARN_MAX_OFFERED_WRITES,
+        existing_agent_file_tokens=existing_agent_file_tokens,
+    )
+    decisions = wb.allocate_writes(candidates, budget, basis)
+
+    out: list[RelearnCluster] = []
+    for p in proposals:
+        decision = decisions.get(p.signature)
+        if decision is None:
+            # Never entered the budget at all — advise-only, or no target to
+            # write into. Nothing is on offer, so say so rather than letting
+            # the dataclass default (`write_offered=True`) stand and claim a
+            # write that does not exist.
+            out.append(replace(p, write_offered=False))
+            continue
+        # The monthly field lives on the 30-day basis, so it is netted against
+        # the PROJECTED session count while the window field is netted against
+        # the observed one. Both use the same per-session standing cost, which
+        # is what keeps the two bases from drifting (the exact error a
+        # window-scoped saving minus a 30-day cost would introduce).
+        monthly_standing = round(
+            decision.standing_tokens_per_session * decision.exposure_sessions * basis.ratio
+        )
+        net_monthly_tokens = (
+            0 if decision.claim_suppressed
+            else max(p.gross_monthly_tokens - monthly_standing, 0)
+        )
+        rate = (
+            p.gross_monthly_usd / p.gross_monthly_tokens
+            if p.gross_monthly_usd is not None and p.gross_monthly_tokens > 0
+            else None
+        )
+        net_monthly_usd = (
+            round(net_monthly_tokens * rate, 6) if rate is not None
+            else (None if p.gross_monthly_usd is None else 0.0)
+        )
+        out.append(replace(
+            p,
+            estimated_recoverable_tokens=decision.claimed_tokens,
+            estimated_monthly_tokens=net_monthly_tokens,
+            estimated_monthly_usd=net_monthly_usd,
+            standing_cost_tokens_per_session=decision.standing_tokens_per_session,
+            standing_cost_tokens=decision.standing_tokens,
+            standing_cost_basis=decision.basis,
+            payback_ratio=decision.payback_ratio,
+            net_negative=decision.net_negative,
+            write_offered=decision.offered,
+            write_blocked_reason=decision.reason,
+            # A suppressed write has no apply path, which is exactly what
+            # `advise_only` already means to every surface. Reusing that flag
+            # (rather than teaching each renderer a second one) makes the
+            # Review inbox show this decision's own reason in place of the
+            # generic workspace-less one.
+            advise_only=p.advise_only or not decision.offered,
+            suggested_target=p.suggested_target if decision.offered else "",
+        ))
+    return out
 
 
 # --- Orchestration (pure, no ctx dependency — testable directly) --------------
@@ -1055,6 +1401,8 @@ def analyze_relearns(
     extra_failures: list[FailureEpisode] | None = None,
     advise_only_repos: set[str] | None = None,
     conn: Any | None = None,
+    persona: str = "unknown",
+    existing_agent_file_tokens: int | None = None,
 ) -> RelearnFinding:
     """Full pipeline over an explicit session list — the pure core the
     registry entry point and the on-disk cache job both call. Never raises.
@@ -1070,6 +1418,8 @@ def analyze_relearns(
     ``conn`` (optional DuckDB connection) is forwarded to ``build_proposals``
     for the per-cluster blended-dollar-rate lookup (Review inbox monthly-$
     basis) — ``None`` keeps every cluster tokens-only, same as today.
+    ``persona`` is forwarded to ``build_proposals`` to gate the rung-1/rung-2
+    write — see its docstring.
     """
     all_failures: list[FailureEpisode] = []
     scanned = 0
@@ -1101,13 +1451,33 @@ def analyze_relearns(
     # window — relearn scans unbounded history. See `_corpus_window_days`.
     window_days = _corpus_window_days(all_failures)
 
+    # The SAME basis the monthly extrapolation above uses, expressed once as a
+    # ProjectionBasis so the write budget can price a permanent rule against
+    # the identical session pace the saving is projected on. Mixing the two
+    # would reintroduce exactly the time-basis error this accounting exists to
+    # remove. See `core/optimize/projection.py`.
+    projection = build_projection_basis(
+        window_days or 0.0, _corpus_active_days(all_failures), scanned,
+    )
+
+    # Per-repo session counts: what a PROJECT-scoped rule's standing cost is
+    # actually charged against (a user-global one is charged against them all).
+    sessions_by_repo: dict[str, int] = {}
+    for _session_id, repo in sessions:
+        sessions_by_repo[repo] = sessions_by_repo.get(repo, 0) + 1
+
     proposals, dropped = build_proposals(
         distilled, min_sessions=min_sessions, doc_text=codified_doc_text,
         repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
-        conn=conn, window_days=window_days,
+        conn=conn, window_days=window_days, persona=persona,
+        projection=projection,
+        existing_agent_file_tokens=existing_agent_file_tokens,
+        sessions_by_repo=sessions_by_repo,
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
     total_monthly_tokens = sum(p.estimated_monthly_tokens for p in proposals) if proposals else None
+    priced = [p.estimated_monthly_usd for p in proposals if p.estimated_monthly_usd is not None]
+    total_monthly_usd = round(sum(priced), 6) if priced else None
 
     return RelearnFinding(
         clusters=proposals,
@@ -1119,6 +1489,7 @@ def analyze_relearns(
         min_sessions=min_sessions,
         window_days=window_days,
         estimated_monthly_tokens=total_monthly_tokens,
+        estimated_monthly_usd=total_monthly_usd,
     )
 
 
@@ -1178,6 +1549,8 @@ def compute_relearn_finding(
     distill_enabled: bool = True,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     transcript_cache_dir: Path | None = None,
+    persona: str = "unknown",
+    existing_agent_file_tokens: int | None = None,
 ) -> RelearnFinding:
     """Standalone entry point that doesn't need a full ``AnalyzerContext`` —
     used by the serve-time background cache job (``api/routes/relearn.py``)
@@ -1185,6 +1558,12 @@ def compute_relearn_finding(
     repo-name enrichment (``sessions.agent_id``); pass ``None`` and every
     session falls back to a ``"unknown"`` repo label — clustering itself needs
     no DB at all, it's a pure filesystem scan.
+
+    ``persona`` (default ``"unknown"``, the conservative no-write default —
+    see ``build_proposals``) is forwarded to gate the rung-1/rung-2 write.
+    ``run(ctx)`` below passes the report's own ``ctx.persona`` rather than
+    re-deriving it here, so a report never carries two different persona
+    classifications for the same window.
 
     Full-corpus by design: enumerates every on-disk Claude Code transcript
     (not window-scoped like the other analyzers — a relearn recurring across
@@ -1255,7 +1634,8 @@ def compute_relearn_finding(
         distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
         extra_failures=span_failures, advise_only_repos=advise_only_repos,
         min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
-        conn=conn,
+        conn=conn, persona=persona,
+        existing_agent_file_tokens=existing_agent_file_tokens,
     )
 
 
@@ -1275,7 +1655,20 @@ def run(ctx: AnalyzerContext) -> None:
     min_sessions = getattr(
         optimize_cfg, "min_recurring_sessions", MIN_RECURRING_SESSIONS,
     )
+    # The write budget's headroom comes from the `summarize` analyzer's own
+    # measurement of the agent files these proposals would append to. It runs
+    # ahead of relearn in ANALYZER_ORDER, so its finding is already on the
+    # report; when it wasn't selected this is None and the lane cap stands
+    # alone. This is the cross-reference the two halves of the loop were
+    # missing: relearn can no longer offer rules for a file the same report
+    # is recommending the user compress.
+    from tokenjam.core.optimize.write_budget import measured_agent_file_tokens
+
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, ctx.since, min_sessions=min_sessions,
         transcript_cache_dir=default_cache_dir(ctx.config),
+        persona=ctx.persona,
+        existing_agent_file_tokens=measured_agent_file_tokens(
+            ctx.report.findings.get("summarize"),
+        ),
     )

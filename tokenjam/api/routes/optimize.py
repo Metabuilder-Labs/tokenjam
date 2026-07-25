@@ -26,7 +26,12 @@ from tokenjam.core.framing import (
     compute_framing,
     plan_tier_mix,
 )
-from tokenjam.core.optimize import ANALYZER_REGISTRY, build_report, report_to_dict
+from tokenjam.core.optimize import (
+    ANALYZER_REGISTRY,
+    build_report,
+    disabled_analyzers_for_persona,
+    report_to_dict,
+)
 from tokenjam.utils.time_parse import parse_since, utcnow
 
 router = APIRouter()
@@ -101,7 +106,19 @@ def get_optimize(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     payload = report_to_dict(report)
-    payload["skipped_analyzers"] = skipped
+    # `skipped_analyzers` means "not run HERE for speed, open the Optimize tab"
+    # — the UI renders a placeholder tile for each one. An analyzer the persona
+    # gate dropped is a different thing entirely: it has no fix this user can
+    # apply, the Optimize tab won't show it either, and it must vanish rather
+    # than leave a row pointing at nothing. So it never enters this list.
+    persona_disabled = disabled_analyzers_for_persona(report.persona)
+    payload["skipped_analyzers"] = [n for n in skipped if n not in persona_disabled]
+    # The names the persona gate dropped, so the UI can tell "ran, found
+    # nothing" (render the empty state) from "not run for this persona"
+    # (render nothing at all). Without this the analyzers that attach no
+    # finding when they find nothing — `placement` — would still draw an
+    # empty-state card for a user who has no way to act on it.
+    payload["persona_disabled_analyzers"] = sorted(persona_disabled)
 
     # Biggest-waste-first ranking (#97) — the same
     # `_rank_findings` the CLI's text view already ranks by, so the web

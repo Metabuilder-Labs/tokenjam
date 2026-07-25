@@ -51,8 +51,12 @@ REUSE_HONESTY_CAVEAT = (
 # Required `estimate_basis` for ReuseFinding (issue #115 AC8 / savings
 # contract). Must contain the word "review".
 REUSE_ESTIMATE_BASIS = (
-    "structurally repeated planning calls — cache-reuse number assumes future "
-    "re-plans skip the LLM call entirely; review templates before reusing"
+    "structurally repeated planning calls — the headline prices the "
+    "script-replacement premise (a template/skill removes the planning call "
+    "entirely: avg cost x reps); the more conservative cache-reuse premise "
+    "(a template only removes the re-plan delta: avg cost x (reps - 1)) "
+    "stays available on every cluster as cache_reuse_recoverable_usd/"
+    "_tokens; review templates before reusing"
 )
 
 
@@ -66,6 +70,15 @@ class WindowSummary:
     total_tokens: int
     total_cost_usd: float
     thin_data:   bool
+    #: Distinct calendar days within the window with >=1 session — the
+    #: user's own "active day" pace, the `D_active` term of the shared 30-day
+    #: projection basis every cost analyzer's rollup uses (see
+    #: `cost_proposals.compute_projection_ratio` / `core/optimize/
+    #: projection.py`). Defaults to 0 for a hand-built `WindowSummary` (tests,
+    #: older callers, a cached report predating the field) — a 0 fails that
+    #: ratio's guardrail, so the projection is simply skipped rather than
+    #: dividing by zero or inventing a pace from a missing count.
+    active_days: int = 0
 
 
 @dataclass

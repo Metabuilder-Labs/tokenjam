@@ -210,7 +210,10 @@ def test_surfaces_remedy_but_does_not_apply(db):
     _seed_session(db, "loud", output_tokens=3000, i=50)
     finding = _run(db)
     assert finding.remedy_snippet
-    assert "concise" in finding.remedy_snippet.lower()
+    # Soft guidance, not an enforceable "be concise" directive (a cohort-
+    # scoped flag written as a blanket rule fails the no-quality-tax gate).
+    assert "review" in finding.remedy_snippet.lower()
+    assert "rule to enforce" in finding.remedy_snippet.lower()
     assert finding.suggested_max_tokens == 300  # the cohort median baseline
 
 

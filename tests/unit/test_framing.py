@@ -8,7 +8,6 @@ import pytest
 from tokenjam.core.framing import (
     DISPLAY_SHOW_DOLLARS,
     DISPLAY_SHOW_DOLLARS_WITH_QUALIFIER,
-    DISPLAY_SUPPRESS_SUBSCRIPTION,
     DISPLAY_SUPPRESS_UNKNOWN,
     DISPLAY_TOKENS_ONLY,
     Framing,
@@ -155,6 +154,9 @@ def test_compute_framing_api_with_unknown_qualifier():
 
 
 def test_compute_framing_subscription():
+    # Standing product decision: dollars are shown by default (assume API
+    # pricing), even for an all-subscription window — never suppressed in
+    # favour of a token-share-only figure.
     f = compute_framing(
         _Config(),
         WindowSummary(total_cost_usd=148.0, total_tokens=2_000_000, sessions=20,
@@ -164,8 +166,10 @@ def test_compute_framing_subscription():
     assert f.plan_tier == "max_5x"
     assert f.plan_label == "Max 5x plan"
     assert f.plan_monthly_usd == 100.0
-    assert f.display_rule == DISPLAY_SUPPRESS_SUBSCRIPTION
+    assert f.display_rule == DISPLAY_SHOW_DOLLARS_WITH_QUALIFIER
     assert f.subscription_share_pct == 100.0
+    assert f.qualifier_text is not None
+    assert "list-price equivalent, not an amount billed" in f.qualifier_text
 
 
 def test_compute_framing_subscription_mixed_window_qualifier():
@@ -175,7 +179,7 @@ def test_compute_framing_subscription_mixed_window_qualifier():
                       plan_tier_mix={"max_5x": 17, "api": 3}),
     )
     assert f.pricing_mode == "subscription"
-    assert f.display_rule == DISPLAY_SUPPRESS_SUBSCRIPTION
+    assert f.display_rule == DISPLAY_SHOW_DOLLARS_WITH_QUALIFIER
     assert f.qualifier_text is not None
     assert "subscription-billed" in f.qualifier_text
     assert f.subscription_share_pct == 85.0

@@ -1,0 +1,54 @@
+name: contributor-label-guard
+
+# Prevents two outside-contribution tools (Cursor background agents and
+# similar) from picking up the same `good first issue` / `help wanted` issue
+# at once. They poll GitHub's search API on those labels, not on claim
+# comments — so the only lever that actually keeps an issue off their feed
+# is removing the labels the moment a PR that would close it is opened, and
+# restoring them only if that PR is later closed without merging.
+#
+# SECURITY — READ BEFORE EDITING THIS FILE:
+# This workflow MUST stay on `pull_request_target`, not `pull_request`. Fork
+# PRs under plain `pull_request` get a read-only GITHUB_TOKEN and this
+# workflow cannot write labels with one — that's exactly the case that
+# matters here (outside contributors are, definitionally, forking).
+# `pull_request_target` runs with the BASE repo's write-scoped token even
+# for a fork PR, which means this workflow executes in a privileged context.
+# DO NOT add `actions/checkout` of the PR head ref (no
+# `ref: ${{ github.event.pull_request.head.sha }}` / `.head.ref`), DO NOT
+# `pip install` / `npm install` / run anything sourced from the PR branch,
+# and DO NOT execute PR-authored scripts. The single checkout step below
+# pins explicitly to the BASE commit for this exact reason — leave it as is.
+# The PR title/body are read by `.github/scripts/contributor_label_guard.py`
+# purely as untrusted text to pattern-match against; they are never
+# evaluated, sourced, or shelled out to.
+on:
+  pull_request_target:
+    types: [opened, reopened, closed]
+
+permissions:
+  issues: write
+  pull-requests: read
+  contents: read
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      # Base repo only — see the security note above. Never point `ref` at
+      # the PR head.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Guard contributor labels
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: python .github/scripts/contributor_label_guard.py

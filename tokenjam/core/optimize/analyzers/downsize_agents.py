@@ -134,14 +134,22 @@ def thinking_share(thinking_tokens: int | None, output_tokens: int) -> float | N
 
 def thinking_tokens_by_session(
     conn: Any, since: datetime, until: datetime, agent_id: str | None,
+    *, main_thread_only: bool = False,
 ) -> dict[str, int]:
     """Reported thinking/reasoning tokens per session, from span attributes.
 
     Empty when no runtime in the window reports them, which is the common case:
     the rows then carry ``thinking_tokens=None`` and the card omits the number
     instead of printing a zero that reads like a measurement.
+
+    ``main_thread_only`` excludes Task-subagent turns (``sub_agent_id IS NOT
+    NULL``). Pass it whenever the output tokens this share is computed against
+    are themselves main-thread-only — the downsize card's are, since subagent
+    tokens belong to the ``subagent`` analyzer — or the share can exceed 1.0.
     """
     clauses = ["start_time >= $1", "start_time < $2", "session_id IS NOT NULL"]
+    if main_thread_only:
+        clauses.append("sub_agent_id IS NULL")
     params: list[Any] = [since, until]
     if agent_id:
         clauses.append(f"agent_id = ${len(params) + 1}")

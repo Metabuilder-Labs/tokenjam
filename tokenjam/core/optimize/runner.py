@@ -44,6 +44,90 @@ ANALYZER_ORDER: list[str] = [
     "deadweight",
 ]
 
+# Analyzers that have NO fix a user of that persona can actually apply.
+#
+# Keyed by the window's dominant persona (`core.framing.dominant_persona`:
+# "claude-code" | "sdk" | "mixed" | "unknown"). A name listed for the dominant
+# persona is dropped from `selected` in `build_report` BEFORE the dispatch
+# loop, so the analyzer is never invoked: it runs no query, produces no
+# finding, and is therefore absent from every downstream surface (the CLI
+# report, the /optimize payload, the Review inbox). That is deliberately a
+# TRUE skip and not an `enabled: False` finding — a disabled analyzer that
+# still queries costs the same time and then renders a row whose only honest
+# caption is "there is nothing you can do about this."
+#
+# The bar for keeping an analyzer is not "a fix could be described" — it is:
+#   1. the output ends in a concrete edit to a file or setting this persona
+#      actually controls;
+#   2. the user is better off NET of the fix's own standing cost (an
+#      always-loaded instruction file is re-sent on every future session);
+#   3. the saving does not come from making the agent terser or dumber.
+# An analyzer that misses any one of those has no business spending query
+# time for that persona. Each entry below records which one it misses.
+#
+# `mixed` / `sdk` / `unknown` disable nothing: the conservative default is to
+# run everything, so an unclassified window never silently loses a finding.
+PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
+    # An interactive coding agent's harness constructs the API request, picks
+    # the model for its own main thread, and owns the prompt template. The
+    # user only controls their workspace config files. Everything below is a
+    # lever that lives on the other side of that line.
+    "claude-code": frozenset({
+        # Cache efficacy is measured off `cache_control` breakpoint placement,
+        # which the harness sets and the user cannot reach — no request field
+        # of theirs to change, so the finding is a diagnostic with no fix.
+        "cache",
+        # Same missing lever as `cache` above: even when the analyzer finds a
+        # stable, repeated prefix — it can, for Claude-Code-sourced spans, via
+        # the project's CLAUDE.md content backfilled onto them (#272, see
+        # cache_recommend.py's module docstring) — a Claude Code user still
+        # has no way to set `cache_control` on the request the harness
+        # builds, so a candidate would be a diagnostic with no fix. This
+        # entry is what keeps the CLAUDE.md-prefix path from ever reaching
+        # that dead end: it drops `cache-recommend` from dispatch before this
+        # persona's window is analyzed, so the path only actually runs for
+        # `sdk`/`mixed` windows (persona is computed per-window, see
+        # `dominant_persona`), where it can serve a real fix.
+        "cache-recommend",
+        # Batch placement recommends re-laning work onto a delayed batch
+        # endpoint. Unreachable from an interactive session by definition —
+        # the whole point is that a human is waiting on the answer. Not a
+        # registry name (the `downsize` analyzer attaches it as a sub-check),
+        # so `downsize` reads this same map to skip it — see model_downgrade.
+        "placement",
+        # Trim predicts low-significance regions of a prompt template so the
+        # author can shorten it. That presumes editable prompt-template source
+        # code, which an interactive coding-agent user does not have.
+        "trim",
+        # Verbosity's detection is sound, but its only remedy is a global
+        # "be concise, answer in the fewest words" instruction written into an
+        # always-loaded file — buying tokens by making the agent terser
+        # everywhere, off a finding that was scoped to one cohort of sessions.
+        # That is a quality tax, which is not a trade this product makes.
+        "verbosity",
+        # Script clusters a session by its ENTIRE ordered (tool, arg-shape)
+        # tuple, so one extra file read or a reordered call breaks the match.
+        # It found zero clusters across ~1.2k real coding sessions, and the
+        # cluster threshold is not the bottleneck — the signature is.
+        # DECISION: disabled for this persona now rather than silently
+        # retired; re-enable if the signature is redesigned to a subsequence
+        # or prefix match that tolerates heterogeneous coding work.
+        "script",
+    }),
+}
+
+
+def disabled_analyzers_for_persona(persona: str) -> frozenset[str]:
+    """Analyzer names with no applicable fix for `persona`.
+
+    Single source of truth for the persona skip gate — `build_report` uses it
+    to drop analyzers before dispatch, the `downsize` analyzer uses it for its
+    `placement` sub-check, and `cost_proposals` uses it so the Review inbox
+    makes the same selection. Unknown/unlisted personas disable nothing.
+    """
+    return PERSONA_DISABLED_ANALYZERS.get(persona, frozenset())
+
+
 THIN_DATA_DAYS = 7
 
 
@@ -67,6 +151,7 @@ def summarize_window(
     row = conn.execute(
         f"SELECT COUNT(*) AS spans, "
         f"COUNT(DISTINCT session_id) AS sessions, "
+        f"COUNT(DISTINCT CAST(start_time AS DATE)) AS active_days, "
         f"COALESCE(SUM(COALESCE(input_tokens,0) + COALESCE(output_tokens,0) + COALESCE(cache_tokens,0) + COALESCE(cache_write_tokens,0)), 0) AS tokens, "
         f"COALESCE(SUM(cost_usd), 0.0) AS cost "
         f"FROM spans WHERE {where}",
@@ -74,14 +159,16 @@ def summarize_window(
     ).fetchone()
     spans = int(row[0] or 0)
     sessions = int(row[1] or 0)
-    tokens = int(row[2] or 0)
-    cost = float(row[3] or 0.0)
+    active_days = int(row[2] or 0)
+    tokens = int(row[3] or 0)
+    cost = float(row[4] or 0.0)
     days = max((until - since).total_seconds() / 86400.0, 0.0)
     return WindowSummary(
         since=since,
         until=until,
         days=days,
         sessions=sessions,
+        active_days=active_days,
         spans=spans,
         total_tokens=tokens,
         total_cost_usd=cost,
@@ -158,6 +245,15 @@ def build_report(
             f"Unknown finding(s): {sorted(unknown)}. "
             f"Available: {sorted(ANALYZER_REGISTRY.keys())}"
         )
+
+    # Persona skip gate. Applied AFTER validation (so a typo still raises) and
+    # BEFORE dispatch, which is what makes it a true skip: an analyzer removed
+    # here is never invoked and runs no query. Unconditional — every caller
+    # that selects analyzers (the CLI, /api/v1/optimize, the Review inbox's
+    # COST_ANALYZERS recompute, the status teaser) funnels through this one
+    # choke point, so none of them can reintroduce a finding this persona
+    # cannot act on. See PERSONA_DISABLED_ANALYZERS for the per-name reasons.
+    selected -= disabled_analyzers_for_persona(persona)
 
     for name in ANALYZER_ORDER:
         if name in selected and name in ANALYZER_REGISTRY:
@@ -505,11 +601,15 @@ def _build_finding_constructors() -> dict:
             files=int(d.get("files", 0)),
             estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
             estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            file_reduction_tokens=d.get("file_reduction_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
             caveat=d.get("caveat", SUMMARIZE_HONESTY_CAVEAT),
             reduction_pct=d.get("reduction_pct"),
             avg_reduction_pct=d.get("avg_reduction_pct"),
+            sessions_examined=int(d.get("sessions_examined", 0) or 0),
+            calls_per_session=d.get("calls_per_session"),
+            rate_basis=d.get("rate_basis", ""),
         )
 
     def _relearn(d: dict) -> RelearnFinding:

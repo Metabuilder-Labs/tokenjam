@@ -937,6 +937,108 @@ def test_capture_flags_are_independent(tmp_path):
     assert GenAIAttributes.TOOL_INPUT not in tool.attributes
 
 
+def test_capture_prompts_reads_project_claude_md_as_system_prefix(tmp_path):
+    """#272: the human's per-turn message never repeats verbatim, so
+    cache-recommend's prefix-hash needs a different, genuinely stable
+    signal. The project's CLAUDE.md is read straight off disk (it's not in
+    the transcript) and stamped as `TjAttributes.SYSTEM_PREFIX_CONTENT` --
+    identical on every assistant span for the same project, unlike
+    PROMPT_CONTENT."""
+    from tokenjam.otel.semconv import TjAttributes
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "CLAUDE.md").write_text("# Project rules\nAlways use tabs.")
+    cwd = str(project_dir)
+
+    path = _make_session_file(
+        tmp_path,
+        session_id="sess-claude-md",
+        cwd=cwd,
+        records=[
+            {"type": "user", "message": {"role": "user", "content": "turn one"}},
+            _assistant_record(
+                "msg-a", "claude-opus-4-7", 1000, 200,
+                "2026-04-01T10:00:00.000Z", "sess-claude-md", cwd,
+            ),
+            {"type": "user", "message": {"role": "user", "content": "turn two, different"}},
+            _assistant_record(
+                "msg-b", "claude-opus-4-7", 900, 150,
+                "2026-04-01T10:05:00.000Z", "sess-claude-md", cwd,
+            ),
+        ],
+    )
+
+    parsed = parse_claude_code_session(path, capture=CaptureConfig(prompts=True))
+    assert parsed is not None
+    llm_spans = [s for s in parsed.spans if s.name == "gen_ai.llm.call"]
+    assert len(llm_spans) == 2
+    for span in llm_spans:
+        assert span.attributes[TjAttributes.SYSTEM_PREFIX_CONTENT] == \
+            "# Project rules\nAlways use tabs."
+    # The per-turn human prompt still differs call to call -- confirming the
+    # two signals are genuinely distinct, not the same field renamed.
+    assert llm_spans[0].attributes[GenAIAttributes.PROMPT_CONTENT] == "turn one"
+    assert llm_spans[1].attributes[GenAIAttributes.PROMPT_CONTENT] == \
+        "turn two, different"
+
+    # prompts=False captures neither.
+    parsed_off = parse_claude_code_session(path, capture=CaptureConfig(prompts=False))
+    llm_off = next(s for s in parsed_off.spans if s.name == "gen_ai.llm.call")
+    assert TjAttributes.SYSTEM_PREFIX_CONTENT not in llm_off.attributes
+
+
+def test_claude_md_lookup_retries_after_a_record_with_no_cwd(tmp_path):
+    """The lazy load uses `None` = "not tried" / `""` = "tried, found nothing".
+    A leading record with no `cwd` can't resolve anything, so it must NOT
+    commit the `""` outcome -- doing so locked the sentinel permanently and
+    every later record that DID carry a cwd silently lost its system prefix."""
+    from tokenjam.otel.semconv import TjAttributes
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "CLAUDE.md").write_text("# Project rules\nAlways use tabs.")
+    cwd = str(project_dir)
+
+    # The first assistant record carries no `cwd` at all; the second does.
+    first = _assistant_record(
+        "msg-a", "claude-opus-4-7", 1000, 200,
+        "2026-04-01T10:00:00.000Z", "sess-late-cwd", cwd,
+    )
+    first.pop("cwd")
+    records = [
+        {"type": "user", "message": {"role": "user", "content": "turn one"}},
+        first,
+        {"type": "user", "message": {"role": "user", "content": "turn two"}},
+        _assistant_record(
+            "msg-b", "claude-opus-4-7", 900, 150,
+            "2026-04-01T10:05:00.000Z", "sess-late-cwd", cwd,
+        ),
+    ]
+    path = _make_session_file(
+        tmp_path, session_id="sess-late-cwd", cwd=cwd, records=records,
+    )
+
+    parsed = parse_claude_code_session(path, capture=CaptureConfig(prompts=True))
+    assert parsed is not None
+    llm_spans = [s for s in parsed.spans if s.name == "gen_ai.llm.call"]
+    assert len(llm_spans) == 2
+    # The retry happened: the later, cwd-bearing record resolved the file.
+    assert llm_spans[-1].attributes[TjAttributes.SYSTEM_PREFIX_CONTENT] == \
+        "# Project rules\nAlways use tabs."
+
+
+def test_capture_prompts_on_without_claude_md_omits_system_prefix(tmp_path):
+    """No CLAUDE.md at the project cwd -> no attribute, never a KeyError or
+    an empty-string placeholder."""
+    from tokenjam.otel.semconv import TjAttributes
+
+    path = _content_session_file(tmp_path)
+    parsed = parse_claude_code_session(path, capture=CaptureConfig(prompts=True))
+    llm, _tool = _llm_and_tool(parsed)
+    assert TjAttributes.SYSTEM_PREFIX_CONTENT not in llm.attributes
+
+
 def test_ingest_persists_captured_content_when_config_enables_it(tmp_path):
     """End-to-end through ingest: with config.capture enabled, the stored span's
     attributes column carries the content; a capture-all-off config stores

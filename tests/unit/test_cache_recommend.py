@@ -146,6 +146,49 @@ def test_candidate_carries_a_ready_cache_control_snippet(db):
     assert len(c.cache_control_snippet) < 500
 
 
+def test_claude_code_persona_produces_candidates_from_system_prefix(db):
+    """#272: live PR-539 showed enabled=True but candidates=0 for
+    Claude-Code-sourced data. Root cause: PROMPT_CONTENT on those spans is
+    the human's per-turn message, a different string every call that never
+    repeats verbatim -- hashing it can never find a shared prefix. Each span
+    here carries a DIFFERENT PROMPT_CONTENT (simulating distinct human
+    turns) but the SAME SYSTEM_PREFIX_CONTENT (simulating the project's
+    CLAUDE.md, resent unchanged on every call) -- the analyzer must key off
+    the latter and still surface a candidate."""
+    from tokenjam.otel.semconv import TjAttributes
+    from tests.factories import make_llm_span
+
+    start = datetime(2026, 5, 10, tzinfo=timezone.utc)
+    claude_md = "# Project rules\n" + "Always use tabs. " * 100
+    for i in range(5):
+        span = make_llm_span(
+            agent_id="claude-code-proj",
+            provider="anthropic",
+            billing_account="anthropic",
+            model="claude-sonnet-4-6",
+            input_tokens=2000,
+            cost_usd=0.005,
+            start_time=start + timedelta(minutes=i),
+            extra_attributes={
+                GenAIAttributes.PROMPT_CONTENT: f"human turn number {i}, always different",
+                TjAttributes.SYSTEM_PREFIX_CONTENT: claude_md,
+            },
+        )
+        db.insert_span(span)
+
+    config = _config(capture_prompts=True)
+    since = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    until = datetime(2026, 5, 30, tzinfo=timezone.utc)
+    report = build_report(db=db, config=config, since=since, until=until,
+                          findings=["cache-recommend"])
+    finding = report.findings["cache-recommend"]
+    assert finding.enabled is True
+    assert len(finding.candidates) == 1
+    c = finding.candidates[0]
+    assert c.occurrences == 5
+    assert "Project rules" in c.sample_chars
+
+
 def test_skips_non_anthropic_providers(db):
     """OpenAI/Gemini spans are counted in skipped_provider_count and not as candidates."""
     _seed_with_prompt(db, prompt="x" * 3000, count=5, provider="openai")

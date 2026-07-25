@@ -294,16 +294,24 @@ def run(ctx: AnalyzerContext) -> None:
             skeleton_session_id=by_recency[0].session_id,
         ))
 
-    # Rank by the conservative (cache-reuse) recoverable amount, descending.
+    # Cluster listing order (independent of the finding-level headline basis
+    # below): rank by the conservative cache-reuse amount, descending.
     surfaced.sort(key=lambda c: c.cache_reuse_recoverable_usd, reverse=True)
 
     finding.clusters = surfaced
     if surfaced:
+        # Headline uses the script-replacement premise (a template/skill
+        # removes the planning call entirely: avg cost x reps) rather than
+        # the more conservative cache-reuse premise (avg cost x (reps - 1)) —
+        # both are legitimate readings of the same measured cluster, and the
+        # conservative figure stays available per-cluster as
+        # cache_reuse_recoverable_usd/_tokens. See REUSE_ESTIMATE_BASIS for
+        # which premise this total rests on.
         finding.estimated_recoverable_usd = round(
-            sum(c.cache_reuse_recoverable_usd for c in surfaced), 6
+            sum(c.script_replacement_recoverable_usd for c in surfaced), 6
         )
         finding.estimated_recoverable_tokens = sum(
-            c.cache_reuse_recoverable_tokens for c in surfaced
+            c.script_replacement_recoverable_tokens for c in surfaced
         )
 
     ctx.report.findings["reuse"] = finding

@@ -219,6 +219,17 @@ class TjAttributes:
     # the [capture] `tool_inputs` toggle (see strip_captured_content).
     REQUEST_TOOLS    = "tokenjam.request.tools"
 
+    # The stable system-prompt-equivalent prefix a session resends verbatim
+    # on every call (#272) — e.g. Claude Code's CLAUDE.md, part of the system
+    # block the stateless chat-completions API requires on every request.
+    # Distinct from PROMPT_CONTENT: for Claude-Code-sourced spans,
+    # PROMPT_CONTENT carries the human's per-turn message, which is a
+    # different string every turn and never repeats verbatim, so hashing it
+    # for a shared-prefix match (cache-recommend) always came up empty. This
+    # carries the one thing that actually IS resent identically call after
+    # call. Gated by the same [capture] `prompts` toggle as PROMPT_CONTENT.
+    SYSTEM_PREFIX_CONTENT = "tokenjam.system_prefix.content"
+
     # Enforcement-plane self-observation (#223). The proxy emits one span per
     # recorded policy decision under this namespace so the web UI + drift see
     # enforcement activity. Suggest mode only: ACTION is what a policy WOULD do,

@@ -6198,25 +6198,32 @@ function capitalize(name) {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
 }
 
-// Mirror core/framing.render_savings: api/unknown → dollars; subscription →
-// token-share of the cycle; local → token count. The mode is server-decided.
+// Mirror core/framing's dollars-by-default rule: dollars unless the server
+// explicitly suppressed them (local inference, or an all-unknown plan mix —
+// see dollarsSuppressed below). Subscription no longer suppresses: dollars
+// price all traffic at API list rates and render with framing.qualifier_text
+// carrying the list-price-equivalent caveat. The `window_total_tokens`
+// token-share fallback stays for the rare case a payload only carries
+// `display_rule`-less legacy framing (pricing_mode-only fallback below).
 function fmtFramedSavings(usd, tokens, framing) {
-  const mode = framing ? framing.pricing_mode : 'api';
-  if (mode === 'subscription') {
+  if (dollarsSuppressed(framing)) {
     if (tokens == null) return '—';
-    if (framing.window_total_tokens > 0) return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';
+    const mode = framing ? framing.pricing_mode : 'api';
+    if (mode === 'subscription' && framing.window_total_tokens > 0) {
+      return (100 * tokens / framing.window_total_tokens).toFixed(1) + '% of cycle tokens';
+    }
     return fmtTokens(tokens) + ' tokens';
   }
-  if (mode === 'local') return tokens == null ? '—' : fmtTokens(tokens) + ' tokens';
   return usd == null ? '—' : fmtCost(usd);
 }
 
 // Is the server telling us NOT to lead with dollars? Reads the explicit
 // server-side decision (`display_rule`, core/framing.py) rather than
-// re-deriving it, with a pricing_mode fallback for older payloads. True for a
-// subscription-dominant corpus (a dollar figure there covers only the
-// API-billed slice, so it understates), for local inference, and for an
-// unknown plan. Callers make TOKENS the headline in that case.
+// re-deriving it, with a pricing_mode fallback for older payloads. True for
+// local inference (no marginal cost to price) and an all-unknown plan mix.
+// Subscription is deliberately NOT in this set — dollars price all traffic at
+// API list rates and are shown with a list-price-equivalent qualifier.
+// Callers make TOKENS the headline only in the suppressed case.
 const DOLLARS_SUPPRESSED_RULES = new Set([
   'suppress_dollars_for_subscription_share', 'tokens_only', 'suppress_dollars_unknown',
 ]);
@@ -6296,18 +6303,30 @@ function classifyFinding(name, fd, skipped) {
 // wave-2 finding carrying the `estimated_recoverable_usd` contract field becomes
 // a tile (so a future `reuse` analyzer appears with no UI change).
 // cache-recommend / budget-projection lack the field → excluded by contract.
+// Persona-disabled analyzers (`opt.persona_disabled_analyzers`, sourced from
+// the server's persona-disabled-analyzer map — core/optimize/runner.py) are
+// dropped before ranking, not shown as a placeholder — they vanish entirely
+// from the band so a claude-code window isn't crowded out by findings it
+// can't act on, and the tile that survives at rank 0 is guaranteed to carry
+// a real lever. An older payload lacking the field falls back to an empty
+// set (show everything) rather than reintroducing a hardcoded list.
 function recoverableTiles(opt) {
   if (!opt) return [];
+  const disabled = new Set(opt.persona_disabled_analyzers || []);
   const out = [];
   const skipped = new Set(opt.skipped_analyzers || []);
   const f = opt.findings || {};
   // Downsize always gets a tile — it runs unconditionally; a null typed slot
   // means "ran, no candidates", not "missing" (issue #126).
-  out.push({ name: 'downsize', ...classifyFinding('downsize', opt.downgrade, skipped) });
+  if (!disabled.has('downsize')) {
+    out.push({ name: 'downsize', ...classifyFinding('downsize', opt.downgrade, skipped) });
+  }
   Object.keys(f).forEach(k => {
+    if (disabled.has(k)) return;
     if (f[k] && 'estimated_recoverable_usd' in f[k]) out.push({ name: k, ...classifyFinding(k, f[k], skipped) });
   });
   skipped.forEach(k => {
+    if (disabled.has(k)) return;
     if (!(k in f) && k !== 'downsize') {
       out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' });
     }
@@ -6511,8 +6530,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         : !(fd.dead_servers || []).length ? html`<div class="opt-line dim">${(fd.notes && fd.notes.length) ? fd.notes.join(' ') : `All ${fd.configured_servers} configured MCP server${fd.configured_servers !== 1 ? 's' : ''} were invoked at least once in this window.`}</div>`
         : html`
           <div class="opt-line">${fd.dead_servers.length} dead MCP server${fd.dead_servers.length !== 1 ? 's' : ''} of ${fd.configured_servers} configured <span class="dim">(schemas injected every session, never called)</span>.</div>
-          <table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax / 90d</th></tr></thead>
-            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_90d != null ? fmtCost(s.estimated_tax_usd_90d) : ('~' + fmtTokens(s.estimated_tax_tokens_90d) + ' tokens')}</td></tr>`)}</tbody></table>
+          <table class="opt-table"><thead><tr><th>Server</th><th>Sessions</th><th>Invocations</th><th>Tax (window)</th></tr></thead>
+            <tbody>${fd.dead_servers.map(s => html`<tr><td class="mono">${s.name} <span class="dim">(${s.scope} · ${s.source})</span></td><td>${s.sessions_present}</td><td>${s.invocations}</td><td>${s.estimated_tax_usd_window != null ? fmtCost(s.estimated_tax_usd_window) : ('~' + fmtTokens(s.estimated_tax_tokens_window) + ' tokens')}</td></tr>`)}</tbody></table>
           ${fd.caveat ? html`<div class="opt-caveat">! ${fd.caveat}</div>` : null}`;
     }
   }
@@ -6618,7 +6637,16 @@ function OptimizeView({ params }) {
   // own full surface in the Review inbox, summarize its own bespoke box
   // below and its own screen (SummarizeView); giving them a second,
   // thinner card here would just duplicate that richer treatment.
-  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement'];
+  // Analyzers the server's persona gate never ran, because they have no fix
+  // this user can apply (`persona_disabled_analyzers` on the /optimize
+  // payload; see core/optimize/runner.py). They must VANISH, not render an
+  // empty state: `placement` (and `downsize`) deliberately show a "ran, found
+  // nothing" card when their finding is absent, which for a gated analyzer
+  // would be a row pointing at a lever the reader does not have. Filtering the
+  // order list here covers every such branch at once, including future ones.
+  const personaGated = new Set((st.opt && st.opt.persona_disabled_analyzers) || []);
+  const order = ['downsize', 'resend', 'cache', 'cache-recommend', 'script', 'trim', 'reuse', 'subagent', 'verbosity', 'deadweight', 'placement']
+    .filter(n => !personaGated.has(n));
   const compFraming = st.comp ? st.comp.framing : framing;
   const useTokens = !!compFraming && (compFraming.pricing_mode === 'subscription' || compFraming.pricing_mode === 'local');
   const compIsApi = !!compFraming && compFraming.pricing_mode === 'api';
@@ -8438,7 +8466,27 @@ function CostProposalCard({ prop, busy, focused, onMark, onDismiss, onChanged, s
 // shows per row), never a live re-measurement of what happened afterward. A
 // bounded verify redesign is a separate, later product decision — see
 // c0316aba before building one.
-function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed }) {
+// #326: `excluded` (from GET /relearn/cost-proposals's rollup.excluded) is
+// waste this page's own totals deliberately do NOT sum in — currently only
+// `summarize`, which keeps its own curate/diff review surface rather than a
+// peer card here (see COST_ANALYZERS's docstring server-side). Left unstated
+// it reads as "the biggest recoverable figure the product computes doesn't
+// exist"; this renders it as an explicit line with a link to where it lives,
+// never folded into the blue tile's own number (a different review flow, not
+// a peer figure to add).
+function ExcludedWasteNote({ excluded }) {
+  const entries = Object.values(excluded || {}).filter(e => e && (e.estimated_monthly_usd != null || e.estimated_recoverable_usd != null));
+  if (entries.length === 0) return null;
+  return html`
+    <div class="dim" style="font-size:12px;margin-top:6px">
+      ${entries.map(e => html`
+        + ${e.estimated_monthly_usd != null ? fmtUsd(e.estimated_monthly_usd) : fmtUsd(e.estimated_recoverable_usd)}/mo more in ${e.label || 'Summarize'} (its own review surface, not summed above) ·
+        <a class="sz-link" href=${e.href || '#/optimize/summarize'}>Review it →</a>
+      `)}
+    </div>`;
+}
+
+function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastAppliedAt, suppressed, excluded }) {
   // monthlyUsdForDisplay excludes resend/TRIM's structural (not-a-savings-
   // claim) dollar figure from this tile the same way estMonthlyLine does for
   // the individual rows. appliedEstimates needs no equivalent call here — its
@@ -8458,9 +8506,11 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
     : appliedTokSum > 0 ? '~' + fmtTokens(appliedTokSum) + ' tok'
     : String(appliedCount);
 
-  if (openItems.length === 0 && appliedCount === 0) return null;
+  const hasExcluded = Object.keys(excluded || {}).length > 0;
+  if (openItems.length === 0 && appliedCount === 0 && !hasExcluded) return null;
   return html`
-    <div style="display:flex;gap:14px;flex-wrap:wrap;margin:10px 0 18px">
+    <div style="margin:10px 0 18px">
+    <div style="display:flex;gap:14px;flex-wrap:wrap">
       ${openItems.length > 0 ? html`
         <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;border-color:rgba(var(--accent-rgb,120,120,255),0.35)">
           <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="dim" style="font-weight:400">/ mo</span></div>
@@ -8468,6 +8518,14 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
             ${leadWithUsd ? fmtUsd(totalUsd) : '~' + fmtTokens(totalToks) + ' tok'}
           </div>
           <div class="dim" style="font-size:12px;margin-top:2px">across ${openItems.length} open item${openItems.length === 1 ? '' : 's'} · review before applying</div>
+          <${ExcludedWasteNote} excluded=${excluded} />
+        </div>
+      ` : hasExcluded ? html`
+        <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px;border-color:rgba(var(--accent-rgb,120,120,255),0.35)">
+          <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">Estimated recoverable <span class="dim" style="font-weight:400">/ mo</span></div>
+          <div style="font-size:24px;font-weight:600;color:var(--accent);margin-top:4px">—</div>
+          <div class="dim" style="font-size:12px;margin-top:2px">no open cost advisory or recurring-mistake fix right now</div>
+          <${ExcludedWasteNote} excluded=${excluded} />
         </div>
       ` : null}
       <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
@@ -8486,6 +8544,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, lastApplied
           ? html`most recent ${daysAgoLabel(lastAppliedAt) || 'unknown'}`
           : html`across ${appliedCount} applied fix${appliedCount === 1 ? '' : 'es'} · estimated when applied`}</div>
       </div>
+    </div>
     </div>`;
 }
 
@@ -8513,6 +8572,7 @@ function ReviewInboxView({ params }) {
   const [costDegraded, setCostDegraded] = useState(false); // a recompute failed even though a good result still renders
   const [costLastError, setCostLastError] = useState(null);
   const [costFraming, setCostFraming] = useState(null);    // plan-tier framing for the cost-advisory dollars
+  const [costExcluded, setCostExcluded] = useState({});    // #326: waste NOT summed into the headline (e.g. summarize)
   const [costApplied, setCostApplied] = useState([]);      // marked-applied cost proposals
   const [marking, setMarking] = useState(null);            // signature currently being marked applied
 
@@ -8546,6 +8606,7 @@ function ReviewInboxView({ params }) {
       setCostDegraded(!!r.degraded);
       setCostLastError(r.last_error || null);
       setCostFraming(r.framing || null);
+      setCostExcluded((r.rollup && r.rollup.excluded) || {});
     } catch (e) { /* the relearn list is load-bearing; degrade quietly */ }
     try {
       const r = await api('/relearn/cost-applied');
@@ -8718,7 +8779,7 @@ function ReviewInboxView({ params }) {
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
 
-    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} />
+    <${InboxStatTiles} openItems=${openItems} appliedEstimates=${appliedEstimates} appliedCount=${appliedOpenCount} lastAppliedAt=${lastAppliedAt} suppressed=${suppressed} excluded=${costExcluded} />
 
     <div class="tab-bar" role="tablist">
       <button class="tab ${tab === 'mistakes' ? 'active' : ''}" role="tab" aria-selected=${tab === 'mistakes'} onClick=${() => setTab('mistakes')}>Recurring mistakes (${visible.length})</button>

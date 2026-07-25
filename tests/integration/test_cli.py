@@ -202,7 +202,10 @@ def test_status_subscription_plan_shows_no_raw_dollar_line(runner, db):
     assert "$0.00" not in result.output
     assert "$0.000000" not in result.output
     assert "Cost today:     0.0% of cycle" in result.output
-    assert "Subscription plan" in result.output
+    # The generic "Subscription plan — flat-fee billing" note was superseded
+    # by compute_framing's list-price-equivalent qualifier, which now fires
+    # unconditionally for subscription mode (see cmd_status._framing_note).
+    assert "list-price equivalent, not an amount billed" in result.output
 
 
 def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):
@@ -1276,6 +1279,55 @@ def test_optimize_json_reports_cost_proposals_available(runner, db, config):
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["cost_proposals_available"] >= 1
+
+
+def test_optimize_json_reports_persona_disabled_analyzers(runner, db, config):
+    """The CLI's --json surface must carry the same persona-gate detail the
+    /optimize route exposes. Without it a scripted consumer sees an absent
+    finding with no way to tell "ran, found nothing" from "not run for this
+    persona" — and the two JSON surfaces silently drift apart."""
+    from datetime import timedelta
+
+    from tokenjam.core.optimize import PERSONA_DISABLED_ANALYZERS
+    from tests.factories import make_llm_span, make_session
+    from tokenjam.utils.time_parse import utcnow
+
+    for i in range(6):
+        started = utcnow() - timedelta(days=i + 1)
+        db.upsert_session(make_session(
+            agent_id="claude-code-x", session_id=f"cc-{i}", plan_tier="api",
+            started_at=started,
+        ))
+        db.insert_span(make_llm_span(
+            agent_id="claude-code-x", provider="anthropic", model="claude-opus-4-7",
+            input_tokens=4000, output_tokens=800, cost_usd=0.12,
+            session_id=f"cc-{i}", start_time=started,
+        ))
+
+    result = _invoke(runner, db, config, ["optimize", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+
+    assert payload["persona"] == "claude-code"
+    assert set(payload["persona_disabled_analyzers"]) == set(
+        PERSONA_DISABLED_ANALYZERS["claude-code"]
+    )
+    # A gated analyzer must vanish, not appear as a finding.
+    assert set(payload["persona_disabled_analyzers"]).isdisjoint(
+        payload.get("findings") or {}
+    )
+
+
+def test_optimize_json_lists_nothing_gated_for_an_sdk_window(runner, db, config):
+    """The conservative default: an sdk window loses no analyzer, so the key is
+    present and empty rather than absent."""
+    _seed_low_cache_efficacy_window(db)
+
+    result = _invoke(runner, db, config, ["optimize", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["persona"] != "claude-code"
+    assert payload["persona_disabled_analyzers"] == []
 
 
 def _seed_optimize_window(db, *, plan_tier: str, sessions: int = 5,

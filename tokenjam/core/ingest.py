@@ -117,6 +117,9 @@ def strip_captured_content(attributes: dict, capture: CaptureConfig) -> dict:
         stripped[TjAttributes.TOOL_ARG_SIG] = sig
     if not capture.prompts:
         stripped.pop(GenAIAttributes.PROMPT_CONTENT, None)
+        # The recovered system prefix (a project's CLAUDE.md text, stamped by
+        # backfill) is prompt content and rides the same toggle.
+        stripped.pop(TjAttributes.SYSTEM_PREFIX_CONTENT, None)
         for key in _REQUEST_PARAM_ATTRS:
             stripped.pop(key, None)
     if not capture.completions:
