@@ -155,7 +155,7 @@ def _check_ingest_secret(config: object) -> dict:
 def _check_prometheus(config: object) -> dict:
     if config.export.prometheus.enabled:
         return {"name": "Prometheus", "level": "ok",
-                "message": f"Prometheus export enabled."}
+                "message": "Prometheus export enabled."}
     return {"name": "Prometheus", "level": "info",
             "message": "Prometheus export disabled."}
 
