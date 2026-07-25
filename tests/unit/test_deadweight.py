@@ -81,6 +81,18 @@ def _invoking_session(root: Path, project: str, session_id: str, cwd: str, tool_
     ])
 
 
+def _multi_call_session(root: Path, project: str, session_id: str, cwd: str, calls: int) -> None:
+    """A session with ``calls`` sequential user/assistant turns -- each
+    assistant turn is one API request, so a configured server's tool schemas
+    ride in the `tools` array of every one of them (see the per-session
+    cache-read multiplier in ``compute_deadweight_finding``)."""
+    records: list[dict] = []
+    for i in range(calls):
+        records.append(_user_prompt(f"turn {i}", cwd=cwd))
+        records.append(_assistant(f"ok {i}", cwd=cwd))
+    _write_transcript(root, project, session_id, records)
+
+
 def _deferred_session(root: Path, project: str, session_id: str, cwd: str, tool_name: str) -> None:
     """A session whose transcript shows the deferred-tools listing naming
     ``tool_name`` — the server's schema was NOT fully loaded this session."""
@@ -438,6 +450,43 @@ def test_invoked_server_is_never_flagged_dead(tmp_path):
     assert finding.dead_servers == []
 
 
+# --- Sidechain/subagent transcripts must not become extra top-level sessions -
+
+def test_sidechain_subagent_transcript_is_not_counted_as_a_top_level_session(tmp_path):
+    """A `subagents/agent-*.jsonl` sidechain transcript lives nested under its
+    parent session's own directory (core/transcript.py) but must not be
+    discovered as an independent top-level "session" -- otherwise a session
+    that happens to spawn a subagent spuriously inflates sessions_present (and
+    thus can push a server across the dead-weight threshold, or inflate the
+    schema tax) purely because of where the subagent's JSONL file lives on
+    disk, not because of any real additional session."""
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s{i}", str(project_dir))
+
+    # A sidechain transcript nested under s0's own subagents/ dir. If it were
+    # (mis)discovered as its own top-level session, sessions_present would
+    # reach MIN_SESSIONS_DEADWEIGHT and flip apollo to dead.
+    sidechain_path = root / "-repo-a" / "s0" / "subagents" / "agent-child1.jsonl"
+    sidechain_path.parent.mkdir(parents=True, exist_ok=True)
+    sidechain_path.write_text(
+        "\n".join(json.dumps(r) for r in [
+            _user_prompt("subagent task", cwd=str(project_dir)),
+            _assistant("working...", cwd=str(project_dir)),
+        ]),
+        encoding="utf-8",
+    )
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+
+    assert finding.sessions_scanned == MIN_SESSIONS_DEADWEIGHT - 1
+    assert finding.dead_servers == []
+    row = next(s for s in finding.servers if s.name == "apollo")
+    assert row.sessions_present == MIN_SESSIONS_DEADWEIGHT - 1
+
+
 # --- Deferred-tools suppression ---------------------------------------------
 
 def test_deferred_listing_suppresses_full_tax_claim(tmp_path):
@@ -479,6 +528,96 @@ def test_partial_deferral_blends_the_two_constants(tmp_path):
     expected = round((5 * FULL_SCHEMA_TAX_TOKENS + 5 * DEFERRED_SCHEMA_TAX_TOKENS) / 10)
     assert dead.estimated_tax_tokens_per_session == expected
     assert dead.estimated_tax_tokens_per_session < FULL_SCHEMA_TAX_TOKENS
+
+
+def test_mixed_deferral_prices_each_call_by_its_own_load_state(tmp_path):
+    """A server deferred at the start of a session but actually invoked partway
+    through (schema now fully loaded -- a deferred tool's own listing says
+    calling it directly "will fail... use ToolSearch to load their schema
+    before calling them", so a successful invocation is positive evidence the
+    schema was already loaded by that call) must have the calls BEFORE the
+    invocation priced at the deferred base and the calls FROM the invocation
+    onward priced at the full base -- never the whole session at the low
+    deferred base just because it was deferred at some point."""
+    from tokenjam.core.pricing import get_rates
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    reminder = (
+        "<system-reminder>\n"
+        "The following deferred tools are now available via ToolSearch. "
+        "Their schemas are NOT loaded — calling them directly will fail "
+        "with InputValidationError. Use ToolSearch to load their schema "
+        "before calling them:\n"
+        "mcp__apollo__apollo_contacts_search\n"
+        "</system-reminder>"
+    )
+    _write_transcript(root, "-repo-a", "s-mixed", [
+        _user_prompt(reminder, cwd=str(project_dir)),
+        _assistant("thinking...", cwd=str(project_dir)),                  # call 1: deferred
+        _user_prompt("continue", cwd=str(project_dir)),
+        _assistant("still deferred", cwd=str(project_dir)),               # call 2: deferred
+        _user_prompt("use the tool", cwd=str(project_dir)),
+        _assistant(                                                        # call 3: loads + invokes
+            "calling it now",
+            tools=[{"id": "t1", "name": "mcp__apollo__apollo_contacts_search", "input": {}}],
+            cwd=str(project_dir),
+        ),
+        _user_prompt("result", cwd=str(project_dir)),
+        _assistant("done", cwd=str(project_dir)),                         # call 4: full
+    ])
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    row = next(s for s in finding.servers if s.name == "apollo")
+
+    rates = get_rates("anthropic", "claude-opus-4-8")
+    ratio = rates.cache_read_per_mtok / rates.input_per_mtok
+    expected_deferred = round(DEFERRED_SCHEMA_TAX_TOKENS * (1.0 + (2 - 1) * ratio))
+    expected_full = round(FULL_SCHEMA_TAX_TOKENS * (1.0 + (2 - 1) * ratio))
+
+    assert row.invocations == 1
+    assert row.dead is False
+    assert row.estimated_tax_tokens_window == expected_deferred + expected_full
+    # Strictly more than the old bug (whole session priced at the deferred
+    # base just because it was deferred at some point).
+    old_buggy_estimate = round(DEFERRED_SCHEMA_TAX_TOKENS * (1.0 + (4 - 1) * ratio))
+    assert row.estimated_tax_tokens_window > old_buggy_estimate
+
+
+def test_schema_tax_scales_with_actual_calls_per_session(tmp_path):
+    """The schema tax must price EVERY call in a session, not just charge the
+    full/deferred constant once -- later calls in the same session re-send
+    the schema and are billed at the cache-read rate, not re-charged at input
+    rate. A mixed population (light single-call sessions + one heavy
+    multi-call session) proves this uses each session's OWN actual call
+    count, never a global mean/median applied uniformly."""
+    from tokenjam.core.pricing import get_rates
+
+    root = tmp_path / "root"
+    project_dir = root / "-repo-a"
+    _write_mcp_json(project_dir, {"apollo": {}})
+    for i in range(MIN_SESSIONS_DEADWEIGHT - 1):
+        _plain_session(root, "-repo-a", f"s-light-{i}", str(project_dir))
+    _multi_call_session(root, "-repo-a", "s-heavy", str(project_dir), calls=10)
+
+    finding = compute_deadweight_finding(_SINCE, _UNTIL, projects_root=root)
+    dead = finding.dead_servers[0]
+    assert dead.sessions_present == MIN_SESSIONS_DEADWEIGHT
+
+    rates = get_rates("anthropic", "claude-opus-4-8")
+    ratio = rates.cache_read_per_mtok / rates.input_per_mtok
+    light_tax = FULL_SCHEMA_TAX_TOKENS  # single call -> multiplier == 1
+    heavy_tax = round(FULL_SCHEMA_TAX_TOKENS * (1.0 + (10 - 1) * ratio))
+    expected_window = light_tax * (MIN_SESSIONS_DEADWEIGHT - 1) + heavy_tax
+
+    assert heavy_tax > FULL_SCHEMA_TAX_TOKENS
+    assert dead.estimated_tax_tokens_window == expected_window
+    # The heavy session's real cost is folded in, not diluted by an averaged
+    # call count applied uniformly to every session.
+    assert dead.estimated_tax_tokens_window > light_tax * MIN_SESSIONS_DEADWEIGHT
+    assert "cache-read rate" in dead.tax_construction
+    assert "5-minute cache TTL" in dead.tax_construction
 
 
 # --- C2: context tax table --------------------------------------------------

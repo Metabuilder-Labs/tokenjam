@@ -768,7 +768,9 @@ async def test_budget_framing_reflects_configured_subscription_plan(db):
     assert framing["pricing_mode"] == "subscription"
     assert framing["plan_tier"] == "max_5x"
     assert framing["plan_label"] == "Max 5x plan"
-    assert framing["display_rule"] == "suppress_dollars_for_subscription_share"
+    # Dollars are shown by default (assume API pricing), qualified as a
+    # list-price equivalent — never suppressed for a subscription plan.
+    assert framing["display_rule"] == "show_dollars_with_qualifier"
 
 
 async def test_get_alerts_returns_list(client):

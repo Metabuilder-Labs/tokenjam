@@ -2509,6 +2509,42 @@ def test_estimated_tile_hides_when_there_are_no_open_items(html):
     assert "openItems.length > 0 ? html`" in tile
 
 
+# --- #326: excluded waste (summarize) is stated + linked, never summed ----- #
+def test_inbox_stat_tiles_renders_the_excluded_cross_reference(html):
+    start = html.index("function ExcludedWasteNote")
+    end = html.index("function ReviewInboxView", start)
+    block = html[start:end]
+    # Rendered inside InboxStatTiles, not just defined standalone.
+    assert "<${ExcludedWasteNote} excluded=${excluded} />" in block
+    assert block.count("<${ExcludedWasteNote} excluded=${excluded} />") == 2
+    # Never folded into the blue tile's own dollar figure — only ever a
+    # separate stated line with a link out.
+    assert "not summed above" in block
+    assert "Review it" in block
+    assert "#/optimize/summarize" in block
+
+
+def test_review_inbox_view_fetches_and_threads_excluded_from_the_rollup(html):
+    view = html[html.index("function ReviewInboxView"):]
+    end = view.index("function ", len("function ReviewInboxView"))
+    view = view[:end]
+    assert "setCostExcluded((r.rollup && r.rollup.excluded) || {})" in view
+    assert "excluded=${costExcluded}" in view
+
+
+def test_estimated_tile_still_renders_with_only_excluded_waste_and_no_open_items(html):
+    # Summarize can be the ONLY recoverable figure in a given scan (no cost
+    # advisories, no recurring mistakes yet) — the tile must still surface it
+    # rather than disappearing the way the pre-#326 empty state did (issue
+    # #326: "the product's largest recoverable figure invisible from the
+    # headline a user reads").
+    start = html.index("function InboxStatTiles")
+    end = html.index("function ReviewInboxView", start)
+    tile = html[start:end]
+    assert "hasExcluded" in tile
+    assert "openItems.length === 0 && appliedCount === 0 && !hasExcluded" in tile
+
+
 # --- Review inbox copy: cost-led, and no hardcoded zero -------------------- #
 def test_review_inbox_intro_matches_the_founder_approved_mockup(html):
     # Inbox redesign: the page title and subtitle are the founder-approved

@@ -455,7 +455,19 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     ledger. Computed here, not client-side, so the headline reflects every
     viewer's state consistently (a browser's local "dismiss" never affects
     this figure — dismissing hides a card from one person's view, it doesn't
-    change what's actually still outstanding)."""
+    change what's actually still outstanding).
+
+    ``rollup`` also folds in the relearn detector's own OPEN clusters (#326:
+    ``rollup.relearn_monthly_usd``/``relearn_monthly_tokens``, added into
+    ``rollup.projected_usd_30d``/``projected_tokens_30d`` — never into the
+    window-observed ``estimated_recoverable_usd``, a different time basis —
+    filtered against the relearn applied-fixes ledger the same way the cost
+    proposals are filtered against the cost-applied one) and carries
+    ``rollup.excluded`` (currently ``{"summarize": {...}}`` when the analyzer
+    found something) — waste this headline deliberately does NOT sum in
+    because it has its own review surface, stated instead of silently
+    dropped. See ``cost_proposals.estimated_recoverable_rollup``'s docstring
+    for the full contract."""
     config = _config(request)
     block = relearn_store.read_cost_proposals(config=config)
     computing = cost_proposals_mod.is_computing_cost_proposals()
@@ -470,6 +482,20 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         if rec.get("state") != "reverted"
     }
     open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
+    # #326: fold the relearn detector's OWN open clusters into the SAME
+    # headline rollup — same "not yet applied" filter as the cost proposals
+    # above, just against the relearn ledger (`applied_fixes.json`) instead
+    # of the cost-applied one, since the two ledgers track different apply
+    # paths (see `_revert_linked_cost_record`'s docstring on why they're
+    # separate).
+    relearn_applied_sigs = {
+        rec.get("signature") for rec in relearn_apply.list_applied(config)
+        if rec.get("state") != "reverted"
+    }
+    open_relearn_clusters = [
+        c for c in relearn_proposals.list_proposals(config)
+        if c.get("signature") not in relearn_applied_sigs
+    ]
     # The window this batch of proposals was actually computed over (#273) —
     # stored alongside them at recompute time, never re-derived here, so the
     # rollup's projection ratio matches the data that produced these figures.
@@ -479,7 +505,12 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
             rollup_kwargs["window_days"] = block["cost_window_days"]
         rollup_kwargs["active_days"] = block.get("cost_active_days") or 0
         rollup_kwargs["n_sessions"] = block.get("cost_n_sessions") or 0
-    rollup = cost_proposals_mod.estimated_recoverable_rollup(open_proposals, **rollup_kwargs)
+    rollup = cost_proposals_mod.estimated_recoverable_rollup(
+        open_proposals,
+        relearn_clusters=open_relearn_clusters,
+        excluded=(block.get("cost_excluded") if block else None),
+        **rollup_kwargs,
+    )
     # Same plan-tier framing the cost-applied payload carries, so a dollar
     # figure rendered here never disagrees with its sibling surfaces.
     framing = _framing(request)

@@ -11,10 +11,11 @@ This module *reads* plan-tier / pricing-mode; it does not define them. The
 canonical derivation lives on ``SessionRecord.pricing_mode`` and the
 ``SUBSCRIPTION_PLAN_TIERS`` frozenset in :mod:`tokenjam.otel.semconv`.
 
-Honesty discipline (see CLAUDE.md Critical Rule 14): subscription users never
-see a raw dollar figure that includes subscription traffic without
-qualification; local users see tokens only; unknown-plan users see dollars with
-an "may overstate" qualifier.
+Honesty discipline (see CLAUDE.md Critical Rule 14): every user is assumed to
+be on API pricing, so dollar figures are shown by default — subscription
+users see them qualified as a list-price equivalent (never an amount billed);
+local users see tokens only (no marginal cost to price); unknown-plan users
+see dollars with a "may overstate" qualifier.
 """
 from __future__ import annotations
 
@@ -385,25 +386,28 @@ def compute_framing(
             + RECONFIGURE_HINT
         )
     elif mode == "subscription":
-        display_rule = DISPLAY_SUPPRESS_SUBSCRIPTION
-        if api_sessions > 0:
-            # Scope-neutral wording ("of sessions", not "this window"): the
-            # /cost route now frames off the user's full session history (#177)
-            # while the CLI / compare callers still pass a window-scoped mix —
-            # the phrasing must read truthfully for both.
-            #
-            # It must also be true about HOW the dollars are derived. This used
-            # to claim they "reflect API traffic only", which no query in the
-            # product does: `plan_tier` lives on `sessions`, every cost
-            # aggregate reads `spans`, and nothing joins the two — so dollars
-            # price ALL traffic at API list rates. That is the right number
-            # (it is what the waste would cost at list price), but it is a
-            # list-price equivalent, not an amount anyone was billed.
-            qualifier = (
-                f"{sub_pct:.1f}% of sessions are subscription-billed. Dollar "
-                f"figures price all traffic at API list rates, so they are a "
-                f"list-price equivalent, not an amount billed."
-            )
+        # Standing product decision: assume every user is on API pricing and
+        # show dollars, because a dollar figure is the unit users actually
+        # reason in — token counts don't translate into a decision. Dollars
+        # price ALL traffic (subscription and API alike) at API list rates,
+        # so they are always shown WITH the qualifier below, never suppressed
+        # in favour of a token-share-only figure. `DISPLAY_SUPPRESS_SUBSCRIPTION`
+        # stays defined for any caller that still wants to detect "this window
+        # is subscription-dominant" from `pricing_mode`, but `display_rule` no
+        # longer resolves to it.
+        display_rule = DISPLAY_SHOW_DOLLARS_WITH_QUALIFIER
+        # It must be true about HOW the dollars are derived. This used to
+        # claim they "reflect API traffic only", which no query in the
+        # product does: `plan_tier` lives on `sessions`, every cost
+        # aggregate reads `spans`, and nothing joins the two — so dollars
+        # price ALL traffic at API list rates. That is the right number
+        # (it is what the waste would cost at list price), but it is a
+        # list-price equivalent, not an amount anyone was billed.
+        qualifier = (
+            f"{sub_pct:.1f}% of sessions are subscription-billed. Dollar "
+            f"figures price all traffic at API list rates, so they are a "
+            f"list-price equivalent, not an amount billed."
+        )
     elif mode == "local":
         display_rule = DISPLAY_TOKENS_ONLY
         qualifier = "Local inference — no marginal cost."

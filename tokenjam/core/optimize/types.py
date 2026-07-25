@@ -51,8 +51,12 @@ REUSE_HONESTY_CAVEAT = (
 # Required `estimate_basis` for ReuseFinding (issue #115 AC8 / savings
 # contract). Must contain the word "review".
 REUSE_ESTIMATE_BASIS = (
-    "structurally repeated planning calls — cache-reuse number assumes future "
-    "re-plans skip the LLM call entirely; review templates before reusing"
+    "structurally repeated planning calls — the headline prices the "
+    "script-replacement premise (a template/skill removes the planning call "
+    "entirely: avg cost x reps); the more conservative cache-reuse premise "
+    "(a template only removes the re-plan delta: avg cost x (reps - 1)) "
+    "stays available on every cluster as cache_reuse_recoverable_usd/"
+    "_tokens; review templates before reusing"
 )
 
 

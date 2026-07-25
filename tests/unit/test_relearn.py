@@ -24,6 +24,7 @@ from tokenjam.core.optimize.analyzers.relearn import (
     extract_failures_for_session,
     is_already_codified,
 )
+from tokenjam.core.pricing import get_rates
 
 
 # --- Fixture builders (mirrors test_transcript.py) ----------------------------
@@ -888,59 +889,122 @@ def test_single_timestamp_corpus_floors_the_window_to_one_day(tmp_path):
 
 
 class _FakeSpanConn:
-    """Minimal stand-in for a DuckDB connection: `_blended_dollar_rate` only
-    ever calls `.execute(sql, params).fetchall()` on it, so this returns
-    canned `(provider, model, cost, tokens)` rows regardless of the SQL text."""
-    def __init__(self, rows):
-        self._rows = rows
+    """Minimal stand-in for a DuckDB connection.
 
-    def execute(self, _sql, _params):
+    Relearn issues two different queries per cluster — the rate blend
+    (``provider, model, input_tokens, cache_tokens``) and the per-session
+    prompt timeline the re-read tail is measured on (``session_id,
+    start_time, prompt_size``) — so this dispatches on the SQL text rather
+    than returning one canned shape to both.
+    """
+    def __init__(self, rate_rows, timeline_rows=()):
+        self._rate_rows = rate_rows
+        self._timeline_rows = list(timeline_rows)
+        self._rows: list = []
+
+    def execute(self, sql, _params):
+        self._rows = self._timeline_rows if "start_time" in sql else self._rate_rows
         return self
 
     def fetchall(self):
         return self._rows
 
 
-def test_blended_dollar_rate_names_the_models_it_derived_from():
-    from tokenjam.core.optimize.analyzers.relearn import _blended_dollar_rate
+def test_blended_rate_profile_names_the_models_it_derived_from():
+    from tokenjam.core.optimize.rate_profile import blended_rate_profile
 
-    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 3.0, 1_000_000)])
-    rate, basis = _blended_dollar_rate(conn, {"s1", "s2"})
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)])
+    profile = blended_rate_profile(conn, session_ids={"s1", "s2"})
 
-    assert rate == pytest.approx(3.0 / 1_000_000)
-    assert "anthropic/claude-sonnet-5" in basis
-    assert "blended" in basis
-
-
-def test_blended_dollar_rate_never_invents_a_rate_with_no_conn_or_sessions():
-    from tokenjam.core.optimize.analyzers.relearn import _blended_dollar_rate
-
-    assert _blended_dollar_rate(None, {"s1"}) == (None, "")
-    assert _blended_dollar_rate(_FakeSpanConn([]), set()) == (None, "")
+    rates = get_rates("anthropic", "claude-sonnet-5")
+    assert profile.input_rate_per_token == pytest.approx(rates.input_per_mtok / 1_000_000)
+    assert profile.cache_read_ratio == pytest.approx(
+        rates.cache_read_per_mtok / rates.input_per_mtok
+    )
+    assert "anthropic/claude-sonnet-5" in profile.basis
 
 
-def test_blended_dollar_rate_degrades_on_query_failure_never_raises():
-    from tokenjam.core.optimize.analyzers.relearn import _blended_dollar_rate
+def test_blended_rate_profile_never_invents_a_rate_with_no_conn_or_sessions():
+    from tokenjam.core.optimize.rate_profile import blended_rate_profile
+
+    assert blended_rate_profile(None, session_ids={"s1"}) is None
+    assert blended_rate_profile(_FakeSpanConn([]), session_ids=set()) is None
+
+
+def test_blended_rate_profile_degrades_on_query_failure_never_raises():
+    from tokenjam.core.optimize.rate_profile import blended_rate_profile
 
     class _RaisingConn:
         def execute(self, _sql, _params):
             raise RuntimeError("boom")
 
-    assert _blended_dollar_rate(_RaisingConn(), {"s1"}) == (None, "")
+    assert blended_rate_profile(_RaisingConn(), session_ids={"s1"}) is None
 
 
 def test_monthly_usd_derived_when_conn_has_priced_spans(tmp_path):
     # End-to-end: analyze_relearns(conn=...) stamps a cluster's
-    # estimated_monthly_usd from the blended rate observed across its own
+    # estimated_monthly_usd from the input rate observed across its own
     # sessions, not a hardcoded or invented one.
     for i in range(MIN_RECURRING_SESSIONS):
         _cwd_confusion_session(tmp_path, f"-Users-test-usd{i}", f"usd-{i}")
     sessions = [(f"usd-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
-    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 3.0, 1_000_000)])
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)])
 
     finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False, conn=conn)
 
     cluster = finding.clusters[0]
-    expected_rate = 3.0 / 1_000_000
+    expected_rate = get_rates("anthropic", "claude-sonnet-5").input_per_mtok / 1_000_000
     assert cluster.estimated_monthly_usd == round(cluster.estimated_monthly_tokens * expected_rate, 6)
     assert "claude-sonnet-5" in cluster.monthly_rate_basis
+    assert finding.estimated_monthly_usd == pytest.approx(cluster.estimated_monthly_usd)
+
+
+def test_occurrence_is_worth_its_re_read_tail_not_just_one_turn(tmp_path):
+    """A failure's text is re-sent on every later call in the same context
+    window, so an occurrence is worth more than its 1,500 raw tokens — and the
+    1,500 constant itself is unchanged."""
+    from tokenjam.core.optimize.analyzers.relearn import GROUNDED_TOKENS_PER_OCCURRENCE
+
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-tail{i}", f"tail-{i}")
+    sessions = [(f"tail-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
+    # Twenty later calls in each session, prompt growing monotonically (no
+    # compaction), all timestamped after the seeded failures.
+    timeline = [
+        (f"tail-{i}", datetime(2030, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=n),
+         1000 * (n + 1))
+        for i in range(MIN_RECURRING_SESSIONS)
+        for n in range(20)
+    ]
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)], timeline)
+
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False, conn=conn)
+    cluster = finding.clusters[0]
+
+    assert GROUNDED_TOKENS_PER_OCCURRENCE == 1_500
+    assert cluster.tail_calls_median == 20
+    assert cluster.tail_multiplier > 1.0
+    assert cluster.gross_recoverable_tokens > (
+        cluster.occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
+    )
+
+
+def test_compaction_truncates_the_re_read_tail(tmp_path):
+    """The tail stops where the context collapses: past a `/compact` the
+    failure text is no longer being re-sent, so those calls are not charged."""
+    for i in range(MIN_RECURRING_SESSIONS):
+        _cwd_confusion_session(tmp_path, f"-Users-test-comp{i}", f"comp-{i}")
+    sessions = [(f"comp-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
+    base = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    # Five growing calls, then a collapse, then fifteen more: only the five
+    # before the collapse re-read the failure.
+    sizes = [1000 * (n + 1) for n in range(5)] + [100] + [1000 * (n + 1) for n in range(15)]
+    timeline = [
+        (f"comp-{i}", base + timedelta(minutes=n), size)
+        for i in range(MIN_RECURRING_SESSIONS)
+        for n, size in enumerate(sizes)
+    ]
+    conn = _FakeSpanConn([("anthropic", "claude-sonnet-5", 1_000_000, 1_000_000)], timeline)
+
+    finding = analyze_relearns(sessions, projects_root=tmp_path, distill_enabled=False, conn=conn)
+    assert finding.clusters[0].tail_calls_median == 5

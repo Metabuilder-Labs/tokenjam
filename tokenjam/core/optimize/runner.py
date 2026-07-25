@@ -601,11 +601,15 @@ def _build_finding_constructors() -> dict:
             files=int(d.get("files", 0)),
             estimated_recoverable_usd=d.get("estimated_recoverable_usd"),
             estimated_recoverable_tokens=d.get("estimated_recoverable_tokens"),
+            file_reduction_tokens=d.get("file_reduction_tokens"),
             estimate_basis=d.get("estimate_basis", ""),
             estimate_confidence=d.get("estimate_confidence", "heuristic"),
             caveat=d.get("caveat", SUMMARIZE_HONESTY_CAVEAT),
             reduction_pct=d.get("reduction_pct"),
             avg_reduction_pct=d.get("avg_reduction_pct"),
+            sessions_examined=int(d.get("sessions_examined", 0) or 0),
+            calls_per_session=d.get("calls_per_session"),
+            rate_basis=d.get("rate_basis", ""),
         )
 
     def _relearn(d: dict) -> RelearnFinding:

@@ -202,7 +202,10 @@ def test_status_subscription_plan_shows_no_raw_dollar_line(runner, db):
     assert "$0.00" not in result.output
     assert "$0.000000" not in result.output
     assert "Cost today:     0.0% of cycle" in result.output
-    assert "Subscription plan" in result.output
+    # The generic "Subscription plan — flat-fee billing" note was superseded
+    # by compute_framing's list-price-equivalent qualifier, which now fires
+    # unconditionally for subscription mode (see cmd_status._framing_note).
+    assert "list-price equivalent, not an amount billed" in result.output
 
 
 def test_status_api_plan_keeps_raw_dollar_line(runner, db, config):

@@ -17,7 +17,7 @@ def require_api_key(
     config = request.app.state.config
     if not config.api.auth.enabled:
         return
-    if credentials is None or credentials.credentials != config.api.auth.api_key:
+    if credentials is None or not secrets.compare_digest(credentials.credentials, config.api.auth.api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
 

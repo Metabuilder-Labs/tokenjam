@@ -111,17 +111,21 @@ def read_cost_proposals(
     install). Shape: ``{"cost_computed_at": iso, "cost_proposals": [dict,
     ...], "cost_proposals_error": str | None, "cost_proposals_error_at": iso |
     None, "cost_window_days": int, "cost_active_days": int,
-    "cost_n_sessions": int}``. ``cost_proposals_error`` is the last recompute
-    failure's message (behavioral requirement #5) — present alongside a GOOD
-    ``cost_proposals`` list when a later recompute failed after an earlier one
-    had already succeeded, so a transient failure never hides the last good
-    result. The three ``cost_*`` count fields (#273) are the window's
-    active-day pace at the moment of the LAST successful recompute — the
-    inputs ``cost_proposals.estimated_recoverable_rollup`` needs to compute
-    its shared 30-day projection ratio centrally; ``0`` for a cache written
-    before they existed (a caller passes them straight to
-    ``compute_projection_ratio``, whose guardrails treat ``0`` as "not enough
-    data", never as a fabricated ratio)."""
+    "cost_n_sessions": int, "cost_excluded": dict}``. ``cost_proposals_error``
+    is the last recompute failure's message (behavioral requirement #5) —
+    present alongside a GOOD ``cost_proposals`` list when a later recompute
+    failed after an earlier one had already succeeded, so a transient failure
+    never hides the last good result. The three ``cost_*`` count fields
+    (#273) are the window's active-day pace at the moment of the LAST
+    successful recompute — the inputs ``cost_proposals.
+    estimated_recoverable_rollup`` needs to compute its shared 30-day
+    projection ratio centrally; ``0`` for a cache written before they existed
+    (a caller passes them straight to ``compute_projection_ratio``, whose
+    guardrails treat ``0`` as "not enough data", never as a fabricated
+    ratio). ``cost_excluded`` (#326) is the rollup's cross-reference for
+    waste deliberately NOT summed into it (currently ``summarize`` —  see
+    ``cost_proposals._excluded_summarize_block``); ``{}`` for a cache written
+    before it existed."""
     raw = read_cache(path, config=config)
     if raw is None:
         return None
@@ -137,6 +141,7 @@ def read_cost_proposals(
         "cost_window_days": raw.get("cost_window_days") or 0,
         "cost_active_days": raw.get("cost_active_days") or 0,
         "cost_n_sessions": raw.get("cost_n_sessions") or 0,
+        "cost_excluded": raw.get("cost_excluded") or {},
     }
 
 
@@ -179,7 +184,7 @@ def clear_cost_proposals_error(
 def write_cost_proposals(
     proposals: list[Any], path: Path | None = None, *, config: TjConfig | None = None,
     window_days: int | None = None, active_days: int | None = None,
-    n_sessions: int | None = None,
+    n_sessions: int | None = None, excluded: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Write the cost proposals into the SAME cache file the relearn finding
     lives in, under a separate ``cost_proposals`` key, preserving the relearn
@@ -193,7 +198,13 @@ def write_cost_proposals(
     time, since the window that produced these proposals may not be the
     window a later reader assumes. ``None`` (the default) leaves any
     previously-stored value untouched, so a caller that doesn't track these
-    yet (a legacy call site) doesn't silently zero out a real prior value."""
+    yet (a legacy call site) doesn't silently zero out a real prior value.
+
+    ``excluded`` (#326) is the rollup's cross-reference block (currently
+    ``{"summarize": {...}}`` when the analyzer found something, else ``{}``)
+    — always written when this call succeeds (unlike the three window
+    fields above, this one has no "leave untouched" case: a fresh recompute
+    always knows the current excluded state, even if it's "nothing")."""
     from dataclasses import is_dataclass
 
     p = path or default_cache_path(config)
@@ -216,6 +227,7 @@ def write_cost_proposals(
         payload["cost_active_days"] = active_days
     if n_sessions is not None:
         payload["cost_n_sessions"] = n_sessions
+    payload["cost_excluded"] = excluded or {}
     _atomic_write(p, payload)
     return payload
 

@@ -52,6 +52,7 @@ from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
 from tokenjam.core.optimize.projection import build_projection_basis
+from tokenjam.core.optimize.rate_profile import RateProfile, blended_rate_profile
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
@@ -75,12 +76,48 @@ MAX_DISTILL_CLUSTERS = 20
 MIN_DISTILL_CLUSTER_SESSIONS = MIN_RECURRING_SESSIONS
 DISTILL_MODEL = "haiku"
 
+# --- Per-occurrence re-read tail ---------------------------------------------
+# A failure does not cost one turn's tokens once. Its text lands in the
+# conversation and is re-sent on every LATER call that still carries it, so an
+# occurrence at call index k of a session whose context survives `tail` more
+# calls actually bills
+#
+#     GROUNDED_TOKENS_PER_OCCURRENCE x input_rate
+#   + GROUNDED_TOKENS_PER_OCCURRENCE x tail x cache_read_rate
+#
+# Everything below is expressed in INPUT-TOKEN EQUIVALENTS so the token figure
+# and the dollar figure stay proportional to one another (the existing
+# recoverable contract prices one against the other, and the write budget nets
+# a rule's standing cost against the token side). A re-read token bills at the
+# cache-read rate — exactly 0.100 x the input rate for every Anthropic model in
+# pricing/models.toml — so one occurrence is worth
+#
+#     1 + cache_read_ratio x tail
+#
+# input-token equivalents rather than 1. That ratio is measured from the
+# cluster's own models, never assumed.
+
+#: A prompt whose size falls to at most this share of the previous turn's has
+#: had its context window reset — a `/compact`, a resume, or a fresh window.
+#: The tail STOPS there: the failure text is no longer in what gets re-sent.
+#: Without this the multiplier assumes a failure is re-read for the rest of the
+#: session, which is measurably wrong on long automated-harness sessions (the
+#: ones that dominate a corpus by call count) and inflates the aggregate.
+COMPACTION_PROMPT_DROP_RATIO = 0.5
+
 ESTIMATE_BASIS = (
     "occurrences x a conservative per-turn token cost (one re-issued tool "
-    "call + re-narration) — never the inflated whole-session footprint; "
-    "reported NET of what the proposed fix costs to keep (a CLAUDE.md rule is "
-    "re-sent on every future session, a hook is not); review the example "
-    "sessions before applying a fix"
+    "call + re-narration) — never the inflated whole-session footprint — "
+    "then x the occurrence's own re-read tail: a failure's text is re-sent on "
+    "every later call that still carries it, billed at the cache-read rate, so "
+    "one occurrence is worth 1 + cache_read_ratio x tail input-token "
+    "equivalents. The tail is truncated at the first compaction (a prompt-size "
+    "collapse), not run to end-of-session, and the cluster takes the MEDIAN of "
+    "its occurrences' multipliers rather than the mean — a handful of very long "
+    "uncompacted sessions otherwise dominate. Reported NET of what the proposed "
+    "fix costs to keep (a CLAUDE.md rule is re-sent on every future session, a "
+    "hook is not); a cluster with no derived fix claims nothing at all. Review "
+    "the example sessions before applying a fix"
 )
 HONESTY_CAVEAT = (
     "Structural failure-signature clustering, not a quality judgment. "
@@ -812,6 +849,14 @@ class RelearnCluster:
     estimated_monthly_tokens:     int = 0
     estimated_monthly_usd:        float | None = None
     monthly_rate_basis:           str = ""
+    #: The measured re-read tail behind the figures above: the MEDIAN number of
+    #: later calls that still carried one of this cluster's occurrences before
+    #: the context was compacted away, and the input-token-equivalent
+    #: multiplier that follows from it (`1 + cache_read_ratio x tail`). Carried
+    #: so a reader can see WHY an occurrence is worth more than its 1,500
+    #: tokens; 0 / 1.0 when no tail could be measured.
+    tail_calls_median:            int = 0
+    tail_multiplier:              float = 1.0
     # Net-of-standing-cost accounting (`core/optimize/write_budget.py`). The
     # four `estimated_*` fields above are reported NET of what the proposed
     # artifact costs to KEEP: a rung-1 CLAUDE.md rule is re-sent on every
@@ -866,6 +911,12 @@ class RelearnFinding:
     # Sum of every cluster's `estimated_monthly_tokens` — the Review inbox
     # headline's token-basis total when it can't lead with dollars.
     estimated_monthly_tokens: int | None = None
+    # Sum of every cluster's `estimated_monthly_usd`. ``None`` when no cluster
+    # could be priced at all (no DB connection, no priced spans, no model with
+    # pricing data) — a zero would read as "this waste is free", which it is
+    # not (CLAUDE.md anti-pattern #22). Clusters with no derived fix contribute
+    # nothing here by construction: they claim zero on every basis.
+    estimated_monthly_usd: float | None = None
 
 
 def _snippet(failure: FailureEpisode) -> str:
@@ -937,50 +988,89 @@ def _monthly_scale(window_days: float | None) -> float:
     return 30.0 / window_days
 
 
-def _blended_dollar_rate(conn: Any, session_ids: set[str]) -> tuple[float | None, str]:
-    """Best-effort $/token blended rate observed across THIS cluster's own
-    sessions' LLM spans, weighted by tokens actually billed.
+def _prompt_timelines(conn: Any, session_ids: set[str]) -> dict[str, list[tuple[Any, int]]]:
+    """``session_id -> [(start_time, prompt_size), ...]`` in wall-clock order.
 
-    Returns ``(None, "")`` when there's no DB connection or no priced spans
-    for these sessions — this never invents a rate (CLAUDE.md anti-pattern
-    #22); the caller falls back to a tokens-only figure in that case. The
-    basis string names every (provider, model) that contributed so the
-    derivation is inspectable rather than a black box (behavioral requirement
-    #2's "never invent a rate silently").
+    ``prompt_size`` is ``input_tokens + cache_tokens``, the same per-turn
+    quantity ``analyzers/context_resend.py`` measures repeat share on. It is
+    what a compaction collapses, which is how the tail knows where to stop.
+    Best-effort: an unavailable DB just means no timeline and no tail.
     """
     if conn is None or not session_ids:
-        return None, ""
+        return {}
     ids = sorted(session_ids)
     placeholders = ", ".join(f"${i + 1}" for i in range(len(ids)))
     try:
         rows = conn.execute(
-            f"SELECT provider, model, "
-            f"COALESCE(SUM(cost_usd), 0.0), "
-            f"COALESCE(SUM(input_tokens + output_tokens + cache_tokens + cache_write_tokens), 0) "
-            f"FROM spans WHERE session_id IN ({placeholders}) AND model IS NOT NULL "
-            f"GROUP BY provider, model",
+            f"SELECT session_id, start_time, "
+            f"COALESCE(input_tokens, 0) + COALESCE(cache_tokens, 0) "
+            f"FROM spans WHERE session_id IN ({placeholders}) "
+            f"AND name = 'gen_ai.llm.call' AND start_time IS NOT NULL "
+            f"ORDER BY session_id, start_time",
             ids,
         ).fetchall()
     except Exception:
-        return None, ""
-    total_cost = 0.0
-    total_tokens = 0
-    models: list[str] = []
-    for provider, model, cost, tokens in rows:
-        tokens = int(tokens or 0)
-        if tokens <= 0:
+        return {}
+    out: dict[str, list[tuple[Any, int]]] = {}
+    for session_id, start_time, prompt_size in rows:
+        out.setdefault(str(session_id), []).append((start_time, int(prompt_size or 0)))
+    return out
+
+
+def _tail_calls(timeline: list[tuple[Any, int]], failure_ts: Any) -> int:
+    """How many later calls still re-read a failure that landed at ``failure_ts``.
+
+    Walks forward from the first call after the failure and stops at the first
+    COMPACTION boundary — a turn whose prompt collapses to at most
+    ``COMPACTION_PROMPT_DROP_RATIO`` of the previous turn's. Past that point the
+    failure text is no longer in the window being re-sent, so counting those
+    calls would claim a cost the user never paid.
+    """
+    if failure_ts is None or not timeline:
+        return 0
+    tail = 0
+    previous_size: int | None = None
+    for start_time, prompt_size in timeline:
+        if start_time is None or start_time <= failure_ts:
+            previous_size = prompt_size
             continue
-        total_cost += float(cost or 0.0)
-        total_tokens += tokens
-        models.append(f"{provider}/{model}")
-    if total_tokens <= 0:
-        return None, ""
-    rate = total_cost / total_tokens
-    basis = (
-        f"blended ${rate * 1_000_000:.2f}/MTok observed across this cluster's "
-        f"own sessions: {', '.join(sorted(set(models)))}"
-    )
-    return rate, basis
+        if (
+            previous_size is not None
+            and previous_size > 0
+            and prompt_size <= previous_size * COMPACTION_PROMPT_DROP_RATIO
+        ):
+            break
+        tail += 1
+        previous_size = prompt_size
+    return tail
+
+
+def _tail_multiplier(
+    failures: list[FailureEpisode],
+    timelines: dict[str, list[tuple[Any, int]]],
+    profile: RateProfile | None,
+) -> tuple[float, int]:
+    """``(multiplier, median_tail_calls)`` in input-token equivalents.
+
+    The MEDIAN of the per-occurrence multipliers, not the mean: a corpus's call
+    volume is dominated by long automated-harness sessions, whose uncompacted
+    tails drag a mean far above what a typical occurrence actually costs.
+    Returns ``(1.0, 0)`` — one occurrence, no tail — whenever the tail cannot be
+    measured, which is the conservative direction (never invent a multiplier).
+    """
+    if profile is None or not timelines:
+        return 1.0, 0
+    tails = [
+        _tail_calls(timelines.get(f.session_id, []), _parse_failure_ts(f.ts))
+        for f in failures
+    ]
+    tails = [t for t in tails if t > 0]
+    if not tails:
+        return 1.0, 0
+    import statistics
+
+    median_tail = int(statistics.median(tails))
+    return 1.0 + profile.cache_read_ratio * median_tail, median_tail
 
 
 def build_proposals(
@@ -1030,6 +1120,7 @@ def build_proposals(
     is unaffected either way — only the apply path is.
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
+    from tokenjam.core.optimize.write_budget import REASON_PLACEHOLDER, is_placeholder_fix
 
     repo_cwd_map = repo_cwd_map or {}
     write_offered = persona in {"claude-code", "mixed"}
@@ -1081,11 +1172,43 @@ def build_proposals(
             except Exception:
                 suggested_target = ""   # never let a bad path computation sink the proposal
 
-        recoverable_tokens = occurrences * GROUNDED_TOKENS_PER_OCCURRENCE
+        # A cluster with no derived fix claims NOTHING, on any basis. 1387 of
+        # 2311 occurrences in a real corpus match no known family and fall back
+        # to the generic "review examples" text — attaching a dollar figure to
+        # those would put a number on a card whose fix the user cannot apply,
+        # which is the "would this be a quiet lie in the user's favour?" test
+        # (CLAUDE.md anti-pattern #22) failing outright. The write budget
+        # already refuses to WRITE a placeholder; this is the same verdict
+        # applied to the CLAIM, so it holds for every persona rather than only
+        # for the windows that reach the write path at all.
+        has_real_fix = not is_placeholder_fix(fix)
+
+        # A placeholder cluster is priced at the bare per-occurrence cost with
+        # no tail — the raw observation stays inspectable on the `gross_*`
+        # fields, and the two round-trip queries the tail needs are skipped for
+        # a cluster that will claim nothing anyway.
+        profile = blended_rate_profile(conn, session_ids=sessions) if has_real_fix else None
+        timelines = _prompt_timelines(conn, sessions) if profile is not None else {}
+        multiplier, median_tail = _tail_multiplier(cluster.failures, timelines, profile)
+
+        # Input-token EQUIVALENTS: the head token at the input rate plus each
+        # re-read at the cache-read rate, expressed on the head's basis so the
+        # token and dollar figures stay proportional. See the constants above.
         scale = _monthly_scale(window_days)
-        monthly_tokens = round(recoverable_tokens * scale)
-        rate, rate_basis = _blended_dollar_rate(conn, sessions)
-        monthly_usd = round(monthly_tokens * rate, 6) if rate is not None else None
+        gross_tokens = round(occurrences * GROUNDED_TOKENS_PER_OCCURRENCE * multiplier)
+        gross_monthly_tokens = round(gross_tokens * scale)
+        gross_monthly_usd = (
+            round(gross_monthly_tokens * profile.input_rate_per_token, 6)
+            if profile is not None else None
+        )
+        # The CLAIM, as distinct from the observation above.
+        recoverable_tokens = gross_tokens if has_real_fix else 0
+        monthly_tokens = gross_monthly_tokens if has_real_fix else 0
+        monthly_usd = gross_monthly_usd if has_real_fix else None
+        rate_basis = "" if profile is None else (
+            f"{profile.basis}; x{multiplier:.2f} for a median re-read tail of "
+            f"{median_tail} later call(s) per occurrence"
+        )
 
         proposals.append(RelearnCluster(
             signature=cluster.signature,
@@ -1106,12 +1229,16 @@ def build_proposals(
             estimated_monthly_tokens=monthly_tokens,
             estimated_monthly_usd=monthly_usd,
             monthly_rate_basis=rate_basis,
+            tail_calls_median=median_tail,
+            tail_multiplier=round(multiplier, 4),
             # Pre-net figures, kept inspectable. `_apply_write_budget` nets the
             # four `estimated_*` fields above in place, so nothing downstream
             # can read a gross figure by accident.
-            gross_recoverable_tokens=recoverable_tokens,
-            gross_monthly_tokens=monthly_tokens,
-            gross_monthly_usd=monthly_usd,
+            gross_recoverable_tokens=gross_tokens,
+            gross_monthly_tokens=gross_monthly_tokens,
+            gross_monthly_usd=gross_monthly_usd,
+            write_offered=has_real_fix,
+            write_blocked_reason="" if has_real_fix else REASON_PLACEHOLDER,
         ))
 
     proposals.sort(key=lambda p: p.sessions, reverse=True)
@@ -1349,6 +1476,8 @@ def analyze_relearns(
     )
     total_tokens = sum(p.estimated_recoverable_tokens for p in proposals)
     total_monthly_tokens = sum(p.estimated_monthly_tokens for p in proposals) if proposals else None
+    priced = [p.estimated_monthly_usd for p in proposals if p.estimated_monthly_usd is not None]
+    total_monthly_usd = round(sum(priced), 6) if priced else None
 
     return RelearnFinding(
         clusters=proposals,
@@ -1360,6 +1489,7 @@ def analyze_relearns(
         min_sessions=min_sessions,
         window_days=window_days,
         estimated_monthly_tokens=total_monthly_tokens,
+        estimated_monthly_usd=total_monthly_usd,
     )
 
 

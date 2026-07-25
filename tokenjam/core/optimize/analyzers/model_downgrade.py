@@ -400,6 +400,32 @@ def analyze_model_downgrade(
         # they don't compute their own monthly figure. Two bases, two
         # explicitly-named surfaces: Overview/Optimize stay window-scoped,
         # the Review inbox is always monthly. Never mix the two on one card.
+        #
+        # Deliberately session-scoped, not turn-scoped: `audit_opus_quota`
+        # below also computes a cheap-segment / mechanical-stretch dollar
+        # counterfactual (`audit.actual_cost_usd`/`alternative_cost_usd`),
+        # but that is a DIFFERENT metric on a DIFFERENT dataclass
+        # (`OpusQuotaAudit`, not `DowngradeFinding`) for a DIFFERENT,
+        # deliberately separate surface (`tj quota-audit` / GET
+        # /api/v1/quota-audit) — verified by tracing every call site of
+        # `audit_opus_quota` (cli/data_access.py, cli/cmd_quota_audit.py,
+        # api/routes/quota_audit.py); `run()` above never calls it, so it
+        # never reaches `ctx.report.downgrade` today. Three reasons this
+        # candidate figure was NOT folded in here: (1) `audit_opus_quota`'s
+        # own docstring and its "Secondary API-only implied-dollar
+        # counterfactual" comment both say its dollar pair is explicitly
+        # NEVER a headline — the audit's headline is
+        # `percent_quota_misallocated`, a quota-weighted PERCENT, because the
+        # subscription majority is on flat-rate plans a dollar figure
+        # mis-targets; (2) it is scoped to PREMIUM-tier turns only
+        # (`is_premium_tier`), never the full `DOWNGRADE_CANDIDATES` ladder
+        # this function covers (sonnet->haiku, openai, google); folding it in
+        # would silently narrow what "downsize recoverable" means on windows
+        # with no premium-tier usage at all. (3) merging two independently
+        # -scoped estimate methodologies onto one contract field is a
+        # product decision beyond a bug fix — see CLAUDE.md anti-pattern #18
+        # (a ticket's Where: line is the scope boundary, not an "approved
+        # design" narrative to redesign a whole subsystem from).
         estimated_recoverable_usd=round(savings_window, 6),
         estimated_recoverable_tokens=candidate_tokens,
         estimate_basis=(
@@ -680,7 +706,10 @@ def audit_opus_quota(
 
     # Secondary API-only implied-dollar counterfactual, aggregated over the
     # flagged premium turns and priced at each session's dominant premium model's
-    # cheaper alternative (never the headline).
+    # cheaper alternative (never the headline). Deliberately never folded into
+    # `analyze_model_downgrade`'s `DowngradeFinding.estimated_recoverable_usd`
+    # (the `tj optimize` downsize card) — see the comment on that assignment
+    # for why the two stay separate.
     for agg in aggs.values():
         provider, model = agg.dominant_model()
         alt = lookup_downgrade(provider, model) if provider else None

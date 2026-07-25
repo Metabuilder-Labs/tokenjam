@@ -12,6 +12,7 @@ the real `tj backfill claude-code` command.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,15 @@ from click.testing import CliRunner
 
 import tokenjam.core.backfill as backfill_mod
 from tokenjam.cli.cmd_onboard import DEFAULT_BACKFILL_DAYS, cmd_onboard
+
+# `sess-recent` must stay well inside the default 30-day backfill window no
+# matter when the suite runs. A hardcoded absolute timestamp is a time bomb:
+# once wall-clock time passes `<that date> + DEFAULT_BACKFILL_DAYS`, the
+# session falls out of scope and every assertion below starts failing with
+# no code change involved. Anchor it relative to "now" instead.
+_RECENT_SESSION_TS = (
+    datetime.now(tz=timezone.utc) - timedelta(days=5)
+).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _make_session_file(root: Path, session_id: str, cwd: str, ts: str) -> Path:
@@ -64,7 +74,7 @@ def _isolated_claude_code_with_history(monkeypatch, tmp_path):
         "tokenjam.cli.cmd_onboard._try_apply_declared_plans", lambda *a, **k: None,
     )
     _make_session_file(projects_root, "sess-recent", "/Users/me/proj",
-                      "2026-06-25T10:00:00.000Z")
+                      _RECENT_SESSION_TS)
     _make_session_file(projects_root, "sess-old", "/Users/me/proj",
                       "2020-01-01T10:00:00.000Z")
     return projects_root
@@ -200,7 +210,7 @@ def test_default_window_actually_filters_old_session(
 ):
     res = _run_claude_code(tmp_path)
     assert res.exit_code == 0, res.output
-    # Only the recent (2026-06-25) session is within a 30-day-from-now window;
+    # Only the recent (5-days-ago) session is within a 30-day-from-now window;
     # the 2020 session must be excluded from the backfilled total.
     assert "1 total session" in res.output
 

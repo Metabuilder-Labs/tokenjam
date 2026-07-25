@@ -79,7 +79,11 @@ def test_subscription_plan_suppresses_raw_dollars(db):
     # render_dollar's "X% of cycle" framing (the COST column may wrap it, so
     # match the distinctive token rather than the whole phrase).
     assert "cycle" in result.output
-    assert "Subscription plan" in result.output  # honesty note surfaced
+    # The generic "Subscription plan — flat-fee billing" note was superseded
+    # by compute_framing's list-price-equivalent qualifier, which now fires
+    # unconditionally for subscription mode (not just mixed subscription/API
+    # windows) so the honesty note is never a bare mode label.
+    assert "list-price equivalent, not an amount billed" in result.output
 
 
 def test_unknown_plan_keeps_dollars_with_qualifier(db):

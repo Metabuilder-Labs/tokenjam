@@ -33,13 +33,27 @@ UNDERESTIMATE of the true repeat share, never an overestimate.
 
 Honesty discipline (CLAUDE.md Rule 14 / anti-pattern #22): `repeat_share`
 itself is a measured token-share, not a savings claim; it is shown
-regardless of pricing or caching state. The full repeat share is NOT claimed
-as recoverable (the benchmark explicitly warns against this: 93.8% re-sent is
-a different, larger number than the 68.3% of Anthropic spend the SAME corpus
-found actually avoidable once caching was added). `estimated_recoverable_*`
-below is discounted by AVOIDABLE_FRACTION_OF_REPEAT, and the dollar figure is
-additionally scoped to only the currently-uncached share of the repeated
-volume; see that constant's docstring and RESEND_ESTIMATE_BASIS for why.
+regardless of pricing or caching state.
+
+**Two dollar figures live on this finding and they are NEVER summed.**
+
+`cost_of_waste_usd` is an OBSERVATION, not a saving: what the re-sent volume
+actually cost over the window, priced per token class at the rates it really
+billed at (cache reads at the cache-read rate, uncached repeat at the input
+rate). Nothing is projected and nothing is discounted, because nothing is
+being claimed — this answers "what did re-sending context cost me", which is
+a question the data answers exactly. It is deliberately much larger than the
+recoverable figure, and publishing it AS a saving would fail the product's
+"if I apply the fix, do I actually save this?" bar outright: multi-turn
+conversation inherently re-sends context (the floor is not zero), subagent
+offload MOVES context rather than deleting it, and compaction only helps
+forward and costs a summarization call of its own.
+
+`estimated_recoverable_usd` is what the fix actually returns, and is derived
+from THIS user's corpus, not from a cross-corpus constant. The lever is a
+compound one — offload context-heavy in-thread work to a subagent AND
+right-size that subagent — and both halves are measured here; see
+`_offload_recoverable` and RESEND_ESTIMATE_BASIS.
 """
 from __future__ import annotations
 
@@ -54,6 +68,7 @@ from tokenjam.core.context_diagnostic import (
     compute_context_diagnostic,
     load_turn_compositions,
 )
+from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.pricing import get_rates
@@ -74,14 +89,51 @@ MIN_TURNS_FOR_SIGNAL = 6
 # a 68.3% reduction cross-checked against one real ground-truth case (see
 # benchmarks/RESULTS.md, "1. Caching recommendations"). That 68.3% is a
 # DIFFERENT metric from the 93.8% repeat-share above (dollars vs tokens,
-# Anthropic-only vs all-providers); it is not a nested fraction of it. It is
-# used here only as the best available proxy for "not every re-sent token
-# converts to a recoverable saving" (cache lookback limits, TTL expiry, and
-# prefix instability all eat into the theoretical maximum; see
-# cache_efficacy.py's A2/A3 root causes for the mechanisms), so both
-# recoverable claims below are discounted by it rather than claiming the
-# full structural repeat share as recoverable.
+# Anthropic-only vs all-providers); it is not a nested fraction of it.
+#
+# It is a calibration constant from ANOTHER corpus, so it prices the TOKENS
+# claim only — the cache_control / compaction lever, whose mechanism is
+# cross-corpus by nature. The DOLLAR claim no longer inherits it: the offload
+# lever's avoidable fraction is measured from the user's own `sub_agent_id`
+# telemetry instead (see `_measure_offloadable_share`), because that lever's
+# realisable share is a property of how THIS user already works, not of a
+# benchmark suite.
 AVOIDABLE_FRACTION_OF_REPEAT = 0.683
+
+# --- The offload lever, measured -------------------------------------------
+# Claude Code's durable fix for repeated context is not caching and not
+# `/compact`: it is keeping context-heavy work OFF the long-lived parent
+# thread. A subagent's tool outputs live in the subagent's own context, so
+# they are never re-billed on any later parent call. The saving is the tail
+# that never happens:
+#
+#     saving_offload  ~ introduced_tokens x tail_calls x cache_read_rate
+#     saving_rightsize ~ offloaded_tokens x (premium_rate - right_sized_rate)
+#
+# and the two COMPOUND — moving the work off the parent thread does not stop
+# the subagent that now does it from running on a cheaper model.
+#
+# Scope, and why it is disjoint from every other analyzer's claim (Critical
+# Rule 27 — two analyzers claiming `estimated_recoverable_*` must draw from
+# disjoint spans). This claim is computed over MAIN-THREAD turns only
+# (`sub_agent_id IS NULL`), so it cannot overlap `subagent`, which filters to
+# `sub_agent_id IS NOT NULL`. And it only counts sessions whose accumulated
+# main-thread context exceeds MIN_SESSION_CONTEXT_TOKENS, which no `downsize`
+# candidate can be: that analyzer's structural gate is input < 5K tokens for
+# the whole session.
+
+#: A session only has an offload lever once its main-thread context is big
+#: enough for re-reading it to cost real money. Same threshold
+#: `subagent_rightsizing.CONTEXT_HEAVY_TOKENS` uses for the same idea, and
+#: an order of magnitude above `downsize`'s 5K structural ceiling, which is
+#: what keeps the two claims disjoint by construction.
+MIN_SESSION_CONTEXT_TOKENS = 50_000
+
+#: A prompt whose size falls to at most this share of the previous turn's has
+#: had its context reset (a `/compact`, a resume, a fresh window). Material
+#: introduced before that point is not re-read after it, so the tail stops
+#: there rather than running to end-of-session.
+COMPACTION_PROMPT_DROP_RATIO = 0.5
 
 RESEND_HONESTY_CAVEAT = (
     "Structural token-share, not a savings claim: a conservative lower bound "
@@ -97,14 +149,34 @@ RESEND_ESTIMATE_BASIS = (
     "token-weighted across sessions. TOKENS claim (compaction lever): "
     "repeat_tokens x 68.3% avoidable-fraction (see AVOIDABLE_FRACTION_OF_REPEAT "
     "docstring); cache-agnostic, since compaction cuts gross token volume "
-    "regardless of caching state. USD claim (cache_control-adoption lever): "
-    "the CURRENTLY-UNCACHED share of that repeat volume only "
-    "(repeat_tokens x new_input_tokens/prompt_tokens for the session), priced "
-    "at the dominant model's (input - cache-read) rate delta x 68.3%; "
-    "already-cached repeat volume already has its caching benefit, so "
-    "re-claiming it here would double-count cache_efficacy's own recoverable "
-    "estimate. Both are heuristic: reviewed against this repo's own benchmark "
-    "corpus, not measured on this user's own data."
+    "regardless of caching state, and cross-corpus calibrated rather than "
+    "measured here. USD claim (subagent-offload + right-sizing lever, measured "
+    "on YOUR data): for each main-thread turn of a context-heavy session, the "
+    "material it introduces (uncached input + output) is re-read by every later "
+    "main-thread turn until the next compaction, billed at the cache-read rate "
+    "— that tail is what offloading the work to a subagent removes, because a "
+    "subagent's tool output never enters the parent context. Only the share of "
+    "that volume you demonstrably CAN offload is claimed, and that share is "
+    "measured from your own sub_agent_id telemetry (how much of the "
+    "context-introducing volume already runs in subagents, in the sessions "
+    "where you delegate at all) rather than inherited from a benchmark. "
+    "Right-sizing stacks on top: the same offloaded volume priced at the "
+    "cheaper same-family model's input rate instead of the premium one. "
+    "Computed over main-thread spans only, so it never overlaps the subagent "
+    "analyzer's own claim."
+)
+
+RESEND_COST_OF_WASTE_BASIS = (
+    "OBSERVED, not recoverable: what re-sent context actually cost over the "
+    "window, priced per token class at the rates it really billed at — cache "
+    "reads at the cache-read rate, the still-uncached share of the repeat "
+    "volume at the input rate. Nothing here is projected or discounted because "
+    "nothing is being claimed. Do NOT read this as a saving: multi-turn work "
+    "inherently re-sends context (the floor is not zero), offloading to a "
+    "subagent moves context rather than deleting it, and compaction only helps "
+    "forward and costs a summarization call of its own. The figure the fix "
+    "actually returns is estimated_recoverable_usd, which is much smaller and "
+    "derived separately."
 )
 
 COMPACTION_FIX = (
@@ -135,6 +207,17 @@ SUBAGENT_OFFLOAD_FIX = (
     "with. Where available, pair this with a hook that warns once context "
     "crosses a size threshold, as a second, automated nudge toward the same "
     "behavior."
+)
+
+#: The second half of the compound lever. Offloading decides WHERE the work
+#: runs; this decides what it runs ON. Both are settable in the same agent
+#: file's frontmatter, so the two land as one artifact rather than two cards.
+RIGHTSIZE_FIX_TEMPLATE = (
+    "Then right-size what you offload to. A subagent doing broad reads and "
+    "returning a short conclusion rarely needs the premium tier: pin both its "
+    "model and its reasoning effort in its own definition file so every future "
+    "dispatch inherits them instead of defaulting to whatever the parent runs "
+    "on."
 )
 
 # Cap on evidence rows carried in the finding payload; aggregates are over ALL
@@ -183,12 +266,33 @@ class ResendFinding:
     # session had a model to name in the snippet.
     fix_compaction:        str = COMPACTION_FIX
     fix_subagent_offload:  str = SUBAGENT_OFFLOAD_FIX
+    fix_rightsize:         str = RIGHTSIZE_FIX_TEMPLATE
     fix_cache_control:     str = ""
     caveat:            str = RESEND_HONESTY_CAVEAT
     estimate_basis:    str = ""
     estimate_confidence: str = "heuristic"
     estimated_recoverable_tokens: int | None = None
     estimated_recoverable_usd:    float | None = None
+    # COST OF WASTE — an observation, never a saving, and NEVER summed with
+    # `estimated_recoverable_usd` anywhere. See the module docstring and
+    # `RESEND_COST_OF_WASTE_BASIS`. `None` when no turn in the window carried a
+    # priced model (a zero would read as "re-sending context is free").
+    cost_of_waste_usd:      float | None = None
+    cost_of_waste_tokens:   int = 0
+    cost_of_waste_basis:    str = RESEND_COST_OF_WASTE_BASIS
+    # The two halves of the compound recoverable claim, kept visible so the
+    # headline is never a black box. They ARE summed into
+    # `estimated_recoverable_usd` — unlike cost-of-waste, these price the same
+    # fix and are independent of one another (moving work off the parent thread
+    # does not stop it from also running on a cheaper model).
+    offload_recoverable_usd:   float | None = None
+    rightsize_recoverable_usd: float | None = None
+    #: Share of context-introducing volume this user already routes through
+    #: subagents, in the sessions where they delegate at all — the measured
+    #: replacement for the inherited 68.3% constant on the dollar claim.
+    #: `None` when no session in the window delegates, in which case no
+    #: offload dollar figure is claimed.
+    offloadable_share:         float | None = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -227,6 +331,87 @@ def _cache_control_snippet(model: str, tokens: int) -> str:
             "cache_control": {"type": "ephemeral"},
         }, indent=2)
     )
+
+
+def _introduced_tokens(turn: TurnComposition) -> int:
+    """Material this turn ADDS to the conversation, and that every later turn
+    in the same context window therefore re-reads: uncached input (a tool
+    result, a pasted file, a user message) plus the assistant's own output.
+    Cache reads are excluded — those are the re-reading, not the material."""
+    return turn.new_input_tokens + turn.output_tokens
+
+
+def _measure_offloadable_share(by_session: dict[str, list[TurnComposition]]) -> float | None:
+    """Share of context-introducing volume this user already routes through
+    subagents, measured across the sessions where they delegate at all.
+
+    This is the corpus-measured replacement for inheriting a cross-corpus
+    constant. Telemetry carries ``sub_agent_id``, so in-thread and offloaded
+    work are directly comparable: sessions that already lean on subagents show
+    what fraction of the material is offloadable IN PRACTICE for this user's
+    kind of work. Sessions that never delegate are excluded from the
+    measurement (they have nothing to measure) but are exactly where the
+    saving is then claimed.
+
+    ``None`` when no session in the window delegates — nothing to measure, so
+    nothing is claimed rather than a fraction being invented.
+    """
+    delegated = 0
+    total = 0
+    for turns in by_session.values():
+        if not any(t.sub_agent_id for t in turns):
+            continue
+        for turn in turns:
+            introduced = _introduced_tokens(turn)
+            total += introduced
+            if turn.sub_agent_id:
+                delegated += introduced
+    if total <= 0 or delegated <= 0:
+        return None
+    return min(delegated / total, 1.0)
+
+
+def _resend_tail_tokens_per_turn(main_turns: list[TurnComposition]) -> list[int]:
+    """Per-turn tail-token contribution — same computation as
+    ``_resend_tail_tokens``, kept ungrouped so each turn's own contribution can
+    be priced at that turn's own model's rate rather than one rate applied to
+    the session-wide sum.
+
+    For each turn, the material it introduces is re-read by every later
+    main-thread turn until the next compaction — a turn whose prompt collapses
+    to at most ``COMPACTION_PROMPT_DROP_RATIO`` of the previous one's, which is
+    what a ``/compact`` or a context reset looks like in the data. Counting
+    past that boundary would claim a cost the user never paid.
+
+    Returns, per turn, ``introduced x tail_length``, i.e. tokens billed as
+    cache reads purely because the work stayed on the parent thread.
+    """
+    n = len(main_turns)
+    prompt_sizes = [t.new_input_tokens + t.reread_tokens for t in main_turns]
+    # boundary_after[i] = index of the first compaction boundary strictly after
+    # turn i, or n when the context survives to the end of the session.
+    boundary_after = [n] * n
+    next_boundary = n
+    for i in range(n - 1, -1, -1):
+        boundary_after[i] = next_boundary
+        collapsed = (
+            i >= 1
+            and prompt_sizes[i - 1] > 0
+            and prompt_sizes[i] <= prompt_sizes[i - 1] * COMPACTION_PROMPT_DROP_RATIO
+        )
+        if collapsed:
+            next_boundary = i
+
+    return [
+        _introduced_tokens(turn) * max(boundary_after[i] - i - 1, 0)
+        for i, turn in enumerate(main_turns)
+    ]
+
+
+def _resend_tail_tokens(main_turns: list[TurnComposition]) -> int:
+    """Window-scoped total of ``_resend_tail_tokens_per_turn`` — kept for
+    callers (and tests) that only need the session's aggregate tail."""
+    return sum(_resend_tail_tokens_per_turn(main_turns))
 
 
 def _capture_flags(config) -> tuple[bool, bool, bool]:
@@ -273,11 +458,20 @@ def run(ctx: AnalyzerContext) -> None:
         ctx.report.findings["resend"] = finding
         return
 
+    # Measured on this user's own telemetry, not inherited: how much of the
+    # context-introducing volume already runs in subagents where they delegate
+    # at all. `None` means the corpus can't answer it, so no dollar claim.
+    offloadable_share = _measure_offloadable_share(by_session)
+
     total_sum = 0
     total_max = 0
     examples: list[ResendSessionExample] = []
-    priced_usd_total = 0.0
-    any_priced = False
+    waste_usd_total = 0.0
+    waste_tokens_total = 0
+    any_waste_priced = False
+    offload_usd_total = 0.0
+    rightsize_usd_total = 0.0
+    offload_tokens_total = 0
 
     for sid, session_turns in by_session.items():
         prompt_sizes = [t.new_input_tokens + t.reread_tokens for t in session_turns]
@@ -303,26 +497,66 @@ def run(ctx: AnalyzerContext) -> None:
 
         if repeat_tokens <= 0:
             continue
-        # Dollar opportunity, cache_control-adoption lever: scoped to the
-        # CURRENTLY-UNCACHED share of this session's prompt volume only. See
-        # RESEND_ESTIMATE_BASIS for why already-cached repeat volume is
-        # excluded (double-counting cache_efficacy's own recoverable figure).
-        total_new_input = sum(t.new_input_tokens for t in session_turns)
-        uncached_fraction = (total_new_input / s_sum) if s_sum else 0.0
-        uncached_repeat_tokens = repeat_tokens * uncached_fraction
-        if uncached_repeat_tokens <= 0:
+
+        # COST OF WASTE (observed), priced per TURN at that turn's OWN model's
+        # rate — a session that mixes models (e.g. opus for some turns, haiku
+        # for others) must not have every turn priced at whichever model
+        # happened to dominate the turn count. `repeat_tokens` is inherently a
+        # session-level quantity (it comes from the sum-vs-max prompt-size
+        # comparison, not a per-turn one), so its uncached share is allocated
+        # across turns in proportion to each turn's own `new_input_tokens` —
+        # the same proportion the old single blended fraction expressed in
+        # aggregate, just applied per turn instead of once. Every cache read
+        # IS re-sent context by definition, billed at that turn's cache-read
+        # rate; the still-uncached share billed at that turn's input rate.
+        # Nothing discounted, nothing projected — this is what it cost, not
+        # what a fix returns. NEVER summed with the recoverable figures below.
+        for t in session_turns:
+            turn_rates = get_rates(t.provider or "unknown", t.model)
+            if turn_rates is None or turn_rates.input_per_mtok <= 0:
+                continue  # this turn's model unpriced: contributes no dollar figure
+            uncached_repeat = repeat_tokens * (t.new_input_tokens / s_sum) if s_sum else 0.0
+            waste_usd_total += (
+                t.reread_tokens / 1_000_000 * turn_rates.cache_read_per_mtok
+                + uncached_repeat / 1_000_000 * turn_rates.input_per_mtok
+            )
+            waste_tokens_total += t.reread_tokens + round(uncached_repeat)
+            any_waste_priced = True
+
+        # RECOVERABLE (the compound offload + right-size lever). Main-thread
+        # turns only, and only in sessions whose context is heavy enough for
+        # the lever to exist — see MIN_SESSION_CONTEXT_TOKENS for why that also
+        # keeps this disjoint from `downsize`. Priced per turn at that turn's
+        # own model's rate, same reasoning as cost-of-waste above.
+        if offloadable_share is None:
             continue
-        rates = get_rates(provider, model)
-        if rates is None or rates.cache_read_per_mtok <= 0:
-            continue  # unpriced / no caching dimension for this model
-        rate_delta = max(0.0, rates.input_per_mtok - rates.cache_read_per_mtok)
-        if rate_delta <= 0:
+        main_turns = [t for t in session_turns if not t.sub_agent_id]
+        if len(main_turns) < 2:
             continue
-        priced_usd_total += (
-            uncached_repeat_tokens / 1_000_000 * rate_delta
-            * AVOIDABLE_FRACTION_OF_REPEAT
-        )
-        any_priced = True
+        if max((t.new_input_tokens + t.reread_tokens for t in main_turns), default=0) < MIN_SESSION_CONTEXT_TOKENS:
+            continue
+
+        # The tail that offloading removes: material re-read by later
+        # main-thread turns purely because the work stayed in the thread.
+        for t, tail_tokens in zip(main_turns, _resend_tail_tokens_per_turn(main_turns)):
+            turn_rates = get_rates(t.provider or "unknown", t.model)
+            if turn_rates is None or turn_rates.cache_read_per_mtok <= 0:
+                continue
+            offloadable_tail = tail_tokens * offloadable_share
+            offload_usd_total += offloadable_tail / 1_000_000 * turn_rates.cache_read_per_mtok
+
+            # Right-sizing stacks independently: the same offloaded material
+            # still has to be read once by whatever runs it, so pricing it at
+            # the cheaper same-family model's input rate instead of this
+            # turn's is a second, non-overlapping cut. Skipped when no
+            # cheaper alternative is priced for this turn's own model.
+            offloaded_material = _introduced_tokens(t) * offloadable_share
+            offload_tokens_total += round(offloadable_tail + offloaded_material)
+            alt = lookup_downgrade(t.provider or "unknown", t.model)
+            alt_rates = get_rates(t.provider or "unknown", alt) if alt else None
+            if alt_rates is not None:
+                rate_gap = max(0.0, turn_rates.input_per_mtok - alt_rates.input_per_mtok)
+                rightsize_usd_total += offloaded_material / 1_000_000 * rate_gap
 
     if total_sum <= 0:
         finding.notes.append(
@@ -345,7 +579,28 @@ def run(ctx: AnalyzerContext) -> None:
     finding.estimated_recoverable_tokens = round(
         AVOIDABLE_FRACTION_OF_REPEAT * finding.repeat_tokens
     )
-    finding.estimated_recoverable_usd = round(priced_usd_total, 6) if any_priced else None
+    finding.cost_of_waste_usd = round(waste_usd_total, 6) if any_waste_priced else None
+    finding.cost_of_waste_tokens = waste_tokens_total
+    finding.offloadable_share = (
+        round(offloadable_share, 4) if offloadable_share is not None else None
+    )
+    if offloadable_share is not None and offload_tokens_total > 0:
+        finding.offload_recoverable_usd = round(offload_usd_total, 6)
+        finding.rightsize_recoverable_usd = round(rightsize_usd_total, 6)
+        # The two halves compound: offloading decides where the work runs,
+        # right-sizing decides what it runs on. Neither cancels the other, so
+        # they sum — unlike cost-of-waste, which never enters this figure.
+        finding.estimated_recoverable_usd = round(
+            offload_usd_total + rightsize_usd_total, 6
+        )
+    else:
+        finding.notes.append(
+            "No dollar figure for the offload lever: this window has no "
+            "session that both delegates to a subagent (nothing to measure "
+            "your offloadable share from) and carries enough main-thread "
+            "context for offloading to pay. The token figure above still "
+            "stands."
+        )
     finding.estimate_basis = RESEND_ESTIMATE_BASIS
 
     heaviest = finding.examples[0] if finding.examples else None
