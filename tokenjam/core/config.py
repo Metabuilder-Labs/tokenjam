@@ -78,8 +78,6 @@ class OtlpConfig:
 @dataclass
 class PrometheusConfig:
     enabled: bool = True
-    port:    int  = 9464
-    path:    str  = "/metrics"
 
 
 @dataclass
@@ -556,9 +554,7 @@ def _parse(raw: dict) -> TjConfig:
     )
     prom_raw = export_raw.get("prometheus", {})
     prometheus = PrometheusConfig(
-        enabled=prom_raw.get("enabled", True),
-        port=prom_raw.get("port", PrometheusConfig.port),
-        path=prom_raw.get("path", PrometheusConfig.path),
+        enabled=prom_raw.get("enabled", True)
     )
     export = ExportConfig(otlp=otlp, prometheus=prometheus)
 
