@@ -112,6 +112,75 @@ def test_cache_invalidates_on_equal_size_rewrite_with_unchanged_mtime(tmp_path):
     assert second != first
 
 
+def test_cache_invalidates_on_middle_only_rewrite_of_a_large_transcript(tmp_path):
+    """The rewritten bytes can sit far from BOTH ends of the file: a large
+    transcript whose middle record changes (identical size, identical mtime,
+    identical first/last few KB) must still invalidate — an edge-sampling
+    fingerprint would serve stale records here."""
+    src = tmp_path / "session.jsonl"
+    # Padding well past any head/tail sampling window on either side, so the
+    # only differing bytes are deep in the middle of the file.
+    pad = [{"type": "user", "message": {"content": "x" * 200}} for _ in range(100)]
+    _write(src, pad + [{"type": "user", "message": {"content": "aaa"}}] + pad)
+    assert src.stat().st_size > 2 * 8192
+    cache_dir = tmp_path / "cache"
+
+    first = tc.cached_read_records(src, cache_dir)
+    assert first[100]["message"]["content"] == "aaa"
+
+    import os
+
+    st = src.stat()
+    _write(src, pad + [{"type": "user", "message": {"content": "bbb"}}] + pad)
+    assert src.stat().st_size == st.st_size  # same size by construction
+    os.utime(src, (st.st_atime, st.st_mtime))  # force mtime back to identical
+
+    second = tc.cached_read_records(src, cache_dir)
+    assert second[100]["message"]["content"] == "bbb"
+
+
+def test_unreadable_file_still_reuses_its_cache_entry(tmp_path, monkeypatch):
+    """A file that stats fine but can't be read has no fingerprint to compare.
+    The stored ``None`` must still validate, otherwise every lookup re-parses
+    (to the same empty result) and rewrites the same unusable entry."""
+    src = tmp_path / "session.jsonl"
+    _write(src, [{"type": "user", "message": {"content": "hi"}}])
+    cache_dir = tmp_path / "cache"
+
+    monkeypatch.setattr(tc, "_fingerprint", lambda _path: None)
+    first = tc.cached_read_records(src, cache_dir)
+
+    def _boom(_path):
+        raise AssertionError("_parse_records was called on an unchanged file")
+
+    monkeypatch.setattr("tokenjam.core.transcript._parse_records", _boom)
+
+    assert tc.cached_read_records(src, cache_dir) == first
+
+
+def test_legacy_cache_entry_without_a_fingerprint_is_reparsed(tmp_path, monkeypatch):
+    """Entries written before fingerprinting existed carry no ``fingerprint``
+    key. They must NOT be mistaken for the unreadable-file case above just
+    because a missing key reads back as ``None``."""
+    src = tmp_path / "session.jsonl"
+    _write(src, [{"type": "user", "message": {"content": "hi"}}])
+    cache_dir = tmp_path / "cache"
+
+    tc.cached_read_records(src, cache_dir)
+    entry = next(cache_dir.glob("*.json"))
+    legacy = json.loads(entry.read_text())
+    legacy.pop("fingerprint")
+    legacy["records"] = [{"stale": True}]
+    entry.write_text(json.dumps(legacy), encoding="utf-8")
+
+    # Even with a readable file whose fingerprint is unavailable, a keyless
+    # legacy entry must lose to a fresh parse.
+    monkeypatch.setattr(tc, "_fingerprint", lambda _path: None)
+    assert tc.cached_read_records(src, cache_dir) == [
+        {"type": "user", "message": {"content": "hi"}}
+    ]
+
+
 def test_missing_source_returns_empty_list_and_no_cache_write(tmp_path):
     src = tmp_path / "gone.jsonl"
     cache_dir = tmp_path / "cache"

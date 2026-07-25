@@ -13,13 +13,15 @@ correctness risk beyond what they already accept.
 
 This module is the cache: one small JSON file per transcript under a cache
 directory, keyed on ``(path, size, mtime)`` — the exact staleness signal the
-callers already trust — plus a cheap content fingerprint (a hash of the
-file's first/last few KB) as a belt-and-suspenders check: size+mtime alone
-can't tell an in-place rewrite that happens to land in the same mtime tick
-(or preserves both) from an unchanged file. A cache hit skips the original
-file's read + parse entirely; a miss (cold entry, or a changed file)
-recomputes and rewrites atomically (temp file + rename), so a concurrent
-reader never observes a partial write.
+callers already trust — plus a full-content fingerprint (a streaming hash of
+the whole file) as a belt-and-suspenders check: size+mtime alone can't tell
+an in-place rewrite that happens to land in the same mtime tick (or
+preserves both) from an unchanged file. A cache hit still re-reads the
+source bytes to hash them, but skips the ``json.loads``-per-line parse that
+profiling showed dominates (hashing a 2MB transcript costs ~1/9th of
+parsing it); a miss (cold entry, or a changed file) recomputes and rewrites
+atomically (temp file + rename), so a concurrent reader never observes a
+partial write.
 
 Opt-in only: ``core.transcript.read_records`` still defaults to its original
 always-reparse behavior. Only a caller that explicitly passes ``cache_dir``
@@ -72,26 +74,28 @@ def _cache_key(path: Path) -> str:
     return f"{digest}.json"
 
 
-#: Bytes hashed from each end of the file for the content fingerprint. Bounds
-#: the extra I/O to at most 2x this per lookup regardless of transcript size.
-_FINGERPRINT_CHUNK = 4096
+#: Read block size for the streaming content hash — an I/O buffer only, NOT a
+#: bound on how much of the file is hashed (every byte is).
+_HASH_BLOCK = 1024 * 1024
 
 
-def _fingerprint(path: Path, size: int) -> str | None:
-    """Cheap content check: a hash of the file's first/last
-    ``_FINGERPRINT_CHUNK`` bytes. Exists purely to catch an equal-size
-    in-place rewrite that ``(size, mtime)`` alone would miss — e.g. two
-    same-size edits landing in the same filesystem mtime tick. Returns
-    ``None`` (never raises) if the file can't be read, matching the
-    tolerant-of-missing-files contract the rest of this module follows.
+def _fingerprint(path: Path) -> str | None:
+    """Content check: a streaming hash of the file's ENTIRE contents.
+
+    Exists to catch an in-place rewrite that ``(size, mtime)`` alone would
+    miss — e.g. two same-size edits landing in the same filesystem mtime
+    tick. Hashing every byte (rather than bounded head/tail chunks) is what
+    makes a middle-only rewrite of a large transcript visible; it is still
+    far cheaper than the parse it saves, since it skips ``json.loads``
+    entirely. Returns ``None`` (never raises) if the file can't be read,
+    matching the tolerant-of-missing-files contract the rest of this module
+    follows.
     """
+    digest = hashlib.sha256()
     try:
         with path.open("rb") as f:
-            head = f.read(_FINGERPRINT_CHUNK)
-            digest = hashlib.sha256(head)
-            if size > len(head):
-                f.seek(max(size - _FINGERPRINT_CHUNK, len(head)))
-                digest.update(f.read(_FINGERPRINT_CHUNK))
+            for block in iter(lambda: f.read(_HASH_BLOCK), b""):
+                digest.update(block)
     except OSError:
         return None
     return digest.hexdigest()
@@ -103,10 +107,15 @@ def cached_read_records(path: Path, cache_dir: Path) -> list[dict[str, Any]]:
     Cache validity is ``(size, mtime, fingerprint)`` matching the live
     file's current stat and content — ``size``/``mtime`` are the pair both
     analyzers already trust for their own mtime filter, and ``fingerprint``
-    (see ``_fingerprint``) is a cheap belt-and-suspenders check that catches
-    an in-place rewrite the other two miss. A stat failure (the transcript
-    vanished mid-scan) degrades to ``[]``, matching ``read_records``'s own
+    (see ``_fingerprint``) is a whole-content check that catches an in-place
+    rewrite the other two miss. A stat failure (the transcript vanished
+    mid-scan) degrades to ``[]``, matching ``read_records``'s own
     tolerant-of-missing-files contract rather than raising.
+
+    An unreadable-but-stattable file yields a ``None`` fingerprint on BOTH
+    sides of the comparison, so its entry still validates: the parse would
+    return ``[]`` for such a file anyway, and rejecting it here would mean
+    re-parsing and rewriting the same unusable entry on every lookup.
     """
     from tokenjam.core.transcript import _parse_records
 
@@ -115,7 +124,7 @@ def cached_read_records(path: Path, cache_dir: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     size, mtime = st.st_size, st.st_mtime
-    fingerprint = _fingerprint(path, size)
+    fingerprint = _fingerprint(path)
 
     cache_path = cache_dir / _cache_key(path)
     cached = _load(cache_path)
@@ -124,7 +133,7 @@ def cached_read_records(path: Path, cache_dir: Path) -> list[dict[str, Any]]:
         and cached.get("size") == size
         and cached.get("mtime") == mtime
         and cached.get("fingerprint") == fingerprint
-        and fingerprint is not None
+        and "fingerprint" in cached
     ):
         records = cached.get("records")
         if isinstance(records, list):
