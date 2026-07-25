@@ -88,6 +88,30 @@ def test_cache_invalidates_on_mtime_change_even_at_same_size(tmp_path):
     assert second[0]["message"]["content"] == "bbb"
 
 
+def test_cache_invalidates_on_equal_size_rewrite_with_unchanged_mtime(tmp_path):
+    """An in-place rewrite that keeps both the byte count AND the mtime
+    identical (e.g. two edits landing in the same filesystem mtime tick)
+    must still be caught — size+mtime alone can't see it, so the content
+    fingerprint is the only thing that can."""
+    src = tmp_path / "session.jsonl"
+    _write(src, [{"type": "user", "message": {"content": "aaa"}}])
+    cache_dir = tmp_path / "cache"
+
+    first = tc.cached_read_records(src, cache_dir)
+    assert first[0]["message"]["content"] == "aaa"
+
+    import os
+
+    st = src.stat()
+    _write(src, [{"type": "user", "message": {"content": "bbb"}}])
+    assert src.stat().st_size == st.st_size  # same size by construction
+    os.utime(src, (st.st_atime, st.st_mtime))  # force mtime back to identical
+
+    second = tc.cached_read_records(src, cache_dir)
+    assert second[0]["message"]["content"] == "bbb"
+    assert second != first
+
+
 def test_missing_source_returns_empty_list_and_no_cache_write(tmp_path):
     src = tmp_path / "gone.jsonl"
     cache_dir = tmp_path / "cache"
@@ -154,8 +178,8 @@ def test_concurrent_writers_never_corrupt_the_cache_file(tmp_path):
     cache_dir = tmp_path / "cache"
     cache_path = cache_dir / tc._cache_key(src)
 
-    tc._store(cache_path, src, 100, 1.0, [{"a": 1}])
-    tc._store(cache_path, src, 100, 1.0, [{"a": 2}])
+    tc._store(cache_path, src, 100, 1.0, "fp1", [{"a": 1}])
+    tc._store(cache_path, src, 100, 1.0, "fp1", [{"a": 2}])
 
     loaded = tc._load(cache_path)
     assert loaded is not None
