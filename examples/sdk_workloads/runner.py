@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -127,12 +128,18 @@ def _write_scratch_config(scratch_dir: Path, max_spend: float) -> Path:
     return toml_path
 
 
+# Wall-clock ceiling for one workload subprocess. Generous: even a live run
+# making several real, network-bound calls should clear this easily. Not
+# expected to ever trip today (nothing in this harness blocks indefinitely
+# as of this writing) -- it exists so a FUTURE regression that does hang
+# fails loudly with a clear message instead of blocking a run forever.
+WORKLOAD_SUBPROCESS_TIMEOUT_S = 180
+
+
 def _run_workload_subprocess(
     workload: str, toml_path: Path, scratch_home: Path,
     dry_run: bool, max_spend: float, model: str | None, extra_args: list[str],
 ) -> int:
-    import os
-
     script = WORKLOADS_DIR / WORKLOADS[workload]["script"]
     cmd = [sys.executable, str(script), "--max-spend", str(max_spend)]
     if dry_run:
@@ -144,12 +151,30 @@ def _run_workload_subprocess(
     env = os.environ.copy()
     env["TJ_CONFIG"] = str(toml_path)
     env["HOME"] = str(scratch_home)
+    # Defense in depth for the child too, even though today only the
+    # PARENT's own report-building step (relearn's transcript walk) is
+    # measured to be slow without this -- see the matching comment in
+    # main(). Cheap to set here and keeps both processes isolated the same
+    # way if a future workload ever reads transcripts itself.
+    env["TJ_CLAUDE_PROJECTS_ROOT"] = str(scratch_home.parent / "no_claude_projects_here")
     scratch_home.mkdir(parents=True, exist_ok=True)
 
     print(f"[runner] scratch home:   {scratch_home}")
     print(f"[runner] scratch config: {toml_path}")
     print(f"[runner] running: {' '.join(cmd)}\n")
-    proc = subprocess.run(cmd, cwd=str(REPO_ROOT), env=env)
+    try:
+        proc = subprocess.run(
+            cmd, cwd=str(REPO_ROOT), env=env, timeout=WORKLOAD_SUBPROCESS_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"\n[runner] WORKLOAD TIMED OUT after {WORKLOAD_SUBPROCESS_TIMEOUT_S}s. "
+            f"This is not expected; treat it as a bug, not a slow run. "
+            f"Killing the child and building a report from whatever telemetry "
+            f"landed before the timeout.\n",
+            file=sys.stderr,
+        )
+        return 124  # conventional shell "command timed out" exit code
     return proc.returncode
 
 
@@ -285,6 +310,22 @@ def main() -> None:
     scratch_dir = Path(tempfile.mkdtemp(prefix="tj-sdk-workload-"))
     toml_path = _write_scratch_config(scratch_dir, args.max_spend)
     scratch_home = scratch_dir / "home"
+
+    # This process (not just the workload subprocess) also isolates itself
+    # before doing anything else. The report-building step below imports
+    # tokenjam.core.optimize.analyzers.relearn, which walks Claude Code
+    # transcripts via tokenjam.core.transcript.resolve_projects_root() ->
+    # DEFAULT_PROJECTS_ROOT = Path.home() / ".claude" / "projects". Left
+    # unset, that resolves to THIS machine's real, possibly enormous,
+    # transcript history, and relearn globs it once per candidate session --
+    # measured at tens of seconds to multiple minutes on a real developer
+    # machine, easily read as a hang rather than a slow report. Setting
+    # TJ_CLAUDE_PROJECTS_ROOT (read live, not cached at import time, unlike
+    # HOME-derived module constants) at a directory that does not exist
+    # makes resolve_projects_root's caller a fast no-op instead. HOME is
+    # also overridden as defense in depth for any other Path.home() read.
+    os.environ["HOME"] = str(scratch_home)
+    os.environ["TJ_CLAUDE_PROJECTS_ROOT"] = str(scratch_dir / "no_claude_projects_here")
 
     since = utcnow() - timedelta(seconds=5)
     returncode = _run_workload_subprocess(

@@ -70,7 +70,7 @@ Complex real-world patterns combining multiple providers and frameworks. These s
 
 ## SDK workload corpus
 
-[`sdk_workloads/`](sdk_workloads/) — six OpenAI-API workloads, each deliberately
+[`sdk_workloads/`](sdk_workloads/); six OpenAI-API workloads, each deliberately
 exhibiting one waste shape `tj optimize` claims to detect, plus a harness
 (`runner.py`) that runs one against a scratch DB and reports which
 analyzers actually fired. Built to give the SDK persona the same kind of

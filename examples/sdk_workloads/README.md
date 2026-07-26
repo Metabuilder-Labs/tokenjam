@@ -27,7 +27,7 @@ second install.
 export OPENAI_API_KEY=sk-...
 ```
 
-Read from the environment only — never hardcoded, never logged, never
+Read from the environment only; never hardcoded, never logged, never
 written to disk by anything in this directory. Every workload refuses to
 run for real without it (with a clear error) unless you pass `--dry-run`,
 which never touches the key or the network at all. See `.env.example` at
@@ -35,7 +35,7 @@ the repo root.
 
 ## 2. Run a workload
 
-Through the harness (recommended — this is what builds the report):
+Through the harness (recommended; this is what builds the report):
 
 ```bash
 python examples/sdk_workloads/runner.py --list
@@ -45,7 +45,7 @@ python examples/sdk_workloads/runner.py oversized-model --max-spend 0.50 --model
 ```
 
 Or run a workload script directly (useful while iterating on one, but you
-won't get the analyzer report — see step 3):
+won't get the analyzer report; see step 3):
 
 ```bash
 python examples/sdk_workloads/oversized_model.py --dry-run
@@ -56,19 +56,21 @@ Every workload and the runner share the same flags:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--dry-run` | off | Zero API calls, zero spend — stubbed client, canned deterministic responses, but the SAME real tokenjam span pipeline (DuckDB, cost engine, optimize analyzers) runs on the result. |
+| `--dry-run` | off | Zero API calls, zero spend; stubbed client, canned deterministic responses, but the SAME real tokenjam span pipeline (DuckDB, cost engine, optimize analyzers) runs on the result. |
 | `--max-spend` | `$2.00` | Hard USD ceiling. Checked BEFORE every real API call using a conservative pre-call cost estimate; the call never happens if it would cross the ceiling. Raise it explicitly if a run needs more. |
-| `--model` | workload-specific (`gpt-5.4-mini` for most — the current cheap mini-class model; `gpt-4o` for `oversized-model`, deliberately the legacy premium model `downsize`'s candidate mapping knows about) | Any OpenAI chat-completions model. |
+| `--model` | workload-specific (`gpt-5.4-mini` for most; the current cheap mini-class model; `gpt-4o` for `oversized-model`, deliberately the legacy premium model `downsize`'s candidate mapping knows about) | Any OpenAI chat-completions model. |
 
 `tool-heavy-chain` also takes `--repeat N` (default 1) to run N independent
-sessions with the identical tool-call signature — see its own docstring
+sessions with the identical tool-call signature; see its own docstring
 for why (the `script` analyzer needs volume a single cheap run can't
 provide).
 
-The runner forwards unrecognized flags straight to the workload:
+The runner forwards unrecognized flags straight to the workload (no `--`
+separator; the runner's own parser only recognizes the flags in the table
+above, so anything else falls through to the workload's argparse):
 
 ```bash
-python examples/sdk_workloads/runner.py tool-heavy-chain --dry-run -- --repeat 20
+python examples/sdk_workloads/runner.py tool-heavy-chain --dry-run --repeat 20
 ```
 
 ## 3. Read the output
@@ -76,23 +78,23 @@ python examples/sdk_workloads/runner.py tool-heavy-chain --dry-run -- --repeat 2
 The runner prints, in order:
 
 1. The workload's own live output (each call, each tool step).
-2. `[spend-guard] cumulative spend: $X.XXXX across N call(s)` — the
+2. `[spend-guard] cumulative spend: $X.XXXX across N call(s)`; the
    workload's own running total.
 3. A table: every registered `tj optimize` analyzer, whether it ran or was
    skipped (persona-gated for this window), whether it produced a finding,
    and a one-line detail (candidate/example count, `past_overspend_usd`
    when the analyzer carries one).
 4. A one-line, source-verified note per analyzer explaining WHY it did or
-   didn't fire — read this before trusting a "no finding" row; several
+   didn't fire; read this before trusting a "no finding" row; several
    analyzers need session/call volume no single cheap run provides (noted
    inline, e.g. `script` needs 20+ sessions).
 5. Alerts fired in the window (e.g. `retry_loop`), separate from the
    optimize analyzers.
-6. `Actual spend recorded by tj's own cost engine` — read directly from
+6. `Actual spend recorded by tj's own cost engine`; read directly from
    the scratch DB's `SUM(cost_usd)`, independent of the workload's own
    guard bookkeeping, as a cross-check.
 7. The scratch DB path, left on disk for manual inspection
-   (`tj status --db <path>`, `duckdb <path>`, etc.) — never auto-deleted.
+   (`tj status --db <path>`, `duckdb <path>`, etc.); never auto-deleted.
 
 Pass `--out report.json` to also get the full machine-readable report
 (the same shape `report_to_dict()` produces) plus the alert list and the
@@ -102,17 +104,17 @@ DB-measured actual spend, for scripted before/after diffing later.
 
 | Workload | Waste shape | Targets | Cost (default model, default settings) |
 |---|---|---|---|
-| `repeated_prefix.py` | Every call shares one ~5,000-token system prompt, 25 calls. | `cache` analyzer. `cache-recommend` is Anthropic-only and never fires here — see caveat below. | ~$0.10 |
+| `repeated_prefix.py` | Every call shares one ~5,000-token system prompt, 25 calls. | `cache` analyzer. `cache-recommend` is Anthropic-only and never fires here; see caveat below. | ~$0.10 |
 | `growing_context.py` | 3 sessions x 4 turns, each turn re-sending the full accumulated history. | `resend` analyzer. | ~$0.01 |
 | `retry_loop.py` | Same tool call retried 5x with byte-identical arguments after a deterministic failure. | `RETRY_LOOP` alert (AlertEngine, not an optimize analyzer). | ~$0.001 |
 | `tool_heavy_chain.py` | 9 deterministic tool calls per session (search/fetch/extract/format/save), 2 LLM calls. | Tool-span capture. `script` analyzer needs `--repeat 20+` to clear its volume gate. | ~$0.003 x `--repeat` |
 | `oversized_model.py` | `gpt-4o` used for one-word yes/no answers. | `downsize` analyzer (fires on a single qualifying session). | ~$0.0004 |
-| `streaming_disconnect.py` | A streaming response abandoned (`generator.close()`) before the usage-bearing final chunk. | Nothing today — demonstrates a real gap in tokenjam's own OpenAI SDK integration. | ~$0.001 |
+| `streaming_disconnect.py` | A streaming response abandoned (`generator.close()`) before the usage-bearing final chunk. | Nothing today; demonstrates a real gap in tokenjam's own OpenAI SDK integration. | ~$0.001 |
 
 All well inside the default `--max-spend $2.00` ceiling, even added together.
 
 Every workload's module docstring is the authoritative source for its
-exact gate math (thresholds, session counts, token volumes) — read it
+exact gate math (thresholds, session counts, token volumes); read it
 before assuming the default run will or won't fire a given analyzer.
 
 Every workload tags its spans with the SDK cost-attribution dimensions
@@ -126,7 +128,7 @@ Wayne), so the corpus also exercises those columns in the Cost view.
 
 - **`cache` "fires" on OpenAI for the wrong reason.** tokenjam's OpenAI
   integration (`tokenjam/sdk/integrations/openai.py`) never reads
-  `response.usage.prompt_tokens_details.cached_tokens` — only
+  `response.usage.prompt_tokens_details.cached_tokens`; only
   `INPUT_TOKENS`/`OUTPUT_TOKENS` are set. So `cache_tokens` is always
   0/unset for every OpenAI span this SDK has ever captured, and the
   `cache` analyzer's "efficacy" reads as 0% regardless of whether OpenAI's
@@ -137,7 +139,7 @@ Wayne), so the corpus also exercises those columns in the Cost view.
   independent of prefix stability or call volume.
 - **`summarize` and `relearn` don't scope to this workload's telemetry.**
   `summarize` scans on-disk prompt files at the harness's CWD (the
-  tokenjam repo itself, when run from the repo root) — a fired card
+  tokenjam repo itself, when run from the repo root); a fired card
   reflects the repo's own docs, not anything a workload wrote.  `relearn`
   deliberately ignores the report window and scans the whole scratch DB's
   retention period, so its count reflects everything written to that DB
@@ -156,14 +158,14 @@ Wayne), so the corpus also exercises those columns in the Cost view.
   subprocess via `TJ_CONFIG` (plus `HOME` override as defense in depth).
   Your real `~/.tj` is never opened, read, or written by anything here.
 - **A fresh Python process per workload run.** tokenjam's `TracerProvider`
-  is a process-global, set-once singleton — reusing one interpreter
+  is a process-global, set-once singleton; reusing one interpreter
   across workloads would silently pin every later run to the first run's
   scratch config. The runner always spawns a subprocess; don't try to
   call a workload's `run()` function from a long-lived process alongside
   another tokenjam SDK user.
 - **The spend guard is enforced BEFORE every call**, using a conservative
   pre-call estimate (worst-case `max_tokens` output, chars/4 input
-  estimate, tokenjam's own pricing table) — never after the fact. A run
+  estimate, tokenjam's own pricing table); never after the fact. A run
   that would cross the ceiling aborts with a clear message and exit code
   2; the runner still builds a report from whatever telemetry landed
   before the abort.
@@ -174,16 +176,24 @@ Wayne), so the corpus also exercises those columns in the Cost view.
   fix-application/replay diffing yet, but nothing here blocks a future
   script from running a workload, applying a fix, re-running the
   identical workload, and diffing `report.json` / `SUM(cost_usd)` between
-  the two runs — `--out` already gives you the JSON to diff.
+  the two runs; `--out` already gives you the JSON to diff.
 
 ## 7. Tests
 
 ```bash
-pytest tests/integration/test_sdk_workload_corpus.py -v
+pytest examples/sdk_workloads/tests/ -v
 ```
 
-Runs entirely with `--dry-run` — zero API calls, `OPENAI_API_KEY` is never
-required. Covers: the spend guard actually blocking an over-ceiling call,
-the missing-key error path, a dry-run workload producing real spans in a
-scratch DB, the retry-loop alert firing, and the runner's report shape
-(table + `--out` JSON).
+Runs entirely with `--dry-run`; zero API calls, `OPENAI_API_KEY` is never
+required. Covers: the spend guard actually blocking an over-ceiling call
+(both in isolation and end-to-end through a real workload script), the
+missing-key error path (including that it never echoes a key), every
+workload dry-running clean through the full harness, and the report
+table's shape (header row, per-analyzer detail strings, the end-to-end
+printed sections).
+
+This suite lives outside `tests/unit` / `tests/synthetic` / `tests/agents`
+/ `tests/integration`; `pyproject.toml`'s `[tool.pytest.ini_options]
+testpaths` deliberately scopes the default `pytest` invocation (and CI) to
+those four core-product directories, so this additive example corpus never
+becomes a mandatory core-CI dependency. Run it explicitly, as above.
