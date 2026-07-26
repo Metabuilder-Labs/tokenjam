@@ -29,6 +29,35 @@ def test_cold_cache_parses_and_returns_records(tmp_path):
     assert list(cache_dir.glob("*.json"))
 
 
+def test_cold_cache_defers_fingerprinting_until_after_parse(tmp_path, monkeypatch):
+    """A cache miss should not hash the file before immediately reading it."""
+    src = tmp_path / "session.jsonl"
+    _write(src, [{"type": "user", "message": {"content": "hi"}}])
+    cache_dir = tmp_path / "cache"
+
+    real_fingerprint = tc._fingerprint
+    from tokenjam.core.transcript import _parse_records as real_parse_records
+
+    fingerprint_calls = 0
+
+    def _tracking_fingerprint(path):
+        nonlocal fingerprint_calls
+        fingerprint_calls += 1
+        return real_fingerprint(path)
+
+    def _assert_lazy_parse(path):
+        assert fingerprint_calls == 0
+        return real_parse_records(path)
+
+    monkeypatch.setattr(tc, "_fingerprint", _tracking_fingerprint)
+    monkeypatch.setattr(
+        "tokenjam.core.transcript._parse_records", _assert_lazy_parse
+    )
+
+    assert tc.cached_read_records(src, cache_dir)
+    assert fingerprint_calls == 1
+
+
 def test_warm_cache_skips_reparsing_the_source_file(tmp_path, monkeypatch):
     src = tmp_path / "session.jsonl"
     _write(src, [{"type": "user", "message": {"content": "hi"}}])
@@ -140,22 +169,90 @@ def test_cache_invalidates_on_middle_only_rewrite_of_a_large_transcript(tmp_path
 
 
 def test_unreadable_file_still_reuses_its_cache_entry(tmp_path, monkeypatch):
-    """A file that stats fine but can't be read has no fingerprint to compare.
-    The stored ``None`` must still validate, otherwise every lookup re-parses
-    (to the same empty result) and rewrites the same unusable entry."""
+    """A warm readable entry invalidates once when the source becomes
+    unreadable, then the stored ``None`` fingerprint is reusable."""
     src = tmp_path / "session.jsonl"
     _write(src, [{"type": "user", "message": {"content": "hi"}}])
     cache_dir = tmp_path / "cache"
 
+    assert tc.cached_read_records(src, cache_dir)
+
     monkeypatch.setattr(tc, "_fingerprint", lambda _path: None)
-    first = tc.cached_read_records(src, cache_dir)
+    parse_calls = 0
+
+    def _unreadable(_path):
+        nonlocal parse_calls
+        parse_calls += 1
+        return []
+
+    monkeypatch.setattr("tokenjam.core.transcript._parse_records", _unreadable)
+
+    assert tc.cached_read_records(src, cache_dir) == []
+    assert parse_calls == 1
 
     def _boom(_path):
         raise AssertionError("_parse_records was called on an unchanged file")
 
     monkeypatch.setattr("tokenjam.core.transcript._parse_records", _boom)
 
-    assert tc.cached_read_records(src, cache_dir) == first
+    assert tc.cached_read_records(src, cache_dir) == []
+
+
+def test_cache_invalidates_when_an_unreadable_file_becomes_readable(
+    tmp_path, monkeypatch
+):
+    """A stored ``None`` fingerprint must lose to a later real fingerprint."""
+    src = tmp_path / "session.jsonl"
+    _write(src, [{"type": "user", "message": {"content": "hi"}}])
+    cache_dir = tmp_path / "cache"
+
+    real_fingerprint = tc._fingerprint
+    from tokenjam.core.transcript import _parse_records as real_parse_records
+
+    monkeypatch.setattr(tc, "_fingerprint", lambda _path: None)
+    monkeypatch.setattr("tokenjam.core.transcript._parse_records", lambda _path: [])
+    assert tc.cached_read_records(src, cache_dir) == []
+
+    monkeypatch.setattr(tc, "_fingerprint", real_fingerprint)
+    monkeypatch.setattr(
+        "tokenjam.core.transcript._parse_records", real_parse_records
+    )
+    assert tc.cached_read_records(src, cache_dir) == [
+        {"type": "user", "message": {"content": "hi"}}
+    ]
+
+
+def test_rewrite_during_parse_is_not_stored(tmp_path, monkeypatch):
+    """A fingerprint/content change during a miss must not be paired with
+    records parsed from the earlier version."""
+    src = tmp_path / "session.jsonl"
+    _write(src, [{"type": "user", "message": {"content": "aaa"}}])
+    cache_dir = tmp_path / "cache"
+    tc.cached_read_records(src, cache_dir)
+
+    import os
+
+    st = src.stat()
+    _write(src, [{"type": "user", "message": {"content": "bbb"}}])
+    os.utime(src, (st.st_atime, st.st_mtime))
+
+    from tokenjam.core.transcript import _parse_records as real_parse_records
+
+    def _parse_then_rewrite(path):
+        records = real_parse_records(path)
+        _write(path, [{"type": "user", "message": {"content": "ccc"}}])
+        os.utime(path, (st.st_atime, st.st_mtime))
+        return records
+
+    monkeypatch.setattr(
+        "tokenjam.core.transcript._parse_records", _parse_then_rewrite
+    )
+    assert tc.cached_read_records(src, cache_dir)[0]["message"]["content"] == "bbb"
+
+    monkeypatch.setattr(
+        "tokenjam.core.transcript._parse_records", real_parse_records
+    )
+    assert tc.cached_read_records(src, cache_dir)[0]["message"]["content"] == "ccc"
 
 
 def test_legacy_cache_entry_without_a_fingerprint_is_reparsed(tmp_path, monkeypatch):

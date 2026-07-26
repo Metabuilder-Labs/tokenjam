@@ -124,23 +124,49 @@ def cached_read_records(path: Path, cache_dir: Path) -> list[dict[str, Any]]:
     except OSError:
         return []
     size, mtime = st.st_size, st.st_mtime
-    fingerprint = _fingerprint(path)
 
     cache_path = cache_dir / _cache_key(path)
     cached = _load(cache_path)
+    fingerprint_before_parse: str | None = None
+    fingerprint_was_checked = False
     if (
         cached is not None
         and cached.get("size") == size
         and cached.get("mtime") == mtime
-        and cached.get("fingerprint") == fingerprint
-        and "fingerprint" in cached
     ):
-        records = cached.get("records")
-        if isinstance(records, list):
-            return records
+        fingerprint_before_parse = _fingerprint(path)
+        fingerprint_was_checked = True
+        if (
+            "fingerprint" in cached
+            and cached.get("fingerprint") == fingerprint_before_parse
+        ):
+            records = cached.get("records")
+            if isinstance(records, list):
+                return records
 
     records = _parse_records(path)
-    _store(cache_path, path, size, mtime, fingerprint, records)
+    try:
+        st_after = path.stat()
+    except OSError:
+        return records
+    fingerprint_after_parse = _fingerprint(path)
+    if (
+        st_after.st_size != size
+        or st_after.st_mtime != mtime
+        or (
+            fingerprint_was_checked
+            and fingerprint_after_parse != fingerprint_before_parse
+        )
+    ):
+        return records
+    _store(
+        cache_path,
+        path,
+        st_after.st_size,
+        st_after.st_mtime,
+        fingerprint_after_parse,
+        records,
+    )
     return records
 
 
