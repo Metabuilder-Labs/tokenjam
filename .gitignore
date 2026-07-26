@@ -40,6 +40,7 @@ sdk-ts/dist/
 # Secrets and env files
 .env
 .env.*
+!.env.example
 tj.toml
 .tj/
 

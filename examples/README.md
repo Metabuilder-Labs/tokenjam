@@ -68,6 +68,19 @@ Complex real-world patterns combining multiple providers and frameworks. These s
 
 ---
 
+## SDK workload corpus
+
+[`sdk_workloads/`](sdk_workloads/) — six OpenAI-API workloads, each deliberately
+exhibiting one waste shape `tj optimize` claims to detect, plus a harness
+(`runner.py`) that runs one against a scratch DB and reports which
+analyzers actually fired. Built to give the SDK persona the same kind of
+real telemetry ground truth the Claude Code corpus already has. See
+[`sdk_workloads/README.md`](sdk_workloads/README.md) for the full guide,
+including a mandatory spend-guard ceiling and a `--dry-run` path that
+makes zero API calls.
+
+---
+
 ## Alerts and Drift
 
 These examples demonstrate what makes tj unique: real-time alerting and behavioral drift detection. **No API keys required** -- they use simulated instrumentation via `record_llm_call()` and `record_tool_call()`.
