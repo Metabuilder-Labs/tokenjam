@@ -133,7 +133,9 @@ def full_stack():
 
     ocw_exporter = TjSpanExporter(pipeline)
 
-    # Create a local TracerProvider (not global) and bind the SDK tracer to it
+    # Create a local TracerProvider (not global) and bind the SDK tracer to it.
+    # Save/restore so later tests in the same pytest process keep the default tracer.
+    original_tracer = agent_mod._tracer
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(ocw_exporter))
     agent_mod._tracer = provider.get_tracer("tokenjam.sdk")
@@ -156,6 +158,7 @@ def full_stack():
     yield stack
 
     provider.shutdown()
+    agent_mod._tracer = original_tracer
     db.close()
 
 
