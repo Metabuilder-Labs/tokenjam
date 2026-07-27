@@ -1749,11 +1749,20 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             )
         scope_flag = "user" if server.scope == "user" else "project"
         plumbing = _mcp_remove_plumbing(server)
-        advise = (
-            server.fix + " Removing (or project-scoping) it is reversible "
-            "and loses no data; it only stops the standing schema-injection "
-            "tax on future sessions."
+        # "(or project-scoping)" is only a real second option for a
+        # USER-scoped (global) server; a server already at project scope has
+        # nothing left to narrow, so offering it there would be a no-op that
+        # delivers $0 of the claim (see `server.fix`'s own conditional
+        # wording in deadweight.py, mirrored here).
+        reversible_note = (
+            " Removing (or project-scoping) it is reversible and loses no "
+            "data; it only stops the standing schema-injection tax on "
+            "future sessions."
+            if server.scope == "user" else
+            " Removing it is reversible and loses no data; it only stops "
+            "the standing schema-injection tax on future sessions."
         )
+        advise = server.fix + reversible_note
         if plumbing.get("apply_capable"):
             advise += (
                 f" tokenjam can remove this exact entry from "
@@ -1762,6 +1771,20 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
             )
         elif plumbing.get("apply_blocked_reason"):
             advise += f" Applying it here is not on offer: {plumbing['apply_blocked_reason']}"
+        if server.other_sources:
+            # The one-paste `claude mcp remove` fallback (and, for that
+            # matter, the deterministic auto-apply above) both edit exactly
+            # ONE file. Neither reaches the other independently-declared
+            # copies, so a reader must be told to repeat the command at each
+            # of them rather than assuming one run closed out the claim.
+            advise += (
+                f" `claude mcp remove` (and the auto-apply above, if "
+                f"offered) only edit {server.source}; the same command "
+                f"needs to be run again from each of the "
+                f"{len(server.other_sources)} other location(s) that "
+                f"independently declare `{server.name}` to stop the rest "
+                f"of the claimed tax."
+            )
         proposals.append(CostProposal(
             kind="cost",
             analyzer="deadweight",
@@ -1779,6 +1802,8 @@ def _deadweight_to_proposals(finding: Any) -> list[CostProposal]:
                 "source": server.source,
                 "example_sessions": list(server.example_sessions),
                 "priced_model": server.priced_model,
+                "other_sources": list(server.other_sources),
+                "primary_source_sessions": server.primary_source_sessions,
             },
             advise_text=advise,
             suggestion=f"claude mcp remove {server.name} --scope {scope_flag}",
