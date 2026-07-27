@@ -88,6 +88,15 @@ class CheckVerdict:
     staged: bool
     produced_by: str
     note: str
+    #: Prose words the source held before the rewrite. Recorded because it is the
+    #: denominator that turns this verdict into evidence: structure is preserved
+    #: verbatim, so ``words_before - words_after`` is prose words actually removed,
+    #: and dividing by this gives the reduction the rewriter ACHIEVED — the number
+    #: `core/summarize/estimate.observed_prose_ratio` reads back so the estimate can
+    #: stop assuming what a rewrite will deliver. Defaulted so an older staged
+    #: result (written before this field existed) still loads; such a result simply
+    #: carries no evidence and is skipped rather than counted as a zero.
+    prose_words_before: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -105,6 +114,7 @@ class CheckVerdict:
             "staged": self.staged,
             "produced_by": self.produced_by,
             "note": self.note,
+            "prose_words_before": self.prose_words_before,
         }
 
 
@@ -282,6 +292,7 @@ def check(config: TjConfig, path: str, summary: str, source_hash: str,
     verdict = CheckVerdict(
         path=str(p), structure_ok=ok, reason="" if ok else wrap.integrity_reason(integ),
         integrity=integ, words_before=wb, words_after=wa, est_tokens_saved=est_saved,
+        prose_words_before=detect.analyze(current).prose_words,
         must_keep_removed=removed, must_keep_added=added, diff=diff, restored=restored,
         staged=ok, produced_by=produced_by, note=CHECK_NOTE if ok else GATE_FAIL_NOTE,
     )

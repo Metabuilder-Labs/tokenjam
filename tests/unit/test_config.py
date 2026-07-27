@@ -4,10 +4,10 @@ from pathlib import Path
 import pytest
 
 from tokenjam.core.config import (
-    find_config_file, load_config, _parse, _serialise, TjConfig, AgentConfig,
-    BudgetConfig, DefaultsConfig, SensitiveAction, SecurityConfig, CaptureConfig,
-    OptimizeConfig, StorageConfig, resolve_effective_budget, validate_budget_value,
-    validate_cycle_start_day,
+    find_config_file, load_config, resolve_config_path, _parse, _serialise,
+    TjConfig, AgentConfig, BudgetConfig, DefaultsConfig, SensitiveAction,
+    SecurityConfig, CaptureConfig, OptimizeConfig, StorageConfig,
+    resolve_effective_budget, validate_budget_value, validate_cycle_start_day,
 )
 
 
@@ -58,6 +58,57 @@ class TestFindConfigFile:
             tmp_path / ".config" / "tj" / "config.toml",
         ])
         assert find_config_file() is None
+
+
+class TestResolveConfigPath:
+    """resolve_config_path is the single source of truth every call site (CLI
+    writers, `tj doctor`, `tj mcp`, the MCP server) must go through so config
+    discovery honors TJ_CONFIG the same way load_config does -- a bare
+    find_config_file() call ignores TJ_CONFIG entirely."""
+
+    def test_honors_tj_config_env_var(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "proj.toml"
+        cfg.write_bytes(b'version = "1"\n')
+        monkeypatch.setenv("TJ_CONFIG", str(cfg))
+        assert resolve_config_path() == cfg
+
+    def test_explicit_override_beats_tj_config_env_var(self, tmp_path, monkeypatch):
+        env_cfg = tmp_path / "env.toml"
+        env_cfg.write_bytes(b'version = "1"\n')
+        explicit_cfg = tmp_path / "explicit.toml"
+        explicit_cfg.write_bytes(b'version = "1"\n')
+        monkeypatch.setenv("TJ_CONFIG", str(env_cfg))
+        assert resolve_config_path(str(explicit_cfg)) == explicit_cfg
+
+    def test_falls_back_to_search_paths_when_tj_config_unset(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TJ_CONFIG", raising=False)
+        import tokenjam.core.config as cfg_mod
+        local_config = tmp_path / ".tj" / "config.toml"
+        local_config.parent.mkdir(parents=True)
+        local_config.write_bytes(b'version = "1"\n')
+        monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+            Path("tokenjam.toml"),
+            Path(".tj/config.toml"),
+            tmp_path / ".config" / "tj" / "config.toml",
+        ])
+        assert resolve_config_path() == Path(".tj/config.toml")
+
+    def test_raises_when_tj_config_points_at_missing_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TJ_CONFIG", str(tmp_path / "nope.toml"))
+        with pytest.raises(FileNotFoundError, match="Config file not found"):
+            resolve_config_path()
+
+    def test_returns_none_when_nothing_discoverable(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("TJ_CONFIG", raising=False)
+        import tokenjam.core.config as cfg_mod
+        monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+            Path("tokenjam.toml"),
+            Path(".tj/config.toml"),
+            tmp_path / ".config" / "tj" / "config.toml",
+        ])
+        assert resolve_config_path() is None
 
 
 class TestLoadConfig:

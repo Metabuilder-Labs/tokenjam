@@ -28,7 +28,7 @@ from tokenjam.core.config import load_config
 
 @pytest.fixture(autouse=True)
 def _no_existing_config(monkeypatch):
-    monkeypatch.setattr("tokenjam.cli.cmd_onboard.find_config_file", lambda: None)
+    monkeypatch.setattr("tokenjam.cli.cmd_onboard.resolve_config_path", lambda *_a: None)
 
 
 def _run_plain(tmp_path):

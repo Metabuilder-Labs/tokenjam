@@ -4709,3 +4709,147 @@ def test_optimize_view_renders_a_cold_state_instead_of_empty_cards(html):
     assert "${!st.loading && scan.known && st.opt ? html`" in fn
     assert "No analyzer scan has completed yet." in fn
     assert "this is not a report of zero waste" in fn
+
+
+# --- Optimize ▸ Analyzer guide --------------------------------------------- #
+# The guide exists because `downsize` and `subagent` were repeatedly read as the
+# same check. Its two structural risks are (a) becoming a second, JS-side copy
+# of the persona gate, and (b) shipping as a route nothing links to. One test
+# each, plus one pinning the contrast itself, since that paragraph IS the page's
+# reason to exist and a later edit could quietly drop it.
+
+
+def test_analyzer_guide_nav_entry_is_unconditional_not_a_nav_child(html):
+    """The bug this pins actually shipped. The guide was a `nav-child`, and
+    App()'s route effect sets `el.style.display = (v === view) ? 'flex' : 'none'`
+    for EVERY `.nav-child` -- so the entry existed in the file, a grep-style test
+    passed, and the sidebar still showed nothing on Traces / Cost / Alerts /
+    Drift / Budget. A string-presence assertion cannot tell those apart, so this
+    asserts the property that differs: the entry must not be a nav-child, and
+    must not carry a data-param (the attribute the child-visibility rule keys
+    on). Reachability has to hold from wherever the user is, not just from the
+    one screen the page explains."""
+    line = next(
+        ln for ln in html.splitlines()
+        if 'href="#/guide"' in ln and "nav-link" in ln
+    )
+    assert "nav-child" not in line, (
+        "the guide nav entry is a nav-child again -- it will be display:none "
+        "everywhere except its parent section"
+    )
+    assert "data-param=" not in line
+    assert 'data-view="guide"' in line
+    assert 'data-lens="observe"' in line
+    # No CSS rule scoped to this entry may reintroduce a display condition.
+    css_rules = [ln for ln in html.splitlines() if ln.startswith(".sidebar a.nav-reference")]
+    assert css_rules, "the nav-reference styling vanished"
+    assert not any("display" in ln for ln in css_rules)
+
+    # Nothing may hide it based on the active view. The route effect's only
+    # display mutation is the nav-child branch; assert it stays scoped there.
+    eff = html[html.index("document.querySelectorAll('.nav-link').forEach"):]
+    eff = eff[:eff.index("}, [route.view, route.param]);")]
+    display_lines = [ln for ln in eff.splitlines() if "style.display" in ln]
+    assert len(display_lines) == 1, (
+        "a second display mutation appeared in the nav effect; the guide entry "
+        "may now be hidden by the active view"
+    )
+    # ...and that single mutation lives inside the nav-child branch.
+    assert "el.classList.contains('nav-child')" in eff
+    assert eff.index("el.classList.contains('nav-child')") < eff.index(display_lines[0])
+
+
+def test_analyzer_guide_is_reachable_from_the_optimize_screen(html):
+    """The contextual entry point, on the screen whose cards it explains. It
+    renders before any `st.opt` / `scan.known` guard, so a cold or failed store
+    still offers the way in."""
+    fn_start = html.index("function OptimizeView({ params })")
+    fn_end = html.index("// Optimize \u25b8 Guide", fn_start)
+    fn = html[fn_start:fn_end]
+    assert 'href="#/guide"' in fn
+    title_at = fn.index("Optimize <${PlanBadge}")
+    link_at = fn.index('href="#/guide"')
+    assert link_at - title_at < 600, "guide link drifted out of the always-rendered title block"
+
+
+def test_analyzer_guide_routes_resolve_and_old_hash_still_works(html):
+    """`#/guide` is canonical; `#/optimize/guide` is the retired spelling and
+    must keep working for anything already pointing at it."""
+    assert "['guide',     AnalyzerGuideView]," in html
+    assert "guide: 'observe'," in html, "the guide must sit in the Observe lens"
+    assert "if (v === 'optimize' && route.param === 'guide') return 'guide';" in html
+    assert "function isLegacyGuideRoute(route)" in html
+    assert "history.replaceState(null, '', '#/guide');" in html
+
+
+def test_analyzer_guide_reads_the_gate_from_the_server_not_a_js_copy(html):
+    """Which checks apply is Python's answer (`PERSONA_DISABLED_ANALYZERS` ->
+    `/optimize/analyzers`). The guide may own PROSE keyed by analyzer name, but
+    never a membership decision -- a JS copy of the map desyncs the first time
+    the Python side changes."""
+    fn_start = html.index("function GuideBody({ persona, sets })")
+    fn_end = html.index("function AnalyzerGuideView()", fn_start)
+    fn = html[fn_start:fn_end]
+    # Membership comes from the payload on both sides: what runs, what is gated.
+    assert "sets.runs" in fn
+    assert "sets.disabled" in fn
+    view_start = html.index("function AnalyzerGuideView()")
+    view_end = html.index("// Optimize ▸ Summarize (Track B)", view_start)
+    view = html[view_start:view_end]
+    assert "api('/optimize/analyzers')" in view
+    # No persona-keyed analyzer-name list anywhere in the guide's own source:
+    # the prose maps are keyed by name, but nothing decides membership from
+    # a persona conditional in JS.
+    guide_start = html.index("const GUIDE_PERSONA_LABELS = {")
+    guide = _no_comments(html[guide_start:view_end])
+    assert "PERSONA_DISABLED_ANALYZERS" not in guide
+    assert "disabled_analyzers_for_persona" not in guide
+
+
+def test_analyzer_guide_states_the_downsize_vs_subagent_distinction(html):
+    """The founder could not tell these two apart; that is the page's whole
+    reason to exist. The contrast must be stated as WHERE vs WHO, and must say
+    that a session can only trip one of them."""
+    start = html.index("const GUIDE_KEY_CONTRAST = {")
+    end = html.index("const GUIDE_ENTRIES = {", start)
+    block = html[start:end]
+    assert "Downsize is about WHERE the work happened." in block
+    assert "Subagent is about WHO did it" in block
+    assert "only considers sessions that never delegated at all" in block
+    # Rendered ABOVE the per-check cards, not buried in one of them.
+    body_start = html.index("function GuideBody({ persona, sets })")
+    body_end = html.index("function AnalyzerGuideView()", body_start)
+    body = html[body_start:body_end]
+    assert body.index("GUIDE_KEY_CONTRAST.title") < body.index("GuideCheck")
+
+
+def test_analyzer_guide_ships_no_unwritten_persona_as_placeholder_prose(html):
+    """Only Claude Code content was validated. An unwritten persona gets a
+    banner naming the gap -- never invented copy, and never a silent fallback
+    that reads as if it were written for the reader's setup."""
+    start = html.index("const GUIDE_ENTRIES = {")
+    end = html.index("function guideMissingEntry(name)", start)
+    entries = html[start:end]
+    # Exactly one persona is populated.
+    assert entries.count("    order: [") == 1
+    assert "'claude-code': {" in entries
+    for absent in ("'sdk': {", "'mixed': {", "'unknown': {"):
+        assert absent not in entries, f"{absent} must not carry unvalidated prose"
+    view_start = html.index("function AnalyzerGuideView()")
+    view = html[view_start:html.index("// Optimize ▸ Summarize (Track B)", view_start)]
+    assert "has not been written yet" in view
+    assert "Nothing has classified this install yet" in view
+
+
+def test_analyzer_guide_makes_no_guaranteed_saving_claim(html):
+    """Honesty discipline (Critical Rule 14) governs every user-visible string:
+    estimates are candidates to review, never a promised saving, and the page
+    never discusses how a figure was derived."""
+    start = html.index("const GUIDE_PERSONA_LABELS = {")
+    end = html.index("// Optimize ▸ Summarize (Track B)", start)
+    guide = html[start:end]
+    for banned in ("saves you", "you will save", "guaranteed", "realization rate",
+                   "best-case", "ceiling of", "over-claim", "past_overspend"):
+        assert banned not in guide, f"guide copy must not contain {banned!r}"
+    assert "estimates from your own history" in guide
+    assert "review before you act on them" in guide

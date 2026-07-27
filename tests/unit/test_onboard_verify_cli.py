@@ -97,7 +97,7 @@ def test_verify_only_sdk_loads_config_and_polls(monkeypatch, tmp_path):
     cfg.parent.mkdir(parents=True)
     cfg.write_text('version = "1"\n')
     calls = []
-    monkeypatch.setattr(cmd_onboard, "find_config_file", lambda: cfg)
+    monkeypatch.setattr(cmd_onboard, "resolve_config_path", lambda *_a: cfg)
     monkeypatch.setattr(cmd_onboard, "load_config", lambda _p: _config(), raising=False)
     monkeypatch.setattr(
         cmd_onboard, "_run_onboard_verification",
@@ -127,7 +127,7 @@ def test_verify_only_claude_code_reads_global_config(monkeypatch, tmp_path):
 
 
 def test_verify_only_errors_cleanly_when_no_config(monkeypatch, capsys):
-    monkeypatch.setattr(cmd_onboard, "find_config_file", lambda: None)
+    monkeypatch.setattr(cmd_onboard, "resolve_config_path", lambda *_a: None)
     called = []
     monkeypatch.setattr(
         cmd_onboard, "_run_onboard_verification",

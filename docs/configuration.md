@@ -117,6 +117,53 @@ on a fresh install.
 it replaces, so an omitted key changes nothing; see `OptimizeConfig` in
 `tokenjam/core/config.py` for the current list and each field's analyzer.
 
+### Which filesystem the analyzers read
+
+Three analyzers — `deadweight`, `relearn` and `summarize` — take their evidence
+from the **filesystem**, not from the telemetry database. That is by design: the
+database holds spans, while the transcripts, the MCP configuration and the
+always-loaded prompt files those three reason about live on disk. By default
+they read `~/.claude/projects` and your agent homes, which is what you want for
+a normal run.
+
+`--projects-root PATH` says which filesystem instead:
+
+```bash
+tj optimize --projects-root /path/to/fixtures/.claude/projects
+tj serve --db /tmp/demo.duckdb --projects-root /tmp/demo-home/.claude/projects
+```
+
+The equivalent config key is `[optimize] projects_root`. Resolution order, first
+match wins:
+
+1. `--projects-root` / `[optimize] projects_root`
+2. the `TJ_CLAUDE_PROJECTS_ROOT` environment variable
+3. **an explicit `--db`, which scopes the filesystem scans OFF** — see below
+4. `~/.claude/projects`
+
+**Passing `--db` suppresses the filesystem scans unless you also pass
+`--projects-root`.** Naming a database names the corpus you want reasoned about,
+so reading a second, unrelated corpus off the machine into the same report is a
+bug, not a feature: served against a throwaway database, those analyzers would
+otherwise surface findings carrying real file paths from unrelated projects, and
+the review inbox's "where to write it" target would point at a real location
+outside the database you opened. Suppression is also why an empty or scoped
+database paints immediately instead of walking a large transcript tree first.
+
+Suppression is never silent. `tj optimize` prints which analyzers did not run and
+why, and the report carries `filesystem_scan_skipped_reason` so every surface can
+tell **"scanned, found nothing"** from **"did not scan"**. A run with no flag, no
+environment variable and no `--db` is unaffected.
+
+**The scope bounds writes too, not just reads.** The review inbox's Approve step
+refuses any target outside the scope's home directory — with
+`--projects-root /tmp/demo-home/.claude/projects` that root is `/tmp/demo-home`,
+so a scoped daemon can neither be talked into writing to your real `~`, nor into
+escaping the scope with a `..` path or a symlink pointing out of it. The
+suggested target and this check resolve from the same scope, so what the card
+proposes is always something Approve will accept. Without a scope the allowed
+root is your real home, exactly as before.
+
 ## Budget limits
 
 Budget limits merge per-field: each agent inherits default limits unless it explicitly overrides them.

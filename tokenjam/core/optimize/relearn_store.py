@@ -41,6 +41,22 @@ def default_cache_path(config: TjConfig | None = None) -> Path:
     return Path.home() / ".tj" / "relearn_cache.json"
 
 
+def _distill_cache_dir_for(config: TjConfig | None) -> Path | None:
+    """The distill cache this run may write to, or None to leave the default.
+
+    Imported lazily and never allowed to raise: a cache-path resolution
+    failure must not sink a recompute that would otherwise succeed.
+    """
+    if config is None:
+        return None
+    try:
+        from tokenjam.core.optimize.analyzers.relearn import _distill_cache_dir
+
+        return _distill_cache_dir(config)
+    except Exception:
+        return None
+
+
 def read_cache(
     path: Path | None = None, *, config: TjConfig | None = None,
 ) -> dict[str, Any] | None:
@@ -262,8 +278,22 @@ def recompute_now(
         # `[loop].transcript_path` lets a Claude Agent SDK app point the loop at
         # its OWN transcript root instead of ~/.claude/projects. None keeps the
         # historical env/default resolution.
-        projects_root = None
-        if config is not None:
+        #
+        # The analyzer scope is consulted FIRST: this daemon job is a second
+        # entry point into the same scan, so a scope honored only by
+        # `analyzers/relearn.run` would leak the machine's global transcript
+        # tree back in through the cache the served routes read. See
+        # `core/optimize/scope.py`.
+        from tokenjam.core.optimize.scope import (
+            resolve_analyzer_scope,
+            resolve_write_scope,
+        )
+
+        scope = resolve_analyzer_scope(config)
+        if not scope.enabled:
+            return None
+        projects_root = scope.projects_root if scope.source == "flag" else None
+        if projects_root is None and config is not None:
             try:
                 from tokenjam.core.transcript import loop_transcript_root
 
@@ -304,6 +334,19 @@ def recompute_now(
         finding = compute_relearn_finding(
             conn, projects_root=projects_root, transcript_cache_dir=transcript_cache_dir,
             persona=persona,
+            # The apply target has to agree with the scope the findings came
+            # from — a card whose evidence is scoped and whose write target is
+            # not describes two different machines. Routed through
+            # `resolve_write_scope` rather than reading `scope.claude_home`
+            # directly, because the API's write guard authorizes against the
+            # OTHER half of that same type; deriving the two independently is
+            # what let the suggestion and the guard disagree.
+            claude_home=resolve_write_scope(scope=scope).suggest_root,
+            # Scoped like every other relearn artifact — the distill cache is a
+            # SECOND cache beside this module's own, and it wrote real files
+            # under the real ~/.tj even from an isolated config until it was
+            # threaded through the same `_storage_base_dir`.
+            distill_cache_dir=_distill_cache_dir_for(config),
             # The archive lane's horizon: what tokenjam kept, not what Claude
             # Code left on disk. See `compute_relearn_finding`.
             retention_days=getattr(getattr(config, "storage", None), "retention_days", None),

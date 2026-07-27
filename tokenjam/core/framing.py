@@ -618,12 +618,20 @@ def agent_persona_mix(
     return mix
 
 
+# Every value `dominant_persona` can return, in the order a UI should offer
+# them. Named here rather than re-listed at each call site so a caller that
+# has to enumerate personas (the analyzer-guide route) cannot drift from the
+# function that actually produces them.
+PERSONAS: tuple[str, ...] = ("claude-code", "sdk", "mixed", "unknown")
+
+
 def dominant_persona(
     agent_mix: dict[str, int], declared_plan: str | None = None,
 ) -> str:
     """Classify the analyzed window's dominant user persona.
 
-    Returns one of ``"claude-code"``, ``"sdk"``, ``"mixed"``, ``"unknown"``.
+    Returns one of ``"claude-code"``, ``"sdk"``, ``"mixed"``, ``"unknown"`` --
+    i.e. a member of :data:`PERSONAS`.
 
     Primary signal is :func:`tokenjam.core.alerts.is_interactive_coding_agent`
     via :func:`agent_persona_mix` (Claude Code or Codex agent id). Falls back

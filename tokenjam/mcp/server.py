@@ -1240,8 +1240,8 @@ def setup_project(agent_id: str | None = None, project_path: str | None = None) 
     for this repo. Infers agent_id from the git remote if not provided.
     """
     try:
-        from tokenjam.core.config import find_config_file
-        cp = find_config_file()
+        from tokenjam.core.config import resolve_config_path
+        cp = resolve_config_path()
         return _tool_setup_project(
             config=_config,
             config_path=str(cp) if cp else None,

@@ -32,33 +32,25 @@ def conn(tmp_path):
 
 
 def _insert_minimal_span(conn, *, trace_id: str, span_id: str) -> None:
-    """Insert just enough to satisfy NOT NULL constraints; everything else NULL."""
+    """Insert just enough to satisfy NOT NULL constraints; everything else NULL.
+
+    Named columns, deliberately: a positional ``INSERT INTO spans VALUES (...)``
+    pins the placeholder count to the column count, so every additive migration
+    broke this helper (and with it every test in this file) for a reason that
+    has nothing to do with what any of them assert. Naming only the NOT NULL
+    columns lets each new nullable column default to NULL on its own.
+    """
     import datetime as dt
     now = dt.datetime.now(dt.timezone.utc)
     conn.execute(
-        "INSERT INTO spans VALUES "
-        "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,"
-        "$29,$30,$31,$32,$33,$34,$35,$36)",
+        "INSERT INTO spans ("
+        "span_id, trace_id, session_id, agent_id, name, kind, status_code, "
+        "start_time, end_time, duration_ms, attributes, input_tokens, "
+        "output_tokens, cache_tokens, cost_usd, events"
+        ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)",
         [
-            span_id, trace_id, None, "session-1",
-            "test-agent", "test-span", "internal", "ok",
-            None, now, now, 0,
-            "{}", None, None, None,
-            0, 0, 0, 0.0,
-            None, None, "[]",
-            None,  # billing_account (migration 4)
-            None,  # cache_write_tokens (migration 5)
-            None,  # request_params (migration 7)
-            None,  # request_tools (migration 7)
-            None,  # sub_agent_id (migration 14)
-            None,  # tenant_id (migration 17)
-            None,  # feature (migration 17)
-            None,  # environment (migration 17)
-            None,  # service_version (migration 17)
-            None,  # commit_sha (migration 17)
-            None,  # prompt_template_id (migration 17)
-            None,  # prompt_template_version (migration 17)
-            None,  # pricing_source (migration 18)
+            span_id, trace_id, "session-1", "test-agent", "test-span",
+            "internal", "ok", now, now, 0, "{}", 0, 0, 0, 0.0, "[]",
         ],
     )
 

@@ -934,7 +934,24 @@ def _below_threshold_residue(
 
 # --- Distill pass over the residual (non-family) bucket -----------------------
 
-def _distill_cache_dir() -> Path:
+def _distill_cache_dir(config: Any | None = None) -> Path:
+    """Where distilled cluster titles are cached between runs.
+
+    This is a SECOND cache, structurally separate from
+    ``relearn_store.default_cache_path``. That one was already threaded through
+    ``relearn_apply._storage_base_dir`` so an isolated config (``:memory:``, a
+    throwaway ``--db``) writes into a temp root instead of the operator's real
+    ``~/.tj``; this one was not, and wrote real files under the real home
+    regardless — silently, since it fires only after a successful distill LLM
+    call. Same helper, same guarantee, so neither cache can leak on its own.
+
+    ``config`` is None only for direct callers that never had a config to
+    thread (the standalone helpers and their tests); those keep the historical
+    path.
+    """
+    if config is not None:
+        from tokenjam.core.optimize.relearn_apply import _storage_base_dir
+        return _storage_base_dir(config) / "distill_cache" / "relearn"
     return Path.home() / ".tj" / "distill_cache" / "relearn"
 
 
@@ -1720,6 +1737,9 @@ def build_proposals(
     *,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     doc_text: str = "",
+    # The scope's Claude home, used only to suggest a user-global write target
+    # (see `relearn_apply.default_target_path`). `None` keeps `~/.claude`.
+    claude_home: Path | None = None,
     repo_cwd_map: dict[str, str] | None = None,
     advise_only_repos: set[str] | None = None,
     conn: Any | None = None,
@@ -1822,6 +1842,7 @@ def build_proposals(
             try:
                 suggested_target = default_target_path(
                     rung, scope, repo_cwd, slugify(cluster.title),
+                    claude_home=claude_home,
                 )
             except Exception:
                 suggested_target = ""   # never let a bad path computation sink the proposal
@@ -2100,6 +2121,9 @@ def analyze_relearns(
     sessions: list[tuple[str, str]],     # [(session_id, repo), ...]
     *,
     projects_root: Path | str | None = None,
+    # The scope's Claude home, used ONLY to suggest a user-global write target.
+    # `None` keeps the historical `~/.claude`; see `default_target_path`.
+    claude_home: Path | None = None,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     distill_enabled: bool = True,
     distill_cache_dir: Path | None = None,
@@ -2204,6 +2228,7 @@ def analyze_relearns(
 
     proposals, dropped = build_proposals(
         distilled, min_sessions=min_sessions, doc_text=codified_doc_text,
+        claude_home=claude_home,
         repo_cwd_map=repo_cwd_map, advise_only_repos=advise_only_repos,
         conn=conn, window_days=corpus_window_days, persona=persona,
         projection=projection,
@@ -2377,6 +2402,8 @@ def compute_relearn_finding(
     since: Any | None = None,
     *,
     projects_root: Path | str | None = None,
+    claude_home: Path | None = None,
+    distill_cache_dir: Path | None = None,
     distill_enabled: bool = True,
     min_sessions: int = MIN_RECURRING_SESSIONS,
     transcript_cache_dir: Path | None = None,
@@ -2511,8 +2538,10 @@ def compute_relearn_finding(
         doc_text = ""
 
     finding = analyze_relearns(
-        sessions, projects_root=root, codified_doc_text=doc_text,
-        distill_enabled=distill_enabled, repo_cwd_map=repo_cwd_map,
+        sessions, projects_root=root, claude_home=claude_home,
+        codified_doc_text=doc_text,
+        distill_enabled=distill_enabled, distill_cache_dir=distill_cache_dir,
+        repo_cwd_map=repo_cwd_map,
         extra_failures=span_failures + archived_failures,
         advise_only_repos=advise_only_repos,
         min_sessions=min_sessions, transcript_cache_dir=transcript_cache_dir,
@@ -2550,7 +2579,19 @@ def run(ctx: AnalyzerContext) -> None:
     ``storage.retention_days`` — what tokenjam actually kept — which is the
     point of keeping it.
     """
+    from tokenjam.core.optimize.scope import resolve_analyzer_scope
     from tokenjam.core.transcript_cache import default_cache_dir
+
+    scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
+    if not scope.enabled:
+        # The leak this guards is not hypothetical: served against an empty
+        # throwaway `--db`, this analyzer surfaced recurring-mistake entries
+        # carrying real file paths from an unrelated project, because its
+        # evidence came off the machine's global transcript tree rather than
+        # the database being served.
+        ctx.report.filesystem_scan_skipped_reason = scope.reason
+        ctx.report.findings["relearn"] = RelearnFinding()
+        return
 
     optimize_cfg = getattr(ctx.config, "optimize", None)
     min_sessions = getattr(
@@ -2570,6 +2611,9 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, min_sessions=min_sessions,
         retention_days=retention_days,
+        projects_root=scope.projects_root,
+        claude_home=scope.claude_home,
+        distill_cache_dir=_distill_cache_dir(ctx.config),
         transcript_cache_dir=default_cache_dir(ctx.config),
         persona=ctx.persona,
         existing_agent_file_tokens=measured_agent_file_tokens(

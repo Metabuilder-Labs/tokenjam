@@ -318,7 +318,7 @@ def test_doctor_exits_0_when_config_is_clean(runner, db, config, tmp_path):
     config.security.ingest_secret = "test-secret"
     # Disable drift so no "insufficient sessions" warning fires
     config.agents["test-agent"].drift.enabled = False
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 0
 
@@ -330,7 +330,7 @@ def test_doctor_exits_1_when_warnings_present(runner, db, config, tmp_path):
     config.agents["test-agent"].drift.enabled = False
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 1
     checks = json.loads(result.output)
@@ -340,7 +340,7 @@ def test_doctor_exits_1_when_warnings_present(runner, db, config, tmp_path):
 
 def test_doctor_exits_2_when_errors_present(runner, db, config):
     # No config file found => error
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=None):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=None):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 2
 
@@ -354,7 +354,7 @@ def test_doctor_sdk_only_setup_exits_0(runner, db, config, tmp_path):
     _clean_doctor_config(config, tmp_path)
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 0
     checks = json.loads(result.output)
@@ -377,7 +377,7 @@ def test_doctor_no_staleness_warning_with_fresh_spans(runner, db, config, tmp_pa
     db.insert_span(span)
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 0
     checks = json.loads(result.output)
@@ -394,7 +394,7 @@ def test_doctor_warns_on_stale_spans(runner, db, config, tmp_path):
     db.insert_span(span)
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 1
     checks = json.loads(result.output)
@@ -408,7 +408,7 @@ def test_doctor_no_staleness_warning_when_no_spans(runner, db, config, tmp_path)
     _clean_doctor_config(config, tmp_path)
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 0
     checks = json.loads(result.output)
@@ -423,7 +423,7 @@ def test_doctor_onboarding_signal_info_when_silent(runner, db, config, tmp_path)
     _clean_doctor_config(config, tmp_path)
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 0
     checks = json.loads(result.output)
@@ -438,7 +438,7 @@ def test_doctor_onboarding_signal_ok_with_spans(runner, db, config, tmp_path):
     db.insert_span(make_llm_span(agent_id="test-agent", start_time=utcnow()))
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     assert result.exit_code == 0
     checks = json.loads(result.output)
@@ -451,7 +451,7 @@ def test_doctor_warns_on_schema_without_capture(runner, db, config, tmp_path):
     config.capture.tool_outputs = False
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
-    with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+    with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
     checks = json.loads(result.output)
     schema_checks = [c for c in checks if c["name"] == "Schema vs capture"]
@@ -483,7 +483,7 @@ def test_doctor_warns_on_missing_schema_column(runner, config, tmp_path):
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
     try:
-        with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
             result = _invoke(runner, backend, config, ["doctor", "--json"])
         assert result.exit_code == 1
         checks = json.loads(result.output)
@@ -501,7 +501,7 @@ def test_doctor_repair_heals_missing_schema_column(runner, config, tmp_path):
     config_file = tmp_path / "tokenjam.toml"
     config_file.write_text('version = "1"\n')
     try:
-        with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
             repair = _invoke(runner, backend, config, ["doctor", "--repair"])
         assert "Schema reconciled" in repair.output
         cols = {
@@ -513,7 +513,7 @@ def test_doctor_repair_heals_missing_schema_column(runner, config, tmp_path):
         }
         assert {"request_params", "request_tools"} <= cols
         # A follow-up doctor run now reports the schema as healthy.
-        with patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+        with patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
             again = _invoke(runner, backend, config, ["doctor", "--json"])
         checks = json.loads(again.output)
         integrity = [c for c in checks if c["name"] == "Schema integrity"]
@@ -538,7 +538,7 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", return_value=None), \
-         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+         patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
         assert result.exit_code == 0
         checks = json.loads(result.output)
@@ -555,7 +555,7 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", side_effect=lambda cmd: "/bin/claude" if cmd == "claude" else None), \
-         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+         patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
         checks = json.loads(result.output)
         mcp_checks = [c for c in checks if c["name"] == "MCP wiring"]
@@ -582,7 +582,7 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", return_value=None), \
-         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+         patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
         assert result.exit_code == 1
         checks = json.loads(result.output)
@@ -608,7 +608,7 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", return_value=None), \
-         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+         patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
         assert result.exit_code == 1
         checks = json.loads(result.output)
@@ -628,7 +628,7 @@ def test_doctor_mcp_wiring_checks(runner, db, config, tmp_path):
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", return_value=None), \
-         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+         patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor", "--json"])
         assert result.exit_code == 1
         checks = json.loads(result.output)
@@ -660,7 +660,7 @@ def test_doctor_mcp_wiring_message_renders_bracket_literal(runner, db, config, t
     with patch("pathlib.Path.home", return_value=fake_home), \
          patch("pathlib.Path.cwd", return_value=fake_cwd), \
          patch("shutil.which", return_value=None), \
-         patch("tokenjam.cli.cmd_doctor.find_config_file", return_value=config_file):
+         patch("tokenjam.cli.cmd_doctor.resolve_config_path", return_value=config_file):
         result = _invoke(runner, db, config, ["doctor"])
 
     assert "[mcp_servers.tj]" in result.output
@@ -811,7 +811,7 @@ def test_onboard_claude_code_writes_settings(runner, tmp_path):
     fake_home.mkdir()
     settings_path = fake_home / ".claude" / "settings.json"
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
@@ -835,7 +835,7 @@ def test_onboard_claude_code_preserves_existing(runner, tmp_path):
         json.dumps({"theme": "dark", "env": {"MY_VAR": "preserved"}}) + "\n"
     )
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         runner.invoke(cli, ["onboard", "--claude-code", "--no-daemon", "--budget", "5.0", "--plan", "max_20x", "--project", "aquanode"])
@@ -854,7 +854,7 @@ def test_onboard_claude_code_creates_tj_config(runner, tmp_path):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
@@ -874,7 +874,7 @@ def test_onboard_claude_code_prompts_for_budget(runner, tmp_path):
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
@@ -897,7 +897,7 @@ def test_onboard_claude_code_skips_budget_prompt_for_subscription_plan(runner, t
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False), \
          patch("tokenjam.core.config.write_config") as mock_write:
@@ -920,7 +920,7 @@ def test_onboard_claude_code_project_flag_sets_config_project(runner, tmp_path):
     fake_home.mkdir()
 
     with runner.isolated_filesystem() as cwd, \
-         patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
@@ -947,7 +947,7 @@ def test_onboard_claude_code_prompts_for_project_name(runner, tmp_path):
     fake_home.mkdir()
 
     with runner.isolated_filesystem() as cwd, \
-         patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         # First prompt is the project name; budget is supplied via flag.
@@ -973,7 +973,7 @@ def test_onboard_claude_code_removes_existing_resource_attrs(runner, tmp_path):
     fake_home.mkdir()
 
     with runner.isolated_filesystem() as cwd, \
-         patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+         patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         proj_settings = Path(cwd) / ".claude" / "settings.json"
@@ -1091,7 +1091,7 @@ def test_onboard_does_not_prompt_for_daemon(runner, tmp_path):
     """Regression: tj onboard should auto-install the daemon without
     prompting. The prompt was removed in v0.1.6 but reappeared.
     See v0.1.7 fix."""
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard._install_daemon", return_value="Daemon installed") as mock_daemon:
         result = runner.invoke(cli, ["onboard", "--budget", "5.0"], input="")
     assert result.exit_code == 0
@@ -1103,7 +1103,7 @@ def test_onboard_does_not_prompt_for_daemon(runner, tmp_path):
 
 def test_onboard_no_daemon_skips_install(runner, tmp_path):
     """--no-daemon flag should skip daemon installation entirely."""
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard._install_daemon") as mock_daemon:
         result = runner.invoke(cli, ["onboard", "--budget", "5.0", "--no-daemon"])
     assert result.exit_code == 0
@@ -1136,7 +1136,7 @@ def test_budget_set_global_writes_config(runner, db, config, tmp_path):
 
     with patch("tokenjam.cli.main.load_config", return_value=config), \
          patch("tokenjam.cli.main.open_db", return_value=db), \
-         patch("tokenjam.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tokenjam.cli.cmd_budget.resolve_config_path", return_value=str(config_file)), \
          patch("tokenjam.cli.cmd_budget.write_config") as mock_write:
         result = runner.invoke(cli, ["budget", "--daily", "8.0"])
 
@@ -1153,7 +1153,7 @@ def test_budget_set_json_outputs_updated_values(runner, db, config, tmp_path):
 
     with patch("tokenjam.cli.main.load_config", return_value=config), \
          patch("tokenjam.cli.main.open_db", return_value=db), \
-         patch("tokenjam.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tokenjam.cli.cmd_budget.resolve_config_path", return_value=str(config_file)), \
          patch("tokenjam.cli.cmd_budget.write_config"):
         result = runner.invoke(cli, ["budget", "--daily", "8.0", "--json"])
 
@@ -1176,7 +1176,7 @@ def test_budget_set_agent_writes_config(runner, db, config, tmp_path):
 
     with patch("tokenjam.cli.main.load_config", return_value=config), \
          patch("tokenjam.cli.main.open_db", return_value=db), \
-         patch("tokenjam.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tokenjam.cli.cmd_budget.resolve_config_path", return_value=str(config_file)), \
          patch("tokenjam.cli.cmd_budget.write_config") as mock_write:
         result = runner.invoke(
             cli, ["budget", "--agent", "test-agent", "--daily", "3.0", "--session", "0.25"]
@@ -1187,6 +1187,38 @@ def test_budget_set_agent_writes_config(runner, db, config, tmp_path):
     saved_config = mock_write.call_args[0][0]
     assert saved_config.agents["test-agent"].budget.daily_usd == 3.0
     assert saved_config.agents["test-agent"].budget.session_usd == 0.25
+
+
+def test_budget_set_writes_to_tj_config_file_not_search_path(runner, db, config, tmp_path, monkeypatch):
+    """`tj budget --daily` must write to the file `TJ_CONFIG` points at, not a
+    search-path config — otherwise the write silently splits from the config
+    the process actually read (a stale search-path file gets the update,
+    while the live TJ_CONFIG file the daemon/SDK reads never changes)."""
+    tj_config_file = tmp_path / "tj_config" / "custom.toml"
+    tj_config_file.parent.mkdir(parents=True)
+    tj_config_file.write_text("")
+    search_path_file = tmp_path / "search_path" / ".tj" / "config.toml"
+    search_path_file.parent.mkdir(parents=True)
+    search_path_file.write_text("")
+
+    monkeypatch.setenv("TJ_CONFIG", str(tj_config_file))
+    import tokenjam.core.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+        tmp_path / "tokenjam.toml",
+        search_path_file,
+        tmp_path / "global" / "config.toml",
+    ])
+
+    with patch("tokenjam.cli.main.load_config", return_value=config), \
+         patch("tokenjam.cli.main.open_db", return_value=db), \
+         patch("tokenjam.cli.cmd_budget.write_config") as mock_write:
+        result = runner.invoke(cli, ["budget", "--daily", "8.0"])
+
+    assert result.exit_code == 0, result.output
+    assert mock_write.called
+    written_path = mock_write.call_args[0][1]
+    assert Path(written_path) == tj_config_file
+    assert Path(written_path) != search_path_file
 
 
 def test_optimize_empty_db_outputs_friendly_message(runner, db, config):
@@ -1654,7 +1686,7 @@ def test_budget_set_negative_daily_rejected(runner, db, config, tmp_path):
 
     with patch("tokenjam.cli.main.load_config", return_value=config), \
          patch("tokenjam.cli.main.open_db", return_value=db), \
-         patch("tokenjam.cli.cmd_budget.find_config_file", return_value=str(config_file)), \
+         patch("tokenjam.cli.cmd_budget.resolve_config_path", return_value=str(config_file)), \
          patch("tokenjam.cli.cmd_budget.write_config") as mock_write:
         result = runner.invoke(cli, ["budget", "--daily", "-5"])
 
@@ -1851,7 +1883,7 @@ def test_onboard_claude_code_installs_claude_wrapper(runner, tmp_path):
     fake_home.mkdir()
     zshrc = fake_home / ".zshrc"
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
@@ -1885,7 +1917,7 @@ def test_onboard_claude_code_wrapper_is_idempotent(runner, tmp_path):
     fake_home.mkdir()
     zshrc = fake_home / ".zshrc"
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         args = [
@@ -1910,7 +1942,7 @@ def test_onboard_claude_code_wrapper_writes_bashrc_when_present(runner, tmp_path
     bashrc = fake_home / ".bashrc"
     bashrc.write_text("# existing bashrc\n")
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [
@@ -1951,7 +1983,7 @@ def test_onboard_claude_code_replaces_legacy_zshrc_otel_markers(runner, tmp_path
         'export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer stale-tj-token"\n'
     )
 
-    with patch("tokenjam.cli.cmd_onboard.find_config_file", return_value=None), \
+    with patch("tokenjam.cli.cmd_onboard.resolve_config_path", return_value=None), \
          patch("tokenjam.cli.cmd_onboard.Path.home", return_value=fake_home), \
          patch("tokenjam.cli.cmd_onboard.click.confirm", return_value=False):
         result = runner.invoke(cli, [

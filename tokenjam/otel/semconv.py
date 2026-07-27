@@ -45,6 +45,12 @@ class GenAIAttributes:
     # Conversation / session continuity
     CONVERSATION_ID = "gen_ai.conversation.id"
 
+    # The provider's own id for the response (Anthropic `msg_...`, OpenAI
+    # `chatcmpl-...`). Names the underlying API CALL, so two observations of
+    # one call — a live provider patch and a later transcript backfill —
+    # can be recognised as the same call rather than counted twice.
+    RESPONSE_ID = "gen_ai.response.id"
+
     # Prompt / completion capture (off by default)
     PROMPT_CONTENT     = "gen_ai.prompt.content"
     COMPLETION_CONTENT = "gen_ai.completion.content"
@@ -106,6 +112,12 @@ class ClaudeCodeEvents:
     SESSION_ID     = "session.id"
     PROMPT_ID      = "prompt.id"
     EVENT_SEQUENCE = "event.sequence"
+
+    # The human's turn text, on `user_prompt` events only, and only when the
+    # user runs Claude Code with OTEL_LOG_USER_PROMPTS=1. The `api_request`
+    # event that becomes the priced LLM span carries no text at ALL, so this
+    # is the exporter's one and only textual signal — see logs.py.
+    PROMPT         = "prompt"
 
     # api_request attributes
     COST_USD              = "cost_usd"
@@ -290,6 +302,18 @@ class TjAttributes:
     # without retaining the (potentially sensitive) raw input.
     TOOL_ARG_SIG      = "tokenjam.tool_arg_sig"
 
+    # Internal stamp naming the API call a span observes, for ingest paths
+    # that know a stable per-call id but have no provider response id to put
+    # in `gen_ai.response.id` (the Claude Code transcript backfill stamps the
+    # assistant message key here). Read by core.optimize.accounting.
+    CALL_ID           = "tj.call_id"
+    # How this observation reached the store: the ingest path's own name
+    # ("backfill.claude_code", a `tj backfill <adapter>` name, ...). Absent
+    # means the live receive path. Load-bearing for duplicate suppression:
+    # two observations of one call always differ here, two genuinely distinct
+    # calls seen by one observer never do.
+    INGEST_SOURCE     = "source"
+
     # -- SDK cost-attribution dimensions, continued --
     # No established OTel semantic convention exists for multi-tenant
     # customer/tenant identity or an application "feature"/workflow label (the
@@ -307,6 +331,26 @@ class TjAttributes:
     # spend, e.g. after a prompt change regresses token usage.
     PROMPT_TEMPLATE_ID      = "tokenjam.prompt.template_id"
     PROMPT_TEMPLATE_VERSION = "tokenjam.prompt.template_version"
+
+    # -- Streaming usage data-quality --
+    # A streamed response only reports its token usage in a FINAL payload: the
+    # `message_delta`/`message_stop` pair on Anthropic, and — only when the
+    # caller opted in with `stream_options={"include_usage": true}` — a trailing
+    # usage chunk on OpenAI-compatible APIs. If the caller abandons the iterator
+    # early (a client disconnect, a `break`, an exception) or never opted in,
+    # that payload never arrives and the call is recorded with no token counts
+    # at all. Nothing about the recorded span distinguishes that from a call
+    # that genuinely cost nothing, so the spend total silently reads LOW.
+    #
+    # These three are set by every code path that observes a stream (the SDK
+    # provider patches and the proxy's SSE tap) so the `stream-usage` analyzer
+    # can tell the three states apart: not a stream at all, a stream that
+    # reported usage, and a stream that produced content and then closed
+    # without reporting any. Metadata about the observation itself, not
+    # content, so they are NOT gated by a [capture] toggle.
+    STREAMING             = "tokenjam.llm.streaming"
+    STREAM_USAGE_REPORTED = "tokenjam.llm.stream_usage_reported"
+    STREAM_CONTENT_CHUNKS = "tokenjam.llm.stream_content_chunks"
 
     # NemoClaw / OpenShell sandbox events
     SANDBOX_EVENT    = "tokenjam.sandbox.event"

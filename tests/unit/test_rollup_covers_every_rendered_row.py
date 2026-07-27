@@ -14,6 +14,7 @@ produced two rows, while the signature was keyed on the agent alone.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from tokenjam.utils.time_parse import utcnow
 
 import pytest
 
@@ -31,6 +32,7 @@ def _candidate(session_id, agent_id, model, alt_model):
         "model": model, "alt_model": alt_model,
         "input_tokens": 100_000, "output_tokens": 20_000,
         "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+        "started_at": utcnow() - timedelta(days=1),
     }
 
 

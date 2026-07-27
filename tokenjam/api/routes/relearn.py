@@ -37,6 +37,9 @@ from tokenjam.core.framing import (
     plan_determination_mix,
 )
 from tokenjam.core.optimize import (
+    scope as scope_mod,
+)
+from tokenjam.core.optimize import (
     cost_apply,
     cost_proposals as cost_proposals_mod,
     inbox_contribution,
@@ -55,25 +58,56 @@ router = APIRouter()
 _WRITE_AUTH = [Depends(require_api_key), Depends(require_relearn_write_auth)]
 
 
-def _reject_target_outside_home(target_path: str) -> None:
+def _allowed_write_root(config: Any) -> Path:
+    """The one directory tree an approved write may land in, for THIS run.
+
+    Resolved from the same ``core.optimize.scope`` contract the apply-target
+    suggestion comes from (``resolve_write_scope``), never from the process's
+    own ``Path.home()``. With ``--projects-root`` pointed outside ``$HOME``
+    the suggestion followed the scoped home while this guard did not, so the
+    UI suggested a target and the API then 403'd that exact write — the
+    suggestion and the authorization disagreed. One helper, one root.
+
+    Fail-closed: a scope that cannot be resolved raises rather than widening
+    to "anywhere". With no scope override this is the real ``$HOME``, exactly
+    as before.
+    """
+    try:
+        root = scope_mod.resolve_write_scope(config).allowed_root
+        return root.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"cannot resolve the allowed write root for this run ({exc}) — refusing.",
+        ) from exc
+
+
+def _reject_target_outside_home(target_path: str, config: Any) -> None:
     """Defense-in-depth (must-fix #1): even with write-auth enforced, refuse
-    to write anywhere outside the user's home directory. Every legitimate
-    target (a project's CLAUDE.md/skill/hook, or a user-global ~/.claude/*
-    file) lives under $HOME — this just makes a bug or a maliciously-crafted
-    ``target_path`` (e.g. ``/etc/...``, ``/root/...``) fail closed rather than
-    relying solely on the overwrite/symlink guards inside relearn_apply.
+    to write anywhere outside this run's allowed root (``_allowed_write_root``
+    — ``$HOME`` unless the run is scoped). Every legitimate target (a
+    project's CLAUDE.md/skill/hook, or a user-global ~/.claude/* file) lives
+    under that root — this just makes a bug or a maliciously-crafted
+    ``target_path`` (e.g. ``/etc/...``, ``/root/...``, or a ``..`` traversal
+    out of the scope) fail closed rather than relying solely on the
+    overwrite/symlink guards inside relearn_apply.
+
+    ``resolve(strict=False)`` is deliberate on both sides: the target usually
+    does not exist yet (that is the point of an apply), and resolving it
+    collapses ``..`` segments AND follows any symlink on the way, so a symlink
+    pointing out of the root is judged by where it LANDS, not by where it sits.
     """
     if not target_path:
         return   # relearn_apply itself refuses an empty target_path (409)
+    root = _allowed_write_root(config)
     try:
         resolved = Path(target_path).expanduser().resolve(strict=False)
-        home = Path.home().resolve(strict=False)
     except (OSError, RuntimeError) as exc:
         raise HTTPException(status_code=400, detail=f"unresolvable target_path: {exc}") from exc
-    if resolved != home and home not in resolved.parents:
+    if resolved != root and root not in resolved.parents:
         raise HTTPException(
             status_code=403,
-            detail=f"target_path {resolved} is outside the allowed root ({home}) — refusing.",
+            detail=f"target_path {resolved} is outside the allowed root ({root}) — refusing.",
         )
 
 
@@ -459,11 +493,15 @@ def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str,
     already holds a non-TokenJam file, or (unless ``force=true``) a live
     session just seen in the target repo (§7: never apply mid-session). The
     UI's re-send-with-force is the explicit "apply anyway" the spec calls for.
-    403s when ``target_path`` resolves outside the user's home directory
-    (defense-in-depth allowlist).
+    403s when ``target_path`` resolves outside this run's allowed write
+    root (defense-in-depth allowlist — ``$HOME`` unless the run is scoped;
+    see ``_allowed_write_root``).
     """
-    _reject_target_outside_home(body.target_path)
-    stored = relearn_proposals.get_proposal(body.proposal_id, config=_config(request))
+    # Config first: the allowed write root is resolved FROM it, and a missing
+    # config must 503 rather than let the guard fall back to a wider root.
+    apply_config = _config(request)
+    _reject_target_outside_home(body.target_path, apply_config)
+    stored = relearn_proposals.get_proposal(body.proposal_id, config=apply_config)
     if stored is None:
         raise HTTPException(
             status_code=404,
@@ -705,10 +743,13 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         if block is not None and block.get("cost_computed_at") else []
     )
     applied_sigs = {
-        rec.get("signature") for rec in cost_apply.list_applied(config)
+        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
         if rec.get("state") != "reverted"
     }
-    open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
+    open_proposals = [
+        p for p in proposals
+        if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
+    ]
     # The window this batch of proposals was actually computed over — stored
     # alongside them at recompute time, never re-derived here, so the window the
     # headline names is the window the figures were observed over. Deliberately
@@ -893,10 +934,11 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
     human-gated (dry-run first) discipline — then records the cost marker so
     the delta-verify pass measures the realized delta after it. ``go=false``
     returns the dry-run diff; a second call with ``go=true`` writes. 404 on an
-    unknown ``proposal_id``; 403 outside home; 409 on a refusal.
+    unknown ``proposal_id``; 403 outside the allowed write root; 409 on a
+    refusal.
     """
-    _reject_target_outside_home(body.target_path)
     config = _config(request)
+    _reject_target_outside_home(body.target_path, config)
     db = getattr(request.app.state, "db", None)
     stored = _stored_cost_proposal(request, body.proposal_id)
     signature = str(stored.get("signature") or "")
@@ -990,14 +1032,15 @@ def post_register_source_path(
     Registration is per AGENT, so one answer unlocks every other proposal for the
     same agent at the next recompute. Several of the eleven share an ``agent_id``.
 
-    403 outside home; 409 on any refusal (a path that is not a directory, not in
+    403 outside the allowed write root; 409 on any refusal (a path that is not a
+    directory, not in
     a git repo, a model id in several files, a dirty target, a live session in
     the repo unless ``force``); 404 on an unknown ``proposal_id``.
     """
     from tokenjam.core.optimize import model_apply
 
-    _reject_target_outside_home(body.source_path)
     config = _config(request)
+    _reject_target_outside_home(body.source_path, config)
     stored = _stored_cost_proposal(request, body.proposal_id)
     if not stored.get("needs_source_path"):
         raise HTTPException(

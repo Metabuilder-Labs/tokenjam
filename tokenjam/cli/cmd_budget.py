@@ -9,7 +9,7 @@ import click
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import (
     AgentConfig,
-    find_config_file,
+    resolve_config_path,
     resolve_effective_budget,
     validate_budget_value,
     write_config,
@@ -50,8 +50,13 @@ def cmd_budget(
         _show_budgets(config, ctx.obj.get("db"), output_json)
         return
 
-    # Write mode — find config file on disk
-    config_path_str = find_config_file()
+    # Write mode — the update must land in the same file `config`
+    # (ctx.obj["config"], loaded above) was read from, or it silently splits
+    # from the live config. Forwarding the invocation's own `--config` value is
+    # what makes that true: `load_config` resolved through the same function
+    # with the same override, whereas a bare call here sees only TJ_CONFIG and
+    # the search path and would name a different file entirely.
+    config_path_str = resolve_config_path(ctx.obj.get("config_path_override"))
     if config_path_str is None:
         raise click.ClickException(
             "No config file found. Run 'tj onboard' to create one."

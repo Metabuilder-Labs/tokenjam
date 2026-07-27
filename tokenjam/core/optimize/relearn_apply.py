@@ -148,14 +148,25 @@ def applied_fixes_path(config: TjConfig) -> Path:
 
 # --- Default target-path suggestion (for the card's scope/target override) ----
 
-def default_target_path(rung: int, scope: str, repo_cwd: str, slug: str) -> str:
+def default_target_path(
+    rung: int, scope: str, repo_cwd: str, slug: str,
+    *, claude_home: Path | None = None,
+) -> str:
     """Best-effort suggested write location — always user-editable before Approve
     (SPEC's "scope override" requirement: repo-identity is noisy, never trust it
     blindly). Returns ``""`` when there isn't enough information (no known cwd
     for a project-scoped cluster) — the UI must then require an explicit path.
+
+    ``claude_home`` scopes the user-global branch to the analyzer scope's home
+    (see ``core/optimize/scope.py``). Without it a review view served from a
+    throwaway ``--db`` defaulted its "where to write it" target to a real path
+    on the operator's machine, so a single Approve click in what looks like a
+    sandbox would write a real file outside the database being served. The
+    target has to agree with the scope the findings came from, or the two
+    halves of the card describe different machines.
     """
     if scope == "user-global":
-        home = Path.home() / ".claude"
+        home = (claude_home if claude_home is not None else Path.home() / ".claude")
         if rung == RUNG_NOTE:
             return str(home / "CLAUDE.md")
         if rung == RUNG_SKILL:

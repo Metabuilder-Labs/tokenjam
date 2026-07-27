@@ -50,8 +50,10 @@ from pathlib import Path
 from typing import Any
 
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import blended_rates, price_span, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
 from tokenjam.core.transcript import _SYSTEM_REMINDER_RE, read_records, resolve_projects_root
+from tokenjam.core.usage import AssistantUsage, assistant_message_key, parse_usage
 
 # --- Tunables ------------------------------------------------------------
 
@@ -81,17 +83,22 @@ MIN_SESSIONS_DEADWEIGHT = 5
 MAX_EXAMPLE_SESSIONS = 3
 
 #: Full MCP-connector schema-injection tax, PER CALL, when its tool schemas
-#: are loaded (not deferred) — a documented community/founder-research figure
-#: (~25K tokens/call for an attached MCP connector's injected tool
-#: definitions; see .claude/context/research/evidence/
-#: subscription-vs-cost-framing.md and feature-context-diagnostic.md), NOT a
-#: live per-call measurement — the on-disk transcript carries no per-schema
-#: token count (see core/context_diagnostic.py's MCP_INJECTION_PARK_NOTE).
-#: `estimated`, conservative, cited in the card footnote. The server's tool
-#: definitions ride in the `tools` array of EVERY call in the session, not
-#: just the first — this is the FIRST call's token count; subsequent calls in
-#: the same session re-send it too but are priced at the cache-read rate, not
-#: this rate again (see the per-session multiplier in the tax loop below).
+#: are loaded (not deferred). This is an ASSUMPTION carried into this module,
+#: not a measurement taken here or anywhere in this repo: the on-disk
+#: transcript has no per-schema token count to measure against (see
+#: core/context_diagnostic.py's MCP_INJECTION_PARK_NOTE, the one real in-repo
+#: source for the "~25K tokens/call" figure) — and that note itself describes
+#: the tax for ALL of a session's attached MCP servers COMBINED, not for one
+#: server. This module nonetheless charges the full 25K flat to EVERY
+#: individual server, every call, regardless of how many tools that server
+#: actually exposes. Do not treat this as measured or as a per-server figure
+#: just because it is used that way below — it is neither. Do not change the
+#: value here; a re-derived, era-correct constant is tracked separately.
+#: The server's tool definitions ride in the `tools` array of EVERY call in
+#: the session, not just the first — this is the FIRST call's token count;
+#: subsequent calls in the same session re-send it too but are priced at the
+#: cache-read rate, not this rate again (see the per-session multiplier in
+#: the tax loop below).
 FULL_SCHEMA_TAX_TOKENS = 25_000
 
 #: When a session's transcript shows this server's tools in a DEFERRED
@@ -138,9 +145,14 @@ def _mcp_server_names(path: Path) -> set[str]:
     return {str(name) for name in servers if str(name).strip()}
 
 
-def _global_config_path() -> Path:
+def _global_config_path(claude_home: Path | None = None) -> Path:
     # Resolved LAZILY (never at import time) so a test patching HOME sees the
-    # fake home, never the developer's real ~/.claude.json.
+    # fake home, never the developer's real ~/.claude.json. `claude_home`
+    # scopes it further: under an explicit `--projects-root` the global MCP
+    # config read must stay inside the root the caller drew, or a scoped run
+    # still reports servers from the operator's real machine.
+    if claude_home is not None:
+        return claude_home / ".claude.json"
     return Path.home() / ".claude.json"
 
 
@@ -149,11 +161,21 @@ class ConfiguredServer:
     """One MCP server as read off config, and where it reaches."""
     name:   str
     scope:  str                      # "user" | "project"
-    source: str                      # config file path (str, for the card)
-    cwds:   set[str] = field(default_factory=set)  # project scope: reachable cwds
+    source: str                      # DETERMINISTICALLY chosen config file (for the card/apply)
+    cwds:   set[str] = field(default_factory=set)  # project scope: every reachable cwd
+    #: Every distinct source path that independently declares this server
+    #: (project scope only), mapped to the cwds reachable through THAT file.
+    #: The same server name can be declared in more than one physical
+    #: ``.mcp.json``/``.claude/settings*.json`` (e.g. one committed into
+    #: several worktrees of the same repo) -- `source` above is only ONE of
+    #: these, chosen deterministically; the rest are named so a caller never
+    #: silently treats the aggregate claim as fixed by editing just one.
+    source_cwds: dict[str, set[str]] = field(default_factory=dict)
 
 
-def enumerate_configured_servers(repo_cwds: set[str]) -> dict[str, ConfiguredServer]:
+def enumerate_configured_servers(
+    repo_cwds: set[str], *, claude_home: Path | None = None,
+) -> dict[str, ConfiguredServer]:
     """Read-only enumeration of MCP servers across the three config
     locations: project ``.mcp.json`` / ``.claude/settings*.json`` under each
     given session cwd, plus the global ``~/.claude.json``. Never edits a
@@ -162,15 +184,27 @@ def enumerate_configured_servers(repo_cwds: set[str]) -> dict[str, ConfiguredSer
     A user-scoped (global) server always wins scope over a same-named
     project entry: the global entry already reaches every session, so
     downgrading it to "project" would only narrow its true presence.
+
+    ``repo_cwds`` is iterated in SORTED order and each project-scoped
+    server's ``source`` is chosen AFTER the full scan (most-cwds-covered
+    first, path string as the tie-break) — never "whichever cwd a raw
+    ``set`` iteration happened to visit first". The same server name
+    independently declared across several cwds (a duplicated ``.mcp.json``
+    committed into multiple worktrees, say) used to hand its ONE apply
+    target to whichever path a hash-seed-dependent set order visited first,
+    so the exact same claim's fix could stop between a sliver and nearly
+    all of the claimed tax depending on nothing but interpreter hash
+    randomization. Deterministic now, and the deterministic choice is also
+    the one that actually matters most (most sessions covered).
     """
     servers: dict[str, ConfiguredServer] = {}
 
-    global_path = _global_config_path()
+    global_path = _global_config_path(claude_home)
     if global_path.is_file():
         for name in _mcp_server_names(global_path):
             servers[name] = ConfiguredServer(name=name, scope="user", source=str(global_path))
 
-    for cwd in repo_cwds:
+    for cwd in sorted(repo_cwds):
         if not cwd:
             continue
         base = Path(cwd)
@@ -188,7 +222,24 @@ def enumerate_configured_servers(repo_cwds: set[str]) -> dict[str, ConfiguredSer
                     name, ConfiguredServer(name=name, scope="project", source=str(path)),
                 )
                 entry.cwds.add(cwd)
+                entry.source_cwds.setdefault(str(path), set()).add(cwd)
+
+    for entry in servers.values():
+        if entry.scope != "project" or len(entry.source_cwds) <= 1:
+            continue
+        # Most cwds covered wins; a path-string tie-break makes the choice
+        # fully deterministic even when two sources cover the same count.
+        entry.source = min(
+            entry.source_cwds.items(), key=lambda kv: (-len(kv[1]), kv[0]),
+        )[0]
     return servers
+
+
+def _other_sources(server: ConfiguredServer) -> list[str]:
+    """Every source path OTHER than the chosen canonical one that also
+    independently declares this server -- sorted, so the disclosure text is
+    stable across runs. Empty for a user-scoped or single-source server."""
+    return sorted(p for p in server.source_cwds if p != server.source)
 
 
 def server_still_configured(name: str, source: str) -> bool:
@@ -506,11 +557,18 @@ class _SessionSignal:
     #: assistant-turn model -> turn count, for pricing the token tax at a
     #: representative model's input rate (see ``_dominant_model``).
     models: dict[str, int] = field(default_factory=dict)
-    #: Total assistant turns in the session — each is one API request, so this
-    #: is the session's ACTUAL call count (mirrors context_diagnostic.py's
-    #: one-``TurnComposition``-per-turn convention). A configured MCP server's
-    #: tool schemas ride in the ``tools`` array of every one of these calls,
-    #: not just the first — see the per-call multiplier in the tax loop below.
+    #: Total assistant turns in the session — the session's ACTUAL call count
+    #: (mirrors context_diagnostic.py's one-``TurnComposition``-per-turn
+    #: convention). NOT one per "role == assistant" transcript record: Claude
+    #: Code writes a SEPARATE record per content block (thinking / text /
+    #: tool_use) of a single API response, all sharing one ``message.id``, so
+    #: counting records one-for-one overcounts the real call count by
+    #: however many blocks a response happened to split into. Deduped by
+    #: message key in ``_analyze_session`` below — the same key
+    #: ``_session_usage_from_records`` already dedupes on, for the identical
+    #: reason. A configured MCP server's tool schemas ride in the ``tools``
+    #: array of every one of these (deduped) calls, not just the first — see
+    #: the per-call multiplier in the tax loop below.
     assistant_turns: int = 0
 
 
@@ -520,11 +578,22 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
     buckets (measured off the FIRST system-reminder blob only — Claude Code
     injects it once at session start; later turns don't repeat it, so
     summing across turns would overcount), and the assistant model(s) used
-    (for pricing the token tax)."""
+    (for pricing the token tax).
+
+    Claude Code writes a SEPARATE transcript record per content block
+    (thinking / text / tool_use) of the same API response, all sharing one
+    ``message.id`` — counting "role == assistant" records one-for-one with
+    API calls overcounts by however many blocks a response happened to split
+    into. ``assistant_turns`` dedupes by ``assistant_message_key`` (the same
+    key ``_session_usage_from_records`` already uses for its own dedup, for
+    the identical reason) so it stays the session's ACTUAL call count, not
+    its record count.
+    """
     signal = _SessionSignal()
     reminder_measured = False
+    seen_message_keys: set[str] = set()
 
-    for record in records:
+    for line_no, record in enumerate(records, start=1):
         message = record.get("message")
         if not isinstance(message, dict):
             continue
@@ -549,10 +618,20 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
                     reminder_measured = True
 
         if role == "assistant":
-            signal.assistant_turns += 1
-            model = message.get("model")
-            if isinstance(model, str) and model:
-                signal.models[model] = signal.models.get(model, 0) + 1
+            # Dedupe by message key before counting a call: Claude Code can
+            # write several records for ONE API response (one per content
+            # block, e.g. a thinking block and a text block each get their
+            # own record but share `message.id`). Counting every "assistant"
+            # record here would overcount how many times the schema tax was
+            # actually re-sent -- do not "simplify" this back to a bare
+            # per-record increment.
+            message_key = assistant_message_key(record, message, line_no)
+            if message_key not in seen_message_keys:
+                seen_message_keys.add(message_key)
+                signal.assistant_turns += 1
+                model = message.get("model")
+                if isinstance(model, str) and model:
+                    signal.models[model] = signal.models.get(model, 0) + 1
 
         for block in blocks:
             if isinstance(block, dict) and block.get("type") == "tool_use":
@@ -560,8 +639,8 @@ def _analyze_session(records: list[dict[str, Any]]) -> _SessionSignal:
                 if server:
                     signal.mcp_invocations[server] = signal.mcp_invocations.get(server, 0) + 1
                     # `assistant_turns` was already incremented above for THIS
-                    # record, so this is the 1-indexed ordinal of the call
-                    # that's doing the invoking.
+                    # record's call (deduped), so this is the 1-indexed
+                    # ordinal of the call that's doing the invoking.
                     signal.first_invocation_turn.setdefault(server, signal.assistant_turns)
 
     return signal
@@ -652,11 +731,21 @@ class ServerDeadweight:
     invocations:                      int
     deferred_sessions:                int
     dead:                             bool
+    #: The LITERAL (undiscounted) count of schema-injection tokens sent —
+    #: the schema rides in the `tools` array of every call regardless of
+    #: caching, so this is bytes actually transmitted, never the
+    #: cache-discounted price-equivalent quantity `estimated_tax_usd_*` is
+    #: derived from. Keeping these two axes on the same undiscounted-vs-
+    #: price-equivalent basis would make one of them silently answer a
+    #: different question than its name claims (Critical Rule 28); this
+    #: field used to BE that price-equivalent quantity relabeled as tokens,
+    #: understating the real count by roughly 1/cache_read_ratio.
     estimated_tax_tokens_per_session: int
-    #: Window-scoped total: the SUM of each present session's own tax (first
-    #: call at input rate + that session's own later calls at the cache-read
-    #: rate — see the per-session multiplier in `compute_deadweight_finding`),
-    #: never `estimated_tax_tokens_per_session x sessions_present` (that would
+    #: Window-scoped total: the SUM of each present session's own literal
+    #: token count (first call's full schema + every later call's full
+    #: re-send — see the per-session multiplier in
+    #: `compute_deadweight_finding`), never
+    #: `estimated_tax_tokens_per_session x sessions_present` (that would
     #: silently substitute the average call count for every session's actual
     #: one). NO projection folded in, and none may be applied downstream
     #: either: this is a past-tense window observation, and the product states
@@ -676,6 +765,19 @@ class ServerDeadweight:
     estimated_tax_usd_per_session:    float | None = None
     #: Window-scoped dollar total — see `estimated_tax_tokens_window` above.
     estimated_tax_usd_window:         float | None = None
+    #: Every OTHER source path that independently declares this same server
+    #: name (project scope only) -- e.g. a duplicated `.mcp.json` committed
+    #: into several worktrees. Empty when `source` is the only place this
+    #: server is declared. NOT touched by the apply/one-paste fix, which
+    #: targets `source` alone; see `primary_source_sessions` for how much of
+    #: `sessions_present` that one edit actually reaches.
+    other_sources:                    list[str] = field(default_factory=list)
+    #: Of `sessions_present`, how many run from a cwd reachable through
+    #: `source` specifically (as opposed to one of `other_sources`). Equals
+    #: `sessions_present` whenever `other_sources` is empty. A claim
+    #: aggregated across multiple source files must not let its one fix
+    #: action silently imply full coverage.
+    primary_source_sessions:         int = 0
 
 
 @dataclass
@@ -702,6 +804,147 @@ class DeadweightFinding:
     estimate_confidence:            str = "estimated"
     caveat:                          str = DEADWEIGHT_HONESTY_CAVEAT
     notes:                            list[str] = field(default_factory=list)
+    #: Distinct recorded session cwds that no longer exist on disk (a deleted
+    #: worktree, typically) — `enumerate_configured_servers` silently
+    #: `continue`s past these, so a vanished repo was previously
+    #: indistinguishable, on this finding, from a live repo genuinely
+    #: carrying no MCP config. Counted here so that blind spot is visible
+    #: instead of silent (see `_unresolvable_coverage_note`).
+    unresolvable_paths:               int = 0
+    #: Sessions whose recorded cwd falls among `unresolvable_paths` above —
+    #: this analyzer could not check project-scoped MCP config for any of
+    #: them at all.
+    unresolvable_sessions:            int = 0
+    #: Total ACTUAL usage tokens (input+output+cache-read+cache-write, not
+    #: the MCP schema tax) across `unresolvable_sessions`, measured directly
+    #: off each session's transcript.
+    unresolvable_tokens:              int = 0
+    #: Dollar conversion of `unresolvable_tokens`, priced per session through
+    #: core/pricing.py at that session's dominant model. `None` when no
+    #: priced model was observed across ANY unresolvable session (never a
+    #: fabricated rate) — see `unresolvable_unpriced_sessions` for how many
+    #: of them are excluded from this sum.
+    unresolvable_usd:                 float | None = None
+    #: Of `unresolvable_sessions`, how many had no priced model observed and
+    #: are therefore excluded from `unresolvable_usd` (the token figure
+    #: above still includes them).
+    unresolvable_unpriced_sessions:   int = 0
+    #: Plain-language statement of the blind spot above, so a reader never
+    #: has to infer "vanished repo" vs. "genuinely no config" from silence.
+    #: Mirrors `context_resend._coverage_note` / `_relearn_coverage_note`.
+    coverage_note:                    str = ""
+
+
+# --- Unresolvable-path coverage (Defect 1: silence when a cwd is gone) ----
+
+def _session_usage_from_records(records: list[dict[str, Any]]) -> AssistantUsage:
+    """Total ACTUAL assistant usage over one already-parsed session,
+    last-wins deduped by message key — same dedup policy as
+    ``core.usage.session_usage``, just replayed over records this module
+    already parsed once rather than re-reading the raw lines a second time.
+
+    This is real usage (what the session actually cost), never to be
+    confused with ``FULL_SCHEMA_TAX_TOKENS``/``DEFERRED_SCHEMA_TAX_TOKENS``
+    above, which model the MCP schema-injection TAX, not actual spend.
+    """
+    by_key: dict[str, AssistantUsage] = {}
+    for line_no, record in enumerate(records, start=1):
+        if record.get("type") != "assistant":
+            continue
+        msg = record.get("message")
+        if not isinstance(msg, dict) or not msg.get("usage"):
+            continue
+        usage = parse_usage(msg.get("usage"))
+        if usage.total == 0:
+            continue
+        by_key[assistant_message_key(record, msg, line_no)] = usage
+    total = AssistantUsage()
+    for usage in by_key.values():
+        total = AssistantUsage(
+            total.input_tokens + usage.input_tokens,
+            total.output_tokens + usage.output_tokens,
+            total.cache_read_tokens + usage.cache_read_tokens,
+            total.cache_write_tokens + usage.cache_write_tokens,
+        )
+    return total
+
+
+def _session_actual_usd(
+    usage: AssistantUsage, model: str, *, at: datetime,
+) -> float | None:
+    """Real dollar cost of one session's ACTUAL usage, priced through
+    core/pricing.py at ``model`` — all four token buckets (input, output,
+    cache-read, AND cache-write; see root CLAUDE.md's "cache token types in
+    aggregates" note on why both cache buckets must be included or the total
+    is silently short). ``None`` when ``model`` is empty or unpriced — never
+    a fabricated rate.
+
+    ``at`` is when the session ran, and is required: this is an OBSERVED cost,
+    so it must use the rate that actually billed it rather than today's.
+    """
+    if not model:
+        return None
+    from tokenjam.core.pricing import provider_for_model
+
+    usd = price_span(
+        provider_for_model(model) or "unknown", model, at=at,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_tokens,
+        cache_write_tokens=usage.cache_write_tokens,
+    )
+    # Kept at 6dp (price_span rounds to 8) so the per-session figures this
+    # returns are bit-for-bit what they were before the pricer swap.
+    return None if usd is None else round(usd, 6)
+
+
+def _unresolvable_coverage_note(finding: DeadweightFinding) -> str:
+    """State, in words, the blind spot a vanished recorded cwd leaves on
+    this finding.
+
+    The defect this closes: ``enumerate_configured_servers`` silently
+    ``continue``s past a recorded session cwd that no longer exists on disk
+    (a deleted worktree, typically) — indistinguishable, on the finding, from
+    a live repo that genuinely carries no MCP config. Both used to read as
+    "nothing to flag" to a reader; only one of them was actually checked.
+    """
+    if finding.unresolvable_sessions <= 0:
+        return ""
+    parts = [
+        f"COVERAGE. {finding.unresolvable_sessions:,} of "
+        f"{finding.sessions_scanned:,} session(s) in this window recorded a "
+        f"working directory that no longer exists on disk "
+        f"({finding.unresolvable_paths:,} distinct path(s), typically a "
+        f"deleted worktree). This analyzer could not read that project's "
+        f"`.mcp.json` / `.claude/settings*.json` for any of them. Its "
+        f"silence there is NOT evidence the config was clean; it is "
+        f"evidence the analyzer never got to look."
+    ]
+    if finding.unresolvable_usd is not None:
+        parts.append(
+            f"${finding.unresolvable_usd:,.2f} of spend sits behind those "
+            f"sessions, priced per session through core/pricing.py at each "
+            f"session's dominant model."
+        )
+        if finding.unresolvable_unpriced_sessions:
+            parts.append(
+                f"{finding.unresolvable_unpriced_sessions:,} of those "
+                f"session(s) had no priced model observed and are excluded "
+                f"from that dollar sum (the token figure still includes "
+                f"them)."
+            )
+    elif finding.unresolvable_tokens:
+        parts.append(
+            f"~{finding.unresolvable_tokens:,} tok of usage sits behind "
+            f"those sessions; no priced model was observed across them, so "
+            f"no dollar figure is stated."
+        )
+    parts.append(
+        "A user-scoped server (global ~/.claude.json) is unaffected by "
+        "this: it resolves regardless of a session's cwd. Only "
+        "project-scoped detection is blind here."
+    )
+    return " ".join(parts)
 
 
 # --- Orchestration (pure, no ctx dependency — testable directly) ----------
@@ -711,6 +954,7 @@ def compute_deadweight_finding(
     until: datetime,
     *,
     projects_root: Path | str | None = None,
+    claude_home: Path | None = None,
     min_sessions: int = MIN_SESSIONS_DEADWEIGHT,
     cache_dir: Path | None = None,
 ) -> DeadweightFinding:
@@ -744,6 +988,11 @@ def compute_deadweight_finding(
         return finding
 
     session_paths: list[tuple[str, Path]] = []
+    # Transcript mtime per session — the only time signal this analyzer has (it
+    # reads JSONL files, not spans) and the instant its dollar figures are
+    # priced at. Without it every session would price at today's list rate; see
+    # `tokenjam.core.optimize.span_pricing` for the convention.
+    session_mtimes: dict[str, datetime] = {}
     for path in sorted(root.rglob("*.jsonl")):
         # Subagent/sidechain transcripts live at
         # `<parent-session-dir>/subagents/agent-<id>.jsonl` (core/transcript.py)
@@ -762,6 +1011,7 @@ def compute_deadweight_finding(
         if mtime < since or mtime >= until:
             continue
         session_paths.append((path.stem, path))
+        session_mtimes[path.stem] = mtime
 
     finding.sessions_scanned = len(session_paths)
     if not session_paths:
@@ -769,6 +1019,7 @@ def compute_deadweight_finding(
 
     per_session: dict[str, _SessionSignal] = {}
     session_cwds: dict[str, str] = {}
+    session_usages: dict[str, AssistantUsage] = {}
     for session_id, path in session_paths:
         try:
             records = read_records(path, cache_dir=cache_dir)
@@ -776,14 +1027,52 @@ def compute_deadweight_finding(
             continue
         session_cwds[session_id] = _session_cwd(records)
         per_session[session_id] = _analyze_session(records)
+        session_usages[session_id] = _session_usage_from_records(records)
 
     repo_cwds = {c for c in session_cwds.values() if c}
-    configured = enumerate_configured_servers(repo_cwds)
+
+    # Unresolvable-path coverage (Defect 1): computed BEFORE the
+    # `if not configured: return` below, and before `configured` is even
+    # enumerated — the worst case (every recorded path gone) is exactly the
+    # one where `configured` comes back empty, so this must never sit behind
+    # that early return or it would go silent in precisely the case it
+    # exists to surface.
+    unresolvable_cwds = {c for c in repo_cwds if not Path(c).is_dir()}
+    if unresolvable_cwds:
+        unresolvable_tokens = 0
+        unresolvable_usd = 0.0
+        priced_any = False
+        unpriced_sessions = 0
+        unresolvable_session_count = 0
+        for session_id, cwd in session_cwds.items():
+            if cwd not in unresolvable_cwds:
+                continue
+            unresolvable_session_count += 1
+            usage = session_usages.get(session_id, AssistantUsage())
+            unresolvable_tokens += usage.total
+            model = _dominant_model(per_session[session_id].models)
+            usd = _session_actual_usd(
+                usage, model,
+                at=span_instant(session_mtimes.get(session_id), window_start=since),
+            )
+            if usd is None:
+                unpriced_sessions += 1
+            else:
+                unresolvable_usd += usd
+                priced_any = True
+        finding.unresolvable_paths = len(unresolvable_cwds)
+        finding.unresolvable_sessions = unresolvable_session_count
+        finding.unresolvable_tokens = unresolvable_tokens
+        finding.unresolvable_usd = round(unresolvable_usd, 6) if priced_any else None
+        finding.unresolvable_unpriced_sessions = unpriced_sessions
+        finding.coverage_note = _unresolvable_coverage_note(finding)
+
+    configured = enumerate_configured_servers(repo_cwds, claude_home=claude_home)
     finding.configured_servers = len(configured)
     if not configured:
         return finding
 
-    from tokenjam.core.pricing import get_rates, provider_for_model
+    from tokenjam.core.pricing import provider_for_model
 
     tax_rows: list[ContextTaxRow] = []
     reminder_bucket_totals: dict[str, list[int]] = {}
@@ -792,8 +1081,13 @@ def compute_deadweight_finding(
         sessions_present = 0
         invocations = 0
         deferred_sessions = 0
+        primary_source_sessions = 0
         example_sessions: list[str] = []
         model_counts: dict[str, int] = {}
+        # (when a present session ran, how many of this server's priced calls it
+        # carried) — the weights `blended_rates` needs to give this server ONE
+        # rate that equals pricing each session at its own instant and summing.
+        model_volume_at: list[tuple[datetime | None, float]] = []
         # (deferred_calls, full_calls) per present session — each session's
         # OWN call count feeds its own cache-read multiplier below; never a
         # global mean/median (call-count distribution is severely
@@ -813,6 +1107,14 @@ def compute_deadweight_finding(
             if not present:
                 continue
             sessions_present += 1
+            # How much of the claim below the ONE fix action (editing
+            # `server.source`) actually reaches -- a server independently
+            # declared in more than one config file must not let removing
+            # just one silently read as removing the whole claimed tax.
+            if server.scope == "user" or session_cwds.get(session_id, "") in (
+                server.source_cwds.get(server.source) or set()
+            ):
+                primary_source_sessions += 1
             invocations += signal.mcp_invocations.get(server.name, 0)
             if deferred_here:
                 deferred_sessions += 1
@@ -820,6 +1122,7 @@ def compute_deadweight_finding(
                 example_sessions.append(session_id)
             for model, count in signal.models.items():
                 model_counts[model] = model_counts.get(model, 0) + count
+                model_volume_at.append((session_mtimes.get(session_id), float(count)))
 
             total_calls = max(signal.assistant_turns, 1)
             if deferred_here:
@@ -845,7 +1148,12 @@ def compute_deadweight_finding(
         cache_read_ratio = 0.0
         if priced_model:
             provider = provider_for_model(priced_model) or "unknown"
-            rates = get_rates(provider, priced_model)
+            # One rate for the server's whole present population, blended across
+            # the sessions' own dates and weighted by their call volume — the
+            # aggregate-safe form of "price each session at its own rate, then
+            # sum" (see span_pricing). Identical to a single lookup whenever no
+            # rate moved inside the window, which is the usual case.
+            rates = blended_rates(provider, priced_model, model_volume_at)
             if rates is not None and rates.input_per_mtok > 0:
                 input_per_mtok = rates.input_per_mtok
                 cache_read_ratio = rates.cache_read_per_mtok / rates.input_per_mtok
@@ -863,19 +1171,36 @@ def compute_deadweight_finding(
         # segment separately: the segment's own first call at the full
         # per-call base (the content just changed, so nothing is cached yet
         # for it), later calls in that SAME segment at the cache-read rate.
+        #
+        # `tax_window` is a PRICE-EQUIVALENT quantity (the cache discount
+        # already folded in via `cache_read_ratio`) -- correct as the input
+        # for the $ conversion below, but NOT a token count: a session's
+        # schema is resent in full on every call regardless of caching, so
+        # the actual bytes transmitted are larger than this by roughly
+        # 1/cache_read_ratio. `tokens_window_real` tracks the literal
+        # (undiscounted) count in parallel so `estimated_tax_tokens_*` can
+        # answer "how many tokens were actually sent" rather than silently
+        # reporting a $-shaped number through a field named `tokens`
+        # (Critical Rule 28: both fields must answer the same question).
         tax_window = 0
+        tokens_window_real = 0
         total_calls = 0
         for deferred_calls, full_calls in session_presence:
             if deferred_calls > 0:
                 tax_window += round(
                     DEFERRED_SCHEMA_TAX_TOKENS * (1.0 + (deferred_calls - 1) * cache_read_ratio)
                 )
+                tokens_window_real += DEFERRED_SCHEMA_TAX_TOKENS * deferred_calls
             if full_calls > 0:
                 tax_window += round(
                     FULL_SCHEMA_TAX_TOKENS * (1.0 + (full_calls - 1) * cache_read_ratio)
                 )
+                tokens_window_real += FULL_SCHEMA_TAX_TOKENS * full_calls
             total_calls += deferred_calls + full_calls
         tax_per_session = round(tax_window / sessions_present) if sessions_present else 0
+        tokens_per_session_real = (
+            round(tokens_window_real / sessions_present) if sessions_present else 0
+        )
         avg_calls_per_session = (total_calls / sessions_present) if sessions_present else 1.0
 
         usd_per_session: float | None = None
@@ -883,6 +1208,39 @@ def compute_deadweight_finding(
         if input_per_mtok is not None:
             usd_per_session = round(tax_per_session / 1_000_000 * input_per_mtok, 6)
             usd_window = round(tax_window / 1_000_000 * input_per_mtok, 6)
+
+        other_sources = _other_sources(server)
+        # The CLAIM stays aggregated across every source that declares this
+        # server (that is what actually happened this window), but the FIX
+        # is deliberately scoped to the one canonical `source` rather than
+        # made multi-target: extending the single-file MCP-remove apply path
+        # to edit several files atomically is a real, separate feature, not
+        # a one-line change, and disclosing the gap here is what keeps a
+        # partial fix honest in the meantime. Do not "complete" this by
+        # silently widening the claim to imply the one apply now covers
+        # every source -- widen the apply first, or leave both as they are.
+        # "Remove or project-scope" is only a real two-option choice for a
+        # USER-scoped (global) server -- narrowing it to project scope is an
+        # actual alternative. A server already at project scope has nothing
+        # left to narrow: offering "project-scope it" there is a no-op that
+        # would deliver $0 of the claim, not a genuine second option.
+        action = "Remove or project-scope" if server.scope == "user" else "Remove"
+        fix = (
+            f"{action} the `{server.name}` MCP server ({server.source}); "
+            f"zero tool calls across {sessions_present} session(s) in this "
+            f"window."
+        )
+        if other_sources:
+            plural = "" if len(other_sources) == 1 else "s"
+            fix += (
+                f" `{server.name}` is ALSO independently declared in "
+                f"{len(other_sources)} other location{plural}, not touched "
+                f"by this edit: {'; '.join(other_sources)}. Removing only "
+                f"{server.source} stops the tax for {primary_source_sessions} "
+                f"of the {sessions_present} session(s) counted here; the "
+                f"remaining {sessions_present - primary_source_sessions} "
+                f"session(s) need their own location edited too."
+            )
 
         row = ServerDeadweight(
             name=server.name,
@@ -892,8 +1250,8 @@ def compute_deadweight_finding(
             invocations=invocations,
             deferred_sessions=deferred_sessions,
             dead=dead,
-            estimated_tax_tokens_per_session=tax_per_session,
-            estimated_tax_tokens_window=tax_window,
+            estimated_tax_tokens_per_session=tokens_per_session_real,
+            estimated_tax_tokens_window=tokens_window_real,
             tax_construction=_tax_construction_note(
                 non_deferred, deferred_sessions, sessions_present,
                 model=priced_model, input_per_mtok=input_per_mtok,
@@ -901,23 +1259,21 @@ def compute_deadweight_finding(
                 avg_calls_per_session=avg_calls_per_session,
                 cache_read_ratio=cache_read_ratio,
             ),
-            fix=(
-                f"Remove or project-scope the `{server.name}` MCP server "
-                f"({server.source}); zero tool calls across {sessions_present} "
-                f"session(s) in this window."
-            ),
+            fix=fix,
             example_sessions=example_sessions,
             priced_model=priced_model,
             estimated_tax_usd_per_session=usd_per_session,
             estimated_tax_usd_window=usd_window,
+            other_sources=other_sources,
+            primary_source_sessions=primary_source_sessions,
         )
         finding.servers.append(row)
         if sessions_present > 0:
             tax_rows.append(ContextTaxRow(
                 source=f"MCP schema: {server.name}",
                 sessions=sessions_present,
-                avg_tokens_per_session=tax_per_session,
-                total_tokens_window=tax_per_session * sessions_present,
+                avg_tokens_per_session=tokens_per_session_real,
+                total_tokens_window=tokens_window_real,
                 tag="estimated",
                 construction=row.tax_construction,
             ))
@@ -1013,7 +1369,17 @@ def run(ctx: AnalyzerContext) -> None:
     repeat HTTP request against a live ``tj serve`` — skips re-parsing every
     session it already has a fresh cache entry for.
     """
+    from tokenjam.core.optimize.scope import resolve_analyzer_scope
     from tokenjam.core.transcript_cache import default_cache_dir
+
+    scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
+    if not scope.enabled:
+        # Scanned nothing, and says so on the report rather than leaving an
+        # empty finding that reads like "no dead MCP servers here" (root
+        # anti-pattern 22).
+        ctx.report.filesystem_scan_skipped_reason = scope.reason
+        ctx.report.findings["deadweight"] = DeadweightFinding()
+        return
 
     optimize_cfg = getattr(ctx.config, "optimize", None)
     min_sessions = getattr(
@@ -1021,6 +1387,8 @@ def run(ctx: AnalyzerContext) -> None:
     )
     ctx.report.findings["deadweight"] = compute_deadweight_finding(
         ctx.since, ctx.until,
+        projects_root=scope.projects_root,
+        claude_home=scope.claude_home,
         min_sessions=min_sessions,
         cache_dir=default_cache_dir(ctx.config),
     )

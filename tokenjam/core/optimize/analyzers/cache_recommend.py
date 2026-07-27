@@ -35,11 +35,12 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import get_rates
+from tokenjam.core.optimize.span_pricing import blended_rates
 from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 
 # The first N characters of the prompt are hashed to identify a "prefix
@@ -167,20 +168,27 @@ def _prefix_cache_control_snippet(
 
 def _estimate_candidate_recoverable(
     model: str, cacheable_tokens_per_call: int, occurrences: int,
+    volume_at: list[tuple[datetime | None, float]],
 ) -> tuple[float | None, int | None]:
     """Price one prefix candidate — same rate lookup and rate-delta math as
-    `cache_efficacy.estimate_cache_recoverable()` (get_rates, then
+    `cache_efficacy.estimate_cache_recoverable()` (a rate for the model, then
     `input_per_mtok - cache_read_per_mtok`), applied to the tokens THIS
     candidate would actually move onto the cache-read rate: the first
     occurrence still pays full price plus one cache write to establish the
     breakpoint, and every occurrence after that reads it back. Returns
     (None, None) when fewer than 2 occurrences (nothing left to read back) or
     no priced Anthropic rate was observed for `model` — never a zero, never a
-    rate borrowed from a different model (CLAUDE.md anti-pattern #22).
+    rate borrowed from a different model (Critical Rule 22, tokenjam/CLAUDE.md).
+
+    ``volume_at`` dates the candidate's own occurrences, so the rate is the
+    volume-weighted blend across the dates they ran rather than today's list
+    price — the aggregate form of the price-each-span-then-sum convention in
+    `tokenjam.core.optimize.span_pricing`, exact for the ``tokens x rate``
+    figures below.
     """
     if cacheable_tokens_per_call <= 0 or occurrences <= 1 or not model:
         return None, None
-    rates = get_rates("anthropic", model)
+    rates = blended_rates("anthropic", model, volume_at)
     if rates is None or rates.cache_read_per_mtok <= 0:
         return None, None
     rate_delta = rates.input_per_mtok - rates.cache_read_per_mtok
@@ -226,7 +234,8 @@ def run(ctx: AnalyzerContext) -> None:
         params.append(ctx.agent_id)
     where = " AND ".join(clauses)
     rows = ctx.conn.execute(
-        f"SELECT provider, model, attributes, input_tokens FROM spans WHERE {where}",
+        f"SELECT provider, model, attributes, input_tokens, start_time "
+        f"FROM spans WHERE {where}",
         params,
     ).fetchall()
 
@@ -234,7 +243,7 @@ def run(ctx: AnalyzerContext) -> None:
     # else gets counted so the renderer can disclose what was skipped.
     prefix_counts: dict[str, dict[str, Any]] = {}
     skipped_provider = 0
-    for provider, model, attrs_raw, input_tokens in rows:
+    for provider, model, attrs_raw, input_tokens, start_time in rows:
         if str(provider).lower() != "anthropic":
             skipped_provider += 1
             continue
@@ -269,9 +278,14 @@ def run(ctx: AnalyzerContext) -> None:
             "count": 0,
             "tokens_sum": 0,
             "model_counts": {},
+            # (when a call carrying this prefix ran, its input volume) — the
+            # weights that let the candidate be priced at the rates that
+            # actually billed it rather than at today's list price.
+            "volume_at": [],
         })
         entry["count"] += 1
         entry["tokens_sum"] += int(input_tokens or 0)
+        entry["volume_at"].append((start_time, float(input_tokens or 0)))
         m = str(model or "")
         entry["model_counts"][m] = entry["model_counts"].get(m, 0) + 1
 
@@ -294,6 +308,7 @@ def run(ctx: AnalyzerContext) -> None:
         )
         usd, tokens = _estimate_candidate_recoverable(
             dominant_model, estimated_cacheable, int(entry["count"]),
+            entry["volume_at"],
         )
         candidates.append(CachePrefixCandidate(
             prefix_hash=h,

@@ -64,6 +64,13 @@ class DefaultsConfig:
 class StorageConfig:
     path:           str = "~/.tj/telemetry.duckdb"
     retention_days: int = 90
+    # Runtime provenance, never read from or written to TOML: True when `path`
+    # came from an explicit `--db` rather than config discovery. The
+    # filesystem-reading analyzers scope themselves off it (see
+    # `core/optimize/scope.py`) — a config file that happens to name the same
+    # path is a normal run, so the two cases have to stay distinguishable
+    # after the override has been applied.
+    path_is_explicit: bool = field(default=False, repr=False, compare=False)
 
 
 @dataclass
@@ -283,6 +290,14 @@ class OptimizeConfig:
     # tool-call-signature cluster needs at least this many member sessions
     # before it's recommended for script-replacement.
     min_cluster_instances: int = 20
+    # The transcript/config root the filesystem-reading analyzers (deadweight,
+    # relearn, summarize) may read — the `--projects-root` flag writes here.
+    # `None` defers to the precedence chain in `core/optimize/scope.py`: the
+    # TJ_CLAUDE_PROJECTS_ROOT env var, then suppression under an explicit
+    # `--db`, then `~/.claude/projects`. Unlike every other field in this
+    # section this is a SCOPE, not a sensitivity threshold — it decides which
+    # filesystem is evidence, not how eager an analyzer is about it.
+    projects_root: str | None = None
     # deadweight (analyzers/deadweight.py MIN_SESSIONS_DEADWEIGHT): an MCP
     # server needs to be configured-present in at least this many distinct
     # sessions, with zero invocations across all of them, to be flagged dead.
@@ -527,25 +542,67 @@ def find_config_file(override: str | None = None) -> Path | None:
     return None
 
 
+def resolve_config_path(override: str | None = None) -> Path | None:
+    """
+    The single source of truth for "which config file is this process using".
+
+    Precedence: an explicit ``override`` wins, then the ``TJ_CONFIG``
+    environment variable, then ``find_config_file``'s ``SEARCH_PATHS`` walk.
+    ``load_config`` resolves through here, so any call site that independently
+    needs the config path — to write back to the file config was read from
+    (budget updates), to report it (``tj doctor``), or to hand it to a
+    subprocess (``tj mcp``, the MCP server) — must call this too, never bare
+    ``find_config_file()``. A bare call ignores ``TJ_CONFIG`` and silently
+    splits reads (TJ_CONFIG-aware, via ``load_config``) from writes/reports
+    (search-path only) across two different files.
+
+    Like ``find_config_file``, raises ``FileNotFoundError`` when an explicit
+    override or ``TJ_CONFIG`` points at a path that doesn't exist — this
+    matches ``load_config``'s fail-loud contract. Callers that must stay
+    resilient to a bad ``TJ_CONFIG`` (e.g. the bare ``tj`` landing screen,
+    which renders before any config is validated) should not use this
+    function directly; see ``cli/home.py``.
+    """
+    if override is None:
+        override = os.environ.get("TJ_CONFIG") or None
+    return find_config_file(override)
+
+
+def active_config_path(config: "TjConfig | None") -> Path | None:
+    """The file this already-loaded config was actually read FROM, if known.
+
+    ``resolve_config_path`` answers "which file WOULD this process discover",
+    which is a different question once a per-invocation ``--config`` override
+    is in play: the override never reaches the environment, so a rediscovery
+    silently falls through to ``TJ_CONFIG`` or the search path and names some
+    other file. Every site that writes the config back — or reports which one
+    is live — must ask about the config it is holding, not re-run discovery.
+
+    Returns ``None`` when the config did not come from a file (defaults only,
+    or a caller-constructed object); the call site then falls back to
+    ``resolve_config_path()`` for the genuine no-config-yet case.
+    """
+    return getattr(config, "config_path", None)
+
+
 def load_config(path: str | None = None) -> TjConfig:
     """
     Load config from file, merge with defaults, return TjConfig.
 
     When no explicit ``path`` is given, honor the ``TJ_CONFIG`` environment
-    variable before falling back to the search-path discovery order. This keeps
-    SDK-bootstrapped processes (``ensure_initialised`` and the SDK integrations,
-    which call ``load_config()`` with no argument) consistent with the CLI — the
-    CLI already resolves ``TJ_CONFIG`` via Click's ``envvar`` and passes the
-    path in, so without this the SDK silently wrote spans to the global DB even
+    variable before falling back to the search-path discovery order (via
+    ``resolve_config_path``). This keeps SDK-bootstrapped processes
+    (``ensure_initialised`` and the SDK integrations, which call
+    ``load_config()`` with no argument) consistent with the CLI — the CLI
+    already resolves ``TJ_CONFIG`` via Click's ``envvar`` and passes the path
+    in, so without this the SDK silently wrote spans to the global DB even
     when ``TJ_CONFIG`` pointed elsewhere (#196). An explicit ``path`` argument
     still wins over the env var.
 
     IMPORTANT: tomllib requires binary mode "rb" -- not text mode "r".
     Using "r" raises TypeError at runtime.
     """
-    if path is None:
-        path = os.environ.get("TJ_CONFIG") or None
-    config_path = find_config_file(path)
+    config_path = resolve_config_path(path)
     if config_path is None:
         return TjConfig(version="1")
 
@@ -740,6 +797,7 @@ def _parse(raw: dict) -> TjConfig:
             "scan_min_rescan_seconds", OptimizeConfig.scan_min_rescan_seconds)),
         scan_ui_poll_seconds=int(optimize_raw.get(
             "scan_ui_poll_seconds", OptimizeConfig.scan_ui_poll_seconds)),
+        projects_root=optimize_raw.get("projects_root") or None,
     )
 
     defaults_raw = raw.get("defaults", {})

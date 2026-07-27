@@ -217,3 +217,135 @@ def test_skip_already_summarized(tmp_path, monkeypatch, iso):
 
     f.write_text(f.read_text() + "\nEDITED LATER\n")
     assert str(f) in [c.path for c in candidates.list_candidates(config=cfg).candidates]      # edit → back
+
+
+# --------------------------------------------------------------------------- #
+# Corpus-wide project scope: many roots, still the catalog-default net.
+# --------------------------------------------------------------------------- #
+
+def _proj(root: Path, *, doc: bool = True) -> Path:
+    root.mkdir(parents=True)
+    (root / "CLAUDE.md").write_text("instructions " * 200)
+    if doc:
+        (root / "README.md").write_text("readme prose " * 300)
+    return root
+
+
+def test_project_roots_scan_every_root(tmp_path, monkeypatch, iso):
+    """The analyzer prices a window spanning many repos; scanning only the cwd
+    left every other repo's always-resident CLAUDE.md contributing nothing."""
+    a, b = _proj(tmp_path / "a"), _proj(tmp_path / "b")
+    monkeypatch.chdir(tmp_path / "elsewhere" if False else a)
+    res = candidates.list_candidates(config=None, project_roots=[a, b])
+
+    paths = {c.path for c in res.candidates}
+    assert str(a / "CLAUDE.md") in paths
+    assert str(b / "CLAUDE.md") in paths
+    assert res.project_roots_scanned == 2
+    assert all(c.scope == "project" for c in res.candidates if c.scope != "global")
+
+
+def test_project_roots_keep_the_catalog_default_net(tmp_path, monkeypatch, iso):
+    """Multi-root scanning must NOT go through the widening `path` argument:
+    that opens the net to every `*.md`, which would price README/CHANGELOG as if
+    the harness auto-loaded them. Nothing auto-loads them, so nothing may."""
+    a, b = _proj(tmp_path / "a"), _proj(tmp_path / "b")
+    res = candidates.list_candidates(config=None, project_roots=[a, b])
+
+    assert not any("README" in c.path for c in res.candidates)
+
+
+def test_project_roots_skip_roots_that_no_longer_exist(tmp_path, monkeypatch, iso):
+    """A recorded root that is gone has no file to read and no fix to offer, so
+    it contributes nothing and is not counted as scanned."""
+    a = _proj(tmp_path / "a")
+    res = candidates.list_candidates(
+        config=None, project_roots=[a, tmp_path / "deleted"],
+    )
+
+    assert res.project_roots_scanned == 1
+    assert {c.path for c in res.candidates if c.scope == "project"} == {
+        str(a / "CLAUDE.md"),
+    }
+
+
+def test_project_roots_record_the_root_each_file_came_from(tmp_path, monkeypatch, iso):
+    """`scan_root` is what lets a consumer tell one file seen under two roots
+    from two different files (the path relative to it is the file's slot)."""
+    a, b = _proj(tmp_path / "a", doc=False), _proj(tmp_path / "b", doc=False)
+    res = candidates.list_candidates(config=None, project_roots=[a, b])
+
+    roots = {c.path: c.scan_root for c in res.candidates if c.scope == "project"}
+    assert roots[str(a / "CLAUDE.md")] == str(a)
+    assert roots[str(b / "CLAUDE.md")] == str(b)
+
+
+def test_single_root_scan_still_records_its_root(tmp_path, monkeypatch, iso):
+    proj = _proj(tmp_path / "proj", doc=False)
+    monkeypatch.chdir(proj)
+    res = candidates.list_candidates(config=None)
+
+    project = [c for c in res.candidates if c.scope == "project"]
+    assert project and all(c.scan_root == str(proj) for c in project)
+
+
+def test_recursive_rules_glob_reaches_nested_rule_files(tmp_path, monkeypatch, iso):
+    """Real rule trees nest (`rules/ecc/common/*.md`). A single-level
+    `rules/*.md` priced none of them."""
+    fake = Catalog(
+        project_files=frozenset({"CLAUDE.md"}),
+        project_globs=(".claude/rules/*.md", ".claude/rules/**/*.md"),
+        global_paths=(),
+        forbidden_roots=(),
+    )
+    monkeypatch.setattr(candidates, "load_catalog", lambda: fake)
+    root = tmp_path / "proj"
+    nested = root / ".claude" / "rules" / "ecc" / "common"
+    nested.mkdir(parents=True)
+    (nested / "style.md").write_text("rule prose " * 200)
+    (root / ".claude" / "rules" / "top.md").write_text("rule prose " * 200)
+
+    res = candidates.list_candidates(config=None, project_roots=[root])
+    found = {c.path: c.is_prompt for c in res.candidates}
+
+    assert found.get(str(nested / "style.md")) is True     # nested, and recognized
+    assert found.get(str(root / ".claude" / "rules" / "top.md")) is True
+
+
+def test_is_safe_scan_root_refuses_home_and_bare_top_levels(tmp_path, monkeypatch, iso):
+    """Roots derived from recorded paths go through the same boundary gate the
+    cwd scan uses — a stray recorded cwd must not point a scan at $HOME."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    assert candidates.is_safe_scan_root(tmp_path) is False       # home
+    assert candidates.is_safe_scan_root(Path("/")) is False       # filesystem root
+    # A bare top-level dir. Built off the anchor rather than hardcoded, because
+    # the gate runs on the RESOLVED path and a platform may symlink a
+    # well-known top-level name somewhere deeper (macOS: /etc -> /private/etc).
+    assert candidates.is_safe_scan_root(Path(tmp_path.anchor) / "nosuchtop") is False
+    deep = tmp_path / "code" / "proj"
+    deep.mkdir(parents=True)
+    assert candidates.is_safe_scan_root(deep) is True
+
+
+def test_symlinked_candidates_are_excluded(tmp_path, monkeypatch, iso):
+    """`session.prepare`/`apply` refuse to rewrite through a link, so a symlink
+    can never realize the saving the scan would offer on it. Listing one is a
+    figure the user cannot act on (Critical Rule 22). Measured on a real
+    `~/.claude`, 10 of 16 candidates were symlinked skill files."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    real = tmp_path / "store" / "AGENTS.md"
+    real.parent.mkdir()
+    real.write_text("instructions " * 200)
+    (root / "CLAUDE.md").write_text("instructions " * 200)
+    (root / "AGENTS.md").symlink_to(real)
+
+    res = candidates.list_candidates(config=None, project_roots=[root])
+    paths = {c.path for c in res.candidates}
+
+    assert str(root / "CLAUDE.md") in paths
+    assert str(root / "AGENTS.md") not in paths
+    # The link target itself is a perfectly good candidate when scanned directly —
+    # it is the LINK that the fix refuses, not the file behind it.
+    direct = candidates.list_candidates(config=None, project_roots=[real.parent])
+    assert str(real) in {c.path for c in direct.candidates}

@@ -898,22 +898,41 @@ def test_single_timestamp_corpus_floors_the_window_to_one_day(tmp_path):
     assert cluster.past_overspend_tokens == cluster.occurrences * 1_500
 
 
+#: The instant a fake rate bucket is priced at. Inside the current rate era for
+#: every model these tests use, so the blend is that model's plain rate.
+_RATE_BUCKET_AT = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+
 class _FakeSpanConn:
     """Minimal stand-in for a DuckDB connection.
 
     Relearn issues two different queries per cluster — the rate blend
-    (``provider, model, input_tokens, cache_tokens``) and the per-session
-    prompt timeline the re-read tail is measured on (``session_id,
+    (``provider, model, input_tokens, cache_tokens, <bucket instant>``) and the
+    per-session prompt timeline the re-read tail is measured on (``session_id,
     start_time, prompt_size``) — so this dispatches on the SQL text rather
     than returning one canned shape to both.
+
+    Dispatches on ``GROUP BY provider``, which only the rate blend does. It
+    used to dispatch on ``start_time``, which stopped identifying the timeline
+    query the moment the rate blend started carrying a time axis of its own (it
+    now selects ``MIN(start_time)`` and groups by UTC day). A stand-in that
+    silently answers the WRONG query returns plausible-looking rows, so the
+    mistake surfaces as a confusing error far from the cause rather than as a
+    shape mismatch at the seam — pick a discriminator the two queries cannot
+    come to share.
+
+    Rate rows are 4-tuples in the test bodies; the bucket instant every rate
+    row now carries is appended here so each test states only what it is about.
     """
     def __init__(self, rate_rows, timeline_rows=()):
-        self._rate_rows = rate_rows
+        self._rate_rows = [(*r, _RATE_BUCKET_AT) for r in rate_rows]
         self._timeline_rows = list(timeline_rows)
         self._rows: list = []
 
     def execute(self, sql, _params):
-        self._rows = self._timeline_rows if "start_time" in sql else self._rate_rows
+        self._rows = (
+            self._rate_rows if "GROUP BY provider" in sql else self._timeline_rows
+        )
         return self
 
     def fetchall(self):

@@ -15,6 +15,7 @@ from tokenjam.core.config import TjConfig
 from tokenjam.core.framing import agent_persona_mix, config_declared_plan, dominant_persona
 from tokenjam.utils.time_parse import utcnow
 from tokenjam.core.optimize.registry import ANALYZER_REGISTRY
+from tokenjam.core.optimize.scope import resolve_analyzer_scope
 from tokenjam.core.optimize.types import (
     AnalyzerContext,
     OptimizeReport,
@@ -42,6 +43,7 @@ ANALYZER_ORDER: list[str] = [
     "relearn",
     "verbosity",
     "deadweight",
+    "stream-usage",
 ]
 
 # Analyzers that have NO fix a user of that persona can actually apply.
@@ -128,6 +130,16 @@ PERSONA_DISABLED_ANALYZERS: dict[str, frozenset[str]] = {
         # this corpus; the SDK case is a separate, unmeasured question and is
         # deliberately left ungated.
         "reuse",
+        # Stream-usage flags streamed calls that closed before the provider
+        # emitted its usage payload, so their spend went unrecorded. Its fix
+        # is a request-side change — `stream_options={"include_usage": True}`,
+        # or draining the stream server-side — to code that constructs the
+        # provider call. An interactive coding agent's harness constructs that
+        # call, which puts the lever on the other side of the actionable
+        # ceiling; and the harness drains its own streams, so the failure mode
+        # does not arise here in the first place. This is an SDK-persona
+        # finding: it stays enabled for `sdk` / `mixed` / `unknown`.
+        "stream-usage",
     }),
     # An SDK/API window has no on-disk Claude Code transcript and never
     # populates `sub_agent_id` (no Task-tool subagent-dispatch concept in
@@ -268,6 +280,11 @@ def build_report(
         budget_provider_filter=budget_provider_filter,
         budget_usd_override=budget_usd_override,
         persona=persona,
+        # Resolved exactly once, here, for the same reason the persona is: an
+        # analyzer that re-derives its own root from `Path.home()` or the env
+        # var escapes whatever scope the caller drew, and `--db` stops meaning
+        # anything. See `core/optimize/scope.py`.
+        scope=resolve_analyzer_scope(config),
     )
 
     selected = set(findings) if findings is not None else set(ANALYZER_REGISTRY.keys())
@@ -513,6 +530,11 @@ def report_from_dict(d: dict) -> OptimizeReport:
         notes=list(d.get("notes") or []),
         findings=findings,
         persona=str(d.get("persona", "unknown")),
+        # Round-tripped like every other report-level field: a report rebuilt
+        # from the daemon's cache must still be able to say its filesystem
+        # analyzers never scanned, or a served surface silently reads an
+        # unscanned report as a scanned-and-empty one.
+        filesystem_scan_skipped_reason=d.get("filesystem_scan_skipped_reason") or None,
     )
 
 
@@ -542,6 +564,7 @@ def _build_finding_classes() -> dict:
     from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
         SubagentRightsizingFinding,
     )
+    from tokenjam.core.optimize.analyzers.stream_usage import StreamUsageFinding
     from tokenjam.core.optimize.analyzers.summarize import SummarizeFinding
     from tokenjam.core.optimize.analyzers.workflow_restructure import (
         WorkflowRestructureFinding,
@@ -560,6 +583,7 @@ def _build_finding_classes() -> dict:
         "deadweight": DeadweightFinding,
         "verbosity": VerbosityFinding,
         "resend": ResendFinding,
+        "stream-usage": StreamUsageFinding,
         # Not a registered analyzer name of its own: the downsize analyzer
         # attaches the batch-placement check under this key. It still needs an
         # entry, or the finding is dropped on the daemon path (every consumer

@@ -423,7 +423,7 @@ def _session_subagents(db: Any, session_id: str) -> dict:
             "cache_write_tokens": cw_t,
             "cost_usd": cost,
             "flags": _flags_for(
-                model=model, output_tokens=out_t, tool_calls=tool_calls,
+                model=model, output_tokens=out_t,
                 input_tokens=in_t, cache_tokens=cache_t, cost_usd=cost,
             ),
         })

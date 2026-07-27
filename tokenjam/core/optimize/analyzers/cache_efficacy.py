@@ -27,8 +27,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import blended_rates
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import get_rates
+from tokenjam.core.pricing import STANDARD_VARIANT, ModelRates, get_rates
 
 # Minimum input volume to surface a recommendation. Below this, the
 # absolute savings are negligible regardless of efficacy.
@@ -112,13 +113,32 @@ def estimate_cache_recoverable(
     tokens, and price the shifted tokens at the input-vs-cache rate delta.
     Returns (usd, tokens) summed across rows, or (None, None) when no row has a
     caching dimension to recover against.
-    """
-    from tokenjam.core.pricing import get_rates
 
+    KNOWN LIMITATION — this prices at TODAY'S RATE, not at the rate that billed
+    the traffic. It is the one figure under `core/optimize` that still does, and
+    it is deliberate.
+
+    A ``CacheEfficacyRow`` is a whole-window aggregate: one row per (provider,
+    model) covering every span in the window, with no instant of its own. The
+    per-span convention in :mod:`tokenjam.core.optimize.span_pricing` therefore
+    cannot be applied without splitting the row per rate era — and this row is
+    also the UI's display row, so splitting it is a change with its own blast
+    radius rather than a pricing fix. Carrying the group's EARLIEST span instead
+    was tried and rejected: a real timestamp stretched over 30 days of traffic
+    is still an approximation, and one that reads as principled while being
+    arbitrary is worse than an honest "now". So: price at now, and say so here.
+
+    What this costs: while no rate changes inside the analyzed window (true of
+    every window today) this is exact. Once one does, this figure prices the
+    whole window at the post-change rate. An era-exact version is filed
+    separately.
+    """
     total_usd = 0.0
     total_tokens = 0
     any_priced = False
     for r in rows:
+        # No `at=` — see the KNOWN LIMITATION above. This is the deliberate
+        # exception to the required-instant rule, not an overlooked call site.
         rates = get_rates(r.provider, r.model)
         if rates is None or rates.cache_read_per_mtok <= 0:
             continue
@@ -399,6 +419,30 @@ def _dominant_provider_model(calls: list[_AgentCallRow]) -> tuple[str, str]:
     return max(counts.items(), key=lambda kv: kv[1])[0]
 
 
+def _rates_for_calls(
+    provider: str, model: str, calls: list[_AgentCallRow],
+    *, variant: str = STANDARD_VARIANT,
+) -> ModelRates | None:
+    """The one rate for a per-agent candidate, across the calls it is built from.
+
+    Every figure these candidates produce is ``tokens x rate-component``, so the
+    volume-weighted blend across the calls' own timestamps is exactly what
+    pricing each call at its own rate and summing would give — see
+    `tokenjam.core.optimize.span_pricing`. Weighted by each call's total billed
+    tokens, the volume all three candidate types derive their figures from.
+    """
+    return blended_rates(
+        provider, model,
+        [
+            (
+                c.start_time,
+                float(c.input_tokens + c.cache_tokens + c.cache_write_tokens),
+            )
+            for c in calls
+        ],
+        variant=variant,
+    )
+
 def _inter_call_gap_minutes(calls: list[_AgentCallRow]) -> list[float]:
     """Gaps (minutes) between consecutive calls within the same session."""
     by_session: dict[str, list[Any]] = {}
@@ -467,7 +511,7 @@ def _classify_a1(
     provider, model = _dominant_provider_model(calls)
     prefix = int(_percentile(input_tokens, 0.25))
     sessions = len({c.session_id for c in calls})
-    rates = get_rates(provider, model)
+    rates = _rates_for_calls(provider, model, calls)
     usd: float | None = None
     tokens: int | None = None
     if rates is not None and prefix > 0:
@@ -515,7 +559,7 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
     cause = "ttl" if gap_p50 > TTL_CAUSE_GAP_MINUTES else "instability"
 
     provider, model = _dominant_provider_model(calls)
-    rates = get_rates(provider, model)
+    rates = _rates_for_calls(provider, model, calls)
     wasted_usd: float | None = None
     if rates is not None:
         wasted_usd = round(
@@ -541,7 +585,9 @@ def _classify_a2(agent_id: str, calls: list[_AgentCallRow]) -> ThrashAgentCandid
             # survives the whole session instead of expiring every 5 min),
             # every other write/read event becomes a cache read.
             remaining_as_reads = max(0, len(write_events) + read_events - bursts)
-            ttl_rates = get_rates(provider, model, variant=ONE_HOUR_TTL_VARIANT) or rates
+            ttl_rates = _rates_for_calls(
+                provider, model, calls, variant=ONE_HOUR_TTL_VARIANT,
+            ) or rates
             cost_1hr = (
                 bursts * avg_write_tokens / 1_000_000 * ttl_rates.cache_write_per_mtok
                 + remaining_as_reads * avg_write_tokens / 1_000_000
@@ -624,7 +670,7 @@ def _classify_a3(
         return None
 
     provider, model = _dominant_provider_model(calls)
-    rates = get_rates(provider, model)
+    rates = _rates_for_calls(provider, model, calls)
     usd: float | None = None
     tokens: int | None = None
     if rates is not None:

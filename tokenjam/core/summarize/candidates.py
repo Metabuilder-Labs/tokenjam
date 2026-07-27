@@ -18,12 +18,14 @@ top-level). Advisory only — reads and reports, never writes.
 """
 from __future__ import annotations
 
+import fnmatch
 import glob as _glob
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Iterator
+from typing import TYPE_CHECKING, Iterable, Iterator, Sequence
 
+from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.core.summarize.detect import MIN_PROSE_WORDS, analyze
 from tokenjam.core.summarize.estimate import DEFAULT_TARGET_RATIO, tokens_saved
@@ -56,6 +58,32 @@ class Candidate:
     pricing_mode: str
     scope: str                  # "global" | "project" | "repo" | "path"
     is_prompt: bool             # matched a catalog prompt name/location
+    #: How this file reaches the model — ``core/summarize/load_semantics``.
+    #: ``always`` (whole body every session) vs ``skill``/``command``/``agent``
+    #: (frontmatter always, body only when invoked). Defaulted so every
+    #: existing construction of this dataclass keeps working.
+    load_class: str = load_semantics.ALWAYS
+    #: The name an invocation of this file is recorded under (``""`` for an
+    #: always-resident file, which is never "invoked").
+    invocation_key: str = ""
+    #: ``est_tokens_saved`` split across the two load semantics: the part
+    #: removed from what every session carries, and the part removed from what
+    #: arrives only on invocation. They sum to ``est_tokens_saved`` up to the
+    #: rounding in :func:`estimate.tokens_saved`, which floors each part
+    #: independently.
+    always_resident_tokens_saved: int = 0
+    on_demand_tokens_saved: int = 0
+    #: Source size of the always-resident portion (the whole file for an
+    #: ALWAYS-class one, the frontmatter for an on-demand one). The write-side
+    #: budget in ``core/optimize/write_budget`` measures the existing agent-file
+    #: footprint off this, so read and write price the same quantity.
+    always_resident_chars: int = 0
+    #: The scan root this file was found under. ``path`` relative to it is the
+    #: file's SLOT (``CLAUDE.md``, ``.claude/commands/ship.md``) — the same slot
+    #: under two roots is the same file seen twice, which is how a consumer
+    #: identifies copies without assuming their bytes still agree. Empty for a
+    #: global-scope file, which has no project root.
+    scan_root: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -68,6 +96,12 @@ class Candidate:
             "scope": self.scope,
             "is_prompt": self.is_prompt,
             "kind": "prompt" if self.is_prompt else "other",
+            "load_class": self.load_class,
+            "invocation_key": self.invocation_key,
+            "always_resident_tokens_saved": self.always_resident_tokens_saved,
+            "on_demand_tokens_saved": self.on_demand_tokens_saved,
+            "always_resident_chars": self.always_resident_chars,
+            "scan_root": self.scan_root,
         }
 
 
@@ -81,6 +115,10 @@ class ScanResult:
     globals_checked: int
     walk_capped: bool
     note: str
+    #: How many project roots the scan enumerated: 1 for a single-root scan (an
+    #: explicit PATH, ``--repo``, or the default cwd), N when the caller passed
+    #: ``project_roots`` — see :func:`list_candidates`.
+    project_roots_scanned: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -91,12 +129,36 @@ class ScanResult:
             "globals_checked": self.globals_checked,
             "walk_capped": self.walk_capped,
             "note": self.note,
+            "project_roots_scanned": self.project_roots_scanned,
         }
 
 
 # --------------------------------------------------------------------------- #
 # Catalog matching — what counts as a "prompt"
 # --------------------------------------------------------------------------- #
+
+def _matches_glob(path: Path, pattern: str) -> bool:
+    """``path`` matched against a catalog glob, from the right.
+
+    ``Path.match`` is used for the ordinary patterns, but it does NOT give
+    ``**`` its recursive meaning before Python 3.13 — it matches a single
+    component, so `.claude/rules/**/*.md` would silently fail to recognize
+    `.claude/rules/ecc/common/coding-style.md` as a rules file and it would be
+    reported as an unrecognized "other" document. A recursive pattern is
+    therefore matched as "this literal directory prefix appears somewhere in the
+    path, and the filename matches the tail".
+    """
+    if "**" not in pattern:
+        return path.match(pattern)
+    head, _, tail = pattern.partition("**/")
+    if not fnmatch.fnmatch(path.name, tail.rsplit("/", 1)[-1]):
+        return False
+    head = head.strip("/")
+    if not head:
+        return True
+    posix = path.as_posix()
+    return f"/{head}/" in posix or posix.startswith(f"{head}/")
+
 
 def _is_prompt(path: Path) -> bool:
     """True iff ``path`` is a catalog-known prompt file — by exact name, or by
@@ -105,7 +167,7 @@ def _is_prompt(path: Path) -> bool:
     cat = load_catalog()
     if path.name in cat.project_files:
         return True
-    return any(path.match(pattern) for pattern in cat.project_globs)
+    return any(_matches_glob(path, pattern) for pattern in cat.project_globs)
 
 
 def _norm_ext(ext: str) -> str:
@@ -121,6 +183,25 @@ def _is_boundary(d: Path, home: Path) -> bool:
     """A dir we must never treat as a repo root: filesystem root, the user's home,
     or any bare top-level dir (<=2 path components)."""
     return d == Path(d.anchor) or d == home or len(d.parts) <= 2
+
+
+def is_safe_scan_root(path: "str | os.PathLike[str]") -> bool:
+    """Whether ``path`` may be used as a scan root at all.
+
+    The same gate :func:`find_repo_root` stops at, exposed for callers that
+    derive roots some other way (``core/summarize/repo_roots`` derives them from
+    the analysed window's recorded working directories). Refuses the filesystem
+    root, the user's home, any bare top-level dir, and every catalog
+    ``forbidden_roots`` entry — so no derivation path can point a scan at
+    ``$HOME`` or ``/``.
+    """
+    try:
+        resolved = Path(path).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    home = Path.home().resolve()
+    extra = {Path(p).expanduser().resolve() for p in load_catalog().forbidden_roots}
+    return not _is_boundary(resolved, home) and resolved not in extra
 
 
 def find_repo_root(start: "str | os.PathLike[str]") -> Path | None:
@@ -157,17 +238,38 @@ def _read(path: Path) -> str | None:
 
 
 def _candidate(path: Path, mode: str, scope: str, min_prose_words: int,
-               ratio: float) -> Candidate | None:
+               ratio: float, scan_root: Path | None = None) -> Candidate | None:
+    # A symlink is not a candidate, and NOT because it might duplicate another
+    # file — because the FIX refuses it. `prepare`, `check`, `apply_staged` and
+    # `undo` all bail on a link rather than rewrite through it (the write could
+    # land outside where you expect), so a saving offered on one is unreachable
+    # by every path this product offers. Pricing it would claim money no fix can
+    # collect (Critical Rule 22). The link TARGET is still a fine candidate when
+    # a scan reaches it directly; it is the link that is refused, not the file.
+    if path.is_symlink():
+        return None
     text = _read(path)
     if text is None:
         return None
     b = analyze(text)
     if b.prose_words < min_prose_words:
         return None
+    # Split the SAME reduction across the two load semantics, measured on the
+    # two halves of the real text rather than apportioned by a ratio: only the
+    # always-resident half is worth (sessions x calls), the on-demand half is
+    # worth (invocations). See core/summarize/load_semantics.
+    load_class = load_semantics.classify(str(path))
+    resident_text, on_demand_text = load_semantics.split_always_resident(text, load_class)
     return Candidate(
+        scan_root=str(scan_root) if scan_root is not None else "",
         path=str(path), prose_words=b.prose_words, total_chars=b.total_chars,
         protected_blocks=b.protected_blocks, est_tokens_saved=tokens_saved(b, ratio),
         pricing_mode=mode, scope=scope, is_prompt=_is_prompt(path),
+        load_class=load_class,
+        invocation_key=load_semantics.invocation_key(str(path), load_class),
+        always_resident_tokens_saved=tokens_saved(analyze(resident_text), ratio),
+        on_demand_tokens_saved=tokens_saved(analyze(on_demand_text), ratio),
+        always_resident_chars=len(resident_text),
     )
 
 
@@ -183,13 +285,34 @@ def _pricing_mode(config: "TjConfig | None") -> str:
 # Target enumeration
 # --------------------------------------------------------------------------- #
 
-def _global_targets() -> list[Path]:
+def _expand_home(raw: str, home: Path | None) -> str:
+    """Expand a leading `~` against `home`, or the real home when None.
+
+    `home` is the analyzer scope's home (see `core/optimize/scope.py`). The
+    catalog's global paths span several agent homes (`~/.claude`, `~/.gemini`,
+    `~/.codex`), so scoping them means redirecting `~` itself — anything
+    narrower would leave most of the catalog reading the operator's real files
+    while a `--projects-root` was in force.
+    """
+    if home is None:
+        return os.path.expanduser(raw)
+    if raw == "~":
+        return str(home)
+    if raw.startswith("~/"):
+        return str(home / raw[2:])
+    return raw
+
+
+def _global_targets(home: Path | None = None) -> list[Path]:
     """Catalog global/system paths ("~" expanded; glob patterns expanded)."""
     out: list[Path] = []
     for raw in load_catalog().global_paths:
-        ep = os.path.expanduser(raw)
+        ep = _expand_home(raw, home)
         if any(ch in ep for ch in "*?["):
-            out.extend(Path(x) for x in sorted(_glob.glob(ep)))
+            # recursive=True so a `**` in a catalog global path (e.g.
+            # `~/.claude/rules/**/*.md`) descends; without it `glob` treats `**`
+            # as a plain `*` and sees only the top level of a nested rule tree.
+            out.extend(Path(x) for x in sorted(_glob.glob(ep, recursive=True)))
         else:
             out.append(Path(ep))
     return out
@@ -267,8 +390,40 @@ def list_candidates(
     min_prose_words: int = MIN_PROSE_WORDS,
     ratio: float = DEFAULT_TARGET_RATIO,
     extra_exts: Iterable[str] = (),
+    home: "Path | None" = None,
+    project_root: "Path | None" = None,
+    project_roots: "Sequence[str | os.PathLike[str]] | None" = None,
 ) -> ScanResult:
-    """Find summarize candidates per DEC-020/021. Advisory: reads only, never writes."""
+    """Find summarize candidates per DEC-020/021. Advisory: reads only, never writes.
+
+    Three parameters govern WHERE the scan looks, and they are deliberately
+    different questions:
+
+    * ``home`` scopes the catalog's ``~``-rooted global paths.
+    * ``project_root`` relocates the implicit "where am I" that the single-root
+      project and repo discovery start from, without any of the widening a
+      positional ``path`` carries: ``path`` marks the scan explicit, which opens
+      ``ext_set`` to all-md and relabels the scope from "project" to "path". A
+      caller that only needs the scan confined — an analyzer honoring
+      ``--projects-root`` — wants the relocation and none of the widening.
+      ``None`` means the process's cwd, which is what every caller got before
+      this parameter existed.
+    * ``project_roots`` replaces that single-root project scope with a scan of
+      EVERY given root. It exists for the optimize analyzer, which prices a
+      whole telemetry window that spans many repos: pricing only the repo the
+      process happens to sit in makes every other repo's always-resident
+      ``CLAUDE.md`` contribute exactly nothing. Roots are scanned with the SAME
+      catalog-default net as the cwd scan — deliberately NOT via ``path``, for
+      the widening reason above. They are the caller's responsibility to derive
+      and to confine within whatever boundary applies (see
+      ``core/summarize/repo_roots`` and the summarize analyzer's scope
+      composition); they are ignored entirely when an explicit
+      ``path``/``--recursive``/``--repo`` asks for a specific scope.
+
+    ``project_root`` and ``project_roots`` never both apply: a caller supplying
+    an explicit root list has already decided the population, and
+    ``project_root`` is the fallback starting point for when it has not.
+    """
     mode = _pricing_mode(config)
     extra = {e for e in (_norm_ext(x) for x in extra_exts) if e}
     # The net opens to all-md (+ extras) the moment ANY widening input is given.
@@ -280,27 +435,32 @@ def list_candidates(
     note = ""
     walk_capped = False
     root_used: Path | None = None
+    roots_scanned = 0
 
-    def _add(p: Path, scope: str) -> None:
+    def _add(p: Path, scope: str, scan_root: Path | None = None) -> None:
         key = str(p.resolve()) if p.exists() else str(p)
         if key in seen:
             return
         seen.add(key)
-        c = _candidate(p, mode, scope, min_prose_words, ratio)
+        c = _candidate(p, mode, scope, min_prose_words, ratio, scan_root)
         if c is not None and not _already_summarized(config, c.path):
             cands.append(c)
 
     # 1) Globals (the floor) — always catalog prompts, unless suppressed.
     globals_checked = 0
     if include_global:
-        for gp in _global_targets():
+        for gp in _global_targets(home):
             if gp.exists():
                 globals_checked += 1
                 _add(gp, "global")
 
     # 2) Project scope.
     explicit = path is not None
-    target = Path(path).expanduser() if path is not None else Path.cwd()
+    # Everywhere below that would have consulted the process's cwd consults
+    # this instead, so a confined scan cannot reach a project outside its root
+    # through the one door the catalog scoping left open.
+    here = Path(project_root).expanduser() if project_root is not None else Path.cwd()
+    target = Path(path).expanduser() if path is not None else here
 
     if explicit and not target.exists():
         # A typo'd / missing PATH shouldn't silently show only globals. This MUST be
@@ -317,21 +477,32 @@ def list_candidates(
         root_used = target
         _add(target, "path")
     elif recursive:
-        walk_root = target if explicit else find_repo_root(Path.cwd())
+        walk_root = target if explicit else find_repo_root(here)
         if walk_root is None:
             tail = "showing globals only" if cands else "nothing to show"
             note = ("--recursive needs a git repo or an explicit PATH; no safe root "
                     f"found — {tail}.")
         else:
             root_used = walk_root
+            roots_scanned = 1
             paths, walk_capped = _walk_targets(walk_root, ext_set)
             for p in paths:
-                _add(p, "path" if explicit else "repo")
+                _add(p, "path" if explicit else "repo", walk_root)
+    elif project_roots is not None:
+        # Corpus-wide project scope: the same catalog-default net, once per root.
+        for raw_root in project_roots:
+            scan_root = Path(raw_root).expanduser()
+            if not scan_root.is_dir():
+                continue
+            roots_scanned += 1
+            for p in _project_targets(scan_root, ext_set):
+                _add(p, "project", scan_root)
+        root_used = None
     else:
         if repo and not explicit:
-            found = find_repo_root(Path.cwd())
+            found = find_repo_root(here)
             if found is None:                       # --repo but no repo: don't fake a "repo" root
-                scope_root, scope = Path.cwd(), "project"
+                scope_root, scope = here, "project"
                 note = "--repo: no git repo found — scanning the current directory instead."
             else:
                 scope_root, scope = found, "repo"
@@ -339,8 +510,9 @@ def list_candidates(
             scope_root = target
             scope = "path" if explicit else "project"
         root_used = scope_root
+        roots_scanned = 1
         for p in _project_targets(scope_root, ext_set):
-            _add(p, scope)
+            _add(p, scope, scope_root)
 
     # Sectioned sort (DEC-021, refined): what the user asked for first — the scanned
     # location (non-global) before the always-on catalog globals (supplementary, shown
@@ -355,4 +527,5 @@ def list_candidates(
         globals_checked=globals_checked,
         walk_capped=walk_capped,
         note=note,
+        project_roots_scanned=roots_scanned,
     )

@@ -476,6 +476,7 @@ async def test_register_source_path_previews_then_applies_a_model_swap(
         "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
         "input_tokens": 100_000, "output_tokens": 20_000,
         "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+        "started_at": utcnow() - timedelta(days=1),
     }], 30.0)
     finding = DowngradeFinding(
         candidate_sessions=1, total_sessions=1, actual_cost_usd=9.0,
@@ -560,6 +561,7 @@ async def test_register_source_path_refuses_a_path_it_cannot_swap_in(
         "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
         "input_tokens": 100_000, "output_tokens": 20_000,
         "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+        "started_at": utcnow() - timedelta(days=1),
     }], 30.0)
     finding = DowngradeFinding(
         candidate_sessions=1, total_sessions=1, actual_cost_usd=9.0,
@@ -632,6 +634,7 @@ async def test_register_source_path_refused_by_apply_leaves_no_registration(
         "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
         "input_tokens": 100_000, "output_tokens": 20_000,
         "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+        "started_at": utcnow() - timedelta(days=1),
     }], 30.0)
     finding = DowngradeFinding(
         candidate_sessions=1, total_sessions=1, actual_cost_usd=9.0,

@@ -14,7 +14,7 @@ from rich.markup import escape
 
 from tokenjam.cli.banner import print_welcome_banner
 from tokenjam.cli.onboard_detect import SdkMatch, detect_stack, install_hint
-from tokenjam.core.config import find_config_file
+from tokenjam.core.config import resolve_config_path
 from tokenjam.core.ingest_adapters.codex import ingest_codex
 from tokenjam.otel.semconv import SUBSCRIPTION_PLAN_TIERS
 from tokenjam.utils.formatting import console, display_path
@@ -506,7 +506,15 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
             return
         # choice == "sdk" → fall through to the generic SDK/API path below.
 
-    existing = find_config_file()
+    # Honor TJ_CONFIG for the EXISTING-config check only (not the write
+    # target below, which always writes a new `.tj/config.toml` by design —
+    # see the comment at that assignment). This is deliberately asymmetric:
+    # a bare search-path find_config_file() here would miss a TJ_CONFIG-
+    # pointed config and go on to double-write `.tj/config.toml` alongside
+    # it, leaving the user with two configs and the wrong one still active
+    # (TJ_CONFIG always wins at read time). Honoring TJ_CONFIG here instead
+    # makes onboard correctly report "Config already exists" and no-op.
+    existing = resolve_config_path((ctx.obj or {}).get("config_path_override"))
     if existing and not force:
         # --reconfigure is only meaningful with --claude-code / --codex.
         # The bare onboard path writes a generic config and doesn't manage
@@ -819,9 +827,10 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
 
     The persona (and which config to read) follows the same flag the user
     onboarded with: ``--claude-code`` / ``--codex`` read the global config;
-    bare reads the nearest project/SDK config via ``find_config_file``. Errors
-    out cleanly when no config exists yet — that's an "run `tj onboard` first"
-    situation, not a verification failure.
+    bare reads the nearest project/SDK config via ``resolve_config_path``
+    (honoring ``TJ_CONFIG`` like every other read path). Errors out cleanly
+    when no config exists yet — that's an "run `tj onboard` first" situation,
+    not a verification failure.
     """
     from tokenjam.core.config import load_config
 
@@ -830,7 +839,7 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
         persona = "claude_code" if claude_code else "codex"
         config_path: Path | None = global_path if global_path.exists() else None
     else:
-        found = find_config_file()
+        found = resolve_config_path((ctx.obj or {}).get("config_path_override"))
         config_path = Path(found) if found else None
         persona = "sdk"
 

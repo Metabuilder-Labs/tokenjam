@@ -26,8 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from tokenjam.core.cost import calculate_cost
-from tokenjam.core.pricing import get_rates
+from tokenjam.core.optimize.span_pricing import price_span
 
 #: Runtimes report a thinking/reasoning token count under these span-attribute
 #: keys (Codex writes ``reasoning_token_count``). Anthropic bills thinking as
@@ -91,29 +90,40 @@ class _Acc:
     output_tokens: int = 0
     cache_tokens: int = 0
     cache_write_tokens: int = 0
+    # Dollars, accumulated per candidate session at that session's own instant
+    # rather than derived from the token sums at one date — see
+    # `tokenjam.core.optimize.span_pricing` for why the convention is
+    # price-each-span-then-sum. `unpriced` records that at least one session in
+    # the group had no rate on one side, which drops the whole group.
+    current_usd: float = 0.0
+    alternative_usd: float = 0.0
+    unpriced: bool = False
 
 
 def price_tokens(
     provider: str,
     model: str,
     *,
+    at: datetime,
     input_tokens: int,
     output_tokens: int,
     cache_tokens: int,
     cache_write_tokens: int,
 ) -> float | None:
-    """Cost of an exact token mix at ``model``'s rates, or ``None`` when the
-    model has no pricing data (we refuse to invent a rate).
+    """Cost of an exact token mix at ``model``'s rates on ``at``, or ``None``
+    when the model has no pricing data (we refuse to invent a rate).
 
     Prices all four billed token types. A cheaper model is still charged for
     cache reads and cache writes, so dropping either type from one side of the
     comparison would manufacture a saving that does not exist.
+
+    ``at`` is required. Both sides of a swap comparison must be priced at the
+    same instant, and that instant must be when the traffic ran: pricing a
+    historical window at today's rates turns any intervening price change into
+    a fake component of the saving.
     """
-    if get_rates(provider, model) is None:
-        return None
-    return calculate_cost(
-        provider=provider,
-        model=model,
+    return price_span(
+        provider, model, at=at,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_read_tokens=cache_tokens,
@@ -177,15 +187,35 @@ def build_agent_price_rows(
     candidates: list[dict[str, Any]],
     window_days: float,
     thinking_by_session: dict[str, int] | None = None,
+    *,
+    window_start: datetime | None = None,
 ) -> list[AgentPriceRow]:
     """Group candidate sessions by (agent, provider, model) and price the swap.
 
     ``candidates`` carries one dict per candidate session with keys
-    ``session_id``, ``agent_id``, ``provider``, ``model``, ``alt_model`` and the
-    four token counts. A group whose current or proposed model has no pricing
-    data is dropped rather than priced at a default rate. Rows come back
-    largest-delta first.
+    ``session_id``, ``agent_id``, ``provider``, ``model``, ``alt_model``,
+    ``started_at`` and the four token counts. A group whose current or proposed
+    model has no pricing data is dropped rather than priced at a default rate.
+    Rows come back largest-delta first.
+
+    Both sides are priced PER SESSION, at that session's own start, and the
+    dollars summed — not by summing the group's tokens and pricing them once.
+    A group spans many sessions across the whole window, so there is no single
+    date the sum belongs to. The two agree exactly whenever no rate moved
+    inside the window.
+
+    A candidate with no ``started_at`` falls back to ``window_start``, then to
+    the earliest instant any sibling candidate carries. One with none of the
+    three drops its group rather than being priced at today's rate — an
+    undated candidate should cost a row, not silently gain a wrong number.
     """
+    fallback = window_start or min(
+        (
+            row["started_at"] for row in candidates
+            if row.get("started_at") is not None
+        ),
+        default=None,
+    )
     thinking_by_session = thinking_by_session or {}
     groups: dict[tuple[str, str, str, str], _Acc] = {}
     thinking: dict[tuple[str, str, str, str], int] = {}
@@ -206,22 +236,39 @@ def build_agent_price_rows(
         acc.output_tokens += int(row.get("output_tokens") or 0)
         acc.cache_tokens += int(row.get("cache_tokens") or 0)
         acc.cache_write_tokens += int(row.get("cache_write_tokens") or 0)
+
+        at = row.get("started_at") or fallback
+        if at is None:
+            acc.unpriced = True
+        else:
+            priced = {
+                "input_tokens": int(row.get("input_tokens") or 0),
+                "output_tokens": int(row.get("output_tokens") or 0),
+                "cache_tokens": int(row.get("cache_tokens") or 0),
+                "cache_write_tokens": int(row.get("cache_write_tokens") or 0),
+            }
+            current = price_tokens(
+                str(row["provider"]), str(row["model"]), at=at, **priced,
+            )
+            alternative = price_tokens(
+                str(row["provider"]), str(row["alt_model"]), at=at, **priced,
+            )
+            if current is None or alternative is None:
+                acc.unpriced = True
+            else:
+                acc.current_usd += current
+                acc.alternative_usd += alternative
+
         if session_id in thinking_by_session:
             thinking[key] = thinking.get(key, 0) + thinking_by_session[session_id]
             saw_thinking.add(key)
 
     rows: list[AgentPriceRow] = []
     for (agent, provider, model, alt_model), acc in groups.items():
-        tokens = {
-            "input_tokens": acc.input_tokens,
-            "output_tokens": acc.output_tokens,
-            "cache_tokens": acc.cache_tokens,
-            "cache_write_tokens": acc.cache_write_tokens,
-        }
-        current = price_tokens(provider, model, **tokens)
-        alternative = price_tokens(provider, alt_model, **tokens)
-        if current is None or alternative is None:
+        if acc.unpriced:
             continue
+        current = acc.current_usd
+        alternative = acc.alternative_usd
         delta = current - alternative
         projected = (delta / window_days * PROJECTION_DAYS) if window_days > 0 else 0.0
         key = (agent, provider, model, alt_model)

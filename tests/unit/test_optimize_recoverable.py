@@ -72,6 +72,46 @@ def test_downsize_window_basis_differs_from_monthly_projection(db):
     assert finding.past_overspend_usd != finding.monthly_savings_usd
 
 
+def test_downsize_tiny_session_prices_cache_write_on_alt_side(db):
+    """The tiny-session secondary case's alternative-model pricing must
+    include cache-write tokens, not just input/output/cache-read. The old
+    `_alt_unit_cost` arithmetic priced only input + output + cache-read for
+    the alternative model while `actual_cost` (the `cost_usd` column) already
+    billed cache-write on the original model -- an asymmetric comparison that
+    inflated `past_overspend_usd` by the alternative model's cache-write cost
+    on every candidate session. A candidate with non-zero cache_write_tokens
+    must therefore price SMALLER than the broken (cache-write-dropped)
+    arithmetic would have."""
+    from tokenjam.core.pricing import get_rates
+
+    start = utcnow() - timedelta(days=2)
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=1_000, output_tokens=200, cache_write_tokens=50_000,
+        cost_usd=1.0, session_id="cw1", start_time=start,
+    ))
+    since, until = _window()
+    finding = analyze_model_downgrade(db.conn, since, until, None, 30.0)
+    assert finding is not None
+    assert finding.candidate_sessions == 1
+
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    assert rates is not None
+    correct_alt_cost = (
+        1_000 / 1e6 * rates.input_per_mtok
+        + 200 / 1e6 * rates.output_per_mtok
+        + 50_000 / 1e6 * rates.cache_write_per_mtok
+    )
+    broken_alt_cost = (  # the old arithmetic: cache-write silently dropped
+        1_000 / 1e6 * rates.input_per_mtok
+        + 200 / 1e6 * rates.output_per_mtok
+    )
+    correct_savings = max(1.0 - correct_alt_cost, 0.0)
+    broken_savings = max(1.0 - broken_alt_cost, 0.0)
+    assert correct_savings < broken_savings
+    assert finding.past_overspend_usd == pytest.approx(correct_savings, abs=1e-6)
+
+
 # --------------------------------------------------------------------------- #
 # cache — efficacy-gap heuristic (pure helper)
 # --------------------------------------------------------------------------- #

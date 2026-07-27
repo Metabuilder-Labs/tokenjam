@@ -9,6 +9,8 @@ from __future__ import annotations
 import subprocess
 from datetime import datetime, timedelta, timezone
 
+from tokenjam.utils.time_parse import utcnow
+
 import pytest
 
 from tokenjam.core.config import AgentConfig, StorageConfig, TjConfig
@@ -54,6 +56,7 @@ def _price_rows(agent_id="svc-a"):
         "model": "claude-opus-4-8", "alt_model": "claude-haiku-4-5",
         "input_tokens": 100_000, "output_tokens": 20_000,
         "cache_tokens": 500_000, "cache_write_tokens": 40_000,
+        "started_at": utcnow() - timedelta(days=1),
     }], 30.0)
 
 
@@ -270,9 +273,16 @@ def test_dirty_repo_falls_back_and_says_why(tmp_path):
 # B2: the subagent card routes to the agent file when there is one
 # --------------------------------------------------------------------------- #
 
-def _subagent_finding(sub_agent_id="explore"):
+def _subagent_finding(sub_agent_type="explore",
+                      sub_agent_id="aexplore-7e1dd2a1642d7c29"):
+    # `sub_agent_id` is Claude Code's PER-DISPATCH id — `a` + an optional
+    # caller-chosen label + a hex suffix. It names no file, and defaults here to
+    # a realistic one so no test can accidentally rely on it resolving.
+    # `sub_agent_type` is the stable identity that addresses
+    # `.claude/agents/<type>.md`.
     row = SubagentRow(
-        session_id="sess-1", sub_agent_id=sub_agent_id, model="claude-opus-4-8",
+        session_id="sess-1", sub_agent_id=sub_agent_id,
+        sub_agent_type=sub_agent_type, model="claude-opus-4-8",
         llm_calls=3, tool_calls=1, input_tokens=80_000, output_tokens=500,
         cache_tokens=10_000, cache_write_tokens=2_000, cost_usd=1.2,
         provider="anthropic", flags=["over_powered"],
@@ -313,12 +323,44 @@ def test_named_subagent_with_a_definition_file_gets_the_model_apply(tmp_path, mo
     assert card.signature == "cost:subagent:explore"
 
 
-def test_inline_subagent_falls_back_to_the_guidance_block(tmp_path, monkeypatch):
-    # A uuid sub_agent_id names no definition file: the rubric note stays the fix.
+def test_a_dispatch_id_never_resolves_to_an_agent_file(tmp_path, monkeypatch):
+    """The lookup keys on the stable TYPE, never on the per-dispatch id.
+
+    This test used to assert the opposite by accident: `sub_agent_id` was the
+    lookup key and a plain-slug shape check was supposed to keep dispatch ids
+    out — but a Claude Code dispatch id IS slug-shaped (99.6% of 3,659 real ones
+    matched), so every lookup went hunting for a `.claude/agents/a<hex>.md`.
+    Here the file that WOULD satisfy the old behaviour exists on disk, named for
+    the dispatch id; resolving it would be the defect, so the card must fall
+    back to the guidance block.
+    """
+    repo = tmp_path / "workspace"
+    decoy = repo / ".claude" / "agents" / "aexplore-7e1dd2a1642d7c29.md"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text(AGENT_FILE, encoding="utf-8")
+    monkeypatch.setattr(cp, "_session_cwds", lambda ids, config: {"sess-1": str(repo)})
+    card = [
+        p for p in cp.cost_proposals_from_report(
+            _report(subagent=_subagent_finding(sub_agent_type="")),
+            config=_cfg(tmp_path),
+        )
+        if p.analyzer == "subagent"
+    ][0]
+    assert card.apply_kind == ""
+    assert card.signature == "cost:subagent"
+    assert card.target_path == ""
+    assert card.rung == 1
+    assert card.proposed_fix
+
+
+def test_a_builtin_dispatch_type_falls_back_to_the_guidance_block(tmp_path, monkeypatch):
+    # `Explore` is a built-in dispatch type with no definition file on disk:
+    # the rubric note stays the fix. Its capital letter fails the slug shape,
+    # which is the correct outcome for exactly that reason.
     monkeypatch.setattr(cp, "_session_cwds", lambda ids, config: {"sess-1": str(tmp_path)})
     card = [
         p for p in cp.cost_proposals_from_report(
-            _report(subagent=_subagent_finding("3f2a9c11-77bd-4f0e-9b6a-2c1d8e5f0a44")),
+            _report(subagent=_subagent_finding("Explore")),
             config=_cfg(tmp_path),
         )
         if p.analyzer == "subagent"
@@ -500,3 +542,58 @@ def test_every_dollar_figure_is_tagged_and_has_a_construction_footnote(tmp_path)
         assert card.estimate_confidence in ("estimated", "measured")
         assert card.estimate_basis, f"{card.signature} prints a figure with no footnote"
         assert card.correlational is True
+
+
+# --------------------------------------------------------------------------- #
+# B3: the two identity-resolution guards
+# --------------------------------------------------------------------------- #
+
+def test_a_dispatch_id_fails_the_agent_definition_name_check():
+    """Real Claude Code dispatch ids, in both shapes seen on a live corpus.
+
+    They are `a` + an optional caller-chosen instance label + a 16-17 hex
+    suffix, so they satisfy the plain-slug shape that used to be the only gate —
+    which is why 3,645 of 3,659 (99.6%) passed it and the lookup resolved
+    nothing at all.
+    """
+    for dispatch_id in (
+        "af8b26e872b7184a7",
+        "aw-ratehistory-7e1dd2a1642d7c29",
+        "aworker-428-63df1d3c53338de1",
+        "apr543-e855e916eeb36f9e",
+    ):
+        assert cp._AGENT_NAME_RE.match(dispatch_id), (
+            "precondition: the slug shape alone does NOT exclude a dispatch id"
+        )
+        assert not cp._names_agent_definition(dispatch_id)
+
+
+def test_a_real_agent_type_passes_the_name_check():
+    for name in ("code-reviewer", "general-purpose", "explore", "tdd-guide"):
+        assert cp._names_agent_definition(name)
+    # No name, and built-in types that carry no definition file.
+    for name in ("", "Explore", "Plan"):
+        assert not cp._names_agent_definition(name)
+
+
+def test_the_scope_session_cap_counts_distinct_sessions_not_rows(tmp_path, monkeypatch):
+    """`_session_cwds` is called with one entry per flagged ROW, and a session
+    that fanned out to many subagents contributes that id many times. Slicing
+    the raw list spent the whole cap on a handful of sessions."""
+    seen: dict[str, list] = {}
+
+    def _capture(pairs, root):
+        seen["pairs"] = list(pairs)
+        return {}
+
+    monkeypatch.setattr(
+        "tokenjam.core.optimize.analyzers.relearn._repo_cwd_map_for", _capture
+    )
+    # 40 sessions, each repeated 30 times — 1200 rows, far past the cap.
+    session_ids = [f"sess-{i}" for i in range(40) for _ in range(30)]
+    cp._session_cwds(session_ids, _cfg(tmp_path))
+
+    got = [sid for sid, _ in seen["pairs"]]
+    assert len(got) == cp._MAX_SCOPE_SESSIONS
+    assert len(set(got)) == cp._MAX_SCOPE_SESSIONS, "every slot is a distinct session"
+    assert got == [f"sess-{i}" for i in range(cp._MAX_SCOPE_SESSIONS)]

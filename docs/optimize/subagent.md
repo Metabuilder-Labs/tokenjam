@@ -31,12 +31,12 @@ checked against two independent structural criteria:
 
 | Flag | Criteria |
 |---|---|
-| `over_powered` | Ran on a premium (Opus-tier — model name contains `opus`) model, produced fewer than 2,000 output tokens, and made 5 or fewer tool calls. Mirrors the [Downsize](downsize.md) heuristic, scoped to one subagent. |
+| `over_powered` | Ran on a premium (Fable or Opus tier) model, full stop. Mirrors the [Downsize](downsize.md) heuristic, scoped to one subagent — but, unlike Downsize, does **not** also require small output or few tool calls. A Claude Code Task subagent is a full agent loop (100-400 LLM calls, cache-read in the hundreds of millions of tokens on a heavy session), not one dispatch/one answer, so its cost compounds with both output length AND tool-call count. Requiring either to stay small made the worst offenders (the ones that did the most work) the *least* eligible to be flagged; measured on a real corpus, only 6.5% of premium-tier subagent spend cleared both of the old clauses. |
 | `over_provisioned` | Was handed a large context — input + cache-read tokens ≥ 50,000 — yet produced fewer than 2,000 output tokens. The prompt it was dispatched with is likely larger than the task needed. |
 
 A single subagent can carry both flags. Thresholds live as module constants in
 `tokenjam/core/optimize/analyzers/subagent_rightsizing.py` (`SMALL_OUTPUT_TOKENS`,
-`FEW_TOOL_CALLS`, `CONTEXT_HEAVY_TOKENS`, `MIN_FLAG_COST_USD`).
+`CONTEXT_HEAVY_TOKENS`, `MIN_FLAG_COST_USD`).
 
 It reads aggregate token counts only — no content capture required.
 
@@ -54,9 +54,14 @@ Rendering follows the same plan-tier-aware convention as the rest of `tj optimiz
 
 ## Estimate basis / confidence
 
-Candidate-only in v1 — `past_overspend_usd` and `past_overspend_tokens` are deliberately `None`; the analyzer surfaces the spend sitting in flagged subagents (`flagged_cost_usd`) rather than assert a guaranteed recovery. `estimate_confidence` is `"heuristic"` and `estimate_basis` reads:
+`past_overspend_usd` and `past_overspend_tokens` are quantified from two components, each with an independent "contributes nothing rather than invent a number" floor:
 
-> spend concentrated in structurally-flagged subagents (premium model with little output, or large context with little output); review before re-dispatching — no guaranteed saving
+- **`over_powered`** — priced at `claude-sonnet-5` (one tier down from Opus/Fable/Mythos) over the exact same token mix the flagged subagent was billed for — a pure model-swap delta, no token-count change. This is a *narrower* step than [Downsize](downsize.md)'s own opus→haiku two-tier jump: Downsize's ladder is tuned for structurally tiny (Sonnet-shaped) whole sessions and can afford the aggressive drop, but this analyzer prices every premium-tier subagent, including full agent-loop ones, so it earns the more defensible one-tier-down target instead.
+- **`over_provisioned`** — priced on the context *excess* over the subagent's own dispatch cohort's median (same calling agent + model, at least 5 like-shaped peers), at the cache-read rate (context arrives overwhelmingly as cache reads).
+
+`estimate_confidence` is `"heuristic"` and `estimate_basis` reads:
+
+> over_powered subagents (any premium-tier subagent above the noise floor) priced at claude-sonnet-5 (one tier down, not model_downgrade's two-tier opus-to-haiku jump) over the same tokens, a model-swap delta, structural fit only, plus over_provisioned subagents priced on their context excess over their dispatch cohort's own median (same calling agent + model), at the cache-read rate; no quality validation, review before re-dispatching. No guaranteed saving.
 
 `confidence` on the finding itself is `structural` (Rule 14, honesty discipline) — the mandatory caveat, surfaced in every render mode:
 

@@ -8,6 +8,7 @@ import click
 from rich.markup import escape as _rich_escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
+from tokenjam.core.optimize.types import DEGRADED_CAPTURE_MODES
 from tokenjam.core.framing import (
     PLAN_LABEL_AND_FEE,
     Framing,
@@ -489,6 +490,7 @@ _MINOR_FINDING_LABELS = {
     "deadweight":      "Deadweight",
     "placement":       "Batch placement",
     "summarize":       "Summarize",
+    "stream-usage":    "Streaming usage gap",
 }
 
 
@@ -851,6 +853,16 @@ def _render_report(
     for note in report.notes:
         console.print(f"  [yellow]![/yellow] {_rich_escape(note)}")
     if report.notes:
+        console.print()
+
+    # Said out loud, because the alternative is three analyzers rendering as
+    # "nothing found" when the truth is that they never looked (root
+    # anti-pattern 22). See `core/optimize/scope.py`.
+    if report.filesystem_scan_skipped_reason:
+        console.print(
+            "  [dim]deadweight, relearn and summarize did not run: "
+            f"{_rich_escape(report.filesystem_scan_skipped_reason)}.[/dim]"
+        )
         console.print()
 
     # An analyzer the user typed by name that this persona's skip gate dropped
@@ -2003,17 +2015,28 @@ def _render_reuse(
             console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
         return
 
-    mode_note = (
-        " [dim](tool-sequence only — enable capture.prompts for finer "
-        "clustering)[/dim]"
-        if finding.capture_mode == "tool_sequence_only"
-        else ""
-    )
+    # `capture_mode` states what clustering ACTUALLY ran on (measured per
+    # window), so the degrade is named without asserting a cause the finding
+    # cannot know — the accompanying hint carries the remedy.
+    if finding.capture_mode == "tool_sequence_only":
+        mode_note = (
+            " [dim](tool-sequence only — no prompt text was captured for "
+            "these calls)[/dim]"
+        )
+    elif finding.capture_mode == "mixed_prompt_prefix":
+        mode_note = (
+            " [dim](mixed basis — only some of these calls carried prompt "
+            "text; the rest matched on tool sequence alone)[/dim]"
+        )
+    else:
+        mode_note = ""
     console.print(
         f"     • [bold]{len(finding.clusters)}[/bold] cluster"
         f"{'s' if len(finding.clusters) != 1 else ''} of repeated planning "
         f"detected{mode_note}"
     )
+    if finding.capture_mode in DEGRADED_CAPTURE_MODES and finding.hint:
+        console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]")
 
     for c in finding.clusters[:5]:
         sig_preview = " → ".join(c.tool_signature) if c.tool_signature else "(no tools)"
@@ -2366,14 +2389,15 @@ def _render_summarize(
     via `--json`.
 
     The per-file line is the one-time, per-CALL reduction (`file_reduction_
-    tokens`); `past_overspend_tokens` and `past_overspend_usd`
-    are both per-WINDOW, because these files are always-on context and the
-    reduction is realized on every session that loads them (see
-    core/optimize/analyzers/summarize.py). The window line only appears
-    when the analyzer could observe how many sessions actually load the files
-    — it is never fabricated from a default rate — and it goes through
-    `render_savings` so a subscription/local plan sees the same framing every
-    other analyzer gives it.
+    tokens`); `past_overspend_tokens` and `past_overspend_usd` are both
+    per-WINDOW, priced by how each file actually LOADS: always-on text (a
+    CLAUDE.md, a rules file, a skill/command/agent's frontmatter) on every call
+    of every loading session, and a skill/command/agent BODY only on the
+    occasions it was observed being invoked (see
+    core/optimize/analyzers/summarize.py). The window line only appears when the
+    analyzer could observe those counts — it is never fabricated from a default
+    rate — and it goes through `render_savings` so a subscription/local plan
+    sees the same framing every other analyzer gives it.
     """
     console.print(_finding_header(marker, "Summarize:"))
     if not finding.candidates:
@@ -2399,11 +2423,22 @@ def _render_summarize(
             console.print(
                 f"       [green]~{savings}[/green] across the "
                 f"[bold]{finding.sessions_examined}[/bold] session(s) in this "
-                f"window that re-send these files on every call"
+                f"window: always-on text on every call; skill / command / agent "
+                f"bodies only when invoked"
             )
+            if getattr(finding, "invocations_observed", False):
+                console.print(
+                    f"       [dim]{finding.invocations_total:,} invocation(s) "
+                    f"observed across {finding.transcripts_examined:,} "
+                    f"transcript(s).[/dim]"
+                )
     for c in finding.candidates[:5]:
+        # An on-demand file's per-call figure is only realized on the calls that
+        # follow an invocation, so the class is named rather than left implied.
+        load_class = getattr(c, "load_class", "always")
+        loads = "always-on" if load_class == "always" else f"on demand: {load_class}"
         console.print(
-            f"       [dim]{c.path}[/dim]  [dim]({c.scope})[/dim]  "
+            f"       [dim]{c.path}[/dim]  [dim]({c.scope}, {loads})[/dim]  "
             f"~{format_tokens(c.est_tokens_saved)} saved  "
             f"[dim]{c.reduction_pct}% reduction[/dim]"
         )
@@ -2439,6 +2474,10 @@ def _render_deadweight(
             f"{'s' if finding.sessions_scanned != 1 else ''}; no MCP server is "
             f"configured, so nothing is being injected.[/dim]"
         )
+        if finding.coverage_note:
+            console.print(
+                f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
+            )
         return
 
     if not finding.dead_servers:
@@ -2511,6 +2550,10 @@ def _render_deadweight(
 
     if finding.estimate_basis:
         console.print(f"     [dim]{finding.estimate_basis}[/dim]")
+    if finding.coverage_note:
+        console.print(
+            f"     [yellow]![/yellow] [dim]{_rich_escape(finding.coverage_note)}[/dim]"
+        )
     if finding.caveat:
         console.print(f"     [yellow]![/yellow] [italic]{finding.caveat}[/italic]")
 
@@ -2702,6 +2745,17 @@ def _render_resend(
             "     [dim]No dollar figure: no priced example session for the "
             "cache_control lever.[/dim]"
         )
+    if recoverable == "—" and getattr(finding, "compaction_avoidable_tokens", None):
+        # The offload lever's token and dollar figures degrade together
+        # (Critical Rule 28 corollary a), so when the pair is absent this is
+        # the only token estimate left — and it prices a different, wider
+        # lever, which is why it is labelled as that lever rather than shown
+        # as the missing recoverable figure.
+        console.print(
+            f"     [dim]Compaction lever (separate estimate, no dollar figure): "
+            f"~{format_tokens(finding.compaction_avoidable_tokens)} tokens "
+            f"avoidable across every session with repeat volume.[/dim]"
+        )
     if finding.estimate_basis:
         console.print(f"     [dim]{finding.estimate_basis}[/dim]")
 
@@ -2760,6 +2814,74 @@ def _render_resend_fix(finding, persona: str) -> None:
             )
 
 
+def _render_stream_usage(
+    finding, *, pricing_mode: str = "api", marker: str = "",
+) -> None:
+    """
+    Render the streaming usage gap — streamed calls whose token counts the
+    provider never reported, so their spend is missing from every total.
+
+    This is the one finding on this screen that is NOT a saving. The figure it
+    carries is spend that already happened and was never recorded, so the copy
+    below never says "recoverable" and the accounting note is printed verbatim
+    rather than summarised: a data-quality number sitting among savings
+    numbers is read as a saving unless it says otherwise every time.
+    """
+    console.print(_finding_header(marker, "Streaming usage gap:"))
+    if not finding.call_sites:
+        console.print(f"     [dim]{_rich_escape(finding.hint)}[/dim]" if finding.hint
+                      else "     [dim]Every observed stream reported its token "
+                           "usage — no measurement gap in this window.[/dim]")
+        return
+
+    console.print(
+        f"     • [bold]{finding.streams_missing_usage}[/bold] of "
+        f"[bold]{finding.streams_observed}[/bold] streamed calls closed without a "
+        f"usage payload [dim](content was produced; no token counts were "
+        f"reported)[/dim]"
+    )
+    if pricing_mode == "api" and finding.undercounted_usd is not None:
+        console.print(
+            f"     [dim]unrecorded spend[/dim] ~"
+            f"{format_tokens(finding.undercounted_tokens)} tokens / "
+            f"{format_cost(finding.undercounted_usd)} "
+            f"[dim](estimated — see basis below)[/dim]"
+        )
+    elif finding.undercounted_tokens is not None:
+        console.print(
+            f"     [dim]unrecorded spend[/dim] ~"
+            f"{format_tokens(finding.undercounted_tokens)} tokens "
+            f"[dim](no dollar figure on this pricing mode)[/dim]"
+        )
+
+    for site in finding.call_sites[:5]:
+        # Escape the analyzer-supplied values, never the markup around them:
+        # a model id or agent name can contain brackets Rich would eat as a
+        # style tag, but escaping the whole line prints the tags literally.
+        label = _rich_escape(f"{site.provider}/{site.model or 'unknown model'}")
+        agent = f" [dim]({_rich_escape(site.agent_id)})[/dim]" if site.agent_id else ""
+        console.print(
+            f"       [bold]{label}[/bold]{agent}  "
+            f"{site.affected_calls} call"
+            f"{'s' if site.affected_calls != 1 else ''} across "
+            f"{site.sessions} session{'s' if site.sessions != 1 else ''}"
+        )
+        console.print(f"          [dim]{_rich_escape(site.derivation)}[/dim]")
+        console.print(f"          [yellow]→[/yellow] {_rich_escape(site.remediation)}")
+        console.print(
+            site.remediation_snippet, markup=False, highlight=False, soft_wrap=True,
+        )
+    if len(finding.call_sites) > 5:
+        console.print(
+            f"       [dim]… and {len(finding.call_sites) - 5} more call site(s). "
+            f"Full detail with [bold]tj optimize stream-usage --json[/bold].[/dim]"
+        )
+
+    if finding.estimate_basis:
+        console.print(f"     [dim]{_rich_escape(finding.estimate_basis)}[/dim]")
+    console.print(f"     [dim]{_rich_escape(finding.accounting_note)}[/dim]")
+
+
 # Dispatch table — analyzer registration name → renderer.
 _FINDING_RENDERERS = {
     "cache":       _render_cache_efficacy,
@@ -2774,4 +2896,5 @@ _FINDING_RENDERERS = {
     "deadweight":   _render_deadweight,
     "placement":    _render_placement,
     "summarize":    _render_summarize,
+    "stream-usage": _render_stream_usage,
 }

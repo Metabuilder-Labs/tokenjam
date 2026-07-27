@@ -148,6 +148,58 @@ def cmd_cost(ctx: click.Context, agent: str | None, since: str,
                       f"[bold]{sum(r.call_count for r in rows)}[/bold]")
 
     console.print(table)
+    _print_pricing_coverage(db, agent, since, since_dt)
+
+
+def _print_pricing_coverage(db, agent: str | None, since: str, since_dt) -> None:
+    """Name any model in this window priced at the flat default rate.
+
+    Without this the table's COST column reads identically whether a rate was
+    published for the model or guessed, which is how a model missing from
+    `models.toml` stays invisible while its dollar figure is badly wrong.
+
+    Direct-conn path measures locally; the API-shim path (daemon holds the DB
+    lock, the common real-world case) reuses the `pricing_coverage` block the
+    /api/v1/cost response already carries — the same direct-conn-else-refetch
+    shape as `_cost_framing`. Checking only `db.conn` meant the mode most users
+    run in printed no warning at all.
+
+    Three outcomes, kept distinct: unpriced models found → name them; measured
+    and everything resolved → say nothing, the table is trustworthy as printed;
+    could not measure → say THAT, because silence here is indistinguishable
+    from a clean bill and this is a screen that must not claim more than its
+    data supports.
+    """
+    from tokenjam.core.pricing_coverage import (
+        coverage_note,
+        summarize_pricing_coverage,
+    )
+
+    conn = getattr(db, "conn", None)
+    if conn is not None:
+        coverage = summarize_pricing_coverage(conn, agent, since_dt, None)
+        note, measured = coverage_note(coverage), coverage.measured
+    else:
+        block = None
+        if hasattr(db, "fetch_pricing_coverage"):
+            try:
+                block = db.fetch_pricing_coverage(since=since, agent_id=agent)
+            except Exception:
+                block = None
+        # A missing block, a failed call and an older daemon all mean the same
+        # thing to a reader: nobody checked. `.get` never defaults to True.
+        measured = bool(block and block.get("measured"))
+        note = block.get("note") if block else None
+
+    if note:
+        console.print()
+        console.print(f"[dim]{note}[/dim]")
+    elif not measured:
+        console.print()
+        console.print(
+            "[dim]Pricing coverage was not checked for this window, so any "
+            "model missing from the pricing table is not flagged above.[/dim]"
+        )
 
 
 def _cost_framing(ctx, db, since, since_dt, until_dt, agent, total_cost, total_tokens):

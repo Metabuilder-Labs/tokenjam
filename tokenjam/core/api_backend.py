@@ -164,6 +164,27 @@ class ApiBackend:
         data = self._get("/api/v1/cost", params)
         return data.get("framing")
 
+    def fetch_pricing_coverage(
+        self, *, since: str = "7d", agent_id: str | None = None,
+    ) -> dict | None:
+        """Return the `pricing_coverage` block from /api/v1/cost.
+
+        `tj cost` names any model priced at the flat default rate, so a cost
+        figure that was guessed does not read identically to one backed by a
+        published rate. That check needs a direct DuckDB handle, which the CLI
+        does not have while the daemon holds the lock — the mode most users
+        actually run in — so it reuses the block the API already computes.
+        Without this the warning simply never appeared on the daemon path.
+
+        Returns None if the response carries no block; the caller must treat
+        that as UNMEASURED, never as "nothing unpriced".
+        """
+        params: dict[str, str] = {"since": since}
+        if agent_id:
+            params["agent_id"] = agent_id
+        data = self._get("/api/v1/cost", params)
+        return data.get("pricing_coverage")
+
     def get_alerts(self, filters: AlertFilters) -> list[Alert]:
         params: dict[str, str | int | bool] = {}
         if filters.agent_id:

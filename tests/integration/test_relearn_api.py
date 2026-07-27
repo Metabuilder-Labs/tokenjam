@@ -666,3 +666,81 @@ async def test_advise_only_proposals_carry_their_reason_in_the_payload(config, c
     workspace_card = by_title["cwd / relative-path confusion"]
     assert workspace_card["advise_only"] is False
     assert workspace_card["advise_only_reason"] is None
+
+
+# --- The guard authorizes against the RUN'S scope, not the process's home ----
+# `--projects-root` outside `$HOME` made the two halves of a card disagree: the
+# suggestion followed the scoped home, the guard stayed pinned to `Path.home()`
+# and 403'd the very path the UI had just proposed. These pin the fix at the
+# route, and pin that it is still fail-closed in the directions that matter.
+
+@pytest.fixture
+def scoped_app(tmp_path, db, monkeypatch):
+    """A daemon scoped to a throwaway home OUTSIDE the real `$HOME`, exactly as
+    `--projects-root /tmp/demo-home/.claude/projects` does."""
+    from tokenjam.core.config import OptimizeConfig
+
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: real_home))
+
+    demo_home = tmp_path / "demo-home"
+    (demo_home / ".claude" / "projects").mkdir(parents=True)
+    scoped_config = TjConfig(
+        version="1",
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        storage=StorageConfig(path=str(tmp_path / "telemetry.duckdb")),
+        optimize=OptimizeConfig(projects_root=str(demo_home / ".claude" / "projects")),
+    )
+    pipeline = IngestPipeline(db=db, config=scoped_config)
+    app = create_app(config=scoped_config, db=db, ingest_pipeline=pipeline)
+    return app, real_home, demo_home
+
+
+@pytest.fixture
+def scoped_client(scoped_app):
+    app, _, _ = scoped_app
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+async def _apply_status(client, app, target_path: str) -> int:
+    r = await client.post(
+        "/api/v1/relearn/apply", json=_apply_body(target_path),
+        headers={"X-TJ-Local-Token": app.state.relearn_write_token},
+    )
+    return r.status_code
+
+
+async def test_scoped_run_accepts_its_own_in_scope_target(scoped_app, scoped_client):
+    """The exact write the UI suggests under a scoped root must be authorized.
+    404 (no such stored proposal) means the guard let it through — that is the
+    assertion; a 403 here is the bug this fixes."""
+    app, _, demo_home = scoped_app
+    in_scope = demo_home / ".claude" / "CLAUDE.md"
+    assert await _apply_status(scoped_client, app, str(in_scope)) == 404
+
+
+async def test_scoped_run_still_rejects_an_out_of_scope_target(scoped_app, scoped_client, tmp_path):
+    app, _, _ = scoped_app
+    outside = tmp_path / "elsewhere" / "CLAUDE.md"
+    assert await _apply_status(scoped_client, app, str(outside)) == 403
+    assert not outside.exists()
+
+
+async def test_scoped_run_rejects_a_path_under_the_real_home(scoped_app, scoped_client):
+    """Scoping is a narrowing, not a shift: the operator's real home is out of
+    bounds while a scope is in force. This is the half that makes 'Approve
+    never writes outside the intended scope' true."""
+    app, real_home, _ = scoped_app
+    real_target = real_home / ".claude" / "CLAUDE.md"
+    assert await _apply_status(scoped_client, app, str(real_target)) == 403
+    assert not real_target.exists()
+
+
+async def test_scoped_run_rejects_a_dot_dot_traversal_out_of_the_scope(scoped_app, scoped_client):
+    """`..` must be judged after resolution, not on the literal string — the
+    path below is textually inside the scope and actually outside it."""
+    app, _, demo_home = scoped_app
+    traversal = demo_home / ".claude" / ".." / ".." / "escaped" / "CLAUDE.md"
+    assert await _apply_status(scoped_client, app, str(traversal)) == 403
+    assert not traversal.resolve().exists()

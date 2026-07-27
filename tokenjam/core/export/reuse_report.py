@@ -32,7 +32,11 @@ from tokenjam.core.optimize.analyzers.plan_reuse import (
     _SpanRow,
     _identify_planning_call,
 )
-from tokenjam.core.optimize.types import ReuseCluster, ReuseFinding
+from tokenjam.core.optimize.types import (
+    DEGRADED_CAPTURE_MODES,
+    ReuseCluster,
+    ReuseFinding,
+)
 from tokenjam.otel.semconv import GenAIAttributes
 
 REUSE_REPORT_CAVEAT = (
@@ -299,12 +303,23 @@ def render_html(
     cache_total = f"${finding.past_overspend_usd or 0.0:,.2f}"
 
     mode_hint = ""
-    if finding.capture_mode == "tool_sequence_only":
-        mode_hint = (
-            "<div class='hint'>Clustered on tool sequences only. Set "
-            "<code>[capture] prompts = true</code> for narrower, more accurate "
-            "clusters.</div>"
+    if finding.capture_mode in DEGRADED_CAPTURE_MODES:
+        # `capture_mode` is measured over the analyzed window, so this states
+        # the degrade; `hint` carries whichever remedy actually applies (the
+        # toggle is off, it is on and nothing was captured anyway, or only
+        # part of the window carried prompt text).
+        remedy = html.escape(finding.hint) if finding.hint else (
+            "Set <code>[capture] prompts = true</code> for narrower, more "
+            "accurate clusters."
         )
+        lead = (
+            "Clustered on tool sequences only: no prompt text was captured "
+            "for these calls."
+            if finding.capture_mode == "tool_sequence_only" else
+            "Mixed basis: only some of these calls carried prompt text, and "
+            "the rest were clustered on tool sequence alone."
+        )
+        mode_hint = f"<div class='hint'>{lead} {remedy}</div>"
 
     sections: list[str] = []
     for idx, r in enumerate(renders, start=1):

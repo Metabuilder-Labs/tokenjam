@@ -153,17 +153,123 @@ def test_over_powered_subagent_carries_quantified_estimate():
         run_subagent(ctx)
         f = ctx.report.findings["subagent"]
 
-        # Cheaper same-family model for opus is haiku. Priced over the SAME tokens:
-        #   input  80_000 @ $1.00/Mtok  = 0.08
-        #   output    100 @ $5.00/Mtok  = 0.0005
-        # alt_cost = 0.0805; delta = 0.60 − 0.0805 = 0.5195.
-        assert f.past_overspend_usd == pytest.approx(0.5195, abs=1e-6)
+        # Swap target for opus subagents is claude-sonnet-5 (one tier down,
+        # not model_downgrade's opus->haiku two-tier jump). Priced over the
+        # SAME tokens:
+        #   input  80_000 @ $2.00/Mtok  = 0.16
+        #   output    100 @ $10.00/Mtok = 0.001
+        # alt_cost = 0.161; delta = 0.60 − 0.161 = 0.439.
+        assert f.past_overspend_usd == pytest.approx(0.439, abs=1e-6)
         # Recoverable tokens = the quota sitting in the priced over_powered rows.
         assert f.past_overspend_tokens == 80_100
         assert f.estimate_confidence == "heuristic"
         assert "review" in f.estimate_basis.lower()
+
+        # CLAUDE.md Critical Rule 28: past_overspend_usd / past_overspend_tokens
+        # must land inside a real price band (never divide two figures that
+        # answer different questions).
+        from tokenjam.core.pricing import get_rates
+        cheapest = get_rates("anthropic", "claude-haiku-4-5")
+        priciest = get_rates("anthropic", "claude-fable-5")
+        implied_rate = f.past_overspend_usd / f.past_overspend_tokens * 1_000_000
+        assert cheapest.cache_read_per_mtok <= implied_rate <= priciest.input_per_mtok
     finally:
         db.close()
+
+
+def test_over_powered_estimate_prices_cache_write_on_both_sides():
+    """`_alt_cost_for_row` must price cache-write tokens on the ALTERNATIVE
+    side too, not just the actual side (`cost_usd` already bills cache-write
+    on the original model). This is the same asymmetry filed against
+    `model_downgrade._alt_unit_cost` — check it does not recur here.
+    Subagents are heavily cache-write-bearing (Task dispatch primes a fresh
+    cache), so a dropped cache-write class on the alt side would inflate this
+    card's numbers specifically."""
+    from tokenjam.core.pricing import get_rates
+
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=100.0)
+        db.insert_span(make_llm_span(
+            model="claude-opus-4-8", provider="anthropic",
+            input_tokens=1_000, output_tokens=100, cache_write_tokens=50_000,
+            cost_usd=1.0, session_id="s1", sub_agent_id="agentCW", start_time=now,
+        ))
+        run_subagent(ctx)
+        f = ctx.report.findings["subagent"]
+
+        rates = get_rates("anthropic", "claude-sonnet-5")
+        assert rates is not None
+        correct_alt_cost = (
+            1_000 / 1e6 * rates.input_per_mtok
+            + 100 / 1e6 * rates.output_per_mtok
+            + 50_000 / 1e6 * rates.cache_write_per_mtok
+        )
+        broken_alt_cost = (  # what it would be if cache-write were dropped
+            1_000 / 1e6 * rates.input_per_mtok
+            + 100 / 1e6 * rates.output_per_mtok
+        )
+        correct_delta = 1.0 - correct_alt_cost
+        broken_delta = 1.0 - broken_alt_cost
+        assert correct_delta < broken_delta
+        assert f.past_overspend_usd == pytest.approx(correct_delta, abs=1e-6)
+    finally:
+        db.close()
+
+
+def test_over_powered_flags_high_output_full_agent_loop_subagent():
+    """The over_powered gate used to require output_tokens < 2_000 AND
+    tool_calls <= 5, which made a Task subagent that ran as a full agent loop
+    (many LLM calls, large output — the shape CLAUDE.md Critical Rule 29
+    warns compounds with session length) LESS eligible to be flagged, not
+    more. Measured on a real corpus, only 6.5% of premium-tier subagent
+    spend cleared both of the old clauses. A premium-model subagent must be
+    flagged regardless of how much output it produced or how many tool calls
+    it made."""
+    db = InMemoryBackend()
+    try:
+        ctx, now = _ctx(db, window_cost_usd=100.0)
+        # Opus subagent: big output (well over the old 2_000 floor) AND many
+        # tool calls (well over the old 5-call ceiling) -> must still be
+        # over_powered under the new gate.
+        db.insert_span(make_llm_span(
+            model="claude-opus-4-8", provider="anthropic",
+            input_tokens=10_000, output_tokens=237_813, tool_name="Read",
+            cost_usd=81.01, session_id="s1", sub_agent_id="agentBig", start_time=now,
+        ))
+        for i in range(50):  # simulate a many-tool-call agent loop
+            db.insert_span(make_llm_span(
+                model="claude-opus-4-8", provider="anthropic",
+                input_tokens=100, output_tokens=10, tool_name="Read",
+                cost_usd=0.001, session_id="s1", sub_agent_id="agentBig",
+                start_time=now,
+            ))
+        run_subagent(ctx)
+        f = ctx.report.findings["subagent"]
+
+        assert len(f.flagged) == 1
+        a = f.flagged[0]
+        assert a.sub_agent_id == "agentBig"
+        assert a.tool_calls > 5
+        assert "over_powered" in a.flags
+        assert f.past_overspend_usd is not None and f.past_overspend_usd > 0
+    finally:
+        db.close()
+
+
+def test_over_powered_swap_target_is_sonnet_5_not_model_downgrades_haiku():
+    """The subagent analyzer must price its own explicit one-tier-down swap
+    (claude-sonnet-5), never silently inherit model_downgrade.lookup_downgrade's
+    opus->haiku two-tier jump (that ladder is tuned for a different
+    heuristic — the whole-session premium quota audit)."""
+    from tokenjam.core.optimize.analyzers.subagent_rightsizing import (
+        _subagent_downgrade_target,
+    )
+    from tokenjam.core.optimize.analyzers.model_downgrade import lookup_downgrade
+
+    assert _subagent_downgrade_target("anthropic", "claude-opus-4-8") == "claude-sonnet-5"
+    # Sanity: this really does differ from the shared ladder's target.
+    assert lookup_downgrade("anthropic", "claude-opus-4-8") == "claude-haiku-4-5"
 
 
 def test_over_provisioned_only_subagent_has_no_estimate():

@@ -317,8 +317,15 @@ def estimate_trim_recoverable(
 
 def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
     """Input-token-weighted average input rate ($/MTok) across the window's
-    model mix, used to price trimmable tokens."""
-    from tokenjam.core.pricing import get_rates
+    model mix, used to price trimmable tokens.
+
+    Weighted across (model, UTC day) rather than (model) alone, so a window
+    straddling a rate change blends the rates that actually applied instead of
+    repricing the whole window at today's. The average IS the aggregate form of
+    price-each-span-then-sum here, because the figure it feeds is
+    ``tokens x rate`` — see `tokenjam.core.optimize.span_pricing`.
+    """
+    from tokenjam.core.optimize.span_pricing import SPAN_UTC_DAY_SQL, rates_at
 
     clauses = ["start_time >= $1", "start_time < $2",
                "provider IS NOT NULL", "model IS NOT NULL"]
@@ -328,17 +335,19 @@ def _window_avg_input_rate(conn, since, until, agent_id: str | None) -> float:
         params.append(agent_id)
     where = " AND ".join(clauses)
     rows = conn.execute(
-        f"SELECT provider, model, COALESCE(SUM(input_tokens), 0) "
-        f"FROM spans WHERE {where} GROUP BY provider, model",
+        f"SELECT provider, model, COALESCE(SUM(input_tokens), 0), "
+        f"MIN(start_time) "
+        f"FROM spans WHERE {where} "
+        f"GROUP BY provider, model, {SPAN_UTC_DAY_SQL}",
         params,
     ).fetchall()
     weighted = 0.0
     total = 0
-    for provider, model, in_tok in rows:
+    for provider, model, in_tok, day_start in rows:
         in_tok = int(in_tok or 0)
         if in_tok <= 0:
             continue
-        rates = get_rates(str(provider), str(model))
+        rates = rates_at(str(provider), str(model), day_start or since)
         if rates is None:
             continue
         weighted += rates.input_per_mtok * in_tok

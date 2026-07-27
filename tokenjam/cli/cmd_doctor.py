@@ -7,7 +7,7 @@ import duckdb
 from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
-from tokenjam.core.config import find_config_file, load_config
+from tokenjam.core.config import load_config, resolve_config_path
 from tokenjam.utils.formatting import console, display_path
 
 
@@ -28,7 +28,7 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     checks: list[dict] = []
 
     # 1. Config file found and valid
-    checks.append(_check_config())
+    checks.append(_check_config(ctx.obj.get("config_path_override")))
 
     # 2. DuckDB file writable
     checks.append(_check_db(config))
@@ -83,6 +83,9 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     # 17. Cost integrity — sessions.total_cost_usd vs SUM(spans.cost_usd)
     checks.append(_check_cost_integrity(ctx.obj["db"]))
 
+    # 18. Duplicate call ingest — one LLM call stored twice, once per observer
+    checks.append(_check_duplicate_call_ingest(ctx.obj["db"]))
+
     if output_json:
         click.echo(json.dumps(checks, default=str))
     else:
@@ -103,9 +106,16 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
         ctx.exit(0)
 
 
-def _check_config() -> dict:
+def _check_config(override: str | None = None) -> dict:
+    """Report which config file is live.
+
+    Takes the invocation's own `--config` value so `tj --config PATH doctor`
+    reports PATH: an explicit override never reaches the environment, so a
+    bare rediscovery here would name a different file while every other check
+    — which reads the config loaded from PATH — describes that one.
+    """
     try:
-        path = find_config_file()
+        path = resolve_config_path(override)
         if path is None:
             return {"name": "Config file", "level": "error",
                     "message": "No config file found. Run `tj onboard` to create one."}
@@ -428,6 +438,53 @@ def _check_cost_integrity(db: object) -> dict:
     }
 
 
+def _check_duplicate_call_ingest(db: object) -> dict:
+    """Flag LLM calls stored once per observer instead of once.
+
+    A session that ran while `tj serve` was up is observed live AND again when
+    its transcript is backfilled. Each path mints its own span_id, so the
+    store's span_id-keyed idempotency never sees the overlap and every cost
+    figure prices the call twice. Both ingest paths suppress this at write time
+    now, so a DB filled by a current build reports nothing here; a DB filled by
+    an older one still carries the doubled rows and reports a cost that is
+    simply too high. The repair drops the redundant observations and
+    reconciles the affected sessions, both idempotent.
+    """
+    from tokenjam.core.db import duplicate_call_observations
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Duplicate call ingest", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        spans, redundant_usd, worst = duplicate_call_observations(conn)
+    except duckdb.Error as e:
+        return {"name": "Duplicate call ingest", "level": "info",
+                "message": f"Skipped — could not inspect span provenance: {e}"}
+    if not spans:
+        return {"name": "Duplicate call ingest", "level": "ok",
+                "message": "No LLM call is stored more than once."}
+    biggest = ""
+    if worst:
+        session_id, session_spans, session_usd = worst[0]
+        biggest = (
+            f" Largest: session {session_id} carries {session_spans} redundant "
+            f"span(s) worth ${session_usd:,.2f}."
+        )
+    return {
+        "name": "Duplicate call ingest",
+        "level": "warning",
+        "message": (
+            f"{spans} span(s) restate an LLM call another ingest path already "
+            f"recorded, inflating reported cost by ${redundant_usd:,.2f}."
+            f"{biggest} Run `tj doctor --repair` to drop the restatements and "
+            f"reconcile the affected sessions."
+        ),
+        "repair_action": "drop_duplicate_calls",
+    }
+
+
 # Spans older than this are treated as a stalled connection. Claude Code /
 # Codex flush their OTLP exporter on a short interval while running, so during
 # any active session the newest span is minutes old at most. A 6h gap means
@@ -641,6 +698,39 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                 console.print(
                     f"  [green]Session costs reconciled — {count - after} of "
                     f"{count} session(s) now match their spans.[/green]"
+                )
+            continue
+        if action == "drop_duplicate_calls":
+            from tokenjam.core.db import purge_duplicate_call_observations
+
+            recompute = getattr(db, "recompute_session_totals_from_spans", None)
+            if conn is None or recompute is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                deleted, sessions = purge_duplicate_call_observations(conn)
+                # The delete moved SUM(spans) under rows nobody rewrote, so the
+                # affected sessions have to be reconciled or this repair simply
+                # trades one disagreement for another.
+                if sessions:
+                    recompute(sessions)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Duplicate-call repair failed — {e}. If the "
+                        f"database is locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                console.print(
+                    f"  [green]Dropped {deleted} restated observation(s) across "
+                    f"{len(sessions)} session(s); their totals were "
+                    f"reconciled.[/green]"
                 )
             continue
         if action == "rebuild_spans":

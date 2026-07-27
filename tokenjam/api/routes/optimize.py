@@ -175,6 +175,41 @@ def get_optimize(
     return payload
 
 
+@router.get("/optimize/analyzers", dependencies=[Depends(require_api_key)])
+def get_optimize_analyzers() -> dict[str, Any]:
+    """Which analyzers run for each persona — the resolved gate, not the map.
+
+    The dashboard's analyzer guide has to say "these are the checks that run
+    for your setup", which means enumerating the gate for a persona OTHER
+    than the one the current window happens to resolve to. `GET /optimize`
+    can only ever publish `persona_disabled_analyzers` for the stored
+    report's own persona, so a guide built on it would have had to re-declare
+    the gating map as a JS literal — the exact desync
+    `PERSONA_DISABLED_ANALYZERS` is a single source of truth to prevent.
+
+    Everything here is derived: `ANALYZER_REGISTRY` for what exists,
+    `disabled_analyzers_for_persona` for what each persona has no lever for,
+    and `runs` is the difference. `disabled` is the raw map entry, so it can
+    legitimately name a sub-check that is not itself a registry entry
+    (`placement`, which `downsize` attaches).
+
+    Static config, no corpus read: it answers identically on a cold store,
+    which is what lets the guide render before any scan has completed.
+    """
+    from tokenjam.core.framing import PERSONAS
+    from tokenjam.core.optimize import ANALYZER_REGISTRY
+
+    registered = sorted(ANALYZER_REGISTRY)
+    personas: dict[str, Any] = {}
+    for persona in PERSONAS:
+        disabled = disabled_analyzers_for_persona(persona)
+        personas[persona] = {
+            "runs": [name for name in registered if name not in disabled],
+            "disabled": sorted(disabled),
+        }
+    return {"registered": registered, "personas": personas}
+
+
 def _mix(fn: Any, conn: Any, since_dt: Any, until_dt: Any, agent_id: str | None) -> dict:
     """Best-effort mix query; `{}` when the storage layer exposes no connection
     (e.g. a proxy backend) rather than failing the whole read."""

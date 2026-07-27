@@ -192,6 +192,28 @@ output_per_mtok = 75.00
 cache_read_per_mtok = 1.50
 cache_write_per_mtok = 18.75
 
+# Claude 3.7 Sonnet. Still the dominant model in archived agent traces, which
+# arrive as `claude-3-7-sonnet-20250219` (date-stripped to this row) or
+# `anthropic/claude-3.7-sonnet` from a gateway.
+#
+# SOURCING — UNVERIFIED, and deliberately left flagged rather than given a
+# citation that would not survive a click. Retired 2026-02-19 (deprecated
+# 2025-10-28) per
+# https://platform.claude.com/docs/en/about-claude/model-deprecations, and
+# retirement removed it from https://platform.claude.com/docs/en/docs/about-claude/pricing,
+# which today lists no Claude 3.x Sonnet row at all. Checked 2026-07-27: absent
+# from that page, from https://aws.amazon.com/bedrock/pricing/ and from
+# https://cloud.google.com/vertex-ai/generative-ai/pricing; web.archive.org is
+# unreachable from this environment. The rates below are the widely-reported
+# last-published ones, carried forward for historical spans, but NO first-party
+# published page could be reached to confirm them. Re-verify against an
+# Anthropic-published archive before treating these four numbers as audited.
+[anthropic.claude-3-7-sonnet]
+input_per_mtok = 3.00
+output_per_mtok = 15.00
+cache_read_per_mtok = 0.30
+cache_write_per_mtok = 3.75
+
 # Claude Haiku 3.5 (retired except on Bedrock and Vertex)
 [anthropic.claude-haiku-3-5]
 input_per_mtok = 0.80
@@ -238,6 +260,16 @@ output_per_mtok = 180.00
 # ─── OpenAI (superseded, kept for historical spans) ─────────────────────────
 # gpt-4o / gpt-4o-mini / o3 / o4-mini are no longer on OpenAI's current pricing
 # page but still appear in older telemetry; rates retained as last-published.
+# GPT-4.1. Rates verified 2026-07-27 against OpenAI's own model page,
+# https://developers.openai.com/api/docs/models/gpt-4.1 — $2.00 input,
+# $0.50 cached input, $8.00 output per million tokens. (It is no longer on the
+# top-level https://developers.openai.com/api/docs/pricing table; the per-model
+# page still carries it.)
+[openai."gpt-4.1"]
+input_per_mtok = 2.00
+output_per_mtok = 8.00
+cache_read_per_mtok = 0.50
+
 [openai.gpt-4o]
 input_per_mtok = 2.50
 output_per_mtok = 10.00
@@ -253,6 +285,21 @@ output_per_mtok = 40.00
 [openai.o4-mini]
 input_per_mtok = 1.10
 output_per_mtok = 4.40
+
+# Gemini 2.0 Flash (shut down 2026-06-01, kept for historical spans). Arrives
+# as the dotted `gemini-2.0-flash`, resolved to this key by the version-dash
+# fallback in `get_rates`.
+#
+# SOURCING — rates captured 2026-07-27 from Google's own Gemini API pricing
+# page, https://ai.google.dev/gemini-api/docs/pricing, which still carries the
+# model under a deprecation warning: $0.10 per 1M input tokens (text/image/
+# video) and $0.40 per 1M output tokens. Note this is the Gemini API rate, NOT
+# Vertex AI's, which prices the same model differently
+# ($0.15/$0.60 at https://cloud.google.com/vertex-ai/generative-ai/pricing);
+# the corpus these rates were reconciled against is Gemini-API-sourced.
+[google.gemini-2-0-flash]
+input_per_mtok = 0.10
+output_per_mtok = 0.40
 
 [google.gemini-2-5-pro]
 input_per_mtok = 1.25

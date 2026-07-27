@@ -50,7 +50,7 @@ from typing import Any
 from tokenjam.core.optimize.analyzers.workflow_restructure import _arg_signature
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
-from tokenjam.core.pricing import get_rates
+from tokenjam.core.optimize.span_pricing import rates_at, span_instant
 from tokenjam.otel.semconv import GenAIAttributes
 
 # A task-shape cohort needs at least this many sessions before its median is a
@@ -225,7 +225,8 @@ def run(ctx: AnalyzerContext) -> None:
         f"MIN(provider) AS provider, "
         f"MODE(model) AS model, "
         f"COALESCE(SUM(output_tokens), 0) AS output_tokens, "
-        f"COALESCE(SUM(input_tokens), 0) AS input_tokens "
+        f"COALESCE(SUM(input_tokens), 0) AS input_tokens, "
+        f"MIN(start_time) AS started_at "
         f"FROM spans WHERE {where} AND model IS NOT NULL "
         f"GROUP BY session_id",
         params,
@@ -259,10 +260,14 @@ def run(ctx: AnalyzerContext) -> None:
         output_tokens: int
         input_tokens: int
         signature: tuple[tuple[str, tuple[str, ...]], ...]
+        # When the session started — the instant its output is priced at, so a
+        # window that straddles a rate change bills each session at the rate
+        # that actually billed it rather than at today's list price.
+        started_at: Any
 
     sessions: list[_Session] = []
     for row in llm_rows:
-        session_id, agent_id, provider, model, out_tok, in_tok = row
+        session_id, agent_id, provider, model, out_tok, in_tok, started_at = row
         if not model:
             continue
         sig = tuple(session_signatures.get(str(session_id), []))
@@ -274,6 +279,7 @@ def run(ctx: AnalyzerContext) -> None:
             output_tokens=int(out_tok or 0),
             input_tokens=int(in_tok or 0),
             signature=sig,
+            started_at=started_at,
         ))
 
     finding.sessions_examined = len(sessions)
@@ -308,7 +314,10 @@ def run(ctx: AnalyzerContext) -> None:
             over = int(round(m.output_tokens - median))
             if over <= 0:
                 continue
-            rates = get_rates(m.provider or "", m.model)
+            rates = rates_at(
+                m.provider, m.model,
+                span_instant(m.started_at, window_start=ctx.since),
+            )
             recoverable_usd: float | None = None
             if rates is not None:
                 recoverable_usd = round(

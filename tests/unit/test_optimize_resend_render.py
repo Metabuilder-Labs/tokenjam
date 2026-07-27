@@ -187,14 +187,23 @@ def test_render_resend_recurring_examples_reuse_context_labels(db, capsys):
 
 def test_render_resend_no_dollar_figure_when_no_priced_example(db, capsys):
     """A fully-cached session recovers no USD (already captured by
-    cache_efficacy's own figure) but still recovers tokens -- api mode must
-    say why the dollar figure is absent rather than silently print nothing."""
+    cache_efficacy's own figure) -- api mode must say why the dollar figure is
+    absent rather than silently print nothing.
+
+    Inverted (Critical Rule 23): this used to assert that a token figure
+    survived on its own when the dollar figure did not. That asymmetry is
+    exactly what Rule 28 corollary (a) forbids, and the suite was enforcing it.
+    The recoverable PAIR now degrades together; what the card must not do is go
+    quiet, so the compaction lever's own separate estimate takes over the line
+    and says which lever it prices.
+    """
     from tokenjam.cli.cmd_optimize import _render_resend
 
     _seed_heavy_resend(db, cache_ratio=1.0)
     _, finding = _run(db)
     assert finding.past_overspend_usd is None
-    assert finding.past_overspend_tokens
+    assert finding.past_overspend_tokens is None
+    assert finding.compaction_avoidable_tokens
 
     _render_resend(finding, pricing_mode="api", marker="①")
     out = capsys.readouterr().out
@@ -203,6 +212,9 @@ def test_render_resend_no_dollar_figure_when_no_priced_example(db, capsys):
     # Never suppressed silently: the reason names the actual mechanism (the
     # cache_control lever specifically), not a bare "no data" shrug.
     assert "cache_control" in out
+    # And the surviving token estimate is labelled with the lever it prices,
+    # never presented as the missing recoverable figure.
+    assert "Compaction lever" in out
 
 
 # --------------------------------------------------------------------------- #

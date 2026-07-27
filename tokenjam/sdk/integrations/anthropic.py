@@ -12,7 +12,7 @@ from typing import Any
 
 from opentelemetry import trace
 
-from tokenjam.otel.semconv import GenAIAttributes
+from tokenjam.otel.semconv import GenAIAttributes, TjAttributes
 from tokenjam.sdk.attribution import stamp_span_attribution
 from tokenjam.sdk.integrations._request_capture import (
     extract_anthropic_completion,
@@ -22,6 +22,20 @@ from tokenjam.sdk.integrations._request_capture import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _record_response_id(span, response: Any) -> None:
+    """Stamp the provider's own id for this response onto the span.
+
+    The id (`msg_...`) names the API CALL rather than this observation of it,
+    so a second observer of the same call — a transcript backfill, a sibling
+    exporter — can be recognised as a restatement instead of counted again.
+    See `core.optimize.accounting`. Best-effort: a response object without an
+    id just leaves the span unstamped, which is what every span carried before.
+    """
+    response_id = getattr(response, "id", None)
+    if isinstance(response_id, str) and response_id:
+        span.set_attribute(GenAIAttributes.RESPONSE_ID, response_id)
 
 
 class AnthropicIntegration:
@@ -80,6 +94,7 @@ class AnthropicIntegration:
                     span.set_attribute(GenAIAttributes.CONVERSATION_ID, conv_id)
             try:
                 response = integration._original_create(self_msg, *args, **kwargs)
+                _record_response_id(span, response)
                 if hasattr(response, "usage"):
                     span.set_attribute(
                         GenAIAttributes.INPUT_TOKENS,
@@ -180,29 +195,81 @@ class AnthropicIntegration:
         self.installed = False
 
 
+def _event_carries_content(event: Any) -> bool:
+    """True when a streamed event delivered generated output to the caller.
+
+    Structural and defensive — an unrecognised event shape counts as no content
+    rather than raising into the caller's iteration.
+    """
+    delta = getattr(event, "delta", None)
+    if delta is None:
+        return False
+    return bool(getattr(delta, "text", None) or getattr(delta, "partial_json", None))
+
+
 class _StreamWrapper:
-    """Wraps an Anthropic stream to capture final usage and end the span."""
+    """Wraps an Anthropic stream to capture final usage and end the span.
+
+    Also records the streaming data-quality signature (see
+    ``TjAttributes.STREAMING``). Anthropic reports output tokens only in the
+    trailing ``message_delta`` / ``message_stop`` pair, which
+    ``get_final_message()`` reads — so a caller that breaks out of the loop or
+    is disconnected mid-response leaves this span with no token counts, which
+    is indistinguishable from a free call unless the span says so itself.
+    """
 
     def __init__(self, stream, span):
         self._stream = stream
         self._span = span
+        self._content_events = 0
 
     def __enter__(self):
         self._stream.__enter__()
         return self
 
+    def _final_message(self) -> Any:
+        """The stream's final message, or None when the stream never finished.
+
+        ``get_final_message()`` raises when the stream was not consumed to
+        completion, which is exactly the case being detected — so the raise is
+        an answer, not an error, and must not escape ``__exit__``.
+        """
+        getter = getattr(self._stream, "get_final_message", None)
+        if getter is None:
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         result = self._stream.__exit__(exc_type, exc_val, exc_tb)
-        final_message = getattr(self._stream, "get_final_message", lambda: None)()
-        if final_message and hasattr(final_message, "usage"):
+        # One message serves two purposes: it names the API call (so a second
+        # observer of the same call is recognised as a restatement rather than
+        # counted again) and it carries the trailing usage. Absent it, both
+        # facts are simply unknown — which is itself recorded below.
+        final_message = self._final_message()
+        if final_message is not None:
+            _record_response_id(self._span, final_message)
+        usage = getattr(final_message, "usage", None)
+        if usage is not None:
             self._span.set_attribute(
                 GenAIAttributes.INPUT_TOKENS,
-                final_message.usage.input_tokens,
+                usage.input_tokens,
             )
             self._span.set_attribute(
                 GenAIAttributes.OUTPUT_TOKENS,
-                final_message.usage.output_tokens,
+                usage.output_tokens,
             )
+        # Stamped unconditionally, including on the happy path: the analyzer
+        # needs the complete streams as the peer baseline it estimates the
+        # missing ones against, so "usage reported" is as load-bearing a fact
+        # as "usage missing".
+        self._span.set_attribute(TjAttributes.STREAMING, True)
+        self._span.set_attribute(TjAttributes.STREAM_USAGE_REPORTED, usage is not None)
+        self._span.set_attribute(
+            TjAttributes.STREAM_CONTENT_CHUNKS, self._content_events,
+        )
         if exc_type is None:
             self._span.set_status(trace.Status(trace.StatusCode.OK))
         else:
@@ -211,10 +278,16 @@ class _StreamWrapper:
         return result
 
     def __iter__(self):
-        return iter(self._stream)
+        for event in self._stream:
+            if _event_carries_content(event):
+                self._content_events += 1
+            yield event
 
     def __next__(self):
-        return next(self._stream)
+        event = next(self._stream)
+        if _event_carries_content(event):
+            self._content_events += 1
+        return event
 
 
 def patch_anthropic() -> None:

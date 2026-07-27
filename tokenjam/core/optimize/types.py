@@ -304,13 +304,35 @@ class ReuseCluster:
     caveat:            str = REUSE_HONESTY_CAVEAT
 
 
+#: Capture modes whose clusters were built, wholly or partly, on tool
+#: signature alone. Every surface that shows a reuse finding must warn on ALL
+#: of these — branching on `== "tool_sequence_only"` is how the partial case
+#: silently rendered as the confident, unqualified path.
+DEGRADED_CAPTURE_MODES = frozenset({"tool_sequence_only", "mixed_prompt_prefix"})
+
+
 @dataclass
 class ReuseFinding:
     """Clusters of sessions with structurally repeated planning calls."""
     clusters:      list[ReuseCluster] = field(default_factory=list)
-    capture_mode:  Literal["tool_sequence_only", "with_prompt_prefix"] = (
-        "tool_sequence_only"
-    )
+    # What clustering ACTUALLY ran on, derived from the analyzed window — never
+    # from the `[capture] prompts` toggle. Echoing the toggle let a report
+    # declare "with_prompt_prefix" while every cluster member's
+    # `prompt_prefix_hash` was None, i.e. advertise content matching while
+    # silently degrading to tool-signature-only clustering.
+    # `mixed_prompt_prefix` is the partially-degraded middle: SOME planning
+    # calls carried prompt text and the rest were clustered on tool signature
+    # alone, so the window's clusters do not share one basis. Collapsing it
+    # into `with_prompt_prefix` (the old behavior — any nonzero coverage) made
+    # a partly tool-signature-only result advertise full content matching,
+    # while the basis string on the same finding said the opposite.
+    capture_mode:  Literal[
+        "tool_sequence_only", "mixed_prompt_prefix", "with_prompt_prefix"
+    ] = "tool_sequence_only"
+    # Measured share of the window's planning calls that carried prompt text,
+    # 0.0-1.0. `None` means "no planning call to measure", never 0.0 — the
+    # difference between an unanswered question and a measured absence.
+    prompt_capture_coverage: float | None = None
     # Recoverable-savings contract (#111). The aggregate uses the conservative
     # cache-reuse number (avg cost x (reps - 1)), never the script-replacement
     # upper bound (avg cost x reps): the first planning call in a cluster was
@@ -351,6 +373,15 @@ class OptimizeReport:
     # (e.g. `cost_proposals.cost_proposals_from_report`) never has to
     # recompute it from a bare `conn`.
     persona:   str = "unknown"
+    # Why the filesystem-reading analyzers (deadweight, relearn, summarize)
+    # scanned nothing, when they scanned nothing — see
+    # `core/optimize/scope.py`. `None` means they DID scan, which is a
+    # different statement from "scanned and found nothing" and must render
+    # differently (root anti-pattern 22): an empty deadweight finding under a
+    # suppressed scope reads as "no dead MCP servers" when the truth is that
+    # no config was ever looked at. One field on the report rather than one
+    # per finding, so every surface reads the same answer.
+    filesystem_scan_skipped_reason: str | None = None
 
 
 @dataclass
@@ -383,6 +414,13 @@ class AnalyzerContext:
     # looking at an SDK caller (e.g. deciding fix modality) read it here
     # instead of re-deriving it from `conn`.
     persona:                str            = "unknown"
+    # Which filesystem the filesystem-reading analyzers (deadweight, relearn,
+    # summarize) may read, and why. Resolved once in `runner.build_report` via
+    # `core.optimize.scope.resolve_analyzer_scope` — an analyzer must never
+    # re-derive a root from `Path.home()` or the env var itself, or `--db`
+    # stops isolating it. `None` only in a hand-built context (tests): treat it
+    # as the unscoped default. See `core/optimize/scope.py` for the contract.
+    scope:                  Any            = None
 
 
 # ---------------------------------------------------------------------------

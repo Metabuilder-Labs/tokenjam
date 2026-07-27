@@ -132,6 +132,51 @@ def test_rollup_counts_the_subagent_tokens_exactly_once(db):
     assert rollup["past_overspend_usd"] <= MAIN_COST + SUB_COST
 
 
+def test_downsize_still_excludes_a_high_output_subagent_after_gate_fix(db):
+    """The over_powered gate no longer requires small output (it used to make
+    a full-agent-loop subagent, the worst offender, LESS eligible to be
+    flagged — CLAUDE.md Critical Rule 29's inversion). Guard that this change
+    does not reopen the downsize/subagent overlap: `downsize`'s exclusion is
+    a `sub_agent_id IS NULL` column filter, structurally independent of the
+    subagent analyzer's flag shape, so a big-output dispatch must still be
+    fully invisible to `downsize`."""
+    start = utcnow() - timedelta(days=2)
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=MAIN_INPUT, output_tokens=MAIN_OUTPUT, cost_usd=MAIN_COST,
+        session_id="s1", sub_agent_id=None, start_time=start,
+    ))
+    # A full-agent-loop-shaped dispatch: large output, few tool calls -> now
+    # flagged over_powered (previously invisible), still must not leak into
+    # downsize's main-thread claim.
+    db.insert_span(make_llm_span(
+        agent_id="claude-code-x", model="claude-opus-4-7", provider="anthropic",
+        input_tokens=4_000, output_tokens=50_000, cost_usd=8.0,
+        session_id="s1", sub_agent_id="researcher", start_time=start,
+    ))
+    since, until = _window()
+    finding = analyze_model_downgrade(db.conn, since, until, None, 30.0)
+    assert finding is not None
+    assert finding.past_overspend_tokens == MAIN_INPUT + MAIN_OUTPUT
+    assert finding.actual_cost_usd == pytest.approx(MAIN_COST, abs=1e-6)
+
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["downsize", "subagent"],
+    )
+    subagent_finding = report.findings["subagent"]
+    big = next(r for r in subagent_finding.flagged if r.sub_agent_id == "researcher")
+    assert "over_powered" in big.flags  # proves the gate fix actually fires here
+
+    proposals = cost_proposals_from_report(report, None, window_days=30.0)
+    downsize_tokens = sum(
+        (p.gross_recoverable_tokens if p.gross_recoverable_tokens is not None
+         else (p.past_overspend_tokens or 0))
+        for p in proposals if p.analyzer == "downsize"
+    )
+    assert downsize_tokens == MAIN_INPUT + MAIN_OUTPUT
+
+
 # --- resend's compound offload claim vs the subagent card --------------------
 # Same class of guard, third pair. `resend` prices the re-read tail that
 # offloading main-thread work removes, plus the right-sizing delta on that same

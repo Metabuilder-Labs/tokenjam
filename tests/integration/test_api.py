@@ -1118,7 +1118,7 @@ async def test_post_budget_zero_clears_limit(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+    with patch("tokenjam.api.routes.budget.resolve_config_path", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post("/api/v1/budget", json={"scope": "my-agent", "daily_usd": 0})
@@ -1165,7 +1165,7 @@ async def test_post_provider_budget_creates_new_ceiling(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+    with patch("tokenjam.api.routes.budget.resolve_config_path", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post(
@@ -1195,7 +1195,7 @@ async def test_post_provider_budget_zero_clears_ceiling_but_keeps_cycle(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+    with patch("tokenjam.api.routes.budget.resolve_config_path", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post("/api/v1/budget/provider", json={"provider": "anthropic", "usd": 0})
@@ -1204,6 +1204,86 @@ async def test_post_provider_budget_zero_clears_ceiling_but_keeps_cycle(db):
     pb = resp.json()["provider_budgets"]["anthropic"]
     assert pb["usd"] is None
     assert pb["cycle_start_day"] == 15  # untouched field survives
+
+
+async def test_post_budget_writes_to_tj_config_file_not_search_path(db, tmp_path, monkeypatch):
+    """POST /budget must write to the file `TJ_CONFIG` points at, not a
+    search-path config — the split-brain hazard `_warn_if_secrets_diverge`
+    already warns about, but for budget writes rather than ingest_secret."""
+    tj_config_file = tmp_path / "tj_config" / "custom.toml"
+    tj_config_file.parent.mkdir(parents=True)
+    tj_config_file.write_text("")
+    search_path_file = tmp_path / "search_path" / ".tj" / "config.toml"
+    search_path_file.parent.mkdir(parents=True)
+    search_path_file.write_text("")
+
+    monkeypatch.setenv("TJ_CONFIG", str(tj_config_file))
+    import tokenjam.core.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+        tmp_path / "tokenjam.toml",
+        search_path_file,
+        tmp_path / "global" / "config.toml",
+    ])
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        agents={"my-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0))},
+    )
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.write_config") as mock_write:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post("/api/v1/budget", json={"scope": "my-agent", "daily_usd": 3.0})
+
+    assert resp.status_code == 200
+    assert mock_write.called
+    written_path = mock_write.call_args[0][1]
+    assert written_path == tj_config_file
+    assert written_path != search_path_file
+
+
+async def test_post_provider_budget_writes_to_tj_config_file_not_search_path(db, tmp_path, monkeypatch):
+    """POST /budget/provider — same split-brain hazard, second write site."""
+    tj_config_file = tmp_path / "tj_config" / "custom.toml"
+    tj_config_file.parent.mkdir(parents=True)
+    tj_config_file.write_text("")
+    search_path_file = tmp_path / "search_path" / ".tj" / "config.toml"
+    search_path_file.parent.mkdir(parents=True)
+    search_path_file.write_text("")
+
+    monkeypatch.setenv("TJ_CONFIG", str(tj_config_file))
+    import tokenjam.core.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "SEARCH_PATHS", [
+        tmp_path / "tokenjam.toml",
+        search_path_file,
+        tmp_path / "global" / "config.toml",
+    ])
+
+    cfg = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret=INGEST_SECRET),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.write_config") as mock_write:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/budget/provider",
+                json={"provider": "anthropic", "usd": 250.0},
+            )
+
+    assert resp.status_code == 200
+    assert mock_write.called
+    written_path = mock_write.call_args[0][1]
+    assert written_path == tj_config_file
+    assert written_path != search_path_file
 
 
 async def test_post_provider_budget_rejects_invalid_cycle_start_day(db):
@@ -1216,7 +1296,7 @@ async def test_post_provider_budget_rejects_invalid_cycle_start_day(db):
     app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
     transport = httpx.ASGITransport(app=app)
 
-    with patch("tokenjam.api.routes.budget.find_config_file", return_value="/fake/tj.toml"), \
+    with patch("tokenjam.api.routes.budget.resolve_config_path", return_value="/fake/tj.toml"), \
          patch("tokenjam.api.routes.budget.write_config"):
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
             resp = await c.post(
@@ -3334,3 +3414,38 @@ async def test_approach_cross_terminal_child_session_level_only(
     assert child_agents[0]["capture_completeness"] == "session_level"
     # No method -> nothing spliced into the spine list.
     assert body["cross_terminal"] == []
+
+
+async def test_post_budget_persists_to_the_path_the_config_was_loaded_from(db):
+    """A budget mutation must be serialized back to the file the DAEMON'S
+    config came from, not to a path rediscovered inside the request.
+
+    `tj serve --config PATH` puts an explicit path on the running app that no
+    rediscovery in this process can see: TJ_CONFIG and the search path point
+    somewhere else entirely. Re-deriving here overwrote that unrelated file
+    while leaving the config the daemon actually reads unchanged.
+    """
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from tokenjam.core.config import SecurityConfig, TjConfig
+    from tokenjam.core.ingest import IngestPipeline
+
+    loaded_from = Path("/loaded/from/tj.toml")
+    cfg = TjConfig(version="1", security=SecurityConfig(ingest_secret=INGEST_SECRET))
+    cfg.config_path = loaded_from
+    pipeline = IngestPipeline(db=db, config=cfg)
+    app = create_app(config=cfg, db=db, ingest_pipeline=pipeline)
+    transport = httpx.ASGITransport(app=app)
+
+    with patch("tokenjam.api.routes.budget.resolve_config_path",
+               return_value="/rediscovered/elsewhere.toml"), \
+         patch("tokenjam.api.routes.budget.write_config") as mock_write:
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.post(
+                "/api/v1/budget", json={"scope": "defaults", "daily_usd": 9.0}
+            )
+
+    assert resp.status_code == 200
+    assert mock_write.called
+    assert Path(mock_write.call_args[0][1]) == loaded_from

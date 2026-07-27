@@ -318,28 +318,32 @@ def is_placeholder_fix(text: str) -> bool:
     return any(p.search(stripped) for p in _PLACEHOLDER_PATTERNS)
 
 
-#: Path fragments whose files are loaded ON DEMAND, not on every session: a
-#: skill body loads when that skill is invoked, a command when it is typed, an
-#: agent definition when it is dispatched. Only their frontmatter description
-#: is always in context, so they are measured at the same
-#: ``SKILL_ALWAYS_LOADED_CHARS`` bound a rung-2 write is charged at. Measuring
-#: their full body would count a 160 KB skill library as always-on context and
-#: slam the budget shut for everyone.
-_ON_DEMAND_PATH_FRAGMENTS = ("/skills/", "/commands/", "/agents/")
-
-
-def _always_loaded_chars(path: str, total_chars: int) -> int:
+def _always_loaded_chars(candidate: object) -> int:
     """How much of one catalog file is re-sent on EVERY session.
 
     The same always-loaded model :func:`standing_tokens_per_session` charges a
     NEW write at, applied to the files that already exist. Measuring the
     existing footprint one way and pricing the new write another would let the
     budget compare two different quantities.
+
+    Prefers the MEASURED frontmatter size the ``summarize`` scan now carries
+    (``always_resident_chars``, from ``core/summarize/load_semantics`` — the
+    single source of truth for the read side too). Falls back to classifying
+    the path and applying the ``SKILL_ALWAYS_LOADED_CHARS`` bound for a
+    candidate that predates that field, so an older serialized report still
+    sizes the budget the way it always did.
     """
-    normalised = path.replace("\\", "/")
-    if any(fragment in normalised for fragment in _ON_DEMAND_PATH_FRAGMENTS):
-        return min(total_chars, SKILL_ALWAYS_LOADED_CHARS)
-    return total_chars
+    from tokenjam.core.summarize import load_semantics
+
+    total_chars = int(getattr(candidate, "total_chars", 0) or 0)
+    path = str(getattr(candidate, "path", "") or "")
+    measured = getattr(candidate, "always_resident_chars", None)
+    load_class = load_semantics.classify(path)
+    if load_class not in load_semantics.ON_DEMAND_CLASSES:
+        return total_chars
+    if measured:
+        return min(int(measured), total_chars)
+    return min(total_chars, SKILL_ALWAYS_LOADED_CHARS)
 
 
 def measured_agent_file_tokens(summarize_finding: object | None) -> int | None:
@@ -365,12 +369,7 @@ def measured_agent_file_tokens(summarize_finding: object | None) -> int | None:
     candidates = getattr(summarize_finding, "candidates", None) or []
     if not candidates:
         return None
-    total_chars = sum(
-        _always_loaded_chars(
-            str(getattr(c, "path", "") or ""), int(getattr(c, "total_chars", 0) or 0),
-        )
-        for c in candidates
-    )
+    total_chars = sum(_always_loaded_chars(c) for c in candidates)
     if total_chars <= 0:
         return None
     return tokens_from_chars(total_chars)

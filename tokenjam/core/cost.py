@@ -43,6 +43,16 @@ def calculate_cost(
     now, which is what a live call wants). `variant` is how it was bought —
     `fast` mode and the Batch API bill the same model id at different rates.
 
+    **That `at=None` default is for LIVE callers only.** Ingest is the reference
+    use: `CostEngine.process_span` below passes `at=span.start_time` and
+    `variant=rate_variant_for_span(span)`, so a cost computed once at write time
+    never moves under a later rate change. Anything reading BACKWARDS — every
+    optimize analyzer — must pass the instant explicitly, and goes through
+    :mod:`tokenjam.core.optimize.span_pricing`, which makes it a required
+    argument and states the aggregation convention (price each span at its own
+    timestamp, then sum; never price an aggregate at a single date). Do not add
+    a new backward-looking caller here that relies on the default.
+
     Returns cost rounded to 8 decimal places.
     Falls back to default rates if the provider/model is not in the pricing table.
     Logs a warning on fallback so developers know to add the model.

@@ -72,6 +72,19 @@ class NormalizedSpan:
     # main-thread spans and non-Claude-Code telemetry. Lets a session's cost be
     # broken down per subagent.
     sub_agent_id:   str | None     = None
+    # The subagent's STABLE identity: the agent TYPE that was dispatched (the
+    # `subagent_type` argument of the spawning Task/Agent call, e.g.
+    # `general-purpose` / `Explore` / a user-defined `.claude/agents/<name>.md`
+    # slug). Distinct from `sub_agent_id` above, which Claude Code mints per
+    # DISPATCH: it is unique to one dispatch and so appears in exactly one
+    # session, which means it can neither form a per-subagent cohort across
+    # sessions nor name anything on disk. This field is the identity that
+    # recurs. Read at backfill time off Claude Code's
+    # `agent-<id>.meta.json` sidecar (`agentType`); None for main-thread spans,
+    # non-Claude-Code telemetry, and dispatches whose "type" is a caller-chosen
+    # per-dispatch instance label rather than a reusable definition name (see
+    # `backfill._subagent_type_for`).
+    sub_agent_type: str | None     = None
     end_time:       datetime | None = None
     duration_ms:    float | None   = None
     status_message: str | None     = None

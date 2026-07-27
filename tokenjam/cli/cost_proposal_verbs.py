@@ -144,10 +144,13 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
         return
 
     applied_sigs = {
-        rec.get("signature") for rec in cost_apply.list_applied(config)
+        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
         if rec.get("state") != "reverted"
     }
-    open_proposals = [p for p in proposals if p.get("signature") not in applied_sigs]
+    open_proposals = [
+        p for p in proposals
+        if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
+    ]
 
     # THE CLI HEADLINE COVERS THE SAME POPULATION AS THE WEB ONE. The web
     # Review inbox's headline (`GET /relearn/cost-proposals`) sums the open
@@ -206,7 +209,8 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
             )
 
     for i, p in enumerate(proposals, start=1):
-        _render_cost_proposal(p, framing, i, applied=p.get("signature") in applied_sigs)
+        applied = cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
+        _render_cost_proposal(p, framing, i, applied=applied)
         console.print()
 
     if any(not p.get("apply_capable") for p in proposals):

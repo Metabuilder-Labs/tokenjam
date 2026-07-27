@@ -93,6 +93,38 @@ def list_applied(config: Any) -> list[dict]:
     return _load_ledger(config)
 
 
+def signature_is_applied(signature: str, applied_sigs: set[str]) -> bool:
+    """Whether ``signature`` should read as already applied against
+    ``applied_sigs`` (the signatures on non-reverted ``cost_applied.json``
+    records).
+
+    Exact match is the common case. One legacy fallback exists: the
+    ``downsize`` per-agent proposal signature has been through TWO formats.
+    It started as agent-only (``cost:downsize:<agent>``), then grew to
+    ``cost:downsize:<agent>:<provider>:<model>:<alt_model>`` (see
+    ``_downsize_agent_proposals`` in ``cost_proposals.py``) so that an agent
+    running two over-sized models gets two distinct signatures instead of
+    colliding in ``past_overspend_rollup``'s dedup-by-signature. That change
+    deliberately did not migrate the stored ledger (its own commit message
+    says so): "an existing apply/dismiss on one of them will not match after
+    the upgrade." A mark recorded under the OLD agent-only signature must
+    still count as "applied" for every model-qualified signature of that same
+    agent -- there is no way to tell, after the fact, which of an agent's
+    model rows the mark was originally for, and reading it as "still open"
+    would wrongly re-nag the user for a fix they already told tokenjam about.
+    This resolves that ambiguity toward "still applied" (the same ambiguity
+    the old signature already had, just carried forward) rather than
+    surprising the user by reopening a fixed card.
+    """
+    if signature in applied_sigs:
+        return True
+    parts = signature.split(":")
+    if len(parts) >= 3 and parts[0] == "cost" and parts[1] == "downsize":
+        legacy = ":".join(parts[:3])
+        return legacy in applied_sigs
+    return False
+
+
 def get_applied(config: Any, record_id: str) -> dict | None:
     for rec in _load_ledger(config):
         if rec.get("id") == record_id:
@@ -125,7 +157,10 @@ def mark_applied(
         raise CostApplyRefused("proposal has no signature.")
 
     for rec in _load_ledger(config):
-        if rec.get("signature") == signature and rec.get("state") != "reverted":
+        if rec.get("state") == "reverted":
+            continue
+        rec_signature = str(rec.get("signature") or "")
+        if signature_is_applied(signature, {rec_signature}):
             return rec  # already marked — don't double-mark or double-count
 
     agent_id = str(proposal.get("agent_id") or "").strip() or None

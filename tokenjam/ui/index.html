@@ -1016,6 +1016,22 @@ a.health-tile.attn { border-color: var(--warn); }
 .opt-table tr.flagged td { color: var(--warn); }
 .opt-caveat { font-size: 12px; font-style: italic; color: var(--warn); margin-top: 10px; }
 
+/* Analyzer guide (Observe ▸ Optimize ▸ Guide). Reading surface, not a data
+   surface: one column capped at a comfortable measure, generous leading. It
+   reuses .opt-section for the card frame so it can never drift from the
+   Optimize cards it explains. */
+.guide-prose { font-size: 13.5px; line-height: 1.65; color: var(--text); max-width: 74ch; margin: 6px 0; }
+.guide-prose.dim { color: var(--text-dim); }
+.guide-lead { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-dim); margin: 12px 0 2px; }
+.guide-name { font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); font-weight: 400; }
+/* The downsize-vs-subagent contrast. Accented because telling those two apart
+   is the single question this page exists to answer. */
+.guide-key { border-left: 3px solid var(--accent); background: var(--surface2); border-radius: 0 8px 8px 0; padding: 14px 18px; margin-bottom: 14px; }
+.guide-banner { font-size: 13px; line-height: 1.6; color: var(--text-dim); background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; margin-bottom: 14px; max-width: 74ch; }
+.guide-hidden-list { list-style: none; padding: 0; margin: 8px 0 0; }
+.guide-hidden-list li { font-size: 13px; line-height: 1.6; color: var(--text-dim); padding: 4px 0; border-bottom: 1px solid var(--border); }
+.guide-hidden-list li:last-child { border-bottom: 0; }
+
 /* Session Story */
 .story-callout {
   background: var(--surface2);
@@ -1515,6 +1531,11 @@ code.md-code {
 .sidebar a.nav-child { display: none; padding-left: 38px; font-size: 13px; color: var(--text-faint); }
 .sidebar a.nav-child.active { color: var(--accent); }
 .sidebar a.nav-child .icon { font-size: 12px; opacity: .6; }
+/* A reference entry: always visible (NOT a nav-child), but set apart from the
+   live data views above it by a rule and a quieter weight. No `display` rule
+   here on purpose — nothing may make this conditional on the active view. */
+.sidebar a.nav-reference { margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--border); color: var(--text-dim); }
+.sidebar a.nav-reference .icon { opacity: .7; }
 .nav-badge { font-size: 9px; letter-spacing: .04em; text-transform: uppercase; border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; color: var(--text-faint); margin-left: auto; }
 .sz-link { color: var(--brand); cursor: pointer; text-decoration: none; }
 .sz-link:hover { text-decoration: underline; }
@@ -1715,6 +1736,18 @@ code.md-code {
   <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="observe"><span class="icon">&#9889;</span> Optimize</a>
   <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="observe"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
   <a href="#/budget" class="nav-link" data-view="budget" data-lens="observe"><span class="icon">$</span> Budget</a>
+  <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
+       parent section is the active view (see App()'s route effect), so as a
+       child of Optimize this entry was invisible from Traces / Cost / Alerts /
+       Drift / Budget — i.e. from everywhere except the one screen whose output
+       you already had in front of you, which is exactly when you least need to
+       be told what the analyzers are. The route resolved and something did
+       link to it, but only conditionally, and "a user has a path to it" has to
+       hold from wherever the user actually is.
+       Last in the Observe group and separated, because it is a reference page
+       rather than a live data view: it reads no window, has no filters, and
+       does not belong interleaved with the screens that do. -->
+  <a href="#/guide" class="nav-link nav-reference" data-view="guide" data-lens="observe"><span class="icon">?</span> Analyzer guide</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
     <a href="https://github.com/Metabuilder-Labs/tokenjam" target="_blank" class="footer-link"><span class="icon">&#x2197;</span> GitHub</a>
@@ -6908,6 +6941,26 @@ function capitalize(name) {
 // Summarize) is byte-identical; the Dashboard passes fmtDashUsd so its
 // Recoverable-waste tiles stay at most 2dp without changing this formatter's
 // precision anywhere else it's used.
+// Reuse clustering runs on prompt prefixes, tool sequences, or a mix of both.
+// Anything short of full prompt capture must SAY so: a window where only some
+// planning calls carried prompt text was previously indistinguishable from one
+// where they all did, because the check tested only for the all-degraded value.
+const DEGRADED_CAPTURE_MODES = ['tool_sequence_only', 'mixed_prompt_prefix'];
+
+function isDegradedCapture(mode) {
+  return DEGRADED_CAPTURE_MODES.includes(mode);
+}
+
+function captureModeNote(mode) {
+  if (mode === 'tool_sequence_only') {
+    return ' (tool-sequence only: no prompt text was captured for these calls)';
+  }
+  if (mode === 'mixed_prompt_prefix') {
+    return ' (mixed basis: only some of these calls carried prompt text; the rest matched on tool sequence alone)';
+  }
+  return '';
+}
+
 function fmtFramedSavings(usd, tokens, framing, dollarFmt = fmtCost) {
   // `framing == null` means "not yet known" (the read that would carry it
   // hasn't landed), NOT "no suppression needed" — dollarsSuppressed(null)
@@ -7492,7 +7545,8 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
         : html`<div class="opt-line dim">No bloat regions above threshold.</div>`;
     } else if (name === 'reuse') {
       body = (fd.clusters || []).length ? html`
-        <div class="opt-line">${fd.clusters.length} cluster${fd.clusters.length !== 1 ? 's' : ''} of repeated planning detected${fd.capture_mode === 'tool_sequence_only' ? ' (tool-sequence only: enable capture.prompts for finer clustering)' : ''}.</div>
+        <div class="opt-line">${fd.clusters.length} cluster${fd.clusters.length !== 1 ? 's' : ''} of repeated planning detected${captureModeNote(fd.capture_mode)}.</div>
+        ${isDegradedCapture(fd.capture_mode) && fd.hint ? html`<div class="opt-line dim">${fd.hint}</div>` : null}
         <table class="opt-table"><thead><tr><th>Repeats</th><th>Signature</th><th>Reuse</th><th>Script</th></tr></thead>
           <tbody>${fd.clusters.slice(0, 5).map(c => html`<tr><td>${c.repetitions}×</td><td class="mono">${(c.tool_signature || []).join(' → ').slice(0, 60)}</td><td>${fmtFramedSavings(c.cache_reuse_recoverable_usd, c.cache_reuse_recoverable_tokens, framing)}</td><td>${fmtFramedSavings(c.script_replacement_recoverable_usd, c.script_replacement_recoverable_tokens, framing)}</td></tr>`)}</tbody></table>
         ${fd.clusters[0].caveat ? html`<div class="opt-caveat">! ${fd.clusters[0].caveat}</div>` : null}`
@@ -7675,8 +7729,16 @@ function OptimizeView({ params }) {
   const sfPctApplied = sfTotal > 0 ? Math.round(sfApplied / sfTotal * 100) : 0;
 
   return html`
+    ${/* In-context entry point, rendered UNCONDITIONALLY, outside every data
+          branch — so it is there while the store is cold, while a scan is in
+          flight, and after a failed read, which are the states a reader is most
+          likely to be wondering what these checks are. The sidebar carries the
+          guide as a top-level Observe entry (that is what makes it reachable
+          from anywhere at all); this link is the contextual one, offered on the
+          screen whose cards it explains. */ ''}
     <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
       Optimize <${PlanBadge} framing=${framing} />
+      <a class="sz-link" href="#/guide" style="font-size:13px;font-weight:400">What do these checks mean? →</a>
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
@@ -7762,18 +7824,19 @@ function OptimizeView({ params }) {
               <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b> — ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
             </div>` : null}
             <table class="opt-table" style="margin-top:12px">
-              <thead><tr><th>File</th><th>Scope</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
+              <thead><tr><th>File</th><th>Scope</th><th>Loads</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
               <tbody>
                 ${sfCands.slice(0, 6).map((c, i) => html`<tr key=${i}>
                   <td class="mono" title=${c.path}>${c.path.split('/').slice(-2).join('/')}</td>
                   <td class="dim" style="font-size:11px">${c.scope}</td>
+                  <td class="dim" style="font-size:11px" title=${(c.load_class && c.load_class !== 'always') ? 'Frontmatter is always in context; the body arrives only when this ' + c.load_class + ' is invoked' + (c.invocations != null ? ' (' + c.invocations + ' observed this window)' : '')  : 'Re-sent at the head of every session that loads it'}>${(!c.load_class || c.load_class === 'always') ? 'always-on' : 'on demand'}</td>
                   <td class="mono" style="text-align:right;color:var(--accent)">~${c.est_tokens_saved}</td>
                   <td class="mono" style="text-align:right">${c.reduction_pct != null ? c.reduction_pct : 0}%</td>
                 </tr>`)}
-                ${sfCands.length > 6 ? html`<tr><td colspan="4" class="dim" style="font-size:11px">+${sfCands.length - 6} more · <a class="sz-link" href="#/optimize/summarize">see all →</a></td></tr>` : null}
+                ${sfCands.length > 6 ? html`<tr><td colspan="5" class="dim" style="font-size:11px">+${sfCands.length - 6} more · <a class="sz-link" href="#/optimize/summarize">see all →</a></td></tr>` : null}
               </tbody>
             </table>
-            <div class="sz-note" style="font-size:12px;margin-top:12px">Estimated per-call token reduction from a filesystem scan — advisory; review each rewrite before applying. <span class="estimated-tag" title=${sf.estimate_basis}>estimated · tokens</span></div>
+            <div class="sz-note" style="font-size:12px;margin-top:12px">Estimated per-call token reduction from a filesystem scan; advisory, review each rewrite before applying. An "on demand" file realizes that reduction only on the calls that follow an invocation, not on every call. <span class="estimated-tag" title=${sf.estimate_basis}>estimated · tokens</span></div>
           ` : html`<div class="opt-line dim">No summarizable prompt files in this scan. <a class="sz-link" href="#/optimize/summarize">Open Summarize →</a></div>`}
         </section>` : null}
 
@@ -7794,6 +7857,251 @@ function OptimizeView({ params }) {
         ${st.opt.budgets.some(b => b.over_budget) && st.comp && st.comp.largest_recoverable_analyzer ? html`
         <div class="opt-line" style="margin-top:6px">Biggest recoverable opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a> — the fastest way to bring the projection back under ceiling.</div>` : null}
       </section>` : null}
+    ` : null}
+  `;
+}
+
+// ============================
+// Optimize ▸ Guide — what each check looks for, in plain language.
+// ============================
+// This page exists for one question that kept getting asked: how are `downsize`
+// and `subagent` different? They sit next to each other on the Optimize screen,
+// both talk about models and workers, and nothing on either card says where the
+// line is. A reader who finishes this page still unsure which check covers
+// which mistake means the page has failed, so that contrast is stated first,
+// before any per-check text.
+//
+// TWO SOURCES, KEPT SEPARATE ON PURPOSE.
+//   * WHICH checks apply is the server's answer, read from
+//     `/optimize/analyzers` (derived from the analyzer registry and the
+//     persona gate in core/optimize/runner.py). There is no gating in this
+//     file: no name list, no persona conditional deciding what runs. A JS copy
+//     of that map is exactly the thing that silently desyncs the first time
+//     Python changes, which is why the endpoint exists.
+//   * WHAT each check means is prose, and prose has to live somewhere. This map
+//     is keyed by analyzer name and carries nothing but words; if a key is
+//     absent from the server's list it simply never renders, and if the server
+//     lists a name this map does not cover the guide says so out loud rather
+//     than quietly omitting a check the reader was told runs.
+//
+// PERSONA. The structure is per-persona because the gate is per-persona and the
+// right explanation genuinely differs by setup. Exactly one persona is written
+// today. An unwritten persona gets an honest banner naming the gap, never
+// invented copy: text describing an SDK user's levers, written from a corpus of
+// interactive coding sessions, would be fabrication.
+const GUIDE_PERSONA_LABELS = {
+  'claude-code': 'Claude Code',
+  'sdk': 'SDK and API',
+  'mixed': 'mixed (Claude Code and SDK)',
+  'unknown': 'unclassified',
+};
+
+// The contrast the page is built around. Rendered before the per-check list.
+const GUIDE_KEY_CONTRAST = {
+  personas: ['claude-code'],
+  title: 'Downsize and Subagent are not the same check',
+  paras: [
+    'Downsize is about WHERE the work happened. It looks at work carried out inline, in the main thread, on an expensive model, when it could have been handed to a worker instead.',
+    'Subagent is about WHO did it, once you had already decided to delegate. The work went to a worker; the worker was simply bigger than the job needed.',
+    'A session can only trip one of them. Downsize only considers sessions that never delegated at all, so the moment a worker is involved the question stops being "should this have been delegated" and becomes "was the right worker chosen".',
+  ],
+};
+
+// Per-check prose. `mistake` is what the check looks for; `fix` is what you do
+// about it. Deliberately no numbers, no field names, no thresholds: those live
+// on the cards, which is where a reader can see them against their own data.
+const GUIDE_ENTRIES = {
+  'claude-code': {
+    order: ['downsize', 'subagent', 'resend', 'summarize', 'deadweight', 'relearn', 'budget-projection'],
+    entries: {
+      downsize: {
+        title: 'Downsize',
+        blurb: 'Heavy work done inline that a worker should have taken',
+        mistake: 'A context-heavy piece of work is carried out in the main thread, on an expensive model, rather than handed to a worker. Everything read in the main thread stays in the main thread, and is sent again on every turn that follows, so the cost of that reading keeps compounding for as long as the session runs. The longer the session, the more the original decision costs.',
+        fix: 'A standing rule that sends context-heavy sub-tasks to a worker, so the reading lands in the worker and only its conclusion comes back. Pair it with a cheaper model pinned for that worker.',
+      },
+      subagent: {
+        title: 'Subagent',
+        blurb: 'Delegated, but to a worker larger than the job',
+        mistake: 'The work was delegated, which was the right call, but the worker was over-sized for it: a premium model where a cheaper one would have done, or far more context handed over than the task ever needed.',
+        fix: 'Pin a cheaper model for that worker. The delegation stays; only the size of what you dispatched changes.',
+      },
+      resend: {
+        title: 'Context resend',
+        blurb: 'The same context, charged again every turn',
+        mistake: 'Context accumulates in the main thread and is re-sent with every subsequent turn, long after the turn that actually needed it. Nothing about it is re-read by you, but all of it travels with each request.',
+        fix: 'Move the work that produced it to a worker, so its output never lands in your thread in the first place. Then right-size that worker so the offload is not simply a more expensive way to read the same files.',
+      },
+      summarize: {
+        title: 'Summarize',
+        blurb: 'Always-loaded instruction files that run long',
+        mistake: 'Instruction files that are always in context, such as CLAUDE.md, rules and skills, carry more prose than they need. Length there is not paid once; it is paid on every call of every session that loads the file.',
+        fix: 'A reviewed rewrite that shortens the prose and keeps the structure exactly as it was. Each rewrite is shown as a diff you approve file by file, and nothing is written until you say so.',
+      },
+      deadweight: {
+        title: 'Deadweight',
+        blurb: 'A connected tool nothing ever calls',
+        mistake: 'An MCP server is connected but never actually used. Its tool definitions still ship with every request, so you pay to describe capabilities that go untouched.',
+        fix: 'Remove the server, or disable it for the projects that do not use it.',
+      },
+      relearn: {
+        title: 'Relearn',
+        blurb: 'The same mistake, session after session',
+        mistake: 'The agent runs into the same class of problem repeatedly across sessions and works it out again each time, because nothing carried the answer forward.',
+        fix: 'Write it down once, as a rule, a skill or a hook, so the next session starts already knowing. Each proposal is shown with the recurrences behind it before anything is written.',
+      },
+      'budget-projection': {
+        title: 'Budget projection',
+        blurb: 'A forecast, not a mistake',
+        mistake: 'This one is not looking for a mistake at all. It compares your current run rate against the monthly ceiling you configured for a provider, and flags when the two are heading for a collision.',
+        fix: 'There is nothing here to apply. It tells you about exposure; the response is to spend less or to raise the ceiling.',
+      },
+    },
+    // Why a check the reader may have heard of is absent for this setup. Keyed
+    // by the name the server reports as gated off, so the copy and the gate can
+    // never disagree about which ones need an explanation.
+    hidden: {
+      cache: 'How a request reuses earlier context is decided by the harness that builds the request, not by you.',
+      'cache-recommend': 'Same reason: the setting this would ask you to change is not one a coding-agent user can reach.',
+      placement: 'Moving work onto a slower, cheaper lane only makes sense when nobody is waiting on the answer, which is never true of an interactive session.',
+      trim: 'Shortening a prompt template needs a prompt template you can edit, and an interactive coding agent writes its own.',
+      verbosity: 'The only available remedy is a blanket instruction to answer in fewer words, which buys tokens by making the agent less useful everywhere. That is not a trade this product makes.',
+      script: 'Its way of recognising a repeated workflow did not hold up against real coding sessions, where one extra file read is enough to break the match.',
+      reuse: 'It rests on a claim telemetry cannot support for interactive work: that two pieces of planning were interchangeable. The idea is worth rebuilding; the current version is not shown.',
+    },
+  },
+};
+
+// Prose for a check the server says runs but this file has no entry for. Better
+// than dropping it silently: the reader was just told it runs.
+function guideMissingEntry(name) {
+  return {
+    title: capitalize(name),
+    blurb: 'Not written up yet',
+    mistake: 'This check runs for your setup, but its plain-language write-up has not been added to this guide yet. Its card on the Optimize screen states what it found.',
+    fix: null,
+  };
+}
+
+function GuideCheck({ name, entry }) {
+  return html`<section class="opt-section" id=${'guide-' + name}>
+    <div class="opt-title">
+      <span>${entry.title} <span class="guide-name">${name}</span></span>
+    </div>
+    <div class="guide-prose dim" style="margin-top:-4px">${entry.blurb}</div>
+    <div class="guide-lead">What it looks for</div>
+    <div class="guide-prose">${entry.mistake}</div>
+    ${entry.fix ? html`
+      <div class="guide-lead">What to do about it</div>
+      <div class="guide-prose">${entry.fix}</div>` : null}
+  </section>`;
+}
+
+// One persona's guide: the contrast callout, then a card per check the server
+// says runs, then the deliberately-absent list. `runs` and `hidden` both come
+// straight from `/optimize/analyzers`; this function chooses order and words,
+// never membership.
+function GuideBody({ persona, sets }) {
+  const guide = GUIDE_ENTRIES[persona];
+  if (!guide || !sets) return null;
+  const runs = sets.runs || [];
+  const ordered = [
+    ...guide.order.filter(n => runs.includes(n)),
+    ...runs.filter(n => !guide.order.includes(n)),
+  ];
+  const hiddenNames = (sets.disabled || []).filter(n => guide.hidden[n]);
+  // Only worth stating where both halves of the contrast actually run — and
+  // the server decides that, not this file. On a setup where one of them is
+  // gated off there are no two things to tell apart.
+  const contrast = GUIDE_KEY_CONTRAST.personas.includes(persona) &&
+    runs.includes('downsize') && runs.includes('subagent');
+  return html`
+    ${contrast ? html`
+      <div class="guide-key">
+        <div class="opt-title" style="margin-bottom:6px"><span>${GUIDE_KEY_CONTRAST.title}</span></div>
+        ${GUIDE_KEY_CONTRAST.paras.map((p, i) => html`<div key=${i} class="guide-prose">${p}</div>`)}
+      </div>` : null}
+    ${ordered.map(n => html`<${GuideCheck} key=${n} name=${n} entry=${guide.entries[n] || guideMissingEntry(n)} />`)}
+    ${hiddenNames.length ? html`
+      <section class="opt-section" id="guide-not-shown">
+        <div class="opt-title"><span>Checks that are not shown here</span></div>
+        <div class="guide-prose">tokenjam has more checks than the ones above. The rest are held back for this setup on purpose, because their only remedy is a setting a ${GUIDE_PERSONA_LABELS[persona] || persona} user does not control, or because they did not earn their place. A check with no reachable fix is a diagnosis you can do nothing with, so it is left off rather than shown as an empty card.</div>
+        <ul class="guide-hidden-list">
+          ${hiddenNames.map(n => html`<li key=${n}><b>${(ANALYZER_META[n] && ANALYZER_META[n].title) || capitalize(n)}</b>. ${guide.hidden[n]}</li>`)}
+        </ul>
+      </section>` : null}
+  `;
+}
+
+function AnalyzerGuideView() {
+  const [st, setSt] = useState({ loading: true, error: null, sets: null, persona: null });
+
+  const load = useCallback(async () => {
+    setSt(s => ({ ...s, loading: true, error: null }));
+    try {
+      // The gate, always. Static config, so it answers on a cold store too.
+      const sets = await api('/optimize/analyzers');
+      // The persona of the stored report, when there IS one. Best-effort: a
+      // cold or failed read means "not classified yet", which the banner says
+      // in words rather than defaulting to a persona nobody measured.
+      const opt = await api('/optimize').catch(() => null);
+      const persona = (opt && opt.report_available !== false && opt.persona) || null;
+      setSt({ loading: false, error: null, sets, persona });
+    } catch (e) {
+      setSt({ loading: false, error: e.message || String(e), sets: null, persona: null });
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // Which persona's guide is actually rendered, and why. Three cases, each with
+  // its own honest sentence:
+  //   written        the resolved persona has a guide -> show it, no caveat
+  //   unclassified   nothing has classified this install -> show the default
+  //                  guide, say that it is the default
+  //   unwritten      resolved to a persona with no guide -> say so plainly and
+  //                  show the written one clearly labelled as another setup's
+  const DEFAULT_PERSONA = 'claude-code';
+  const resolved = st.persona;
+  const written = resolved && GUIDE_ENTRIES[resolved];
+  const shown = written ? resolved : DEFAULT_PERSONA;
+  const sets = st.sets && st.sets.personas ? st.sets.personas[shown] : null;
+  const uncovered = st.sets && st.sets.personas && shown === DEFAULT_PERSONA && resolved && !written;
+
+  return html`
+    <div class="page-title" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      Analyzer guide
+      ${/* Forward, not "back": this is a top-level Observe page now, reachable
+            from any screen, so a reader may well have arrived without ever
+            visiting Optimize. Pointing AT the cards is true from anywhere;
+            "back" would be a guess about where they came from. */ ''}
+      <a class="sz-link" href="#/optimize" style="font-size:13px;font-weight:400">See these on the Optimize screen →</a>
+    </div>
+
+    ${st.error ? html`<div class="chart-card" style="border-color:var(--error)">
+      <div style="color:var(--error);font-size:13px;margin-bottom:10px">Couldn't load the analyzer list: ${st.error}</div>
+      <button class="btn" onClick=${load}>Retry</button>
+    </div>` : null}
+    ${st.loading ? html`<div class="shimmer" style="height:200px"></div>` : null}
+
+    ${!st.loading && !st.error && sets ? html`
+      <div class="guide-prose" style="margin-bottom:14px">Every card on the Optimize screen comes from one of the checks below. Each one looks for a different way tokens get spent without buying anything, and each ends in something you can change. Figures on the cards are estimates from your own history, offered as candidates to review before you act on them.</div>
+
+      ${written && !uncovered ? html`
+        <div class="guide-banner">Written for <b>${GUIDE_PERSONA_LABELS[shown]}</b>, which is what your recent sessions look like.</div>
+      ` : uncovered ? html`
+        <div class="guide-banner">Your recent sessions look like a <b>${GUIDE_PERSONA_LABELS[resolved] || resolved}</b> setup, and a guide for that setup has not been written yet. What follows describes <b>${GUIDE_PERSONA_LABELS[shown]}</b>, so parts of it may not match how you work. The checks that actually run for you are still decided by your own setup, not by this page.</div>
+      ` : html`
+        ${/* Names the thing that is actually missing: the analyzer SCAN, not
+              the data. "Nothing has classified this install yet" reads as "you
+              have no sessions", which on a corpus of thousands would be the
+              page claiming less than its data supports — the same defect class
+              as claiming more. Wording deliberately mirrors the Optimize
+              screen's own cold state so the two agree. */ ''}
+        <div class="guide-banner">No analyzer scan has completed yet, so your setup has not been classified. What follows is the <b>${GUIDE_PERSONA_LABELS[shown]}</b> guide; once a scan has run, this page describes whichever setup your sessions turn out to match.</div>
+      `}
+
+      <${GuideBody} persona=${shown} sets=${sets} />
     ` : null}
   `;
 }
@@ -11640,7 +11948,7 @@ function DashboardView({ params }) {
 const VIEW_LENS = {
   review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
   traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
-  optimize: 'observe', budget: 'observe',
+  optimize: 'observe', budget: 'observe', guide: 'observe',
 };
 
 // ============================
@@ -11664,6 +11972,7 @@ const PRIMARY_VIEWS = [
   ['drift',     DriftView],
   ['optimize',  OptimizeView],
   ['summarize', SummarizeView],
+  ['guide',     AnalyzerGuideView],
   ['budget',    BudgetView],
 ];
 const PRIMARY_KEYS = new Set(PRIMARY_VIEWS.map(([k]) => k));
@@ -11675,14 +11984,26 @@ const WARM_STAGGER_MS = 120;   // gap between mounting each warmed-on-boot view
 // screen was the same AnalyticsView the Dashboard already embeds as its
 // "Explore" section, so the separate route was a second door to one room);
 // #/status and #/runs are silent aliases for Sessions (they render the same
-// StatusView); #/optimize/summarize is the Summarize sub-view. Anything else
-// is its own view key.
+// StatusView); #/optimize/summarize is the Summarize sub-view. The analyzer
+// guide is a TOP-LEVEL route (#/guide) — it was briefly a sub-view of Optimize,
+// which made its sidebar entry a nav-child and therefore invisible from every
+// other screen; `#/optimize/guide` survives as a silent alias so any link that
+// already points at the old hash keeps working (the effect in App() rewrites
+// the address bar to the canonical form). Anything else is its own view key.
 function primaryKeyFor(route) {
   const v = route.view;
   if (v === 'overview' || v === 'analytics') return 'dashboard';
   if (v === 'status' || v === 'runs') return 'sessions';
   if (v === 'optimize' && route.param === 'summarize') return 'summarize';
+  if (v === 'optimize' && route.param === 'guide') return 'guide';
   return v;
+}
+
+// True for the retired `#/optimize/guide` hash only. Kept as a named predicate
+// so the alias is stated once and both the router and the canonicalising effect
+// read the same rule.
+function isLegacyGuideRoute(route) {
+  return route.view === 'optimize' && route.param === 'guide';
 }
 
 // Detail overlay for an id-keyed drill-in (mounts fresh per id), else null.
@@ -11716,6 +12037,20 @@ function App() {
       history.replaceState(null, '', '#/review');
     }
   }, []);
+
+  // Canonicalise the retired `#/optimize/guide` hash to `#/guide`. The router
+  // already renders the right view for either (primaryKeyFor), so this exists
+  // for the SIDEBAR: the guide's nav entry keys on `data-view="guide"`, and on
+  // the legacy hash the active view is still `optimize`, which would light up
+  // the wrong row. replaceState leaves no history entry (so Back does not
+  // bounce between the two spellings) and fires no hashchange, hence the
+  // explicit re-read.
+  useEffect(() => {
+    if (isLegacyGuideRoute(route)) {
+      history.replaceState(null, '', '#/guide');
+      setRoute(getRoute());
+    }
+  }, [route.view, route.param]);
 
   // Update active nav link + reveal nested children of the active section +
   // keep the Improve/Observe lens pill in sync with the current route (self-

@@ -26,6 +26,7 @@ from click.testing import CliRunner
 import tokenjam.core.optimize.analyzers.model_downgrade as md
 from tokenjam.core.config import ProviderBudget, TjConfig
 from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.model_tiers import PREMIUM_TIER_LABEL
 from tokenjam.core.optimize.analyzers.model_downgrade import audit_opus_quota
 from tokenjam.core.optimize.types import (
     OPUS_QUOTA_AUDIT_CAVEAT,
@@ -460,7 +461,12 @@ def test_cli_renders_quota_audit_with_caveat(db, monkeypatch):
     # Retrospective mirror headline (not dollars), new grain-accurate noun.
     assert "went to Sonnet-shaped work" in flat
     assert "reclaimable" not in flat.lower()
-    assert "Opus/Fable" in out
+    # Names which tier is audited. Asserted via the constant rather than the
+    # literal it happened to hold: the literal used to be "Opus/Fable", which
+    # pinned the copy to a moment when Mythos was billed at the premium rate but
+    # not yet classified — so the label naming every premium tier is checked in
+    # test_model_tiers.py, and this only checks the CLI actually prints it.
+    assert PREMIUM_TIER_LABEL in out
     # The single number is presented as a labelled estimate.
     assert "estimate" in flat
     # Subscription users get the habit nudge, not dollars.

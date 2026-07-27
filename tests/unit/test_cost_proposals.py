@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from tokenjam.utils.time_parse import utcnow
 
 import pytest
 
@@ -1433,6 +1434,7 @@ def test_downsize_agent_row_carries_the_window_delta_never_the_row_projection():
         "session_id": f"s{i}", "agent_id": "claude-code", "provider": "anthropic",
         "model": "claude-opus-4-7", "alt_model": "claude-haiku-4-5",
         "input_tokens": 1, "output_tokens": 48, "cache_tokens": 3142, "cache_write_tokens": 6716,
+        "started_at": utcnow() - timedelta(days=1),
     } for i in range(32)]
     rows = build_agent_price_rows(candidates, window_days=30.0)
     assert rows and rows[0].delta_usd > 0
@@ -1511,6 +1513,7 @@ def test_downsize_agent_card_apply_blocked_gets_cc_lever_for_claude_code():
         "session_id": f"s{i}", "agent_id": "claude-code", "provider": "anthropic",
         "model": "claude-opus-4-7", "alt_model": "claude-haiku-4-5",
         "input_tokens": 1, "output_tokens": 48, "cache_tokens": 3142, "cache_write_tokens": 6716,
+        "started_at": utcnow() - timedelta(days=1),
     } for i in range(32)]
     rows = build_agent_price_rows(candidates, window_days=30.0)
 

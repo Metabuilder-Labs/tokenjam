@@ -54,6 +54,7 @@ from tokenjam.core.optimize.analyzers.downsize_agents import (
     build_agent_price_rows,
 )
 from tokenjam.core.optimize.registry import register
+from tokenjam.core.optimize.span_pricing import price_span, rates_at, span_instant
 from tokenjam.core.optimize.stats import bootstrap_ci
 from tokenjam.core.optimize.types import (
     AnalyzerContext,
@@ -63,7 +64,6 @@ from tokenjam.core.optimize.types import (
     OpusAuditExample,
     OpusQuotaAudit,
 )
-from tokenjam.core.pricing import get_rates
 
 # Structural heuristic thresholds for the SECONDARY tiny-session case. Sessions
 # are flagged only when ALL three hold; the analyzer never claims the cheaper
@@ -109,17 +109,32 @@ OPUS_AUDIT_MAX_EXAMPLES = 5
 # Premium → cheaper alternative in the same provider family. Pricing for both
 # sides is resolved at runtime from pricing/models.toml; if either is missing
 # the candidate is silently skipped (we won't invent a savings number).
-# Premium-tier ladder: Fable → Sonnet and Opus → Haiku each drop two tiers, the
+# Premium-tier ladder (fable/mythos > opus > sonnet > haiku): Fable/Mythos and
+# Opus (4.x) each drop TWO tiers (to Sonnet and Haiku respectively), the
 # aggressive step justified because the quota audit only proposes these for
-# structurally tiny (Sonnet-shaped) sessions. Keep new premium families in sync
-# with tokenjam.core.model_tiers.PREMIUM_TIERS so every flagged session has a
-# real routing target.
+# structurally tiny (Sonnet-shaped) sessions. `claude-opus-5` is the one
+# exception, mapped only ONE tier down to `claude-sonnet-5`: it is also the
+# swap target subagent_rightsizing.py prices its own over_powered candidates
+# against (a full agent loop, not a tiny session, so it earns the narrower
+# step) — keeping both consumers of "what does opus-5 downgrade to" in
+# agreement matters more than matching the opus-4.x precedent. `claude-sonnet-5`
+# itself downgrades to haiku, same as sonnet-4.x. Keep new premium families in
+# sync with tokenjam.core.model_tiers.PREMIUM_TIERS so every flagged session
+# has a real routing target. `claude-mythos-5` used to be a cautionary example
+# of the two lists drifting: it had a row here and a rate in models.toml but no
+# "mythos" entry in model_tiers.TIER_SUBSTRINGS, so it was invisible to every
+# premium-gated flag and only the tiny-session case below (gated on membership
+# HERE, not on is_premium_tier) ever reached it. Both lists now carry it, and
+# `test_every_priced_model_resolves_to_a_tier` fails the next half-added family.
 DOWNGRADE_CANDIDATES: dict[str, dict[str, str]] = {
     "anthropic": {
         "claude-fable-5":    "claude-sonnet-4-6",
+        "claude-mythos-5":   "claude-sonnet-5",
+        "claude-opus-5":     "claude-sonnet-5",
         "claude-opus-4-8":   "claude-haiku-4-5",
         "claude-opus-4-7":   "claude-haiku-4-5",
         "claude-opus-4-6":   "claude-haiku-4-5",
+        "claude-sonnet-5":   "claude-haiku-4-5",
         "claude-sonnet-4-6": "claude-haiku-4-5",
         "claude-sonnet-4-5": "claude-haiku-4-5",
     },
@@ -203,14 +218,39 @@ _lookup_downgrade = lookup_downgrade
 
 
 def _alt_unit_cost(provider: str, original_model: str, alt_model: str,
-                   input_tokens: int, output_tokens: int, cache_tokens: int) -> float | None:
-    rates = get_rates(provider, alt_model)
-    if rates is None:
-        return None
-    return (
-        (input_tokens / 1_000_000) * rates.input_per_mtok
-        + (output_tokens / 1_000_000) * rates.output_per_mtok
-        + (cache_tokens / 1_000_000) * rates.cache_read_per_mtok
+                   input_tokens: int, output_tokens: int, cache_tokens: int,
+                   cache_write_tokens: int = 0, *,
+                   at: datetime) -> float | None:
+    """Cost of the given token mix priced at ``alt_model``, or ``None`` when the
+    alternative has no pricing data at ``at``.
+
+    Routes through :func:`tokenjam.core.optimize.span_pricing.price_span` — and
+    so through :func:`tokenjam.core.cost.calculate_cost`, the ONE place that
+    prices all four token classes (input, output, cache-read, cache-write) —
+    rather than hand-rolling the arithmetic here a second time. The hand-rolled
+    version used to price only input/output/cache-read, silently dropping
+    cache-write from the alternative side while the actual side (the
+    ``cost_usd`` column) already includes it; that asymmetry inflated every
+    savings figure derived from this function by the full cache-write cost of
+    the candidate. ``cache_write_tokens`` defaults to 0 for the one call site
+    (the per-turn quota-audit counterfactual) whose upstream aggregation does
+    not carry a cache-write figure at all — that is unchanged behaviour, not a
+    new omission.
+
+    ``at`` is the instant the ORIGINAL traffic ran, and is required. A
+    counterfactual priced at a different date than the traffic it replaces
+    would make the delta between them part rate-change and part model choice,
+    with nothing in the number to say which — and the old default (whatever
+    today's rate happened to be) made every historical window that way.
+
+    ``original_model`` is unused by the arithmetic (kept for call-site
+    readability / potential future per-model-pair overrides).
+    """
+    del original_model
+    return price_span(
+        provider, alt_model, at=at,
+        input_tokens=input_tokens, output_tokens=output_tokens,
+        cache_read_tokens=cache_tokens, cache_write_tokens=cache_write_tokens,
     )
 
 
@@ -292,15 +332,39 @@ def _driver_session_arithmetic(
     provider: str,
     driver_model: str,
     alt_model: str,
+    *,
+    window_start: datetime,
 ) -> _DriverAgg | None:
     """Price one flagged session's inline-vs-routed counterfactual.
 
     ``None`` when the session carries no tool-driven stretch, or when no turn in
     one had priced rates on both sides — we refuse to invent a savings number.
+
+    Both sides are resolved per turn at that turn's own timestamp, so the tier
+    gap is a gap between two models on one date rather than a gap that has
+    absorbed a price change. ``window_start`` is the fallback instant for a turn
+    with no recorded time; see :func:`span_pricing.span_instant`.
     """
-    alt_rates = get_rates(provider, alt_model)
-    if alt_rates is None:
-        return None
+    # No `offloadable_share`-style factor is applied here, and that is a
+    # deliberate difference in MECHANISM, not an omission — this case scopes by
+    # SELECTION rather than by a fraction.
+    #
+    # `context_resend` multiplies every main-thread turn's tail by a measured
+    # delegable-share proxy. This case instead prices only the turns `mask`
+    # admits: contiguous runs where each turn actually ran a tool, inside
+    # sessions `premium_driver_role` has already restricted to premium drivers
+    # that never delegated. That selection IS the delegability scope — the
+    # material claimed is the exploration/edit work a subagent would have
+    # carried, taken at full weight, with everything outside a stretch priced
+    # at nothing.
+    #
+    # So both analyzers scope the same quantity by different means: a fraction
+    # of a broad population there, all of a narrow one here. The difference is
+    # which structure each population offers to select on — resend's figure
+    # deliberately covers the sessions this gate REJECTS, where no contiguous
+    # tool-run signal is available to select with. Neither carries a
+    # realization or compliance discount, and adding one here would be a
+    # second, different claim rather than a consistency fix.
     mask = tool_driven_stretch_mask(main_turns)
     if not any(mask):
         return None
@@ -317,8 +381,10 @@ def _driver_session_arithmetic(
     for i, turn in enumerate(main_turns):
         if not mask[i]:
             continue
-        rates = get_rates(turn.provider or provider, turn.model)
-        if rates is None:
+        at = span_instant(turn.start_time, window_start=window_start)
+        rates = rates_at(turn.provider or provider, turn.model, at)
+        alt_rates = rates_at(provider, alt_model, at)
+        if rates is None or alt_rates is None:
             continue
         priced_any = True
         agg.stretch_turns += 1
@@ -357,6 +423,7 @@ def analyze_driver_role(
     turns_by_session: dict[str, list[TurnComposition]],
     agent_by_session: dict[str, str],
     *,
+    window_start: datetime,
     tool_fanout_floor: int = DRIVER_TOOL_FANOUT_FLOOR,
 ) -> list[_DriverAgg]:
     """Flagged driver-role sessions, priced.
@@ -385,7 +452,7 @@ def analyze_driver_role(
             continue
         agg = _driver_session_arithmetic(
             session_id, main_thread_turns(session_turns),
-            provider, driver_model, alt,
+            provider, driver_model, alt, window_start=window_start,
         )
         if agg is None:
             continue
@@ -472,6 +539,7 @@ def analyze_model_downgrade(
     }
     driver_aggs = analyze_driver_role(
         _turns_by_session(conn, since, until, agent_id), agent_by_session,
+        window_start=since,
     )
     driver_sessions = {a.session_id for a in driver_aggs}
 
@@ -537,7 +605,14 @@ def analyze_model_downgrade(
         ):
             continue
 
-        alt_unit = _alt_unit_cost(provider, model, alt, int(in_tok), int(out_tok), int(cache_tok))
+        # Priced at this session's own start, not today: the row is a
+        # per-session aggregate, and a session is short enough that its start is
+        # inside whatever rate era billed all of it.
+        alt_unit = _alt_unit_cost(
+            provider, model, alt, int(in_tok), int(out_tok), int(cache_tok),
+            int(cache_write_tok or 0),
+            at=span_instant(start_time, window_start=since),
+        )
         if alt_unit is None:
             # No pricing data for the alternative — refuse to invent a savings number.
             continue
@@ -562,6 +637,7 @@ def analyze_model_downgrade(
             "output_tokens": int(out_tok or 0),
             "cache_tokens": int(cache_tok or 0),
             "cache_write_tokens": int(cache_write_tok or 0),
+            "started_at": start_time,
         })
         suggestions[model] = alt
         if (provider, model, alt) not in swaps:
@@ -622,6 +698,7 @@ def analyze_model_downgrade(
         thinking_tokens_by_session(
             conn, since, until, agent_id, main_thread_only=True,
         ),
+        window_start=since,
     )
 
     commands = [f"tjb run --original {p}:{orig} --candidate {p}:{alt}" for p, orig, alt in swaps]
@@ -883,10 +960,15 @@ class _SessionAgg:
     spot-check example list (largest-quota first)."""
 
     __slots__ = ("session_id", "quota_by_model", "quota", "new_input",
-                 "output", "reread", "tool_calls", "cost")
+                 "output", "reread", "tool_calls", "cost", "first_turn_at")
 
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
+        # Earliest flagged turn in this session — the instant the counterfactual
+        # below is priced at. Carried on the aggregate because the aggregate is
+        # what gets priced: without it the dollar figure would fall back to
+        # today's rate for traffic that ran weeks ago.
+        self.first_turn_at: datetime | None = None
         # (provider, model) -> flagged premium quota, so the example reports the
         # model that actually carried the most misallocated quota in this session
         # rather than freezing on whichever premium turn happened to appear first
@@ -996,6 +1078,10 @@ def audit_opus_quota(
                 agg.reread += t.reread_tokens
                 agg.tool_calls += t.tool_fanout
                 agg.cost += t.cost_usd
+                if t.start_time is not None and (
+                    agg.first_turn_at is None or t.start_time < agg.first_turn_at
+                ):
+                    agg.first_turn_at = t.start_time
                 key = (t.provider, t.model)
                 agg.quota_by_model[key] = (
                     agg.quota_by_model.get(key, 0.0) + t.quota_weighted_tokens
@@ -1025,6 +1111,7 @@ def audit_opus_quota(
         assert provider is not None
         alt_unit = _alt_unit_cost(
             provider, model, alt, agg.new_input, agg.output, agg.reread,
+            at=span_instant(agg.first_turn_at, window_start=since),
         )
         if alt_unit is not None:
             actual_cost += agg.cost
