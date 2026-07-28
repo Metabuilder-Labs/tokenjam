@@ -1795,6 +1795,16 @@ def test_optimize_export_templates_writes_markdown(runner, db, tmp_path, monkeyp
     assert list(tmp_path.glob("reuse-*.html")) == []   # markdown only, no HTML
 
 
+def test_optimize_export_templates_requires_reuse_finding(runner, db, config):
+    """#578: --export-templates without reuse must fail fast, not claim no
+    repeated planning was detected."""
+    result = _invoke(runner, db, config,
+                     ["optimize", "downsize", "--export-templates"])
+    assert result.exit_code != 0
+    assert "requires the reuse finding" in result.output
+    assert "No repeated planning detected" not in result.output
+
+
 def test_report_reuse_api_mode_writes_artifacts(runner, db, tmp_path, monkeypatch):
     """#154: with the daemon holding the DB lock, `tj report --reuse` fetches
     the finding + skeleton text from /api/v1/reuse/clusters via ApiBackend and

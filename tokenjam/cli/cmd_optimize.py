@@ -184,6 +184,21 @@ def cmd_optimize(
     requested = list(findings) if findings else None
     analyzer_findings = _resolve_analyzer_names(requested)
 
+    if export_templates:
+        # --export-templates only makes sense when the reuse analyzer runs.
+        # findings=None runs every registered analyzer (including reuse).
+        selected = (
+            set(analyzer_findings)
+            if analyzer_findings is not None
+            else set(ANALYZER_REGISTRY.keys())
+        )
+        if "reuse" not in selected:
+            raise click.ClickException(
+                "--export-templates requires the reuse finding. Run "
+                "`tj optimize reuse --export-templates`, or include "
+                "`reuse` in the finding list."
+            )
+
     # Two paths depending on whether the daemon holds the DB lock.
     #
     # Local DB available (no daemon, or we got handed a real DuckDBBackend) →
