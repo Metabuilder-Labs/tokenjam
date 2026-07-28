@@ -62,6 +62,18 @@ WRAP_SUMM_SYS = (
     "the rewritten prompt — no commentary, no code fences."
 )
 
+# Appended to the contract for an always-resident instruction file that is over
+# the published size target. The word budget above is derived FROM that target,
+# so stating the goal as well as the number gives the model the thing it is
+# actually optimising for: a file short enough to be followed, not a word count.
+# ``{lines}`` is `estimate.PUBLISHED_LINE_TARGET`; the quote is Anthropic's.
+WRAP_SUMM_SYS_LINE_GOAL = (
+    "\n\nThis file is loaded into EVERY session, and it is currently over the "
+    "published size target for such a file: \"{quote}\" The word budget above is "
+    "what reaching {lines} lines requires. Aim for that; a file that is merely "
+    "shorter but still far over the target has not solved the problem."
+)
+
 _WORD_RE = re.compile(r"\S+")
 _CRIT_STRIP = ".,;:!?\"'()[]{}*_`"
 _KEEP_RE = re.compile(r'<tj-keep id="(\d+)"[^>]*?(?:/>|>.*?</tj-keep>)', re.DOTALL)

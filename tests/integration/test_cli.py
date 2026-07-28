@@ -12,7 +12,7 @@ from click.testing import CliRunner
 
 from tokenjam.cli.main import cli
 from tokenjam.core.config import AgentConfig, BudgetConfig, TjConfig
-from tokenjam.core.db import InMemoryBackend
+from tokenjam.core.db import SPANS_INDEX_SQL, InMemoryBackend
 from tokenjam.core.models import (
     AgentRecord,
     Alert,
@@ -473,6 +473,12 @@ def _duckdb_with_dropped_migration_7(tmp_path):
         backend.conn.execute(f"DROP INDEX IF EXISTS {idx}")
     backend.conn.execute("ALTER TABLE spans DROP COLUMN request_params")
     backend.conn.execute("ALTER TABLE spans DROP COLUMN request_tools")
+    # DuckDB refuses to drop a column while the table carries ART indexes, so
+    # the indexes above come off first — and have to go straight back on. Left
+    # off, this fixture would additionally reproduce the SEPARATE fault doctor's
+    # index-integrity check exists for, and these tests would be asserting an
+    # exit code that has nothing to do with the missing column they are about.
+    backend.conn.execute(SPANS_INDEX_SQL)
     return backend
 
 

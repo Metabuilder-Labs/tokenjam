@@ -35,6 +35,26 @@ from tests.factories import make_session
 ANCHOR = datetime(2026, 7, 27, 12, 0, tzinfo=timezone.utc)
 
 
+def utc_noon(days_ago: int) -> datetime:
+    """A seed instant that cannot straddle a day boundary, in any timezone.
+
+    The day-span measure counts DISTINCT UTC days and discards anything dated
+    later than today, so a fixture seeded at an offset from ``utcnow()`` puts
+    its rows wherever the wall clock happens to be: rows land on one calendar
+    day for part of the day and two for the rest, and a row seeded at "now" can
+    read as tomorrow under a database timezone that runs ahead of UTC. Both
+    made the assertions below go red for a few hours out of every day and green
+    again afterwards, which reads as "whoever pushed last broke it".
+
+    Noon UTC is the furthest any instant can be from both boundaries, so the
+    day a row belongs to is fixed no matter when or where the suite runs.
+    """
+    today = datetime.now(tz=timezone.utc).date()
+    return datetime(
+        today.year, today.month, today.day, 12, 0, tzinfo=timezone.utc,
+    ) - timedelta(days=days_ago)
+
+
 @pytest.fixture
 def db():
     backend = InMemoryBackend()
@@ -203,7 +223,9 @@ async def test_a_cache_without_windowed_figures_says_so_rather_than_faking_one(
 @pytest.mark.asyncio
 async def test_the_days_of_data_available_measure_is_served(client, config, db):
     _seed_relearn_cache(config)
-    db.upsert_session(make_session(session_id="s1", agent_id="claude-code-x"))
+    db.upsert_session(make_session(
+        session_id="s1", agent_id="claude-code-x", started_at=utc_noon(0),
+    ))
     async with client as c:
         body = (await c.get("/api/v1/relearn/proposals")).json()
     span = body["data_span"]
@@ -220,8 +242,9 @@ async def test_an_ancient_row_does_not_inflate_the_served_span(client, config, d
     actually carries data on.
     """
     _seed_relearn_cache(config)
-    now = datetime.now(tz=timezone.utc)
-    db.upsert_session(make_session(session_id="s1", agent_id="a", started_at=now))
+    db.upsert_session(make_session(
+        session_id="s1", agent_id="a", started_at=utc_noon(0),
+    ))
     db.upsert_session(make_session(
         session_id="ancient", agent_id="a",
         started_at=datetime(2020, 1, 1, tzinfo=timezone.utc),

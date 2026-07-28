@@ -8,6 +8,8 @@ from rich.markup import escape
 
 from tokenjam.cli.json_option import json_option, resolve_output_json
 from tokenjam.core.config import load_config, resolve_config_path
+from tokenjam.core.data_span import MIN_PLAUSIBLE_YEAR
+from tokenjam.core.db import SPANS_INDEXES
 from tokenjam.utils.formatting import console, display_path
 
 
@@ -58,6 +60,10 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
     spans_stats_check = _check_spans_stats(ctx.obj["db"])
     checks.append(spans_stats_check)
 
+    # 9b. Secondary-index integrity on spans — a fault the statistics check
+    #     above cannot see, and one that makes the retention DELETE unreliable.
+    checks.append(_check_spans_indexes(ctx.obj["db"]))
+
     # 10. Live-span staleness — flags a stalled OTLP connection (issue #179)
     checks.append(_check_span_staleness(ctx.obj["db"]))
 
@@ -85,6 +91,14 @@ def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None
 
     # 18. Duplicate call ingest — one LLM call stored twice, once per observer
     checks.append(_check_duplicate_call_ingest(ctx.obj["db"]))
+
+    # 18b. Timestamp sentinels an older build wrote — a one-shot cleanup.
+    checks.append(_check_sentinel_timestamps(ctx.obj["db"]))
+
+    # 19. Retention — the analysis span, what it keeps, and what the last run
+    #     actually deleted. A delete of user history has to be readable after
+    #     the fact, not inferable by diffing two measurements days apart.
+    checks.append(_check_retention(config, ctx.obj["db"]))
 
     if output_json:
         click.echo(json.dumps(checks, default=str))
@@ -331,6 +345,147 @@ def _check_spans_stats(db: object) -> dict:
         }
     return {"name": "Spans column statistics", "level": "ok",
             "message": "Column statistics are consistent."}
+
+
+def _check_spans_indexes(db: object) -> dict:
+    """Detect a missing or under-reporting secondary index on `spans`.
+
+    An ERROR, not a warning, and deliberately: the retention job's `DELETE FROM
+    spans WHERE start_time < ?` maintains every index inside its own
+    transaction, so a damaged one can abort the statement part-way and leave it
+    reporting fewer rows removed than it matched. A deletion of user history
+    whose extent nobody can state afterwards is not a degraded read path, it is
+    an unsafe write path, and the column-statistics check next door cannot see
+    it — that one asks only about `trace_id`'s row-group statistics and reports
+    OK on either fault below.
+    """
+    from tokenjam.core.db import check_spans_index_corruption
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Spans index integrity", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        faults = check_spans_index_corruption(conn)
+    except duckdb.Error as e:
+        return {"name": "Spans index integrity", "level": "info",
+                "message": f"Skipped — could not probe the indexes: {e}"}
+    if faults:
+        detail = "; ".join(f"{name} {reason}" for name, reason in faults)
+        return {
+            "name": "Spans index integrity",
+            "level": "error",
+            "message": f"Secondary index damage on the spans table — {detail}. "
+                       f"Queries served by these indexes return incomplete "
+                       f"results, and a DELETE (retention cleanup) can abort "
+                       f"part-way through. Run `tj doctor --repair` to rebuild "
+                       f"them from the table (no data is moved).",
+            "repair_action": "rebuild_spans_indexes",
+        }
+    return {"name": "Spans index integrity", "level": "ok",
+            "message": f"All {len(SPANS_INDEXES)} secondary indexes on spans "
+                       f"agree with the table."}
+
+
+def _check_retention(config: object, db: object) -> dict:
+    """Report the analysis span, the retention derived from it, and the last delete.
+
+    A deletion of the user's own history that leaves no account of itself is
+    discoverable only by measuring the store twice, days apart, and diffing —
+    which is how eight weeks of the oldest history went missing unnoticed. The
+    ledger makes it a fact on disk; this makes it a fact somebody sees.
+
+    Never an error: retention doing its job is not a fault. What would be a
+    fault is a config whose retention undercuts its own span, and that cannot
+    happen — `core/analysis_span.retention_days_for` raises it — so this reports
+    when the clamp fired rather than warning about a state that no longer exists.
+    """
+    from tokenjam.core.analysis_span import (
+        retention_days_for,
+        retention_was_raised_to_span,
+        span_label,
+    )
+
+    storage = getattr(config, "storage", None)
+    if storage is None:
+        return {"name": "Retention", "level": "info",
+                "message": "Skipped — no storage config."}
+
+    span = span_label(storage)
+    kept = retention_days_for(storage)
+    kept_text = (
+        "deletion is disabled" if kept is None else f"history is kept for {kept} days"
+    )
+    clamp = ""
+    if retention_was_raised_to_span(storage):
+        clamp = (
+            " Storage retention is set shorter than the span and has been raised "
+            "to match — nothing tj analyzes can be deleted underneath it."
+        )
+
+    conn = getattr(db, "conn", None)
+    last = ""
+    if conn is not None:
+        try:
+            row = conn.execute(
+                "SELECT ran_at, spans_deleted, sessions_deleted, oldest_kept "
+                "FROM retention_events ORDER BY ran_at DESC LIMIT 1"
+            ).fetchone()
+        except duckdb.Error:
+            row = None
+        if row is None:
+            last = " No retention run has been recorded yet."
+        else:
+            ran_at, spans_deleted, sessions_deleted, oldest_kept = row
+            last = (
+                f" Last run {ran_at:%Y-%m-%d %H:%M} UTC removed {spans_deleted} "
+                f"span(s) and {sessions_deleted} session(s)"
+            )
+            last += (
+                f"; oldest surviving span {oldest_kept:%Y-%m-%d}." if oldest_kept
+                else "; no dated spans remain."
+            )
+
+    return {"name": "Retention", "level": "ok",
+            "message": f"Analyzing {span}, so {kept_text}.{clamp}{last}"}
+
+
+def _check_sentinel_timestamps(db: object) -> dict:
+    """Find rows an older build stamped with an epoch sentinel instead of a time.
+
+    Ingest can no longer produce one — a record with no observed time is
+    rejected at the boundary — so this is a one-shot cleanup for corpora already
+    written, offered here rather than as a SQL snippet somebody has to be told
+    about. A warning, not an error: the rows are inert until something takes a
+    naive `MIN()` over them, at which point a single row reports a span decades
+    wide and crushes every derived rate to zero.
+    """
+    from tokenjam.core.db import count_sentinel_timestamp_rows
+
+    conn = getattr(db, "conn", None)
+    if conn is None:
+        return {"name": "Timestamp sentinels", "level": "info",
+                "message": "Skipped — CLI is running through the HTTP API "
+                           "fallback (stop `tj serve` to access the DB directly)."}
+    try:
+        found = count_sentinel_timestamp_rows(conn)
+    except duckdb.Error as e:
+        return {"name": "Timestamp sentinels", "level": "info",
+                "message": f"Skipped — could not scan for sentinels: {e}"}
+    if found:
+        detail = ", ".join(f"{count} in {table}" for table, count in sorted(found.items()))
+        return {
+            "name": "Timestamp sentinels",
+            "level": "warning",
+            "message": f"Rows dated before {MIN_PLAUSIBLE_YEAR} — {detail}. These "
+                       f"carry no real observed time and a single one makes a "
+                       f"naive MIN() report a span decades wide. Run `tj doctor "
+                       f"--repair` to delete them.",
+            "repair_action": "purge_timestamp_sentinels",
+        }
+    return {"name": "Timestamp sentinels", "level": "ok",
+            "message": "No rows carry a placeholder timestamp."}
 
 
 def _check_schema_integrity(db: object) -> dict:
@@ -617,8 +772,11 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
     """Run repair actions for any check that flagged one."""
     from tokenjam.core.db import (
         SESSION_COST_DRIFT_TOLERANCE_USD,
+        check_spans_index_corruption,
         ensure_expected_columns,
         ensure_expected_tables,
+        purge_sentinel_timestamp_rows,
+        repair_spans_indexes,
         repair_spans_stats,
         session_cost_drift,
     )
@@ -732,6 +890,67 @@ def _attempt_repairs(checks: list[dict], db: object, output_json: bool) -> None:
                     f"{len(sessions)} session(s); their totals were "
                     f"reconciled.[/green]"
                 )
+            continue
+        if action == "purge_timestamp_sentinels":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                removed = purge_sentinel_timestamp_rows(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Sentinel purge failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                detail = ", ".join(
+                    f"{count} from {table}" for table, count in sorted(removed.items())
+                ) or "nothing"
+                console.print(f"  [green]Deleted {detail}.[/green]")
+            continue
+        if action == "rebuild_spans_indexes":
+            if conn is None:
+                if not output_json:
+                    console.print(
+                        "  [yellow]Repair skipped — CLI is using the HTTP API "
+                        "fallback. Stop `tj serve` and retry so doctor has "
+                        "direct DB access.[/yellow]"
+                    )
+                continue
+            try:
+                repair_spans_indexes(conn)
+                remaining = check_spans_index_corruption(conn)
+            except duckdb.Error as e:
+                if not output_json:
+                    console.print(
+                        f"  [red]Index rebuild failed — {e}. If the database is "
+                        f"locked, stop `tj serve` and retry.[/red]"
+                    )
+                continue
+            if not output_json:
+                if remaining:
+                    # Rebuilding from the table cannot leave an index disagreeing
+                    # with it, so anything still failing is a fault one layer
+                    # down — say so rather than reporting a repair that did not
+                    # take.
+                    console.print(
+                        f"  [red]Rebuilt, but {len(remaining)} index(es) still "
+                        f"disagree with the table — the damage is below the "
+                        f"index layer. Run `tj doctor --repair` again to rebuild "
+                        f"the table itself.[/red]"
+                    )
+                else:
+                    console.print(
+                        f"  [green]Rebuilt {len(SPANS_INDEXES)} secondary "
+                        f"index(es) on spans; no rows were moved.[/green]"
+                    )
             continue
         if action == "rebuild_spans":
             if conn is None:

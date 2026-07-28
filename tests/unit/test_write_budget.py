@@ -10,6 +10,14 @@ from __future__ import annotations
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+    MAX_NUDGES_PER_SESSION,
+)
+
 from tokenjam.core.optimize import write_budget as wb
 from tokenjam.core.optimize.projection import (
     MAX_PROJECTION_RATIO,
@@ -77,27 +85,48 @@ def test_disclosure_names_every_input_it_used():
     assert "30 days" in basis.disclosure
 
 
-# --- Standing cost by rung -----------------------------------------------------
+# --- Standing cost by delivery mechanism ---------------------------------------
 
-def test_rung_one_charges_the_whole_block():
+def test_a_claude_md_rule_charges_the_whole_block():
     text = "x" * 400
-    assert wb.standing_tokens_per_session(1, text) == 100
+    assert wb.standing_tokens_per_session(DELIVERY_CLAUDE_MD_RULE, text) == 100
 
 
-def test_rung_two_charges_only_the_always_loaded_frontmatter():
+def test_a_skill_charges_only_the_always_loaded_frontmatter():
     """A skill's body loads on invoke; only its description is always sent."""
     long_skill = "x" * 8_000
-    assert wb.standing_tokens_per_session(2, long_skill) == wb.tokens_from_chars(
-        wb.SKILL_ALWAYS_LOADED_CHARS,
-    )
+    assert wb.standing_tokens_per_session(
+        DELIVERY_SKILL, long_skill,
+    ) == wb.tokens_from_chars(wb.SKILL_ALWAYS_LOADED_CHARS)
     # A skill shorter than the cap costs only what it is.
-    assert wb.standing_tokens_per_session(2, "x" * 40) == 10
+    assert wb.standing_tokens_per_session(DELIVERY_SKILL, "x" * 40) == 10
 
 
-def test_rung_three_and_up_have_no_standing_cost():
-    """A hook is executed, never sent as prompt text: a real zero."""
-    for rung in (3, 4, 5):
-        assert wb.standing_tokens_per_session(rung, "x" * 4_000) == 0
+def test_only_the_executing_hook_has_no_standing_cost():
+    """An EXECUTING hook is run by the harness, never sent as prompt text: a
+    real zero, and the only one earned here.
+
+    This assertion is the inverse of the one it replaces. That one said "a hook
+    is executed, never sent as prompt text" of EVERY hook, which made the suite
+    require the defect: an injecting hook exists precisely to put text in front
+    of the model, and pricing it at zero understated the cost of most of the
+    hook families that actually ship. Same guard, correct state."""
+    assert wb.standing_tokens_per_session(DELIVERY_EXECUTING_HOOK, "x" * 4_000) == 0
+
+
+def test_an_injecting_hook_is_charged_for_the_text_it_injects():
+    """Never zero, and charged per nudge: a hook that fires twice injects
+    twice. Stated as a floor rather than an exact figure — the injected block
+    then rides in the conversation for every later turn."""
+    injected = "x" * 400
+    assert wb.standing_tokens_per_session(DELIVERY_INJECTING_HOOK, injected) == (
+        100 * MAX_NUDGES_PER_SESSION
+    )
+    # And strictly more than the same words carried as a CLAUDE.md rule, which
+    # is the whole reason it cannot inherit the executing hook's zero.
+    assert wb.standing_tokens_per_session(
+        DELIVERY_INJECTING_HOOK, injected,
+    ) > wb.standing_tokens_per_session(DELIVERY_CLAUDE_MD_RULE, injected)
 
 
 # --- The quality floor ---------------------------------------------------------
@@ -116,9 +145,9 @@ def test_placeholder_is_caught_inside_a_rendered_artifact_block():
     "no known fix template matched" pattern is the only thing that catches it
     — anchoring it for symmetry with the other two switches the quality floor
     off for every cluster that has no fix template."""
-    from tokenjam.core.optimize.relearn_apply import artifact_for_rung
+    from tokenjam.core.optimize.relearn_apply import artifact_for_delivery
 
-    rendered = artifact_for_rung(
+    rendered = artifact_for_delivery(
         {
             "title": "Some recurring failure",
             "proposed_fix": "Review examples — no known fix template matched.",
@@ -144,9 +173,12 @@ def test_an_honesty_caveat_is_not_mistaken_for_a_placeholder():
 
 # --- Netting and suppression ---------------------------------------------------
 
-def _candidate(key, family="fam", rung=1, text=_REAL_FIX, tokens=1_000_000, usd=None):
+def _candidate(
+    key, family="fam", delivery=DELIVERY_CLAUDE_MD_RULE, text=_REAL_FIX,
+    tokens=1_000_000, usd=None,
+):
     return wb.WriteCandidate(
-        key=key, family=family, rung=rung, artifact_text=text,
+        key=key, family=family, delivery=delivery, artifact_text=text,
         gross_tokens=tokens, gross_usd=usd,
     )
 
@@ -405,33 +437,53 @@ def test_relearn_never_offers_a_placeholder_fix_as_a_permanent_rule():
     assert p.past_overspend_tokens > 0
 
 
-def test_relearn_nets_a_rung_one_rule_but_not_a_rung_three_hook():
-    """cwd_confusion is a rung-3 hook (no standing prompt cost, net == gross);
-    edit_before_read is a rung-1 CLAUDE.md note (netted down)."""
+def test_relearn_nets_by_mechanism_not_by_whether_it_is_a_hook():
+    """Three families, three mechanisms, three different standing costs.
+
+    `sleep_chain` is an EXECUTING hook: it blocks a command and injects
+    nothing, so its zero is earned. `cwd_confusion` is an INJECTING hook: it
+    hands the model ``additionalContext``, so it is prompt text and is charged.
+    `read_too_large` is a CLAUDE.md rule and is netted down as it always was.
+
+    **This inverts the assertion it replaces.** That one paired `cwd_confusion`
+    with "no standing prompt cost, net == gross" — enforcing the exact defect,
+    since the two hooks have opposite cost behaviour and only one of them is
+    free. The guard is kept and now defends the correct state.
+
+    (An earlier version of this test used `edit_before_read`, which stopped
+    being a valid vehicle when that family became advisory-only: an advisory
+    family is never offered and so cannot demonstrate netting at all, yet the
+    assertions still passed. A fixture that is a real domain object can quietly
+    stop testing what it claims to.)"""
     from tokenjam.core.optimize.analyzers.relearn import build_proposals
 
     proposals, _ = build_proposals(
         [
+            _raw("sleep_chain", "sleep_chain", "sleep chain", _episodes("s", 40)),
             _raw("cwd_confusion", "cwd_confusion", "cwd confusion", _episodes("c", 40)),
-            _raw("edit_before_read", "edit_before_read", "edit before read",
+            _raw("read_too_large", "read_too_large", "read too large",
                  _episodes("e", 40)),
         ],
         repo_cwd_map={"repo": "/tmp/repo"}, persona="claude-code",
         projection=_basis(sessions=80, active_days=10, window_days=30.0),
     )
     by_family = {p.family_key: p for p in proposals}
-    hook = by_family["cwd_confusion"]
-    note = by_family["edit_before_read"]
+    guard = by_family["sleep_chain"]
+    nudge = by_family["cwd_confusion"]
+    note = by_family["read_too_large"]
 
-    # The netting arithmetic itself (not a rendered forward field any more —
-    # see `write_budget.py`) still distinguishes a zero-standing-cost hook
-    # from a rung-1 note that costs something to keep.
-    assert hook.rung == 3
-    assert hook.standing_cost_tokens == 0
-    assert hook.payback_ratio is None or hook.payback_ratio >= 1.0
-    assert not hasattr(hook, "estimated_recoverable_tokens")
+    assert guard.delivery == DELIVERY_EXECUTING_HOOK
+    assert guard.standing_cost_tokens == 0
+    assert guard.payback_ratio is None or guard.payback_ratio >= 1.0
+    assert not hasattr(guard, "estimated_recoverable_tokens")
 
-    assert note.rung == 1
+    # The bug this whole change exists to close: same "it is a hook", opposite
+    # answer, because the mechanism is what was asked.
+    assert nudge.delivery == DELIVERY_INJECTING_HOOK
+    assert nudge.standing_cost_tokens > 0
+    assert nudge.standing_cost_basis
+
+    assert note.delivery == DELIVERY_CLAUDE_MD_RULE
     assert note.standing_cost_tokens > 0
     assert note.standing_cost_basis
     assert not hasattr(note, "estimated_recoverable_tokens")

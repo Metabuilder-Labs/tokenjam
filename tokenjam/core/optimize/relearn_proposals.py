@@ -48,7 +48,7 @@ _ID_HEX_LEN = 12
 #: having been REGISTERED in the user's own config, and a caller-supplied path
 #: would aim the write at any repo on disk.
 APPLY_CLUSTER_FIELDS = (
-    "signature", "family_key", "title", "proposed_fix", "rung",
+    "signature", "family_key", "title", "proposed_fix", "delivery",
     "sessions", "occurrences", "repos", "examples",
     "apply_kind", "agent_name", "current_model", "proposed_model", "source_path",
     # Past-overspend figure (the one canonical dollar field): carried through
@@ -70,7 +70,7 @@ MODEL_ROUTING_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
 
 def missing_apply_fields(cluster: dict[str, Any]) -> tuple[str, ...]:
     """The required fields this cluster's ``apply_kind`` needs and does not
-    have. Empty for a rung-ladder fix (no ``apply_kind``) and for a complete
+    have. Empty for a delivery-mechanism fix (no ``apply_kind``) and for a complete
     model-routing proposal."""
     apply_kind = str(cluster.get("apply_kind") or "")
     if not apply_kind:

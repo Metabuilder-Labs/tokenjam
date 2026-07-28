@@ -410,6 +410,13 @@ def _print_instrument_agent_snippet() -> None:
               help="Plan tier for the provider being onboarded. Skips the "
                    "interactive plan prompt when set. Choices: api / pro / "
                    "max_5x / max_20x (Anthropic), plus / team / enterprise (OpenAI).")
+@click.option("--analysis-span", "analysis_span",
+              type=click.Choice(["30d", "90d", "all"]),
+              default=None,
+              help="How far back tj should analyze. Storage retention is "
+                   "derived from this — 'all' disables deletion entirely — so "
+                   "history the analyzers use can never be deleted underneath "
+                   "them. Skips the interactive span prompt when set.")
 @click.option("--project", "project_override", default=None,
               help="Project name to group this repo under in the dashboard "
                    "(OTel service.namespace — e.g. all Aquanodeio/* repos under "
@@ -435,7 +442,8 @@ def _print_instrument_agent_snippet() -> None:
 @click.pass_context
 def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: float | None,
                 install_daemon: bool, no_daemon: bool, force: bool,
-                reconfigure: bool, plan: str | None, project_override: str | None,
+                reconfigure: bool, plan: str | None, analysis_span: str | None,
+                project_override: str | None,
                 backfill_days: int | None, backfill_all: bool,
                 verify: bool, verify_only: bool, add_project: bool) -> None:
     """Interactive setup wizard for tj."""
@@ -473,10 +481,12 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     if claude_code:
         _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
                              project_override, verify=verify,
-                             backfill_days=backfill_days, backfill_all=backfill_all)
+                             backfill_days=backfill_days, backfill_all=backfill_all,
+                             analysis_span=analysis_span)
         return
     if codex:
-        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan, verify=verify)
+        _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
+                       verify=verify, analysis_span=analysis_span)
         return
 
     # Path-branched first run (#448): the bare `tj onboard` no longer assumes an
@@ -493,16 +503,20 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         if choice == "claude_code":
             _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
                                  project_override, verify=verify,
-                                 backfill_days=backfill_days, backfill_all=backfill_all)
+                                 backfill_days=backfill_days,
+                                 backfill_all=backfill_all,
+                                 analysis_span=analysis_span)
             return
         if choice == "codex":
             _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
-                           verify=verify)
+                           verify=verify, analysis_span=analysis_span)
             return
         if choice == "combination":
             _onboard_combination(ctx, budget, no_daemon, force, plan,
                                   project_override, verify=verify,
-                                  backfill_days=backfill_days, backfill_all=backfill_all)
+                                  backfill_days=backfill_days,
+                                  backfill_all=backfill_all,
+                                  analysis_span=analysis_span)
             return
         # choice == "sdk" → fall through to the generic SDK/API path below.
 
@@ -594,6 +608,16 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     if budget and budget > 0:
         budget_line = f"daily_usd = {budget}"
 
+    # The one span question, asked here because this path writes its config as
+    # TOML text rather than through `write_config` — `_apply_analysis_span`
+    # cannot reach it. Same choice, same default, same silence when non-tty.
+    from tokenjam.core.analysis_span import DEFAULT_ANALYSIS_SPAN, parse_analysis_span
+    if analysis_span is None:
+        analysis_span = (
+            _prompt_analysis_span() if _is_interactive() else DEFAULT_ANALYSIS_SPAN
+        )
+    parse_analysis_span(analysis_span)  # reject an unwritable span before it is written
+
     config_text = f"""\
 # TokenJam configuration
 # Docs: https://github.com/Metabuilder-Labs/tokenjam#configuration
@@ -622,7 +646,12 @@ tool_outputs = false
 
 [storage]
 path = "~/.tj/telemetry.duckdb"
-retention_days = 90
+# How far back tj analyzes: "30d", "90d", or "all" (keep everything, never
+# delete). Storage retention is DERIVED from this, so history the analyzers use
+# can never be deleted underneath them. Set retention_days as well only if you
+# want to keep MORE than you analyze; a value shorter than the span is raised
+# to it rather than honoured.
+analysis_span = "{analysis_span}"
 
 # Per-agent overrides (optional):
 # [agents.my-agent]
@@ -900,6 +929,94 @@ def _prompt_plan(provider_label: str, choices: list[tuple[str, str]],
         show_default=True,
     )
     return keys[int(raw) - 1]
+
+
+_ANALYSIS_SPAN_CHOICES = [
+    ("30d", "Last 30 days"),
+    ("90d", "Last 90 days"),
+    ("all", "All available — keep everything, never delete"),
+]
+
+
+def _prompt_analysis_span(current: str | None = None) -> str:
+    """Ask the one span question. Returns a key from ANALYSIS_SPAN_CHOICES.
+
+    Deliberately framed as "how far back should tj analyze" rather than "how
+    long should tj keep data": those were two settings that were free to
+    disagree, and they did — retention was quietly deleting the oldest history
+    the analyzers were still sizing their window against. There is one answer
+    now and storage follows it.
+    """
+    console.print("\nHow far back should tj analyze?")
+    for i, (_key, desc) in enumerate(_ANALYSIS_SPAN_CHOICES, start=1):
+        console.print(f"  [accent]{i}[/accent]) {desc}")
+    console.print(
+        "  [muted]Older data is deleted, so this also decides what is kept.[/muted]"
+    )
+    keys = [k for k, _ in _ANALYSIS_SPAN_CHOICES]
+    default_idx = keys.index(current) + 1 if current in keys else keys.index("90d") + 1
+    raw = click.prompt(
+        "Choose",
+        type=click.IntRange(1, len(_ANALYSIS_SPAN_CHOICES)),
+        default=default_idx,
+        show_default=True,
+    )
+    return keys[int(raw) - 1]
+
+
+def _apply_analysis_span(
+    config: object, span_override: str | None = None, *, reconfigure: bool = False,
+) -> None:
+    """Settle the analysis span on `config` before it is written.
+
+    The coupling lives in code, not in a comment: retention is derived from the
+    span (`core/analysis_span.retention_days_for`), and an explicit
+    `retention_days` shorter than the span is raised to it rather than honoured.
+    Lowering storage retention must not be able to silently retract a span the
+    product has already promised to analyze over, so the clamp only ever moves
+    retention UP, and it says so when it fires.
+
+    Idempotent and prompt-free once a span is on the config, so a flow that
+    writes the config more than once (or the combination flow, which runs two
+    of them over the same file) asks exactly once.
+    """
+    from tokenjam.core.analysis_span import (
+        DEFAULT_ANALYSIS_SPAN,
+        analysis_span_days,
+        parse_analysis_span,
+        retention_was_raised_to_span,
+        span_label,
+    )
+
+    storage = config.storage  # type: ignore[attr-defined]
+    if span_override:
+        # Validate before storing: an unparseable span written to disk would
+        # raise on every later read instead of here, where it can be corrected.
+        parse_analysis_span(span_override)
+        storage.analysis_span = span_override
+    elif storage.analysis_span is None:
+        if storage.retention_days is not None and not reconfigure:
+            # A config written before the coupling existed. Its kept history IS
+            # the most the product could ever have analyzed, so adopt it as the
+            # span rather than re-asking — nothing about this setup changes.
+            storage.analysis_span = f"{int(storage.retention_days)}d"
+        elif _is_interactive():
+            storage.analysis_span = _prompt_analysis_span(
+                f"{int(storage.retention_days)}d"
+                if storage.retention_days is not None else None
+            )
+        else:
+            storage.analysis_span = DEFAULT_ANALYSIS_SPAN
+    elif reconfigure and _is_interactive():
+        storage.analysis_span = _prompt_analysis_span(storage.analysis_span)
+
+    if retention_was_raised_to_span(storage):
+        console.print(
+            f"  Storage retention was shorter than the {span_label(storage)} "
+            f"analysis span; raised to match so nothing tj analyzes can be "
+            f"deleted underneath it."
+        )
+        storage.retention_days = analysis_span_days(storage)
 
 
 def _is_interactive() -> bool:
@@ -1562,6 +1679,7 @@ def _onboard_claude_code(
     backfill_days: int | None = None,
     backfill_all: bool = False,
     plan_usd_override: float | None = None,
+    analysis_span: str | None = None,
 ) -> None:
     """Configure Claude Code to send telemetry to tj.
 
@@ -1659,6 +1777,7 @@ def _onboard_claude_code(
         # project without restarting the agent (see AgentConfig.project).
         config.agents[agent_id].project = namespace
         config_path = global_config_path
+        _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(f"  tj config updated: {display_path(config_path)}", soft_wrap=True)
     else:
@@ -1690,6 +1809,7 @@ def _onboard_claude_code(
         )
         config_path = global_config_path
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(
             f"[ok]\u2713[/ok] Config written to "
@@ -2065,6 +2185,7 @@ def _onboard_codex(
     plan_usd_override: float | None = None,
     verify: bool = False,
     standalone: bool = True,
+    analysis_span: str | None = None,
 ) -> None:
     """Configure Codex CLI to send telemetry to tj.
 
@@ -2158,6 +2279,7 @@ def _onboard_codex(
         budget = _prompt_daily_budget(budget, plan)
         if budget and budget > 0:
             config.agents[agent_id].budget.daily_usd = budget
+        _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(f"  tj config updated: {display_path(config_path)}", soft_wrap=True)
     else:
@@ -2187,6 +2309,7 @@ def _onboard_codex(
             )},
         )
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        _apply_analysis_span(config, analysis_span, reconfigure=reconfigure)
         write_config(config, config_path)
         console.print(
             f"[ok]\u2713[/ok] Config written to "
@@ -2463,6 +2586,7 @@ def _onboard_combination(
     verify: bool = False,
     backfill_days: int | None = None,
     backfill_all: bool = False,
+    analysis_span: str | None = None,
 ) -> None:
     """The "combination" path (#448): the user runs more than one kind of agent.
 
@@ -2532,6 +2656,7 @@ def _onboard_combination(
             project_override=project_override,
             verify=False, standalone=False,
             backfill_days=backfill_days, backfill_all=backfill_all,
+            analysis_span=analysis_span,
         )
         done.append("Claude Code")
 
@@ -2542,7 +2667,7 @@ def _onboard_combination(
         _onboard_codex(
             ctx, codex_budget, no_daemon, force, reconfigure=False,
             plan_override=codex_plan, plan_usd_override=codex_usd,
-            verify=False, standalone=False,
+            verify=False, standalone=False, analysis_span=analysis_span,
         )
         # Run the on-disk Codex backfill exactly once here. Passing
         # standalone=False above suppressed the per-path onboarder's own backfill
@@ -3280,6 +3405,9 @@ def _onboard_add_project(ctx: click.Context, project_override: str | None) -> No
 
     namespace = _prompt_project_name(project_override, project_name)
     config.agents[agent_id].project = namespace
+    # Not a fresh onboard, so no span question — but the clamp still runs,
+    # so a config hand-edited to a shorter retention is corrected here too.
+    _apply_analysis_span(config)
     write_config(config, config_path)
 
     console.print(

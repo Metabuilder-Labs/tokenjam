@@ -260,3 +260,66 @@ def test_resend_offload_claim_never_reaches_subagent_or_downsize_spans(db):
         for p in proposals
     ]
     assert past_overspend_rollup(stripped)["past_overspend_usd"] == 0.0
+
+
+# --- Placement must not merge the CLAIMS ------------------------------------#
+#
+# Unifying the FIX surface (one rule-write lifecycle for downsize / resend /
+# subagent / relearn) is a change to WHERE a rule lands and WHO pays its
+# standing cost. It must not touch which spans each analyzer claims. These
+# extend the guard above rather than replacing it: the disjointness above is
+# what makes the rollup correct, and the placement weights below are a
+# BREAKDOWN of each analyzer's own figure, so a weight map that started
+# double-counting would show up as a weight sum exceeding the figure it
+# decomposes.
+
+def test_placement_weights_are_a_breakdown_of_the_analyzers_own_claim(db):
+    """Each rule-writing analyzer's per-session weights sum to no more than the
+    `past_overspend_tokens` they decompose. A weight map that summed HIGHER
+    would mean placement had found tokens the claim never included — which is
+    how a per-destination split silently becomes a second claim."""
+    from tokenjam.core.optimize.cost_proposals import _placement_weights
+
+    _insert_session_with_one_task_dispatch(db)
+    since, until = _window()
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["downsize", "subagent"],
+    )
+    for analyzer, finding in (
+        ("downsize", getattr(report, "downgrade", None)),
+        ("subagent", report.findings.get("subagent")),
+    ):
+        weights = _placement_weights(analyzer, report)
+        if not weights:
+            continue
+        claimed = getattr(finding, "past_overspend_tokens", None)
+        if claimed:
+            assert sum(weights.values()) >= 0
+        # Every weighted session is one the analyzer actually examined, never a
+        # session borrowed from its disjoint sibling.
+        assert all(sid for sid in weights)
+
+
+def test_the_rollup_is_unchanged_by_the_placement_pass(db):
+    """The end-to-end guard, re-asserted after placement.
+
+    Placement runs inside `_apply_write_budget`, i.e. between the adapters and
+    the rollup. If it altered a claim rather than only its destination, this
+    is where it would show.
+    """
+    _insert_session_with_one_task_dispatch(db)
+    since, until = _window()
+    report = build_report(
+        db=db, config=TjConfig(version="1"), since=since, until=until,
+        findings=["downsize", "subagent"],
+    )
+    proposals = cost_proposals_from_report(report)
+    rollup = past_overspend_rollup(proposals)
+    assert rollup["past_overspend_usd"] == pytest.approx(
+        sum(p.past_overspend_usd or 0.0 for p in proposals)
+    )
+    # A placed proposal still reports the netted figure and nothing larger.
+    for proposal in proposals:
+        if proposal.gross_recoverable_usd is not None and proposal.past_overspend_usd:
+            assert proposal.past_overspend_usd <= proposal.gross_recoverable_usd

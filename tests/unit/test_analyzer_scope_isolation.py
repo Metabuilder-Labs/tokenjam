@@ -19,6 +19,8 @@ from pathlib import Path
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE, DELIVERY_EXECUTING_HOOK, DELIVERY_INJECTING_HOOK, DELIVERY_SKILL
+
 from tokenjam.core.optimize.analyzers import deadweight, relearn
 from tokenjam.core.optimize.analyzers import summarize as summarize_analyzer
 from tokenjam.core.optimize.relearn_apply import default_target_path
@@ -157,19 +159,20 @@ def test_the_user_global_apply_target_follows_the_scope(tmp_path):
 
 
 def test_the_apply_target_is_unchanged_without_a_scope():
-    target = default_target_path(1, "user-global", "", "slug")
+    target = default_target_path(DELIVERY_CLAUDE_MD_RULE, "user-global", "", "slug")
     assert target == str(Path.home() / ".claude" / "CLAUDE.md")
 
 
-@pytest.mark.parametrize("rung,tail", [
-    (1, ["CLAUDE.md"]),
-    (2, ["skills", "slug", "SKILL.md"]),
-    (3, ["hooks", "slug.py"]),
+@pytest.mark.parametrize("delivery,tail", [
+    (DELIVERY_CLAUDE_MD_RULE, ["CLAUDE.md"]),
+    (DELIVERY_SKILL, ["skills", "slug", "SKILL.md"]),
+    (DELIVERY_EXECUTING_HOOK, ["hooks", "slug.py"]),
+    (DELIVERY_INJECTING_HOOK, ["hooks", "slug.py"]),
 ])
-def test_every_rung_of_the_apply_target_is_scoped(rung, tail, tmp_path):
+def test_every_delivery_of_the_apply_target_is_scoped(delivery, tail, tmp_path):
     scoped_home = tmp_path / ".claude"
     target = Path(
-        default_target_path(rung, "user-global", "", "slug", claude_home=scoped_home)
+        default_target_path(delivery, "user-global", "", "slug", claude_home=scoped_home)
     )
     assert target == scoped_home.joinpath(*tail)
 

@@ -76,6 +76,10 @@ def cli(ctx: click.Context, config_path: str | None, output_json: bool,
     no_db_commands = {
         "stop", "uninstall", "onboard", "mcp", "demo", "policy",
         "proxy", "summarize", "pricing", "otel-resource-attrs", "session-end",
+        # `rules` reads the proposal cache the optimize pass already wrote —
+        # config only, no analyzer sweep — so it works while `tj serve` holds
+        # the DuckDB write lock.
+        "rules",
         "statusline", "upgrade",
         # `ping` emits a test span through the SDK (which resolves its own
         # HTTP-vs-direct path); it must not take the CLI's DuckDB lock (#80).
@@ -214,3 +218,6 @@ cli.add_command(cmd_demo, name="demo")
 
 from tokenjam.cli.cmd_summarize import cmd_summarize  # noqa: E402
 cli.add_command(cmd_summarize, name="summarize")
+
+from tokenjam.cli.cmd_rules import cmd_rules  # noqa: E402
+cli.add_command(cmd_rules, name="rules")

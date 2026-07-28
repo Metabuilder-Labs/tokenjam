@@ -106,7 +106,7 @@ class WorkflowCluster:
     total_cost_usd: float = 0.0
     total_tokens:    int   = 0
     # Up to 3 example session ids for this cluster (beyond the single
-    # `example_session_id` above), so a downstream apply artifact (a rung-2
+    # `example_session_id` above), so a downstream apply artifact (a
     # skill note) can cite more than one instance. Defaulted for round-trip.
     example_session_ids: list[str] = field(default_factory=list)
 

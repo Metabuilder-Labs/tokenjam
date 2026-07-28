@@ -60,6 +60,27 @@ class DataSpan:
     oldest_in_block:           str | None
     ignored_days_before_block: int
     basis:                     str
+    #: The OLDEST PLAUSIBLE day carrying data, ISO, ``None`` when nothing dated
+    #: was found. Behind a gap, and so deliberately NOT ``oldest_in_block``.
+    #:
+    #: This is the far edge of the measure the module docstring calls wrong for
+    #: "how far back can I ask", and it is the right one for a different
+    #: question: "how far back must an analyzer look to see everything it is
+    #: entitled to". Bounding a query by ``available_days`` would discard
+    #: everything behind a gap — a fortnight away would silently delete the
+    #: quarter before it from a past-tense figure — whereas widening a query
+    #: past the data costs nothing, since rows that are not there return nothing
+    #: either way. So the two are not interchangeable and neither replaces the
+    #: other: clamp a SELECTOR against ``available_days``, size a LOOKBACK
+    #: against this.
+    #:
+    #: Only safe to expose because ingest no longer ADMITS an epoch sentinel: a
+    #: record with no observed time is rejected at the boundary rather than
+    #: stored with a made-up one. A single 1970 row used to move this by
+    #: decades, which is what the contiguous-block measure was introduced to
+    #: survive; the plausible-year floor below remains the backstop for rows an
+    #: older build already wrote (and `tj doctor --repair` removes those).
+    oldest:                    str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +90,7 @@ class DataSpan:
             "oldest_in_block": self.oldest_in_block,
             "ignored_days_before_block": self.ignored_days_before_block,
             "basis": self.basis,
+            "oldest": self.oldest,
         }
 
 
@@ -125,7 +147,7 @@ def data_span_from_days(
         return DataSpan(
             available_days=None, days_with_data=0, newest=None,
             oldest_in_block=None, ignored_days_before_block=0,
-            basis=_UNKNOWN_BASIS,
+            basis=_UNKNOWN_BASIS, oldest=None,
         )
 
     newest = plausible[-1]
@@ -153,6 +175,7 @@ def data_span_from_days(
             f"gap here. days_with_data counts every distinct day instead, which "
             f"one outlier can move by at most one"
         ),
+        oldest=plausible[0].isoformat(),
     )
 
 
@@ -177,13 +200,19 @@ def available_data_span(
     """
     if conn is None:
         return data_span_from_days([], max_gap_days=max_gap_days)
+    # `AT TIME ZONE 'UTC'` before the cast is load-bearing, not decoration
+    # (Critical Rule 1): DuckDB resolves a bare `CAST(TIMESTAMPTZ AS DATE)`
+    # through the session timezone, so on a machine running ahead of UTC the
+    # newest rows come back stamped with TOMORROW's date — and `_plausible_days`
+    # then drops them as future. The whole of today would vanish from the span
+    # for the hours the local date leads, and reappear at local midnight.
     days = _distinct_days(
         conn,
-        "SELECT DISTINCT CAST(start_time AS DATE) FROM spans "
+        "SELECT DISTINCT CAST(start_time AT TIME ZONE 'UTC' AS DATE) FROM spans "
         "WHERE start_time IS NOT NULL",
     ) + _distinct_days(
         conn,
-        "SELECT DISTINCT CAST(started_at AS DATE) FROM sessions "
+        "SELECT DISTINCT CAST(started_at AT TIME ZONE 'UTC' AS DATE) FROM sessions "
         "WHERE started_at IS NOT NULL",
     )
     return data_span_from_days(days, max_gap_days=max_gap_days)

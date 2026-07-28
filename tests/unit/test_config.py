@@ -7,7 +7,9 @@ from tokenjam.core.config import (
     find_config_file, load_config, resolve_config_path, _parse, _serialise,
     TjConfig, AgentConfig, BudgetConfig, DefaultsConfig, SensitiveAction,
     SecurityConfig, CaptureConfig, OptimizeConfig, StorageConfig,
-    resolve_effective_budget, validate_budget_value, validate_cycle_start_day,
+    CodingGroupConfig, GroupBudgetConfig,
+    resolve_effective_budget, resolve_group_budget,
+    validate_budget_value, validate_cycle_start_day,
 )
 
 
@@ -429,6 +431,88 @@ class TestResolveEffectiveBudget:
         eff = resolve_effective_budget("a", config)
         assert eff.daily_usd == 10.0
         assert eff.session_usd == 5.0
+
+
+class TestCodingAgentGroupBudget:
+    """[coding_agents.<group_id>.budget] — daily-only ceilings for a coding
+    TOOL group ("claude-code" / "codex"), a separate top-level TOML table
+    from [agents.*] so a group id like "claude-code" never collides with a
+    literal per-agent [agents.claude-code] entry."""
+
+    def test_group_roundtrip(self):
+        config = TjConfig(
+            version="1",
+            coding_agents={
+                "claude-code": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=50.0)),
+                "codex": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=20.0)),
+            },
+        )
+        serialised = _serialise(config)
+        assert serialised["coding_agents"]["claude-code"]["budget"]["daily_usd"] == 50.0
+        restored = _parse(serialised)
+        assert restored.coding_agents["claude-code"].budget.daily_usd == 50.0
+        assert restored.coding_agents["codex"].budget.daily_usd == 20.0
+
+    def test_absent_coding_agents_section_parses_empty(self):
+        assert _parse({"version": "1"}).coding_agents == {}
+
+    def test_group_namespace_does_not_collide_with_bare_agent_of_same_name(self):
+        """A literal [agents.claude-code] entry (bare agent_id) and a
+        [coding_agents.claude-code] group cap must coexist independently."""
+        raw = {
+            "version": "1",
+            "agents": {"claude-code": {"description": "literal bare agent"}},
+            "coding_agents": {"claude-code": {"budget": {"daily_usd": 42.0}}},
+        }
+        config = _parse(raw)
+        assert config.agents["claude-code"].description == "literal bare agent"
+        assert config.coding_agents["claude-code"].budget.daily_usd == 42.0
+
+    def test_defaults_coding_budget_roundtrip(self):
+        config = TjConfig(
+            version="1",
+            defaults=DefaultsConfig(coding_budget=GroupBudgetConfig(daily_usd=100.0)),
+        )
+        restored = _parse(_serialise(config))
+        assert restored.defaults.coding_budget.daily_usd == 100.0
+
+
+class TestResolveGroupBudget:
+    def test_group_override_wins_over_defaults(self):
+        config = TjConfig(
+            version="1",
+            defaults=DefaultsConfig(coding_budget=GroupBudgetConfig(daily_usd=10.0)),
+            coding_agents={"claude-code": CodingGroupConfig(budget=GroupBudgetConfig(daily_usd=50.0))},
+        )
+        assert resolve_group_budget("claude-code", config).daily_usd == 50.0
+
+    def test_unconfigured_group_inherits_zone_default(self):
+        """A newly-appearing tool with no [coding_agents.<id>] entry yet
+        inherits the coding-zone default instead of arriving uncapped."""
+        config = TjConfig(
+            version="1",
+            defaults=DefaultsConfig(coding_budget=GroupBudgetConfig(daily_usd=25.0)),
+        )
+        assert resolve_group_budget("codex", config).daily_usd == 25.0
+
+    def test_no_defaults_no_override_returns_none(self):
+        config = TjConfig(version="1")
+        assert resolve_group_budget("claude-code", config).daily_usd is None
+
+
+class TestBackwardCompatSessionUsd:
+    def test_existing_session_usd_survives_a_roundtrip_that_also_touches_daily(self):
+        """A POST that only changes daily_usd must not erase a session_usd
+        the user already had configured on the same scope."""
+        config = TjConfig(
+            version="1",
+            agents={"legacy-agent": AgentConfig(budget=BudgetConfig(daily_usd=5.0, session_usd=1.5))},
+        )
+        # Simulate a write that only touches daily_usd, as the redesigned UI does.
+        config.agents["legacy-agent"].budget.daily_usd = 8.0
+        restored = _parse(_serialise(config))
+        assert restored.agents["legacy-agent"].budget.daily_usd == 8.0
+        assert restored.agents["legacy-agent"].budget.session_usd == 1.5
 
 
 class TestValidateBudgetValue:

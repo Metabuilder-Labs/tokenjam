@@ -13,6 +13,23 @@ import threading
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+)
+
+#: Which hook mechanism each matchered family produces. Declared here the
+#: same way the analyzer declares it per family: a guard blocks and injects
+#: nothing, a reactive spec exists to inject.
+_DELIVERY_BY_FAMILY = {
+    "sleep_chain": DELIVERY_EXECUTING_HOOK,
+    "cwd_confusion": DELIVERY_INJECTING_HOOK,
+    "stale_read_race": DELIVERY_INJECTING_HOOK,
+    "edit_string_not_found": DELIVERY_INJECTING_HOOK,
+}
+
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.optimize import relearn_apply as pa
 
@@ -29,7 +46,7 @@ def _cluster(**overrides) -> dict:
         "family_key": "cwd_confusion",
         "title": "cwd / relative-path confusion",
         "proposed_fix": "Verify an absolute cwd before a relative Read.",
-        "rung": 1,
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
         "sessions": 5,
         "occurrences": 9,
         "repos": ["demo"],
@@ -86,17 +103,17 @@ def test_slugify_two_clusters_sharing_a_long_tool_list_prefix_never_collide():
 
 
 def test_slug_collision_regression_via_full_write_plan(cfg, tmp_path):
-    """End-to-end: applying two rung-2 clusters that previously collided on
+    """End-to-end: applying two skill clusters that previously collided on
     one slug must now land at two DIFFERENT default_target_path locations,
     so approving the second never overwrites the first cluster's skill
     file."""
     shared_prefix = " -> ".join(["Bash", "Read", "Write", "Edit", "Grep", "Glob"] * 4)
     cluster_a = _cluster(
-        signature="script:aaaaaaaaaaaa", family_key=None, rung=2,
+        signature="script:aaaaaaaaaaaa", family_key=None, delivery=DELIVERY_SKILL,
         title=f"Deterministic tool pattern: {shared_prefix} (aaaaaaaaaaaa)",
     )
     cluster_b = _cluster(
-        signature="script:bbbbbbbbbbbb", family_key=None, rung=2,
+        signature="script:bbbbbbbbbbbb", family_key=None, delivery=DELIVERY_SKILL,
         title=f"Deterministic tool pattern: {shared_prefix} (bbbbbbbbbbbb)",
     )
     slug_a = pa.slugify(cluster_a["title"])
@@ -119,12 +136,16 @@ def test_slug_collision_regression_via_full_write_plan(cfg, tmp_path):
 def test_default_target_path_user_global(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(pa.Path, "home", classmethod(lambda cls: tmp_path))
-    note = pa.default_target_path(1, "user-global", "", "slug")
-    skill = pa.default_target_path(2, "user-global", "", "slug")
-    hook = pa.default_target_path(3, "user-global", "", "slug")
+    note = pa.default_target_path(DELIVERY_CLAUDE_MD_RULE, "user-global", "", "slug")
+    skill = pa.default_target_path(DELIVERY_SKILL, "user-global", "", "slug")
+    hook = pa.default_target_path(DELIVERY_EXECUTING_HOOK, "user-global", "", "slug")
+    nudge = pa.default_target_path(DELIVERY_INJECTING_HOOK, "user-global", "", "slug")
     assert note == str(tmp_path / ".claude" / "CLAUDE.md")
     assert skill == str(tmp_path / ".claude" / "skills" / "slug" / "SKILL.md")
     assert hook == str(tmp_path / ".claude" / "hooks" / "slug.py")
+    # Both hook mechanisms write a hook script; they differ in what it DOES and
+    # what it costs, not in where it lands.
+    assert nudge == hook
 
 
 def test_default_target_path_project_needs_cwd():
@@ -138,7 +159,7 @@ def test_default_target_path_project_finds_nearest_claude_md(tmp_path):
     assert pa.default_target_path(1, "project", str(sub), "slug") == str(tmp_path / "CLAUDE.md")
 
 
-# --- rung 1: note ------------------------------------------------------------
+# --- claude_md_rule: the note -------------------------------------------------
 
 def test_apply_note_dry_run_writes_nothing(cfg, tmp_path):
     target = tmp_path / "CLAUDE.md"
@@ -155,7 +176,7 @@ def test_apply_note_go_writes_marked_section(cfg, tmp_path):
     result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     assert result["dry_run"] is False
     rec = result["record"]
-    assert rec["kind"] == "note" and rec["state"] == "applied"
+    assert rec["kind"] == DELIVERY_CLAUDE_MD_RULE and rec["state"] == "applied"
     written = target.read_text()
     assert pa.NOTE_SECTION_HEADER in written
     assert "<!-- tokenjam:relearn:cwd_confusion -->" in written
@@ -163,14 +184,14 @@ def test_apply_note_go_writes_marked_section(cfg, tmp_path):
 
 
 def test_command_not_found_apply_writes_real_note_not_stub(cfg, tmp_path):
-    # Downgraded to rung 1 (SPEC honesty fix): there is no safe automatic
-    # config/env writer, so Apply must write a real CLAUDE.md note with
-    # genuinely useful guidance instead of the inert stub hook rung 5 used to
-    # produce via _render_stub_hook.
+    # Downgraded to a CLAUDE.md rule (SPEC honesty fix): there is no safe
+    # automatic config/env writer, so Apply must write a real note with
+    # genuinely useful guidance instead of the inert stub hook the old
+    # config/env level used to produce via _render_stub_hook.
     cluster = _cluster(
         signature="command_not_found", family_key="command_not_found",
         title="command not found (bashisms under zsh, bare interpreter)",
-        rung=1,
+        delivery=DELIVERY_CLAUDE_MD_RULE,
         proposed_fix=(
             "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
             "PATH. Common causes here: using bare `python` instead of `python3`, "
@@ -182,7 +203,7 @@ def test_command_not_found_apply_writes_real_note_not_stub(cfg, tmp_path):
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
     result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
-    assert result["record"]["kind"] == "note"
+    assert result["record"]["kind"] == DELIVERY_CLAUDE_MD_RULE
     written = target.read_text()
     assert "python3" in written
     assert "<!-- tokenjam:relearn:command_not_found -->" in written
@@ -213,21 +234,21 @@ def test_reapply_same_signature_is_idempotent_not_duplicated(cfg, tmp_path):
     assert "updated fix text" in written
 
 
-# --- rung 2: skill ------------------------------------------------------------
+# --- skill --------------------------------------------------------------------
 
 def test_apply_skill_writes_frontmatter(cfg, tmp_path):
     cluster = _cluster(signature="deferred_tool_cold", family_key="deferred_tool_cold",
-                        title="deferred tool cold", rung=2)
+                        title="deferred tool cold", delivery=DELIVERY_SKILL)
     target = tmp_path / ".claude" / "skills" / "deferred-tool-cold" / "SKILL.md"
     result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
-    assert result["record"]["kind"] == "skill"
+    assert result["record"]["kind"] == DELIVERY_SKILL
     content = target.read_text()
     assert content.startswith("---\nname: deferred-tool-cold")
     assert "tokenjam:relearn:deferred_tool_cold" in content
 
 
 def test_apply_skill_refuses_to_clobber_foreign_file(cfg, tmp_path):
-    cluster = _cluster(signature="x", rung=2)
+    cluster = _cluster(signature="x", delivery=DELIVERY_SKILL)
     target = tmp_path / ".claude" / "skills" / "x" / "SKILL.md"
     target.parent.mkdir(parents=True)
     target.write_text("hand-authored skill, not ours\n", encoding="utf-8")
@@ -236,11 +257,11 @@ def test_apply_skill_refuses_to_clobber_foreign_file(cfg, tmp_path):
     assert target.read_text() == "hand-authored skill, not ours\n"   # untouched
 
 
-# --- rungs 3-5: enforcement (hook), disabled by default -----------------------
+# --- the hook mechanisms: enforcement, disabled by default --------------------
 
 def test_apply_hook_is_written_disabled(cfg, tmp_path):
     cluster = _cluster(signature="sleep_chain", family_key="sleep_chain",
-                        title="blocked sleep-chain", rung=3)
+                        title="blocked sleep-chain", delivery=DELIVERY_EXECUTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
     result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     rec = result["record"]
@@ -253,7 +274,8 @@ def test_apply_hook_is_written_disabled(cfg, tmp_path):
 
 
 def test_hook_fails_open_on_garbage_stdin(cfg, tmp_path):
-    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
+    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain",
+                       delivery=DELIVERY_EXECUTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
     pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     proc = subprocess.run([sys.executable, str(target)], input="not { valid json",
@@ -262,7 +284,8 @@ def test_hook_fails_open_on_garbage_stdin(cfg, tmp_path):
 
 
 def test_hook_blocks_real_sleep_chain(cfg, tmp_path):
-    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
+    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain",
+                       delivery=DELIVERY_EXECUTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
     pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "sleep 5 && ls"}})
@@ -273,7 +296,8 @@ def test_hook_blocks_real_sleep_chain(cfg, tmp_path):
 
 
 def test_hook_allows_unrelated_command(cfg, tmp_path):
-    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
+    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain",
+                       delivery=DELIVERY_EXECUTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
     pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls -la"}})
@@ -282,19 +306,19 @@ def test_hook_allows_unrelated_command(cfg, tmp_path):
     assert proc.returncode == 0
 
 
-def test_matcherless_family_refuses_rung_3_and_offers_rung_1(cfg, tmp_path):
+def test_matcherless_family_refuses_a_hook_and_offers_a_rule(cfg, tmp_path):
     # A family with no hand-authored matcher used to get an inert TODO stub
     # hook: a file on disk, a ledger record, an "applied" badge, and zero
-    # behaviour. Apply must refuse it outright and point at rung 1 instead.
+    # behaviour. Apply must refuse it outright and point at a CLAUDE.md rule.
     cluster = _cluster(signature="mystery", family_key="mystery_family",
-                        title="some novel relearn", rung=3)
+                        title="some novel relearn", delivery=DELIVERY_INJECTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "mystery.py"
 
     with pytest.raises(pa.RelearnApplyRefused) as exc:
         pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
 
     assert "no matcher exists" in str(exc.value)
-    assert "rung 1" in str(exc.value)
+    assert "CLAUDE.md rule" in str(exc.value)
     assert not target.exists()          # nothing written
     assert not pa.list_applied(cfg)     # nothing recorded as applied
 
@@ -302,7 +326,8 @@ def test_matcherless_family_refuses_rung_3_and_offers_rung_1(cfg, tmp_path):
 def test_matcherless_family_refuses_the_dry_run_too(cfg, tmp_path):
     # The refusal has to land on the dry run as well, or the card shows a diff
     # for a hook the real apply will then reject.
-    cluster = _cluster(signature="mystery", family_key="mystery_family", rung=3)
+    cluster = _cluster(signature="mystery", family_key="mystery_family",
+                       delivery=DELIVERY_INJECTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "mystery.py"
     with pytest.raises(pa.RelearnApplyRefused):
         pa.apply_relearn_fix(cfg, cluster, target_path=str(target),
@@ -312,17 +337,18 @@ def test_matcherless_family_refuses_the_dry_run_too(cfg, tmp_path):
 
 def test_matchered_families_are_exactly_the_hand_authored_ones(cfg, tmp_path):
     # The refusal boundary: every family listed here has a real matcher, and a
-    # rung-3 apply for each writes a hook file.
+    # a hook apply for each writes a hook file.
     assert pa.matchered_families() == {"sleep_chain", "cwd_confusion",
                                        "stale_read_race", "edit_string_not_found"}
     for family in sorted(pa.matchered_families()):
         target = tmp_path / ".claude" / "hooks" / f"{family}.py"
-        cluster = _cluster(signature=family, family_key=family, rung=3)
+        cluster = _cluster(signature=family, family_key=family,
+                           delivery=_DELIVERY_BY_FAMILY[family])
         pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
         assert target.is_file()
 
 
-# --- rung 3: PostToolUseFailure REACTIVE hooks (cwd_confusion, stale_read_race,
+# --- injecting_hook: PostToolUseFailure REACTIVE hooks (cwd_confusion, stale_read_race,
 # edit_string_not_found) — never block (PostToolUseFailure fires only after a
 # tool already failed), only inject `additionalContext`. Every test below
 # checks BOTH that the real failure signature fires AND that a battery of
@@ -331,7 +357,8 @@ def test_matchered_families_are_exactly_the_hand_authored_ones(cfg, tmp_path):
 # than a no-op). ------------------------------------------------------------
 
 def _apply_reactive_hook(cfg, tmp_path, family_key: str, title: str):
-    cluster = _cluster(signature=family_key, family_key=family_key, title=title, rung=3)
+    cluster = _cluster(signature=family_key, family_key=family_key, title=title,
+                       delivery=DELIVERY_INJECTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / f"{family_key}.py"
     pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     return target
@@ -546,7 +573,8 @@ def test_reactive_hook_stale_read_fires_via_tool_response_error(cfg, tmp_path):
 
 
 def test_enable_enforcement_requires_confirm(cfg, tmp_path):
-    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
+    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain",
+                       delivery=DELIVERY_EXECUTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
     result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
@@ -556,7 +584,8 @@ def test_enable_enforcement_requires_confirm(cfg, tmp_path):
 
 
 def test_enable_then_disable_enforcement(cfg, tmp_path):
-    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
+    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain",
+                       delivery=DELIVERY_EXECUTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
     result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
@@ -574,7 +603,8 @@ def test_enable_then_disable_enforcement(cfg, tmp_path):
 
 
 def test_revert_disables_enforcement_and_deletes_hook(cfg, tmp_path):
-    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain", rung=3)
+    cluster = _cluster(signature="sleep_chain", family_key="sleep_chain",
+                       delivery=DELIVERY_EXECUTING_HOOK)
     target = tmp_path / ".claude" / "hooks" / "blocked-sleep-chain.py"
     result = pa.apply_relearn_fix(cfg, cluster, target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
@@ -628,10 +658,21 @@ def test_revert_unknown_fix_id_refuses(cfg):
         pa.revert_applied_fix(cfg, "does-not-exist")
 
 
-def test_unknown_rung_refuses(cfg, tmp_path):
+def test_an_unresolvable_delivery_refuses(cfg, tmp_path):
     target = tmp_path / "CLAUDE.md"
-    with pytest.raises(pa.RelearnApplyRefused, match="unknown rung"):
-        pa.apply_relearn_fix(cfg, _cluster(rung=99), target_path=str(target), scope="project", go=True)
+    # Inverted from "unknown rung 99": the number is gone, and what must still
+    # be refused is a record this build cannot resolve to an artifact. A
+    # legacy rung 4/5 lands here too — no build ever produced one, so there is
+    # nothing to migrate and nothing to guess.
+    with pytest.raises(pa.RelearnApplyRefused, match="cannot tell what artifact"):
+        pa.apply_relearn_fix(cfg, _cluster(delivery="wrapper"), target_path=str(target),
+                             scope="project", go=True)
+    with pytest.raises(pa.RelearnApplyRefused, match="cannot tell what artifact"):
+        legacy = _cluster()
+        legacy.pop("delivery")
+        legacy["rung"] = 5
+        pa.apply_relearn_fix(cfg, legacy, target_path=str(target),
+                             scope="project", go=True)
 
 
 def test_empty_target_path_refuses(cfg):
@@ -688,16 +729,16 @@ def test_active_session_warning_never_raises_on_bad_conn(tmp_path):
     assert pa.active_session_warning(_BrokenConn(), str(tmp_path / "CLAUDE.md")) is None
 
 
-# --- must-fix #2: rung-1 note target allowlist ---------------------------------
+# --- must-fix #2: note target allowlist ---------------------------------------
 
 def test_note_apply_refuses_non_markdown_target(cfg, tmp_path):
-    """rung=1 (note) at an arbitrary non-.md target (e.g. a .py file with no
+    """A CLAUDE.md rule at an arbitrary non-.md target (e.g. a .py file with no
     prior tokenjam marker) must be refused outright — otherwise a client-
     supplied target_path could corrupt any file on disk."""
     target = tmp_path / "some_script.py"
     target.write_text("print('do not touch me')\n", encoding="utf-8")
     with pytest.raises(pa.RelearnApplyRefused, match="not an allowlisted note target"):
-        pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+        pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     assert target.read_text() == "print('do not touch me')\n"   # untouched
 
 
@@ -705,7 +746,7 @@ def test_note_apply_refuses_dotfile_target(cfg, tmp_path):
     target = tmp_path / ".zshrc"
     target.write_text("export PATH=/usr/bin\n", encoding="utf-8")
     with pytest.raises(pa.RelearnApplyRefused, match="not an allowlisted note target"):
-        pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+        pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     assert target.read_text() == "export PATH=/usr/bin\n"   # untouched
 
 
@@ -713,7 +754,7 @@ def test_note_apply_allows_md_target(cfg, tmp_path):
     """A *.md target (not just literally CLAUDE.md) is allowed."""
     target = tmp_path / "AGENTS.md"
     target.write_text("# Agents\n", encoding="utf-8")
-    result = pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     assert result["dry_run"] is False
     assert "<!-- tokenjam:relearn:cwd_confusion -->" in target.read_text()
 
@@ -727,7 +768,7 @@ def test_note_apply_allows_re_apply_to_already_marked_non_md_file(cfg, tmp_path)
         "<!-- tokenjam:relearn:cwd_confusion -->\nold\n<!-- /tokenjam:relearn:cwd_confusion -->\n",
         encoding="utf-8",
     )
-    result = pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     assert result["dry_run"] is False
 
 
@@ -739,7 +780,7 @@ def test_apply_refuses_symlinked_target(cfg, tmp_path):
     link = tmp_path / "CLAUDE.md"
     link.symlink_to(real)
     with pytest.raises(pa.RelearnApplyRefused, match="symlink"):
-        pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(link), scope="project", go=True)
+        pa.apply_relearn_fix(cfg, _cluster(), target_path=str(link), scope="project", go=True)
     assert real.read_text() == "# elsewhere\n"   # the real file was never touched through the link
 
 
@@ -750,7 +791,7 @@ def test_apply_refuses_dangling_symlink_target(cfg, tmp_path):
     link = tmp_path / "CLAUDE.md"
     link.symlink_to(tmp_path / "does-not-exist.md")
     with pytest.raises(pa.RelearnApplyRefused, match="symlink"):
-        pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(link), scope="project", go=True)
+        pa.apply_relearn_fix(cfg, _cluster(), target_path=str(link), scope="project", go=True)
     assert not (tmp_path / "does-not-exist.md").exists()
 
 
@@ -759,7 +800,7 @@ def test_revert_refuses_when_target_became_a_symlink(cfg, tmp_path):
     revert must refuse rather than restore/delete through the new link."""
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    result = pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
 
     elsewhere = tmp_path / "elsewhere.md"
@@ -889,7 +930,7 @@ def test_memory_storage_apply_and_revert_round_trip_via_temp_root(tmp_path):
     cfg = TjConfig(version="1", storage=StorageConfig(path=":memory:"))
     target = tmp_path / "CLAUDE.md"
     target.write_text("# Repo\n", encoding="utf-8")
-    result = pa.apply_relearn_fix(cfg, _cluster(rung=1), target_path=str(target), scope="project", go=True)
+    result = pa.apply_relearn_fix(cfg, _cluster(), target_path=str(target), scope="project", go=True)
     fix_id = result["record"]["id"]
     assert pa.get_applied(cfg, fix_id) is not None
     reverted = pa.revert_applied_fix(cfg, fix_id)
@@ -902,7 +943,7 @@ def test_memory_storage_apply_and_revert_round_trip_via_temp_root(tmp_path):
 # versions carries `tokenjam:pothole:`. The three "is this file ours?" checks
 # keyed on the CURRENT marker only, so those live files read as strangers':
 # re-apply refused with "wasn't written by TokenJam" (observed on 4 installed
-# hooks), and a rung-1 note re-apply appended a duplicate block instead of
+# hooks), and a note re-apply appended a duplicate block instead of
 # replacing it. Root CLAUDE.md anti-pattern #21.
 
 LEGACY_HOOK = (

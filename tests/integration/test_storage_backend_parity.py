@@ -109,6 +109,7 @@ SHIM_NOT_IMPLEMENTED = {
     "delete_spans_before",
     "get_active_session",
     "get_cost_delta_by_group",
+    "get_daily_cost_for_agents",
     "get_distinct_agent_ids",
     "get_policy_decisions",
     "get_savings_entries",

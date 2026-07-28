@@ -47,7 +47,7 @@ def _mcp_cluster(source_path: str, server_name: str = "apollo", **overrides) -> 
     base = {
         "signature": f"cost:deadweight:{server_name}",
         "title": f"Unused MCP server: {server_name}",
-        "rung": 0,
+        "delivery": "",
         "apply_kind": dw.APPLY_KIND_MCP_REMOVE,
         "agent_name": server_name,
         "source_path": source_path,

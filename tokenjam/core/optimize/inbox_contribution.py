@@ -135,8 +135,11 @@ def headline_window_days(cached: Any) -> int:
     """The window the Review inbox headline is LABELLED with.
 
     Read from the cost block's own ``cost_window_days`` (the window the
-    stored cost figures were observed over), falling back to the recompute
-    default when a cache predates the key or carries a zero. EVERY surface
+    stored cost figures were observed over), which is where the resolved
+    analysis span lands — so the headline follows the span the user chose with
+    no derivation of its own. The constant is reached only when a cache predates
+    the key or carries a zero, and labels a figure nobody can now attribute to a
+    window. EVERY surface
     that builds the headline resolves it through this one function -- the
     web ``/relearn/cost-proposals`` and ``/relearn/proposals`` routes and the
     CLI's ``tj relearn cost-proposals`` alike -- so a row can never publish a
@@ -150,7 +153,7 @@ def headline_window_days(cached: Any) -> int:
         days = int(raw or 0)
     except (TypeError, ValueError):
         days = 0
-    return days or _cost_proposals_mod.DEFAULT_COST_WINDOW_DAYS
+    return days or _cost_proposals_mod.FALLBACK_COST_WINDOW_DAYS
 
 
 def exact_window_label(

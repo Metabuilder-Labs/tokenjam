@@ -17,28 +17,73 @@ and rewrites observed while building this delivered materially less than the
 target asks for. Using the ask as the estimate therefore overstates, so this
 module separates the two:
 
-* :data:`DEFAULT_TARGET_RATIO` — what the rewriter is asked for.
+* :data:`DEFAULT_TARGET_RATIO` — what the rewriter is asked for. Used ONLY to
+  build the rewriter's prompt. Never to estimate.
 * :func:`observed_prose_ratio` — what rewrites on THIS machine have actually
   delivered, derived from staged results (`session.CheckVerdict`), or ``None``
   when there is no credible sample.
+* :data:`UNMEASURED_PRIOR_RATIO` — what to estimate with until that exists.
 
 A caller that wants a defensible number asks for the observed ratio first and
-falls back to the target only while saying so (see the summarize analyzer's
-`estimate_basis`). Nothing here invents a middle number: a ratio that is neither
-the documented ask nor a measured outcome would be the least defensible of the
-three.
+falls back to the PRIOR — not the ask — while saying so (see the summarize
+analyzer's `estimate_basis`). Estimating at the ask is what made the figure
+overstate by roughly an order of magnitude: measured rewrites came nowhere near
+the target, and an unmeasured default should be conservative rather than
+flattering.
+
+**Every token count here is whitespace-normalized** (`detect.content_chars`).
+A raw character delta books REFLOW as compression — un-hard-wrapping a file the
+author wrapped on purpose deletes a newline per line and changes nothing a
+tokenizer bills. On real instruction files that artifact was the majority of the
+claimed reduction, so normalizing is what makes the number measure what it says.
+
+**Waiting for evidence is not the same as having none.** The observed ratio used
+to appear only if a user happened to rewrite files on their own; `tj summarize
+calibrate` (`core/summarize/calibrate`) now runs the real rewrite over a bounded,
+explicitly-consented sample so the measurement can exist on demand. It writes
+through the same `session.check` gate into the same staging dir this module
+reads, so there is exactly one store and one definition of a sample.
+
+**A ratio is also the wrong SHAPE for the goal on an always-resident file.**
+Anthropic publishes a concrete target for that artifact — :data:`PUBLISHED_LINE_TARGET`
+— and a huge file halved is still far past the point where adherence degrades.
+:func:`line_target_prose_words` turns that target into the word budget the
+rewriter is ASKED for. It deliberately does not touch the CLAIM: what a rewrite
+is asked for and what it delivers are the two things this module exists to keep
+apart, so the estimate stays bounded by :func:`observed_prose_ratio` (or the
+target ratio) no matter how aggressive the line goal is.
 """
 from __future__ import annotations
 
 import logging
 from typing import TYPE_CHECKING
 
-from tokenjam.core.summarize.detect import CHARS_PER_TOKEN, StructureBreakdown
+from tokenjam.core.summarize import load_semantics
+from tokenjam.core.summarize.detect import CHARS_PER_TOKEN, StructureBreakdown, line_breakdown
 
 if TYPE_CHECKING:
     from tokenjam.core.config import TjConfig
 
 logger = logging.getLogger(__name__)
+
+#: Anthropic's published size target for an always-resident instruction file,
+#: quoted below. Ours is the *application* of it to every ALWAYS-class file
+#: (`.claude/rules/*.md` and `AGENTS.md` load the same way a `CLAUDE.md` does);
+#: the number itself is theirs, which is why every surface that states it also
+#: states where it came from rather than presenting it as a tokenjam threshold.
+PUBLISHED_LINE_TARGET = 200
+PUBLISHED_LINE_TARGET_SOURCE = "https://code.claude.com/docs/en/memory"
+PUBLISHED_LINE_TARGET_QUOTE = (
+    "target under 200 lines per CLAUDE.md file. Longer files consume more "
+    "context and reduce adherence."
+)
+#: Anthropic's own suggested alternative to compressing an oversized instruction
+#: file, quoted so the advice that mentions it cannot drift from what they say.
+#: Summarize only ever MENTIONS this; it does not write path-scoped rules.
+PATH_SCOPED_RULES_QUOTE = (
+    "If your instructions are growing large, use path-scoped rules so "
+    "instructions load only when Claude works with matching files."
+)
 
 #: What the rewriter is INSTRUCTED to hit — `session.prepare` turns this into
 #: the word count in the model's prompt. It is an ask, not a prediction, and
@@ -50,6 +95,28 @@ logger = logging.getLogger(__name__)
 #: results exist.
 DEFAULT_TARGET_RATIO = 0.5
 
+#: What the ESTIMATE assumes while no rewrite has been verified on this machine.
+#: Deliberately NOT :data:`DEFAULT_TARGET_RATIO` — that is the ask, and using an
+#: ask as a prediction is the defect this module exists to prevent. Two
+#: independent runs against real instruction files (11 rewrites, achieved ratios
+#: spanning roughly 0.72 to 0.99) put the delivered ratio an order of magnitude
+#: in savings terms away from the 0.5 ask, so continuing to estimate at the ask
+#: overstates by ~10x.
+#:
+#: This is a PRIOR, not a new hardcoded guess, and three things keep it honest:
+#: it is a measurement rather than an invention; it is measured on OTHER
+#: people's files, so every surface that uses it says so along with the sample
+#: size and spread (Critical Rule 30(c) — a behavioural sample generalised onto
+#: a different population must disclose both, every time it is shown); and it is
+#: superseded by :func:`observed_prose_ratio` the moment the user has three
+#: verified rewrites of their own, which `tj summarize calibrate` exists to
+#: produce. An unmeasured default should be conservative rather than flattering.
+UNMEASURED_PRIOR_RATIO = 0.95
+#: Sample behind the prior, carried so no surface has to restate it from memory
+#: and so it can be corrected in exactly one place when re-measured.
+UNMEASURED_PRIOR_SAMPLES = 11
+UNMEASURED_PRIOR_RANGE = (0.72, 0.99)
+
 #: Minimum evidence before an observed ratio may replace the target. Both gates
 #: must pass: too few files, or too little prose, and one unusual rewrite would
 #: set the number for every file the user owns.
@@ -57,7 +124,7 @@ MIN_OBSERVED_SAMPLES = 3
 MIN_OBSERVED_PROSE_WORDS = 500
 
 
-def tokens_saved(breakdown: StructureBreakdown, ratio: float = DEFAULT_TARGET_RATIO) -> int:
+def tokens_saved(breakdown: StructureBreakdown, ratio: float = UNMEASURED_PRIOR_RATIO) -> int:
     """Estimated tokens removed per call by summarizing the prose to ``ratio``.
 
     Protected structure (fenced code/JSON, tables, tags, inline code, templates) is preserved
@@ -65,7 +132,10 @@ def tokens_saved(breakdown: StructureBreakdown, ratio: float = DEFAULT_TARGET_RA
     """
     if ratio >= 1.0:
         return 0
-    prose_tokens = breakdown.prose_chars / CHARS_PER_TOKEN
+    # Whitespace-normalized, never raw `prose_chars`: a raw count makes reflow
+    # look like compression, and on hard-wrapped instruction files that artifact
+    # was the majority of the claimed saving. See `detect.content_chars`.
+    prose_tokens = breakdown.prose_content_chars / CHARS_PER_TOKEN
     return max(0, int(prose_tokens * (1.0 - ratio)))
 
 
@@ -122,3 +192,57 @@ def observed_prose_ratio(config: "TjConfig | None") -> tuple[float | None, int]:
     # reduction), never a negative saving.
     ratio = 1.0 - (removed_total / prose_before_total)
     return min(1.0, max(0.0, ratio)), samples
+
+
+def gate_failed_attempts(config: "TjConfig | None") -> int:
+    """How many rewrites here were attempted and FAILED the structure gate.
+
+    A failed rewrite is deliberately excluded from :func:`observed_prose_ratio`
+    (it was never a usable outcome), but it is not nothing: a file the rewriter
+    cannot compress without mangling its structure is a real finding about that
+    file, and dropping the attempt silently would let a run that produced only
+    failures look identical to a run that never happened. Reported alongside the
+    ratio so the basis can say what the sample cost as well as what it showed.
+
+    Never raises: an unreadable attempt record is skipped.
+    """
+    if config is None:
+        return 0
+    from tokenjam.core.summarize.session import list_attempts
+
+    try:
+        return len(list_attempts(config))
+    except Exception:
+        logger.debug("summarize estimate: could not read attempt records", exc_info=True)
+        return 0
+
+
+def line_target_prose_words(
+    *,
+    text: str,
+    load_class: str,
+    prose_words: int,
+    line_target: int = PUBLISHED_LINE_TARGET,
+) -> int | None:
+    """Prose-word budget that would bring ``text`` under ``line_target`` lines.
+
+    ``None`` when the target does not apply, and the three reasons are all real
+    rather than error cases: the file is not always-resident (the published
+    guidance is about a file that loads every session), it is already under the
+    target, or its protected structure ALONE exceeds the target — in which case
+    summarizing cannot get there and pretending otherwise would be an ask the
+    fix structurally cannot deliver.
+
+    This is an ASK. It never widens a saving: the caller takes whichever of this
+    and the ratio budget is smaller for the rewriter's prompt, and prices the
+    result off the ratio regardless (see the module docstring).
+    """
+    if load_class != load_semantics.ALWAYS or prose_words <= 0:
+        return None
+    lines = line_breakdown(text)
+    if lines.total_lines <= line_target or lines.prose_lines <= 0:
+        return None
+    allowance = line_target - lines.protected_lines
+    if allowance <= 0:
+        return None
+    return max(8, int(prose_words * (allowance / lines.prose_lines)))

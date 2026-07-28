@@ -17,12 +17,23 @@ so no aggregate surface could see it at all.
 
 All spans/sessions go through ``tests/factories`` (Critical Rule 8); the backend
 is in-memory and no real ``~/.tj`` or ``~/.claude`` is touched.
+
+NOTE ON THE FIXTURE FAILURE MESSAGE. These tests used to seed an "has not been
+read yet" episode, which clusters as ``edit_before_read``. That family is now
+ADVISORY-ONLY — its own fix text says the harness already blocks the mistake
+and no rule is needed — so it never enters the write budget and cannot
+demonstrate any budget behaviour at all. The seed is now a ``read_too_large``
+episode, a non-advisory CLAUDE.md-rule family. Every assertion below is unchanged; only
+the family standing in for them (Critical Rule 23 in spirit: the vehicle became
+invalid, the property being pinned did not).
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
 
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize.analyzers.relearn import (
@@ -198,7 +209,7 @@ def test_no_fix_template_cluster_still_carries_its_observed_cost(db):
 
 
 def test_net_negative_write_budget_does_not_zero_the_past_cost(db):
-    """A rung-1 rule that costs more to keep than it saves is correctly not
+    """A CLAUDE.md rule that costs more to keep than it saves is correctly not
     offered, and correctly claims nothing. It must NOT retroactively make the
     failures it describes free."""
     failures = []
@@ -207,8 +218,8 @@ def test_net_negative_write_budget_does_not_zero_the_past_cost(db):
         _priced_session(db, session_id)
         failures.append(_episode(
             session_id,
-            "File has not been read yet. Read it first before writing to it.",
-            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+            "File content (52000 tokens) exceeds maximum allowed tokens (25000).",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Read",
         ))
     from tokenjam.core.optimize.analyzers.relearn import cluster_failures
 
@@ -240,8 +251,8 @@ def test_past_overspend_is_never_netted_against_standing_cost(db):
         _priced_session(db, session_id)
         failures.append(_episode(
             session_id,
-            "File has not been read yet. Read it first before writing to it.",
-            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+            "File content (52000 tokens) exceeds maximum allowed tokens (25000).",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Read",
         ))
     from tokenjam.core.optimize.analyzers.relearn import cluster_failures
 
@@ -336,8 +347,8 @@ def test_relearn_produces_no_cost_proposal_and_keeps_its_claim_on_its_clusters(d
         _priced_session(db, session_id)
         failures.append(_episode(
             session_id,
-            "File has not been read yet. Read it first before writing to it.",
-            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+            "File content (52000 tokens) exceeds maximum allowed tokens (25000).",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Read",
         ))
     finding = analyze_relearns(
         [], conn=db.conn, distill_enabled=False, extra_failures=failures,
@@ -390,8 +401,8 @@ def test_suppressed_cluster_carries_a_short_gate_label(db):
         _priced_session(db, session_id)
         failures.append(_episode(
             session_id,
-            "File has not been read yet. Read it first before writing to it.",
-            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+            "File content (52000 tokens) exceeds maximum allowed tokens (25000).",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Read",
         ))
     clusters = list(cluster_failures(failures).values())
     underwater = build_projection_basis(30.0, 30, 500_000)
@@ -445,8 +456,8 @@ def test_cli_relearn_row_leads_with_what_it_cost_not_the_gated_claim(db):
         _priced_session(db, session_id)
         failures.append(_episode(
             session_id,
-            "File has not been read yet. Read it first before writing to it.",
-            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+            "File content (52000 tokens) exceeds maximum allowed tokens (25000).",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Read",
         ))
     clusters = list(cluster_failures(failures).values())
     underwater = build_projection_basis(30.0, 30, 500_000)
@@ -478,7 +489,8 @@ def test_offered_cluster_has_no_gate_line(db):
 
     offered = RelearnCluster(
         signature="ok", title="ok", family_key="fam", sessions=3, occurrences=3,
-        repos=["demo"], rung=1, scope="project", proposed_fix="do the thing",
+        repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
+        proposed_fix="do the thing",
         write_offered=True, write_blocked_reason="",
     )
     assert _relearn_write_gate_line(offered) == ""
@@ -666,8 +678,8 @@ def test_head_term_is_measured_from_the_corpus_not_a_constant(db):
         _priced_session(db, session_id)
         failures.append(_episode(
             session_id,
-            "File has not been read yet. Read it first before writing to it.",
-            ts=(BASE + timedelta(days=i)).isoformat(), tool="Edit",
+            "File content (52000 tokens) exceeds maximum allowed tokens (25000).",
+            ts=(BASE + timedelta(days=i)).isoformat(), tool="Read",
         ))
     sessions = {f.session_id for f in failures}
     profile = blended_rate_profile(db.conn, session_ids=sessions)
@@ -713,9 +725,9 @@ def test_relearn_claims_the_retry_turn_and_never_the_reread_tail(db):
         for occurrence in range(4):
             failures.append(_episode(
                 session_id,
-                "File has not been read yet. Read it first before writing to it.",
+                "File content (52000 tokens) exceeds maximum allowed tokens (25000).",
                 ts=(BASE + timedelta(days=i, minutes=occurrence)).isoformat(),
-                tool="Edit",
+                tool="Read",
             ))
     clusters = list(cluster_failures(failures).values())
     proposals, _ = build_proposals(

@@ -15,7 +15,7 @@ owning the other's file. ``cmd_relearn`` attaches them with::
 Thin by construction. Every command here is a wrapper over the SAME functions
 the API route calls (``core.optimize.relearn_proposals`` for the stored
 proposal, ``core.optimize.relearn_apply`` for the write, backup, git commit
-and revert). No detection, no rung routing, no ledger logic lives in this file,
+and revert). No detection, no delivery routing, no ledger logic lives in this file,
 so the CLI and the UI can never drift into two different meanings of "apply".
 
 The human gate is unchanged and unconditional:
@@ -33,6 +33,8 @@ import json
 import click
 
 from tokenjam.core.optimize import relearn_apply, relearn_proposals
+from tokenjam.core.rulewrite.delivery import delivery_label
+from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
 from tokenjam.utils.formatting import console, make_table
 
 
@@ -78,14 +80,19 @@ def list_cmd(ctx: click.Context) -> None:
             "inside `tj serve`; give it a pass over your sessions first.[/dim]"
         )
         return
-    table = make_table("ID", "TITLE", "SESSIONS", "RUNG", "SCOPE", "APPLY")
+    # `SCOPE` used to sit between FIX TYPE and APPLY. It came out when the
+    # column that replaced RUNG started carrying words instead of a digit: at
+    # 80 columns the extra width truncated the proposal ID, which is the one
+    # cell in this table a user has to copy verbatim. Scope is not lost — the
+    # apply preview prints the resolved target path, which states it more
+    # concretely than "project" ever did, and `--json` still carries the field.
+    table = make_table("ID", "TITLE", "SESSIONS", "FIX TYPE", "APPLY")
     for p in proposals:
         table.add_row(
             str(p.get("proposal_id") or ""),
             str(p.get("title") or p.get("signature") or ""),
             str(p.get("sessions") or 0),
-            str(p.get("rung") or ""),
-            str(p.get("scope") or ""),
+            delivery_label(delivery_from_legacy_record(p)),
             "advise-only" if p.get("advise_only") else "workspace fix",
         )
     console.print(table)

@@ -124,8 +124,8 @@ def test_interactive_prompt_shown_and_recent_choice_notes_complete_later(
     _isolated_claude_code_with_history, tmp_path, monkeypatch,
 ):
     monkeypatch.setattr("tokenjam.cli.cmd_onboard._is_interactive", lambda: True)
-    # Plan choice "3", budget "0", THEN backfill-scope choice "1" (recent).
-    res = _run_claude_code(tmp_path, input_str="3\n0\n1\n")
+    # Plan "3", budget "0", analysis span "2" (90d), THEN backfill scope "1".
+    res = _run_claude_code(tmp_path, input_str="3\n0\n2\n1\n")
     assert res.exit_code == 0, res.output
     flat = _flat(res.output)
     assert "Backfill your Claude Code history:" in flat
@@ -138,7 +138,7 @@ def test_interactive_prompt_everything_choice_skips_complete_later_note(
     _isolated_claude_code_with_history, tmp_path, monkeypatch,
 ):
     monkeypatch.setattr("tokenjam.cli.cmd_onboard._is_interactive", lambda: True)
-    res = _run_claude_code(tmp_path, input_str="3\n0\n2\n")
+    res = _run_claude_code(tmp_path, input_str="3\n0\n2\n2\n")
     assert res.exit_code == 0, res.output
     flat = _flat(res.output)
     assert "afterwards for your full history" not in flat

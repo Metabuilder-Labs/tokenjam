@@ -90,6 +90,7 @@ def create_app(
     from tokenjam.api.routes.version import router as version_router, health_router
     from tokenjam.api.routes.policy import router as policy_router
     from tokenjam.api.routes.loop import router as loop_router
+    from tokenjam.api.routes.rules import router as rules_router
     from tokenjam.api.routes.summarize import router as summarize_router
     from tokenjam.api.routes.summarize_run import router as summarize_run_router
     from tokenjam.api.routes.relearn import router as relearn_router
@@ -115,6 +116,7 @@ def create_app(
     app.include_router(version_router, prefix="/api/v1")
     app.include_router(policy_router, prefix="/api/v1")  # /policy/* enforcement reads (#223)
     app.include_router(loop_router, prefix="/api/v1")  # /annotations, /expectations (#53)
+    app.include_router(rules_router, prefix="/api/v1")  # /rules/* — placed CLAUDE.md rule writes (list/stage/apply/undo)
     app.include_router(summarize_router, prefix="/api/v1")  # /summarize/* reads + apply/undo (Track B)
     app.include_router(summarize_run_router, prefix="/api/v1")  # /summarize/{run,prep,check} OUTBOUND (Track B, design-gated)
     app.include_router(relearn_router, prefix="/api/v1")  # /relearn/{proposals,refresh} — self-improve loop Review inbox

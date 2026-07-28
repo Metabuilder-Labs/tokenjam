@@ -29,6 +29,8 @@ from pathlib import Path
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE
+
 from tokenjam.core.optimize.cost_proposals import (
     CostProposal,
     _with_past_overspend,
@@ -113,13 +115,13 @@ def _relearn_finding():
     clusters = [
         RelearnCluster(
             signature="no-fix", family_key=None, title="No fix template",
-            sessions=3, occurrences=5, repos=["demo"], rung=1, scope="project",
+            sessions=3, occurrences=5, repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
             proposed_fix="", write_offered=False,
             write_blocked_reason=REASON_PLACEHOLDER,
         ),
         RelearnCluster(
             signature="net-neg", family_key=None, title="Net-negative rule",
-            sessions=4, occurrences=6, repos=["demo"], rung=1, scope="project",
+            sessions=4, occurrences=6, repos=["demo"], delivery=DELIVERY_CLAUDE_MD_RULE, scope="project",
             proposed_fix="Add a rule.", write_offered=False,
             write_blocked_reason=REASON_NET_NEGATIVE,
         ),
@@ -530,7 +532,7 @@ def test_summarize_is_a_cost_analyzer_producing_a_real_peer_card():
     assert p.advise_only is True
     assert p.apply_capable is False
     assert p.apply_kind == ""
-    assert p.rung == 0
+    assert p.delivery == ""
 
 
 def test_summarize_card_empty_with_no_candidates_or_no_priced_evidence():

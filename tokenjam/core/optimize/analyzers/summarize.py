@@ -110,9 +110,17 @@ from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 from tokenjam.core.summarize.estimate import (
     DEFAULT_TARGET_RATIO,
     MIN_OBSERVED_SAMPLES,
+    PUBLISHED_LINE_TARGET,
+    PUBLISHED_LINE_TARGET_QUOTE,
+    PUBLISHED_LINE_TARGET_SOURCE,
+    UNMEASURED_PRIOR_RANGE,
+    UNMEASURED_PRIOR_RATIO,
+    UNMEASURED_PRIOR_SAMPLES,
+    gate_failed_attempts,
     observed_prose_ratio,
 )
 from tokenjam.core.summarize.invocations import InvocationCounts
+from tokenjam.core.summarize.route import BEST_PRACTICES_SOURCE, PRUNE_TEST_QUOTE
 from tokenjam.core.summarize.repo_roots import ResolvedRoots, resolve_roots
 
 logger = logging.getLogger(__name__)
@@ -165,14 +173,18 @@ SUMMARIZE_ESTIMATE_BASIS = (
 #: whether any rewrite has actually been verified on this machine.
 _RATIO_TARGET = (
     "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
-    "a saving offered on one could never be realized. The per-file reduction "
-    "assumes prose compresses to {pct:.0f}% of its words, which is the TARGET the "
-    "rewriter is asked for — NOT a measured outcome. Nothing enforces it: there "
-    "is no retry and no gate on hitting the target. No verified rewrite sample "
-    "exists here yet ({samples:,} usable so far, {needed:,} needed), so this "
-    "figure is an upper bound on the reduction half and should be read as one. "
-    "It is replaced by the measured ratio automatically once enough rewrites "
-    "have been staged and structure-checked."
+    "a saving offered on one could never be realized. No verified rewrite exists "
+    "on THIS machine yet ({samples:,} usable so far, {needed:,} needed), so the "
+    "per-file reduction assumes prose compresses to {pct:.0f}% of its words — "
+    "which is tokenjam's own measurement across {prior_n:,} rewrites of real "
+    "instruction files on other machines, achieved ratios spanning {lo:.0%} to "
+    "{hi:.0%}. That spread is wide and those were not your files, so treat it as "
+    "a prior rather than a property of your corpus. It is deliberately NOT the "
+    "{target:.0%} target the rewriter is asked for: nothing enforces that target "
+    "(there is no retry and no gate on hitting it) and measured rewrites came "
+    "nowhere near it, so estimating at the ask overstated this figure by roughly "
+    "an order of magnitude. Run `tj summarize calibrate --via claude-p --go` to "
+    "replace the prior with what rewrites actually deliver on your own files."
 )
 _RATIO_OBSERVED = (
     "Symlinked files are excluded: the fix refuses to rewrite through a link, so "
@@ -183,14 +195,97 @@ _RATIO_OBSERVED = (
     "is asked for, which nothing enforces and which observed rewrites do not "
     "reach."
 )
+#: Appended to either half whenever some rewrite here failed the structure gate.
+#: Those attempts are excluded from the ratio on purpose (a mangled rewrite was
+#: never a usable outcome), and a basis that stayed silent about them would let
+#: a sample built mostly of failures read as a clean measurement.
+_RATIO_GATE_FAILURES = (
+    " {failures:,} attempted rewrite(s) here failed the structure check and are "
+    "excluded from the ratio; those files could not be safely compressed as "
+    "summarized, which is a finding about them rather than a figure."
+)
+#: The reduction target for the files this guidance is published for. Only the
+#: token delta is claimed as a saving (Critical Rule 14) — the adherence benefit
+#: of a shorter file is real, is Anthropic's stated reason for the target, and is
+#: NOT something tokenjam measures, so it appears here as rationale and never as
+#: a dollar or token figure. The target also cannot inflate anything: it changes
+#: what the rewriter is ASKED for, while the figure above stays bounded by the
+#: measured (or target) prose ratio.
+_LINE_TARGET_NOTE = (
+    " For an always-resident instruction file, the fix aims at a size rather "
+    "than only a ratio: getting the file under {lines} lines, which is "
+    'Anthropic\'s published guidance ("{quote}" {source}) and not tokenjam\'s. '
+    "A large file compressed by a ratio can still be far over that size. The "
+    "adherence half of that guidance is their rationale for the target, not a "
+    "saving claimed here; only the token reduction is."
+)
+#: The offer must not present compression as the only or default route for an
+#: instruction file. Such a file is usually long because rules ACCUMULATED, so
+#: compressing it shortens each surviving rule rather than removing any — which
+#: trades adherence for tokens and fails Critical Rule 26's third gate. The
+#: other three routes do not. Every candidate carries a `reduction_route` so a
+#: rule-heavy file is flagged as a PRUNE candidate rather than being offered
+#: compression as though it were the obvious move.
+_ROUTE_NOTE = (
+    " Compression is only ONE of four routes to that size, and the only one "
+    "that costs specificity. The others — pruning rules that do not earn their "
+    "place (\"{prune_test}\" {best_practices}), moving area-specific rules "
+    "behind `paths:` frontmatter so they load only for matching files, and "
+    "escalating a must-always-run instruction to a hook — remove tokens without "
+    "making any surviving instruction vaguer, and summarize performs NONE of "
+    "them; it names them. Each candidate carries a `reduction_route` diagnosing "
+    "which it wants, read from whether its prose is written as discrete "
+    "directives (rules accumulated: prune or scope it) or as running paragraphs "
+    "(padding: a genuine compression candidate). That is a measurement of the "
+    "SHAPE of the prose, never of which rules earn their place, and it is "
+    "withheld rather than guessed where a file is too small to read a shape "
+    "from. Applying stays a dry-run until `--go` because a human reading the "
+    "diff is the only check on meaning: the structure gate verifies that code "
+    "blocks, tables and tags came back verbatim, and does not read the prose."
+    " COVERAGE: the figure above prices ONLY what compression recovers. "
+    "It is not the size of the opportunity. A SECOND operation is now performed "
+    "and priced separately in `relocation_past_overspend_usd` / "
+    "`relocation_past_overspend_tokens`: relocating a whole REFERENCE section — "
+    "a module inventory, an API surface, a directory layout — out of an "
+    "always-loaded file into a linked one, leaving a followable pointer behind. "
+    "That is a pure MOVE with no semantic loss at all, which is why it is the "
+    "safer of the two: compression rewrites prose and can erode a modifier that "
+    "no structural check would catch, whereas nothing here is rewritten or "
+    "deleted. **The two must never be added together**: a section relocated out "
+    "of a file is no longer there to be compressed, so summing them would price "
+    "the same text twice (Critical Rule 27). They are alternatives to pick "
+    "between, per file. The relocation figure covers only sections a validated "
+    "classifier is confident about, and it is deliberately conservative — the "
+    "cost of moving an instruction out of the file that carries it is a silent "
+    "correctness bug, while the cost of leaving a reference section in place is "
+    "a missed saving, so ambiguity always resolves to leaving it alone. Measured "
+    "against a hand-labelled set of real sections, it moved nothing it should "
+    "not have and declined a majority of what it could have moved. The remaining "
+    "two routes — pruning rules that do not earn their place, and path-scoping "
+    "area-specific ones behind `paths:` frontmatter — recover real tokens that "
+    "are still unmeasured, not zero: they are the part this analyzer does not "
+    "perform, and pricing an operation the product cannot carry out would be a "
+    "ceiling the user could disprove."
+)
 
 
-def _ratio_basis(ratio: float, observed: bool, samples: int) -> str:
+def _ratio_basis(ratio: float, observed: bool, samples: int, gate_failures: int = 0) -> str:
     """How much of each file the figure assumes goes away, stated truthfully."""
     if observed:
-        return _RATIO_OBSERVED.format(pct=ratio * 100, samples=samples)
-    return _RATIO_TARGET.format(
-        pct=ratio * 100, samples=samples, needed=MIN_OBSERVED_SAMPLES,
+        head = _RATIO_OBSERVED.format(pct=ratio * 100, samples=samples)
+    else:
+        head = _RATIO_TARGET.format(
+            pct=ratio * 100, samples=samples, needed=MIN_OBSERVED_SAMPLES,
+            prior_n=UNMEASURED_PRIOR_SAMPLES, lo=UNMEASURED_PRIOR_RANGE[0],
+            hi=UNMEASURED_PRIOR_RANGE[1], target=DEFAULT_TARGET_RATIO,
+        )
+    if gate_failures > 0:
+        head += _RATIO_GATE_FAILURES.format(failures=gate_failures)
+    return head + _LINE_TARGET_NOTE.format(
+        lines=PUBLISHED_LINE_TARGET, quote=PUBLISHED_LINE_TARGET_QUOTE,
+        source=PUBLISHED_LINE_TARGET_SOURCE,
+    ) + _ROUTE_NOTE.format(
+        prune_test=PRUNE_TEST_QUOTE, best_practices=BEST_PRACTICES_SOURCE,
     )
 
 #: Population half of the basis (Critical Rule 14): which files were even looked
@@ -264,9 +359,10 @@ def _estimate_basis(
     invocations: "InvocationCounts | None",
     roots: "ResolvedRoots | None" = None,
     roots_scanned: int = 0,
-    ratio: float = DEFAULT_TARGET_RATIO,
+    ratio: float = UNMEASURED_PRIOR_RATIO,
     ratio_observed: bool = False,
     ratio_samples: int = 0,
+    ratio_gate_failures: int = 0,
 ) -> str:
     """The basis string with the evidence actually used spelled out.
 
@@ -289,7 +385,7 @@ def _estimate_basis(
     return SUMMARIZE_ESTIMATE_BASIS.format(
         invocation_source=source,
         population=_population_basis(roots, roots_scanned),
-        ratio=_ratio_basis(ratio, ratio_observed, ratio_samples),
+        ratio=_ratio_basis(ratio, ratio_observed, ratio_samples, ratio_gate_failures),
     )
 
 # Mandatory caveat (Rule 14) — carried as the dataclass default like the other
@@ -297,7 +393,15 @@ def _estimate_basis(
 # drop it. Names summary's ONE risk: structure is guaranteed (restore-by-id),
 # meaning is not.
 SUMMARIZE_HONESTY_CAVEAT = (
-    "Structure is guaranteed; meaning may change — review each rewrite before applying."
+    "Structure is guaranteed; meaning may change — nothing automatic checks it. "
+    "The structure gate verifies that code blocks, tables and tags came back "
+    "verbatim; it does not read the prose. Review each rewrite's diff before "
+    "applying, and look specifically at MODIFIERS: across verified rewrites of "
+    "real instruction files, no instruction was dropped and nothing was "
+    "invented, but qualifiers eroded — an 'only' deleted from a constraint, a "
+    "'can go stale' hardened into 'goes stale', a 'the rule exists to prevent' "
+    "flattened to 'the rule prevents'. Each is small, changes what the rule "
+    "actually says, and is invisible to a structural check."
 )
 
 
@@ -342,6 +446,25 @@ class SummarizeCandidate:
     #: condition ``est_usd_saved`` uses; the one-time per-call reduction stays
     #: available as ``est_tokens_saved``.
     est_tokens_saved_window: int | None = None
+    #: Which route to a smaller file this candidate wants — see
+    #: ``core/summarize/route``. ``prune`` means the file is long because rules
+    #: accumulated, so compressing it would shorten each surviving rule instead
+    #: of removing any; ``compress`` means the prose is genuinely padded;
+    #: ``undiagnosed`` means the file was too small to read a shape from and no
+    #: route is guessed. The saving stays the same either way — this changes
+    #: what the product OFFERS, never what it claims.
+    reduction_route: str = ""
+    #: Share of prose words in discrete directives — the evidence for the route.
+    directive_share: float = 0.0
+    #: One-time always-resident token reduction available by RELOCATING this
+    #: file's reference sections into a non-loaded document, and what that is
+    #: worth over the window on the SAME session/call multiplier the
+    #: compression figures use. An ALTERNATIVE operation on overlapping text,
+    #: never an addition: relocating a section and then compressing it prices
+    #: the same tokens twice (Critical Rule 27).
+    relocatable_tokens: int = 0
+    relocation_tokens_window: int | None = None
+    relocation_usd: float | None = None
 
 
 @dataclass
@@ -417,10 +540,50 @@ class SummarizeFinding:
     #: than an expectation. That framing stays internal — the user-facing basis
     #: says the target is unverified without asserting anything about rewrites
     #: on THEIR machine, where by construction none have happened yet.
-    prose_ratio: float = DEFAULT_TARGET_RATIO
+    prose_ratio: float = UNMEASURED_PRIOR_RATIO
     prose_ratio_observed: bool = False
     #: Structure-checked rewrites the ratio was derived from (0 when assumed).
     prose_ratio_samples: int = 0
+    #: Rewrites attempted here that FAILED the structure gate. Excluded from the
+    #: ratio (never a usable outcome) but carried, because a sample made mostly
+    #: of failures must not read as a clean measurement — and because a file
+    #: that cannot be safely compressed at all is a real finding about it.
+    prose_ratio_gate_failures: int = 0
+    #: The published size target the fix aims at for an always-resident
+    #: instruction file, and where it comes from. Carried so no surface has to
+    #: restate the number itself; it is Anthropic's guidance, not tokenjam's,
+    #: and it governs what the rewriter is ASKED for, never what is claimed.
+    line_target: int = PUBLISHED_LINE_TARGET
+    line_target_source: str = PUBLISHED_LINE_TARGET_SOURCE
+    #: How many candidates want each route (``route`` -> count), so a surface
+    #: can say "N of these want pruning, not compression" without walking the
+    #: list. Counts only; it changes what is OFFERED, never what is claimed —
+    #: a prune-route candidate keeps its full token and dollar figure, because
+    #: the tokens are recoverable by whichever route the user picks.
+    candidates_by_route: dict[str, int] = field(default_factory=dict)
+    #: The RELOCATION figures, carried beside the compression ones and
+    #: deliberately NOT summed into ``past_overspend_usd`` /
+    #: ``past_overspend_tokens``. The two operations act on overlapping text —
+    #: a section relocated out of a file is no longer there to be compressed —
+    #: so adding them would double-count exactly the way Critical Rule 27
+    #: forbids. They are alternatives the user picks between, and relocation is
+    #: the safer of the two by construction: it moves text and rewrites none, so
+    #: it cannot erode a modifier the way a rewrite can.
+    #:
+    #: Same basis as their compression counterparts (Critical Rule 28): the same
+    #: sessions x reads-per-session event count, one counted and one priced, and
+    #: ``None`` on the same "no loading session observed" condition rather than a
+    #: zero.
+    relocation_past_overspend_usd: float | None = None
+    relocation_past_overspend_tokens: int | None = None
+    #: One-time sum of the per-file relocatable reduction — the relocation
+    #: counterpart of ``file_reduction_tokens``, on the same one-time basis.
+    relocation_file_reduction_tokens: int | None = None
+    #: How many candidate files have any relocatable reference section at all.
+    #: Deliberately reported: on a corpus where this is small the ceiling above
+    #: is concentrated in a handful of files, which is a materially different
+    #: claim from a broad one and a reader cannot tell them apart from a total.
+    relocation_files: int = 0
 
 
 def _src_tokens(total_chars: int) -> int:
@@ -923,8 +1086,15 @@ def run(ctx: AnalyzerContext) -> None:
     # what the rewriter is ASKED for and nothing enforces it, so a measured
     # ratio from verified rewrites on this machine supersedes it whenever one
     # exists; the basis says which is in force either way (Critical Rule 14).
+    # The FALLBACK is the measured prior, not the target: the target is what the
+    # rewriter is ASKED for, and estimating at an ask nothing enforces is the
+    # defect this analyzer's basis exists to disclose. Two independent runs on
+    # real instruction files put the delivered ratio ~10x (in savings terms)
+    # away from the ask, so the ask is not a conservative default, it is a
+    # flattering one.
     measured_ratio, ratio_samples = observed_prose_ratio(ctx.config)
-    ratio = measured_ratio if measured_ratio is not None else DEFAULT_TARGET_RATIO
+    ratio = measured_ratio if measured_ratio is not None else UNMEASURED_PRIOR_RATIO
+    ratio_gate_failures = gate_failed_attempts(ctx.config)
 
     try:
         # read-only, never writes. Three scope inputs, one resolved scope:
@@ -967,13 +1137,14 @@ def run(ctx: AnalyzerContext) -> None:
     profile = _load_profile(ctx)
     finding.estimate_basis = _estimate_basis(
         invocations, roots, scan.project_roots_scanned,
-        ratio, measured_ratio is not None, ratio_samples,
+        ratio, measured_ratio is not None, ratio_samples, ratio_gate_failures,
     )
     finding.project_roots_scanned = scan.project_roots_scanned
     finding.project_roots_vanished = roots.vanished
     finding.prose_ratio = round(ratio, 4)
     finding.prose_ratio_observed = measured_ratio is not None
     finding.prose_ratio_samples = ratio_samples
+    finding.prose_ratio_gate_failures = ratio_gate_failures
     finding.invocations_observed = invocations.observed
     finding.invocations_total = invocations.total_invocations
     finding.transcripts_examined = invocations.sessions_scanned
@@ -987,6 +1158,7 @@ def run(ctx: AnalyzerContext) -> None:
         load_class = getattr(c, "load_class", load_semantics.ALWAYS)
         on_demand = load_class in load_semantics.ON_DEMAND_CLASSES
         resident_tokens, on_demand_tokens = _load_split(c)
+        relocatable = int(getattr(c, "relocatable_tokens", 0) or 0)
         sessions = _sessions_loading(c.path, c.scope, profile) if profile else 0
         calls_per_session = (
             _repo_calls_per_session(c.path, c.scope, profile) if profile else 0.0
@@ -1031,6 +1203,26 @@ def run(ctx: AnalyzerContext) -> None:
                 )
                 if priceable else None
             ),
+            reduction_route=str(getattr(c, "reduction_route", "") or ""),
+            directive_share=float(getattr(c, "directive_share", 0.0) or 0.0),
+            relocatable_tokens=relocatable,
+            # Routed through the SAME multiplier the compression figures use, so
+            # the two operations are directly comparable and the token and
+            # dollar fields count the same events (Critical Rule 28). Relocation
+            # only ever touches always-resident text, so the on-demand term is
+            # structurally zero rather than merely unobserved.
+            relocation_tokens_window=(
+                _tokens_saved_over_window(
+                    relocatable, 0, sessions, calls_per_session, 0,
+                )
+                if priceable and relocatable > 0 else None
+            ),
+            relocation_usd=(
+                _price_reduction(
+                    relocatable, 0, sessions, calls_per_session, 0, profile.rates,
+                )
+                if priceable and relocatable > 0 and profile is not None else None
+            ),
         )
         if _is_measured_zero(candidate):
             continue
@@ -1043,6 +1235,11 @@ def run(ctx: AnalyzerContext) -> None:
     finding.duplicate_copies_collapsed = collapsed
     finding.candidates = candidates
     finding.files = len(finding.candidates)
+    route_counts: dict[str, int] = {}
+    for cand in finding.candidates:
+        if cand.reduction_route:
+            route_counts[cand.reduction_route] = route_counts.get(cand.reduction_route, 0) + 1
+    finding.candidates_by_route = route_counts
     if finding.candidates:
         # One-time aggregate (curate/diff basis) — always available regardless
         # of whether any loading session was observed.
@@ -1061,6 +1258,28 @@ def run(ctx: AnalyzerContext) -> None:
         # — a candidate contributes to either both sums or neither.
         finding.past_overspend_tokens = sum(window_tokens) if window_tokens else None
         finding.past_overspend_usd = round(sum(priced), 6) if priced else None
+        # The relocation aggregates, on the same degrade-symmetrically rule and
+        # deliberately kept OUT of the compression sums above (Critical Rule 27
+        # — the two operations act on overlapping text and are alternatives,
+        # never addends).
+        reloc_one_time = sum(c.relocatable_tokens for c in finding.candidates)
+        finding.relocation_file_reduction_tokens = reloc_one_time or None
+        finding.relocation_files = sum(
+            1 for c in finding.candidates if c.relocatable_tokens > 0
+        )
+        reloc_window = [
+            c.relocation_tokens_window for c in finding.candidates
+            if c.relocation_tokens_window is not None
+        ]
+        reloc_priced = [
+            c.relocation_usd for c in finding.candidates if c.relocation_usd is not None
+        ]
+        finding.relocation_past_overspend_tokens = (
+            sum(reloc_window) if reloc_window else None
+        )
+        finding.relocation_past_overspend_usd = (
+            round(sum(reloc_priced), 6) if reloc_priced else None
+        )
         if profile is not None:
             finding.sessions_examined = profile.sessions_total
             finding.calls_per_session = round(profile.calls_per_session, 2)

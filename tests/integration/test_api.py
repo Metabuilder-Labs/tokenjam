@@ -964,6 +964,139 @@ async def test_get_drift_without_agent_id_returns_all(client):
     assert "agents" in data
 
 
+def _drift_baseline(agent_id: str):
+    """A baseline row for `agent_id` with realistic-looking spread."""
+    from tokenjam.core.models import DriftBaseline
+    from tokenjam.utils.time_parse import utcnow
+
+    return DriftBaseline(
+        agent_id=agent_id,
+        sessions_sampled=12,
+        computed_at=utcnow(),
+        avg_input_tokens=4200.0,
+        stddev_input_tokens=310.0,
+        avg_output_tokens=800.0,
+        stddev_output_tokens=90.0,
+        avg_session_duration_s=45.0,
+        stddev_session_duration=6.0,
+        avg_tool_call_count=3.0,
+        stddev_tool_call_count=0.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_drift_list_excludes_interactive_coding_agent_baselines(tmp_path):
+    """A legacy coding-agent baseline must never render as a drift card.
+
+    `DriftDetector.on_session_end` already refuses to build one, but baselines
+    are written once and never recomputed, so a row from before that skip (or
+    from an id reclassified since) survives forever. The read path applies the
+    same persona gate so the two cannot disagree.
+    """
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        db.upsert_baseline(_drift_baseline("claude-code"))
+        db.upsert_baseline(_drift_baseline("codex-cli"))
+        db.upsert_baseline(_drift_baseline("prod-summarizer"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/drift")
+            assert resp.status_code == 200
+            agent_ids = [a["agent_id"] for a in resp.json()["agents"]]
+            assert agent_ids == ["prod-summarizer"]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_drift_for_a_single_coding_agent_returns_no_baseline(tmp_path):
+    """The explicit `?agent_id=` path applies the same gate as the list path."""
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        db.upsert_baseline(_drift_baseline("claude-code"))
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/drift", params={"agent_id": "claude-code"})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["baseline"] is None
+            assert body["baseline_skipped_reason"] == "interactive_coding_agent"
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_acknowledging_an_alert_drops_it_from_the_unread_list(tmp_path):
+    """The contract the Alerts screen's Acknowledge button relies on.
+
+    The endpoint existed with no control wired to it, so nothing exercised the
+    acknowledge-then-refetch round trip the UI performs: PATCH with a JSON body,
+    then re-read with `unread=true` and expect the alert to be gone.
+    """
+    from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.config import StorageConfig
+    from tokenjam.core.models import Alert, AlertType, Severity
+    from tokenjam.utils.time_parse import utcnow
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "t.duckdb")))
+    try:
+        config = TjConfig(
+            version="1",
+            security=SecurityConfig(ingest_secret=INGEST_SECRET),
+            api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+        )
+        pipeline = IngestPipeline(db=db, config=config)
+        alert = Alert(
+            alert_id="ack-me",
+            fired_at=utcnow(),
+            type=AlertType.SESSION_DURATION,
+            severity=Severity.WARNING,
+            title="Long session",
+            detail={},
+            agent_id="prod-summarizer",
+            acknowledged=False,
+        )
+        db.insert_alert(alert)
+
+        app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+            resp = await c.get("/api/v1/alerts", params={"unread": "true"})
+            assert [a["alert_id"] for a in resp.json()["alerts"]] == ["ack-me"]
+
+            resp = await c.patch("/api/v1/alerts/ack-me/acknowledge", json={})
+            assert resp.status_code == 200
+            assert resp.json() == {"acknowledged": True, "alert_id": "ack-me"}
+
+            resp = await c.get("/api/v1/alerts", params={"unread": "true"})
+            assert resp.json()["alerts"] == []
+            resp = await c.get("/api/v1/alerts")
+            assert resp.json()["alerts"][0]["acknowledged"] is True
+    finally:
+        db.close()
+
 # ── API key auth ───────────────────────────────────────────────────────────
 
 async def test_get_endpoint_requires_api_key_when_auth_enabled(auth_client):

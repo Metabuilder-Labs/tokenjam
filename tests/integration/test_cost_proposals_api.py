@@ -11,6 +11,8 @@ from datetime import timedelta
 import httpx
 import pytest
 
+from tokenjam.core.rulewrite.kinds import DELIVERY_SKILL
+
 from tokenjam.api.app import create_app
 from tokenjam.core.config import ApiAuthConfig, ApiConfig, StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
@@ -198,7 +200,7 @@ async def test_apply_workspace_refuses_a_caller_supplied_proposed_fix(
 
 
 async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, db, monkeypatch, tmp_path):
-    """A CC-origin subagent proposal routes a reversible rung-1 note through the
+    """A CC-origin subagent proposal routes a reversible CLAUDE.md rule through the
     existing relearn apply path, then records the cost marker for delta-verify."""
     from tokenjam.core.optimize import relearn_apply as pa
 
@@ -253,17 +255,17 @@ async def test_cost_apply_workspace_writes_note_and_records_marker(app, client, 
     assert any(r["analyzer"] == "subagent" for r in applied["applied"])
 
 
-async def test_cost_apply_workspace_writes_skill_for_a_rung2_proposal_and_reverts(
+async def test_cost_apply_workspace_writes_skill_for_a_skill_proposal_and_reverts(
     app, client, config, db, monkeypatch, tmp_path,
 ):
     """`apply-workspace` is generic across analyzers, not special-cased to
-    `subagent`: a rung-2 skill-note proposal routes through the SAME path,
+    `subagent`: a skill-note proposal routes through the SAME path,
     writes, and reverts cleanly.
 
     Two facts are pinned here. First, a deterministic tool-call cluster on a
     claude-code window produces NO `script` card any more: the analyzer has no
     fix that survives for that persona and is skipped before it runs. Second,
-    the generic rung-2 write/revert route still works, exercised by seeding the
+    the generic skill write/revert route still works, exercised by seeding the
     proposal the adapter builds directly into the store."""
     from tokenjam.core.optimize import relearn_apply as pa, relearn_store
     from tokenjam.core.optimize.analyzers.workflow_restructure import (
@@ -322,7 +324,7 @@ async def test_cost_apply_workspace_writes_skill_for_a_rung2_proposal_and_revert
     prop = script_props[0]
     assert prop["apply_capable"] is True
     assert prop["advise_only"] is False
-    assert prop["rung"] == 2
+    assert prop["delivery"] == DELIVERY_SKILL
 
     body = {"proposal_id": prop["proposal_id"], "target_path": str(target)}
 

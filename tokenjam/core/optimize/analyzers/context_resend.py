@@ -105,6 +105,7 @@ from tokenjam.core.optimize.analyzers.resend_tail import (
     resend_tail_tokens_per_turn,
     session_context_tokens,
 )
+from tokenjam.core import fixes as _fixes
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.span_pricing import rates_at, span_instant
 from tokenjam.core.optimize.types import AnalyzerContext
@@ -276,14 +277,8 @@ def _offloadable_share_disclosure(measured: OffloadableShare) -> str:
         f"delegability measure is computed anywhere today.{spread}"
     )
 
-COMPACTION_FIX = (
-    "Run /compact (or start a fresh session) once accumulated context crosses "
-    "your working set. The repeated volume this finding measures is the same "
-    "content being re-sent turn over turn: trimming it directly cuts future "
-    "prompt size, regardless of whether caching is on. This is a manual, "
-    "per-session action, so it never fixes the pattern going forward — treat "
-    "it as immediate relief for an already-full session, not the durable fix."
-)
+# THE text lives in `core/fixes/registry.py`, so the lint sees it.
+COMPACTION_FIX = _fixes.fix_text("resend.compaction_relief")
 
 # The SDK-persona fallback when no priced `cache_control` example exists
 # (``fix_cache_control`` == ""). `/compact` is a Claude Code interactive
@@ -291,15 +286,13 @@ COMPACTION_FIX = (
 # unlike COMPACTION_FIX above, this stays scoped to what any SDK caller
 # controls directly: the content it assembles into the next request, not a
 # harness-specific command.
-RESEND_SDK_TRIM_FIX = (
-    "Trim or summarize the accumulated context before including it in the "
-    "next request instead of resending it unchanged turn over turn. This is "
-    "the same repeated volume this finding measures; cutting it at the call "
-    "site directly reduces future prompt size, independent of whether "
-    "caching is enabled."
-)
+# THE text lives in `core/fixes/registry.py`. It was ALSO a clause inside the
+# `resend.sdk_cache_breakpoint` record, and both are shown on the same SDK
+# card — so the trim instruction reached one user twice. One record each now:
+# that one says where to put the breakpoint, this one says what to trim.
+RESEND_SDK_TRIM_FIX = _fixes.fix_text("resend.sdk_trim_context")
 
-# The durable claude-code lever: a rung-1 CLAUDE.md rule (same write machinery
+# The durable claude-code lever: a CLAUDE.md rule (same write machinery
 # `script`/`reuse`/`verbosity` use via `cost_proposals._persona_gated_write_fields`)
 # so the context that would otherwise get re-sent every turn never accumulates
 # on the main thread in the first place. Unlike `/compact`, this persists
@@ -308,28 +301,32 @@ RESEND_SDK_TRIM_FIX = (
 # instead of `/compact` (founder critique, 2026-07-25: a real CC user abandons
 # an over-full session and starts fresh rather than compacting it, so telling
 # them to compact isn't a useful recommendation).
-SUBAGENT_OFFLOAD_FIX = (
-    "Offload context-heavy sub-tasks (broad file reads, multi-file search, "
-    "long tool-output loops, exploratory investigation) to a subagent instead "
-    "of running them inline in the main thread. A subagent's own tool logs "
-    "and intermediate output stay in its own context; only its short "
-    "conclusion returns to the caller, so the material that keeps getting "
-    "re-sent turn over turn never accumulates on the main thread to begin "
-    "with. Where available, pair this with a hook that warns once context "
-    "crosses a size threshold, as a second, automated nudge toward the same "
-    "behavior."
-)
+# THE text lives in `core/fixes/registry.py`. This constant, `downsize`'s
+# driver-role advice and `relearn`'s `context_overflow` family were three
+# separately-authored wordings of ONE instruction, so three near-identical
+# blocks could land in a single CLAUDE.md. Length and redundancy reduce
+# adherence, which makes writing the rule three times strictly worse than
+# writing it once — and the write budget's one-block-per-family rule cannot
+# catch it, because they are three families from three analyzers.
+SUBAGENT_OFFLOAD_FIX = _fixes.fix_text("resend.offload_to_subagent")
 
 #: The second half of the compound lever. Offloading decides WHERE the work
 #: runs; this decides what it runs ON. Both are settable in the same agent
 #: file's frontmatter, so the two land as one artifact rather than two cards.
-RIGHTSIZE_FIX_TEMPLATE = (
-    "Then right-size what you offload to. A subagent doing broad reads and "
-    "returning a short conclusion rarely needs the premium tier: pin both its "
-    "model and its reasoning effort in its own definition file so every future "
-    "dispatch inherits them instead of defaulting to whatever the parent runs "
-    "on."
-)
+#:
+#: This text used to say a subagent "doing broad reads and returning a short
+#: conclusion rarely needs the premium tier" — the same contradiction the
+#: subagent rubric carried (see ``cost_proposals.SUBAGENT_RUBRIC_INTRO``'s note).
+#: Breadth of reading is exactly what the offload half of this compound fix
+#: creates, so pairing "offload the broad reads" with "broad reads are cheap"
+#: told the agent the resulting worker did not need right-sizing at all, and
+#: applying the fix would not have erased the number that motivated it.
+# THE text lives in `core/fixes/registry.py`. This constant and the subagent
+# rubric in `cost_proposals` were two hand-maintained statements of one policy,
+# and they drifted: the identical "a short conclusion rarely needs the premium
+# tier" contradiction lived in both, in different words, so correcting the
+# reported one left this live. One definition, linted.
+RIGHTSIZE_FIX_TEMPLATE = _fixes.fix_text("resend.rightsize_worker")
 
 # Cap on evidence rows carried in the finding payload; aggregates are over ALL
 # sessions with measurable prompt volume, not just the capped examples.
@@ -457,6 +454,15 @@ class ResendFinding:
     #: of being claimed here (Critical Rule 27). Surfaced so the partition is
     #: visible on the payload rather than being an invisible subtraction.
     driver_role_sessions:      int = 0
+    #: ``session_id -> that session's own claimed tokens``. A BREAKDOWN of
+    #: `past_overspend_tokens`, not a second quantity: the values sum to it,
+    #: over exactly the in-scope sessions the avoidable figure was computed on.
+    #: It exists so `core/optimize/rule_placement` can put this card's
+    #: CLAUDE.md rule in the projects whose sessions incurred the re-sending,
+    #: instead of in the one file every project pays for. Weights are TOKENS and
+    #: drive both the token and the dollar split, so each destination's implied
+    #: per-token rate equals the finding's own (Critical Rule 28).
+    session_weights: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -727,6 +733,9 @@ def run(ctx: AnalyzerContext) -> None:
     sessions_by_class: dict[str, int] = {
         COVERAGE_IN_SCOPE: 0, COVERAGE_DRIVER_ROLE: 0, COVERAGE_NO_LEVER: 0,
     }
+    #: Per-session breakdown of the claimed tokens, for rule placement. Filled
+    #: alongside the two totals it decomposes, never re-derived afterwards.
+    session_weights: dict[str, int] = {}
 
     for sid, session_turns in by_session.items():
         prompt_sizes = [t.new_input_tokens + t.reread_tokens for t in session_turns]
@@ -847,6 +856,11 @@ def run(ctx: AnalyzerContext) -> None:
             offloadable_tail = tail_tokens * offloadable_share
             offload_usd_total += offloadable_tail / 1_000_000 * turn_rates.cache_read_per_mtok
             offload_tokens_total += round(offloadable_tail)
+            # Same addend, attributed to the session it came from — the
+            # placement weight (see `ResendFinding.session_weights`). Kept on
+            # the same line as the total so the two can never drift into
+            # covering different turns.
+            session_weights[sid] = session_weights.get(sid, 0) + round(offloadable_tail)
             # Same tail at a hypothetical full share: the ceiling the scope
             # factor is applied to, kept so the card can separate "outside the
             # tail definition" from "outside the measured delegable share"
@@ -874,6 +888,9 @@ def run(ctx: AnalyzerContext) -> None:
                 if rate_gap > 0:
                     rightsize_usd_total += offloaded_material / 1_000_000 * rate_gap
                     rightsize_tokens_total += round(offloaded_material)
+                    session_weights[sid] = (
+                        session_weights.get(sid, 0) + round(offloaded_material)
+                    )
 
     if total_sum <= 0:
         finding.notes.append(
@@ -929,6 +946,7 @@ def run(ctx: AnalyzerContext) -> None:
             offload_usd_total + rightsize_usd_total, 6
         )
         finding.past_overspend_tokens = claimed_tokens
+        finding.session_weights = dict(session_weights)
     else:
         # Symmetric degrade (Rule 28 corollary a): no dollars means no tokens
         # either. The measured `repeat_tokens` and the compaction lever's own

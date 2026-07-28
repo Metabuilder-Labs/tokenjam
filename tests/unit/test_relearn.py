@@ -14,6 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_INJECTING_HOOK,
+)
+
 from tokenjam.core.optimize.analyzers.relearn import (
     MIN_RECURRING_SESSIONS,
     FailureEpisode,
@@ -181,13 +186,13 @@ def test_classify_deferred_tool_cold_still_matches_non_offset_errors():
     assert classify_known_family("Monitor", text) == "deferred_tool_cold"
 
 
-def test_command_not_found_is_rung_one_with_real_guidance():
-    # Downgraded from rung 5 (no safe automatic config/env writer exists) to
-    # a rung-1 CLAUDE.md note with genuinely useful guidance — not a stub.
+def test_command_not_found_is_a_claude_md_rule_with_real_guidance():
+    # Downgraded from a config/env fix (no safe automatic config/env writer
+    # exists) to a CLAUDE.md rule with genuinely useful guidance — not a stub.
     from tokenjam.core.optimize.analyzers.relearn import _FAMILY_BY_KEY
 
     fam = _FAMILY_BY_KEY["command_not_found"]
-    assert fam["rung"] == 1
+    assert fam["delivery"] == DELIVERY_CLAUDE_MD_RULE
     assert "python3" in fam["fix"]
     assert "mapfile" in fam["fix"] or "shopt" in fam["fix"]
 
@@ -276,7 +281,9 @@ def test_recurring_cluster_surfaces_as_a_proposal(tmp_path):
     cluster = finding.clusters[0]
     assert cluster.family_key == "cwd_confusion"
     assert cluster.sessions == MIN_RECURRING_SESSIONS
-    assert cluster.rung == 3
+    # cwd_confusion is a PostToolUseFailure hook: it injects recovery context
+    # rather than blocking anything, which is what makes it prompt text.
+    assert cluster.delivery == DELIVERY_INJECTING_HOOK
     # Spread across 3 distinct repos -> user-global scope (§7).
     assert cluster.scope == "user-global"
     # The one canonical dollar field, no carve-out: a relearn cluster shows
@@ -288,7 +295,7 @@ def test_recurring_cluster_surfaces_as_a_proposal(tmp_path):
     assert finding.past_overspend_tokens == cluster.past_overspend_tokens
 
 
-def test_command_not_found_proposal_is_rung_one_note(tmp_path):
+def test_command_not_found_proposal_is_a_claude_md_rule(tmp_path):
     for i in range(MIN_RECURRING_SESSIONS):
         _command_not_found_session(tmp_path, f"-Users-test-cnf{i}", f"cnf-{i}")
     sessions = [(f"cnf-{i}", f"repo{i}") for i in range(MIN_RECURRING_SESSIONS)]
@@ -298,7 +305,7 @@ def test_command_not_found_proposal_is_rung_one_note(tmp_path):
     assert len(finding.clusters) == 1
     cluster = finding.clusters[0]
     assert cluster.family_key == "command_not_found"
-    assert cluster.rung == 1
+    assert cluster.delivery == DELIVERY_CLAUDE_MD_RULE
     assert "python3" in cluster.proposed_fix
 
 
@@ -481,7 +488,7 @@ def test_single_repo_cluster_scopes_to_project(tmp_path):
     assert finding.clusters[0].repos == ["onerepo"]
 
 
-# --- Persona gating on the rung-1/rung-2 write --------------------------------
+# --- Persona gating on the CLAUDE.md/skill write ------------------------------
 # Mirrors cost_proposals._persona_gated_write_fields's gate on the SAME class
 # of surface (a CLAUDE.md/skill write): only claude-code/mixed get the write.
 # A workspace-having (non-OTel) cluster used to be apply-capable regardless of
@@ -741,7 +748,7 @@ def test_relearn_in_click_choices_and_renderer():
 
 def test_render_relearn_shows_clusters_without_error(tmp_path, capsys):
     """The finding renders through the CLI dispatch path and surfaces the
-    cluster signature + occurrences + rung — not a generic empty state."""
+    cluster signature + occurrences + delivery — not a generic empty state."""
     from tokenjam.cli.cmd_optimize import _render_relearn
 
     for i in range(MIN_RECURRING_SESSIONS):
@@ -755,7 +762,9 @@ def test_render_relearn_shows_clusters_without_error(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "cwd_confusion" in out
     assert f"{finding.clusters[0].occurrences}" in out
-    assert "rung 3" in out
+    # Inverted: the row named a ladder number the reader had to translate.
+    # It now names the mechanism, which is the thing they can act on.
+    assert "hook (context nudge)" in out
     assert "No candidates flagged" not in out
 
 

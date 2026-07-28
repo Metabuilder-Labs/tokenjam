@@ -251,7 +251,7 @@ def summarize_via(
         model = config.summarize.api_model
         assert model is not None  # rewrite_usd is set only on the api path, which required a model
         rates_known = get_rates("anthropic", model) is not None   # else the $ used default rates (#4)
-        if verdict.structure_ok:
+        if verdict.structure_ok and verdict.est_tokens_saved is not None:
             saving = calculate_cost("anthropic", model, verdict.est_tokens_saved, 0)
             break_even = math.ceil(delivered.rewrite_usd / saving) if saving > 0 else None
         else:

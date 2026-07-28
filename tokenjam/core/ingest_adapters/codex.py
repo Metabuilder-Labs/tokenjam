@@ -103,6 +103,8 @@ class ParsedCodexSession:
     total_cache_tokens: int
     total_cost_usd: float
     tool_call_count: int
+    # See ParsedSession.records_undated in core/backfill.py.
+    records_undated: int = 0
 
 
 # --- ID derivation helpers ---------------------------------------------------
@@ -171,6 +173,7 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
     current_model: str | None = None
     earliest: datetime | None = None
     latest: datetime | None = None
+    records_undated = 0
 
     # Deterministic dedup within the file. A rollout is append-only and never
     # replays a line, but keying by span_id keeps ingest idempotent across
@@ -201,6 +204,11 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
                 earliest = ts
             if latest is None or ts > latest:
                 latest = ts
+        # Note `ts` may still be None here: `session_meta` carries the cwd and
+        # session id and is read regardless. Only the SPAN-producing branches
+        # below require an observed time, and each declines without one rather
+        # than substituting `now` — which would date months-old rollout work to
+        # whenever the backfill ran. Same idiom as core/backfill.py.
 
         if rtype == "session_meta":
             # `session_id` on current builds; older/renamed builds carried the
@@ -242,12 +250,15 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
             if input_tokens == 0 and output_total == 0 and cached == 0:
                 continue
 
+            if ts is None:
+                records_undated += 1
+                continue
             sid = session_id or path.stem
             turn_index += 1
             turn_key = str(turn_index)
             span_id = _span_id_for_llm(sid, turn_key)
             trace_id = _trace_id_for(sid)
-            start_time = ts or datetime.now(tz=timezone.utc)
+            start_time = ts
 
             # OpenAI automatic prompt caching: cached_input_tokens are read-hits
             # billed at the (lower) cache-read rate; there is no separate
@@ -294,13 +305,16 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
             continue
 
         if rtype == "response_item" and payload.get("type") == "function_call":
+            if ts is None:
+                records_undated += 1
+                continue
             sid = session_id or path.stem
             call_id = payload.get("call_id") or _det_id(
                 "codex-tool-fallback", sid, str(line_no)
             )
             tool_span_id = _span_id_for_tool(sid, call_id)
             tool_name = payload.get("name") or "unknown"
-            start_time = ts or datetime.now(tz=timezone.utc)
+            start_time = ts
             spans_by_id[tool_span_id] = NormalizedSpan(
                 span_id=tool_span_id,
                 trace_id=_trace_id_for(sid),
@@ -333,7 +347,11 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
         total_cache += s.cache_tokens or 0
         total_cost += s.cost_usd or 0.0
 
-    started_at = earliest or datetime.now(tz=timezone.utc)
+    if earliest is None:
+        # Every record in this rollout was undated, so there is no session to
+        # describe — returning one would invent both its start and its extent.
+        return None
+    started_at = earliest
     ended_at = latest or started_at
 
     return ParsedCodexSession(
@@ -348,6 +366,7 @@ def parse_codex_rollout(path: Path) -> ParsedCodexSession | None:
         total_cache_tokens=total_cache,
         total_cost_usd=round(total_cost, 8),
         tool_call_count=tool_count,
+        records_undated=records_undated,
     )
 
 

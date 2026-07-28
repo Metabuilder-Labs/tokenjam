@@ -1,8 +1,8 @@
 """Net-of-standing-cost accounting and the write budget for permanent fixes.
 
 Several analyzers propose writing a PERMANENT artifact into the user's agent
-files: a rung-1 ``CLAUDE.md`` rule, a rung-2 ``.claude/skills/<slug>/SKILL.md``
-note. Those artifacts are not free. A CLAUDE.md rule is re-sent on every future
+files: a ``CLAUDE.md`` rule, a ``.claude/skills/<slug>/SKILL.md`` note, a hook.
+Those artifacts are not free. A CLAUDE.md rule is re-sent on every future
 session, forever, and every write-bearing analyzer used to report its saving
 GROSS of that permanent cost with nothing anywhere netting the two. A rule
 costing ~200 tokens per session that prevents a 1,500-token failure twice a
@@ -56,31 +56,20 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Iterable, Sequence
 
 from tokenjam.core.optimize.projection import ProjectionBasis
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+    MAX_NUDGES_PER_SESSION,
+)
 from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
 
-# --- Standing cost by intervention rung --------------------------------------
-
-#: How much of a written artifact is re-sent on EVERY future session, by rung
-#: of the intervention ladder (relearn SPEC 6). This distinction is the whole
-#: reason the module is not a flat "count the block" helper:
-#:
-#:   rung 1  CLAUDE.md note  -> the entire block, re-sent in full, forever.
-#:   rung 2  SKILL.md        -> only the frontmatter name + description. The
-#:                              harness lists skills by description and loads
-#:                              a body only when that skill is invoked.
-#:   rung 3+ hook / wrapper / config -> ZERO. A settings file is executed, not
-#:                              sent as prompt text, so it has no standing
-#:                              per-session token cost at all.
-#:
-#: So relearn's rung-3 hook families keep their full gross saving and only the
-#: rung-1/rung-2 prompt-text writes get netted down. That is the correct
-#: answer, not a loophole.
-RUNG_CLAUDE_MD = 1
-RUNG_SKILL = 2
+# --- Standing cost by delivery mechanism -------------------------------------
 
 #: ``relearn_apply.render_skill_content`` truncates the description at 200
 #: chars; the name line and frontmatter fences add a little more. The
@@ -162,7 +151,7 @@ MIN_FIX_CHARS = 40
 #: must stay that way — the text handed to :func:`is_placeholder_fix` on the
 #: live relearn path is not the raw fix but the fully RENDERED artifact (a
 #: marker comment, a heading, the fix, an evidence line; see
-#: ``relearn_apply.artifact_for_rung``), so the placeholder sentence sits in the
+#: ``relearn_apply.artifact_for_delivery``), so the placeholder sentence sits in the
 #: middle of the block and an anchored pattern never sees it. Anchoring this one
 #: for symmetry silently switches the whole quality floor off for that path.
 _PLACEHOLDER_PATTERNS = (
@@ -192,6 +181,16 @@ REASON_BUDGET_FULL = (
     "snippet, and this becomes offerable once an earlier rule is applied or "
     "the agent files are compressed."
 )
+#: Not a suppression and not a deferral — a statement that there is no action.
+#: The observation is real and keeps its figure; what is withdrawn is only the
+#: offer, because the fix text itself says the harness already handles it and
+#: agents self-correct. A card whose fix says to do nothing must not occupy an
+#: apply slot; leaving it there sells a change the user cannot make.
+REASON_ADVISORY_ONLY = (
+    "Reported for awareness, not as a fix: the harness already handles this "
+    "and agents self-correct on the next turn, so there is no rule worth "
+    "writing. What the retries already cost is still reported in full."
+)
 REASON_FAMILY_MERGED = (
     "Covered by the single rule offered for this family: one block is written "
     "for the whole family rather than one per cluster."
@@ -214,10 +213,27 @@ BASIS_NOT_PRICEABLE = (
     "standing cost not netted: this finding carries no token estimate to net "
     "the permanent rule's own per-session cost against"
 )
+#: THE REMEDY THIS NAMES HAS TO BE ONE THAT WORKS. The first version said
+#: "compress them (see the summarize findings)". Measured on seven real
+#: instruction files across six repos, compression returned a 0.952 mean prose
+#: ratio — roughly 5%, of which 34-71% was pure whitespace reflow. So the
+#: product was gating its two largest cards on a remedy that returns almost
+#: nothing, and a gate the user cannot pass is not a gate, it is a dead end.
+#:
+#: It also named the wrong lever for the wrong reason. Files that hit this
+#: ceiling are long by ACCUMULATION — numbered incident lists, append-only
+#: logs — where what frees space is pruning what no longer applies, expiring
+#: what was time-bound, and moving what is file-specific into a path-scoped
+#: rule that loads only on a matching read. Compression works on prose; these
+#: files are not long because their prose is verbose.
 REASON_CEILING_REACHED = (
-    "Your agent files already carry more standing per-session context than the "
-    "budget allows to grow. Compress them (see the summarize findings) before "
-    "adding new permanent rules."
+    "Your instruction files already carry more standing per-session context "
+    "than the budget allows to grow. These files are usually long by "
+    "accumulation rather than by verbosity, so the levers that free real space "
+    "are pruning entries that no longer apply, expiring anything that was "
+    "time-bound, and moving file-specific guidance into a path-scoped rule "
+    "that loads only when a matching file is read. Compressing the prose "
+    "typically returns very little."
 )
 
 #: The same five verdicts as a SHORT label, for a dense list where the full
@@ -252,7 +268,8 @@ REASON_SHORT_BY_REASON.update({
     REASON_NET_NEGATIVE: "a rule would cost more to keep than it returns",
     REASON_BUDGET_FULL: "deferred — this window's rule budget is spent",
     REASON_FAMILY_MERGED: "covered by another cluster's rule",
-    REASON_CEILING_REACHED: "blocked — agent files already too large to grow",
+    REASON_ADVISORY_ONLY: "awareness only — nothing to change",
+    REASON_CEILING_REACHED: "blocked — instruction files already too large to grow",
     REASON_BELOW_VALUE_FLOOR: (
         f"returns under ${MIN_NET_WRITE_USD:.0f} — not worth a permanent rule"
     ),
@@ -293,17 +310,40 @@ def artifact_tokens(text: str) -> int:
     return tokens_from_chars(len(text)) if text else 0
 
 
-def standing_tokens_per_session(rung: int, text: str) -> int:
-    """Tokens this artifact adds to EVERY future session, by rung.
+def standing_tokens_per_session(delivery: str, text: str) -> int:
+    """Tokens this artifact adds to EVERY future session, by DELIVERY MECHANISM.
 
-    See ``RUNG_CLAUDE_MD`` above for why rung 3 and up are zero: a hook or a
-    config edit is never sent to the model as prompt text.
+    Each mechanism answers for itself, because the answers genuinely differ and
+    nothing about an artifact's appearance predicts them:
+
+    * a ``CLAUDE.md`` rule re-sends its entire block, in full, forever;
+    * a skill re-sends only its frontmatter name + description — the harness
+      lists skills by description and loads a body only when one is invoked;
+    * an EXECUTING hook costs zero. A guard, a formatter, a lint gate: run by
+      the harness, never sent to the model as text. This zero is earned;
+    * an INJECTING hook costs the text it injects, per nudge, times the cap the
+      generated script enforces on itself. **It is not zero**, and it is
+      worse-behaved than a rule: the injected block lands in the conversation
+      and is re-sent on every later turn, so this is a floor, not a ceiling.
+
+    The last two are why the mechanism is asked rather than the artifact's
+    shape. Both are "a hook". One is free and one is the most expensive thing
+    here, and a scheme that groups them charges one of them wrongly — silently,
+    and in the direction that makes a fix look better than it is.
     """
     tokens = artifact_tokens(text)
-    if rung >= 3:
+    if delivery == DELIVERY_EXECUTING_HOOK:
         return 0
-    if rung == RUNG_SKILL:
+    if delivery == DELIVERY_INJECTING_HOOK:
+        return tokens * MAX_NUDGES_PER_SESSION
+    if delivery == DELIVERY_SKILL:
         return min(tokens, tokens_from_chars(SKILL_ALWAYS_LOADED_CHARS))
+    # A CLAUDE.md rule, and a path-scoped rule reaching this budget-side pricer
+    # without its rendered frontmatter to measure. Charging a path-scoped rule
+    # the whole block over-states it — its precise price lives on its own
+    # delivery kind, which reads the rendered file — but over-stating a COST is
+    # the safe direction here, and inventing a discount from text we cannot see
+    # is not.
     return tokens
 
 
@@ -375,6 +415,43 @@ def measured_agent_file_tokens(summarize_finding: object | None) -> int | None:
     return tokens_from_chars(total_chars)
 
 
+def measured_agent_file_tokens_by_path(
+    summarize_finding: object | None,
+) -> dict[str, int]:
+    """The always-loaded footprint of EACH agent file, keyed by resolved path.
+
+    :func:`measured_agent_file_tokens` collapses the same scan into one number,
+    which is the right input for "how much new standing text may this window
+    take on at all". It is the wrong input for "may this rule grow THIS file",
+    and the difference only became visible once a rule could land in several
+    files: a growth share computed against the aggregate lets two rules
+    converge on one small project ``CLAUDE.md`` and add more to it than the
+    whole file contained, while the aggregate — dominated by a large root file
+    — reports plenty of headroom.
+
+    A path absent from the scan simply has no measured size; the caller falls
+    back to the lane budget rather than inventing one, which is the same
+    "an unmeasured file is not evidence of a full one" default the aggregate
+    already applies.
+    """
+    if summarize_finding is None:
+        return {}
+    out: dict[str, int] = {}
+    for candidate in (getattr(summarize_finding, "candidates", None) or []):
+        path = str(getattr(candidate, "path", "") or "")
+        if not path:
+            continue
+        chars = _always_loaded_chars(candidate)
+        if chars <= 0:
+            continue
+        try:
+            key = str(Path(path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            key = path
+        out[key] = out.get(key, 0) + tokens_from_chars(chars)
+    return out
+
+
 @dataclass(frozen=True)
 class WriteBudget:
     """How much new permanent standing cost this window may take on.
@@ -391,6 +468,67 @@ class WriteBudget:
     max_writes: int
     existing_tokens: int
     ceiling_reached: bool
+    #: Per-FILE always-loaded footprint, resolved path -> tokens, from the same
+    #: ``summarize`` scan ``existing_tokens`` aggregates. Used to size one
+    #: file's own growth allowance; empty means no per-file measurement, and
+    #: every destination then falls back to ``budget_tokens``.
+    existing_by_path: dict[str, int] = field(default_factory=dict)
+
+    def destination_blocked(self, path: str) -> bool:
+        """Whether THIS file is the one that is too large to grow.
+
+        The ceiling used to be a single verdict over the AGGREGATE footprint,
+        which made one pathological file block every write — including a write
+        into a different, nearly-empty project file that had ample headroom.
+        Once placement can put a rule somewhere else, an aggregate ceiling is
+        answering a question nobody asked: the file that cannot grow is the
+        file that cannot grow, not every file.
+
+        That mattered in practice, not in theory. The two largest cards this
+        product produces were both withheld under the aggregate ceiling while
+        their resolved destinations were project files with room, and the
+        remedy the message named returned ~5% on measurement — so the largest
+        fixes were gated behind something the user could not clear.
+
+        Falls back to the aggregate verdict for a file the scan never measured,
+        which is the conservative direction and preserves the old behaviour
+        wherever per-file sizes are unavailable.
+        """
+        if not path or not self.existing_by_path:
+            return self.ceiling_reached
+        try:
+            key = str(Path(path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            key = path
+        existing = self.existing_by_path.get(key)
+        if existing is None:
+            return self.ceiling_reached
+        return existing >= AGENT_FILE_STANDING_CEILING_TOKENS
+
+    def destination_budget(self, path: str) -> int:
+        """How much new standing text ONE file may take on.
+
+        The same growth share the lane budget uses, applied to this file's own
+        measured size rather than to the aggregate — so a small project
+        ``CLAUDE.md`` gets a small allowance even when a large root file makes
+        the corpus-wide footprint look roomy. Unmeasured files fall back to the
+        lane budget, which is the historical single-destination behaviour.
+        """
+        if self.destination_blocked(path):
+            return 0
+        if not path:
+            return self.budget_tokens
+        try:
+            key = str(Path(path).expanduser().resolve())
+        except (OSError, RuntimeError):
+            key = path
+        existing = self.existing_by_path.get(key)
+        if existing is None:
+            return self.budget_tokens
+        return max(
+            MIN_WRITE_BUDGET_TOKENS,
+            int(existing * AGENT_FILE_GROWTH_SHARE_PER_WINDOW),
+        )
 
 
 def build_write_budget(
@@ -398,6 +536,7 @@ def build_write_budget(
     lane_budget_tokens: int,
     lane_max_writes: int,
     existing_agent_file_tokens: int | None = None,
+    existing_by_path: dict[str, int] | None = None,
 ) -> WriteBudget:
     """Size this lane's write budget against the measured agent-file footprint.
 
@@ -413,16 +552,17 @@ def build_write_budget(
     and the lane cap bounds the whole thing regardless.
     """
     lane_cap = max(0, lane_budget_tokens)
+    by_path = dict(existing_by_path or {})
     if existing_agent_file_tokens is None:
         return WriteBudget(
             budget_tokens=lane_cap, max_writes=max(0, lane_max_writes),
-            existing_tokens=0, ceiling_reached=False,
+            existing_tokens=0, ceiling_reached=False, existing_by_path=by_path,
         )
     existing = max(0, int(existing_agent_file_tokens))
     if existing >= AGENT_FILE_STANDING_CEILING_TOKENS:
         return WriteBudget(
             budget_tokens=0, max_writes=0, existing_tokens=existing,
-            ceiling_reached=True,
+            ceiling_reached=True, existing_by_path=by_path,
         )
     allowed_growth = max(
         MIN_WRITE_BUDGET_TOKENS, int(existing * AGENT_FILE_GROWTH_SHARE_PER_WINDOW),
@@ -432,6 +572,7 @@ def build_write_budget(
         max_writes=max(0, lane_max_writes),
         existing_tokens=existing,
         ceiling_reached=False,
+        existing_by_path=by_path,
     )
 
 
@@ -453,7 +594,9 @@ class WriteCandidate:
 
     key: str
     family: str
-    rung: int
+    #: HOW this artifact reaches the agent, which is also WHAT gets written and
+    #: therefore what it costs to keep. See ``core/rulewrite/delivery``.
+    delivery: str
     artifact_text: str
     gross_tokens: int
     gross_usd: float | None = None
@@ -464,6 +607,23 @@ class WriteCandidate:
     #: same basis mismatch in a different costume. ``None`` falls back to the
     #: basis's own session count (the user-global case).
     exposure_sessions: int | None = None
+    #: The FILES this artifact would be written into, when placement resolved
+    #: more than the single user-global default (see
+    #: :mod:`tokenjam.core.optimize.rule_placement`). Empty means the historical
+    #: one-destination behaviour, which is still correct for a genuinely global
+    #: rule.
+    #:
+    #: Two distinct costs fall out of this and they must not be conflated. The
+    #: STANDING cost is per-session x ``exposure_sessions`` — what the rule
+    #: costs to keep, and the only figure the saving is netted against. The
+    #: FOOTPRINT cost is per-session x the number of destinations — what the
+    #: FILES have to carry, and the only figure the budget is spent in. Three
+    #: project files each grow by one block even though no single session ever
+    #: loads more than one of them, so a placement that halves the standing cost
+    #: can still triple the budget spend. Both are real; charging either one for
+    #: the other's question is how a placement decision silently stops being
+    #: arithmetic.
+    destinations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -506,6 +666,13 @@ class WriteDecision:
     #: saving is real and whose snippet is still copyable today.
     claim_suppressed: bool
     basis: str
+    #: Per-session tokens x the number of files written — what the budget is
+    #: spent in. Equals ``standing_tokens_per_session`` for the single-file
+    #: case; see ``WriteCandidate.destinations`` for why the two differ.
+    footprint_tokens: int = 0
+    #: The files this write lands in, carried through so a caller can stage one
+    #: diff per destination without re-deriving the placement.
+    destinations: tuple[str, ...] = ()
 
 
 def _rate_per_token(gross_usd: float | None, gross_tokens: int) -> float | None:
@@ -527,17 +694,27 @@ def _unpriceable_decision(candidate: WriteCandidate) -> WriteDecision:
     figures pass through untouched, with the basis saying plainly that the
     netting did not run.
     """
+    per_session = standing_tokens_per_session(
+        candidate.delivery, candidate.artifact_text,
+    )
     return WriteDecision(
         key=candidate.key, offered=True, reason="",
-        standing_tokens_per_session=standing_tokens_per_session(
-            candidate.rung, candidate.artifact_text,
-        ),
+        standing_tokens_per_session=per_session,
         standing_tokens=0, standing_usd=None,
         net_tokens=0, net_usd=candidate.gross_usd,
         payback_ratio=None, net_negative=False, exposure_sessions=0,
+        footprint_tokens=per_session * _destination_count(candidate),
+        destinations=candidate.destinations,
         claimed_tokens=candidate.gross_tokens, claimed_usd=candidate.gross_usd,
         claim_suppressed=False, basis=BASIS_NOT_PRICEABLE,
     )
+
+
+def _destination_count(candidate: WriteCandidate) -> int:
+    """How many files this write grows. One when placement resolved nothing —
+    the historical single-destination case is a write into exactly one file,
+    never into none."""
+    return max(1, len(candidate.destinations))
 
 
 def _decide_family(
@@ -576,7 +753,7 @@ def _decide_family(
     # withhold the write even when the family's COMBINED return clears the
     # value floor below.
     family_gross_tokens = sum(c.gross_tokens for c in ordered)
-    per_session = standing_tokens_per_session(rep.rung, rep.artifact_text)
+    per_session = standing_tokens_per_session(rep.delivery, rep.artifact_text)
     exposure = max(
         rep.exposure_sessions if rep.exposure_sessions is not None else basis.sessions, 0,
     )
@@ -604,6 +781,8 @@ def _decide_family(
         standing_tokens=standing, standing_usd=standing_usd,
         net_tokens=max(net_tokens, 0), net_usd=clamped_net_usd,
         payback_ratio=payback, net_negative=net_negative, exposure_sessions=exposure,
+        footprint_tokens=per_session * _destination_count(rep),
+        destinations=rep.destinations,
         claimed_tokens=0 if net_negative else max(net_tokens, 0),
         claimed_usd=(
             None if family_gross_usd is None
@@ -692,6 +871,14 @@ def allocate_writes(
     ranked.sort(key=lambda pair: (-pair[1].net_tokens, pair[0].key))
     spent_tokens = 0
     offered_count = 0
+    #: Per-DESTINATION spend, so four analyzers proposing rules into the same
+    #: file cannot each spend the whole budget against it. Before placement
+    #: existed there was exactly one destination and the single ``spent_tokens``
+    #: counter was that guarantee by construction; once a write can land in
+    #: three project files and another write in two of the same three, the
+    #: global counter stops answering "how much did THIS file grow" — which is
+    #: the question the growth share and the standing ceiling are both asked in.
+    spent_by_destination: dict[str, int] = {}
     for rep, decision in ranked:
         # Spent in PER-SESSION tokens, the same unit the ceiling and the
         # summarize-measured footprint are in. Charging the window TOTAL here
@@ -699,23 +886,44 @@ def allocate_writes(
         # is backwards: a busier user is exactly who a good permanent rule pays
         # off for. The window total is what the SAVING is netted against; the
         # per-session figure is what the FILE has to carry.
+        #
+        # The write is all-or-nothing across its destinations: a rule offered
+        # into two of its three projects would leave the third exhibiting the
+        # behaviour with no rule and a card claiming it was covered.
+        targets = decision.destinations or ("",)
+        per_file = decision.standing_tokens_per_session
+        # `max_writes` is zero under the aggregate ceiling, which would still
+        # withhold every write even when the chosen destinations have room. The
+        # count cap only binds where the ceiling genuinely applies to this
+        # write's own files.
+        blocked_here = any(budget.destination_blocked(path) for path in targets)
+        write_cap = budget.max_writes if not budget.ceiling_reached or not blocked_here else 0
         fits = (
-            offered_count < budget.max_writes
-            and spent_tokens + decision.standing_tokens_per_session <= budget.budget_tokens
+            offered_count < max(write_cap, 0 if blocked_here else budget.max_writes)
+            and spent_tokens + decision.footprint_tokens <= budget.budget_tokens
+            and all(
+                spent_by_destination.get(path, 0) + per_file
+                <= budget.destination_budget(path)
+                for path in targets
+            )
         )
         if fits:
-            spent_tokens += decision.standing_tokens_per_session
+            spent_tokens += decision.footprint_tokens
+            for path in targets:
+                spent_by_destination[path] = spent_by_destination.get(path, 0) + per_file
             offered_count += 1
             decisions[rep.key] = decision
             continue
         decisions[rep.key] = WriteDecision(
             key=decision.key, offered=False,
-            reason=REASON_CEILING_REACHED if budget.ceiling_reached else REASON_BUDGET_FULL,
+            reason=REASON_CEILING_REACHED if blocked_here else REASON_BUDGET_FULL,
             standing_tokens_per_session=decision.standing_tokens_per_session,
             standing_tokens=decision.standing_tokens, standing_usd=decision.standing_usd,
             net_tokens=decision.net_tokens, net_usd=decision.net_usd,
             payback_ratio=decision.payback_ratio, net_negative=False,
             exposure_sessions=decision.exposure_sessions,
+            footprint_tokens=decision.footprint_tokens,
+            destinations=decision.destinations,
             claimed_tokens=decision.claimed_tokens, claimed_usd=decision.claimed_usd,
             claim_suppressed=False, basis=decision.basis,
         )

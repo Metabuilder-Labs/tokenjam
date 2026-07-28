@@ -572,11 +572,79 @@ def test_budget_view_failure_does_not_blank_content_it_already_has(html):
     assert 'class="band-msg err"' in budget
     assert "Couldn't refresh budget data." in budget
     assert "setError(null);" in budget
-    # The per-agent and provider tables still render below the banner --
+    # The coding, SDK, and provider tables still render below the banner --
     # the banner never replaces them.
     banner_idx = budget.index('class="band-msg err"')
-    assert budget.index("Per-agent budget caps", banner_idx) > banner_idx
+    assert budget.index("Coding-tool budget caps", banner_idx) > banner_idx
+    assert budget.index("SDK workflow budget caps", banner_idx) > banner_idx
     assert budget.index("Provider spend forecast", banner_idx) > banner_idx
+
+
+def test_budget_view_has_two_daily_only_zones_no_session_column(html):
+    """The Budget-page redesign (api/routes/budget.py) splits the old single
+    "Per-agent budget caps" table into two zones -- coding-tool groups
+    (Claude Code / Codex, one row per TOOL) and SDK workflow agents (one row
+    per agent_id) -- and drops the per-session column from the page
+    entirely: a per-session cap on a coding agent has no reliable meaning at
+    session start, and it crowded one ceiling-per-tool into noisy
+    one-row-per-project rows. The backend still honors an already-configured
+    session_usd; this screen just never offers a way to set a new one."""
+    budget = _budget_src(html)
+
+    # Old single-zone heading + its false claim are gone.
+    assert "Per-agent budget caps" not in budget
+    assert "Fires a real-time alert the moment" not in budget
+
+    # Both new zone headings render.
+    assert "Coding-tool budget caps" in budget
+    assert "SDK workflow budget caps" in budget
+
+    # Enforcement is described accurately: session end, not the instant
+    # spend crosses the line.
+    assert "session end" in budget
+
+    # Per-session column and its handling are gone from BudgetView / its row
+    # component -- no sessionVal state, no session_usd sent on save (a
+    # comment may still name session_usd to explain why it's absent, but no
+    # payload field or JS binding does), no "Per-session (USD)" header.
+    assert "Per-session (USD)" not in budget
+    assert "sessionVal" not in budget
+    assert "session_usd:" not in budget
+    assert "session_usd,\n" not in budget
+
+    # Both zones read the coding/sdk superset, never the legacy top-level keys.
+    assert "data.coding.groups" in budget
+    assert "data.coding.defaults" in budget
+    assert "data.sdk.agents" in budget
+    assert "data.sdk.defaults" in budget
+    assert "data.agents" not in budget
+
+    # Coding zone posts group / defaults_coding scopes; SDK zone keeps
+    # posting plain agent_id / "defaults" scopes.
+    assert '"group:" + gid' in budget or "'group:' + gid" in budget
+    assert 'scope="defaults_coding"' in budget
+    assert 'scope="defaults"' in budget
+
+    # No em dashes in the new zone copy this redesign wrote (the untouched
+    # Provider spend forecast paragraph below it keeps its own pre-existing
+    # em dash and is out of scope here).
+    coding_idx = budget.index("Coding-tool budget caps")
+    sdk_end = budget.index("</div>", budget.index("SDK workflow budget caps"))
+    zones_copy = budget[coding_idx:sdk_end]
+    assert "—" not in zones_copy
+
+
+def test_budget_row_component_is_daily_only(html):
+    """DailyBudgetRow (the shared row for both zones) never renders a
+    per-session input -- only BudgetRow's replacement should exist."""
+    assert "function DailyBudgetRow(" in html
+    assert "function BudgetRow(" not in html
+    row_start = html.index("function DailyBudgetRow(")
+    row_end = html.index("\nfunction ", row_start + 1)
+    row = html[row_start:row_end]
+    assert "sessionVal" not in row
+    assert "session_usd" not in row
+    assert row.count("<input") == 1
 
 
 def test_overview_error_handling_is_asymmetric(html):
@@ -2613,22 +2681,86 @@ def test_summarize_nav_child_and_route(html):
     assert "el.style.display = (v === view) ? 'flex' : 'none';" in html
 
 
+def test_summarize_tj_keep_not_double_escaped(html):
+    """htm/Preact tagged templates build static text children via
+    `createTextNode`, so an HTML entity written directly into the template
+    (e.g. `&lt;tj-keep&gt;`) is never decoded -- it renders on screen as the
+    literal text `&lt;tj-keep&gt;` rather than `<tj-keep>`. The fix is
+    JS-expression interpolation (`${'<tj-keep>'}`), which Preact assigns as a
+    real text node instead of re-parsing; both `tj-keep` mentions in the file
+    must use that form, and the escaped form must not appear anywhere."""
+    assert "&lt;tj-keep&gt;" not in html, "tj-keep must not be HTML-entity-escaped"
+    assert html.count("${'<tj-keep>'}") == 2
+
+
 def test_summarize_component_present(html):
     assert "function SummarizeView" in html
-    # The four-phase flow (engine gate → curate → run → review) is what makes the
-    # screen worth more than the all-or-nothing CLI (DEC-034 granularity).
-    assert "const [phase, setPhase] = useState('engine')" in html
+    # Looking is free: the screen lands on the candidate list (curate) with no
+    # engine choice required. The engine is only demanded inline at the
+    # Finish/Approve step, the moment a rewrite is actually requested.
+    assert "const [phase, setPhase] = useState('curate')" in html
+    assert "const [phase, setPhase] = useState('engine')" not in html
     for phase in ("phase === 'review'", "phase === 'run'", "phase === 'curate'"):
         assert phase in html, f"missing phase branch {phase}"
 
 
 def test_summarize_engine_gate_is_capabilities_driven(html):
-    # The page starts on a capability-gated engine chooser (never defaulted), so a
+    # The engine chooser (rendered inline at the Finish/Approve step, not on
+    # its own landing page) is capability-gated and never defaulted, so a
     # dead engine (no key / no `claude`) is disabled with its reason.
     assert "api('/summarize/capabilities')" in html
     assert "const avail = cap ? cap.available : false;" in html
     # all three engines are offered; claude_p is normalized to the wire's claude-p
     assert "id === 'claude_p' ? 'claude-p' : id" in html
+
+
+def test_summarize_candidates_render_with_no_engine_selected(html):
+    # Looking is free: the landing phase is 'curate' (the candidate list), and
+    # nothing about rendering that list depends on an engine having been
+    # picked. Only producing a rewrite (Finish -> Approve) demands a tool.
+    start = html.index("function SummarizeView")
+    end = html.index("\n}\n", start)
+    body = html[start:end]
+    assert "const [phase, setPhase] = useState('curate')" in body
+    # the candidate table's render guard is `!loading` only -- no `engine`
+    # check gates whether the list (as opposed to a gate page) is shown.
+    listbox_at = body.index('<div class="cur-listbox">\n      <table class="cur-table">')
+    guard_at = body.rindex("${!loading ? html`", 0, listbox_at)
+    guard_to_list = body[guard_at:listbox_at]
+    assert "engine" not in guard_to_list
+
+
+def test_summarize_load_scan_runs_on_mount(html):
+    # The scan used to be deferred until an engine was picked (pickEngine ->
+    # loadScan()), which is exactly the gate this ticket removes. The mount
+    # effect must now kick off loadScan() unconditionally alongside caps/
+    # staged/backups, with no engine precondition anywhere in that effect.
+    assert "useEffect(() => { loadScan(); loadCaps(); loadStaged(); loadBackups(); }, []);" in html
+    assert "const pickEngine" not in html
+
+
+def test_summarize_scan_loading_state_precedes_any_count_or_empty_copy(html):
+    # Root anti-pattern 22: no count and no empty-state string may render
+    # while the scan fetch is unresolved. `loading` must start true (the
+    # mount effect always fires a scan, so the very first render -- before
+    # the effect has run -- must not be able to reach the empty-state /
+    # count branch), and every count/empty-state string for the candidate
+    # list must live behind the `!loading` guard, never unconditionally.
+    assert "const [loading, setLoading] = useState(true);" in html
+    start = html.index("function SummarizeView")
+    end = html.index("\n}\n", start)
+    body = html[start:end]
+    # the "N shown" count and the "No summarizable files found" empty-state
+    # copy are both inside the same `${!loading ? html`...` : null}` block.
+    loading_gate_at = body.index("${!loading ? html`")
+    shown_at = body.index("${visible.length} shown", loading_gate_at)
+    empty_at = body.index("No summarizable files found.", loading_gate_at)
+    assert loading_gate_at < shown_at
+    assert loading_gate_at < empty_at
+    # and the gate must close (` : null}`) only after both, i.e. loading is
+    # not flipped back to allow either to leak out from under it.
+    gate_close_at = body.index("` : null}", empty_at)
+    assert shown_at < gate_close_at and empty_at < gate_close_at
 
 
 def test_summarize_curator_wires_to_candidates_scan(html):
@@ -2841,7 +2973,7 @@ def test_cost_proposals_wired_into_review_inbox(html):
 
 def test_subagent_cost_card_has_workspace_apply_flow(html):
     # The subagent (4th) analyzer is apply-capable: its CC-origin card routes a
-    # reversible rung-1 note through the apply-workspace endpoint (dry-run diff
+    # reversible CLAUDE.md rule through the apply-workspace endpoint (dry-run diff
     # then write), unlike the three advise-only analyzers.
     assert "'/relearn/cost-proposals/apply-workspace'" in html
     assert "apply_capable" in html
@@ -2916,7 +3048,7 @@ def test_sizing_note_apply_explains_unregistered_project(html):
     assert "register it once with" in row
     # The reversibility fact rides the same line and is NOT trimmed with the rest:
     # it is what makes a one-click write to the reader's own file acceptable.
-    assert "writes a reversible rung-1 note" in row
+    assert "writes a reversible note" in row
     # The register-command is one-click copyable, not just prose.
     assert '<${CopySnippetButton} text="tj onboard --add-project" />' in row
     # Smarter UX: "no path yet" is not an error. The buttons are disabled until
@@ -3624,6 +3756,74 @@ def test_no_row_renders_a_dead_end(html):
     # description, so it can never talk over the server's own wording.
     assert "${!blockedReason && !description ? html`" in card
     assert "optimizeFindingHref(prop.analyzer)" in card
+
+
+def test_dismiss_uses_the_shared_action_row_treatment_on_every_card_kind(html):
+    # The MCP-remove card (`mcp_remove`'s "Remove this MCP server entry", the
+    # `hasApplyKind` branch below) used to render Dismiss as a bare blue link
+    # OUTSIDE the card's inner `opt-section` panel, on its own line underneath
+    # it, via one trailing `${canApply ? html\`<div ...>Dismiss</div>\` : null}`
+    # shared by all three apply-capable branches (needsSourcePath / hasApplyKind
+    # / the workspace-note fallback). Every other card kind already rendered
+    # Dismiss inline, beside its primary button, in `var(--text)` (white) rather
+    # than the `.sz-link` default brand blue. Fixed by giving each branch its
+    # own Dismiss in the same row as its primary button, using the identical
+    # treatment — so this asserts the shared treatment rather than one card's
+    # markup, to catch a future branch that reintroduces the divergence.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+
+    # The old outside-the-panel fallback must be gone.
+    assert "canApply ? html`<div style=\"margin-top:8px\">" not in card
+
+    # Every `onDismiss(prop.signature)` call site renders through the exact
+    # same white-text `.sz-link` markup — one shared treatment, not a
+    # per-branch reimplementation that could drift.
+    dismiss_calls = re.findall(r'<span class="sz-link".*?Dismiss</span>', card)
+    assert len(dismiss_calls) >= 6, "expected a Dismiss control on every card branch"
+    for call in dismiss_calls:
+        assert 'style="color:var(--text)"' in call, (
+            f"Dismiss must use the shared white treatment, not brand-blue: {call}"
+        )
+
+    # The three apply-capable branches (needsSourcePath, hasApplyKind incl.
+    # mcp_remove, and the workspace-note fallback) each carry Dismiss INSIDE
+    # their own action row, alongside Preview/Apply, not in a separate div.
+    for anchor in (
+        "registerSourcePath(true)}>Apply swap →</button>",
+        "applyKindFix(true)}>${akCopy.button} →</button>",
+        "applyWorkspace(true)}>Apply note →</button>",
+    ):
+        pos = card.index(anchor)
+        row_end = card.index("</div>", pos)
+        row_tail = card[pos:row_end]
+        assert "onDismiss(prop.signature)}>Dismiss</span>" in row_tail, (
+            f"Dismiss must sit in the same action row as: {anchor}"
+        )
+
+
+def test_review_inbox_action_rows_are_right_aligned(html):
+    # Every card-footer action row (primary button + Dismiss, and the Preview
+    # button where present) is right aligned within the card, not left aligned
+    # under the card body. Rows with a path input use the input's `flex:1` to
+    # push the buttons flush right instead of an explicit `justify-content`,
+    # since the input already claims the row's full width.
+    card = html[html.index("function CostProposalCard"):html.index("function InboxStatTiles")]
+    for anchor in (
+        '<a class="cur-btn primary" style="text-decoration:none" href=${(prop.target_key && prop.target_key.href) || \'#/optimize/summarize\'}>Review in Summarize →</a>',
+        "<button class=\"cur-btn primary\" disabled=${busy} onClick=${() => onMark(prop)}>${busy ? 'Marking…' : 'Mark applied'}</button>",
+        '<a class="sz-link" href=${optimizeFindingHref(prop.analyzer)}>See the full analysis →</a>',
+    ):
+        row_start = card.rindex('<div style="display:flex', 0, card.index(anchor))
+        row_line_end = card.index(">", row_start)
+        assert "justify-content:flex-end" in card[row_start:row_line_end], (
+            f"action row for {anchor[:40]!r}... must be right aligned"
+        )
+
+    row = html[html.index("function RecurringMistakeRow"):html.index("function RelearnApplyModal")]
+    approve_anchor = "Approve & write →</button>"
+    row_start = row.rindex('<div style="display:flex', 0, row.index(approve_anchor))
+    row_line_end = row.index(">", row_start)
+    assert "justify-content:flex-end" in row[row_start:row_line_end]
 
 
 def test_inbox_row_text_is_uncapped_without_lifting_the_global_measure(html):
@@ -4488,11 +4688,23 @@ def test_dashboard_use_tokens_is_local_only(html):
 
 
 def _summarize_engine_view(html: str) -> str:
-    """The `phase === 'engine'` render — the back link, heading, intro
-    paragraph, and the three API/Claude CLI/Manual mode cards."""
-    start = html.index("if (phase === 'engine') {")
-    end = html.index("if (phase === 'run' && engine !== 'manual') {", start)
-    return html[start:end]
+    """The engine-choice surface: the curate (landing) header — back link,
+    heading, intro paragraph — plus the inline engine picker that now renders
+    at the Finish/Approve step, inside the approve modal, instead of on its
+    own `phase === 'engine'` gate page. Deliberately excludes the rest of
+    curate (filters, candidate table, staged/backups tallies) so this stays
+    scoped to the content that actually moved, not everything now sharing
+    the same `curate` return statement."""
+    h_start = html.index("// phase === 'curate'")
+    h_end = html.index("<div class=${'cur-tally'", h_start)
+    header = html[h_start:h_end]
+    e_start = html.index("const eng = (id, name, tag, desc) => {")
+    e_end = html.index("\n  };", e_start) + len("\n  };")
+    eng_fn = html[e_start:e_end]
+    p_start = html.index("${modal === 'approve' && !engine ? html`", h_end)
+    p_end = html.index("` : html`", p_start)
+    picker = html[p_start:p_end]
+    return header + eng_fn + picker
 
 
 def test_summarize_back_link_is_not_the_brand_blue_sz_link(html):
@@ -4584,15 +4796,22 @@ def test_summarize_engine_view_has_no_unrendered_backticks(html):
 
 
 def test_summarize_tj_keep_token_is_escaped_and_code_styled(html):
-    # `<tj-keep>` used to be interpolated as a bare JS string (`${'<tj-keep>'}`)
-    # which rendered as plain, unstyled angle-bracket text sitting oddly in
-    # the sentence. It's still inserted as escaped text (never a real
-    # unknown-tag risk to htm's parser), but now explicitly HTML-escaped and
-    # wrapped in <code> so it reads as a token, not stray prose.
+    # This test previously asserted the token was written as the literal
+    # markup `<code>&lt;tj-keep&gt;</code>` -- but htm/Preact tagged
+    # templates build STATIC text children via `createTextNode`, which never
+    # decodes HTML entities (that only happens when a browser parses real
+    # HTML, which htm does not do). That "fix" was itself the double-escaping
+    # bug: it rendered on screen as the literal text `&lt;tj-keep&gt;`
+    # instead of `<tj-keep>`. The actual fix is JS-expression interpolation
+    # (`${'<tj-keep>'}`), still wrapped in <code> for styling -- the same
+    # idiom already used a few hundred lines later in the diff-review phase's
+    # own "unchanged lines are kept verbatim" note, which this test also pins
+    # so the two can't drift apart again.
     view = _summarize_engine_view(html)
-    assert "<code>&lt;tj-keep&gt;</code>" in view
-    assert "${'<tj-keep>'}" not in view
-    assert "Rewrites prose only: code, tables, and <code>&lt;tj-keep&gt;</code> blocks stay verbatim." in view
+    assert "&lt;tj-keep&gt;" not in view, "the entity-escaped form must never render"
+    assert "<code>${'<tj-keep>'}</code>" in view
+    assert "Rewrites prose only: code, tables, and <code>${'<tj-keep>'}</code> blocks stay verbatim." in view
+    assert html.count("${'<tj-keep>'}") == 2, "both mentions must use the same interpolation idiom"
 
 
 def test_summarize_engine_intro_uses_colon_not_em_dash(html):
@@ -4675,13 +4894,87 @@ def test_budgets_at_risk_cannot_report_ready_off_a_cold_store(html):
 
 
 def test_both_analyzer_surfaces_carry_provenance_and_a_rescan_control(html):
-    # The Dashboard band and the Optimize view both mount the shared ScanBar, so
-    # neither can render figures without saying when they were computed.
-    assert html.count("<${ScanBar}") >= 2
+    # The Dashboard band, the Optimize view and the Review inbox all mount the
+    # shared ScanBar, so none of the three can render figures without saying
+    # when they were computed.
+    assert html.count("<${ScanBar}") >= 3
     # A rescan that FAILED must not look like one that succeeded, so the POST
     # goes through the helper that surfaces the server's reason.
     assert "apiPostOrDetail('/optimize/rescan', {})" in html
     assert "rescan failed: " in html
+
+
+def test_rescan_control_is_a_prominent_accessible_button_not_a_bare_link(html):
+    """Founder constraints: prominent, not dark blue, real hover/active/disabled/
+    focus states, keyboard-operable. A styled <span onClick> link is none of
+    that; a <button> with a dedicated class is."""
+    fn_start = html.index("function ScanBar({ scan, busy, error, onRescan })")
+    fn_end = html.index("\n// A rescan button plus the state", fn_start)
+    fn = html[fn_start:fn_end]
+    assert '<button type="button" class="rescan-ctl' in fn
+    assert "disabled=${scanning}" in fn
+
+    css_start = html.index(".rescan-ctl {")
+    css_end = html.index(".btn-restore {", css_start)
+    css = html[css_start:css_end]
+    # Monochrome accent, never the brand blue used for logo/category fills.
+    assert "var(--brand)" not in css
+    assert "var(--accent)" in css
+    assert ":hover:not(:disabled)" in css
+    assert ":active:not(:disabled)" in css
+    assert ":focus-visible" in css
+    assert ":disabled" in css
+
+
+def test_rescan_control_sits_top_right_of_each_heading_row(html):
+    """Placement requirement: top right of the content area, aligned with the
+    page heading row -- not buried in a filters row or a sub-band."""
+    # Optimize: ScanBar is a sibling of the page-title block inside a
+    # space-between flex row, not inside `.filters` any more.
+    opt_start = html.index("function OptimizeView({ params })")
+    opt_end = html.index("\n// Two lenses, one router", opt_start)
+    opt_fn = html[opt_start:opt_end]
+    head_start = opt_fn.index("justify-content:space-between")
+    filters_start = opt_fn.index('<div class="filters">')
+    scanbar_in_head = opt_fn.index("<${ScanBar}", head_start)
+    assert head_start < scanbar_in_head < filters_start, (
+        "Optimize's ScanBar must render in the heading row, before .filters"
+    )
+
+    # Dashboard: ScanBar renders inside `.ov-head`, alongside the window
+    # picker, not inside the "Recoverable waste" band label any more.
+    dash_start = html.index("function DashboardView({ params })")
+    dash_end = html.index("\nfunction ", dash_start + 1)
+    dash_fn = html[dash_start:dash_end]
+    ov_head_start = dash_fn.index('<div class="ov-head">')
+    ov_head_end = dash_fn.index("</div>\n    </div>", ov_head_start)
+    assert "<${ScanBar}" in dash_fn[ov_head_start:ov_head_end]
+    assert '<div class="band-label">Recoverable waste</div>' in dash_fn
+
+    # Review inbox: ScanBar renders beside the "Inbox" page-title, not as a
+    # bespoke sz-link.
+    inbox_start = html.index("function ReviewInboxView({ params })")
+    inbox_end = html.index("\nfunction ", inbox_start + 1)
+    inbox_fn = html[inbox_start:inbox_end]
+    title_at = inbox_fn.index('<div class="page-title" style="margin-bottom:0">Inbox</div>')
+    scanbar_at = inbox_fn.index("<${ScanBar}", title_at)
+    tab_bar_at = inbox_fn.index('<div class="tab-bar"', title_at)
+    assert title_at < scanbar_at < tab_bar_at
+
+
+def test_review_inbox_rescan_reuses_the_shared_hook_and_surfaces_failure(html):
+    """The inbox re-runs two stores (relearn + cost-advisory) rather than
+    `/optimize/rescan`, but it must still go through apiPostOrDetail (not the
+    silently-swallowing apiPost) so a refused POST reaches the shared
+    ScanBar's error prop instead of failing invisibly."""
+    fn_start = html.index("function ReviewInboxView({ params })")
+    fn_end = html.index("\nfunction ", fn_start + 1)
+    fn = html[fn_start:fn_end]
+    assert "apiPostOrDetail('/relearn/refresh', {})" in fn
+    assert "apiPostOrDetail('/relearn/cost-proposals/refresh', {})" in fn
+    assert "Promise.allSettled" in fn
+    assert "setRefreshError(" in fn
+    assert "error=${refreshError}" in fn
 
 
 def test_auto_rescan_is_visibility_gated_and_killable(html):
@@ -4720,26 +5013,27 @@ def test_optimize_view_renders_a_cold_state_instead_of_empty_cards(html):
 
 
 def test_analyzer_guide_nav_entry_is_unconditional_not_a_nav_child(html):
-    """The bug this pins actually shipped. The guide was a `nav-child`, and
-    App()'s route effect sets `el.style.display = (v === view) ? 'flex' : 'none'`
-    for EVERY `.nav-child` -- so the entry existed in the file, a grep-style test
-    passed, and the sidebar still showed nothing on Traces / Cost / Alerts /
-    Drift / Budget. A string-presence assertion cannot tell those apart, so this
-    asserts the property that differs: the entry must not be a nav-child, and
-    must not carry a data-param (the attribute the child-visibility rule keys
-    on). Reachability has to hold from wherever the user is, not just from the
-    one screen the page explains."""
+    """The bug this pins actually shipped. The guide (now labeled FAQ, living
+    in the Improve lens) was a `nav-child`, and App()'s route effect sets
+    `el.style.display = (v === view) ? 'flex' : 'none'` for EVERY `.nav-child`
+    -- so the entry existed in the file, a grep-style test passed, and the
+    sidebar still showed nothing on Traces / Cost / Alerts / Drift / Budget. A
+    string-presence assertion cannot tell those apart, so this asserts the
+    property that differs: the entry must not be a nav-child, and must not
+    carry a data-param (the attribute the child-visibility rule keys on).
+    Reachability has to hold from wherever the user is, not just from the one
+    screen the page explains."""
     line = next(
         ln for ln in html.splitlines()
-        if 'href="#/guide"' in ln and "nav-link" in ln
+        if 'href="#/faq"' in ln and "nav-link" in ln
     )
     assert "nav-child" not in line, (
-        "the guide nav entry is a nav-child again -- it will be display:none "
+        "the FAQ nav entry is a nav-child again -- it will be display:none "
         "everywhere except its parent section"
     )
     assert "data-param=" not in line
-    assert 'data-view="guide"' in line
-    assert 'data-lens="observe"' in line
+    assert 'data-view="faq"' in line
+    assert 'data-lens="improve"' in line
     # No CSS rule scoped to this entry may reintroduce a display condition.
     css_rules = [ln for ln in html.splitlines() if ln.startswith(".sidebar a.nav-reference")]
     assert css_rules, "the nav-reference styling vanished"
@@ -4751,7 +5045,7 @@ def test_analyzer_guide_nav_entry_is_unconditional_not_a_nav_child(html):
     eff = eff[:eff.index("}, [route.view, route.param]);")]
     display_lines = [ln for ln in eff.splitlines() if "style.display" in ln]
     assert len(display_lines) == 1, (
-        "a second display mutation appeared in the nav effect; the guide entry "
+        "a second display mutation appeared in the nav effect; the FAQ entry "
         "may now be hidden by the active view"
     )
     # ...and that single mutation lives inside the nav-child branch.
@@ -4759,93 +5053,331 @@ def test_analyzer_guide_nav_entry_is_unconditional_not_a_nav_child(html):
     assert eff.index("el.classList.contains('nav-child')") < eff.index(display_lines[0])
 
 
+def test_faq_nav_entry_is_last_in_improve_and_absent_from_observe(html):
+    """The founder's ask: FAQ moved out of Observe entirely and became the
+    LAST entry in the Improve lens sidebar, keeping the pinned-to-bottom
+    nav-reference treatment it had under Observe."""
+    nav_lines = [
+        ln for ln in html.splitlines()
+        if 'class="nav-link' in ln and 'data-lens="improve"' in ln
+    ]
+    assert nav_lines, "no Improve-lens nav links found"
+    assert 'data-view="faq"' in nav_lines[-1], (
+        "FAQ must be the last nav-link in the Improve lens group"
+    )
+    # Must not appear under Observe at all.
+    observe_lines = [
+        ln for ln in html.splitlines()
+        if 'class="nav-link' in ln and 'data-lens="observe"' in ln
+    ]
+    assert not any('data-view="faq"' in ln for ln in observe_lines)
+    assert not any('href="#/guide"' in ln for ln in observe_lines)
+
+
 def test_analyzer_guide_is_reachable_from_the_optimize_screen(html):
     """The contextual entry point, on the screen whose cards it explains. It
     renders before any `st.opt` / `scan.known` guard, so a cold or failed store
     still offers the way in."""
     fn_start = html.index("function OptimizeView({ params })")
-    fn_end = html.index("// Optimize \u25b8 Guide", fn_start)
+    fn_end = html.index("// FAQ (formerly Optimize \u25b8 Guide)", fn_start)
     fn = html[fn_start:fn_end]
-    assert 'href="#/guide"' in fn
+    assert 'href="#/faq"' in fn
     title_at = fn.index("Optimize <${PlanBadge}")
-    link_at = fn.index('href="#/guide"')
-    assert link_at - title_at < 600, "guide link drifted out of the always-rendered title block"
+    link_at = fn.index('href="#/faq"')
+    assert link_at - title_at < 600, "FAQ link drifted out of the always-rendered title block"
 
 
-def test_analyzer_guide_routes_resolve_and_old_hash_still_works(html):
-    """`#/guide` is canonical; `#/optimize/guide` is the retired spelling and
-    must keep working for anything already pointing at it."""
-    assert "['guide',     AnalyzerGuideView]," in html
-    assert "guide: 'observe'," in html, "the guide must sit in the Observe lens"
-    assert "if (v === 'optimize' && route.param === 'guide') return 'guide';" in html
-    assert "function isLegacyGuideRoute(route)" in html
-    assert "history.replaceState(null, '', '#/guide');" in html
-
-
-def test_analyzer_guide_reads_the_gate_from_the_server_not_a_js_copy(html):
-    """Which checks apply is Python's answer (`PERSONA_DISABLED_ANALYZERS` ->
-    `/optimize/analyzers`). The guide may own PROSE keyed by analyzer name, but
-    never a membership decision -- a JS copy of the map desyncs the first time
-    the Python side changes."""
-    fn_start = html.index("function GuideBody({ persona, sets })")
-    fn_end = html.index("function AnalyzerGuideView()", fn_start)
-    fn = html[fn_start:fn_end]
-    # Membership comes from the payload on both sides: what runs, what is gated.
-    assert "sets.runs" in fn
-    assert "sets.disabled" in fn
+def test_analyzer_guide_heading_has_no_optimize_backlink(html):
+    """The founder asked for the "See these on the Optimize screen ->" link
+    next to the FAQ heading to be deleted entirely -- the heading row is just
+    the heading now. This is the FAQ page's OWN title block, distinct from
+    the forward link OptimizeView renders pointing AT the FAQ (that one, and
+    its `sz-link` class, are unrelated and must stay)."""
     view_start = html.index("function AnalyzerGuideView()")
     view_end = html.index("// Optimize ▸ Summarize (Track B)", view_start)
     view = html[view_start:view_end]
-    assert "api('/optimize/analyzers')" in view
-    # No persona-keyed analyzer-name list anywhere in the guide's own source:
-    # the prose maps are keyed by name, but nothing decides membership from
-    # a persona conditional in JS.
-    guide_start = html.index("const GUIDE_PERSONA_LABELS = {")
-    guide = _no_comments(html[guide_start:view_end])
-    assert "PERSONA_DISABLED_ANALYZERS" not in guide
-    assert "disabled_analyzers_for_persona" not in guide
+    assert "See these on the Optimize screen" not in view
+    assert '<div class="page-title">FAQ</div>' in view
+    assert "sz-link" not in view
+
+
+def test_analyzer_guide_content_is_fully_static_no_fetch_no_loading_state(html):
+    """The page used to fetch `/optimize/analyzers` and `/optimize` before it
+    knew which checks to show, which needed a loading state. It now carries a
+    card for EVERY registered analyzer, in a fixed order, with each card's
+    live/gated status written into its own static prose -- so which checks
+    exist and which are gated for Claude Code are both already decided in
+    code (`ANALYZER_REGISTRY`, `PERSONA_DISABLED_ANALYZERS`) at build time,
+    not at request time. Nothing on this page depends on a network read
+    answering, so it renders immediately: no `useState`, no `useEffect`, no
+    `api(...)` call, and no shimmer/skeleton of any kind."""
+    view_start = html.index("function AnalyzerGuideView()")
+    view_end = html.index("// Optimize ▸ Summarize (Track B)", view_start)
+    view = html[view_start:view_end]
+    assert "useState" not in view
+    assert "useEffect" not in view
+    assert "useCallback" not in view
+    assert "api(" not in view
+    assert "shimmer" not in view
+    assert "st.loading" not in view
+    assert "st.error" not in view
+    assert '<div class="page-title">FAQ</div>' in view
+    assert "<${GuideBody} />" in view
+
+
+def test_analyzer_guide_prose_fills_the_card_width(html):
+    """The founder's complaint: the prose inside each FAQ card (and the intro
+    paragraph) was clamped to a ~74ch editorial measure while the card itself
+    spanned the full page width, leaving a large empty column on the right.
+    `.guide-prose` is used ONLY on the FAQ page (never by any other screen),
+    so widening it here cannot affect anything else; `.opt-line`, which every
+    OTHER Optimize-family card uses for its body text, carries no such
+    clamp, and that is the width this page should match. Card padding
+    (`.opt-section`) must stay intact -- the fix is the text filling the
+    card, not touching its edges."""
+    assert re.search(r"\.guide-prose\s*\{[^}]*\}", html)
+    assert not re.search(r"\.guide-prose\s*\{[^}]*max-width[^}]*\}", html), (
+        "the FAQ card prose must not be clamped to an editorial measure"
+    )
+    # The persona callout banner class is retired along with the box itself.
+    assert ".guide-banner" not in html
+    # Card padding untouched.
+    assert ".opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }" in html
+
+
+def test_analyzer_guide_routes_resolve_and_old_hash_still_works(html):
+    """`#/faq` is canonical; `#/optimize/guide` and `#/guide` are the retired
+    spellings and must keep working for anything already pointing at them."""
+    assert "['faq',       AnalyzerGuideView]," in html
+    assert "faq: 'improve'," in html, "FAQ must sit in the Improve lens"
+    assert "if (v === 'optimize' && route.param === 'guide') return 'faq';" in html
+    assert "if (v === 'guide') return 'faq';" in html
+    assert "function isLegacyGuideRoute(route)" in html
+    assert "history.replaceState(null, '', '#/faq');" in html
+
+
+def test_analyzer_guide_persona_box_is_gone_and_helper_retired(html):
+    """The founder asked for the persona callout box ("Written for **Claude
+    Code**, which is what your recent sessions look like.") to be deleted
+    entirely, render path and all -- not just its text. `GUIDE_PERSONA_LABELS`
+    fed only that box (and its two sibling variants: the "uncovered" and
+    "unclassified" cases), so it retires with it rather than staying as a
+    dead helper. The persona VALUE itself (`GUIDE_ENTRIES['claude-code']`)
+    still drives which card set and order render, and that use stays."""
+    assert "GUIDE_PERSONA_LABELS" not in html
+    assert "Written for" not in html
+    assert "which is what your recent sessions look like" not in html
+    assert "has not been written yet" not in html
+    assert "Nothing has classified this install yet" not in html
+    assert "uncovered" not in html
+
+
+# The page's inclusion rule is NOT "is it in the analyzer registry" -- it is
+# "does the check end in a fix a user could apply". `budget-projection` (a
+# spend forecast against a ceiling, no fix claimed -- see
+# ANALYZER-PERSONA-MATRIX.md line 95) and `stream-usage` (corrects a spend
+# FIGURE, recovers nothing) both live in the registry and both fail that
+# rule, so neither gets a card even though they're gated-off-for-nobody
+# (they run for every persona). This is a REVIEWED, human-curated list, not
+# something a rule can derive from the registry alone -- so a newly
+# registered analyzer must show up in exactly one of the two sets below
+# before this test will pass, forcing a human decision instead of letting
+# the page silently drift (either by never gaining a card, or by gaining an
+# unreviewed one).
+_FAQ_SHOWN_ANALYZERS = {
+    "downsize", "subagent", "resend", "summarize", "deadweight", "relearn",
+    "cache", "cache-recommend", "reuse", "script", "trim", "verbosity",
+}
+_FAQ_EXCLUDED_ANALYZERS = {
+    "budget-projection": "informational forecast against a ceiling, no fix claimed (ANALYZER-PERSONA-MATRIX.md)",
+    "stream-usage": "corrects a spend FIGURE (a data-quality gap); recovers nothing, ends in no fix",
+}
+
+
+def test_analyzer_guide_covers_the_reviewed_user_facing_analyzer_list(html):
+    """A real card for every analyzer that ends in a fix a user could apply,
+    derived from the registry but filtered through a human-reviewed
+    inclusion rule -- never "every registry name" and never memory or the
+    retired hidden-checks card's text. Live (Claude-Code-runnable) analyzers
+    come first, gated ones after, never interleaved. `placement` is a
+    sub-check `downsize` attaches, not its own registry entry, so it must
+    NOT get its own card. Fails loudly, naming the analyzer, if a
+    newly-registered one is in neither `_FAQ_SHOWN_ANALYZERS` nor
+    `_FAQ_EXCLUDED_ANALYZERS` -- that is the point: a human has to triage it,
+    the page must never silently do nothing or silently add an unreviewed
+    card."""
+    from tokenjam.core.optimize import ANALYZER_REGISTRY
+
+    registered = set(ANALYZER_REGISTRY)
+    assert registered, "the registry itself must not be empty"
+
+    reviewed = _FAQ_SHOWN_ANALYZERS | set(_FAQ_EXCLUDED_ANALYZERS)
+    unreviewed = registered - reviewed
+    assert not unreviewed, (
+        f"analyzer(s) {sorted(unreviewed)} are registered but neither shown "
+        "on the FAQ page nor explicitly excluded -- triage each against the "
+        "\"ends in a fix\" rule and add it to _FAQ_SHOWN_ANALYZERS or "
+        "_FAQ_EXCLUDED_ANALYZERS (with a reason) before this test can pass"
+    )
+    # Every excluded name really is registered (no stale exclusion entries).
+    stale_exclusions = set(_FAQ_EXCLUDED_ANALYZERS) - registered
+    assert not stale_exclusions, f"stale exclusion(s), no longer registered: {stale_exclusions}"
+
+    entries_start = html.index("const GUIDE_ENTRIES = {")
+    entries_end = html.index("function GuideCheck({ name, entry })", entries_start)
+    entries_block = html[entries_start:entries_end]
+
+    order_match = re.search(r"order:\s*\[(.*?)\],\n\s*entries:", entries_block, re.S)
+    assert order_match, "could not find claude-code's `order` array"
+    order_names = re.findall(r"'([a-z][a-z-]*)'", order_match.group(1))
+
+    assert set(order_names) == _FAQ_SHOWN_ANALYZERS, (
+        "the FAQ's `order` list must match the reviewed shown-analyzer set exactly"
+    )
+    for name in _FAQ_EXCLUDED_ANALYZERS:
+        assert name not in order_names, f"{name} is excluded but still has a card"
+        assert re.search(r"(^|\s)'?%s'?:\s*\{" % re.escape(name), entries_block) is None, (
+            f"{name} is excluded but still has an entries[...] card"
+        )
+    for name in order_names:
+        assert re.search(r"(^|\s)'?%s'?:\s*\{" % re.escape(name), entries_block), (
+            f"{name} is listed in `order` but has no entries[...] card"
+        )
+    assert "placement" not in order_names, (
+        "placement is a downsize sub-check, not its own registry entry, "
+        "and must not get its own card"
+    )
+
+    from tokenjam.core.optimize.runner import disabled_analyzers_for_persona
+    disabled = disabled_analyzers_for_persona("claude-code")
+    live = [n for n in order_names if n not in disabled]
+    gated = [n for n in order_names if n in disabled]
+    assert live and gated, "expect at least one live and one gated analyzer for claude-code"
+    # Not interleaved: every live name's index precedes every gated name's.
+    assert max(order_names.index(n) for n in live) < min(order_names.index(n) for n in gated), (
+        "live and gated analyzer cards must not be interleaved"
+    )
+
+
+def test_analyzer_guide_no_longer_carries_a_hidden_checks_card(html):
+    """The founder asked for the "Checks that are not shown here" card to be
+    deleted entirely, not just hidden -- along with the old gated-analyzer
+    prose map (`hidden:`) that used to feed it. Gated analyzers now get a
+    real card each (`test_analyzer_guide_covers_every_registered_analyzer`),
+    not a bundled list."""
+    guide_start = html.index("const GUIDE_ENTRIES = {")
+    guide_end = html.index("function GuideCheck({ name, entry })", guide_start)
+    entries = html[guide_start:guide_end]
+    assert "hidden:" not in entries
+    body_start = html.index("function GuideBody()")
+    body_end = html.index("function AnalyzerGuideView()", body_start)
+    body = html[body_start:body_end]
+    assert "guide-not-shown" not in body
+    assert "hiddenNames" not in body
+    assert "Checks that are not shown here" not in html
+    assert "guide-hidden-list" not in html
 
 
 def test_analyzer_guide_states_the_downsize_vs_subagent_distinction(html):
-    """The founder could not tell these two apart; that is the page's whole
-    reason to exist. The contrast must be stated as WHERE vs WHO, and must say
-    that a session can only trip one of them."""
-    start = html.index("const GUIDE_KEY_CONTRAST = {")
-    end = html.index("const GUIDE_ENTRIES = {", start)
-    block = html[start:end]
-    assert "Downsize is about WHERE the work happened." in block
-    assert "Subagent is about WHO did it" in block
-    assert "only considers sessions that never delegated at all" in block
-    # Rendered ABOVE the per-check cards, not buried in one of them.
-    body_start = html.index("function GuideBody({ persona, sets })")
-    body_end = html.index("function AnalyzerGuideView()", body_start)
-    body = html[body_start:body_end]
-    assert body.index("GUIDE_KEY_CONTRAST.title") < body.index("GuideCheck")
+    """The founder could not tell these two apart; that used to be answered by
+    a separate callout card, which is now gone. The distinction (WHERE vs WHO,
+    and that a session can only trip one of them) must instead live inside
+    EACH of the two sections' own descriptions, so either stands alone."""
+    assert "GUIDE_KEY_CONTRAST" not in html, "the retired callout must not come back"
+    assert ".guide-key {" not in html, "the retired callout's CSS must not come back"
+
+    entries_start = html.index("const GUIDE_ENTRIES = {")
+    entries_end = html.index("function GuideCheck({ name, entry })", entries_start)
+
+    downsize_start = html.index("downsize: {", entries_start)
+    assert downsize_start < entries_end
+    downsize_end = html.index("subagent: {", downsize_start)
+    downsize = html[downsize_start:downsize_end]
+    assert "Downsize is about WHERE the work happened" in downsize
+    assert "never dispatched a subagent" in downsize
+    assert "Subagent check answers instead" in downsize
+
+    subagent_start = downsize_end
+    subagent_end = html.index("resend: {", subagent_start)
+    subagent = html[subagent_start:subagent_end]
+    assert "Subagent is about WHO did the work" in subagent
+    assert "only ever looks at spans already dispatched to a worker" in subagent
+    assert "moves out of Downsize" in subagent
 
 
-def test_analyzer_guide_ships_no_unwritten_persona_as_placeholder_prose(html):
-    """Only Claude Code content was validated. An unwritten persona gets a
-    banner naming the gap -- never invented copy, and never a silent fallback
-    that reads as if it were written for the reader's setup."""
-    start = html.index("const GUIDE_ENTRIES = {")
-    end = html.index("function guideMissingEntry(name)", start)
-    entries = html[start:end]
-    # Exactly one persona is populated.
-    assert entries.count("    order: [") == 1
-    assert "'claude-code': {" in entries
-    for absent in ("'sdk': {", "'mixed': {", "'unknown': {"):
-        assert absent not in entries, f"{absent} must not carry unvalidated prose"
-    view_start = html.index("function AnalyzerGuideView()")
-    view = html[view_start:html.index("// Optimize ▸ Summarize (Track B)", view_start)]
-    assert "has not been written yet" in view
-    assert "Nothing has classified this install yet" in view
+def test_analyzer_guide_downsize_subagent_claim_matches_the_analyzers(html):
+    """The distinction rewritten into the Downsize/Subagent sections makes a
+    factual claim about how the underlying analyzers are scoped (never
+    delegated / already delegated). Pin the claim against the analyzer source
+    so a future change to either analyzer's scoping is forced to revisit this
+    prose instead of leaving it to quietly go stale."""
+    repo_root = _UI.parent.parent.parent
+    downgrade_src = (
+        repo_root / "tokenjam/core/optimize/analyzers/model_downgrade.py"
+    ).read_text()
+    # The driver-role case (Downsize's flagship detection) is documented, in
+    # its own basis string shown to users, as requiring zero delegation.
+    assert "never dispatched a subagent" in downgrade_src
+    assert "these sessions dispatch no subagent, so they carry no subagent spans" in downgrade_src
+
+    subagent_src = (
+        repo_root / "tokenjam/core/optimize/analyzers/subagent_rightsizing.py"
+    ).read_text()
+    # subagent_rightsizing only ever reads spans already tagged as dispatched
+    # to a worker.
+    assert "sub_agent_id IS NOT NULL" in subagent_src
+
+
+def test_analyzer_guide_card_has_one_heading_one_description(html):
+    """Every card on the page gets exactly one heading and one description,
+    no "WHAT IT LOOKS FOR" / "WHAT TO DO ABOUT IT" sub-headings inside it.
+    The description may still be several paragraphs of prose -- that
+    plurality is how the WHERE/WHO enrichment (and every card's former
+    blurb+mistake+fix) fits -- but there is exactly one `opt-title` per
+    `GuideCheck` and no `guide-lead` sub-heading class left anywhere in the
+    file. Applies to gated-analyzer cards too, and their descriptions must
+    stay noticeably shorter than a live card's (no padding to match length)."""
+    assert "guide-lead" not in html, "sub-heading class must be fully retired"
+    assert "What it looks for" not in html
+    assert "What to do about it" not in html
+
+    fn_start = html.index("function GuideCheck({ name, entry })")
+    fn_end = html.index("function GuideBody()", fn_start)
+    fn = html[fn_start:fn_end]
+    assert fn.count("opt-title") == 1
+    assert "entry.blurb" not in fn
+    assert "entry.mistake" not in fn
+    assert "entry.fix" not in fn
+    assert "entry.description" in fn
+
+    # Every entry (live and gated) carries a `description` array, not the old
+    # three-field shape, and there is exactly one per shown analyzer (per
+    # `test_analyzer_guide_covers_the_reviewed_user_facing_analyzer_list`).
+    entries_start = html.index("const GUIDE_ENTRIES = {")
+    entries_end = html.index("function GuideCheck({ name, entry })", entries_start)
+    entries = html[entries_start:entries_end]
+    assert "blurb: '" not in entries
+    assert "mistake: '" not in entries
+    assert "fix: '" not in entries
+    assert entries.count("description: [") == len(_FAQ_SHOWN_ANALYZERS)
+
+    # Gated cards stay brief: at most 2 short paragraphs (what it looks for,
+    # why it is off here), never the 3-paragraph enrichment a live card like
+    # Downsize/Subagent carries.
+    for name in ("cache", "cache-recommend", "reuse", "script", "trim", "verbosity"):
+        needle = f"{name}: {{" if re.match(r"^[a-z][a-z0-9]*$", name) else f"'{name}': {{"
+        entry_start = entries.index(needle)
+        desc_start = entries.index("description: [", entry_start)
+        desc_end = entries.index("],", desc_start)
+        paragraphs = re.findall(r"^\s+'", entries[desc_start:desc_end], re.M)
+        assert len(paragraphs) <= 2, f"{name}'s gated-card description should stay brief"
 
 
 def test_analyzer_guide_makes_no_guaranteed_saving_claim(html):
     """Honesty discipline (Critical Rule 14) governs every user-visible string:
     estimates are candidates to review, never a promised saving, and the page
     never discusses how a figure was derived."""
-    start = html.index("const GUIDE_PERSONA_LABELS = {")
+    start = html.index("const GUIDE_ENTRIES = {")
     end = html.index("// Optimize ▸ Summarize (Track B)", start)
     guide = html[start:end]
     for banned in ("saves you", "you will save", "guaranteed", "realization rate",
@@ -4853,3 +5385,107 @@ def test_analyzer_guide_makes_no_guaranteed_saving_claim(html):
         assert banned not in guide, f"guide copy must not contain {banned!r}"
     assert "estimates from your own history" in guide
     assert "review before you act on them" in guide
+
+
+def test_drift_zero_variance_row_is_neutral_not_a_drift_verdict(html):
+    """A baseline with no spread cannot judge anything.
+
+    `z_score()` in `core/drift.py` deliberately returns inf when stddev is 0 and
+    the value moved, and the UI used to mirror that literally: a metric whose
+    every sampled session had the same value (tool calls `0.0 +/- 0.0`) rendered
+    `inf` under a red `drift` badge. That is an absence of evidence, not a
+    regression. The row now reads as "cannot judge". The Python helper is
+    unchanged; this is a display decision only.
+    """
+    start = html.index("function DriftView({ params })")
+    end = html.index("// Budget View", start)
+    view = _no_comments(html[start:end])
+    assert "const noVariance =" in view
+    assert "'no baseline variance'" in view
+    assert "badge-neutral" in view
+    # The old inf-as-maximum-anomaly rendering is gone.
+    assert "zDisplay = 'inf'" not in view
+    assert "z = Infinity" not in view
+
+
+def test_drift_empty_state_explains_why_there_is_no_baseline(html):
+    """"None yet" is not an answer when two of the three reasons are permanent.
+
+    Interactive coding sessions are never baselined (the API applies the same
+    persona gate the detector does) and backfilled history never builds one, so
+    the empty state names both alongside the session-count requirement.
+    """
+    start = html.index("function DriftView({ params })")
+    end = html.index("// Budget View", start)
+    view = _no_comments(html[start:end])
+    assert "drift-empty-why" in view
+    assert "compares a service against its own past behavior" in view
+    assert "Interactive coding sessions are not baselined" in view
+    assert "Baselines build only from live sessions" in view
+    # No em dashes in user-facing copy.
+    why_start = view.index("drift-empty-why")
+    why_end = view.index("</div>\n    </div>", why_start)
+    assert "—" not in view[why_start:why_end]
+
+
+def test_alerts_view_wires_the_acknowledge_endpoint(html):
+    """`PATCH /alerts/{id}/acknowledge` existed with no control to reach it.
+
+    Rule 24 in `tokenjam/CLAUDE.md`: a capability is only real if a user has a
+    path to it. The Alerts table now carries a Status column with an
+    Acknowledge button, and reloads afterwards so the "Unread only" filter
+    stays honest.
+    """
+    start = html.index("function AlertsView({ params })")
+    end = html.index("// Drift View", start)
+    view = _no_comments(html[start:end])
+    assert "/acknowledge" in view
+    assert "apiPatch(" in view
+    assert "const acknowledge = useCallback" in view
+    # Acknowledged alerts read as acknowledged, and the detail row still spans
+    # the full width after the Status column was added.
+    assert "badge-neutral" in view
+    assert 'colspan="7"' in view
+    assert 'colspan="6"' not in view
+    # apiPatch is a real helper, not a call into nothing.
+    assert "async function apiPatch(path, body)" in html
+
+
+def test_the_uis_delivery_labels_cover_exactly_the_server_registry(html):
+    """The inbox card names a fix by its delivery mechanism, and it cannot ask
+    the server for the label the way `RulesView` does — that registry is
+    fetched in a different component. So there is a small local map, and a
+    local map is exactly the thing that drifts.
+
+    This pins it in both directions. A mechanism added server-side without a
+    label here renders as "unknown (legacy record)" on a brand-new fix, which
+    reads as a broken record rather than a new capability; a label left here
+    after its mechanism is removed is a name for something that cannot happen.
+    """
+    import re
+
+    from tokenjam.core.rulewrite.delivery import DELIVERY_KINDS
+
+    block = re.search(r"const DELIVERY_LABELS = \{(.*?)\n\};", html, re.DOTALL)
+    assert block, "the UI's delivery-label map has moved or been renamed"
+    labelled = set(re.findall(r"^\s*(\w+):", block.group(1), re.MULTILINE))
+
+    assert labelled == set(DELIVERY_KINDS), (
+        "the UI's DELIVERY_LABELS and core/rulewrite/delivery.DELIVERY_KINDS "
+        f"disagree; only in UI: {sorted(labelled - set(DELIVERY_KINDS))}, "
+        f"only in server: {sorted(set(DELIVERY_KINDS) - labelled)}"
+    )
+
+
+def test_every_relearn_badge_maps_a_real_delivery_mechanism(html):
+    """Same discipline for the badge map. Its fallback is the generic 'FIX',
+    so a missing entry degrades quietly rather than visibly — which is why it
+    needs a test rather than a bug report."""
+    import re
+
+    from tokenjam.core.rulewrite.delivery import DELIVERY_KINDS
+
+    block = re.search(r"const RELEARN_BADGE_BY_DELIVERY = \{(.*?)\n\};", html, re.DOTALL)
+    assert block, "the relearn badge map has moved or been renamed"
+    badged = set(re.findall(r"^\s*(\w+):", block.group(1), re.MULTILINE))
+    assert badged == set(DELIVERY_KINDS), sorted(badged ^ set(DELIVERY_KINDS))

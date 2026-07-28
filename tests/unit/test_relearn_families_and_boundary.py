@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import pytest
 
+from tokenjam.core.rulewrite.delivery import DELIVERY_KINDS
+
 from tokenjam.core.optimize.analyzers.relearn import (
     _KNOWN_FAMILIES,
     classify_known_family,
@@ -67,7 +69,11 @@ def test_every_family_ships_an_actionable_fix_not_a_placeholder():
 
     for family in _KNOWN_FAMILIES:
         assert not is_placeholder_fix(family["fix"]), family["key"]
-        assert family["rung"] in (1, 2, 3, 4, 5), family["key"]
+        # Every family declares a mechanism this build can actually render.
+        # Inverted from a numeric range check that admitted 4 and 5, levels no
+        # build ever produced — the range passed while asserting nothing about
+        # whether the artifact could be written at all.
+        assert family["delivery"] in DELIVERY_KINDS, family["key"]
 
 
 def test_family_keys_are_unique():

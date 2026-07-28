@@ -492,13 +492,16 @@ def _mcp_server_from_tool_name(tool_name: str) -> str | None:
 
 
 def _session_cwd(records: list[dict[str, Any]]) -> str:
-    """Best-effort session cwd, from the first record that carries one
-    (mirrors relearn.py's ``_repo_cwd_map_for``)."""
-    for record in records[:5]:
-        cwd = record.get("cwd")
-        if isinstance(cwd, str) and cwd:
-            return cwd
-    return ""
+    """Best-effort session cwd, from the first record that carries one.
+
+    Delegates to ``core.transcript.first_recorded_cwd``, which is the one
+    extractor this question has — relearn's repo-label map and rule placement
+    read it too, and three copies of the same loop is three chances for them to
+    disagree about which repo a session ran in.
+    """
+    from tokenjam.core.transcript import first_recorded_cwd
+
+    return first_recorded_cwd(records)
 
 
 def _bucket_for_doc(label: str) -> str:

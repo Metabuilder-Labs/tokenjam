@@ -27,6 +27,22 @@ class BudgetConfig:
 
 
 @dataclass
+class GroupBudgetConfig:
+    """A coding-tool GROUP's daily cap — e.g. one ceiling covering every
+    claude-code-<project> variant summed together. Daily-only: a per-session
+    cap has no meaning at group scope (there is no single session to cap),
+    and the UI never offers a per-session field for these rows. Kept as its
+    own dataclass rather than reusing BudgetConfig so a `session_usd` can
+    never be silently written here and silently ignored."""
+    daily_usd: float | None = None
+
+
+@dataclass
+class CodingGroupConfig:
+    budget: GroupBudgetConfig = field(default_factory=GroupBudgetConfig)
+
+
+@dataclass
 class DriftConfig:
     enabled:            bool  = True
     baseline_sessions:  int   = 10
@@ -57,13 +73,28 @@ class AgentConfig:
 
 @dataclass
 class DefaultsConfig:
+    # SDK-workflow zone default (per-agent daily + session cap).
     budget: BudgetConfig = field(default_factory=BudgetConfig)
+    # Coding-agent zone default: the daily group cap a newly-appearing coding
+    # tool (a claude-code/codex group with no [coding_agents.<id>] entry yet)
+    # inherits, so it starts capped instead of arriving uncapped.
+    coding_budget: GroupBudgetConfig = field(default_factory=GroupBudgetConfig)
 
 
 @dataclass
 class StorageConfig:
     path:           str = "~/.tj/telemetry.duckdb"
-    retention_days: int = 90
+    # THE user-chosen analysis span — "30d" / "90d" / "all" — written by
+    # `tj onboard`. Retention is derived from it, never chosen independently,
+    # so deletion cannot remove history the product is offering to analyze. See
+    # `core/analysis_span.py` for the derivation and the one-directional clamp;
+    # read the span through that module, never off this field, so the
+    # back-compat path below is applied everywhere.
+    analysis_span:  str | None = None
+    # None means "derive from analysis_span". A config that sets this and
+    # nothing else — every config written before the coupling existed — has its
+    # value read AS the span, so nothing about that setup changes.
+    retention_days: int | None = None
     # Runtime provenance, never read from or written to TOML: True when `path`
     # came from an explicit `--db` rather than config discovery. The
     # filesystem-reading analyzers scope themselves off it (see
@@ -432,6 +463,15 @@ class TjConfig:
     version:  str
     defaults: DefaultsConfig          = field(default_factory=DefaultsConfig)
     agents:   dict[str, AgentConfig]  = field(default_factory=dict)
+    # Coding-tool GROUP caps ([coding_agents.<group_id>.budget] in TOML), keyed
+    # by group id ("claude-code" / "codex" — see core/agent_kind.py). A
+    # deliberately SEPARATE namespace from `agents`: a group id like
+    # "claude-code" would otherwise collide with a literal per-agent
+    # [agents.claude-code] entry (the bare agent_id some setups still emit).
+    # Keeping groups in their own top-level TOML table means both can be
+    # configured independently with no ambiguity about which one a given
+    # section name refers to.
+    coding_agents: dict[str, CodingGroupConfig] = field(default_factory=dict)
     storage:  StorageConfig           = field(default_factory=StorageConfig)
     export:   ExportConfig            = field(default_factory=ExportConfig)
     alerts:   AlertsConfig            = field(default_factory=AlertsConfig)
@@ -649,7 +689,12 @@ def _parse(raw: dict) -> TjConfig:
     storage_raw = raw.get("storage", {})
     storage = StorageConfig(
         path=storage_raw.get("path", StorageConfig.path),
-        retention_days=storage_raw.get("retention_days", StorageConfig.retention_days),
+        # Absence is meaningful for both of these and must survive the load:
+        # `analysis_span` absent + `retention_days` present is the pre-coupling
+        # config whose kept history IS its span. Defaulting either one here
+        # would erase that distinction.
+        analysis_span=storage_raw.get("analysis_span"),
+        retention_days=storage_raw.get("retention_days"),
     )
 
     export_raw = raw.get("export", {})
@@ -802,7 +847,24 @@ def _parse(raw: dict) -> TjConfig:
 
     defaults_raw = raw.get("defaults", {})
     defaults_budget_raw = defaults_raw.get("budget", {})
-    defaults = DefaultsConfig(budget=BudgetConfig(**defaults_budget_raw))
+    defaults_coding_budget_raw = defaults_raw.get("coding_budget", {})
+    defaults = DefaultsConfig(
+        budget=BudgetConfig(**defaults_budget_raw),
+        coding_budget=GroupBudgetConfig(**defaults_coding_budget_raw),
+    )
+
+    # [coding_agents.<group_id>.budget] — daily-only ceilings for a coding
+    # TOOL group ("claude-code" / "codex"), summed across every member
+    # agent_id. Separate top-level table from [agents.*] on purpose: see
+    # TjConfig.coding_agents docstring for the collision this avoids.
+    coding_agents: dict[str, CodingGroupConfig] = {}
+    for group_id, group_raw in raw.get("coding_agents", {}).items():
+        if not isinstance(group_raw, dict):
+            continue
+        group_budget_raw = group_raw.get("budget", {})
+        coding_agents[group_id] = CodingGroupConfig(
+            budget=GroupBudgetConfig(**group_budget_raw)
+        )
 
     # [budget.<provider>] sections — periodic monthly ceilings used by tj optimize.
     # Distinct from [defaults.budget] / [agents.X.budget] (per-agent alert thresholds).
@@ -839,6 +901,7 @@ def _parse(raw: dict) -> TjConfig:
         version=raw.get("version", "1"),
         defaults=defaults,
         agents=agents,
+        coding_agents=coding_agents,
         storage=storage,
         export=export,
         alerts=alerts,
@@ -893,6 +956,16 @@ def _serialise(config: TjConfig) -> dict:
         agents_out[agent_id] = _dc_to_dict(agent_cfg)
     d["agents"] = agents_out
 
+    # coding_agents is a dict of str -> CodingGroupConfig, handle specially
+    # (same reason as `agents`/`budgets`: the generic dict branch above would
+    # assign the raw dataclass objects instead of recursing into them).
+    d.pop("coding_agents", None)
+    coding_agents_out: dict = {}
+    for group_id, group_cfg in config.coding_agents.items():
+        coding_agents_out[group_id] = _dc_to_dict(group_cfg)
+    if coding_agents_out:
+        d["coding_agents"] = coding_agents_out
+
     # budgets is a dict of str -> ProviderBudget, handle specially
     budgets_out: dict = {}
     for provider, prov_cfg in config.budgets.items():
@@ -924,6 +997,24 @@ def resolve_effective_budget(agent_id: str, config: TjConfig) -> BudgetConfig:
     return BudgetConfig(
         daily_usd=ab.daily_usd if ab.daily_usd is not None else defaults.daily_usd,
         session_usd=ab.session_usd if ab.session_usd is not None else defaults.session_usd,
+    )
+
+
+def resolve_group_budget(group_id: str, config: TjConfig) -> GroupBudgetConfig:
+    """Return the effective daily cap for a coding-tool GROUP (see
+    core/agent_kind.py for what a "group" is), merging any
+    [coding_agents.<group_id>.budget] override over
+    [defaults.coding_budget] — same per-field-fallback shape as
+    resolve_effective_budget, just for the group namespace instead of the
+    per-agent one.
+    """
+    defaults = config.defaults.coding_budget
+    group_cfg = config.coding_agents.get(group_id)
+    if group_cfg is None:
+        return GroupBudgetConfig(daily_usd=defaults.daily_usd)
+    gb = group_cfg.budget
+    return GroupBudgetConfig(
+        daily_usd=gb.daily_usd if gb.daily_usd is not None else defaults.daily_usd,
     )
 
 

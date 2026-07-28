@@ -190,6 +190,18 @@ class DowngradeFinding:
     driver_substitutes:       dict[str, str] = field(default_factory=dict)
     driver_examples:          list[DriverRoleExample] = field(default_factory=list)
     driver_estimate_basis:    str   = ""
+    #: ``session_id -> that session's own driver-role tokens``. A BREAKDOWN of
+    #: `driver_tokens`, not a second quantity: the values sum to it. It exists
+    #: so `core/optimize/rule_placement` can answer "which projects incurred
+    #: this, and in what proportion" — the fix for this card is a CLAUDE.md
+    #: rule, and a rule written into the projects that exhibited the behaviour
+    #: is re-sent in those projects only, rather than in every session of every
+    #: project the user has. Weights are TOKENS and are the single attribution
+    #: weight for both the token and the dollar split, so every destination's
+    #: implied per-token rate equals the finding's own (Critical Rule 28).
+    #: Empty when the driver-role case did not fire; placement then falls back
+    #: to the user-global file, which is the historical behaviour.
+    driver_session_tokens:    dict[str, int] = field(default_factory=dict)
 
 
 @dataclass

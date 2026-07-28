@@ -212,11 +212,76 @@ def test_delete_spans_before_cutoff(db):
     db.insert_span(span_new)
 
     cutoff = now - timedelta(days=90)
-    deleted = db.delete_spans_before(cutoff)
-    assert deleted == 1
+    spans_deleted, sessions_deleted = db.delete_spans_before(cutoff)
+    assert spans_deleted == 1
 
     remaining = db.conn.execute("SELECT COUNT(*) FROM spans").fetchone()
     assert remaining[0] == 1
+    # The session straddles the cutoff and still has a live span, so it stays:
+    # a session is orphaned by the delete only once it has NO spans left.
+    assert sessions_deleted == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+
+
+def test_delete_spans_before_cutoff_takes_the_sessions_it_orphans(db):
+    """Deleting only spans left the parent sessions asserting a day had data.
+
+    `core/data_span` unions `sessions.started_at` into the day set it measures
+    the available span from, so every orphan went on claiming a day carried data
+    after the data for that day was destroyed — the deletion skewed the measure
+    of what survived it.
+    """
+    _insert_agent(db)
+    now = utcnow()
+    old = now - timedelta(days=100)
+
+    aged_out = make_session(started_at=old, ended_at=old + timedelta(minutes=1))
+    db.upsert_session(aged_out)
+    db.insert_span(make_llm_span(session_id=aged_out.session_id, start_time=old))
+
+    live = make_session()
+    db.upsert_session(live)
+    db.insert_span(make_llm_span(
+        session_id=live.session_id, start_time=now - timedelta(days=1),
+    ))
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (1, 1)
+
+    surviving = [
+        r[0] for r in db.conn.execute("SELECT session_id FROM sessions").fetchall()
+    ]
+    assert surviving == [live.session_id]
+
+
+def test_delete_spans_before_cutoff_takes_an_aged_out_session_with_no_spans(db):
+    """A pre-cutoff session with no spans is aged-out history like any other.
+
+    Left behind it would go on asserting, to `core/data_span`, that a day
+    beyond the retention horizon carried data.
+    """
+    _insert_agent(db)
+    now = utcnow()
+    empty = make_session(
+        started_at=now - timedelta(days=100),
+        ended_at=now - timedelta(days=100) + timedelta(minutes=1),
+    )
+    db.upsert_session(empty)
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (0, 1)
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+
+
+def test_delete_spans_before_cutoff_keeps_a_live_session_with_no_spans_yet(db):
+    """An open session that has not written a span is not aged out."""
+    _insert_agent(db)
+    now = utcnow()
+    db.upsert_session(make_session(started_at=now, ended_at=None))
+
+    spans_deleted, sessions_deleted = db.delete_spans_before(now - timedelta(days=90))
+    assert (spans_deleted, sessions_deleted) == (0, 0)
+    assert db.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
 
 
 # -- Traces --

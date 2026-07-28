@@ -819,6 +819,12 @@ def analyze_model_downgrade(
         driver_substitutes=driver_substitutes,
         driver_examples=driver_examples,
         driver_estimate_basis=driver_basis,
+        # Per-session breakdown of `driver_tokens` above (they sum to it),
+        # carried so the rule this card proposes can be placed in the projects
+        # that actually incurred it — see `DowngradeFinding.driver_session_tokens`.
+        driver_session_tokens={
+            str(a.session_id): int(a.tokens) for a in driver_aggs if a.session_id
+        },
     )
 
 

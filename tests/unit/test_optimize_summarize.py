@@ -912,18 +912,30 @@ def test_nested_roots_stack_but_parallel_checkouts_collapse(db, monkeypatch):
     assert f.duplicate_copies_collapsed == 1
 
 
-def test_basis_calls_the_target_ratio_an_ask_not_a_measurement(db, monkeypatch):
-    """Critical Rule 14: nothing enforces the target the rewriter is asked for —
-    there is no retry and no gate on hitting it — so with no verified sample the
-    basis must say the reduction is an upper bound, not an expectation."""
+def test_basis_says_the_unmeasured_figure_uses_a_prior_from_other_machines(db, monkeypatch):
+    """Critical Rule 14 + 30(c). With no verified sample here, the figure rests
+    on tokenjam's own measurement of OTHER people's files, so the basis must say
+    that, disclose the sample size and spread, and say plainly that it is not
+    the target the rewriter is asked for. (Inverted from an earlier version that
+    asserted the basis called the number a TARGET — estimating at the ask was
+    the defect, and the guard now defends the corrected state.)"""
     from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.estimate import (
+        UNMEASURED_PRIOR_RANGE,
+        UNMEASURED_PRIOR_SAMPLES,
+    )
     from tokenjam.core.summarize.invocations import InvocationCounts
 
     basis = _estimate_basis(InvocationCounts(observed=True))
 
-    assert "TARGET" in basis
-    assert "NOT a measured outcome" in basis
-    assert "upper bound" in basis
+    assert "No verified rewrite exists on THIS machine yet" in basis
+    assert "not your files" in basis or "not yours" in basis or "were not your files" in basis
+    assert f"{UNMEASURED_PRIOR_SAMPLES:,} rewrites" in basis      # sample size
+    assert f"{UNMEASURED_PRIOR_RANGE[0]:.0%}" in basis            # ...and spread
+    assert f"{UNMEASURED_PRIOR_RANGE[1]:.0%}" in basis
+    assert "deliberately NOT the 50% target" in basis
+    assert "overstated this figure by roughly an order of magnitude" in basis
+    assert "tj summarize calibrate" in basis
     assert "Symlinked files are excluded" in basis
 
 
@@ -938,6 +950,117 @@ def test_basis_switches_to_the_measured_ratio_when_one_exists(db, monkeypatch):
     assert "ACTUALLY delivered" in basis
     assert "7 structure-checked" in basis
     assert "upper bound" not in basis
+
+
+def test_basis_names_the_command_that_produces_the_missing_evidence(db):
+    """Waiting passively for a user to happen to rewrite files is what made the
+    target permanent. The unmeasured basis says how to measure it."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    basis = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.5, False, 0)
+
+    assert "tj summarize calibrate" in basis
+
+
+def test_basis_discloses_gate_failures_excluded_from_the_ratio(db):
+    """A sample made mostly of failed rewrites must not read as a clean
+    measurement, so the excluded attempts are stated rather than implied."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    clean = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.82, True, 7)
+    noisy = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.82, True, 7, 4)
+
+    assert "failed the structure check" not in clean
+    assert "4 attempted rewrite(s) here failed the structure check" in noisy
+    assert "excluded from the ratio" in noisy
+
+
+def test_basis_attributes_the_line_target_to_anthropic_and_claims_only_tokens(db):
+    """The size target is theirs, the adherence benefit is their rationale and
+    not a saving we measure, and the path-scoped-rules alternative is a mention
+    rather than something summarize writes (Critical Rule 14)."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.estimate import PUBLISHED_LINE_TARGET
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    basis = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.5, False, 0)
+
+    assert f"under {PUBLISHED_LINE_TARGET} lines" in basis
+    assert "Anthropic's published guidance" in basis
+    assert "not tokenjam's" in basis
+    assert "only the token reduction is" in basis
+
+
+def test_basis_refuses_to_present_compression_as_the_only_route(db):
+    """An instruction file is usually long because rules ACCUMULATED, so
+    compressing it shortens each surviving rule rather than removing any. That
+    trades adherence for tokens (Critical Rule 26, gate 3), so the three routes
+    that cost no specificity have to be named alongside it."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+    from tokenjam.core.summarize.route import PRUNE_TEST_QUOTE
+
+    basis = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.5, False, 0)
+
+    assert "only ONE of four routes" in basis
+    assert "the only one that costs specificity" in basis
+    assert PRUNE_TEST_QUOTE in basis                  # prune
+    assert "`paths:` frontmatter" in basis            # path-scope
+    assert "escalating a must-always-run instruction to a hook" in basis
+    assert "summarize performs NONE of them; it names them" in basis
+    # The diagnosis is of prose SHAPE, never of which rules are needed.
+    assert "never of which rules earn their place" in basis
+    assert "withheld rather than guessed" in basis
+    # And meaning is not verified by anything automatic.
+    assert "does not read the prose" in basis
+
+
+def test_basis_states_the_figure_prices_only_the_operation_we_perform(db):
+    """The coverage statement must stay accurate as the product grows.
+
+    It used to say relocation was NOT counted and its size unmeasured. Relocation
+    is now performed and priced, so the same pin is INVERTED rather than deleted
+    (Critical Rule 23): it now asserts that relocation is priced in its own named
+    fields, that the two figures must not be added, and that the two routes still
+    NOT performed are the ones described as unmeasured. Deleting the assertion
+    would have left the whole class uncovered at exactly the moment it changed."""
+    from tokenjam.core.optimize.analyzers.summarize import _estimate_basis
+    from tokenjam.core.summarize.invocations import InvocationCounts
+
+    basis = _estimate_basis(InvocationCounts(observed=True), None, 0, 0.5, False, 0)
+
+    assert "COVERAGE:" in basis
+    assert "prices ONLY what compression recovers" in basis
+    assert "not the size of the opportunity" in basis
+    # Relocation is now performed, priced, and named — no longer "not counted".
+    assert "relocation_past_overspend_usd" in basis
+    assert "pure MOVE with no semantic loss" in basis
+    assert "must never be added together" in basis
+    # ...and the routes still unperformed are the ones called unmeasured.
+    assert "unmeasured, not zero" in basis
+    assert "pruning rules that do not earn their place" in basis
+
+
+def test_a_prune_route_candidate_keeps_its_full_figure(db, monkeypatch, tmp_path):
+    """The route changes what is OFFERED, never what is claimed: the tokens are
+    recoverable by whichever route the user picks, so a rule-heavy file is not
+    quietly discounted for being a pruning candidate."""
+    from tokenjam.core.summarize import route
+    from tokenjam.core.summarize.candidates import Candidate
+
+    rules = "\n".join(f"- Never skip step {i}; run its own check first." for i in range(60))
+    advice = route.recommend_route(text=rules, load_class="always")
+    assert advice.route == route.ROUTE_PRUNE
+
+    c = Candidate(
+        path="/x/CLAUDE.md", prose_words=600, total_chars=4_000, protected_blocks=0,
+        est_tokens_saved=500, pricing_mode="api", scope="project", is_prompt=True,
+        reduction_route=advice.route, directive_share=advice.directive_share,
+    )
+    assert c.est_tokens_saved == 500                  # undiscounted
+    assert c.to_dict()["reduction_route"] == route.ROUTE_PRUNE
 
 
 def test_measured_ratio_supersedes_the_target_in_the_figure(db, monkeypatch, tmp_path):
@@ -978,3 +1101,129 @@ def test_measured_ratio_supersedes_the_target_in_the_figure(db, monkeypatch, tmp
     assert f.prose_ratio == pytest.approx(0.9)
     assert f.prose_ratio_observed is True
     assert f.prose_ratio_samples == 3
+
+
+# --------------------------------------------------------------------------- #
+# Relocation: the second operation, priced beside compression and never added
+# to it (Critical Rules 27 + 28)
+# --------------------------------------------------------------------------- #
+
+def _reloc_cand(path: str, saved: int, relocatable_chars: int, *, scope: str = "global"):
+    import dataclasses
+    return dataclasses.replace(
+        _cand(path, saved, scope=scope), relocatable_content_chars=relocatable_chars,
+    )
+
+
+def test_relocation_is_priced_on_the_same_multiplier_as_compression(db, monkeypatch):
+    """The whole point of routing it through the same per-file session/call
+    multiplier: the two operations become directly comparable, and the token and
+    dollar fields count the same events (Critical Rule 28)."""
+    db.upsert_session(make_session(session_id="s1"))
+    db.upsert_session(make_session(session_id="s2"))
+    for sid in ("s1", "s2"):
+        for _ in range(3):
+            db.insert_span(make_llm_span(
+                session_id=sid, provider="anthropic", model="claude-haiku-4-5",
+                input_tokens=100, output_tokens=10,
+                start_time=utcnow() - timedelta(days=1),
+            ))
+    # 4_000 content chars relocatable = 1_000 tokens on the shared constant,
+    # which is exactly the compression reduction — so the two figures must come
+    # out identical, proving they run through one multiplier and not two.
+    _patch_scan(monkeypatch, [_reloc_cand("~/.claude/CLAUDE.md", 1_000, 4_000)])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                     findings=["summarize"]).findings["summarize"]
+
+    assert f.relocation_files == 1
+    assert f.relocation_file_reduction_tokens == 1_000
+    assert f.relocation_past_overspend_tokens == f.past_overspend_tokens
+    assert f.relocation_past_overspend_usd == pytest.approx(f.past_overspend_usd)
+
+
+def test_the_relocation_figure_is_never_summed_into_the_compression_one(db, monkeypatch):
+    """A section relocated out of a file is no longer there to be compressed, so
+    adding the two would price the same text twice (Critical Rule 27). They are
+    alternatives the user picks between, per file."""
+    db.upsert_session(make_session(session_id="s1"))
+    for _ in range(3):
+        db.insert_span(make_llm_span(
+            session_id="s1", provider="anthropic", model="claude-haiku-4-5",
+            input_tokens=100, output_tokens=10,
+            start_time=utcnow() - timedelta(days=1),
+        ))
+    _patch_scan(monkeypatch, [_reloc_cand("~/.claude/CLAUDE.md", 1_000, 4_000)])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                     findings=["summarize"]).findings["summarize"]
+
+    # The compression aggregate is untouched by the relocation figure existing.
+    assert f.past_overspend_tokens == f.candidates[0].est_tokens_saved_window
+    assert f.relocation_past_overspend_tokens is not None
+    assert f.past_overspend_tokens != (
+        f.past_overspend_tokens + f.relocation_past_overspend_tokens
+    )
+
+
+def test_the_relocation_implied_rate_lands_inside_a_real_price_band(db, monkeypatch):
+    """Critical Rule 28, written as the mechanical check it prescribes: divide
+    the dollars by the tokens and the implied per-token rate must sit between
+    the cache-read rate and the input rate. A hardcoded-number assertion passes
+    happily while both fields drift; a rate assertion cannot, because a basis
+    mismatch always throws the implied rate orders of magnitude out of band."""
+    from tokenjam.core.pricing import get_rates
+
+    db.upsert_session(make_session(session_id="s1"))
+    for _ in range(8):
+        db.insert_span(make_llm_span(
+            session_id="s1", provider="anthropic", model="claude-haiku-4-5",
+            input_tokens=100, output_tokens=10,
+            start_time=utcnow() - timedelta(days=1),
+        ))
+    _patch_scan(monkeypatch, [_reloc_cand("~/.claude/CLAUDE.md", 1_000, 4_000)])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                     findings=["summarize"]).findings["summarize"]
+
+    rates = get_rates("anthropic", "claude-haiku-4-5")
+    implied = f.relocation_past_overspend_usd / f.relocation_past_overspend_tokens * 1_000_000
+    assert rates.cache_read_per_mtok <= implied <= rates.input_per_mtok
+
+
+def test_a_file_with_nothing_relocatable_carries_no_relocation_figure(db, monkeypatch):
+    """Symmetric degrade: a measured zero is not a figure to render, and the
+    aggregate is `None` rather than `0` when nothing qualified — "no reference
+    section here" is not "relocation is worth nothing"."""
+    db.upsert_session(make_session(session_id="s1"))
+    db.insert_span(make_llm_span(
+        session_id="s1", provider="anthropic", model="claude-haiku-4-5",
+        input_tokens=100, output_tokens=10,
+        start_time=utcnow() - timedelta(days=1),
+    ))
+    _patch_scan(monkeypatch, [_cand("~/.claude/CLAUDE.md", 1_000, scope="global")])
+
+    since, until = _window()
+    f = build_report(db=db, config=TjConfig(version="1"), since=since, until=until,
+                     findings=["summarize"]).findings["summarize"]
+
+    assert f.relocation_files == 0
+    assert f.relocation_past_overspend_usd is None
+    assert f.relocation_past_overspend_tokens is None
+    assert f.relocation_file_reduction_tokens is None
+    # ...while the compression figure is unaffected.
+    assert f.past_overspend_usd is not None
+
+
+def test_an_unpriceable_window_carries_neither_relocation_figure(db, monkeypatch):
+    """Same "no evidence" condition the compression figures degrade on: a file
+    no observed session loads gets no window figure at all, never a zero."""
+    _patch_scan(monkeypatch, [_reloc_cand("./CLAUDE.md", 400, 4_000, scope="repo")])
+    f = _run(db)
+    assert f.relocation_past_overspend_usd is None
+    assert f.relocation_past_overspend_tokens is None
+    # The one-time figure survives, exactly as `file_reduction_tokens` does.
+    assert f.relocation_file_reduction_tokens == 1_000

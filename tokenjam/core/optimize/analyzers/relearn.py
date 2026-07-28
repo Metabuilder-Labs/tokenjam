@@ -33,7 +33,8 @@ Pipeline (validated 2026-07-12 against the full local corpus):
      dropped — the already-documented check.
   5. PROPOSE  — surviving, recurring (>=3 distinct sessions) clusters get a
      conservative token estimate (occurrences x grounded per-turn cost, never
-     the inflated afflicted-session footprint), a target rung (§6 of the
+     the inflated afflicted-session footprint), a delivery mechanism (see
+     ``core/rulewrite/delivery``,
      intervention ladder) and a scope (project vs user-global, by how many
      distinct repos the cluster's sessions span).
 
@@ -70,12 +71,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from tokenjam.core.analysis_span import retention_days_for, window_label_for
 from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
 from tokenjam.core.optimize.projection import build_projection_basis
 from tokenjam.core.optimize.analyzers.resend_tail import RELEARN_RESEND_BOUNDARY
 from tokenjam.core.optimize.rate_profile import RateProfile, blended_rate_profile
+from tokenjam.core import fixes as _fixes
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.relearn_window import (
     RELEARN_WINDOW_LABELS,
@@ -84,8 +87,15 @@ from tokenjam.core.optimize.relearn_window import (
     RelearnWindowTotal,
     sum_windowed,
     window_days,
+    window_labels_including,
 )
 from tokenjam.core.optimize.types import AnalyzerContext
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_EXECUTING_HOOK,
+    DELIVERY_INJECTING_HOOK,
+    DELIVERY_SKILL,
+)
 from tokenjam.core.transcript import build_session_story, resolve_projects_root
 
 # --- Tunables ----------------------------------------------------------------
@@ -181,9 +191,13 @@ HONESTY_CAVEAT = (
 
 # --- Known, validated relearn families ----------------------------------------
 # Each entry: (family key, human title, tool-name filter (None = any),
-# regex over the raw error text, default rung, default proposed fix).
-# Rungs follow the intervention ladder (SPEC §6): 1 CLAUDE.md note,
-# 2 skill/scoped doc, 3 hook, 4 wrapper/script, 5 config/env.
+# regex over the raw error text, DELIVERY MECHANISM, default proposed fix).
+#
+# The delivery is declared per family, in words, because it is the family that
+# knows: `sleep_chain` blocks a command and injects nothing, while the three
+# PostToolUseFailure families exist precisely to inject text. Those two cost
+# opposite amounts, and no property of the artifact tells them apart — only the
+# family's own matcher does. See `core/rulewrite/delivery`.
 _KNOWN_FAMILIES: list[dict[str, Any]] = [
     {
         "key": "cwd_confusion",
@@ -194,14 +208,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"file does not exist\.\s*note:\s*your current working directory",
             re.IGNORECASE,
         ),
-        "rung": 3,
-        "fix": (
-            "PostToolUseFailure hook (Bash/Read): react only after a "
-            "'no such file or directory' failure by injecting the real cwd + "
-            "a short directory listing as additionalContext, so the agent "
-            "recovers in one shot instead of a PreToolUse guess-and-block on "
-            "every relative path (which would misfire on normal usage)."
-        ),
+        "delivery": DELIVERY_INJECTING_HOOK,
+        "fix": _fixes.fix_text("relearn.cwd_confusion"),
     },
     {
         # BY FAR the largest family on a real coding corpus (measured
@@ -228,24 +236,22 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"exceeds? the (?:maximum )?context (?:window|length|limit)",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md note: this session hit the model's context ceiling and "
-            "the request was rejected outright — the tokens were spent and no "
-            "completion came back. The durable fix is to keep bulk content off "
-            "the main thread: delegate whole-file reads, log sweeps and "
-            "multi-file investigations to a subagent (its tool output lives in "
-            "its own context and is never re-sent on a later parent turn), and "
-            "prefer Grep plus a targeted Read offset/limit over reading a "
-            "large file end to end."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        # Lead-in names what THIS family observed; the durable instruction is
+        # the shared catalog record, not a third wording of it (see that
+        # record's note on why three copies is worse than one). BOTH halves are
+        # catalogued — the lead-in lives on the record as this analyzer's
+        # framing, because a sentence written here is prose the lint cannot see,
+        # and prose the lint cannot see is how one instruction comes to be
+        # stated twice inside one written block.
+        "fix": _fixes.fix_text_for("resend.offload_to_subagent", "relearn"),
     },
     {
         "key": "edit_before_read",
         "title": "Edit/Write before Read",
         "tools": {"Edit", "Write", "MultiEdit", "NotebookEdit"},
         "pattern": re.compile(r"has not been read yet", re.IGNORECASE),
-        # Downgraded from rung 3 (Phase 2.5): the harness already errors
+        # Downgraded from a hook (Phase 2.5): the harness already errors
         # clearly on this ("has not been read yet") and the agent virtually
         # always self-corrects on the very next turn by reading the file —
         # there's no failure-recovery gap for a reactive hook to close. A
@@ -256,13 +262,16 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         # false block on a file the harness knows was read but our own
         # tracking missed (a session resume, a compaction, a subagent read).
         # Safer to note the pattern than to guess at its state.
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: the harness already blocks an Edit/Write "
-            "before a Read with a clear error ('has not been read yet') and "
-            "agents reliably self-correct by reading next turn — no hook "
-            "needed, this is advisory awareness only."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        # ADVISORY ONLY, and the flag is what makes that mechanical. This
+        # family's own fix text says there is nothing to do — the harness
+        # already errors clearly and agents self-correct next turn — so the
+        # card must not occupy an apply slot offering it. The recurrence still
+        # COST something and that figure stands untouched (Critical Rule 32):
+        # a gate on whether we have an action available never reaches back and
+        # edits what a behaviour already cost.
+        "advisory_only": True,
+        "fix": _fixes.fix_text("relearn.edit_before_read"),
     },
     {
         "key": "sleep_chain",
@@ -280,23 +289,16 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             re.IGNORECASE,
         ),
         "label_pattern": re.compile(r"^\s*sleep\b", re.IGNORECASE),
-        "rung": 3,
-        "fix": (
-            "PreToolUse hook: block a `sleep N && <check>` Bash chain and point the "
-            "agent at the Monitor tool instead of a busy-wait."
-        ),
+        "delivery": DELIVERY_EXECUTING_HOOK,
+        "fix": _fixes.fix_text("relearn.sleep_chain"),
     },
     {
         "key": "stale_read_race",
         "title": "file modified since read (linter/hook race)",
         "tools": {"Edit", "Write", "MultiEdit"},
         "pattern": re.compile(r"modified since (it was last read|read)", re.IGNORECASE),
-        "rung": 3,
-        "fix": (
-            "PostToolUseFailure hook (Edit/Write/MultiEdit): react only after "
-            "a 'modified since read' failure by injecting a re-Read reminder "
-            "as additionalContext — never touches a successful edit."
-        ),
+        "delivery": DELIVERY_INJECTING_HOOK,
+        "fix": _fixes.fix_text("relearn.reread_before_retrying_edit"),
     },
     {
         "key": "edit_string_not_found",
@@ -306,12 +308,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"string to replace not found|old_string not found|not found in file",
             re.IGNORECASE,
         ),
-        "rung": 3,
-        "fix": (
-            "PostToolUseFailure hook (Edit/MultiEdit): react only after a "
-            "string-not-found failure by injecting a re-Read reminder as "
-            "additionalContext — never touches a successful edit."
-        ),
+        "delivery": DELIVERY_INJECTING_HOOK,
+        "fix": _fixes.fix_text("relearn.reread_before_retrying_edit"),
     },
     {
         # MUST stay ordered before "edit_string_not_found" above would have
@@ -326,13 +324,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"replace_all is false",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: when an Edit's `old_string` appears more "
-            "than once, include enough surrounding lines to make it unique "
-            "rather than retrying the same short string — or pass "
-            "`replace_all: true` when every occurrence really should change."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.edit_ambiguous_match"),
     },
     {
         "key": "read_too_large",
@@ -343,13 +336,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"file content \(\d+ tokens\) exceeds",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: this file is too large to read whole. Grep "
-            "for the symbol first and Read only the region around the hit "
-            "(`offset`/`limit`), or delegate the sweep to a subagent so the "
-            "bulk never lands in this thread's context."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.read_too_large"),
     },
     {
         "key": "read_directory",
@@ -358,12 +346,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "pattern": re.compile(
             r"eisdir|illegal operation on a directory", re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: Read takes a file path. To see what is in a "
-            "directory use Glob (or `ls` via Bash), then Read the file you "
-            "actually want."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.read_directory"),
     },
     {
         # MUST stay ordered before "deferred_tool_cold" below: that family's
@@ -384,8 +368,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "title": "Read malformed offset (array, not scalar)",
         "tools": {"Read"},
         "pattern": re.compile(r"offset.{0,20}(must be|invalid|expected)|invalid.{0,20}offset", re.IGNORECASE),
-        "rung": 1,
-        "fix": "CLAUDE.md/skill note: Read's `offset`/`limit` are scalars, not arrays.",
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.read_offset_malformed"),
     },
     {
         "key": "deferred_tool_cold",
@@ -399,19 +383,16 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"no such tool available|is not enabled in this context",
             re.IGNORECASE,
         ),
-        "rung": 2,
-        "fix": (
-            "Skill/scoped note: deferred tools need a ToolSearch lookup for their "
-            "schema before the first call; optionally a PreToolUse intercept hook."
-        ),
+        "delivery": DELIVERY_SKILL,
+        "fix": _fixes.fix_text("relearn.deferred_tool_cold"),
     },
     {
-        # Downgraded from rung 5 (Phase 2.5, 2026-07-14): rung 5 promises a
-        # "config/env fix", but there is no safe automatic config/env writer
-        # in this codebase -- Apply used to render an inert stub hook for
-        # this family (`_render_stub_hook`, never wired to block/inject
-        # anything), advertising a fix that did nothing. A rung-1 CLAUDE.md
-        # note is honest about what's actually deliverable and still useful.
+        # Downgraded from a config/env fix (Phase 2.5, 2026-07-14): there is
+        # no safe automatic config/env writer in this codebase -- Apply used to
+        # render an inert stub hook for this family (`_render_stub_hook`, never
+        # wired to block/inject anything), advertising a fix that did nothing.
+        # A CLAUDE.md rule is honest about what's actually deliverable and
+        # still useful.
         "key": "command_not_found",
         "title": "command not found (bashisms under zsh, bare interpreter)",
         "tools": {"Bash"},
@@ -426,14 +407,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"command not found|^\s*[\w.\-/]+:? not found\s*$",
             re.IGNORECASE | re.MULTILINE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: this shell doesn't have that binary/builtin on "
-            "PATH. Common causes here: using bare `python` instead of `python3`, "
-            "or a bash-only builtin (`mapfile`, `shopt`, `[[ ... ]]` extensions) "
-            "that doesn't exist under this shell (e.g. zsh, sh) or POSIX mode. "
-            "Prefer the portable/explicit form."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.command_not_found"),
     },
     {
         "key": "bash_timeout",
@@ -449,14 +424,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"exit code 143\b.{0,80}tim(?:ed )?out",
             re.IGNORECASE | re.DOTALL,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: this command outlived the tool's timeout "
-            "and was killed, so its work was lost and the tokens spent "
-            "waiting bought nothing. Run long jobs in the background "
-            "(`run_in_background`) and poll for completion, or raise the "
-            "call's own timeout when the wait is genuinely expected."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.bash_timeout"),
     },
     {
         "key": "bash_chained_approval",
@@ -469,13 +438,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
         "pattern": re.compile(
             r"bash command contains multiple operations", re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: a chained Bash command (`cd X && cmd`, "
-            "`a; b`) is approved as a whole, so one un-allowlisted part blocks "
-            "the entire chain. Issue the parts as separate Bash calls, and "
-            "prefer an absolute path over a leading `cd`."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.bash_chained_approval"),
     },
     {
         "key": "git_branch_exists",
@@ -486,13 +450,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"already exists and is not a valid branch name",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": (
-            "CLAUDE.md/skill note: check out the existing branch "
-            "(`git checkout <name>`) instead of re-creating it, or pick a "
-            "fresh name — `git checkout -b` on an existing branch always "
-            "fails."
-        ),
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.git_branch_exists"),
     },
     {
         "key": "webfetch_domain_blocked",
@@ -512,8 +471,8 @@ _KNOWN_FAMILIES: list[dict[str, Any]] = [
             r"following domains are not accessible",
             re.IGNORECASE,
         ),
-        "rung": 1,
-        "fix": "CLAUDE.md/skill note: this domain is blocked — use a search tool or a different source instead.",
+        "delivery": DELIVERY_CLAUDE_MD_RULE,
+        "fix": _fixes.fix_text("relearn.webfetch_domain_blocked"),
     },
 ]
 
@@ -1134,7 +1093,8 @@ def apply_distill_to_residual(
             # can look it up like a known family (keeps one code path).
             _FAMILY_BY_KEY.setdefault(family_key, {
                 "key": family_key, "title": result["title"], "tools": None,
-                "pattern": None, "rung": 1, "fix": result.get("fix") or "",
+                "pattern": None, "delivery": DELIVERY_CLAUDE_MD_RULE,
+                "fix": result.get("fix") or "",
             })
         target.failures.extend(cluster.failures)
 
@@ -1244,14 +1204,17 @@ class RelearnCluster:
     sessions:                  int
     occurrences:                int
     repos:                      list[str]
-    rung:                       int             # 1-5, SPEC §6 intervention ladder
+    #: HOW this fix reaches the agent, and therefore what gets written and
+    #: where (``core/rulewrite/kinds``). Declared by the family, never derived
+    #: from the artifact's shape.
+    delivery:                   str
     scope:                      str              # "project" | "user-global"
     proposed_fix:                str
     examples:                    list[RelearnExample] = field(default_factory=list)
     confidence:                   str = "heuristic"
     novel:                        bool = True
     # Phase 2 (apply) — best-effort cwd of the cluster's (sole, if project-
-    # scoped) repo, and a suggested rung-1 write target derived from it. Both
+    # scoped) repo, and a suggested write target derived from it. Both
     # are just a DEFAULT for the Review inbox card's scope/target override
     # (§7's "repo-identity is noisy" — never applied blindly); "" when
     # unknown (multi-repo / user-global / no cwd could be resolved).
@@ -1273,13 +1236,13 @@ class RelearnCluster:
     tail_calls_median:            int = 0
     tail_multiplier:              float = 1.0
     # Net-of-standing-cost accounting (`core/optimize/write_budget.py`). This
-    # decides whether a PERMANENT artifact is worth writing at all: a rung-1
-    # CLAUDE.md rule is re-sent on every future session forever, so its
-    # standing cost is priced against the same session pace and compared
-    # against what the cluster cost (`past_overspend_tokens` below — there is
-    # no separate pre-net figure any more; the observation IS the netting
-    # input). Rung 3+ (hook / wrapper / config) is never sent to the model as
-    # prompt text, so its standing cost is a genuine zero.
+    # decides whether a PERMANENT artifact is worth writing at all: a CLAUDE.md
+    # rule is re-sent on every future session forever, so its standing cost is
+    # priced against the same session pace and compared against what the
+    # cluster cost (`past_overspend_tokens` below — there is no separate pre-net
+    # figure any more; the observation IS the netting input). An EXECUTING hook
+    # is never sent to the model as prompt text, so its standing cost is a
+    # genuine zero; an INJECTING one is prompt text and is charged for it.
     standing_cost_tokens_per_session: int = 0
     standing_cost_tokens:             int = 0
     standing_cost_basis:              str = ""
@@ -1771,7 +1734,7 @@ def build_proposals(
     all in that set is marked ``advise_only`` and gets NO suggested target: there
     is nothing to apply into, so the card must not imply an apply path exists.
 
-    ``persona`` gates the rung-1/rung-2 CLAUDE.md/skill write exactly like
+    ``persona`` gates the CLAUDE.md/skill write exactly like
     ``cost_proposals._persona_gated_write_fields`` gates the script/reuse/
     resend cards it shares that same write surface with (``verbosity`` is NOT
     a peer here — it no longer routes through that helper and is
@@ -1791,6 +1754,7 @@ def build_proposals(
     """
     from tokenjam.core.optimize.relearn_apply import default_target_path, slugify
     from tokenjam.core.optimize.write_budget import (
+        REASON_ADVISORY_ONLY,
         REASON_PLACEHOLDER,
         is_placeholder_fix,
         short_reason,
@@ -1809,8 +1773,13 @@ def build_proposals(
             continue
 
         family = _FAMILY_BY_KEY.get(cluster.family_key or "")
-        rung = family["rung"] if family else 1
-        fix = family["fix"] if family else "Review examples — no known fix template matched."
+        # A cluster that matched no known family has no family to declare a
+        # mechanism, so it gets the default one. That is a real default, not a
+        # guess about the artifact: with no matcher there is no hook to write.
+        delivery = family["delivery"] if family else DELIVERY_CLAUDE_MD_RULE
+        fix = family["fix"] if family else _fixes.fix_text(
+            "relearn.no_template_matched",
+        )
 
         repos = sorted(cluster.repos)
         occurrences = len(cluster.failures)
@@ -1841,7 +1810,7 @@ def build_proposals(
         else:
             try:
                 suggested_target = default_target_path(
-                    rung, scope, repo_cwd, slugify(cluster.title),
+                    delivery, scope, repo_cwd, slugify(cluster.title),
                     claude_home=claude_home,
                 )
             except Exception:
@@ -1856,7 +1825,13 @@ def build_proposals(
         # a fix template is a gap in OUR library, not evidence the waste was
         # unavoidable; the observed cost is computed for every cluster below,
         # placeholder or not, and reported on the `past_overspend_*` fields.
-        has_real_fix = not is_placeholder_fix(fix)
+        # A family whose own fix text says no action is needed is never
+        # OFFERED, however well-formed that text is. `is_placeholder_fix` can't
+        # see this: the text is a real, specific, non-placeholder sentence — it
+        # just happens to say "there is nothing to do here", which is the one
+        # thing an offered write must not say.
+        advisory_only = bool(family.get("advisory_only")) if family else False
+        has_real_fix = not is_placeholder_fix(fix) and not advisory_only
 
         # Priced for EVERY cluster now, not only the ones with a fix: the tail
         # is part of what the recurrence actually cost, and a cluster that will
@@ -1956,7 +1931,7 @@ def build_proposals(
             sessions=len(sessions),
             occurrences=occurrences,
             repos=repos,
-            rung=rung,
+            delivery=delivery,
             scope=scope,
             proposed_fix=fix,
             examples=examples,
@@ -1977,9 +1952,15 @@ def build_proposals(
             past_reread_usd=past_reread_usd,
             past_overspend_windows=windows,
             write_offered=has_real_fix,
-            write_blocked_reason="" if has_real_fix else REASON_PLACEHOLDER,
+            write_blocked_reason=(
+                "" if has_real_fix
+                else (REASON_ADVISORY_ONLY if advisory_only else REASON_PLACEHOLDER)
+            ),
             write_blocked_short=(
-                "" if has_real_fix else short_reason(REASON_PLACEHOLDER)
+                "" if has_real_fix
+                else short_reason(
+                    REASON_ADVISORY_ONLY if advisory_only else REASON_PLACEHOLDER
+                )
             ),
         ))
 
@@ -2042,15 +2023,26 @@ def _apply_write_budget(
 
     from tokenjam.core.optimize import write_budget as wb
     from tokenjam.core.optimize.projection import build_projection_basis
-    from tokenjam.core.optimize.relearn_apply import artifact_for_rung, slugify
+    from tokenjam.core.optimize.relearn_apply import artifact_for_delivery, slugify
 
     basis = projection or build_projection_basis(0.0, 0, 0)
     candidates: list[wb.WriteCandidate] = []
     for p in proposals:
-        if p.advise_only or not p.suggested_target:
+        # An ADVISORY family never enters the budget. Its `write_offered` was
+        # already set False at construction, and letting it become a candidate
+        # here would have `decision.offered` overwrite that a few lines below —
+        # which is exactly how the withdrawal was reaching the unit test and
+        # NOT the live report. A flag set upstream of a pass that rewrites the
+        # same field is not a flag, it is a suggestion.
+        family = _FAMILY_BY_KEY.get(p.family_key or "")
+        if p.advise_only or not p.suggested_target or (
+            family is not None and family.get("advisory_only")
+        ):
             continue
         try:
-            artifact = artifact_for_rung(asdict(p), p.signature, p.rung, slugify(p.title))
+            artifact = artifact_for_delivery(
+                asdict(p), p.signature, p.delivery, slugify(p.title),
+            )
         except Exception:
             artifact = p.proposed_fix     # never let a render hiccup sink a proposal
         candidates.append(wb.WriteCandidate(
@@ -2059,7 +2051,7 @@ def _apply_write_budget(
             # their own signature keeps each a family of one rather than
             # collapsing every unrelated residual into a single bucket.
             family=p.family_key or f"signature:{p.signature}",
-            rung=p.rung,
+            delivery=p.delivery,
             artifact_text=artifact or p.proposed_fix,
             # `past_overspend_tokens` IS the pre-net observation — there is no
             # separate gross field any more; the past-tense figure doubles as
@@ -2152,7 +2144,7 @@ def analyze_relearns(
     ``conn`` (optional DuckDB connection) is forwarded to ``build_proposals``
     for the per-cluster blended-dollar-rate lookup (Review inbox monthly-$
     basis) — ``None`` keeps every cluster tokens-only, same as today.
-    ``persona`` is forwarded to ``build_proposals`` to gate the rung-1/rung-2
+    ``persona`` is forwarded to ``build_proposals`` to gate the
     write — see its docstring.
 
     ``window_labels`` additionally computes each cluster's observed cost BOUNDED
@@ -2380,7 +2372,11 @@ def _repo_cwd_map_for(
     directory name is unreliable, so this reads each session's transcript's
     first ``cwd`` field directly (cheap: short-circuits after the first hit)
     for one representative session per repo."""
-    from tokenjam.core.transcript import _locate_transcript, read_records
+    from tokenjam.core.transcript import (
+        _locate_transcript,
+        first_recorded_cwd,
+        read_records,
+    )
 
     out: dict[str, str] = {}
     for session_id, repo in sessions:
@@ -2389,11 +2385,12 @@ def _repo_cwd_map_for(
         path = _locate_transcript(session_id, projects_root)
         if path is None:
             continue
-        for record in read_records(path, cache_dir=transcript_cache_dir)[:5]:
-            cwd = record.get("cwd")
-            if isinstance(cwd, str) and cwd:
-                out[repo] = cwd
-                break
+        # `first_recorded_cwd` is the shared extractor (deadweight and rule
+        # placement read it too) — see its docstring for why this is not three
+        # copies of the same five-record loop any more.
+        cwd = first_recorded_cwd(read_records(path, cache_dir=transcript_cache_dir))
+        if cwd:
+            out[repo] = cwd
     return out
 
 
@@ -2419,7 +2416,7 @@ def compute_relearn_finding(
     see below), which is the only thing a filesystem-only scan can offer.
 
     ``persona`` (default ``"unknown"``, the conservative no-write default —
-    see ``build_proposals``) is forwarded to gate the rung-1/rung-2 write.
+    see ``build_proposals``) is forwarded to gate the CLAUDE.md/skill write.
     ``run(ctx)`` below passes the report's own ``ctx.persona`` rather than
     re-deriving it here, so a report never carries two different persona
     classifications for the same window.
@@ -2598,7 +2595,13 @@ def run(ctx: AnalyzerContext) -> None:
         optimize_cfg, "min_recurring_sessions", MIN_RECURRING_SESSIONS,
     )
     storage_cfg = getattr(ctx.config, "storage", None)
-    retention_days = getattr(storage_cfg, "retention_days", None)
+    # Resolved, never read off the field: `storage.retention_days` is now
+    # derived from the chosen analysis span and is None on a default config,
+    # which a raw read would take to mean "unbounded" — the opposite of what a
+    # 90-day span promises. See core/analysis_span.py.
+    retention_days = (
+        retention_days_for(storage_cfg) if storage_cfg is not None else None
+    )
     # The write budget's headroom comes from the `summarize` analyzer's own
     # measurement of the agent files these proposals would append to. It runs
     # ahead of relearn in ANALYZER_ORDER, so its finding is already on the
@@ -2611,6 +2614,10 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, min_sessions=min_sessions,
         retention_days=retention_days,
+        # So the inbox's one window label always has a bucket on this side too.
+        window_labels=window_labels_including(
+            window_label_for(storage_cfg, ctx.conn)
+        ),
         projects_root=scope.projects_root,
         claude_home=scope.claude_home,
         distill_cache_dir=_distill_cache_dir(ctx.config),

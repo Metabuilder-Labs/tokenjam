@@ -239,7 +239,17 @@ def test_render_resend_cache_control_snippet_is_unmangled(db, capsys):
 # Persona branching: compaction (agent-harness) vs cache_control (SDK)
 # --------------------------------------------------------------------------- #
 
-def test_render_resend_claude_code_persona_leads_with_compaction(db, capsys):
+def test_render_resend_claude_code_persona_leads_with_the_durable_fix(db, capsys):
+    # INVERTED (Critical Rule 23). This test was named
+    # `..._leads_with_compaction` and asserted exactly that — while the Review
+    # inbox card for the SAME finding led with the durable offload rule and
+    # demoted compaction to secondary relief. Two surfaces, one finding, two
+    # different fixes, and the CLI showing the weaker one.
+    #
+    # `COMPACTION_FIX`'s own text disclaims it: "never fixes the pattern going
+    # forward — treat it as immediate relief for an already-full session, not
+    # the durable fix". The suite was pinning the CLI to lead with something
+    # the constant itself says is not the fix.
     from tokenjam.cli.cmd_optimize import _render_resend
 
     _seed_heavy_resend(db)
@@ -249,7 +259,11 @@ def test_render_resend_claude_code_persona_leads_with_compaction(db, capsys):
     out = _flat(capsys.readouterr().out)
 
     assert "Fix:" in out
-    assert finding.fix_compaction in out
+    # The durable lever leads.
+    assert "Offload context-heavy sub-tasks" in out
+    # Compaction survives, in the SAME secondary position the card gives it.
+    assert "Immediate relief in an already-full session" in out
+    assert out.index("Offload context-heavy") < out.index("Immediate relief")
     # Secondary aside for the cache_control lever, not the lead.
     assert "If you also run SDK agents" in out
 

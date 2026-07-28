@@ -11,7 +11,7 @@ contends with the live request connection's write lock.
 Phase 1 (detect + surface) was read-only. Phase 2 (this module's ``/apply``,
 ``/{id}/enable``, ``/{id}/disable``, ``/{id}/revert``, ``/applied``) adds the
 Approve stage: writes route through ``core.optimize.relearn_apply`` for every
-rung-routing / backup / git-commit / fail-open guarantee — this route only
+delivery-routing / backup / git-commit / fail-open guarantee — this route only
 translates HTTP <-> that module's ``RelearnApplyRefused`` (-> 409) contract,
 it never hand-rolls a parallel write path. ``/apply`` names a STORED proposal
 (``core.optimize.relearn_proposals``) and never accepts cluster content from
@@ -47,6 +47,8 @@ from tokenjam.core.optimize import (
     relearn_proposals,
     relearn_store,
 )
+from tokenjam.core.rulewrite.kinds import DEFAULT_DELIVERY
+from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
 from tokenjam.core.optimize.relearn_window import resolve_window_label, window_report
 
 router = APIRouter()
@@ -444,7 +446,7 @@ def refresh_relearn_proposals(request: Request) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------- #
 # Apply stage (Phase 2) — every write routes through `core.optimize.
-# relearn_apply`, which owns the rung-routing / backup / git-commit /
+# relearn_apply`, which owns the delivery-routing / backup / git-commit /
 # fail-open / active-session-guard guarantees. Default is a DRY-RUN
 # (go=False): the UI's card shows the diff before the user commits to it.
 # --------------------------------------------------------------------------- #
@@ -481,15 +483,15 @@ class ApplyRelearnRequest(BaseModel):
 
 @router.post("/relearn/apply", dependencies=_WRITE_AUTH)
 def post_relearn_apply(request: Request, body: ApplyRelearnRequest) -> dict[str, Any]:
-    """Dry-run (default) or write (``go=true``) an approved fix at its rung.
+    """Dry-run (default) or write (``go=true``) an approved fix by its delivery.
 
     Takes a ``proposal_id`` from ``GET /relearn/proposals``. 404s when no
     stored proposal carries that ID: a client-constructed cluster has no way
     into the write machinery, which is what makes "human-gated" a property of
     the server rather than of the UI flow.
 
-    409s (via ``RelearnApplyRefused``) on: an unknown rung, a family with no
-    matcher at an enforcement rung, a create-only target (skill/hook) that
+    409s (via ``RelearnApplyRefused``) on: an unresolvable delivery, a family
+    with no matcher for a hook, a create-only target (skill/hook) that
     already holds a non-TokenJam file, or (unless ``force=true``) a live
     session just seen in the target repo (§7: never apply mid-session). The
     UI's re-send-with-force is the explicit "apply anyway" the spec calls for.
@@ -585,7 +587,7 @@ class EnableEnforcementRequest(BaseModel):
 
 @router.post("/relearn/{fix_id}/enable", dependencies=_WRITE_AUTH)
 def post_relearn_enable(request: Request, fix_id: str, body: EnableEnforcementRequest) -> dict[str, Any]:
-    """Wire a generated rung 3-5 hook into settings.json. Requires an explicit
+    """Wire a generated hook into settings.json. Requires an explicit
     ``confirm: true`` — the UI's "this intercepts your tools" warning."""
     try:
         return relearn_apply.enable_enforcement(_config(request), fix_id, confirm=body.confirm)
@@ -742,10 +744,7 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
         relearn_proposals.list_cost_proposals(config)
         if block is not None and block.get("cost_computed_at") else []
     )
-    applied_sigs = {
-        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
+    applied_sigs = cost_apply.applied_signatures(config)
     open_proposals = [
         p for p in proposals
         if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
@@ -772,11 +771,7 @@ def get_cost_proposals(request: Request) -> dict[str, Any]:
     relearn_label = inbox_contribution.contribution_window_label(
         relearn_finding, window_days,
     )
-    relearn_applied_sigs = {
-        str(rec.get("signature") or "")
-        for rec in relearn_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
+    relearn_applied_sigs = relearn_apply.applied_signatures(config)
     relearn_rows = inbox_contribution.relearn_contribution_rows(
         relearn_finding, label=relearn_label,
         applied_signatures=relearn_applied_sigs,
@@ -907,7 +902,7 @@ class ApplyWorkspaceCostRequest(BaseModel):
     """A named STORED cost proposal plus the human's confirmed write target.
 
     Same split as ``ApplyRelearnRequest``: the proposal's content and its apply
-    plumbing (``proposed_fix``, ``rung``) come off the store, because the card
+    plumbing (``proposed_fix``, ``delivery``) come off the store, because the card
     the human approved was rendered FROM that stored proposal; only the write
     target and the go/force confirmations are the caller's to choose.
     """
@@ -926,9 +921,9 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
 
     Covers every analyzer whose fix is a workspace surface an orchestrating
     agent (or the model itself) reads before acting, rather than a file this
-    proposal can edit outright: ``subagent`` (rung-1 sizing rubric),
-    ``script`` (rung-2 deterministic-workflow skill), ``reuse`` (rung-1
-    planning-skeleton note), ``verbosity`` (rung-1 output-brevity note). This
+    proposal can edit outright: ``subagent`` (a sizing-rubric rule),
+    ``script`` (a deterministic-workflow skill), ``reuse`` (a planning-skeleton
+    rule), ``verbosity`` (an output-brevity rule). This
     routes the actual write through the EXISTING relearn apply path
     (``relearn_apply.apply_relearn_fix``) — same reversible, git-committed,
     human-gated (dry-run first) discipline — then records the cost marker so
@@ -944,7 +939,7 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
     signature = str(stored.get("signature") or "")
     analyzer = str(stored.get("analyzer") or "")
     baseline = dict(stored.get("baseline") or {})
-    # The cluster shape relearn_apply renders a rung-1/2 note/skill from,
+    # The cluster shape relearn_apply renders a rule or skill from,
     # projected from the STORE: a caller-supplied proposed_fix would be
     # arbitrary text written into the user's workspace under a reviewed
     # proposal's name. `apply_sessions` falls back to the subagent analyzer's
@@ -955,7 +950,11 @@ def post_cost_apply_workspace(request: Request, body: ApplyWorkspaceCostRequest)
         "family_key": f"cost_{analyzer}" if analyzer else "cost_proposal",
         "title": str(stored.get("title") or "") or signature,
         "proposed_fix": str(stored.get("proposed_fix") or ""),
-        "rung": int(stored.get("rung") or 1),
+        # A stored proposal names its own mechanism; a cache written by an
+        # older build named a ladder number, mapped on read. Never defaulted
+        # blindly: what this resolves to decides which artifact is written to
+        # a real path.
+        "delivery": delivery_from_legacy_record(stored) or DEFAULT_DELIVERY,
         "sessions": int(
             baseline.get("apply_sessions", baseline.get("flagged_subagents", 0)) or 0
         ),
@@ -1084,7 +1083,6 @@ def post_register_source_path(
             "current_model": current_model,
             "proposed_model": proposed_model,
             "source_path": resolved,
-            "rung": int(stored.get("rung") or 1),
             "sessions": 0,
             "repos": [],
             "examples": [],

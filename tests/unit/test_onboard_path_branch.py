@@ -121,9 +121,9 @@ def test_bare_onboard_sdk_choice_falls_through_to_generic(_routing_stubs, monkey
     )
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        # path=3(sdk) → plan prompt(1=api) → api ceiling(0) → daily budget(0)
+        # path=3(sdk) → daily budget(1) → analysis span(2=90d) → ceiling(0)
         res = runner.invoke(
-            cmd_onboard, ["--no-daemon"], input="3\n1\n0\n", obj={},
+            cmd_onboard, ["--no-daemon"], input="3\n1\n2\n0\n", obj={},
         )
     assert res.exit_code == 0, res.output
     # No per-path onboarder fired.

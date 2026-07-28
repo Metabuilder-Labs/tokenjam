@@ -30,7 +30,9 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from tokenjam.core.data_span import DataSpan, data_span_from_days
+from tokenjam.core.rulewrite.kinds import DELIVERY_INJECTING_HOOK
+
+from tokenjam.core.data_span import DataSpan, available_data_span, data_span_from_days
 from tokenjam.core.optimize.analyzers.relearn import (
     GROUNDED_TOKENS_PER_OCCURRENCE,
     FailureEpisode,
@@ -301,7 +303,8 @@ def test_a_cache_written_before_windowing_loads_and_reads_unknown():
     old_cluster = {
         "signature": "cwd_confusion", "family_key": "cwd_confusion",
         "title": "cwd confusion", "sessions": 3, "occurrences": 9,
-        "repos": ["repo-a"], "rung": 3, "scope": "project",
+        "repos": ["repo-a"], "delivery": DELIVERY_INJECTING_HOOK,
+        "scope": "project",
         "proposed_fix": "hook", "past_overspend_tokens": 12345,
         "past_overspend_usd": 1.25,
     }
@@ -400,6 +403,37 @@ def test_implausible_and_future_days_are_discarded_before_measuring():
     span = data_span_from_days(days)
     assert span.available_days == 1
     assert span.newest == today.isoformat()
+
+
+@pytest.mark.parametrize("db_timezone", ["UTC", "Asia/Kolkata", "America/Los_Angeles"])
+def test_the_day_union_reads_utc_days_whatever_the_databases_timezone_is(db_timezone):
+    """The read side must group by the SAME day boundary the filter uses.
+
+    ``_plausible_days`` drops any day later than the UTC date, so a bare
+    ``CAST(ts AS DATE)`` — which DuckDB resolves through the session timezone
+    before truncating (Critical Rule 1) — silently deletes TODAY from the span
+    for every hour the local date runs ahead of the UTC one. On a ``+05:30``
+    machine that is the last five and a half hours of every day: the served
+    ``available_days`` drops by one at 18:30 local and comes back at midnight,
+    with no change behind it. Late-in-the-UTC-day rows are the ones that
+    expose it, so the fixture pins them there rather than at ``utcnow()``.
+    """
+    import duckdb
+
+    conn = duckdb.connect()
+    conn.execute(f"SET TimeZone='{db_timezone}'")
+    conn.execute("CREATE TABLE spans (start_time TIMESTAMPTZ)")
+    conn.execute("CREATE TABLE sessions (started_at TIMESTAMPTZ)")
+
+    today = datetime.now(tz=timezone.utc).date()
+    late = datetime(today.year, today.month, today.day, 23, 30, tzinfo=timezone.utc)
+    conn.execute("INSERT INTO spans VALUES (?)", [late - timedelta(days=1)])
+    conn.execute("INSERT INTO sessions VALUES (?)", [late])
+
+    span = available_data_span(conn)
+    assert span.newest == today.isoformat()
+    assert span.days_with_data == 2
+    assert span.available_days == 2
 
 
 def test_no_data_at_all_is_unknown_not_a_zero_day_span():

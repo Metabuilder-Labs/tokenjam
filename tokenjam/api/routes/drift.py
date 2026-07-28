@@ -14,6 +14,16 @@ is therefore ``None`` for that window. That null is accompanied by
 ``latest_session_outside_window`` and the timestamp that fell outside, because a
 bare null here reads as "this agent never ran" when the truth is "it ran, just
 not inside the window you asked about". The baseline itself is never hidden.
+
+One exception, and it is a persona exception rather than a window one:
+interactive coding agents are never baselined. ``DriftDetector.on_session_end``
+already refuses to build a baseline for them, because a single mean/stddev over
+a heterogeneous, human-driven workload measures nothing. That is a WRITE-path
+skip, and baselines are only ever built once and never recomputed, so a row
+written before that skip existed (or by an id that has since been reclassified)
+outlives it and still renders. This route therefore applies the same gate on the
+READ path, through the same ``is_interactive_coding_agent`` helper, so the two
+paths cannot disagree and a legacy row cannot surface as a drift verdict.
 """
 from __future__ import annotations
 
@@ -22,6 +32,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from tokenjam.api.deps import require_api_key
+from tokenjam.core.alerts import is_interactive_coding_agent
 from tokenjam.core.data_span import available_data_span
 from tokenjam.utils.time_parse import parse_since
 
@@ -47,6 +58,16 @@ def _iso(value: Any) -> str | None:
 
 def _build_agent_drift(db: Any, agent_id: str, since: Any = None) -> dict:
     """Build drift info dict for a single agent, bounded to ``since``."""
+    if is_interactive_coding_agent(agent_id):
+        # Read-path mirror of the write-path skip in DriftDetector.on_session_end.
+        # A stale row from before that skip must not render as a drift verdict.
+        return {
+            "agent_id": agent_id,
+            "baseline": None,
+            "latest_session": None,
+            "baseline_skipped_reason": "interactive_coding_agent",
+        }
+
     baseline = db.get_baseline(agent_id)
     if baseline is None:
         return {"agent_id": agent_id, "baseline": None, "latest_session": None}
@@ -133,5 +154,11 @@ async def get_drift(
     rows = conn.execute(
         "SELECT DISTINCT agent_id FROM drift_baselines ORDER BY agent_id"
     ).fetchall()
-    agents = [_build_agent_drift(db, row[0], since_dt) for row in rows]
+    # Filtered in Python, not in SQL, so the prefix list stays in exactly one
+    # place (core/alerts.py) instead of being restated as a LIKE clause here.
+    agents = [
+        _build_agent_drift(db, row[0], since_dt)
+        for row in rows
+        if not is_interactive_coding_agent(row[0])
+    ]
     return {"agents": agents, "window": window, "data_span": data_span}

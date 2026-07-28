@@ -91,6 +91,10 @@ class BackfillResult:
     # user re-backfills a DB that still holds pre-v0.5.2 uuid-keyed rows.
     spans_stale_purged: int = 0
     files_failed: int = 0
+    # Transcript records declined for carrying no parseable timestamp — see
+    # ParsedSession.records_undated. Surfaced by `tj backfill`'s summary so a
+    # decline is never silent.
+    records_undated: int = 0
     earliest: datetime | None = None
     latest: datetime | None = None
     total_cost_usd: float = 0.0
@@ -149,6 +153,10 @@ class ParsedSession:
     # gone quiet, without re-deriving a second definition of "stale" (backfill
     # used to hardcode every session's status "completed" regardless).
     transcript_mtime: datetime | None = None
+    # Records declined for carrying no parseable timestamp. Counted rather than
+    # dropped in silence: a record tj refuses to ingest is a change to what the
+    # corpus contains, and has to be as visible as one it accepts.
+    records_undated: int = 0
 
 
 # --- ID derivation helpers ---------------------------------------------------
@@ -359,6 +367,7 @@ def parse_claude_code_session(
     cwd: str | None = None
     earliest: datetime | None = None
     latest: datetime | None = None
+    records_undated: int = 0
 
     # Dedup by span_id WITHIN the session (#294). Claude Code replays/re-snapshots
     # assistant turns into the same JSONL on resume/branch — each appended record
@@ -425,11 +434,19 @@ def parse_claude_code_session(
             continue
 
         ts = _parse_ts(record.get("timestamp"))
-        if ts is not None:
-            if earliest is None or ts < earliest:
-                earliest = ts
-            if latest is None or ts > latest:
-                latest = ts
+        if ts is None:
+            # No observed time, so the record is not ingested rather than
+            # ingested with a made-up one. `now` would date months-old
+            # transcript work to whenever the backfill happened to run — which
+            # reads as a real observation, and is why this is worse than the
+            # 1970 sentinel it replaced rather than better. Same idiom as
+            # ingest_adapters/langfuse.py and helicone.py.
+            records_undated += 1
+            continue
+        if earliest is None or ts < earliest:
+            earliest = ts
+        if latest is None or ts > latest:
+            latest = ts
 
         msg = record.get("message") or {}
         if not isinstance(msg, dict):
@@ -501,7 +518,7 @@ def parse_claude_code_session(
         # read+write. See models.py NormalizedSpan + Critical Rule on cache.
 
         agent_id = _agent_id_from_cwd(cwd)
-        start_time = ts or datetime.now(tz=timezone.utc)
+        start_time = ts
 
         # Per-message content (opt-in, gated by [capture]). Default-off leaves
         # llm_attrs carrying provenance only — the ingest source and the call
@@ -622,7 +639,11 @@ def parse_claude_code_session(
         total_cost += s.cost_usd or 0.0
 
     agent_id = _agent_id_from_cwd(cwd)
-    started_at = earliest or datetime.now(tz=timezone.utc)
+    if earliest is None:
+        # Every record in this file was undated, so there is no session to
+        # describe — returning one would invent both its start and its extent.
+        return None
+    started_at = earliest
     ended_at = latest or started_at
 
     return ParsedSession(
@@ -638,6 +659,7 @@ def parse_claude_code_session(
         total_cost_usd=round(total_cost, 8),
         tool_call_count=tool_count,
         transcript_mtime=transcript_mtime,
+        records_undated=records_undated,
     )
 
 
@@ -1111,6 +1133,7 @@ def ingest_claude_code(
         # the full in-window total, not a new-only figure that reads as "barely
         # worked" on an idempotent re-run (#238).
         result.total_cost_usd += parsed.total_cost_usd
+        result.records_undated += parsed.records_undated
         if result.earliest is None or parsed.started_at < result.earliest:
             result.earliest = parsed.started_at
         if result.latest is None or parsed.ended_at > result.latest:

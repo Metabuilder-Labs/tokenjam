@@ -47,6 +47,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any
 
+from tokenjam.core import fixes as _fixes
 from tokenjam.core.optimize.analyzers.workflow_restructure import _arg_signature
 from tokenjam.core.optimize.registry import register
 from tokenjam.core.optimize.types import AnalyzerContext
@@ -93,13 +94,8 @@ VERBOSITY_ESTIMATE_BASIS = (
 # analyzer's own honesty caveat above says output length is not waste. So this
 # names the cohort instead of asserting a rule, and states the tradeoff rather
 # than commanding brevity.
-VERBOSITY_REMEDY_SNIPPET = (
-    "This shape of task ran noticeably longer, output-wise, than similar "
-    "sessions recently. Worth a look: if a shorter answer would serve this "
-    "shape of task just as well, prefer it — but only when brevity doesn't "
-    "cost completeness, correctness, or clarity. A longer answer is often "
-    "the right one; this is a candidate to review, not a rule to enforce."
-)
+# THE text lives in `core/fixes/registry.py`, so the lint sees it.
+VERBOSITY_REMEDY_SNIPPET = _fixes.fix_text("verbosity.prefer_shorter_when_it_serves")
 
 
 @dataclass

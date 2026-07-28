@@ -63,6 +63,11 @@ class NormalizedSpan:
     name:           str
     kind:           SpanKind
     status_code:    SpanStatus
+    # Always a REAL observed instant. Ingest may neither substitute a default
+    # (a zero epoch drags every MIN() and day union back by decades; `now`
+    # silently dates historical work to whenever tj received it) nor leave it
+    # unset — a record with no observed time is rejected at the boundary
+    # instead. See `api/routes/logs.py` and `core/backfill.py`.
     start_time:     datetime
     parent_span_id: str | None     = None
     session_id:     str | None     = None

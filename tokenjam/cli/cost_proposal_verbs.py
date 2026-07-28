@@ -53,6 +53,8 @@ from tokenjam.core.optimize import (
     relearn_proposals,
     relearn_store,
 )
+from tokenjam.core.rulewrite.kinds import DEFAULT_DELIVERY
+from tokenjam.core.rulewrite.legacy import delivery_from_legacy_record
 from tokenjam.utils.formatting import console
 
 
@@ -143,10 +145,7 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
         )
         return
 
-    applied_sigs = {
-        str(rec.get("signature") or "") for rec in cost_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
+    applied_sigs = cost_apply.applied_signatures(config)
     open_proposals = [
         p for p in proposals
         if not cost_apply.signature_is_applied(str(p.get("signature") or ""), applied_sigs)
@@ -169,11 +168,7 @@ def cost_proposals_cmd(ctx: click.Context) -> None:
     relearn_label = inbox_contribution.contribution_window_label(
         relearn_finding, window_days,
     )
-    relearn_applied_sigs = {
-        str(rec.get("signature") or "")
-        for rec in relearn_apply.list_applied(config)
-        if rec.get("state") != "reverted"
-    }
+    relearn_applied_sigs = relearn_apply.applied_signatures(config)
     relearn_rows = inbox_contribution.relearn_contribution_rows(
         relearn_finding, label=relearn_label,
         applied_signatures=relearn_applied_sigs,
@@ -330,8 +325,8 @@ def cost_apply_cmd(
 
     analyzer = str(stored.get("analyzer") or "")
     baseline = dict(stored.get("baseline") or {})
-    # The cluster shape `relearn_apply.apply_relearn_fix` renders a rung-1/2
-    # note/skill from, built the same way `POST
+    # The cluster shape `relearn_apply.apply_relearn_fix` renders a rule or
+    # skill from, built the same way `POST
     # /relearn/cost-proposals/apply-workspace` builds it
     # (api/routes/relearn.py) -- duplicated here rather than imported,
     # because the CLI must not import across into the API layer.
@@ -340,7 +335,11 @@ def cost_apply_cmd(
         "family_key": f"cost_{analyzer}" if analyzer else "cost_proposal",
         "title": str(stored.get("title") or "") or str(stored.get("signature") or ""),
         "proposed_fix": str(stored.get("proposed_fix") or ""),
-        "rung": int(stored.get("rung") or 1),
+        # A stored proposal names its own mechanism; a cache written by an
+        # older build named a ladder number, mapped on read. Never defaulted
+        # blindly: what this resolves to decides which artifact is written to
+        # a real path.
+        "delivery": delivery_from_legacy_record(stored) or DEFAULT_DELIVERY,
         "sessions": int(
             baseline.get("apply_sessions", baseline.get("flagged_subagents", 0)) or 0
         ),

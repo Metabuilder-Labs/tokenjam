@@ -13,6 +13,11 @@ from tokenjam.utils.time_parse import utcnow
 
 import pytest
 
+from tokenjam.core.rulewrite.kinds import (
+    DELIVERY_CLAUDE_MD_RULE,
+    DELIVERY_SKILL,
+)
+
 from tokenjam.core.config import StorageConfig, TjConfig
 from tokenjam.core.db import InMemoryBackend
 from tokenjam.core.optimize import cost_apply, relearn_store
@@ -186,7 +191,7 @@ def test_relearn_recompute_preserves_cost_window_and_excluded(tmp_path):
     """A relearn detector recompute must not silently forget a non-default
     cost window or the excluded block a prior cost-proposals recompute wrote.
 
-    Both routes fall back to the same `DEFAULT_COST_WINDOW_DAYS` today, so a
+    Both routes fall back to the same `FALLBACK_COST_WINDOW_DAYS` today, so a
     dropped `cost_window_days` was invisible on live data -- but the moment a
     caller stores a non-default window, `write_cache` (the relearn job's own
     write into the shared cache file) must round-trip it rather than reset
@@ -241,7 +246,7 @@ def test_subagent_proposal_is_apply_capable_cc_origin():
     assert p.analyzer == "subagent"
     assert p.apply_capable is True
     assert p.advise_only is False        # CC-origin has a workspace surface
-    assert p.rung == 1 and p.scope == "project"
+    assert p.delivery == DELIVERY_CLAUDE_MD_RULE and p.scope == "project"
     assert p.proposed_fix                # a sizing rubric note to write
     assert p.target_key == {"models": ["claude-opus-4-8"], "subagent": True}
 
@@ -442,10 +447,10 @@ def test_script_proposal_shape_and_apply_fields():
     assert p.past_overspend_usd == 0.5
     assert p.past_overspend_tokens == 12_500
     assert p.estimate_basis == "script basis"
-    # Apply-capable: a rung-2 skill note, same class of surface as `subagent`.
+    # Apply-capable: a skill note, same class of surface as `subagent`.
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung == 2
+    assert p.delivery == DELIVERY_SKILL
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.baseline["apply_sessions"] == 25
@@ -524,7 +529,7 @@ def test_reuse_proposal_shape_and_apply_fields():
     assert p.past_overspend_tokens == 900
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung == 1
+    assert p.delivery == DELIVERY_CLAUDE_MD_RULE
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.baseline["apply_sessions"] == 4
@@ -575,7 +580,9 @@ def test_verbosity_proposal_shape_and_apply_fields():
     assert p.past_overspend_tokens == 9_000
     assert p.advise_only is True
     assert p.apply_capable is False
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     # The remedy snippet + the concrete suggested cap both land in the
@@ -613,8 +620,8 @@ def test_script_reuse_verbosity_wired_into_cost_analyzers_and_report_adapter():
 
 # --- Persona-gated fix modality (script / reuse / verbosity) ----------------
 #
-# script/reuse's apply path is a rung-1 CLAUDE.md note or rung-2
-# .claude/skills/<slug>/SKILL.md — an artifact nothing in an SDK service's
+# script/reuse's apply path is a CLAUDE.md rule or a
+# .claude/skills/<slug>/SKILL.md skill — an artifact nothing in an SDK service's
 # request path ever reads. An "sdk"/"unknown" persona must never see
 # apply_capable=True for them; the identical recommendation must still reach
 # them as a copy-pasteable `suggestion`. A "claude-code" window must be
@@ -651,7 +658,9 @@ def test_sdk_persona_gets_snippet_not_write(adapter_name, finder):
     p = props[0]
     assert p.apply_capable is False
     assert p.advise_only is True
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     assert p.suggestion  # the recommendation still reaches the sdk user
@@ -701,7 +710,7 @@ def test_claude_code_persona_is_byte_identical_to_pre_gating_shape(adapter_name,
     p = props[0]
     assert p.advise_only is False
     assert p.apply_capable is True
-    assert p.rung in (1, 2)
+    assert p.delivery in (DELIVERY_CLAUDE_MD_RULE, DELIVERY_SKILL)
     assert p.scope == "project"
     assert p.proposed_fix
     assert p.suggestion == ""  # unchanged from before this gating existed
@@ -740,7 +749,9 @@ def test_verbosity_never_offers_the_write_for_any_persona(persona):
     p = props[0]
     assert p.apply_capable is False
     assert p.advise_only is True
-    assert p.rung == 0
+    # No mechanism named at all is what "no write is offered" now looks
+    # like: an empty string, not a zero that had to mean "off the ladder".
+    assert p.delivery == ""
     assert p.scope == ""
     assert p.proposed_fix == ""
     assert p.suggestion == p.advise_text  # the recommendation still reaches everyone
@@ -1166,14 +1177,20 @@ def test_resend_suppresses_cache_control_snippet_for_claude_code():
     assert prop.advise_text.startswith(SUBAGENT_OFFLOAD_FIX)
     assert "Run /compact." in prop.advise_text   # kept, but only as secondary relief
     # The one-paste artifact is the SECOND half of the compound fix: the agent
-    # file's model + reasoning-effort pin. The offload rule is a WRITE, carried
-    # on `proposed_fix` and applied rather than pasted.
+    # file's model pin. The offload rule is a WRITE, carried on `proposed_fix`
+    # and applied rather than pasted.
     assert "model:" in prop.one_paste_fix
-    assert "reasoning_effort:" in prop.one_paste_fix
+    # INVERTED (Critical Rule 23). This used to assert `reasoning_effort:` was
+    # PRESENT — a key Claude Code does not read at all, so the user pasted it,
+    # believed effort was pinned, and nothing changed. The suite was enforcing
+    # the defect. The real key is `effort`, and it is emitted only where the
+    # observation supports a value; a guessed effort in a frontmatter block is
+    # indistinguishable from a measured one to the reader.
+    assert "reasoning_effort" not in prop.one_paste_fix
 
 
 def test_resend_claude_code_offers_apply_capable_compound_write():
-    # Durable claude-code lever: a rung-1 CLAUDE.md rule, apply-capable via the
+    # Durable claude-code lever: a CLAUDE.md rule, apply-capable via the
     # same `_persona_gated_write_fields` machinery script/reuse/verbosity use.
     # ONE card carries BOTH halves of the lever — offload the context-heavy
     # work, and right-size what you offload it to — so this consolidates the
@@ -1187,7 +1204,7 @@ def test_resend_claude_code_offers_apply_capable_compound_write():
     prop = _resend_to_proposals(_resend_finding(), persona="claude-code")[0]
     assert prop.advise_only is False
     assert prop.apply_capable is True
-    assert prop.rung == 1
+    assert prop.delivery == DELIVERY_CLAUDE_MD_RULE
     assert prop.scope == "project"
     assert SUBAGENT_OFFLOAD_FIX in prop.proposed_fix
     assert RIGHTSIZE_FIX_TEMPLATE in prop.proposed_fix
@@ -1271,7 +1288,11 @@ def test_resend_mixed_persona_offers_write_and_keeps_snippet():
     # the SDK share keeps its cache_control snippet on `suggestion`, while the
     # one-paste slot carries the claude-code share's right-sizing frontmatter
     # (the offload rule itself is a WRITE on `proposed_fix`, applied not pasted).
-    assert "reasoning_effort:" in prop.one_paste_fix
+    # INVERTED (Critical Rule 23) — see the sibling test: `reasoning_effort` is
+    # not a key Claude Code reads, so asserting its presence pinned a
+    # silently-ignored line into the product.
+    assert "reasoning_effort" not in prop.one_paste_fix
+    assert "model:" in prop.one_paste_fix
     assert "cache_control" not in prop.one_paste_fix
 
 
@@ -1525,13 +1546,26 @@ def test_downsize_agent_card_apply_blocked_gets_cc_lever_for_claude_code():
     props = _downsize_agent_proposals(_Finding(), config=None, persona="claude-code")
     assert len(props) == 1
     p = props[0]
-    assert "Applying it here is not on offer" in p.advise_text
     assert "switch your own interactive model" in p.advise_text
+    # INVERTED (Critical Rule 23). This used to assert the generic
+    # "Applying it here is not on offer:" wording, which arrived attached to a
+    # redeploy-shaped offer. On Claude Code `agent_id` is
+    # `claude-code-<cwd-basename>` — a PROJECT DIRECTORY with ephemeral
+    # sessions, no process and no model id written down — so there is nothing
+    # to redeploy or restart, and naming three things that do not exist reads
+    # as the product not understanding the user's setup.
+    assert "redeploy" not in p.advise_text.lower()
+    assert "restart the agent" not in p.advise_text.lower()
+    assert "project directory, not a deployed service" in p.advise_text
+    # The OBSERVATION is untouched by that gate (Critical Rule 32).
+    assert p.past_overspend_usd is not None and p.past_overspend_usd > 0
 
-    # sdk/unknown never get the CC lever appended.
+    # sdk/unknown never get the CC lever appended, and DO keep the redeploy
+    # instruction, which is correct for a real deployed service.
     for persona in ("sdk", "unknown"):
         p2 = _downsize_agent_proposals(_Finding(), config=None, persona=persona)[0]
         assert "switch your own interactive model" not in p2.advise_text
+        assert "redeploy" in p2.one_paste_fix.lower()
 
 
 # --- Persona gating: placement (batch) ---------------------------------------
