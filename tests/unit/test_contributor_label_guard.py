@@ -1,7 +1,7 @@
 """
 Unit tests for `.github/scripts/contributor_label_guard.py` — the closing-
-keyword parser and the remove/restore decision logic behind the outside-
-contribution label guard. Pure logic only, no network calls.
+keyword parser, remove/restore decision logic, and mocked-HTTP coverage for
+the GitHub API I/O layer behind the outside-contribution label guard.
 
 The module under test lives outside the `tokenjam` package (it's a workflow
 helper script, following the `archive_traffic.py` convention), so it's
@@ -9,8 +9,14 @@ imported by path rather than as a normal package import.
 """
 from __future__ import annotations
 
+import io
+import json
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+import urllib.error
 
 _SCRIPTS_DIR = Path(__file__).resolve().parents[2] / ".github" / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -243,3 +249,183 @@ def test_is_pull_request_true_when_payload_has_pull_request_key():
 
 def test_is_pull_request_false_for_plain_issue():
     assert guard._is_pull_request({"number": 1}) is False
+
+
+# ---------------------------------------------------------------------------
+# Network I/O — mocked HTTP (issue #608)
+# ---------------------------------------------------------------------------
+
+
+def _mock_http_ok(payload: object | None, status: int = 200) -> MagicMock:
+    mock_resp = MagicMock()
+    mock_resp.__enter__ = lambda s: s
+    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_resp.status = status
+    mock_resp.read.return_value = json.dumps(payload).encode() if payload is not None else b""
+    return mock_resp
+
+
+def _mock_http_error(
+    url: str, status: int, payload: object | None = None, headers: dict[str, str] | None = None
+) -> urllib.error.HTTPError:
+    raw = json.dumps(payload).encode() if payload is not None else b""
+    return urllib.error.HTTPError(url, status, "error", headers or {}, io.BytesIO(raw))
+
+
+def test_api_request_success_returns_status_and_payload(monkeypatch):
+    issue = {"number": 1, "state": "open", "labels": []}
+
+    def fake_urlopen(req, timeout=30):
+        assert req.get_method() == "GET"
+        assert req.full_url.endswith("/repos/Metabuilder-Labs/tokenjam/issues/1")
+        return _mock_http_ok(issue)
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    status, payload = guard._api_request("GET", "/repos/Metabuilder-Labs/tokenjam/issues/1", "token")
+    assert status == 200
+    assert payload == issue
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+def test_api_request_http_auth_and_rate_limit_errors_do_not_raise(monkeypatch, status):
+    headers = {"X-RateLimit-Remaining": "0"} if status == 429 else {}
+
+    def fake_urlopen(req, timeout=30):
+        raise _mock_http_error(req.full_url, status, {"message": "nope"}, headers)
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    returned_status, payload = guard._api_request(
+        "GET", "/repos/Metabuilder-Labs/tokenjam/issues/1", "token"
+    )
+    assert returned_status == status
+    assert payload == {"message": "nope"}
+
+
+def test_api_request_http_error_with_non_json_body_returns_none_payload(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        err = urllib.error.HTTPError(req.full_url, 500, "error", {}, io.BytesIO(b"not-json"))
+        raise err
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    status, payload = guard._api_request("GET", "/repos/Metabuilder-Labs/tokenjam/issues/1", "token")
+    assert status == 500
+    assert payload is None
+
+
+def test_fetch_issue_404_does_not_raise(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        raise _mock_http_error(req.full_url, 404, {"message": "Not Found"})
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    status, payload = guard.fetch_issue(REPO, 999, "token")
+    assert status == 404
+    assert payload == {"message": "Not Found"}
+
+
+def test_fetch_issue_timeline_paginates_until_short_page(monkeypatch):
+    page_one = [{"event": "labeled", "label": {"name": "bug"}, "created_at": "t1"}] * 100
+    page_two = [{"event": "unlabeled", "label": {"name": "bug"}, "created_at": "t2"}]
+    responses = iter([_mock_http_ok(page_one), _mock_http_ok(page_two)])
+    seen_pages: list[int] = []
+
+    def fake_urlopen(req, timeout=30):
+        page = int(req.full_url.rsplit("page=", 1)[-1])
+        seen_pages.append(page)
+        return next(responses)
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    events = guard.fetch_issue_timeline(REPO, 42, "token")
+    assert seen_pages == [1, 2]
+    assert len(events) == 101
+
+
+def test_fetch_issue_timeline_non_200_returns_empty(monkeypatch):
+    def fake_urlopen(req, timeout=30):
+        raise _mock_http_error(req.full_url, 403, {"message": "Forbidden"})
+
+    monkeypatch.setattr(guard.urllib.request, "urlopen", fake_urlopen)
+    assert guard.fetch_issue_timeline(REPO, 42, "token") == []
+
+
+def test_handle_claim_issue_not_found_logs_distinguishable_noop(monkeypatch, capsys):
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (404, {"message": "Not Found"}))
+    guard._handle_claim(REPO, 999, "token")
+    assert "no-op: issue #999 not found (status 404)" in capsys.readouterr().out
+
+
+def test_handle_claim_auth_failure_logs_distinguishable_noop(monkeypatch, capsys):
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (403, None))
+    guard._handle_claim(REPO, 12, "token")
+    assert "no-op: issue #12 not found (status 403)" in capsys.readouterr().out
+
+
+def test_handle_claim_payload_missing_labels_key_does_not_crash(monkeypatch, capsys):
+    monkeypatch.setattr(
+        guard,
+        "fetch_issue",
+        lambda repo, number, token: (200, {"number": 7, "state": "open"}),
+    )
+    guard._handle_claim(REPO, 7, "token")
+    assert "no-op: issue #7 has none of the guarded labels" in capsys.readouterr().out
+
+
+def test_handle_claim_remove_failure_logs_warn_to_stderr(monkeypatch, capsys):
+    issue = {
+        "number": 5,
+        "state": "open",
+        "labels": [{"name": "good first issue"}],
+    }
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(guard, "remove_label", lambda repo, number, label, token: 403)
+    guard._handle_claim(REPO, 5, "token")
+    captured = capsys.readouterr()
+    assert "removed label 'good first issue' from issue #5" not in captured.out
+    assert "warn: failed to remove label 'good first issue' from issue #5 (status 403)" in captured.err
+
+
+def test_handle_claim_success_removes_present_guarded_labels(monkeypatch, capsys):
+    issue = {
+        "number": 8,
+        "state": "open",
+        "labels": [{"name": "good first issue"}, {"name": "help wanted"}],
+    }
+    removed: list[str] = []
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(
+        guard,
+        "remove_label",
+        lambda repo, number, label, token: removed.append(label) or 204,
+    )
+    guard._handle_claim(REPO, 8, "token")
+    assert removed == ["good first issue", "help wanted"]
+    out = capsys.readouterr().out
+    assert "removed label 'good first issue' from issue #8" in out
+    assert "removed label 'help wanted' from issue #8" in out
+
+
+def test_handle_release_restore_failure_logs_warn_to_stderr(monkeypatch, capsys):
+    issue = {"number": 3, "state": "open", "labels": []}
+    events = [_unlabeled_event("help wanted")]
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(guard, "fetch_issue_timeline", lambda repo, number, token: events)
+    monkeypatch.setattr(guard, "add_labels", lambda repo, number, labels, token: 429)
+    guard._handle_release(REPO, 3, "token", guard.DEFAULT_ACTOR_LOGIN)
+    captured = capsys.readouterr()
+    assert "restored labels ['help wanted'] on issue #3" not in captured.out
+    assert "warn: failed to restore labels ['help wanted'] on issue #3 (status 429)" in captured.err
+
+
+def test_handle_release_success_restores_labels(monkeypatch, capsys):
+    issue = {"number": 4, "state": "open", "labels": []}
+    events = [_unlabeled_event("good first issue")]
+    added: list[list[str]] = []
+    monkeypatch.setattr(guard, "fetch_issue", lambda repo, number, token: (200, issue))
+    monkeypatch.setattr(guard, "fetch_issue_timeline", lambda repo, number, token: events)
+    monkeypatch.setattr(
+        guard,
+        "add_labels",
+        lambda repo, number, labels, token: added.append(list(labels)) or 201,
+    )
+    guard._handle_release(REPO, 4, "token", guard.DEFAULT_ACTOR_LOGIN)
+    assert added == [["good first issue"]]
+    assert "restored labels ['good first issue'] on issue #4" in capsys.readouterr().out
