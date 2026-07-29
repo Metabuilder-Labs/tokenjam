@@ -214,8 +214,9 @@ body[data-persona="claude-code"] .health-glance { display: none; }
    left float it sat BEFORE the page title, so the reader met a global control
    before learning which page they were on, and any prose paragraph following
    the heading wrapped its first line around it. */
-.persona-bar { float: right; display: flex; align-items: center; gap: 8px; margin: 0 0 10px 18px; }
-.persona-bar-label { font-size: 12px; color: var(--text-dim); }
+.persona-bar { float: right; margin: 0 0 10px 18px; }
+.persona-pick { display: inline-flex; align-items: center; gap: 8px; }
+.persona-bar-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
 .persona-bar-note { font-size: 12px; color: var(--text-faint); }
 /* A native <select>: two mutually exclusive views of the same data is what a
    dropdown is for, and it matches the range/metric pickers the analytics
@@ -336,6 +337,17 @@ body[data-persona="claude-code"] .health-glance { display: none; }
   max-width: 220px;
 }
 .rename-input:focus { outline: none; border-color: var(--brand); }
+/* The action row inside a card's apply box: a target-path input and its
+   buttons. Every other card kind right-aligns its actions
+   (`justify-content:flex-end`), but these rows reuse `.rename-input`, whose
+   `max-width` exists for the narrow session-rename affordance above. Capped at
+   that width the input could not grow, so the buttons hugged it on the left and
+   the row sat visibly out of line with every neighbouring card. Letting the
+   input fill the row fixes the alignment and, on the same edit, stops
+   truncating the path: these cards ask the reader to "confirm the target
+   first", which they could not do on a path cut off mid-string. */
+.fix-action-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.fix-action-row .rename-input { flex: 1 1 280px; max-width: none; }
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
   display: inline-block;
@@ -2021,8 +2033,8 @@ code.md-code {
 // Source code is unchanged from when it was loaded from esm.sh — the
 // importmap just redirects the bare specifiers to vendored local files
 // under /ui/vendor/ so the dashboard works fully offline. (Issue #87.)
-import { h, render, Component, Fragment } from 'preact';
-import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'preact/hooks';
+import { h, render, Component, Fragment, createContext } from 'preact';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect, useContext } from 'preact/hooks';
 import htm from 'htm';
 
 const html = htm.bind(h);
@@ -2986,7 +2998,7 @@ function SdkServicesPanel({ services, framing }) {
     const seen = (quiet ? 'went quiet ' : 'last seen ') + fmtAgo(s.last_seen);
     return html`
       <div class=${'inact-row clickable ' + (quiet ? 'quiet' : 'dormant')}
-           title=${quiet ? 'Was steady and just stopped — check for an incident' : 'Long silent — likely decommissioned'}
+           title=${quiet ? 'Was steady and just stopped; check for an incident' : 'Long silent; likely decommissioned'}
            onClick=${() => openTraces(s.agent_id)}>
         <div class="inact-name"><span class="status-dot ${dotCls}"></span>${s.agent_id}</div>
         <div><span class=${'inact-tag ' + tagCls}>${tag}</span></div>
@@ -3247,7 +3259,7 @@ function StatusView({ params }) {
           <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
-          ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
+          ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time: the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
           ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
@@ -3286,7 +3298,7 @@ function StatusView({ params }) {
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 18px;font-family:'Geist Mono',monospace">
       ${agentId
         ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a>`
-        : 'Two zones — coding sessions (bounded work) and SDK services (unbounded telemetry).'}
+        : 'Two zones: coding sessions (bounded work) and SDK services (unbounded telemetry).'}
     </div>
 
     ${(codingAgents.length || codingArchived.length) ? html`
@@ -3520,7 +3532,7 @@ function StorySection({ sessionId }) {
   if (!story.available) {
     return html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
-      <div class="story-unavailable">No transcript on disk — Timeline is available for Claude Code sessions.</div>
+      <div class="story-unavailable">No transcript on disk. Timeline is available for Claude Code sessions.</div>
     `;
   }
 
@@ -3531,7 +3543,7 @@ function StorySection({ sessionId }) {
   // newest ask on top; within each ask the steps read in order (prompt first).
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest ask first — each reads in order${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest ask first; each reads in order${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
 
     ${steps.length === 0
       ? html`<div class="story-unavailable">Transcript found but no narrated steps.</div>`
@@ -3637,7 +3649,7 @@ function WorkMapAsk({ ask, sessionSubs, distilled }) {
       <div class="wm-milestone idle">
         <span class="wm-dot-spine idle">·</span>
         <div class="wm-milestone-head ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
-          <span class="wm-chat" title=${prompt}>you: ${promptShort}${headline ? ' — ' + headline : ''}</span>
+          <span class="wm-chat" title=${prompt}>you: ${promptShort}${headline ? ' · ' + headline : ''}</span>
           <span class="wm-ask-meta">${tokenTag}</span>
         </div>
         ${open && hasDetail ? html`<div class="wm-ask-body"><div class="wm-detail"><span class="k">full</span>${ask.outcome}</div></div>` : null}
@@ -3645,7 +3657,7 @@ function WorkMapAsk({ ask, sessionSubs, distilled }) {
     `;
   }
 
-  const outcomeShort = headline || '(did work — no narration)';
+  const outcomeShort = headline || '(did work, no narration)';
   return html`
     <div class="wm-milestone ${cls}">
       <span class="wm-dot-spine ${cls}">${icon}</span>
@@ -3752,7 +3764,7 @@ function WorkMapRunCard({ run }) {
   return html`
     <div class="wm-run-card ${inferred ? 'inferred' : ''}">
       <div class="wm-run-head">
-        <div class="wm-run-title">↳ Launched run <span class="wm-run-id">${run.run_id}</span>${inferred ? html`<span class="wm-run-src" title="Scraped from this session's transcript and matched to a real run — best-effort, not declared by the harness.">inferred</span>` : null}</div>
+        <div class="wm-run-title">↳ Launched run <span class="wm-run-id">${run.run_id}</span>${inferred ? html`<span class="wm-run-src" title="Scraped from this session's transcript and matched to a real run; best-effort, not declared by the harness.">inferred</span>` : null}</div>
         <span class="wm-run-view" onClick=${goRun}>View run →</span>
       </div>
       <div class="wm-run-meta">${count} worker${count === 1 ? '' : 's'} · ${fmtCost(run.total_cost_usd)} · ${run.tool_call_count || 0} tool calls</div>
@@ -3826,7 +3838,7 @@ function WorkMapSection({ sessionId }) {
   if (!map.available) {
     return html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
-      <div class="story-unavailable">No transcript on disk — the work map is available for Claude Code sessions.</div>
+      <div class="story-unavailable">No transcript on disk. The work map is available for Claude Code sessions.</div>
     `;
   }
 
@@ -3853,8 +3865,8 @@ function WorkMapSection({ sessionId }) {
   const distillNote =
     distillState === 'running' ? html`<span class="wm-distill-note">✨ distilling with your local Claude… (~10s)</span>`
     : distillState === 'applied' ? html`<span class="wm-distill-note">titles distilled by your local Claude · haiku · cached</span>`
-    : distillState === 'nothing' ? html`<span class="wm-distill-note">titles already concise — nothing to distill</span>`
-    : distillState === 'failed' ? html`<span class="wm-distill-note">couldn't reach your local claude — showing raw titles</span>`
+    : distillState === 'nothing' ? html`<span class="wm-distill-note">titles already concise; nothing to distill</span>`
+    : distillState === 'failed' ? html`<span class="wm-distill-note">couldn't reach your local claude; showing raw titles</span>`
     : null;
   const distillBusy = distillState === 'running';
   const distillBtnLabel = distillBusy ? '✨ Distilling…'
@@ -3867,7 +3879,7 @@ function WorkMapSection({ sessionId }) {
         ${distillBtnLabel}
       </button>
     </div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first) — bold line is what the agent did, dim line is your prompt. ${meta}.${distillNote ? html` ${distillNote}` : null}</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first). Bold line is what the agent did, dim line is your prompt. ${meta}.${distillNote ? html` ${distillNote}` : null}</div>
     ${map.launched_run ? html`<${WorkMapRunCard} run=${map.launched_run} />` : null}
     ${asks.length === 0 ? null : html`
       <div class="wm-summary-band">
@@ -3878,7 +3890,7 @@ function WorkMapSection({ sessionId }) {
           <span>${flagged} flagged</span>
         </div>
         ${topFanouts.length ? html`<div class="wm-summary-fanouts">
-          ${topFanouts.map(a => html`<div class="wm-summary-fanout" title=${a.outcome || ''}>${Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)}×: ${firstSentence(a.outcome || a.summary || '') || '(did work — no narration)'}</div>`)}
+          ${topFanouts.map(a => html`<div class="wm-summary-fanout" title=${a.outcome || ''}>${Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)}×: ${firstSentence(a.outcome || a.summary || '') || '(did work, no narration)'}</div>`)}
         </div>` : null}
       </div>
     `}
@@ -3889,7 +3901,7 @@ function WorkMapSection({ sessionId }) {
           ? html`<${WorkMapChatRun} asks=${seg.asks} sessionSubs=${sub} distilled=${distilled} />`
           : html`<${WorkMapAsk} ask=${seg.ask} sessionSubs=${sub} distilled=${distilled} />`)}</div>`}
     ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not attributed to an ask (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
-    <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Each ask is one thing you asked; structure + activity from the transcript, tokens from spans. Descriptive only — tj reports what happened, you judge the approach.</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Each ask is one thing you asked; structure + activity from the transcript, tokens from spans. Descriptive only: tj reports what happened, you judge the approach.</div>
   `;
 }
 
@@ -4125,7 +4137,7 @@ function ApproachDelegation({ deleg }) {
         <span class="ap-caret">▶</span>
         <div class="ap-deleg-main">
           <div class="ap-deleg-name">↳ ${deleg.name} <span class="ap-depthtag">depth ${deleg.depth}</span>${verifyChip}</div>
-          <div class="ap-deleg-note">not expanded — ${capped}</div>
+          <div class="ap-deleg-note">not expanded: ${capped}</div>
         </div>
       </div>`;
   }
@@ -4218,7 +4230,7 @@ function ApproachRail({ agents }) {
             </div>
           </div>`;
       })}
-      <div class="ap-railcap">Nodes below main were <b>killed</b> when done — their context is gone, so tokenjam rebuilds <b>how each one solved its piece</b> from the captured transcript. The badge never claims more than tokenjam actually has.</div>
+      <div class="ap-railcap">Nodes below main were <b>killed</b> when done; their context is gone, so tokenjam rebuilds <b>how each one solved its piece</b> from the captured transcript. The badge never claims more than tokenjam actually has.</div>
     </div>
   `;
 }
@@ -4243,7 +4255,7 @@ function ApproachSection({ sessionId }) {
   if (!data.available) {
     return html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Approach</div>
-      <div class="story-unavailable">${data.reason || 'No transcript or snapshot for this session — Approach is available for Claude Code sessions.'}</div>
+      <div class="story-unavailable">${data.reason || 'No transcript or snapshot for this session. Approach is available for Claude Code sessions.'}</div>
     `;
   }
 
@@ -4264,7 +4276,7 @@ function ApproachSection({ sessionId }) {
     + ' · ' + (meta.tokens != null ? fmtTokens(meta.tokens) : '-') + ' tok';
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Approach</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How the agent attempted it — the method spine, rebuilt for every agent and kept after each is killed; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How the agent attempted it: the method spine, rebuilt for every agent and kept after each is killed; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
     <div class="ap-grid">
       <${ApproachRail} agents=${agents} />
       <div class="ap-panel">
@@ -4845,7 +4857,7 @@ function MapBoardSection({ sessionId }) {
     }
     if (territory) {
       const editedCount = territory.dirs.reduce((s, d) => s + d.files.filter((f) => f.edited).length, 0);
-      if (editedCount) insights.push({ k: 'edits landed in', v: editedCount + ' file' + (editedCount === 1 ? '' : 's'), title: 'distinct files edited — see "Where the work landed" below' });
+      if (editedCount) insights.push({ k: 'edits landed in', v: editedCount + ' file' + (editedCount === 1 ? '' : 's'), title: 'distinct files edited; see "Where the work landed" below' });
     }
   }
 
@@ -4873,7 +4885,7 @@ function MapBoardSection({ sessionId }) {
 
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 0;font-family:'Geist Mono',monospace">Where this run's time and money went — phases, tool activity, sub-agents, per-call context size and cost burn on one shared axis. Toggle time⇄step to re-space every lane; hover any point for details.</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 0;font-family:'Geist Mono',monospace">Where this run's time and money went: phases, tool activity, sub-agents, per-call context size and cost burn on one shared axis. Toggle time⇄step to re-space every lane; hover any point for details.</div>
     <div class="mb-head">
       <div class="mb-chips">
         <span class="mb-chip">${mbFmtTime(duration)}</span>
@@ -5055,10 +5067,10 @@ function MapBoardSection({ sessionId }) {
             ${territory.scratch ? html`
               <div class="mb-dir mb-scratch" title=${territory.scratch.title}>
                 <div class="mb-dh"><span class="mb-dh-nm">temp / scratch</span> <span class="mb-meta">demoted</span></div>
-                <div class="mb-meta">${territory.scratch.count} file${territory.scratch.count === 1 ? '' : 's'} · ${territory.scratch.reads} read${territory.scratch.reads === 1 ? '' : 's'}${territory.scratch.edits ? ' · ' + territory.scratch.edits + ' edit' + (territory.scratch.edits === 1 ? '' : 's') : ''} — hover for paths</div>
+                <div class="mb-meta">${territory.scratch.count} file${territory.scratch.count === 1 ? '' : 's'} · ${territory.scratch.reads} read${territory.scratch.reads === 1 ? '' : 's'}${territory.scratch.edits ? ' · ' + territory.scratch.edits + ' edit' + (territory.scratch.edits === 1 ? '' : 's') : ''} · hover for paths</div>
               </div>` : null}
           </div>
-          <div class="mb-tcap">Cards are sized by edits over reads — edits (green, ✎) are where the work landed; reads sweep wide. Order badges show first-touch sequence; temp/scratch reads collapse into one muted card. Descriptive only — tj reports what happened, you judge the approach.</div>
+          <div class="mb-tcap">Cards are sized by edits over reads: edits (green, ✎) are where the work landed; reads sweep wide. Order badges show first-touch sequence; temp/scratch reads collapse into one muted card. Descriptive only: tj reports what happened, you judge the approach.</div>
         </div>
       </div>
     ` : null}
@@ -5176,7 +5188,7 @@ function SessionDetailView({ sessionId }) {
       <div class="card">
         <div class="card-header">Cost & Tokens</div>
         ${isLocal
-          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
+          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model, no API cost</span></div>`
           : html`<div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></span><span class="value">${fmtFramedDollar(s.total_cost_usd, framing)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(s.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(s.output_tokens)}</span></div>
@@ -5279,7 +5291,7 @@ function SessionDetailView({ sessionId }) {
           `)}
         </tbody>
       </table></div>
-      <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Candidate-flagging heuristic, not a quality judgment — review before changing how subagents are dispatched.</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Candidate-flagging heuristic, not a quality judgment; review before changing how subagents are dispatched.</div>
     ` : html`<div class="empty">No subagents in this session.</div>`}
     ` : null}
 
@@ -5585,7 +5597,7 @@ function RunDetailView({ runId }) {
       <div class="card">
         <div class="card-header">Cost & Tokens</div>
         ${isLocal
-          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
+          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model, no API cost</span></div>`
           : html`<div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">${costTip}</span></span></span><span class="value">${fmtCost(r.total_cost_usd)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(r.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(r.output_tokens)}</span></div>
@@ -5879,7 +5891,7 @@ function TraceDetailView({ traceId }) {
       </div>
       <div class="view-toggle">
         <button class=${wfMode2 === 'tokens' ? 'active' : ''} onClick=${() => setWfMode('tokens')}>By tokens</button>
-        <button class=${wfMode2 === 'duration' ? 'active' : ''} onClick=${() => setWfMode('duration')} title=${wfHasDuration ? '' : 'Backfilled spans have no latency — bars will be flat'}>By duration</button>
+        <button class=${wfMode2 === 'duration' ? 'active' : ''} onClick=${() => setWfMode('duration')} title=${wfHasDuration ? '' : 'Backfilled spans have no latency; bars will be flat'}>By duration</button>
       </div>
     </div>
     <div class="wf-head">
@@ -6536,7 +6548,7 @@ function CostView({ params }) {
       <div class="chart-card">
         <div class="chart-head">
           <div class="chart-title">Spend over time ${groupBy === 'model' ? 'by model' : groupBy === 'agent' ? 'by agent' : ''} ${useTokens ? '(tokens)' : ''}</div>
-          ${isAttributionDim ? html`<div class="chart-meta"><span class="dim">Shown as a single total line — the chart doesn't yet split by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}; the table below does.</span></div>` : null}
+          ${isAttributionDim ? html`<div class="chart-meta"><span class="dim">Shown as a single total line; the chart doesn't yet split by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}; the table below does.</span></div>` : null}
           <div class="chart-meta">
             <span class="chart-total">${hasCostData ? totalDisplay : html`<span class="shimmer" style="display:inline-block;width:140px;height:15px;vertical-align:middle"></span>`}</span>
             ${hasCostData ? html`<${TrendChip} pct=${trendPct} prevThin=${trendPrevThin} />` : null}
@@ -6548,11 +6560,11 @@ function CostView({ params }) {
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate}
               showLegend=${false} bucket=${series.bucket} />
             ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
-            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets; this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
           ` : html`
             <${StackedBarChart} data=${series.data} labels=${series.labels} height=${200}
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} bucket=${series.bucket} />
-            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets; this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
           `) : html`<div class="empty compact">No spend in this window.</div>`}
       </div>
     ` : null}
@@ -6577,7 +6589,7 @@ function CostView({ params }) {
             fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtCost}
             bucket=${cacheSeries.bucket} />
           <div class="chart-foot">
-            <span class="dim">Per-${cacheSeries.bucket === 'hour' ? 'hour' : 'day'} ${useTokens ? 'cached-token volume' : 'savings'}. Cached input bills at roughly a tenth of the normal input rate — you read these tokens at that discount, ${useTokens ? 'sparing your token budget' : 'saving the difference vs paying full price'}.</span>
+            <span class="dim">Per-${cacheSeries.bucket === 'hour' ? 'hour' : 'day'} ${useTokens ? 'cached-token volume' : 'savings'}. Cached input bills at roughly a tenth of the normal input rate; you read these tokens at that discount, ${useTokens ? 'sparing your token budget' : 'saving the difference vs paying full price'}.</span>
             ${cacheSeries.coarsened ? html` <span class="dim">Showing ${cacheSeries.bucket} buckets.</span>` : null}
           </div>
         `}
@@ -6601,7 +6613,7 @@ function CostView({ params }) {
           <th>${COST_GROUP_BY_LABELS[tableMode] || 'Group'}</th>
           ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
           ${tableMode !== 'model' ? html`<th>Model</th>` : null}
-          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th>
+          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens: often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th>
         </tr></thead>
         <tbody>
           ${rows.map(r => html`
@@ -7153,7 +7165,7 @@ function BudgetView({ params }) {
             between a closing tag and the next line's text, so the link ran
             straight into the word after it ("Budget projectionprojects"). */''}
       agent or day. This is what Optimize's <a class="sz-link" href="#/optimize">Budget projection</a>${' '}
-      projects your current run rate against — it is advisory only (a forecast, never an alert).
+      projects your current run rate against; it is advisory only (a forecast, never an alert).
       Clear a field or enter 0 to remove the ceiling.
     </div>
     <div class="table-wrap"><table>
@@ -7564,7 +7576,7 @@ const ANALYZER_META = {
   deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
   resend:     { title: 'Context resend', hint: 'How much of each turn re-sends context already sent in an earlier turn' },
   placement:  { title: 'Batch placement', hint: 'Unattended, cadence-regular workloads that fit the Batch API\'s flat-rate discount' },
-  summarize:  { title: 'Summarize', hint: 'Oversized catalog prompt files — review a compression in the curate/diff surface' },
+  summarize:  { title: 'Summarize', hint: 'Oversized catalog prompt files; review a compression in the curate/diff surface' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
@@ -7729,7 +7741,7 @@ const CACHE_EFFICACY_CEILING = 0.80;
 //   not_ready   — couldn't run (capture off / missing dep / skipped on fast)
 // Reads richer discriminators from the finding rather than `usd in (None,0)`.
 function classifyFinding(name, fd, skipped) {
-  if (skipped.has(name)) return { state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' };
+  if (skipped.has(name)) return { state: 'not_ready', hint: 'Not run on Overview. Open the Optimize tab.' };
   if (fd && fd.enabled === false) {
     return { state: 'not_ready', hint: fd.hint || (ANALYZER_META[name] || {}).hint };
   }
@@ -7904,7 +7916,7 @@ function recoverableTiles(opt) {
   skipped.forEach(k => {
     if (disabled.has(k)) return;
     if (!(k in f) && k !== 'downsize') {
-      out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' });
+      out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview. Open the Optimize tab.' });
     }
   });
   return rankTiles(out, opt.finding_rank);
@@ -8111,7 +8123,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
     if (!dg) {
       return html`<section class="opt-section" id="opt-downsize">
         <div class="opt-title">Downsize</div>
-        <div class="opt-line dim">No downsize candidates in this window — sessions don't match the smaller-model shape (small input/output, few tool calls).</div>
+        <div class="opt-line dim">No downsize candidates in this window; sessions don't match the smaller-model shape (small input/output, few tool calls).</div>
       </section>`;
     }
     body = html`
@@ -8232,7 +8244,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       // whole, complete answer, not a lesser version of it — so that block
       // renders unconditionally and the provenance line/Summarize pointer
       // render only when `source_path` is actually set.
-      body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled — needs [capture] prompts = true and tokenjam[bloat].'}</div>`
+      body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled: needs [capture] prompts = true and tokenjam[bloat].'}</div>`
         : (fd.per_prompt || []).length ? html`
           <div class="opt-line">${fd.prompts_scored} prompt(s) scored; ${fd.total_bloat_chars} of ${fd.total_chars} chars flagged.</div>
           ${fd.per_prompt.slice(0, 5).map((p, i) => html`
@@ -8440,6 +8452,7 @@ function OptimizeView({ params }) {
       <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:0">
         Optimize <${PlanBadge} framing=${framing} />
       </div>
+      <${PersonaPicker} />
       <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
     </div>
     <div class="filters">
@@ -8504,7 +8517,7 @@ function OptimizeView({ params }) {
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
               `;})}
-            </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window — no estimated waste from any analyzer.</div>`}
+            </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window; no estimated waste from any analyzer.</div>`}
           ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
         </div>` : null}
 
@@ -8534,7 +8547,7 @@ function OptimizeView({ params }) {
             </div>
             ${sfApplied > 0 ? html`<div style="margin:14px 0 2px">
               <div class="sz-prog" style="height:10px"><div style=${'width:' + sfPctApplied + '%;background:var(--success)'}></div></div>
-              <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b> — ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
+              <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b>: ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
             </div>` : null}
             <table class="opt-table" style="margin-top:12px">
               <thead><tr><th>File</th><th>Scope</th><th>Loads</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
@@ -8558,17 +8571,17 @@ function OptimizeView({ params }) {
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section" id="opt-budget-projection">
-        <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling — not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
+        <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling, not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
         ${st.opt.budgets.map(b => html`<div class="opt-line">
           <a class="sz-link" href=${'#/budget?provider=' + encodeURIComponent(b.provider)} title="Edit this provider's monthly ceiling on the Budget screen">${b.provider}</a>:
           run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs
           ${fmtFramedDollar(b.budget_usd, framing)}/cycle ceiling
           (<a class="sz-link" href=${'#/budget?provider=' + encodeURIComponent(b.provider)}>configured for ${b.provider}</a>, cycle resets day ${b.cycle_start_day})
-          ${b.over_budget ? html`<span style="color:var(--error)">— projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">— projected within ceiling</span>`}
+          ${b.over_budget ? html`<span style="color:var(--error)">· projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">· projected within ceiling</span>`}
         </div>`)}
-        <div class="opt-caveat">! This projects your current run rate forward against the ceiling you set for that provider on the <a class="sz-link" href="#/budget">Budget screen</a> — not the per-agent daily/session caps shown there. It identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the ceiling.</div>
+        <div class="opt-caveat">! This projects your current run rate forward against the ceiling you set for that provider on the <a class="sz-link" href="#/budget">Budget screen</a>, not the per-agent daily/session caps shown there. It identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the ceiling.</div>
         ${st.opt.budgets.some(b => b.over_budget) && st.comp && st.comp.largest_recoverable_analyzer ? html`
-        <div class="opt-line" style="margin-top:6px">Biggest recoverable opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a> — the fastest way to bring the projection back under ceiling.</div>` : null}
+        <div class="opt-line" style="margin-top:6px">Biggest recoverable opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>. The fastest way to bring the projection back under ceiling.</div>` : null}
       </section>` : null}
     ` : null}
   `;
@@ -8953,7 +8966,7 @@ function RulesView() {
                   </div>
                   <div class="opt-line dim">
                     ${dests.length === 0
-                      ? 'No destination resolved — no session it was derived from recorded a working directory that still exists.'
+                      ? 'No destination resolved: no session it was derived from recorded a working directory that still exists.'
                       : dests.length === 1
                         ? html`Writes into <span class="mono" title=${dests[0].path}>${shortPath(dests[0].path)}</span> <span class="dim">(${dests[0].scope})</span>`
                         : html`Writes into ${dests.length} project files`}
@@ -8984,7 +8997,7 @@ function RulesView() {
                   ${open === r.signature ? html`<pre class="sz-copybox" style="margin-top:10px">${r.artifact_text}</pre>` : null}
                   ${st.length ? html`<div class="opt-line dim" style="margin-top:6px">
                     ${st.map(s => html`<div class="mono" title=${s.path}>
-                      ${s.applyable ? '✓' : '!'} ${shortPath(s.path)}${s.applyable ? '' : ` — ${s.reason}`}
+                      ${s.applyable ? '✓' : '!'} ${shortPath(s.path)}${s.applyable ? '' : `: ${s.reason}`}
                     </div>`)}
                   </div>` : null}
                 </div>`;
@@ -8992,13 +9005,13 @@ function RulesView() {
       </div>
 
       ${preview ? html`<div class="panel">
-        <div class="panel-head"><h2>Preview — nothing written</h2></div>
+        <div class="panel-head"><h2>Preview: nothing written</h2></div>
         <div class="panel-body">
           ${(preview.applied || []).map(a => html`<div class="sz-diffblock" key=${a.path}>
             <div class="sz-diffblock-h">${a.path}${a.created_file ? ' (new file)' : ''}</div>
             <div class="rev-diff">${a.diff}</div>
           </div>`)}
-          ${(preview.skipped || []).map(s => html`<div class="opt-line" style="color:var(--warn)" key=${s.path}>${s.path} — ${s.reason}</div>`)}
+          ${(preview.skipped || []).map(s => html`<div class="opt-line" style="color:var(--warn)" key=${s.path}>${s.path}: ${s.reason}</div>`)}
           <div style="margin-top:8px;display:flex;gap:8px">
             <button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(preview.signature)}>Write these</button>
             <button class="cur-btn" onClick=${() => setPreview(null)}>Close</button>
@@ -9285,7 +9298,7 @@ function SummarizeView({ params }) {
     setRevChecked(new Set()); setBusy(false);
     const okN = results.filter(r => r.ok).length;
     const fails = results.filter(r => !r.ok);
-    setMsg('Applied ' + okN + ' file(s).' + (fails.length ? ' ' + fails.length + ' skipped — ' + fails.map(f => shortP(f.path) + ' (' + f.reason + ')').join('; ') : ''), fails.length ? 'warn' : 'ok');
+    setMsg('Applied ' + okN + ' file(s).' + (fails.length ? ' ' + fails.length + ' skipped: ' + fails.map(f => shortP(f.path) + ' (' + f.reason + ')').join('; ') : ''), fails.length ? 'warn' : 'ok');
     loadBackups();   // newly-applied files now have a backup → surface them as undoable
   };
   const applyChecked = () => applyPaths(rvCheckedStaged);
@@ -9303,8 +9316,8 @@ function SummarizeView({ params }) {
       await apiPostOrDetail('/summarize/undo', { path, go: true });
       setFileStates(s => ({ ...s, [path]: 'reverted' }));
       setBackups(bs => bs.filter(b => b.source_path !== path));   // no longer undoable (now == original)
-      setMsg('Reverted ' + shortP(path) + ' — restored from backup.', 'ok');
-    } catch (e) { setMsg('Undo failed for ' + shortP(path) + ' — ' + (e.message || String(e)), 'warn'); }
+      setMsg('Reverted ' + shortP(path) + '. Restored from backup.', 'ok');
+    } catch (e) { setMsg('Undo failed for ' + shortP(path) + ': ' + (e.message || String(e)), 'warn'); }
     setBusy(false);
   };
   const reRun = async path => {
@@ -9317,7 +9330,7 @@ function SummarizeView({ params }) {
         setStaged(prev => prev.map(s => s.path === path ? one.staged[0] : s));
         setFileStates(s => { const n = { ...s }; delete n[path]; return n; });
       }
-    } catch (e) { setMsg('Re-run failed for ' + shortP(path) + ' — ' + (e.message || String(e)), 'warn'); }
+    } catch (e) { setMsg('Re-run failed for ' + shortP(path) + ': ' + (e.message || String(e)), 'warn'); }
     setBusy(false);
   };
 
@@ -9329,7 +9342,7 @@ function SummarizeView({ params }) {
     const elapsed = rs.curStart ? Math.max(0, Math.round((Date.now() - rs.curStart) / 1000)) : 0;
     return html`
       <div class="page-title">Summarize <span class="sz-sub">· running via ${engine}</span></div>
-      <div class="sz-note">Summarizing ${rs.total} file(s), one at a time${engine === 'claude-p' ? ' — ~30–90s each via claude-p' : ''}. Results are staged; <b>nothing is written yet</b>.</div>
+      <div class="sz-note">Summarizing ${rs.total} file(s), one at a time${engine === 'claude-p' ? ' (~30-90s each via claude-p)' : ''}. Results are staged; <b>nothing is written yet</b>.</div>
       <div class="sz-prog"><div style=${'width:' + pct + '%'}></div></div>
       <div class="dim" style="font-size:12px;margin-bottom:10px">${rs.done} / ${rs.total} done${rs.running && rs.current ? ' · running ' + shortP(rs.current) + ' (' + elapsed + 's)' : (rs.running ? '' : ' · complete')}</div>
       <div class="cur-listbox" style="max-height:360px">
@@ -9360,7 +9373,7 @@ function SummarizeView({ params }) {
     const belowGate = manPrep && !manPrep.error && !manPrep.wrapped_prompt;
     const full = manPrep ? (manPrep.system_rules ? manPrep.system_rules + '\n\n' : '') + manPrep.wrapped_prompt : '';
     return html`
-      <div class="page-title">Summarize <span class="sz-sub">· manual — file ${Math.min(manIdx + 1, total)} of ${total}</span></div>
+      <div class="page-title">Summarize <span class="sz-sub">· manual · file ${Math.min(manIdx + 1, total)} of ${total}</span></div>
       <div class="dim" style="font-size:12.5px;margin-bottom:10px;font-family:'Geist Mono',monospace">${path}</div>
       ${manBusy ? html`<div class="shimmer" style="height:120px"></div>` : null}
       ${manErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">${manErr}</div></div>` : null}
@@ -9377,7 +9390,7 @@ function SummarizeView({ params }) {
         </div>
       ` : null}
       ${!manBusy && belowGate ? html`
-        <div class="opt-caveat">${manPrep.note || 'Below the prose gate — not worth summarizing.'}</div>
+        <div class="opt-caveat">${manPrep.note || 'Below the prose gate; not worth summarizing.'}</div>
         <div class="cur-addbar"><button class="cur-btn primary" onClick=${manNext}>Skip →</button><button class="cur-btn" onClick=${() => setPhase('curate')}>← back to curator</button></div>
       ` : null}
     `;
@@ -9390,7 +9403,7 @@ function SummarizeView({ params }) {
     return html`
       <div style="margin:0 0 4px"><span class="sz-link" onClick=${() => setPhase('curate')}>← back to curator</span></div>
       <div class="page-title">Summarize <span class="sz-sub">· review & apply</span></div>
-      <div class="sz-note rev-note">${revRows.length} staged. Structure is guaranteed; <b>meaning may change</b> — click a row for its diff. <b>Apply</b> writes the file (backs up first); <b>Reject</b> dismisses it here.</div>
+      <div class="sz-note rev-note">${revRows.length} staged. Structure is guaranteed; <b>meaning may change</b>. Click a row for its diff. <b>Apply</b> writes the file (backs up first); <b>Reject</b> dismisses it here.</div>
       ${dataErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">${dataErr}</div></div>` : null}
       ${applyMsg ? html`<div class="opt-caveat" style=${'font-style:normal;color:' + (applyMsg.tone === 'warn' ? 'var(--warn)' : 'var(--success)')}>${applyMsg.text}</div>` : null}
       <div class="cur-filters">
@@ -9431,10 +9444,10 @@ function SummarizeView({ params }) {
         <span class="dim" style="font-size:12px">Click a row for its diff.</span>
         <a class="cur-btn" style="margin-left:auto;text-decoration:none" href="#/optimize">Done → Optimize</a>
       </div>
-      ${revRows.length > 0 && stagedCount === 0 ? html`<div class="opt-caveat" style="font-style:normal;color:var(--success);margin-top:12px">✓ All ${revRows.length} rewrite(s) resolved — ${appliedCount} applied, ${rejectedCount} rejected${revertedCount ? ', ' + revertedCount + ' reverted' : ''}.${appliedCount ? ' Applied one you didn\'t want? Undo it below.' : ''} <a class="sz-link" href="#/optimize">Back to Optimize</a> · <span class="sz-link" onClick=${() => setPhase('curate')}>summarize more →</span></div>` : null}
+      ${revRows.length > 0 && stagedCount === 0 ? html`<div class="opt-caveat" style="font-style:normal;color:var(--success);margin-top:12px">✓ All ${revRows.length} rewrite(s) resolved: ${appliedCount} applied, ${rejectedCount} rejected${revertedCount ? ', ' + revertedCount + ' reverted' : ''}.${appliedCount ? ' Applied one you didn\'t want? Undo it below.' : ''} <a class="sz-link" href="#/optimize">Back to Optimize</a> · <span class="sz-link" onClick=${() => setPhase('curate')}>summarize more →</span></div>` : null}
 
       ${backups.length ? html`<div class="opt-section" style="margin:16px 0 4px">
-        <div class="opt-title" style="font-size:14px;margin-bottom:2px">Applied earlier — undo</div>
+        <div class="opt-title" style="font-size:14px;margin-bottom:2px">Applied earlier: undo</div>
         <div style="margin:0 0 4px"><span class="dim" style="font-weight:400;font-size:12px">restores the original from backup</span></div>
         ${backups.map((b, i) => html`<div class="sz-runrow" key=${i}>
           <span style="color:var(--success)">✓</span>
@@ -9442,7 +9455,7 @@ function SummarizeView({ params }) {
           ${b.applied_at ? html`<span class="dim" style="font-size:12px">${b.applied_at.slice(0, 16).replace('T', ' ')}</span>` : null}
           ${b.undoable
             ? html`<button class="cur-btn" disabled=${busy} onClick=${() => undoPath(b.source_path)}>Undo</button>`
-            : html`<span class="dim" style="font-size:12px" title=${b.reason}>can't undo — ${b.reason}</span>`}
+            : html`<span class="dim" style="font-size:12px" title=${b.reason}>can't undo: ${b.reason}</span>`}
         </div>`)}
       </div>` : null}
       ${mf ? html`
@@ -9458,7 +9471,7 @@ function SummarizeView({ params }) {
                 ${mf.structure_ok ? html`<span class="badge badge-ok">structure ok</span>` : html`<span class="badge badge-error">structure fail</span>`}
                 <span class="dim"> ${mf.words_before.toLocaleString()} → ${mf.words_after.toLocaleString()} words · ~${mf.est_tokens_saved} tok/call saved${mf.produced_by ? ' · via ' + mf.produced_by : ''}</span>
               </div>
-              ${(mf.must_keep_removed && mf.must_keep_removed.length) ? html`<div class="opt-caveat" style="margin-top:0">Must-keep phrases changed: ${mf.must_keep_removed.length} removed${mf.must_keep_added && mf.must_keep_added.length ? ', ' + mf.must_keep_added.length + ' added' : ''} — check the diff before applying.</div>` : null}
+              ${(mf.must_keep_removed && mf.must_keep_removed.length) ? html`<div class="opt-caveat" style="margin-top:0">Must-keep phrases changed: ${mf.must_keep_removed.length} removed${mf.must_keep_added && mf.must_keep_added.length ? ', ' + mf.must_keep_added.length + ' added' : ''}. Check the diff before applying.</div>` : null}
               ${mf.note ? html`<div class="dim" style="font-size:12.5px">${mf.note}</div>` : null}
               <div class="sz-note" style="font-size:12px;margin:0 0 10px"><span style="color:var(--error)">−</span> lines removed · <span style="color:var(--success)">+</span> lines added · unchanged lines are kept verbatim (code, tables, ${'<tj-keep>'} blocks). Shown per changed block:</div>
               ${mfBlocks.length ? mfBlocks.map((b, i) => html`<div class="sz-diffblock" key=${i}>
@@ -9498,7 +9511,7 @@ function SummarizeView({ params }) {
       ${addedList.length ? html`<div class="cur-chips">${chipEls}</div>` : null}
     </div>
 
-    ${staged.length ? html`<div class="opt-caveat" style="font-style:normal">${staged.length} file(s) already staged from an earlier run or the <code>tj summarize</code> CLI — <span class="sz-link" onClick=${() => setPhase('review')}>Review & apply →</span></div>` : null}
+    ${staged.length ? html`<div class="opt-caveat" style="font-style:normal">${staged.length} file(s) already staged from an earlier run or the <code>tj summarize</code> CLI. <span class="sz-link" onClick=${() => setPhase('review')}>Review & apply →</span></div>` : null}
     ${backups.filter(b => b.undoable).length ? html`<div class="dim" style="font-size:12px;margin-top:4px">${backups.filter(b => b.undoable).length} applied summary(ies) can be undone: <span class="sz-link" onClick=${() => setPhase('review')}>review & undo →</span></div>` : null}
 
     <div class="cur-filters">
@@ -9555,14 +9568,14 @@ function SummarizeView({ params }) {
     </div>
     ` : null}
 
-    <div class="sz-note" style="font-size:12px;margin-top:14px"><b>Finish → Approve</b> ${engine ? html`runs the summarizer${engine === 'manual' ? ' (you paste each result back)' : ' via ' + engine}` : 'asks which tool to use, then runs the summarizer'} — you review each rewrite before applying.</div>
+    <div class="sz-note" style="font-size:12px;margin-top:14px"><b>Finish → Approve</b> ${engine ? html`runs the summarizer${engine === 'manual' ? ' (you paste each result back)' : ' via ' + engine}` : 'asks which tool to use, then runs the summarizer'}. You review each rewrite before applying.</div>
 
     ${modal ? html`
       <div class="cur-overlay" onClick=${() => setModal(null)}>
         <div class="cur-modal" onClick=${e => e.stopPropagation()}>
           <div class="cur-modal-head">
-            <span class="cur-modal-title">${modal === 'approve' ? (engine ? 'Approve ' + added.size + ' file' + (added.size === 1 ? '' : 's') + ' to summarize?' : 'How should we summarize ' + added.size + ' file' + (added.size === 1 ? '' : 's') + '?') : 'Basket — ' + added.size + ' file' + (added.size === 1 ? '' : 's')}</span>
-            <button class="cur-modal-x" onClick=${() => setModal(null)} title="Close — go back and change">✕</button>
+            <span class="cur-modal-title">${modal === 'approve' ? (engine ? 'Approve ' + added.size + ' file' + (added.size === 1 ? '' : 's') + ' to summarize?' : 'How should we summarize ' + added.size + ' file' + (added.size === 1 ? '' : 's') + '?') : 'Basket · ' + added.size + ' file' + (added.size === 1 ? '' : 's')}</span>
+            <button class="cur-modal-x" onClick=${() => setModal(null)} title="Close: go back and change">✕</button>
           </div>
           <div class="cur-modal-body">
             ${modal === 'approve' && !engine ? html`
@@ -9592,7 +9605,7 @@ function SummarizeView({ params }) {
               <button class="cur-btn" disabled=${modalList.length === 0} onClick=${clearShownModal}>Clear shown</button>
               <button class="cur-btn" disabled=${added.size === 0} onClick=${clearAll}>Clear all</button>
               ${modal === 'approve'
-                ? html`<button class="cur-btn primary" style="margin-left:auto" disabled=${added.size === 0} onClick=${approve}>${engine === 'manual' ? 'Approve ' + added.size + ' — prep first →' : 'Approve ' + added.size + ' — run via ' + engine + ' →'}</button>`
+                ? html`<button class="cur-btn primary" style="margin-left:auto" disabled=${added.size === 0} onClick=${approve}>${engine === 'manual' ? 'Approve ' + added.size + ': prep first →' : 'Approve ' + added.size + ': run via ' + engine + ' →'}</button>`
                 : html`<button class="cur-btn primary" style="margin-left:auto" onClick=${() => setModal(null)}>Done</button>`}
             `}
           </div>
@@ -10022,7 +10035,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
         </div>
         ${toolDimNoMetric ? html`
           <div class="empty compact">
-            <div style="font-size:13px;margin-bottom:12px">Tools don't carry ${metric === 'spend' ? 'cost' : 'tokens'} — those live on the LLM-call spans, not tool spans.</div>
+            <div style="font-size:13px;margin-bottom:12px">Tools don't carry ${metric === 'spend' ? 'cost' : 'tokens'}; those live on the LLM-call spans, not tool spans.</div>
             <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
               <button class="btn" onClick=${() => setFilter('metric', 'events')}>Switch to Events</button>
               <button class="btn" onClick=${() => setFilter('group_by', 'model')}>Group by Model</button>
@@ -10034,7 +10047,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
           : loading && !resp ? html`<div class="shimmer" style="height:220px"></div>`
           : emptyFromStack ? html`
             <div class="empty compact">
-              <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these — e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
+              <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these: e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
               <button class="btn" onClick=${() => setFilter('stack', '')}>Clear stack</button>
             </div>`
           : chart === 'hbar'
@@ -10052,13 +10065,13 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
                   </div>`;
                 })}
               </div>
-              ${boardGap ? html`<div class="chart-foot"><span class="dim">Only ${fmtCount(boardTotal)} of ${fmtCount(kpiCount)} ${countMetric} have a ${dimName} — the rest aren't in this breakdown.</span></div>` : null}
+              ${boardGap ? html`<div class="chart-foot"><span class="dim">Only ${fmtCount(boardTotal)} of ${fmtCount(kpiCount)} ${countMetric} have a ${dimName}; the rest aren't in this breakdown.</span></div>` : null}
               ` : html`<div class="empty compact">No data in this window.</div>`)
             : (series ? html`
               ${chart === 'line'
                 ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} showLegend=${series.labels.length > 1} bucket=${series.bucket} />`
                 : html`<${StackedBarChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} bucket=${series.bucket} />`}
-              ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+              ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets; this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
             ` : html`<div class="empty compact">No data in this window.</div>`)}
       </div>` : null}
   `;
@@ -11015,7 +11028,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
                       that follows it, so without it this reads "tokensover". */ ''}
                 ${cluster.past_overspend_usd != null && cluster.past_overspend_tokens ? ' · ~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens ' : ' '}
                 over the scanned corpus, priced at the rates these sessions were billed at. Observed, not projected, and not netted against any fix's cost.
-                ${cluster.past_reread_usd != null ? html`<div style="margin-top:4px">Of that, ${fmtUsd(cluster.past_reread_usd)} is the re-read tail — the failure text still being carried on later calls. That share is re-sent context the Resend card prices in full, so the two overlap and must never be added together.</div>` : null}
+                ${cluster.past_reread_usd != null ? html`<div style="margin-top:4px">Of that, ${fmtUsd(cluster.past_reread_usd)} is the re-read tail: the failure text still being carried on later calls. That share is re-sent context the Resend card prices in full, so the two overlap and must never be added together.</div>` : null}
               </div>
             </div>` : null}
           <div class="opt-section" style="margin:0 0 14px">
@@ -11023,7 +11036,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
             <div class="sz-note" style="margin-top:4px">${cluster.proposed_fix}</div>
           </div>
           <div class="opt-section" style="margin:0 0 6px">
-            <div class="opt-title" style="font-size:13px">Evidence — repro sessions</div>
+            <div class="opt-title" style="font-size:13px">Evidence: repro sessions</div>
             ${(cluster.examples || []).map((ex, i) => html`
               <div class="sz-runrow" key=${i} style="align-items:flex-start">
                 ${ex.session_resolvable
@@ -11049,7 +11062,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
               ${(cluster.payback_ratio != null && cluster.standing_cost_tokens_per_session) ? html`
                 <div class="sz-note" style="margin-top:8px">
                   A permanent rule for this would carry ~${fmtTokens(cluster.standing_cost_tokens_per_session)} tokens into every future session, forever.
-                  Against what the fix is modelled to recover that is a payback of ${cluster.payback_ratio.toFixed(2)}×${cluster.payback_ratio < 1 ? ' — under 1.0, so on the quantities we can count it costs more to keep than it returns' : ''}.
+                  Against what the fix is modelled to recover that is a payback of ${cluster.payback_ratio.toFixed(2)}×${cluster.payback_ratio < 1 ? '; under 1.0, so on the quantities we can count it costs more to keep than it returns' : ''}.
                   <div style="margin-top:4px" class="dim">This is a modelled comparison, not an observed one. It does not count what the rule might save by preventing the failure in the first place; the measurement that would settle that returned no usable signal.</div>
                 </div>` : null}
             </div>
@@ -11066,7 +11079,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
                   placeholder="/absolute/path/to/target"
                   onInput=${e => setTarget(e.target.value)} />
               </div>
-              ${ENFORCEMENT_DELIVERIES.has(cluster.delivery) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">This writes a hook, DISABLED by default — it will not run until you separately confirm "Enable enforcement".</div>` : null}
+              ${ENFORCEMENT_DELIVERIES.has(cluster.delivery) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">This writes a hook, DISABLED by default; it will not run until you separately confirm "Enable enforcement".</div>` : null}
             </div>
           ` : html`
             <div class="opt-section" style="margin:0 0 6px">
@@ -11589,8 +11602,8 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
                 model is as good", not harder (Critical Rule 14). */ ''}
           ${prop.apply_caveat ? html`
             <div class="opt-caveat" style="margin-top:6px">${prop.apply_caveat}</div>` : null}
-          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
-            <input class="rename-input" style="flex:1;min-width:280px" value=${spTarget}
+          <div class="fix-action-row" style="margin-top:6px">
+            <input class="rename-input" value=${spTarget}
               placeholder="/absolute/path/to/the/agent/checkout" onInput=${e => setSpTarget(e.target.value)} />
             <button class="cur-btn" disabled=${spBusy || !spTarget.trim()} onClick=${() => registerSourcePath(false)}>${spBusy ? 'working…' : 'Preview'}</button>
             <button class="cur-btn primary" disabled=${spBusy || !spTarget.trim()} onClick=${() => registerSourcePath(true)}>Apply swap →</button>
@@ -11608,8 +11621,8 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         <div class="opt-section" style="margin:10px 0 0">
           <div class="opt-title" style="font-size:12.5px;margin-bottom:2px">${akCopy.title}</div>
           <div style="font-size:12.5px;margin:0 0 4px"><span class="dim" style="font-weight:400">${akCopy.hint}</span></div>
-          <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap;align-items:center">
-            <input class="rename-input" style="flex:1;min-width:280px" value=${akTarget}
+          <div class="fix-action-row">
+            <input class="rename-input" value=${akTarget}
               placeholder="/absolute/path/to/target" onInput=${e => setAkTarget(e.target.value)} />
             <button class="cur-btn" disabled=${akBusy} onClick=${() => applyKindFix(false)}>${akBusy ? 'working…' : 'Preview'}</button>
             <button class="cur-btn primary" disabled=${akBusy} onClick=${() => applyKindFix(true)}>${akCopy.button} →</button>
@@ -11641,8 +11654,8 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
             <span class="dim" style="font-weight:400">writes a reversible note to the project ${prop.target_path ? 'below' : html`<code>CLAUDE.md</code> you paste below, or register it once with <code>tj onboard --add-project</code>`}</span>
             ${!prop.target_path ? html`<${CopySnippetButton} text="tj onboard --add-project" />` : null}
           </div>
-          <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap;align-items:center">
-            <input class="rename-input" style="flex:1;min-width:280px" value=${target}
+          <div class="fix-action-row">
+            <input class="rename-input" value=${target}
               placeholder="/absolute/path/to/project/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
             <button class="cur-btn" disabled=${wbusy || !target.trim()} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
             <button class="cur-btn primary" disabled=${wbusy || !target.trim()} onClick=${() => applyWorkspace(true)}>Apply note →</button>
@@ -11810,7 +11823,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnow
         ${/* Skeleton, never a zero. Same geometry as the real figure so the tile
               does not resize when the read lands. */ ''}
         ${appliedKnown
-          ? html`<div style="font-size:24px;font-weight:600;margin-top:4px" title="each fix's own estimate at the moment it was applied — never re-measured afterward">${appliedBig}</div>`
+          ? html`<div style="font-size:24px;font-weight:600;margin-top:4px" title="each fix's own estimate at the moment it was applied; never re-measured afterward">${appliedBig}</div>`
           : html`<div class="shimmer" style="height:24px;width:38%;margin-top:6px"></div>`}
         ${/* The sub-line never restates the number above it. When the big
               figure is an estimate, the line dates it to apply time (the same
@@ -12205,7 +12218,8 @@ function ReviewInboxView({ params }) {
             screens) is already the one place that reports scan state. */ ''}
       <span style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
         ${d.sessionsScanned != null ? html`<span class="scan-provenance">${d.sessionsScanned} sessions scanned</span>` : null}
-        <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} onRescan=${doRefresh} />
+        <${PersonaPicker} />
+      <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} onRescan=${doRefresh} />
       </span>
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
@@ -12747,7 +12761,7 @@ function DashboardView({ params, persona }) {
   // api/subscription/unknown. Requires `projection`, which requires
   // `costData`, so this caption cannot be built from an unanswered read.
   const kpiCaption = (projection && projection !== '—')
-    ? ('At this pace, ~' + projection + ' by ' + cyc.label + ' — linear run-rate, not a forecast')
+    ? ('At this pace, ~' + projection + ' by ' + cyc.label + '; linear run-rate, not a forecast')
     : null;
 
   return html`
@@ -12758,6 +12772,7 @@ function DashboardView({ params, persona }) {
         <${PlanBadge} framing=${framing} />
       </div>
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <${PersonaPicker} />
         <div class="filters" style="margin:0">${winPicker}</div>
         <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
       </div>
@@ -13040,21 +13055,50 @@ function personaHides(persona, view) {
  * that this machine has no SDK workflows rather than find the option missing
  * and be left guessing whether it is supported.
  */
-function PersonaBar({ persona, detected, known, counts, onChange }) {
+const PersonaCtx = createContext(null);
+
+// The switcher itself, position-free. Rendered by whichever container owns the
+// spot: a page's own header-right group when it has one, otherwise the floated
+// fallback below. Reads context rather than props so a page can place it
+// without every view having to thread persona state down to its header.
+function PersonaPicker() {
+  const ctx = useContext(PersonaCtx);
+  if (!ctx) return null;
+  const { persona, detected, known, counts, onChange } = ctx;
   const opts = [['claude-code', 'Claude Code'], ['sdk', 'SDK workflows']];
   return html`
-    <div class="persona-bar">
-      <label class="persona-bar-label" for="persona-select">Viewing as</label>
-      <select id="persona-select" class="persona-select" aria-label="Persona"
-              value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
-        ${opts.map(([value, label]) => html`
-          <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
-      </select>
+    <span class="persona-pick">
+      ${/* No id + for pairing here. App keeps every visited primary view
+            MOUNTED (hidden with display:none), so several of them render their
+            own picker at once and a fixed id would be duplicated across the
+            document. The label wraps its control instead, which associates the
+            two without needing a global identifier. */''}
+      <label class="persona-bar-label">Viewing as
+        <select class="persona-select" aria-label="Persona"
+                value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
+          ${opts.map(([value, label]) => html`
+            <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
+        </select>
+      </label>
       ${known && detected && persona !== detected ? html`
         <span class="persona-bar-note">Detected: ${detected === 'claude-code' ? 'Claude Code' : detected}</span>` : null}
       ${known && counts && counts[persona] === 0 ? html`
         <span class="persona-bar-note">No ${persona === 'sdk' ? 'SDK' : 'Claude Code'} sessions on this machine</span>` : null}
-    </div>`;
+    </span>`;
+}
+
+// Views that render `PersonaPicker` themselves, as the FIRST item of their own
+// header-right group so it reads before the controls that scope the page (the
+// window picker, then Rescan). App() must not also float the fallback for
+// these, or the switcher appears twice. Anything not listed here has no
+// header-right group of its own and gets the floated fallback instead.
+const VIEWS_WITH_PERSONA_SLOT = new Set(['dashboard', 'optimize', 'review']);
+
+// The fallback for every page with no header-right group of its own. Floated
+// so it shares the line with a heading that follows it in source, rather than
+// taking a row above every such page.
+function PersonaBar() {
+  return html`<div class="persona-bar"><${PersonaPicker} /></div>`;
 }
 
 function App() {
@@ -13205,10 +13249,15 @@ function App() {
   // Keep-alive stack: every mounted primary view renders, but only the active
   // one is visible; the rest are display:none (kept mounted, state intact). A
   // detail drill-in (mounted fresh, keyed by id) overlays the hidden stack.
+  const personaCtx = { persona, detected: personaInfo.detected, known: personaInfo.known,
+                       counts: personaInfo.counts, onChange: setPersona };
+  // The floated fallback is suppressed for views that render the picker inside
+  // their own header-right group; a detail drill-in never has one, so it always
+  // takes the fallback regardless of which primary view is behind it.
+  const ownsPersonaSlot = !detail && VIEWS_WITH_PERSONA_SLOT.has(primaryKey);
   return html`
-    <${PersonaBar} persona=${persona} detected=${personaInfo.detected}
-                   known=${personaInfo.known} counts=${personaInfo.counts}
-                   onChange=${setPersona} />
+    <${PersonaCtx.Provider} value=${personaCtx}>
+    ${ownsPersonaSlot ? null : html`<${PersonaBar} />`}
     ${PRIMARY_VIEWS.map(([key, Comp]) => {
       if (!mounted.has(key)) return null;
       const isActive = !detail && key === primaryKey;
@@ -13221,6 +13270,7 @@ function App() {
     })}
     ${detail ? html`<div key=${'detail:' + route.view + ':' + route.param} class="view-pane">${detail}</div>` : null}
     ${!detail && !PRIMARY_KEYS.has(primaryKey) ? html`<div class="empty">Page not found.</div>` : null}
+    <//>
   `;
 }
 
