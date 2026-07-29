@@ -176,6 +176,12 @@ code, .mono {
 .lens-btn.active { background: rgba(var(--accent-rgb),0.16); color: var(--accent); }
 .sidebar[data-lens="improve"] a.nav-link[data-lens="observe"] { display: none; }
 .sidebar[data-lens="observe"] a.nav-link[data-lens="improve"] { display: none; }
+/* Persistent top-level items (data-lens="all", e.g. Dashboard, issue #654)
+   serve both lenses equally, so they sit ABOVE the Improve/Observe toggle and
+   are never hidden by it. The two rules above only target improve/observe, so
+   an "all" link is already immune — this margin just seats it as a header item
+   above the switch. */
+.sidebar a.nav-link[data-lens="all"] { margin-bottom: 8px; }
 /* Persona gating. A coding-agent user has no Observe lens at all, so the
    lens switcher is hidden rather than left as a control with one option:
    showing a toggle that cannot toggle reads as a broken affordance. An SDK
@@ -894,6 +900,17 @@ table.archive-list .a-id { color: var(--text); }
   padding-left: 12px;
 }
 .drift-empty-why div + div { margin-top: 8px; }
+/* A scannable one-line headline above the grey detail wall (issue #657): the
+   detail below is correct but hard to skim, so the lead states the requirement
+   in a single sentence a user reads at a glance. */
+.drift-empty-lead {
+  max-width: 620px;
+  margin: 8px auto 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
+}
 
 /* Empty state.
    `.empty` is the whole-page shape: nothing on this route, so it gets the
@@ -1926,11 +1943,15 @@ code.md-code {
 
 <nav class="sidebar" data-lens="improve">
   <div class="sidebar-brand"><svg class="brand-mark" xmlns="http://www.w3.org/2000/svg" viewBox="54 32 132 132" width="26" height="26" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" aria-label="TokenJam"><rect x="74" y="44" width="92" height="20" rx="6" ry="6"/><path d="M 104 72 L 74 72 L 74 152 L 104 152"/><path d="M 136 72 L 166 72 L 166 152 L 136 152"/><g fill="currentColor" stroke="none" fill-rule="evenodd"><path transform="translate(85.68,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(106.83,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M4.74,-7.50 L4.74,-8.75 L7.24,-8.75 L7.24,-0.00 L5.86,-0.00 L5.86,-7.50 L4.74,-7.50 Z"/><path transform="translate(123.97,104)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(145.12,107)" d="M0.54,-7.50 L0.54,-8.75 L3.04,-8.75 L3.04,-0.00 L1.66,-0.00 L1.66,-7.50 L0.54,-7.50 Z M5.68,-1.86 Q6.83,-2.86 7.49,-3.50 Q8.16,-4.14 8.60,-4.84 Q9.05,-5.53 9.05,-6.23 Q9.05,-6.95 8.71,-7.36 Q8.36,-7.76 7.63,-7.76 Q6.92,-7.76 6.53,-7.31 Q6.14,-6.86 6.12,-6.11 L4.80,-6.11 Q4.84,-7.48 5.62,-8.20 Q6.41,-8.93 7.62,-8.93 Q8.93,-8.93 9.67,-8.21 Q10.40,-7.49 10.40,-6.29 Q10.40,-5.42 9.97,-4.63 Q9.53,-3.83 8.92,-3.20 Q8.32,-2.57 7.38,-1.74 L6.84,-1.26 L10.64,-1.26 L10.64,-0.12 L4.81,-0.12 L4.81,-1.12 L5.68,-1.86 Z"/><path transform="translate(84.35,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(105.44,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M7.46,-7.50 L7.46,-8.75 L9.96,-8.75 L9.96,-0.00 L8.58,-0.00 L8.58,-7.50 L7.46,-7.50 Z"/><path transform="translate(122.64,128)" d="M21.19,-14.32 L16.75,-0.00 L13.63,-0.00 L10.74,-10.58 L7.85,-0.00 L4.73,-0.00 L0.26,-14.32 L3.27,-14.32 L6.26,-2.81 L9.31,-14.32 L12.40,-14.32 L15.32,-2.86 L18.28,-14.32 L21.19,-14.32 Z"/><path transform="translate(143.73,131)" d="M1.48,-1.86 Q2.63,-2.86 3.29,-3.50 Q3.96,-4.14 4.40,-4.84 Q4.85,-5.53 4.85,-6.23 Q4.85,-6.95 4.51,-7.36 Q4.16,-7.76 3.43,-7.76 Q2.72,-7.76 2.33,-7.31 Q1.94,-6.86 1.92,-6.11 L0.60,-6.11 Q0.64,-7.48 1.42,-8.20 Q2.21,-8.93 3.42,-8.93 Q4.73,-8.93 5.47,-8.21 Q6.20,-7.49 6.20,-6.29 Q6.20,-5.42 5.77,-4.63 Q5.33,-3.83 4.72,-3.20 Q4.12,-2.57 3.18,-1.74 L2.64,-1.26 L6.44,-1.26 L6.44,-0.12 L0.61,-0.12 L0.61,-1.12 L1.48,-1.86 Z M8.40,-1.86 Q9.55,-2.86 10.22,-3.50 Q10.88,-4.14 11.33,-4.84 Q11.77,-5.53 11.77,-6.23 Q11.77,-6.95 11.43,-7.36 Q11.09,-7.76 10.36,-7.76 Q9.65,-7.76 9.26,-7.31 Q8.87,-6.86 8.84,-6.11 L7.52,-6.11 Q7.56,-7.48 8.35,-8.20 Q9.13,-8.93 10.34,-8.93 Q11.65,-8.93 12.39,-8.21 Q13.13,-7.49 13.13,-6.29 Q13.13,-5.42 12.69,-4.63 Q12.25,-3.83 11.65,-3.20 Q11.04,-2.57 10.10,-1.74 L9.56,-1.26 L13.37,-1.26 L13.37,-0.12 L7.54,-0.12 L7.54,-1.12 L8.40,-1.86 Z"/></g></svg><span>TokenJam Lens</span></div>
+  <!-- Dashboard is a persistent top-level entry ABOVE the Improve/Observe
+       toggle (issue #654): its waste tiles + spend pivot serve both lenses
+       equally, so it stays visible in either mode. data-lens="all" keeps it
+       out of the improve/observe hide rules. -->
+  <a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="all"><span class="icon">&#9678;</span> Dashboard</a>
   <div class="lens-switch" role="tablist" aria-label="Lens">
     <button type="button" class="lens-btn active" data-lens="improve">Improve</button>
     <button type="button" class="lens-btn" data-lens="observe">Observe</button>
   </div>
-  <a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="improve"><span class="icon">&#9678;</span> Dashboard</a>
   <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review inbox</a>
   <!-- One Sessions entry, not two. The old "Status" link (#/status) and this
        one rendered the SAME StatusView for their bare route, so the sidebar
@@ -2283,18 +2304,25 @@ function friendlyAlertType(type) {
 function getRoute() {
   const raw = location.hash.replace(/^#\/?/, '');
   const qIdx = raw.indexOf('?');
-  // Empty hash → Review inbox, the Improve lens's home (self-improve-loop
-  // SPEC.md §12 — Improve is the default lens, review inbox is its home).
-  // getRoute is the single source of the default so the first render and the
-  // URL agree — no render-time location.hash redirect (which raced the first render).
-  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'review';
+  // Empty hash → Dashboard, the top-level triage front door shared by both the
+  // Improve and Observe lenses (issue #654). getRoute is the single source of
+  // the default so the first render and the URL agree — no render-time
+  // location.hash redirect (which raced the first render, #132).
+  const path = (qIdx >= 0 ? raw.slice(0, qIdx) : raw) || 'dashboard';
   const query = qIdx >= 0 ? raw.slice(qIdx + 1) : '';
   const parts = path.split('/');
-  return { view: parts[0] || 'review', param: parts[1] || null, params: new URLSearchParams(query) };
+  return { view: parts[0] || 'dashboard', param: parts[1] || null, params: new URLSearchParams(query) };
 }
 
 // CLI-matching time-window vocabulary, plus explicit YYYY-MM-DD:YYYY-MM-DD ranges.
 const SINCE_VALUES = ['1h', '24h', '7d', '30d', '90d'];
+// One shared window default across every window-driven screen (Traces, Cost,
+// Optimize, the Dashboard/Analytics explorer) so they agree on what "no since
+// in the URL" means (issue #655). Resolved here in the param layer — each
+// screen reads `DEFAULT_SINCE` rather than hardcoding its own. Alerts keeps its
+// own empty default on purpose (it filters ALL alerts by default, not a window;
+// a 30d default would hide older unacknowledged alerts).
+const DEFAULT_SINCE = '30d';
 const _RANGE_RE = /^\d{4}-\d{2}-\d{2}:\d{4}-\d{2}-\d{2}$/;
 // A window selector derived from the store's real data span (standardWindowOptions
 // below) can offer an exact-span option outside the standard ladder (e.g. "67d"
@@ -5584,7 +5612,7 @@ const TRACE_SORTS = ['recent', 'cost'];
 
 function TracesListView({ params }) {
   // Filters come from the URL (issue #112). `result` maps to the API's `status`.
-  const DEFAULTS = { since: '24h', result: '', agent_id: '', sort: 'recent', min_cost: '' };
+  const DEFAULTS = { since: DEFAULT_SINCE, result: '', agent_id: '', sort: 'recent', min_cost: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const result = readParam(params, 'result', DEFAULTS.result, v => ['ok', 'error'].includes(v));
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
@@ -6309,7 +6337,7 @@ const COST_GROUP_BY_LABELS = {
 };
 
 function CostView({ params }) {
-  const DEFAULTS = { since: '7d', group_by: 'total', agent_id: '' };
+  const DEFAULTS = { since: DEFAULT_SINCE, group_by: 'total', agent_id: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const groupBy = readParam(params, 'group_by', DEFAULTS.group_by,
     v => ['total', 'model', 'agent', ...COST_ATTRIBUTION_DIMS.map(d => d[0])].includes(v));
@@ -6766,6 +6794,7 @@ function DriftView({ params }) {
     <div class="page-title">Drift Detection</div>
     <div class="empty">
       <div>No drift baselines to compare against.</div>
+      <div class="drift-empty-lead">Drift needs live SDK agents with 10+ completed sessions — Claude Code / Codex sessions and backfilled history aren't baselined.</div>
       <div class="drift-empty-why">
         <div>Drift compares a service against its own past behavior, so it needs a baseline: at least 10 completed sessions for one agent.</div>
         <div>Interactive coding sessions are not baselined. A Claude Code or Codex session varies by design; one mean and standard deviation over that workload measures nothing, so no baseline is built or shown for those agents.</div>
@@ -8127,7 +8156,7 @@ function RecommendationsPanel({ rec }) {
 }
 
 function OptimizeView({ params }) {
-  const DEFAULTS = { since: '30d', agent_id: '', compare: '', finding: '' };
+  const DEFAULTS = { since: DEFAULT_SINCE, agent_id: '', compare: '', finding: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const agentId = readParam(params, 'agent_id', DEFAULTS.agent_id);
   const compare = readParam(params, 'compare', DEFAULTS.compare, v => ['previous', 'last-week', 'last-month', 'last-7d', 'last-30d'].includes(v));
@@ -9645,7 +9674,7 @@ function downloadCsv(filename, text) {
 const KPI_SKELETON_TILES = [0, 1, 2, 3];
 
 function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCaption = null }) {
-  const DEFAULTS = { since: '30d', metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
+  const DEFAULTS = { since: DEFAULT_SINCE, metric: 'spend', group_by: 'model', stack: '', chart: 'bar',
     agent_id: '', provider: '', model: '', tool: '' };
   const since = readParam(params, 'since', DEFAULTS.since, validSince);
   const metric = readParam(params, 'metric', DEFAULTS.metric, v => ANALYTICS_METRICS.some(m => m[0] === v));
@@ -11199,10 +11228,15 @@ function CopySnippetButton({ text }) {
 // CostProposalCard's direct-edit apply flow — the write differs by what's
 // actually changing (a config entry removed vs a model id swapped), so the
 // card has to say which rather than a one-size "Apply the sizing note".
+// The hint on each spells out that Approve is a file/config WRITE effective on
+// the NEXT run — not live, in-path enforcement, and not a guaranteed saving
+// (issue #656, honesty Rule 14). The button verbs stay concrete ("Write the
+// change") rather than the ambiguous "Apply", which read as if tokenjam were
+// enforcing the change at request time.
 const APPLY_KIND_COPY = {
-  model_swap:  { title: 'Apply the model swap', hint: 'writes the new model id at the registered source path; confirm the target first', button: 'Apply swap' },
-  agent_model: { title: "Apply the agent's model change", hint: "sets this subagent's definition-file model key directly; confirm the target first", button: 'Apply change' },
-  mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; confirm the target first", button: 'Remove entry' },
+  model_swap:  { title: 'Write the model swap to disk', hint: 'writes the new model id at the registered source path; takes effect on the next run, not live — confirm the target first', button: 'Write swap' },
+  agent_model: { title: "Write the agent's model change to disk", hint: "sets this subagent's definition-file model key directly; takes effect on the next run, not live — confirm the target first", button: 'Write change' },
+  mcp_remove:  { title: 'Remove this MCP server entry', hint: "deletes the dead server's config entry; takes effect on the next run, not live — confirm the target first", button: 'Remove entry' },
 };
 
 function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, onChanged, suppressed }) {
@@ -11292,7 +11326,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
     } finally { setAkBusy(false); }
   };
 
-  const akCopy = APPLY_KIND_COPY[prop.apply_kind] || { title: 'Apply this fix', hint: 'confirm the target first', button: 'Apply' };
+  const akCopy = APPLY_KIND_COPY[prop.apply_kind] || { title: 'Write this fix to disk', hint: 'writes the fix to its config/source file; takes effect on the next run, not live — confirm the target first', button: 'Write fix' };
 
   // Register-then-apply state. Starts EMPTY and is never pre-filled by guessing:
   // the whole reason this row exists is that nothing here knows the path, and a
@@ -12084,6 +12118,15 @@ function ReviewInboxView({ params }) {
   // Clicking a fully-selected box clears it; anything else selects the lot.
   const toggleAll = () => setChecked(
     prev => nextSelectAllSelection(bulkRelearn.map(c => c.signature), prev));
+  // How many open rows tokenjam can write for you vs. the copy-and-apply rest
+  // (issue #656). Two rows are visually distinct classes: an auto-apply row
+  // carries a checkbox + Approve; every other row is a copyable fix you apply
+  // yourself. The count line makes that split legible ("1 of 6 can be applied
+  // automatically") instead of implying the whole list is selectable, and the
+  // bulk Select-all only earns its place when there is more than one to select.
+  const autoApplyCount = bulkRelearn.length;
+  const openTotal = shownItems.length;
+  const showBulkSelect = autoApplyCount > 1;
   const dismissChecked = () => {
     // Only the selected rows that are actually listed: a stale signature left in
     // `checked` after its row was approved must not be swept along silently.
@@ -12149,7 +12192,19 @@ function ReviewInboxView({ params }) {
             just the write, since the write is a minority of rows. Each row still
             names its own action; these are the two consequences a row cannot
             state for itself. */ ''}
-      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes a fix to disk; a copyable fix is yours to apply. <b>Dismiss</b> only hides a row in this browser.</div>
+      <div class="sz-note" style="margin:12px 0 10px"><b>Approve</b> writes the fix to a file or config, effective on the next run — not live enforcement; a copyable fix is yours to apply. <b>Dismiss</b> only hides a row in this browser.</div>
+      ${/* The appliable-count line: it names how many of the open rows tokenjam
+            can write for you vs. the copy-and-apply rest, so "Open (6)" next to
+            a single checkbox stops reading as "5 rows you forgot to select"
+            (issue #656). Rendered only once the count is known. */ ''}
+      ${openCountKnown && openTotal > 0 ? html`
+        <div class="dim" style="font-size:12px;margin:0 2px 10px">
+          ${autoApplyCount === 0
+            ? html`None of the ${openTotal} open ${openTotal === 1 ? 'row' : 'rows'} can be applied automatically — each is a copy-and-apply fix.`
+            : autoApplyCount === openTotal
+              ? html`<b>${autoApplyCount}</b> ${autoApplyCount === 1 ? 'row' : 'rows'} can be applied automatically.`
+              : html`<b>${autoApplyCount} of ${openTotal}</b> can be applied automatically — the rest are copy-and-apply.`}
+        </div>` : null}
       ${/* The degraded warning is the one thing the header's Rescan link cannot
             say: the last cost refresh FAILED and these rows are the last good
             result. */ ''}
@@ -12174,7 +12229,7 @@ function ReviewInboxView({ params }) {
             offer that set is empty, and an always-present select-all governing
             nothing is worse than no select-all: it implies the list is
             selectable when it is not. */ ''}
-      ${bulkRelearn.length > 0 ? html`
+      ${showBulkSelect ? html`
         <label style="display:flex;align-items:center;gap:8px;margin:0 2px 6px;font-size:12.5px;cursor:pointer;width:fit-content">
           <${SelectAllCheckbox} total=${bulkRelearn.length} selected=${selectedCount} onToggle=${toggleAll} />
           <span class="dim">Select all ${bulkRelearn.length} tokenjam can apply${selectedCount ? ` · ${selectedCount} selected` : ''}</span>
@@ -12227,7 +12282,7 @@ function ReviewInboxView({ params }) {
           renderItem=${renderRow} />
         <${BelowFloorNote} items=${floorItems} label=${pluralItems(floorItems.length)} />
       </div>
-      ${bulkRelearn.length > 0 ? html`
+      ${showBulkSelect ? html`
         <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
           <button class="cur-btn primary" disabled=${selectedCount === 0}
             onClick=${() => startReview(selectedVisible.map(c => c.signature))}
@@ -12409,10 +12464,10 @@ function PersonaNoDataNotice({ persona }) {
 }
 
 function DashboardView({ params, persona }) {
-  const since = readParam(params, 'since', '30d', validSince);
+  const since = readParam(params, 'since', DEFAULT_SINCE, validSince);
   // Preserve the explorer's params (metric/group_by/stack/chart/filters) when
   // only the window changes, so the hero keeps its slice across window switches.
-  const setWin = v => navigate('dashboard', { ...Object.fromEntries(params.entries()), since: v }, { since: '30d' });
+  const setWin = v => navigate('dashboard', { ...Object.fromEntries(params.entries()), since: v }, { since: DEFAULT_SINCE });
 
   // A retired #/analytics link lands here (primaryKeyFor aliases it to
   // 'dashboard') with its metric/group_by/stack/chart/since params intact, but
