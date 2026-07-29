@@ -64,6 +64,23 @@
   --chart-10: #fb923c;
   --chart-11: #e879f9;
   --chart-12: #38bdf8;
+
+  /* ---- Spacing scale (#437) ----------------------------------------------
+     Every surface in this app is one of four shapes: a card/section body, a
+     row inside one, a head strip above one, and a table cell. Before these
+     tokens each shape had been re-guessed per page — horizontal insets ran
+     9/12/14/16/18px and stacked containers sometimes touched — so a table
+     inside a panel did not line up with the panel's own head, and the same
+     component read differently on two pages. One horizontal inset for all
+     four shapes is what makes a page read as one surface; the VERTICAL value
+     still varies by density, which is legitimate (a table row is denser than
+     a card body) and is why these are four tokens rather than one.
+     Use the tokens, not literals, for any new container. */
+  --inset-x: 16px;      /* the single horizontal inset — cards, rows, heads, cells */
+  --pad-card-y: 16px;   /* vertical padding of a card / section body */
+  --pad-row-y: 11px;    /* vertical padding of a list or table body row */
+  --pad-head-y: 10px;   /* vertical padding of a head strip / table header */
+  --stack-gap: 16px;    /* vertical gap between two stacked cards or panels */
 }
 [data-theme="light"] {
   --bg: #fff;
@@ -184,13 +201,37 @@ body[data-persona="claude-code"] .health-glance { display: none; }
    which differs: some carry a plan badge, a range picker and a Rescan button,
    some carry nothing). Headings that are flex rows establish their own
    formatting context and sit beside the float rather than under it. */
-.persona-bar { float: left; display: flex; align-items: center; gap: 8px; margin: 2px 18px 10px 0; }
+/* Floated RIGHT, so it lands at the far end of whatever heading row follows
+   it. App() renders this once, above every view, but each view renders its own
+   <h1>; a block here would always take a line of its own above the heading.
+   Floating lets the heading share the line without every page having to render
+   the switcher itself, and without its position depending on each page's own
+   header markup (some carry a plan badge, a range picker and a Rescan button,
+   some carry nothing). Headings that are flex rows establish their own
+   formatting context and shrink to sit beside the float rather than run under
+   it, which is why a page's own right-aligned controls land just inside this
+   rather than overlapping it. It floats right rather than left because as a
+   left float it sat BEFORE the page title, so the reader met a global control
+   before learning which page they were on, and any prose paragraph following
+   the heading wrapped its first line around it. */
+.persona-bar { float: right; display: flex; align-items: center; gap: 8px; margin: 0 0 10px 18px; }
 .persona-bar-label { font-size: 12px; color: var(--text-dim); }
 .persona-bar-note { font-size: 12px; color: var(--text-faint); }
-.persona-switch { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
-.persona-btn { background: none; border: none; border-radius: 6px; padding: 4px 12px; font: inherit; font-size: 12.5px; color: var(--text-dim); cursor: pointer; }
-.persona-btn:hover { color: var(--text); }
-.persona-btn.active { background: rgba(var(--accent-rgb),0.16); color: var(--accent); }
+/* A native <select>: two mutually exclusive views of the same data is what a
+   dropdown is for, and it matches the range/metric pickers the analytics
+   header already uses, so the page has one control idiom instead of two.
+   Styled off `.filters select` so they cannot drift apart. */
+.persona-select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+.persona-select:focus { outline: none; border-color: var(--accent); }
 .sidebar-footer {
   margin-top: auto;
   border-top: 1px solid var(--border);
@@ -251,12 +292,12 @@ body[data-persona="claude-code"] .health-glance { display: none; }
 }
 
 /* Cards */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--stack-gap); margin-bottom: 24px; }
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 16px;
+  padding: var(--pad-card-y) var(--inset-x);
 }
 .card.clickable { cursor: pointer; transition: border-color 0.15s; }
 .card.clickable:hover { border-color: var(--accent); }
@@ -386,7 +427,26 @@ body[data-persona="claude-code"] .health-glance { display: none; }
    label rendered over the Trigger column. `min-width:0` is the load-bearing
    part; without it a flex item refuses to shrink below its content width and
    wrapping never engages. */
-.ctx-audit-src { display: flex; align-items: flex-start; gap: 6px; }
+/* `min-width` is a floor, and it is load-bearing. The label below carries
+   `overflow-wrap:anywhere` + `min-width:0`, which together make this cell's
+   min-content width ONE CHARACTER — so under auto table-layout the Source
+   column is the first thing the browser sacrifices when the other columns
+   want room, and it collapses to a vertical stack of single letters rather
+   than wrapping. Class 2's table is where this shows first (its Trigger and
+   What-fires columns carry the longest text), and it is sensitive to small
+   changes elsewhere: normalising the shared cell inset was enough to tip it
+   over. The floor makes the column's minimum a readable width instead of a
+   character, and the horizontal scroll on `.table-wrap` absorbs the rest. */
+.ctx-audit-src { display: flex; align-items: flex-start; gap: 6px; min-width: 190px; }
+/* Class 2's triggers ("SessionStart hook (matcher: startup|clear|compact)") run
+   two to three times longer than Class 1's or Class 3's, and `td` is nowrap by
+   default, so this one column decided the table's width: the three tables that
+   sit one under another on this page came out visibly different widths, and
+   Class 2's ran off the right edge into a scrollbar the others did not need.
+   Capped and wrapped, the same treatment the description column already gets,
+   so the three read as one inventory rather than three tables that happen to
+   share a page. */
+.ctx-audit-trigger { white-space: normal; max-width: 240px; }
 .ctx-audit-expand-btn, .ctx-audit-src-plain {
   flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: normal; text-align: left;
 }
@@ -422,7 +482,7 @@ table {
 }
 th {
   text-align: left;
-  padding: 8px 12px;
+  padding: var(--pad-head-y) var(--inset-x);
   color: var(--text-dim);
   font-weight: 500;
   font-size: 11px;
@@ -432,7 +492,7 @@ th {
   white-space: nowrap;
 }
 td {
-  padding: 8px 12px;
+  padding: var(--pad-row-y) var(--inset-x);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
@@ -478,7 +538,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 
 /* Collapsible archive / inactive block */
 details.archive-block { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
-details.archive-block > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+details.archive-block > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: var(--pad-head-y) var(--inset-x); background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
 details.archive-block > summary::-webkit-details-marker { display: none; }
 details.archive-block > summary .tw { color: var(--text-faint); font-size: 9px; transition: transform 0.15s; display: inline-block; }
 details.archive-block[open] > summary .tw { transform: rotate(90deg); }
@@ -486,19 +546,35 @@ details.archive-block > summary .a-count { color: var(--text-faint); }
 details.archive-block > summary .a-hint { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-faint); }
 details.archive-block .table-wrap { border-top: 1px solid var(--border); }
 table.archive-list { width: 100%; border-collapse: collapse; font-family: 'Geist Mono', monospace; font-size: 13px; min-width: 820px; }
-table.archive-list th { text-align: left; padding: 9px 14px; color: var(--text-faint); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-table.archive-list td { padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; color: var(--text-dim); }
+table.archive-list th { text-align: left; padding: var(--pad-head-y) var(--inset-x); color: var(--text-faint); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table.archive-list td { padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); white-space: nowrap; color: var(--text-dim); }
 table.archive-list tr:last-child td { border-bottom: none; }
 table.archive-list tr.clickable:hover td { background: rgba(var(--accent-rgb),0.04); }
 table.archive-list .a-id { color: var(--text); }
 
 /* SDK services panel (Prometheus-style rows) */
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-.panel-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+/* Two stacked panels used to sit flush against each other, reading as one
+   container with a stray divider through it. Adjacent-sibling rather than a
+   blanket margin-bottom, so a panel that is the last thing on a page adds no
+   trailing space and a panel inside a grid still spaces via the grid's gap. */
+.panel + .panel, .panel + .card, .card + .panel { margin-top: var(--stack-gap); }
+.panel-head { display: flex; align-items: center; gap: 10px; padding: var(--pad-head-y) var(--inset-x); border-bottom: 1px solid var(--border); background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+/* The two shapes a panel's contents take. `.panel` itself is padding-free so
+   it can hold a full-bleed table or head strip, which is exactly why its
+   direct children kept being written with a hand-picked inline padding (or,
+   on the Rules page, none at all — content ran flush to the border while the
+   head above it was inset). These are the shared alternative: `.panel-body`
+   for one block of prose or controls, `.panel-row` for a repeated row in a
+   list. Both take the same horizontal inset as `.panel-head` and as a table
+   cell, so every edge down a panel lines up. */
+.panel-body { padding: var(--pad-card-y) var(--inset-x); }
+.panel-row { padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); }
+.panel-row:last-child { border-bottom: none; }
 .panel-head .grip { color: var(--text-faint); }
 .panel-head .range { margin-left: auto; text-transform: none; letter-spacing: 0; }
 .panel-head .range-tag { padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); }
-.svc-row { display: grid; grid-template-columns: 200px 82px 1fr 90px 120px; align-items: center; gap: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border); transition: background 0.12s; }
+.svc-row { display: grid; grid-template-columns: 200px 82px 1fr 90px 120px; align-items: center; gap: 16px; padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); transition: background 0.12s; }
 .svc-row:last-child { border-bottom: none; }
 .svc-row.clickable { cursor: pointer; }
 .svc-row.clickable:hover { background: rgba(var(--accent-rgb),0.03); }
@@ -512,11 +588,11 @@ table.archive-list .a-id { color: var(--text); }
 .err-good { color: var(--success); }
 .err-warn { color: var(--warn); }
 .err-bad { color: var(--error); }
-.svc-empty { padding: 16px 14px; font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); }
+.svc-empty { padding: var(--pad-card-y) var(--inset-x); font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); }
 
 /* Inactive services list */
 .inactive-list { border-top: 1px solid var(--border); }
-.inact-row { display: grid; grid-template-columns: 220px 150px 1fr 176px auto; align-items: center; gap: 16px; padding: 13px 14px; border-bottom: 1px solid var(--border); transition: background 0.12s; }
+.inact-row { display: grid; grid-template-columns: 220px 150px 1fr 176px auto; align-items: center; gap: 16px; padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); transition: background 0.12s; }
 .inact-row:last-child { border-bottom: none; }
 .inact-row.clickable { cursor: pointer; }
 .inact-row.clickable:hover { background: rgba(var(--accent-rgb),0.03); }
@@ -570,7 +646,7 @@ table.archive-list .a-id { color: var(--text); }
 .preset-row { margin-top: -6px; }
 .preset-btn { font-size: 11px; padding: 4px 9px; }
 .kpi-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.kpi-tile { flex: 1 1 140px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.kpi-tile { flex: 1 1 140px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px var(--inset-x); }
 .kpi-tile.kpi-active { border-color: var(--accent); }
 .kpi-tile.kpi-clickable { cursor: pointer; }
 .kpi-tile.kpi-clickable:hover { border-color: var(--accent); }
@@ -874,19 +950,39 @@ table.archive-list .a-id { color: var(--text); }
 }
 .drift-empty-why div + div { margin-top: 8px; }
 
-/* Empty state */
+/* Empty state.
+   `.empty` is the whole-page shape: nothing on this route, so it gets the
+   room to say so. `.empty.compact` is the same voice inside a panel, a chart
+   card or a tab body, where 48px of air would push the surrounding chrome
+   apart. `.empty.err` is the failed-read case, which must never be worded or
+   coloured as "there is nothing here" (root anti-pattern 22 — a surface
+   asserting more than its data supports). These three modifiers exist so a
+   page never re-guesses the padding inline; every ad-hoc
+   `class="dim" style="padding:32px 16px;text-align:center"` was a hand-rolled
+   copy of one of them. */
 .empty {
   text-align: center;
   padding: 48px 24px;
   color: var(--text-dim);
   font-size: 14px;
 }
+.empty.compact { padding: 28px var(--inset-x); }
+.empty.err { color: var(--error); }
 .empty code {
   display: block;
   margin-top: 12px;
   color: var(--accent);
   font-size: 13px;
 }
+/* The same state as a full-width row inside a table, so the message sits in
+   the body rather than under it and the table keeps its own borders. */
+td.empty-cell {
+  text-align: center;
+  padding: 28px var(--inset-x);
+  color: var(--text-dim);
+  white-space: normal;
+}
+td.empty-cell.err { color: var(--error); }
 
 /* Expand toggle */
 .expand-toggle { display: inline-block; width: 16px; font-size: 10px; color: var(--text-dim); transition: transform 0.15s; }
@@ -922,8 +1018,8 @@ table.archive-list .a-id { color: var(--text); }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 14px 16px;
-  margin-bottom: 16px;
+  padding: var(--pad-card-y) var(--inset-x);
+  margin-bottom: var(--stack-gap);
 }
 .chart-title {
   font-family: 'Geist Mono', monospace;
@@ -1143,7 +1239,13 @@ a.health-tile.attn { border-color: var(--warn); }
    rule (the Dashboard and the Review inbox reached for it independently); the
    duplicate is gone rather than kept, because two rules for one primitive is
    exactly the drift that lets two screens' skeletons diverge. */
-.opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
+.opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: var(--pad-card-y) var(--inset-x); margin-bottom: var(--stack-gap); }
+/* An `.opt-section` used as one column of a flex row of equal tiles rather
+   than as a full-width panel. Three sites rendered this shape with the same
+   inline `flex:1;min-width:260px` plus a re-declared border and radius; the
+   flex behaviour is the only thing that actually differs from the base class,
+   so that is all this modifier carries. */
+.opt-tile { flex: 1; min-width: 260px; }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 /* Deep-link highlight for a Review-inbox cost advisory (card → apply hop).
    The card's own inline `border` wins over a plain class rule, so this needs
@@ -1345,14 +1447,14 @@ a.health-tile.attn { border-color: var(--warn); }
 .wm-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); margin: -6px 0 12px; flex-wrap: wrap; }
 /* Summary band: the 5-second read above the asks list — totals + biggest
    fan-outs. Subtle bordered panel, mono/dim like the other wm-* meta. */
-.wm-summary-band { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
+.wm-summary-band { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: var(--pad-row-y) var(--inset-x); margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
 .wm-summary-stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text); }
 .wm-summary-stats span { color: var(--text-dim); }
 .wm-summary-fanouts { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
 .wm-summary-fanout { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Launcher -> run card: when a session spawned (or belongs to) a multi-session
    run, surface a breadcrumb to the run + its worker sessions. */
-.wm-run-card { border: 1px solid var(--brand); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
+.wm-run-card { border: 1px solid var(--brand); border-radius: 8px; background: var(--surface); padding: var(--pad-row-y) var(--inset-x); margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
 .wm-run-card.inferred { border-style: dashed; }
 .wm-run-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .wm-run-title { font-size: 13px; color: var(--text); }
@@ -1690,6 +1792,17 @@ code.md-code {
    components, so they inherit this without a second rule. The relearn Approve
    MODAL is deliberately not covered: it renders outside the card and is a reading
    surface, so 74ch is still correct there. */
+/* The row's own box. This was written inline on all four components that
+   render one (the real row, the group row, the proposal row and the loading
+   skeleton), each repeating a border and radius `.opt-section` already
+   declares and each overriding its padding to a different value — so a
+   skeleton and the row it stood in for could disagree, and the inbox sat on a
+   different inset from every other list in the app. Declared once here, with
+   the shared row padding; `.opt-section.inbox-row` rather than `.inbox-row`
+   alone so it beats `.opt-section` on specificity rather than on source
+   order. The tighter bottom margin is the one intentional difference: these
+   stack as a dense list, not as standalone panels. */
+.opt-section.inbox-row { padding: var(--pad-row-y) var(--inset-x); margin: 0 0 10px; }
 .inbox-row .sz-note, .inbox-row .sz-copybox { max-width: none; }
 /* A snippet is the row's payload and stays visible, but it must not decide the
    row's height: a six-line downsize fix made that row 2.5x a relearn row. Capped
@@ -1788,7 +1901,7 @@ code.md-code {
 .cur-btn.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
 .cur-btn.primary:hover:not(:disabled) { background:#2f7ae8; border-color:#2f7ae8; }
 .cur-btn:disabled { opacity:.4; cursor:not-allowed; }
-.cur-tally { border:1px solid var(--border); border-radius:9px; background:var(--surface); padding:16px 18px; margin:0; cursor:pointer; transition:border-color .15s; }
+.cur-tally { border:1px solid var(--border); border-radius:9px; background:var(--surface); padding:var(--pad-card-y) var(--inset-x); margin:0; cursor:pointer; transition:border-color .15s; }
 .cur-tally.empty { cursor:default; }
 .cur-tally:not(.empty):hover { border-color:rgba(var(--accent-rgb),0.5); }
 .cur-tally-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
@@ -1800,11 +1913,11 @@ code.md-code {
 .cur-chip.more { background:transparent; border-color:var(--border); color:var(--text-faint); }
 .cur-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.62); display:flex; align-items:center; justify-content:center; z-index:60; padding:24px; }
 .cur-modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:min(760px,100%); max-height:84vh; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.55); }
-.cur-modal-head { display:flex; align-items:center; gap:10px; padding:16px 18px; border-bottom:1px solid var(--border); }
+.cur-modal-head { display:flex; align-items:center; gap:10px; padding:var(--pad-card-y) var(--inset-x); border-bottom:1px solid var(--border); }
 .cur-modal-title { font-size:15px; font-weight:600; }
 .cur-modal-x { margin-left:auto; background:none; border:none; color:var(--text-dim); font-size:18px; cursor:pointer; line-height:1; }
-.cur-modal-body { padding:16px 18px; overflow-y:auto; }
-.cur-modal-foot { padding:14px 18px; border-top:1px solid var(--border); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.cur-modal-body { padding:var(--pad-card-y) var(--inset-x); overflow-y:auto; }
+.cur-modal-foot { padding:var(--pad-card-y) var(--inset-x); border-top:1px solid var(--border); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .cur-mrow { display:flex; align-items:center; gap:12px; padding:9px 0; border-bottom:1px solid var(--border); font-size:13px; }
 .cur-mrow .path { font-family:'Geist Mono',monospace; flex:1; word-break:break-all; }
 .cur-mrow .rm { background:none; border:1px solid var(--border); color:var(--error); border-radius:4px; width:24px; height:24px; cursor:pointer; line-height:1; flex:0 0 auto; }
@@ -1826,16 +1939,16 @@ code.md-code {
 /* Run progress + manual copy block */
 .sz-prog { height:8px; border-radius:4px; background:var(--surface3); overflow:hidden; margin:0; }
 .sz-prog > div { height:100%; background:var(--brand); transition:width .2s; }
-.sz-runrow { display:flex; align-items:center; gap:12px; font-size:13px; padding:9px 4px; border-bottom:1px solid var(--border); font-family:'Geist Mono',monospace; }
+.sz-runrow { display:flex; align-items:center; gap:12px; font-size:13px; padding:var(--pad-row-y) var(--inset-x); border-bottom:1px solid var(--border); font-family:'Geist Mono',monospace; }
 .sz-spin { display:inline-block; color:var(--brand); animation:sz-spin 1s linear infinite; }
 @keyframes sz-spin { to { transform:rotate(360deg); } }
 /* Optimize ▸ Summarize cost box (Track A tiles) */
 .sz-tiles { display:flex; gap:16px; flex-wrap:wrap; margin:6px 0; }
-.sz-tile { flex:1 1 150px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:16px 18px; }
+.sz-tile { flex:1 1 150px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:var(--pad-card-y) var(--inset-x); }
 .sz-tile-v { font-family:'Geist Mono',monospace; font-size:26px; font-weight:700; color:var(--accent); }
 .sz-tile-l { font-size:12.5px; color:var(--text-dim); margin-top:5px; }
-.sz-copybox { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:14px 16px; max-height:320px; overflow:auto; font-family:'Geist Mono',monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
-.sz-ta { width:100%; min-height:130px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:12px 14px; font-family:'Geist Mono',monospace; font-size:13px; resize:vertical; }
+.sz-copybox { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:var(--pad-card-y) var(--inset-x); max-height:320px; overflow:auto; font-family:'Geist Mono',monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+.sz-ta { width:100%; min-height:130px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:var(--pad-row-y) var(--inset-x); font-family:'Geist Mono',monospace; font-size:13px; resize:vertical; }
 
 </style>
 <script>
@@ -6440,7 +6553,7 @@ function CostView({ params }) {
             <${StackedBarChart} data=${series.data} labels=${series.labels} height=${200}
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} bucket=${series.bucket} />
             ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
-          `) : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
+          `) : html`<div class="empty compact">No spend in this window.</div>`}
       </div>
     ` : null}
 
@@ -6473,7 +6586,7 @@ function CostView({ params }) {
 
     ${!error && !loading && isAttributionDim && rows.length === 0 ? html`
       <div class="chart-card">
-        <div class="empty" style="padding:24px 0">
+        <div class="empty compact">
           No ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()} data in this window.
           ${costResp && costResp.attribution_coverage && !costResp.attribution_coverage[groupBy].has_data
             ? html`Set <code class="mono">${costResp.attribution_coverage[groupBy].attribute}</code> at the call site (an OTel span or resource attribute) to see spend broken down by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}.`
@@ -6531,7 +6644,7 @@ function TopTenantsPanel({ tenants, framing }) {
         <div class="chart-title">Top tenants by spend</div>
       </div>
       ${loading ? html`<div class="shimmer" style="height:120px"></div>` : (!data || !data.has_data) ? html`
-        <div class="empty" style="padding:24px 0">
+        <div class="empty compact">
           No tenant data in this window. Set <code class="mono">${(data && data.attribute) || 'tokenjam.tenant_id'}</code>
           at the call site (an OTel span attribute, or via <code class="mono">tokenjam.sdk.attribution.attribution(tenant_id=...)</code>
           for auto-instrumented calls) to see spend concentration by customer/tenant.
@@ -6930,7 +7043,7 @@ function BudgetView({ params }) {
   // refresh (this view polls every 10s) must not throw away the last good
   // data still on screen -- it renders as a scoped banner above the content
   // instead, same pattern the Dashboard uses for its own /cost failures.
-  if (error && !data) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
+  if (error && !data) return html`<div class="empty err">${error}</div>`;
   if (!data) return html`
     <div class="page-title">Budget</div>
     ${TableRowsSkeleton(['Scope', 'Daily (USD)', ''], 6)}`;
@@ -6991,7 +7104,7 @@ function BudgetView({ params }) {
           />
         `)}
         ${codingGroups.length === 0 ? html`
-          <tr><td colspan="3" style="color:var(--text-dim);font-size:13px;padding:12px 0">
+          <tr><td colspan="3" class="empty-cell">
             No coding-tool sessions recorded yet. Run Claude Code or Codex once to register it.
           </td></tr>
         ` : null}
@@ -7026,7 +7139,7 @@ function BudgetView({ params }) {
           />
         `)}
         ${sdkAgents.length === 0 ? html`
-          <tr><td colspan="3" style="color:var(--text-dim);font-size:13px;padding:12px 0">
+          <tr><td colspan="3" class="empty-cell">
             No SDK workflow agents configured yet. Declare one with @watch() and run it once.
           </td></tr>
         ` : null}
@@ -7036,7 +7149,10 @@ function BudgetView({ params }) {
     <div style="font-size:13px;font-weight:600;margin-top:28px;margin-bottom:8px">Provider spend forecast</div>
     <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
       A recurring monthly ceiling per provider, scoped to its billing cycle rather than a single
-      agent or day. This is what Optimize's <a class="sz-link" href="#/optimize">Budget projection</a>
+      ${/* The space before "projects" is explicit: htm drops the whitespace
+            between a closing tag and the next line's text, so the link ran
+            straight into the word after it ("Budget projectionprojects"). */''}
+      agent or day. This is what Optimize's <a class="sz-link" href="#/optimize">Budget projection</a>${' '}
       projects your current run rate against — it is advisory only (a forecast, never an alert).
       Clear a field or enter 0 to remove the ceiling.
     </div>
@@ -7054,7 +7170,7 @@ function BudgetView({ params }) {
           />
         `)}
         ${providerNames.length === 0 ? html`
-          <tr><td colspan="4" style="color:var(--text-dim);font-size:13px;padding:12px 0">
+          <tr><td colspan="4" class="empty-cell">
             No provider budgets configured yet.
           </td></tr>
         ` : null}
@@ -7174,7 +7290,7 @@ function ContextAuditRow({ row, unit, max, onExpandGroup }) {
           </button>
         ` : html`<span class="ctx-audit-src-plain" title=${row.label}>${shortPath(row.label)}</span>`}
       </td>
-      <td style="color:var(--text-dim);font-size:12px">${row.trigger}</td>
+      <td class="ctx-audit-trigger" style="color:var(--text-dim);font-size:12px">${row.trigger}</td>
       <td>${ctxAuditSizeCell(row, unit, max)}</td>
       <td class="ctx-audit-desc" style="color:var(--text-dim);font-size:12px"><span title=${row.description || ''}>${row.description || '-'}</span></td>
       <td style="color:var(--text-dim);font-size:12px">${row.frequency}</td>
@@ -7210,7 +7326,7 @@ function ContextAuditTable({ rows, descLabel, onExpandGroup }) {
       <thead><tr>${headers.map((h, i) => html`<th key=${i}>${h}</th>`)}</tr></thead>
       <tbody>
         ${rows.length === 0 ? html`
-          <tr><td colspan=${headers.length} style="color:var(--text-dim);font-size:13px;padding:12px 0">None found.</td></tr>
+          <tr><td colspan=${headers.length} class="empty-cell">None found.</td></tr>
         ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} unit=${unit}
                                        max=${isChars ? maxChars : maxTokens} onExpandGroup=${onExpandGroup} />`)}
       </tbody>
@@ -7301,19 +7417,25 @@ function ContextAuditGroupModal({ group, onClose }) {
     </div>`;
 }
 
-// The not-loaded pile: one reassurance line, expands to the full list. Its
+// The costs-nothing pile: one reassurance line, expands to the full list. Its
 // cost is always and only zero (a file existing on disk is not evidence of
 // being loaded, Critical Rule 22), so the summary states that plainly
 // rather than making the reader open it to find out.
+//
+// Labelled by what the reader needs to know, not by the mechanism. "Not
+// loaded" names how the harness treats these files; what the reader is
+// actually here to learn is that they are free, which is the one fact that
+// tells them whether to care. The mechanism has not gone away: it is still
+// the reason column, one click down, where someone asking "but why" will look.
 function ContextAuditUnloaded({ rows, count }) {
   if (!count) return null;
   return html`
     <details style="margin-top:28px">
       <summary style="cursor:pointer;font-size:12px;color:var(--text-dim)">
-        ${count} file(s) scanned, not loaded, 0 tokens
+        ${count} file(s) scanned that cost nothing: never loaded into a session, 0 tokens
       </summary>
       <div class="table-wrap" style="margin-top:8px"><table>
-        <thead><tr><th>Source</th><th>Chars (on disk)</th><th>Why it's not loaded</th></tr></thead>
+        <thead><tr><th>Source</th><th>Chars (on disk)</th><th>Why it costs nothing</th></tr></thead>
         <tbody>
           ${rows.map((r, i) => html`
             <tr key=${i}>
@@ -7364,11 +7486,11 @@ function ContextAuditView() {
   // corpus scan this page's one fetch depends on can take several seconds
   // uncached, so the skeleton (never a number, never an empty-state claim)
   // must cover that whole wait rather than the page appearing hung.
-  if (error && !data) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
+  if (error && !data) return html`<div class="empty err">${error}</div>`;
   if (!data) return html`
     <div class="page-title">Context audit</div>
     <div style="color:var(--text-dim);font-size:13px;margin-bottom:12px">Scanning ~/.claude and every recently-active project.</div>
-    ${TableRowsSkeleton(['Source', 'Trigger', 'Chars', 'Tokens', 'What it puts in context', 'Frequency'], 8)}`;
+    ${TableRowsSkeleton(['Source', 'Trigger', 'Chars', 'What it puts in context', 'Frequency'], 8)}`;
 
   // A recorded working directory that loads NOTHING (a scratch/temp path a
   // session happened to run in, not a real project) is not the project this
@@ -8805,19 +8927,19 @@ function RulesView() {
         Permanent CLAUDE.md rules the analyzers propose, and the project files
         each one would be written into.
       </div>
-      ${err ? html`<div class="panel"><div class="opt-line" style="color:var(--error)">${err}</div></div>` : null}
-      ${msg ? html`<div class="panel"><div class="opt-line">${msg}</div></div>` : null}
+      ${err ? html`<div class="panel"><div class="panel-body opt-line" style="color:var(--error)">${err}</div></div>` : null}
+      ${msg ? html`<div class="panel"><div class="panel-body opt-line">${msg}</div></div>` : null}
 
       <div class="panel">
         <div class="panel-head"><h2>On offer</h2></div>
         ${rules === null
-          ? html`<div class="opt-line dim">Loading…</div>`
+          ? html`<div class="panel-body opt-line dim">Loading…</div>`
           : rules.length === 0
-            ? html`<div class="opt-line dim">No permanent rules on offer. Run an optimize pass, then reload.</div>`
+            ? html`<div class="empty compact">No permanent rules on offer. Run an optimize pass, then reload.</div>`
             : rules.map(r => {
                 const dests = r.destinations || [];
                 const st = stagedBySig[r.signature] || [];
-                return html`<div key=${r.signature} style="display:block;padding:14px 16px;border-bottom:1px solid var(--border)">
+                return html`<div key=${r.signature} class="panel-row" style="display:block">
                   <div style="display:flex;align-items:center;gap:10px">
                     <b>${r.title || r.signature}</b>
                     <span class="dim" style="font-size:12px">${r.analyzer} · ${
@@ -8869,26 +8991,28 @@ function RulesView() {
               })}
       </div>
 
-      ${preview ? html`<div class="panel" style="margin-top:18px">
+      ${preview ? html`<div class="panel">
         <div class="panel-head"><h2>Preview — nothing written</h2></div>
-        ${(preview.applied || []).map(a => html`<div class="sz-diffblock" key=${a.path}>
-          <div class="sz-diffblock-h">${a.path}${a.created_file ? ' (new file)' : ''}</div>
-          <div class="rev-diff">${a.diff}</div>
-        </div>`)}
-        ${(preview.skipped || []).map(s => html`<div class="opt-line" style="color:var(--warn)" key=${s.path}>${s.path} — ${s.reason}</div>`)}
-        <div style="margin-top:8px;display:flex;gap:8px">
-          <button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(preview.signature)}>Write these</button>
-          <button class="cur-btn" onClick=${() => setPreview(null)}>Close</button>
+        <div class="panel-body">
+          ${(preview.applied || []).map(a => html`<div class="sz-diffblock" key=${a.path}>
+            <div class="sz-diffblock-h">${a.path}${a.created_file ? ' (new file)' : ''}</div>
+            <div class="rev-diff">${a.diff}</div>
+          </div>`)}
+          ${(preview.skipped || []).map(s => html`<div class="opt-line" style="color:var(--warn)" key=${s.path}>${s.path} — ${s.reason}</div>`)}
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(preview.signature)}>Write these</button>
+            <button class="cur-btn" onClick=${() => setPreview(null)}>Close</button>
+          </div>
         </div>
       </div>` : null}
 
-      <div class="panel" style="margin-top:18px">
+      <div class="panel">
         <div class="panel-head"><h2>Applied</h2></div>
         ${applied === null
-          ? html`<div class="opt-line dim">Loading…</div>`
+          ? html`<div class="panel-body opt-line dim">Loading…</div>`
           : applied.length === 0
-            ? html`<div class="opt-line dim">Nothing applied yet.</div>`
-            : applied.map(a => html`<div class="opt-line" key=${a.source_path + a.signature}>
+            ? html`<div class="empty compact">Nothing applied yet.</div>`
+            : applied.map(a => html`<div class="panel-row opt-line" key=${a.source_path + a.signature}>
                 <span class="mono" title=${a.source_path}>${shortPath(a.source_path)}</span>
                 <span class="dim"> · ${a.applied_at}</span>
                 ${a.undoable
@@ -9221,7 +9345,7 @@ function SummarizeView({ params }) {
           <span style="flex:1;word-break:break-all">${rs.current}</span>
           <span class="dim">summarizing${'.'.repeat((tick % 3) + 1)} · ${elapsed}s</span>
         </div>` : null}
-        ${rs.results.length === 0 && !(rs.running && rs.current) ? html`<div class="dim" style="padding:16px;text-align:center">Starting…</div>` : null}
+        ${rs.results.length === 0 && !(rs.running && rs.current) ? html`<div class="empty compact">Starting…</div>` : null}
       </div>
       <div class="cur-addbar">
         <button class="cur-btn primary" disabled=${rs.running} onClick=${() => setPhase('review')}>Review ${okN} staged →</button>
@@ -9297,7 +9421,7 @@ function SummarizeView({ params }) {
                 <td><span class=${'rev-state ' + st}>${st}</span>${st === 'applied' ? html` <span class="sz-link" style="font-size:11px" title="restore this file from its backup" onClick=${() => undoPath(r.path)}>undo</span>` : null}</td>
               </tr>`;
             })}
-            ${rvVisible.length === 0 ? html`<tr><td colspan="7" class="dim" style="padding:16px;text-align:center">${revRows.length === 0 ? 'Nothing staged. Run the summarizer from the curator.' : 'No files match these filters.'}</td></tr>` : null}
+            ${rvVisible.length === 0 ? html`<tr><td colspan="7" class="empty-cell">${revRows.length === 0 ? 'Nothing staged. Run the summarizer from the curator.' : 'No files match these filters.'}</td></tr>` : null}
           </tbody>
         </table>
       </div>
@@ -9420,7 +9544,7 @@ function SummarizeView({ params }) {
               <td class="dim" style="font-size:12px">${st}</td>
             </tr>`;
           })}
-          ${visible.length === 0 ? html`<tr><td colspan="7" class="dim" style="padding:16px;text-align:center">${cands.length === 0 ? 'No summarizable files found. Try recursive / repo, or open a project with prompt files.' : 'No files match these filters.'}</td></tr>` : null}
+          ${visible.length === 0 ? html`<tr><td colspan="7" class="empty-cell">${cands.length === 0 ? 'No summarizable files found. Try recursive / repo, or open a project with prompt files.' : 'No files match these filters.'}</td></tr>` : null}
         </tbody>
       </table>
     </div>
@@ -9453,7 +9577,7 @@ function SummarizeView({ params }) {
             ` : html`
               <input class="cur-search" style="width:100%;margin-bottom:10px" placeholder="search basket…" value=${mQuery} onInput=${e => setMQuery(e.target.value)} />
               ${modalList.length === 0
-                ? html`<div class="dim" style="padding:14px;text-align:center">${added.size === 0 ? 'Basket is empty.' : 'No items match.'}</div>`
+                ? html`<div class="empty compact">${added.size === 0 ? 'Basket is empty.' : 'No items match.'}</div>`
                 : modalList.map((c, i) => html`<div class="cur-mrow" key=${i}>
                     <span class="path">${c.path}</span>
                     <span class="dim mono" style="font-size:12px">~${c.est_tokens_saved} tok/call</span>
@@ -9897,7 +10021,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
           <div class="chart-title">${(ANALYTICS_METRICS.find(m => m[0] === metric) || [, metric])[1]} by ${(ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1]}${metricSuffix}</div>
         </div>
         ${toolDimNoMetric ? html`
-          <div class="empty" style="padding:32px 16px;text-align:center">
+          <div class="empty compact">
             <div style="font-size:13px;margin-bottom:12px">Tools don't carry ${metric === 'spend' ? 'cost' : 'tokens'} — those live on the LLM-call spans, not tool spans.</div>
             <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
               <button class="btn" onClick=${() => setFilter('metric', 'events')}>Switch to Events</button>
@@ -9909,7 +10033,7 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
              moves nothing below it. */
           : loading && !resp ? html`<div class="shimmer" style="height:220px"></div>`
           : emptyFromStack ? html`
-            <div class="empty" style="padding:32px 16px;text-align:center">
+            <div class="empty compact">
               <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these — e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
               <button class="btn" onClick=${() => setFilter('stack', '')}>Clear stack</button>
             </div>`
@@ -9929,13 +10053,13 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
                 })}
               </div>
               ${boardGap ? html`<div class="chart-foot"><span class="dim">Only ${fmtCount(boardTotal)} of ${fmtCount(kpiCount)} ${countMetric} have a ${dimName} — the rest aren't in this breakdown.</span></div>` : null}
-              ` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
+              ` : html`<div class="empty compact">No data in this window.</div>`)
             : (series ? html`
               ${chart === 'line'
                 ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} showLegend=${series.labels.length > 1} bucket=${series.bucket} />`
                 : html`<${StackedBarChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} bucket=${series.bucket} />`}
               ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
-            ` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)}
+            ` : html`<div class="empty compact">No data in this window.</div>`)}
       </div>` : null}
   `;
 }
@@ -10222,7 +10346,7 @@ function BelowFloorNote({ items, label }) {
   if (!items || items.length === 0) return null;
   const usd = items.reduce((s, i) => s + (i.past_overspend_usd || 0), 0);
   return html`
-    <div class="dim" style="font-size:12px;padding:10px 14px;border-top:1px solid var(--border)">
+    <div class="dim" style="font-size:12px;padding:var(--pad-row-y) var(--inset-x);border-top:1px solid var(--border)">
       ${items.length} smaller ${label} under ${fmtUsd(INBOX_MIN_USD)} ${items.length === 1 ? 'is' : 'are'} hidden · ${fmtUsd(usd)} combined, still counted in the total above.
     </div>`;
 }
@@ -10259,7 +10383,7 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
 // progress bar, which on a scan of unknown length could only fake progress.
 function InboxSkeletonRow() {
   return html`
-    <div class="opt-section inbox-row" aria-hidden="true" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+    <div class="opt-section inbox-row" aria-hidden="true">
       <div style="display:flex;align-items:center;gap:8px">
         <div class="shimmer" style="height:13px;width:38%"></div>
         <div class="shimmer" style="height:11px;width:64px;flex-shrink:0"></div>
@@ -10536,7 +10660,7 @@ function PastOverspendTile({ block }) {
   // second-population key available to put back.
   const derivation = [block.basis, block.disclosure].filter(Boolean).join('\n\n');
   return html`
-    <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+    <div class="opt-section opt-tile">
       <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">
         What you could have avoided
       </div>
@@ -10598,7 +10722,7 @@ function CollapsedTailRow({ tail, suppressed, summary, onDismissAll, onMarkAllAp
   if (tail.length === 0) return null;
   const label = open ? 'Show less' : ('Show ' + tail.length + ' more');
   return html`
-    <div class="cur-row" style="padding:10px 14px;border-bottom:1px solid var(--border)">
+    <div class="cur-row panel-row">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span class="sz-link" onClick=${() => setOpen(o => !o)}>
           ${open ? '▾' : '▸'} ${label}${summary ? ' · ' + summary : ''}
@@ -10705,7 +10829,7 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
     ? '~' + fmtTokens(cluster.standing_cost_tokens_per_session) + ' tokens would ride into every future session, forever; modelled payback ' + cluster.payback_ratio.toFixed(2) + '×.'
     : null;
   return html`
-    <div class="opt-section inbox-row" data-mechanism=${inboxMechanismTag(cluster)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${cluster.signature}>
+    <div class="opt-section inbox-row" data-mechanism=${inboxMechanismTag(cluster)} key=${cluster.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         ${/* Only where a bulk action can genuinely reach this row. */ ''}
         ${canApply ? html`<input type="checkbox" checked=${checked} onChange=${onToggle} />` : null}
@@ -11035,7 +11159,7 @@ function appliedEstimate(rec) {
 // it stands in for causes exactly the layout jump it exists to prevent.
 function AppliedSkeletonRow() {
   return html`
-    <div class="sz-runrow" aria-hidden="true" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 14px;border-bottom:1px solid var(--border)">
+    <div class="sz-runrow" aria-hidden="true" style="align-items:flex-start;flex-direction:column;gap:6px">
       <div style="display:flex;align-items:center;gap:8px;width:100%">
         <div class="shimmer" style="height:13px;width:38%"></div>
         <div class="shimmer" style="height:13px;width:60px;margin-left:auto"></div>
@@ -11075,7 +11199,7 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
   return html`
     ${/* Horizontal padding matches the cost cards' 14px so the row's text and
           its right-aligned state chip never sit flush against the panel edge. */ ''}
-    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 14px;border-bottom:1px solid var(--border)">
+    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px">
       <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap">
         <span style="font-weight:500">${rec.title}</span>
         ${!isRelearn ? html`<span class="badge badge-info">${(COST_BADGE_BY_ANALYZER[rec.analyzer] || rec.analyzer || '').toUpperCase()}</span>` : null}
@@ -11346,7 +11470,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
   // Mark applied / Dismiss actions. The fix modality is legible from the
   // fix block itself, so it no longer gets its own sub-label.
   return html`
-    <div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
+    <div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
@@ -11660,7 +11784,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnow
     return html`
       <div style="margin:10px 0 18px;display:flex;gap:14px;flex-wrap:wrap" aria-hidden="true">
         ${[0, 1].map(i => html`
-          <div key=${i} class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+          <div key=${i} class="opt-section opt-tile">
             <div class="shimmer" style="height:11px;width:44%"></div>
             <div class="shimmer" style="height:24px;width:38%;margin-top:6px"></div>
             <div class="shimmer" style="height:12px;width:66%;margin-top:6px"></div>
@@ -11678,7 +11802,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnow
           invites adding them together. */ ''}
     <div style="display:flex;gap:14px;flex-wrap:wrap">
       ${hasOpenOverspend ? html`<${PastOverspendTile} block=${pastOverspend} />` : null}
-      <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+      <div class="opt-section opt-tile">
         <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--success)">Fixes applied</div>
         ${/* The green belongs to the label, not the figure: the number reads as
               a plain fact, matching the blue tile where the figure is also
@@ -12145,18 +12269,18 @@ function ReviewInboxView({ params }) {
               completed-but-empty result. */ ''}
         ${openItems.length === 0 ? (
           d.error && costStatus === 'error'
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load the inbox: ${d.error}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
+            ? html`<div class="empty compact err">Couldn't load the inbox: ${d.error}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
           : d.error
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>`
+            ? html`<div class="empty compact err">Couldn't load proposals: ${d.error}</div>`
           : showSkeleton
             ? html`
                 <${InboxLoadingNote} scanning=${!firstLoad && scanning} sessionsScanned=${d.sessionsScanned} />
                 ${[0, 1, 2, 3].map(i => html`<${InboxSkeletonRow} key=${i} />`)}`
           : costStatus === 'error'
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
+            ? html`<div class="empty compact err">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
           : d.status === 'never_run' && costStatus === 'never_run'
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>`
-            : html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing open. The last scan found nothing worth a row (or you've dismissed or applied everything).</div>`
+            ? html`<div class="empty compact">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>`
+            : html`<div class="empty compact">Nothing open. The last scan found nothing worth a row (or you've dismissed or applied everything).</div>`
         ) : null}
         ${topOpen.map(renderRow)}
         ${/* The tail's own line is stated in the same tense as the rows it
@@ -12232,7 +12356,7 @@ function ReviewInboxView({ params }) {
         ${!appliedCountKnown
           ? html`${[0, 1, 2].map(i => html`<${AppliedSkeletonRow} key=${i} />`)}`
           : combinedApplied.length === 0
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing applied yet.</div>`
+            ? html`<div class="empty compact">Nothing applied yet.</div>`
             : combinedApplied.map(rec => html`<${AppliedItemRow} key=${rec.kind + ':' + rec.id} rec=${rec} suppressed=${suppressed} onChanged=${() => { loadApplied(); loadCost(); }} />`)}
       </div>
     ` : null}
@@ -12920,13 +13044,12 @@ function PersonaBar({ persona, detected, known, counts, onChange }) {
   const opts = [['claude-code', 'Claude Code'], ['sdk', 'SDK workflows']];
   return html`
     <div class="persona-bar">
-      <span class="persona-bar-label">Viewing as</span>
-      <div class="persona-switch" role="tablist" aria-label="Persona">
+      <label class="persona-bar-label" for="persona-select">Viewing as</label>
+      <select id="persona-select" class="persona-select" aria-label="Persona"
+              value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
         ${opts.map(([value, label]) => html`
-          <button type="button" role="tab" aria-selected=${persona === value}
-                  class=${'persona-btn' + (persona === value ? ' active' : '')}
-                  onClick=${() => onChange(value)}>${label}</button>`)}
-      </div>
+          <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
+      </select>
       ${known && detected && persona !== detected ? html`
         <span class="persona-bar-note">Detected: ${detected === 'claude-code' ? 'Claude Code' : detected}</span>` : null}
       ${known && counts && counts[persona] === 0 ? html`
