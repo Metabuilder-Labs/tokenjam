@@ -7314,7 +7314,38 @@ function ctxAuditScopeTag(scopeLabel) {
 // the shared description column means for THIS class ("what it puts in
 // context" for Class 1, "what fires" for Class 2/3); the underlying field is
 // the same evidence-derived text either way.
-function ContextAuditRow({ row, unit, onExpandGroup }) {
+// The Remove control: two clicks, never one. The first click arms the row and
+// says what will happen in words ("Confirm"); the second sends it. A single
+// click that moves a file out of the user's ~/.claude is exactly the kind of
+// action a mis-aimed cursor should not be able to complete, and a confirm
+// modal for a reversible action is heavier than the action deserves.
+//
+// A group row is deliberately not removable (see `rows_for_display`): its
+// members carry their own buttons inside the expand modal.
+function ContextAuditRemoveCell({ row, busy, onRemove }) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return undefined;
+    // Disarm on any click elsewhere, so a row left armed by accident does not
+    // sit there waiting to fire on a later, unrelated click.
+    const off = () => setArmed(false);
+    const t = setTimeout(() => document.addEventListener('click', off, { once: true }), 0);
+    return () => { clearTimeout(t); document.removeEventListener('click', off); };
+  }, [armed]);
+
+  if (!row.removable) return html`<td></td>`;
+  if (busy) return html`<td><span style="color:var(--text-dim);font-size:12px">working...</span></td>`;
+  return html`
+    <td>
+      <button type="button" class="ctx-audit-unit-btn"
+              title=${armed ? 'Move it to the quarantine folder' : 'Remove this from your sessions'}
+              onClick=${(e) => { e.stopPropagation(); if (armed) { setArmed(false); onRemove(row); } else setArmed(true); }}>
+        ${armed ? 'Confirm' : 'Remove'}
+      </button>
+    </td>`;
+}
+
+function ContextAuditRow({ row, unit, onExpandGroup, busyId, onRemove }) {
   const isGroup = row.kind === 'group' && row.members.length > 0;
   return html`
     <tr>
@@ -7330,6 +7361,7 @@ function ContextAuditRow({ row, unit, onExpandGroup }) {
       <td>${ctxAuditSizeCell(row, unit)}</td>
       <td class="ctx-audit-desc" style="color:var(--text-dim);font-size:12px"><span title=${row.description || ''}>${row.description || '-'}</span></td>
       <td style="color:var(--text-dim);font-size:12px">${row.frequency}</td>
+      <${ContextAuditRemoveCell} row=${row} busy=${busyId === row.row_id} onRemove=${onRemove} />
     </tr>
   `;
 }
@@ -7337,7 +7369,7 @@ function ContextAuditRow({ row, unit, onExpandGroup }) {
 // One combined table (Class 1, or Class 2/3 once expanded): headers vary by
 // class per the CLI's own column framing (content for Class 1, action for
 // Class 2/3), the last four are otherwise identical.
-function ContextAuditTable({ rows, descLabel, onExpandGroup }) {
+function ContextAuditTable({ rows, descLabel, onExpandGroup, busyId, onRemove }) {
   // Chars and tokens are two units for ONE quantity (how much of this reaches
   // the model), so they share a column rather than competing for width. Chars
   // is the default because it is the measured value; tokens is an estimate
@@ -7354,22 +7386,22 @@ function ContextAuditTable({ rows, descLabel, onExpandGroup }) {
               aria-label=${isChars ? 'Show tokens instead' : 'Show characters instead'}
               onClick=${() => setUnit(isChars ? 'tokens' : 'chars')}>${isChars ? 'tokens' : 'chars'}</button>
     </span>`;
-  const headers = ['Source', 'Trigger', sizeHeader, descLabel, 'Frequency'];
+  const headers = ['Source', 'Trigger', sizeHeader, descLabel, 'Frequency', ''];
   return html`
     <div class="table-wrap"><table>
       <thead><tr>${headers.map((h, i) => html`<th key=${i}>${h}</th>`)}</tr></thead>
       <tbody>
         ${rows.length === 0 ? html`
           <tr><td colspan=${headers.length} class="empty-cell">None found.</td></tr>
-        ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} unit=${unit} onExpandGroup=${onExpandGroup} />`)}
+        ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} unit=${unit} onExpandGroup=${onExpandGroup} busyId=${busyId} onRemove=${onRemove} />`)}
       </tbody>
     </table></div>`;
 }
 
 // Class 1's table: always rendered, never collapsed (it's the headline
 // class), rows sorted by tokens descending.
-function ContextAuditClass1Table({ rows, onExpandGroup }) {
-  return html`<${ContextAuditTable} rows=${rows} descLabel="What it puts in context" onExpandGroup=${onExpandGroup} />`;
+function ContextAuditClass1Table({ rows, onExpandGroup, busyId, onRemove }) {
+  return html`<${ContextAuditTable} rows=${rows} descLabel="What it puts in context" onExpandGroup=${onExpandGroup} busyId=${busyId} onRemove=${onRemove} />`;
 }
 
 // Class 2/3: always rendered open, exactly like Class 1. There is deliberately
@@ -7379,7 +7411,7 @@ function ContextAuditClass1Table({ rows, onExpandGroup }) {
 // labelled NOT resident, because its raw token count can exceed Class 1's (it
 // sums every on-demand body whether or not it is ever invoked) and must never
 // read as a bigger cost than the always-resident floor above it.
-function ContextAuditClassSection({ classKey, rows, count, deemphasise, onExpandGroup }) {
+function ContextAuditClassSection({ classKey, rows, count, deemphasise, onExpandGroup, busyId, onRemove }) {
   const totalTokens = rows.reduce((s, r) => s + r.tokens, 0);
   const label = classKey === 'class2' ? 'Class 2' : 'Class 3';
   const notResident = classKey === 'class3' ? ' (NOT resident: costs nothing until invoked)' : '';
@@ -7389,7 +7421,7 @@ function ContextAuditClassSection({ classKey, rows, count, deemphasise, onExpand
         <b>${label}</b>: ${CTX_AUDIT_CLASS_MEANING[classKey] + ' '}
         ${count} item(s), ~${fmtTokens(totalTokens)} tokens${notResident}.
       </div>
-      <${ContextAuditTable} rows=${rows} descLabel="What fires" onExpandGroup=${onExpandGroup} />
+      <${ContextAuditTable} rows=${rows} descLabel="What fires" onExpandGroup=${onExpandGroup} busyId=${busyId} onRemove=${onRemove} />
     </section>`;
 }
 
@@ -7403,7 +7435,7 @@ function ContextAuditClassSection({ classKey, rows, count, deemphasise, onExpand
 // Close on the X button, Escape, and a backdrop click (all three). Focus
 // moves into the card on open and back to the row's expand button on close,
 // so keyboard navigation survives the round trip.
-function ContextAuditGroupModal({ group, onClose }) {
+function ContextAuditGroupModal({ group, onClose, busyId, onRemove }) {
   const modalRef = useRef(null);
 
   useEffect(() => {
@@ -7433,7 +7465,7 @@ function ContextAuditGroupModal({ group, onClose }) {
         </div>
         <div class="cur-modal-body">
           <div class="table-wrap"><table>
-            <thead><tr><th>Source</th><th>What it is</th><th>Chars</th><th>Tokens</th></tr></thead>
+            <thead><tr><th>Source</th><th>What it is</th><th>Chars</th><th>Tokens</th><th></th></tr></thead>
             <tbody>
               ${members.map((m, i) => html`
                 <tr key=${i}>
@@ -7441,6 +7473,7 @@ function ContextAuditGroupModal({ group, onClose }) {
                   <td class="ctx-audit-desc" style="color:var(--text-dim);font-size:12px"><span title=${m.description || ''}>${m.description || '-'}</span></td>
                   <td>${m.chars.toLocaleString('en-US')}</td>
                   <td>${fmtTokens(m.tokens)}</td>
+                  <${ContextAuditRemoveCell} row=${m} busy=${busyId === m.row_id} onRemove=${onRemove} />
                 </tr>
               `)}
             </tbody>
@@ -7495,10 +7528,52 @@ function ctxAuditCombine(globalRows, projectRows) {
   return tagged.sort((a, b) => b.tokens - a.tokens);
 }
 
+// What was removed from this page, and how to put it back. Rendered from its
+// OWN fetch, so it distinguishes "not yet known" (nothing rendered at all)
+// from "known and empty" (the reassurance line) rather than borrowing the
+// audit's loading state: a "nothing removed" claim while the removals fetch
+// is still in flight would be a confident statement about files the page has
+// not looked for yet.
+function ContextAuditRemovals({ state, busyId, onRestore }) {
+  if (!state) return null;
+  const { removals, quarantine_dir } = state;
+  if (!removals.length) return null;
+  return html`
+    <details style="margin-top:28px" open>
+      <summary style="cursor:pointer;font-size:12px;color:var(--text-dim)">
+        ${removals.length} item(s) removed. Nothing was deleted: each one moved to ${quarantine_dir}
+      </summary>
+      <div class="table-wrap" style="margin-top:8px"><table>
+        <thead><tr><th>Removed</th><th>Came from</th><th>When</th><th></th></tr></thead>
+        <tbody>
+          ${removals.map((r, i) => html`
+            <tr key=${i}>
+              <td>${r.label || r.original_path}</td>
+              <td class="mono" style="max-width:420px;overflow-wrap:anywhere" title=${r.original_path}>${shortPath(r.original_path)}</td>
+              <td style="color:var(--text-dim);font-size:12px">${fmtAgo(r.removed_at)}</td>
+              <td>
+                ${r.restorable ? html`
+                  <button type="button" class="ctx-audit-unit-btn"
+                          disabled=${busyId === r.record_id}
+                          onClick=${() => onRestore(r)}>
+                    ${busyId === r.record_id ? 'working...' : 'Restore'}
+                  </button>
+                ` : html`<span style="color:var(--text-dim);font-size:12px" title=${r.reason}>can't restore: ${r.reason}</span>`}
+              </td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    </details>`;
+}
+
 function ContextAuditView() {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [modalGroup, setModalGroup] = useState(null);
+  const [removals, setRemovals] = useState(null);
+  const [busyId, setBusyId] = useState('');
+  const [actionError, setActionError] = useState('');
   const onExpandGroup = useCallback((row) => setModalGroup(row), []);
 
   const load = useCallback(async () => {
@@ -7511,7 +7586,44 @@ function ContextAuditView() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  const loadRemovals = useCallback(async () => {
+    try {
+      setRemovals(await api('/context-audit/removals', {}, { noCache: true }));
+    } catch (e) {
+      // The removals list failing must never blank the audit above it; the
+      // page still tells the truth about what loads, it just can't show the
+      // undo list. Surfaced in the action banner, not as a page error.
+      setActionError(e.message || String(e));
+    }
+  }, []);
+
+  const onRemove = useCallback(async (row) => {
+    setBusyId(row.row_id);
+    setActionError('');
+    try {
+      await apiPostOrDetail('/context-audit/remove', { row_id: row.row_id });
+      await Promise.all([load(), loadRemovals()]);
+    } catch (e) {
+      setActionError(e.message || String(e));
+    } finally {
+      setBusyId('');
+    }
+  }, [load, loadRemovals]);
+
+  const onRestore = useCallback(async (rec) => {
+    setBusyId(rec.record_id);
+    setActionError('');
+    try {
+      await apiPostOrDetail('/context-audit/restore', { record_id: rec.record_id });
+      await Promise.all([load(), loadRemovals()]);
+    } catch (e) {
+      setActionError(e.message || String(e));
+    } finally {
+      setBusyId('');
+    }
+  }, [load, loadRemovals]);
+
+  useEffect(() => { load(); loadRemovals(); }, [load, loadRemovals]);
 
   // Blank only when there is no prior answer at all; a failed refresh on an
   // already-loaded page is a scoped banner above the still-good content
@@ -7523,7 +7635,7 @@ function ContextAuditView() {
   if (!data) return html`
     <div class="page-title">Context audit</div>
     <div style="color:var(--text-dim);font-size:13px;margin-bottom:12px">Scanning ~/.claude and every recently-active project.</div>
-    ${TableRowsSkeleton(['Source', 'Trigger', 'Chars', 'What it puts in context', 'Frequency'], 8)}`;
+    ${TableRowsSkeleton(['Source', 'Trigger', 'Chars', 'What it puts in context', 'Frequency', ''], 8)}`;
 
   // A recorded working directory that loads NOTHING (a scratch/temp path a
   // session happened to run in, not a real project) is not the project this
@@ -7553,7 +7665,8 @@ function ContextAuditView() {
       Everything that can enter a Claude Code session, and its context cost. Classified by
       how it reaches the model, not by where it sits on disk. An inventory, not a
       recommendation engine: nothing here is a savings claim, and nothing is flagged for you
-      to cut. ${data.plugins_enabled} plugin(s) enabled, ${data.plugins_disabled} disabled
+      to cut. Remove is yours to aim; it never deletes anything, it moves the file to a
+      folder outside tokenjam's own storage and keeps a Restore next to it. ${data.plugins_enabled} plugin(s) enabled, ${data.plugins_disabled} disabled
       (a disabled plugin's skills/hooks are excluded; its rules files, if any, are counted on
       their own merit; the harness reads that directory regardless of plugin state).
     </div>
@@ -7564,6 +7677,14 @@ function ContextAuditView() {
         <p>Showing the last scan that succeeded; everything below is unaffected.</p>
       </div>` : null}
 
+    ${actionError ? html`
+      <div class="band-msg err" style="margin:14px 0">
+        <b>That didn't go through.</b>
+        <p>${actionError}</p>
+        <p>Nothing was changed on disk. If the machine moved on since this page last
+        scanned, reload and try again.</p>
+      </div>` : null}
+
     ${!currentProject ? html`
       <div style="color:var(--text-dim);font-size:13px;margin-bottom:20px">
         No project roots found yet. A project shows up here once Claude Code has recorded at
@@ -7571,11 +7692,12 @@ function ContextAuditView() {
       </div>
     ` : null}
 
-    <${ContextAuditClass1Table} rows=${combinedClass1} onExpandGroup=${onExpandGroup} />
-    <${ContextAuditClassSection} classKey="class2" rows=${combinedClass2} count=${combinedClass2Count} deemphasise=${false} onExpandGroup=${onExpandGroup} />
-    <${ContextAuditClassSection} classKey="class3" rows=${combinedClass3} count=${combinedClass3Count} deemphasise=${true} onExpandGroup=${onExpandGroup} />
+    <${ContextAuditClass1Table} rows=${combinedClass1} onExpandGroup=${onExpandGroup} busyId=${busyId} onRemove=${onRemove} />
+    <${ContextAuditClassSection} classKey="class2" rows=${combinedClass2} count=${combinedClass2Count} deemphasise=${false} onExpandGroup=${onExpandGroup} busyId=${busyId} onRemove=${onRemove} />
+    <${ContextAuditClassSection} classKey="class3" rows=${combinedClass3} count=${combinedClass3Count} deemphasise=${true} onExpandGroup=${onExpandGroup} busyId=${busyId} onRemove=${onRemove} />
     <${ContextAuditUnloaded} rows=${combinedUnloaded} count=${combinedUnloadedCount} />
-    <${ContextAuditGroupModal} group=${modalGroup} onClose=${() => setModalGroup(null)} />
+    <${ContextAuditRemovals} state=${removals} busyId=${busyId} onRestore=${onRestore} />
+    <${ContextAuditGroupModal} group=${modalGroup} onClose=${() => setModalGroup(null)} busyId=${busyId} onRemove=${onRemove} />
   `;
 }
 

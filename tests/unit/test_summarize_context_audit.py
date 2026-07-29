@@ -15,6 +15,7 @@ feature brief:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -381,3 +382,72 @@ def test_plugin_skills_group_under_the_plugin_short_name(tmp_path, monkeypatch):
     assert enabled == 1
     assert len(display) == 1
     assert display[0]["label"] == "widget 2 skill descriptions"
+
+
+# --------------------------------------------------------------------------- #
+# Removal handles. The page's Remove button resolves through the audit's own
+# rows, so what a row DECLARES as its removal target is the safety boundary.
+# --------------------------------------------------------------------------- #
+
+def test_a_hook_row_targets_the_file_that_wires_it_not_its_command_string():
+    """A hook is not a file: `source` is the command, and quarantining that as
+    a path would either miss or hit something unrelated. The removal target has
+    to be the settings JSON that declares it."""
+    events = {"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "sweep.sh"}]}]}
+    rows = ca._hook_rows_from_events(
+        events, ca.GLOBAL_SCOPE, declared_in=Path("/x/settings.json"))
+
+    assert len(rows) == 1
+    assert rows[0].removal_kind == "hook"
+    assert rows[0].origin_path == "/x/settings.json"
+    assert rows[0].hook_event == "Stop"
+    assert rows[0].hook_command == "sweep.sh"
+
+
+def test_a_hook_with_no_declaring_file_is_reported_but_not_removable():
+    events = {"Stop": [{"matcher": "", "hooks": [{"type": "command", "command": "sweep.sh"}]}]}
+    rows = ca._hook_rows_from_events(events, ca.GLOBAL_SCOPE)
+
+    assert rows[0].removable is False
+    assert rows[0].row_id == ""
+
+
+def test_two_rows_for_one_file_share_a_row_id_because_one_remove_takes_both():
+    """A skill contributes an always-listed description row AND an on-demand
+    body row. They are two lines of cost, one file, one removal."""
+    desc = ca.Row("/s/SKILL.md", "tool listing", 10, "every turn", ca.CLASS_1, "global",
+                  **ca._file_removal(Path("/s/SKILL.md")))
+    body = ca.Row("/s/SKILL.md", "user invokes the skill", 90, "on demand", ca.CLASS_3,
+                  "global", **ca._file_removal(Path("/s/SKILL.md")))
+
+    assert desc.row_id == body.row_id != ""
+
+
+def test_find_removable_refuses_a_row_id_the_scan_never_produced():
+    """The remove endpoint resolves through this, which is what stops it being
+    talked into quarantining an arbitrary path on the machine."""
+    row = ca.Row("/a/CLAUDE.md", "harness auto-load", 5, "every turn", ca.CLASS_1, "global",
+                 **ca._file_removal(Path("/a/CLAUDE.md")))
+    result = ca.ContextAuditResult(ca.ScopeAudit("global", class1=(row,)))
+
+    assert result.find_removable(row.row_id) is row
+    assert result.find_removable("deadbeef") is None
+    assert result.find_removable("") is None
+
+
+def test_a_group_is_not_removable_as_a_unit_but_its_members_are():
+    """"Remove 41 skill descriptions" is one click for 41 quarantines; the
+    undo store records them one at a time and cannot honestly reverse that as a
+    single action."""
+    rows = [
+        ca.Row(f"/p/skills/{n}/SKILL.md", "tool listing", 10 + i, "every turn",
+               ca.CLASS_1, "global", "", "skill_desc", "acme",
+               **ca._file_removal(Path(f"/p/skills/{n}/SKILL.md")))
+        for i, n in enumerate(("one", "two"))
+    ]
+    display = ca.rows_for_display(rows)
+
+    assert display[0]["kind"] == "group"
+    assert display[0]["removable"] is False
+    assert all(m["removable"] for m in display[0]["members"])
+    assert len({m["row_id"] for m in display[0]["members"]}) == 2

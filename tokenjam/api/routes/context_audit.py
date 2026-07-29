@@ -12,11 +12,12 @@ polls.
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
-from tokenjam.api.deps import require_api_key
+from tokenjam.api.deps import require_api_key, require_relearn_write_auth
 
 router = APIRouter()
 
@@ -75,11 +76,37 @@ def _resolved_project_roots(config) -> list[str]:
     return [str(r) for r in resolved.roots]
 
 
-def _compute(config) -> dict[str, Any]:
+def _compute(config):
     from tokenjam.core.summarize.context_audit import run_context_audit
 
     roots = _resolved_project_roots(config)
-    return run_context_audit(roots).to_dict()
+    return run_context_audit(roots)
+
+
+def _cached_result(config, *, refresh: bool = False):
+    """The audit RESULT object (not its dict), cached.
+
+    The object is what is cached rather than the payload because removal
+    resolves a row_id against the rows this scan produced — see
+    ``ContextAuditResult.find_removable``. Caching only the dict would leave
+    the remove endpoint re-running a scan measured in tens of seconds just to
+    look up one row.
+    """
+    now = time.monotonic()
+    if not refresh and _cache["result"] is not None and (now - _cache["at"]) < _CACHE_TTL_SECONDS:
+        return _cache["result"]
+    result = _compute(config)
+    _cache["result"] = result
+    _cache["at"] = now
+    return result
+
+
+def _invalidate() -> None:
+    """Drop the cache after a removal: the page's own numbers are now stale by
+    exactly the row that just went, and a Remove followed by a stale re-read
+    showing the row still there reads as a failed removal."""
+    _cache["result"] = None
+    _cache["at"] = 0.0
 
 
 @router.get("/context-audit", dependencies=[Depends(require_api_key)])
@@ -90,10 +117,65 @@ def get_context_audit(
     """The full context-audit payload: global scope + one entry per scanned
     project root, cached for `_CACHE_TTL_SECONDS`. `refresh=true` forces a
     fresh scan (e.g. a user-triggered "Rescan" button)."""
-    now = time.monotonic()
-    if not refresh and _cache["result"] is not None and (now - _cache["at"]) < _CACHE_TTL_SECONDS:
-        return _cache["result"]
-    result = _compute(_config(request))
-    _cache["result"] = result
-    _cache["at"] = now
-    return result
+    return _cached_result(_config(request), refresh=refresh).to_dict()
+
+
+@router.get("/context-audit/removals", dependencies=[Depends(require_api_key)])
+def get_removals() -> dict[str, Any]:
+    """Everything removed from this page so far, newest first, each with
+    whether it can still be restored."""
+    from tokenjam.core.summarize.context_quarantine import list_removals, quarantine_root
+
+    return {"removals": list_removals(), "quarantine_dir": str(quarantine_root())}
+
+
+# Both mutating routes carry the always-on local write guard as well as the
+# API key. These move files on the user's machine and edit their settings
+# JSON, which is strictly more destructive than the relearn writes the guard
+# was first built for; a page reachable from a browser must not be able to do
+# that on a cross-origin request or without the process-local token.
+@router.post("/context-audit/remove",
+             dependencies=[Depends(require_api_key), Depends(require_relearn_write_auth)])
+def post_remove(request: Request, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Reversibly remove one audited row.
+
+    409 rather than 500 on every refusal (symlink, already gone, hook entry not
+    present): these are all "the machine is not in the state you saw", which is
+    a conflict the user resolves by rescanning, not a server fault.
+    """
+    from tokenjam.core.summarize.context_quarantine import remove_file, remove_hook
+    from tokenjam.core.summarize.session import SummarizeRefused
+
+    row_id = str(body.get("row_id") or "")
+    result = _cached_result(_config(request))
+    row = result.find_removable(row_id)
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="that row is not in the current audit — rescan and try again.")
+    try:
+        if row.removal_kind == "hook":
+            rec = remove_hook(Path(row.origin_path), row.hook_event, row.hook_matcher,
+                              row.hook_command, label=row.source)
+        else:
+            rec = remove_file(Path(row.origin_path), label=Path(row.origin_path).name,
+                              detail=row.trigger)
+    except SummarizeRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _invalidate()
+    return {"removed": rec.to_dict()}
+
+
+@router.post("/context-audit/restore",
+             dependencies=[Depends(require_api_key), Depends(require_relearn_write_auth)])
+def post_restore(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """Put one removal back where it came from."""
+    from tokenjam.core.summarize.context_quarantine import restore
+    from tokenjam.core.summarize.session import SummarizeRefused
+
+    try:
+        out = restore(str(body.get("record_id") or ""))
+    except SummarizeRefused as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    _invalidate()
+    return {"restored": out}

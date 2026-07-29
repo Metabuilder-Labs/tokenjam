@@ -51,6 +51,7 @@ from typing import Any, Sequence
 from tokenjam.core.summarize import load_semantics
 from tokenjam.core.summarize.catalog import load_catalog
 from tokenjam.core.summarize.detect import CHARS_PER_TOKEN
+from tokenjam.core.summarize.session import sha256
 
 log = logging.getLogger(__name__)
 
@@ -203,16 +204,51 @@ class Row:
     description: str = ""
     family_kind: str = ""
     family_qualifier: str = ""
+    #: What a Remove would act on. ``origin_path`` is the file to quarantine
+    #: (a file-backed row) or the settings JSON to edit (a hook row) — never
+    #: derived from ``source``, which for a hook row is the command STRING and
+    #: names no file at all. A row with no ``removal_kind`` gets no button.
+    origin_path: str = ""
+    removal_kind: str = ""
+    hook_event: str = ""
+    hook_matcher: str = ""
+    hook_command: str = ""
 
     @property
     def tokens(self) -> int:
         return _tokens(self.chars)
+
+    @property
+    def removable(self) -> bool:
+        return bool(self.removal_kind and self.origin_path)
+
+    @property
+    def row_id(self) -> str:
+        """Stable handle the page posts back to remove this row.
+
+        Derived from the removal TARGET, not from the display text: two rows
+        for the same file (a skill's always-listed description and its
+        on-demand body) share an id on purpose, because one Remove takes both.
+        """
+        if not self.removable:
+            return ""
+        return sha256("|".join([
+            self.removal_kind, self.origin_path,
+            self.hook_event, self.hook_matcher, self.hook_command,
+        ]))[:32]
+
+    def removal_dict(self) -> dict[str, Any]:
+        return {
+            "row_id": self.row_id, "removable": self.removable,
+            "removal_kind": self.removal_kind, "origin_path": self.origin_path,
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "source": self.source, "trigger": self.trigger, "chars": self.chars,
             "tokens": self.tokens, "frequency": self.frequency,
             "class": self.cls, "scope": self.scope, "description": self.description,
+            **self.removal_dict(),
         }
 
 
@@ -312,7 +348,7 @@ def rows_for_display(rows: Sequence[Row]) -> list[dict[str, Any]]:
             display.append({
                 "kind": "row", "label": r.source, "description": r.description,
                 "chars": r.chars, "tokens": r.tokens, "frequency": r.frequency,
-                "trigger": r.trigger, "members": [],
+                "trigger": r.trigger, "members": [], **r.removal_dict(),
             })
             continue
         family_kind, qualifier = key
@@ -326,9 +362,16 @@ def rows_for_display(rows: Sequence[Row]) -> list[dict[str, Any]]:
             "description": description,
             "chars": chars, "tokens": tokens,
             "frequency": members[0].frequency, "trigger": members[0].trigger,
+            # A GROUP is never removable as a unit, even when every member is:
+            # "remove 41 skill descriptions" is one click that quarantines 41
+            # files, and an undo-per-file store cannot honestly present that as
+            # one reversible action. Members carry their own handles, so the
+            # expand affordance is where removal lives.
+            "row_id": "", "removable": False, "removal_kind": "", "origin_path": "",
             "members": [
                 {"source": m.source, "chars": m.chars, "tokens": m.tokens,
-                 "trigger": m.trigger, "description": m.description}
+                 "trigger": m.trigger, "description": m.description,
+                 **m.removal_dict()}
                 for m in ranked
             ],
         })
@@ -412,11 +455,36 @@ class ContextAuditResult:
             "last_scanned_at": self.last_scanned_at,
         }
 
+    def find_removable(self, row_id: str) -> "Row | None":
+        """The row a Remove request names, or None.
+
+        Removal resolves through THIS scan rather than through a path the
+        client supplies: the page may only remove something the audit itself
+        reported. A request naming a path the scan never saw has no row_id to
+        match and is refused, so the endpoint can never be talked into
+        quarantining an arbitrary file on the machine.
+        """
+        if not row_id:
+            return None
+        for scope in (self.global_scope, *self.projects):
+            for row in (*scope.class1, *scope.class2, *scope.class3):
+                if row.removable and row.row_id == row_id:
+                    return row
+        return None
+
 
 # --------------------------------------------------------------------------- #
 # CLAUDE.md / AGENTS.md / rules — reuse the catalog, split unscoped vs
 # paths:-scoped rules via load_semantics (never assumed from directory alone).
 # --------------------------------------------------------------------------- #
+
+def _file_removal(path: Path) -> dict[str, str]:
+    """Removal target for a row whose cost IS a file: quarantining that file
+    removes the row. Every file-backed row gets one, including plugin-owned
+    files — a plugin reinstall can put its file back, which the page says out
+    loud rather than withholding the button."""
+    return {"origin_path": str(path), "removal_kind": "file"}
+
 
 def _is_rule_path(path: Path) -> bool:
     return "/rules/" in path.as_posix()
@@ -518,11 +586,11 @@ def _catalog_prose_rows(paths: Sequence[Path], scope: str) -> tuple[list[Row], l
         if is_rule and load_semantics.has_paths_scope(text):
             rows.append(Row(str(path), "matching file read (paths: scope)", chars,
                              "on file read", CLASS_2, scope, description,
-                             family_kind, family_qualifier))
+                             family_kind, family_qualifier, **_file_removal(path)))
         else:
             trigger = "harness auto-load" if not is_rule else "harness auto-load (unscoped rule)"
             rows.append(Row(str(path), trigger, chars, "every turn", CLASS_1, scope,
-                             description, family_kind, family_qualifier))
+                             description, family_kind, family_qualifier, **_file_removal(path)))
     return rows, unloaded
 
 
@@ -555,23 +623,24 @@ def _skill_command_agent_rows(
         if load_class not in load_semantics.ON_DEMAND_CLASSES or load_class == load_semantics.PATH_SCOPED:
             # Shouldn't happen for a skills/commands/agents path, but never
             # misclassify silently — fall back to reading it as always-resident.
-            rows.append(Row(str(path), "harness auto-load", len(text), "every turn", CLASS_1, scope, description))
+            rows.append(Row(str(path), "harness auto-load", len(text), "every turn", CLASS_1,
+                             scope, description, **_file_removal(path)))
             continue
         resident, on_demand = load_semantics.split_always_resident(text, load_class)
         kind = {"skill": "skill", "command": "command", "agent": "agent"}[load_class]
         rows.append(Row(str(path), "tool listing", len(resident),
                          "every turn", CLASS_1, scope, description,
-                         f"{kind}_desc", group_qualifier))
+                         f"{kind}_desc", group_qualifier, **_file_removal(path)))
         if not on_demand:
             continue  # no body (frontmatter-only file) — nothing else to report
         if load_class == load_semantics.COMMAND:
             rows.append(Row(str(path), "user types the slash command", len(on_demand),
                              "on demand", CLASS_3, scope, description,
-                             f"{kind}_body", group_qualifier))
+                             f"{kind}_body", group_qualifier, **_file_removal(path)))
         elif _looks_auto_invoked(description):
             rows.append(Row(str(path), f"description implies auto-invoke ({kind})",
                              len(on_demand), "on demand (auto-triggered)", CLASS_2, scope,
-                             description, f"{kind}_body", group_qualifier))
+                             description, f"{kind}_body", group_qualifier, **_file_removal(path)))
         else:
             rows.append(Row(str(path), f"user or model invokes the {kind}", len(on_demand),
                              "on demand", CLASS_3, scope, description,
@@ -697,6 +766,7 @@ def _plugin_hook_rows(hooks_json: Path, plugin_id: str) -> list[Row]:
     return _hook_rows_from_events(
         events, GLOBAL_SCOPE, source_prefix=f"plugin:{plugin_id}",
         group_qualifier=_plugin_short_name(plugin_id),
+        declared_in=hooks_json,
     )
 
 
@@ -741,7 +811,12 @@ def _scan_plugins() -> tuple[list[Row], list[Row], list[Row], list[UnloadedRow],
 
 def _hook_rows_from_events(
     events: dict, scope: str, *, source_prefix: str = "", group_qualifier: str = "",
+    declared_in: Path | None = None,
 ) -> list[Row]:
+    """``declared_in`` is the JSON file that WIRES these hooks — the settings
+    file or a plugin's ``hooks/hooks.json``. It is the removal target: a hook
+    is not a file, so removing one means editing the entry out of the file that
+    declares it. Without it a hook row is reported but not removable."""
     rows: list[Row] = []
     for event_name, matchers in events.items():
         if not isinstance(matchers, list):
@@ -768,7 +843,11 @@ def _hook_rows_from_events(
                 # the config footprint only — honestly smaller than the real
                 # cost, never larger.
                 rows.append(Row(source, trigger, len(command), frequency, CLASS_2, scope,
-                                 "", "hook", group_qualifier))
+                                 "", "hook", group_qualifier,
+                                 origin_path=str(declared_in) if declared_in else "",
+                                 removal_kind="hook" if declared_in else "",
+                                 hook_event=event_name, hook_matcher=matcher,
+                                 hook_command=command))
     return rows
 
 
@@ -777,7 +856,8 @@ def _settings_hook_rows(settings_path: Path, scope: str, *, group_qualifier: str
     events = data.get("hooks", {})
     if not isinstance(events, dict):
         return []
-    return _hook_rows_from_events(events, scope, group_qualifier=group_qualifier)
+    return _hook_rows_from_events(events, scope, group_qualifier=group_qualifier,
+                                  declared_in=settings_path)
 
 
 # --------------------------------------------------------------------------- #

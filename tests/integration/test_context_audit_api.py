@@ -124,3 +124,92 @@ async def test_refresh_flag_forces_a_rescan(client, fake_home, monkeypatch):
     await client.get("/api/v1/context-audit")
     await client.get("/api/v1/context-audit", params={"refresh": "true"})
     assert calls["n"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# Remove / restore. These move real files, so the round trip and the refusals
+# are proven through the app, guard headers and all.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def removable_home(tmp_path, monkeypatch, fake_home):
+    """`fake_home` with the global CLAUDE.md declared removable, plus the
+    quarantine store redirected into the same scratch home so the test can
+    never write to the operator's real one."""
+    from tokenjam.core.summarize import context_quarantine as cq
+
+    claude_dir = fake_home / ".claude"
+    target = claude_dir / "CLAUDE.md"
+
+    def _scan(claude_dir_arg=None):
+        return ca.ScopeAudit(
+            scope=ca.GLOBAL_SCOPE,
+            class1=(ca.Row(str(target), "harness auto-load", 15, "every turn",
+                           ca.CLASS_1, ca.GLOBAL_SCOPE, **ca._file_removal(target)),),
+        )
+    monkeypatch.setattr(ca, "scan_global", _scan)
+    monkeypatch.setattr(cq, "quarantine_root", lambda home=None: fake_home / ".claude-context-trash")
+    return fake_home
+
+
+def _write_headers(app):
+    return {"X-TJ-Local-Token": app.state.relearn_write_token}
+
+
+async def test_remove_then_restore_round_trips_the_file(client, app, removable_home):
+    target = removable_home / ".claude" / "CLAUDE.md"
+    before = target.read_text()
+
+    audit = (await client.get("/api/v1/context-audit")).json()
+    row_id = audit["global"]["class1"][0]["row_id"]
+    assert row_id
+
+    r = await client.post("/api/v1/context-audit/remove", json={"row_id": row_id},
+                          headers=_write_headers(app))
+    assert r.status_code == 200
+    assert not target.exists()
+
+    listed = (await client.get("/api/v1/context-audit/removals")).json()["removals"]
+    assert len(listed) == 1 and listed[0]["restorable"] is True
+
+    r = await client.post("/api/v1/context-audit/restore",
+                          json={"record_id": listed[0]["record_id"]},
+                          headers=_write_headers(app))
+    assert r.status_code == 200
+    assert target.read_text() == before
+
+
+async def test_remove_without_the_local_write_token_is_refused(client, removable_home):
+    target = removable_home / ".claude" / "CLAUDE.md"
+    audit = (await client.get("/api/v1/context-audit")).json()
+    row_id = audit["global"]["class1"][0]["row_id"]
+
+    r = await client.post("/api/v1/context-audit/remove", json={"row_id": row_id})
+
+    assert r.status_code == 401
+    assert target.exists(), "a refused request must not have touched the file"
+
+
+async def test_remove_refuses_a_row_id_the_audit_never_reported(client, app, removable_home):
+    """The endpoint takes a handle, never a path — an id the scan did not
+    produce resolves to nothing and removes nothing."""
+    await client.get("/api/v1/context-audit")
+
+    r = await client.post("/api/v1/context-audit/remove",
+                          json={"row_id": "not-a-real-row-id"}, headers=_write_headers(app))
+
+    assert r.status_code == 404
+    assert (removable_home / ".claude" / "CLAUDE.md").exists()
+
+
+async def test_removing_a_file_that_vanished_since_the_scan_is_a_conflict(client, app, removable_home):
+    target = removable_home / ".claude" / "CLAUDE.md"
+    audit = (await client.get("/api/v1/context-audit")).json()
+    row_id = audit["global"]["class1"][0]["row_id"]
+    target.unlink()
+
+    r = await client.post("/api/v1/context-audit/remove", json={"row_id": row_id},
+                          headers=_write_headers(app))
+
+    assert r.status_code == 409
+    assert "no longer exists" in r.json()["detail"]
