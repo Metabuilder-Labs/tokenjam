@@ -1,10 +1,10 @@
 """Behavioural tests for the Review inbox's select-all transition.
 
-The rest of the Lens UI is guarded by static source assertions
-(``test_lens_ui_regression.py``) because there is no JS test runner in the
-Python CI job. That is weak for a bulk-action control: a string match on the
-source still passes if the surrounding state logic is wrong, and the failure
-mode here is dismissing rows the user never saw.
+There is no JS test runner in the Python CI job, and the Lens UI was once
+guarded by static source assertions instead. Those were deleted: a string match
+on the source still passes if the surrounding state logic is wrong, while
+breaking on every harmless rewording. The failure mode this module guards is
+dismissing rows the user never saw, which no substring can detect.
 
 So this module extracts the one pure function the control delegates to
 (``nextSelectAllSelection``) straight out of the served ``index.html`` and runs
