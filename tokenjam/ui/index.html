@@ -1826,6 +1826,15 @@ code.md-code {
        keys on data-view === route.view, so only data-view="sessions" lights up
        while a session detail is open. #/status survives as a silent route alias
        for old bookmarks. -->
+  <!-- Optimize sits in Improve, not Observe: its most-populated analyzers end
+       in a concrete edit the user makes, which is what this lens is for. Its
+       two children carry the SAME lens for the reason the old comment gave in
+       reverse: `data-lens` decides which sidebar GROUP a link sits in, so a
+       child in a different group than its parent is orphaned. All three stay
+       above Sessions and well above the FAQ, which is pinned last here. -->
+  <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="improve"><span class="icon">&#9889;</span> Optimize</a>
+  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="improve"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
+  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-lens="improve"><span class="icon">&#8627;</span> Rules <span class="nav-badge">new</span></a>
   <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
        parent section is the active view (see App()'s route effect), so as a
@@ -1843,13 +1852,6 @@ code.md-code {
   <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Cost</a>
   <a href="#/alerts" class="nav-link" data-view="alerts" data-lens="observe"><span class="icon">!</span> Alerts</a>
   <a href="#/drift" class="nav-link" data-view="drift" data-lens="observe"><span class="icon">~</span> Drift</a>
-  <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="observe"><span class="icon">&#9889;</span> Optimize</a>
-  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="observe"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
-  <!-- Same lens as its Summarize sibling: `data-lens` decides which sidebar
-       GROUP a link sits in, not what the screen does, and both of these are
-       children of Optimize. Marking this one "improve" would put it after the
-       FAQ, which is pinned last in that group. -->
-  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-lens="observe"><span class="icon">&#8627;</span> Rules <span class="nav-badge">new</span></a>
   <a href="#/budget" class="nav-link" data-view="budget" data-lens="observe"><span class="icon">$</span> Budget</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
@@ -12721,11 +12723,16 @@ function DashboardView({ params }) {
 // Claude-Code wedge (review inbox, dashboard, session monitoring), Observe is
 // the SDK/observability suite. Views not listed default to 'improve' — every
 // existing view still renders, this only decides which nav group frames it.
+// Lens membership lives in TWO places that must agree: each nav anchor's own
+// `data-lens` attribute (pure CSS decides which group renders) and this map
+// (which lens a ROUTE belongs to, used to flip the active lens on a deep-link
+// or a back-nav). Changing one without the other desyncs the sidebar from the
+// URL: the link sits in one group while landing on it activates the other.
 const VIEW_LENS = {
   review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
-  faq: 'improve', 'context-audit': 'improve',
+  faq: 'improve', 'context-audit': 'improve', optimize: 'improve',
   traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
-  optimize: 'observe', budget: 'observe',
+  budget: 'observe',
 };
 
 // ============================
