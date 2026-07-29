@@ -40,7 +40,7 @@ class TestUsagePathPrompt:
 
     @pytest.mark.parametrize(
         "choice,expected",
-        [(1, "claude_code"), (2, "codex"), (3, "sdk"), (4, "combination")],
+        [(1, "claude-code"), (2, "codex"), (3, "sdk"), (4, "combination")],
     )
     def test_returns_selected_key(self, choice, expected, monkeypatch):
         import click as _click
@@ -64,7 +64,7 @@ def _routing_stubs(monkeypatch):
     )
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._onboard_claude_code",
-        lambda *a, **k: called.__setitem__("claude_code", True),
+        lambda *a, **k: called.__setitem__("claude-code", True),
     )
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._onboard_codex",
@@ -79,7 +79,7 @@ def _routing_stubs(monkeypatch):
 
 @pytest.mark.parametrize(
     "answer,key",
-    [("1", "claude_code"), ("2", "codex"), ("4", "combination")],
+    [("1", "claude-code"), ("2", "codex"), ("4", "combination")],
 )
 def test_bare_onboard_routes_to_selected_path(_routing_stubs, answer, key):
     res = CliRunner().invoke(cmd_onboard, [], input=f"{answer}\n", obj={})
