@@ -327,6 +327,27 @@ code, .mono {
 
 /* Tables */
 .table-wrap { overflow-x: auto; }
+/* Context audit's "What it is" column: an unbounded description (some
+   skill/plugin descriptions run long) blew the table wider than its
+   container, pushing the Tokens/Frequency columns off-screen and requiring
+   a horizontal scroll to see them — the same "everything must fit before
+   interaction" bug the whole redesign exists to fix, just in one column
+   instead of the whole page. Capped + wrapped, same treatment the Source
+   column already gets. */
+/* The width cap lives on the INNER div, not the td: table-layout is auto
+   here (no fixed layout, no colgroup), and a max-width on a <td> itself is
+   only a hint the browser's column-sizing algorithm is free to ignore when
+   the table has room to grow — confirmed live (a long description still
+   rendered its full width and pushed Tokens/Frequency off-screen with only
+   `max-width` on the td). A block child with its own max-width + a
+   single-line ellipsis reliably caps the column's min-content width instead. */
+.ctx-audit-desc > span { display: block; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A group row's expand control — opens `ContextAuditGroupModal`. Plain-text
+   look (no button chrome) so it reads like the rest of the mono source
+   column, but stays a real <button> for keyboard access and modal focus
+   restore on close. */
+.ctx-audit-expand-btn { background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit; cursor: pointer; text-align: left; }
+.ctx-audit-expand-btn:hover, .ctx-audit-expand-btn:focus-visible { text-decoration: underline; }
 table {
   width: 100%;
   border-collapse: collapse;
@@ -1771,6 +1792,7 @@ code.md-code {
   </div>
   <a href="#/dashboard" class="nav-link" data-view="dashboard" data-lens="improve"><span class="icon">&#9678;</span> Dashboard</a>
   <a href="#/review" class="nav-link" data-view="review" data-lens="improve"><span class="icon">&#9745;</span> Review inbox</a>
+  <a href="#/context-audit" class="nav-link" data-view="context-audit" data-lens="improve"><span class="icon">&#9636;</span> Context audit</a>
   <!-- One Sessions entry, not two. The old "Status" link (#/status) and this
        one rendered the SAME StatusView for their bare route, so the sidebar
        advertised two items that were one page. This #/sessions link is the one
@@ -7009,6 +7031,340 @@ function BudgetView({ params }) {
       `}
   `;
 }
+
+// ============================
+// Context audit ("CleanMyMac for Claude Code")
+// ============================
+// Everything that can enter a Claude Code session, classified by HOW it
+// reaches the model (never by where it sits — see
+// core/summarize/context_audit.py's module docstring):
+//   class1 — loads unconditionally, resident every turn
+//   class2 — fires conditionally, unrequested (hooks, path-scoped rules,
+//            auto-invoking skill/agent descriptions)
+//   class3 — runs only when the user invokes it (slash commands, plain skills)
+// An inventory, not a recommendation engine: no dollar figures, no savings
+// claims, no verdicts on what to cut. The user decides what's junk.
+//
+// Presentation redesign (post-review): the server already groups rows by
+// source family (a rules directory, a plugin's skill descriptions, ...) and
+// sorts every class by tokens descending — this file only renders that
+// shape. Individual members live behind a per-group expand toggle, collapsed
+// by default, so Class 1 for a scope reads as ~8-15 rows instead of one row
+// per file.
+const CTX_AUDIT_CLASS_MEANING = {
+  class1: 'loads into every session whether you use it or not.',
+  class2: 'fires on its own, without you asking.',
+  class3: 'costs nothing until you invoke it.',
+};
+
+// A proportional bar in the tokens cell, so the biggest row in a table reads
+// as visually dominant at a glance rather than requiring a column-scan.
+// `max` is the table's own largest token value (never a cross-table or
+// cross-scope figure — a bar's meaning is "relative to its neighbors").
+function ctxAuditTokenCell(tokens, max) {
+  const pct = max > 0 ? Math.max(3, Math.round((tokens / max) * 100)) : 0;
+  return html`
+    <div style="display:flex;align-items:center;gap:8px;min-width:140px">
+      <span style="min-width:52px;text-align:right;font-variant-numeric:tabular-nums">${fmtTokens(tokens)}</span>
+      <div style="flex:1;max-width:100px;height:6px;border-radius:3px;background:var(--border);overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:var(--brand)"></div>
+      </div>
+    </div>`;
+}
+
+// One display row from `rows_for_display` — a plain row, or a group whose
+// expand control opens `ContextAuditGroupModal` (a centered popup, per
+// review — nothing expands in place and the page never grows taller). The
+// group line (label + summed chars/tokens) IS the useful figure on its own;
+// the member breakdown is a "show me" detail behind the modal.
+function ContextAuditRow({ row, maxTokens, onExpandGroup }) {
+  const isGroup = row.kind === 'group' && row.members.length > 0;
+  return html`
+    <tr>
+      <td class="mono" style="max-width:380px;overflow-wrap:anywhere" title=${isGroup ? '' : row.label}>
+        ${isGroup ? html`
+          <button type="button" class="ctx-audit-expand-btn" onClick=${(e) => onExpandGroup(row, e.currentTarget)}>
+            <span aria-hidden="true" style="display:inline-block;width:14px;color:var(--text-dim)">▸</span>${row.label}
+          </button>
+        ` : shortPath(row.label)}
+      </td>
+      <td class="ctx-audit-desc" style="color:var(--text-dim);font-size:12px"><span title=${row.description || ''}>${row.description || '—'}</span></td>
+      <td>${ctxAuditTokenCell(row.tokens, maxTokens)}</td>
+      <td style="color:var(--text-dim);font-size:12px">${row.frequency}</td>
+    </tr>
+  `;
+}
+
+// Class 1's table: always rendered (never collapsed — it's the headline
+// class), rows sorted by tokens descending (server-side), each carrying a
+// relative-size bar so the dominant row is visually obvious.
+function ContextAuditClass1Table({ rows, onExpandGroup }) {
+  const headers = ['Source', 'What it is', 'Tokens', 'Frequency'];
+  const maxTokens = rows.reduce((m, r) => Math.max(m, r.tokens), 0);
+  return html`
+    <div class="table-wrap"><table>
+      <thead><tr>${headers.map(h => html`<th key=${h}>${h}</th>`)}</tr></thead>
+      <tbody>
+        ${rows.length === 0 ? html`
+          <tr><td colspan=${headers.length} style="color:var(--text-dim);font-size:13px;padding:12px 0">None found.</td></tr>
+        ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} maxTokens=${maxTokens} onExpandGroup=${onExpandGroup} />`)}
+      </tbody>
+    </table></div>`;
+}
+
+// Class 2/3: collapsed behind one summary line by default — expanding shows
+// the same row/group table Class 1 uses. Class 3's summary is visually
+// de-emphasised (dimmed, explicitly labelled NOT resident) so its raw token
+// count — which can be LARGER than Class 1's, since it sums every on-demand
+// body regardless of whether it's ever invoked — never reads as a bigger
+// cost than the always-resident floor above it.
+function ContextAuditClassDetails({ classKey, rows, count, deemphasise, onExpandGroup }) {
+  const totalTokens = rows.reduce((s, r) => s + r.tokens, 0);
+  const headers = ['Source', 'What it is', 'Tokens', 'Frequency'];
+  const maxTokens = rows.reduce((m, r) => Math.max(m, r.tokens), 0);
+  const label = classKey === 'class2' ? 'Class 2' : 'Class 3';
+  const notResident = classKey === 'class3' ? ' — NOT resident, costs nothing until invoked' : '';
+  return html`
+    <details style="margin-top:16px">
+      <summary style="cursor:pointer;font-size:13px;${deemphasise ? 'color:var(--text-dim)' : ''}">
+        <b>${label}</b> — ${CTX_AUDIT_CLASS_MEANING[classKey]}
+        ${count} item(s), ~${fmtTokens(totalTokens)} tokens${notResident}.
+      </summary>
+      <div style="margin-top:8px"><table>
+        <thead><tr>${headers.map(h => html`<th key=${h}>${h}</th>`)}</tr></thead>
+        <tbody>
+          ${rows.length === 0 ? html`
+            <tr><td colspan=${headers.length} style="color:var(--text-dim);font-size:13px;padding:12px 0">None found.</td></tr>
+          ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} maxTokens=${maxTokens} onExpandGroup=${onExpandGroup} />`)}
+        </tbody>
+      </table></div>
+    </details>`;
+}
+
+// The group-detail popup (per review: a centered modal, not inline
+// expansion — the main table never grows). Reuses the dashboard's existing
+// modal markup/classes verbatim (`.cur-overlay`/`.cur-modal`/`.cur-modal-*`,
+// first built for `RelearnApplyModal`) rather than inventing a second
+// pattern, styled off the same `--surface`/`--border` custom properties so
+// it matches the dark/light theming automatically.
+//
+// Close on the X button, Escape, AND a backdrop click (all three, per
+// review) — none of those three existed for the reused pattern before this,
+// so this component adds its own Escape handling and focus management
+// rather than assuming the shared classes provide it. Focus moves into the
+// card on open and back to the row's expand button on close, so keyboard
+// navigation survives the round trip.
+function ContextAuditGroupModal({ group, onClose }) {
+  const modalRef = useRef(null);
+
+  useEffect(() => {
+    if (!group) return;
+    const trigger = document.activeElement;
+    if (modalRef.current) modalRef.current.focus();
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      if (trigger && typeof trigger.focus === 'function') trigger.focus();
+    };
+  }, [group]);
+
+  if (!group) return null;
+  const members = [...group.members].sort((a, b) => b.tokens - a.tokens);
+
+  return html`
+    <div class="cur-overlay" onClick=${onClose}>
+      <div class="cur-modal" onClick=${e => e.stopPropagation()} ref=${modalRef} tabIndex="-1" role="dialog" aria-modal="true" aria-label=${group.label}>
+        <div class="cur-modal-head">
+          <span class="cur-modal-title">${group.label}</span>
+          <span class="dim" style="font-size:12px;margin-left:8px">
+            ${members.length} item(s) · ${group.chars.toLocaleString('en-US')} chars · ${fmtTokens(group.tokens)} tokens
+          </span>
+          <button class="cur-modal-x" onClick=${onClose} title="Close">✕</button>
+        </div>
+        <div class="cur-modal-body">
+          <div class="table-wrap"><table>
+            <thead><tr><th>Source</th><th>What it is</th><th>Chars</th><th>Tokens</th></tr></thead>
+            <tbody>
+              ${members.map((m, i) => html`
+                <tr key=${i}>
+                  <td class="mono" style="max-width:340px;overflow-wrap:anywhere" title=${m.source}>${shortPath(m.source)}</td>
+                  <td class="ctx-audit-desc" style="color:var(--text-dim);font-size:12px"><span title=${m.description || ''}>${m.description || '—'}</span></td>
+                  <td>${m.chars.toLocaleString('en-US')}</td>
+                  <td>${fmtTokens(m.tokens)}</td>
+                </tr>
+              `)}
+            </tbody>
+          </table></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// The not-loaded pile: one reassurance line, expands to the full list. Its
+// cost is always and only zero — a file existing on disk is not evidence of
+// being loaded (Critical Rule 22) — so the summary states that plainly
+// rather than making the reader open it to find out.
+function ContextAuditUnloaded({ rows, count }) {
+  if (!count) return null;
+  return html`
+    <details style="margin-top:16px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--text-dim)">
+        ${count} file(s) scanned, not loaded, 0 tokens
+      </summary>
+      <div class="table-wrap" style="margin-top:8px"><table>
+        <thead><tr><th>Source</th><th>Chars (on disk)</th><th>Why it's not loaded</th></tr></thead>
+        <tbody>
+          ${rows.map((r, i) => html`
+            <tr key=${i}>
+              <td class="mono" style="max-width:420px;overflow-wrap:anywhere" title=${r.source}>${shortPath(r.source)}</td>
+              <td>${r.chars.toLocaleString('en-US')}</td>
+              <td style="color:var(--text-dim);font-size:12px">${r.reason}</td>
+            </tr>
+          `)}
+        </tbody>
+      </table></div>
+    </details>`;
+}
+
+// One scope's (global, or the currently-selected project's) full section:
+// Class 1 expanded, Class 2/3 and the not-loaded pile collapsed.
+function ContextAuditScope({ heading, subtotalNote, scope, onExpandGroup }) {
+  return html`
+    <div style="margin-top:28px">
+      <div style="font-size:15px;font-weight:600">${heading}</div>
+      ${subtotalNote ? html`<div style="color:var(--text-dim);font-size:12px;margin-top:2px;margin-bottom:10px">${subtotalNote}</div>` : null}
+      <${ContextAuditClass1Table} rows=${scope.class1} onExpandGroup=${onExpandGroup} />
+      <${ContextAuditClassDetails} classKey="class2" rows=${scope.class2} count=${scope.class2_count} deemphasise=${false} onExpandGroup=${onExpandGroup} />
+      <${ContextAuditClassDetails} classKey="class3" rows=${scope.class3} count=${scope.class3_count} deemphasise=${true} onExpandGroup=${onExpandGroup} />
+      <${ContextAuditUnloaded} rows=${scope.unloaded} count=${scope.unloaded_count} />
+    </div>`;
+}
+
+// Ranked one-line list of every OTHER project, click to switch the
+// currently-displayed one. Never renders every project's full section at
+// once (the "26 tables stacked vertically" bug this exists to fix) — only
+// the selected project's ContextAuditScope mounts below.
+function ContextAuditProjectPicker({ projects, selected, onSelect }) {
+  if (projects.length <= 1) return null;
+  const ranked = [...projects].sort((a, b) => b.class1_total_tokens - a.class1_total_tokens);
+  return html`
+    <div style="margin-top:10px;font-size:12px;color:var(--text-dim)">
+      ${ranked.map((p, i) => html`
+        <span key=${i}
+          class="clickable"
+          style="margin-right:14px;${p.scope === selected ? 'color:var(--text);font-weight:600' : ''}"
+          onClick=${() => onSelect(p.scope)}
+        >${shortPath(p.scope)} — ${fmtTokens(p.class1_total_tokens)}</span>
+      `)}
+    </div>`;
+}
+
+function ContextAuditView() {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [selectedScope, setSelectedScope] = useState('');
+  const [modalGroup, setModalGroup] = useState(null);
+  const onExpandGroup = useCallback((row) => setModalGroup(row), []);
+
+  const load = useCallback(async (refresh) => {
+    try {
+      const d = await api('/context-audit', refresh ? { refresh: 'true' } : {}, { noCache: true });
+      setData(d);
+      setError(null);
+    } catch (e) {
+      setError(e.message || String(e));
+    }
+  }, []);
+
+  useEffect(() => { load(false); }, [load]);
+
+  const handleRescan = async () => {
+    setRefreshing(true);
+    await load(true);
+    setRefreshing(false);
+  };
+
+  // Blank only when there is no prior answer at all; a failed rescan on an
+  // already-loaded page is a scoped banner above the still-good content
+  // (same convention Budget/the Review inbox use), never a page wipe. The
+  // corpus scan this page's one fetch depends on can take several seconds
+  // uncached, so the skeleton — never a number, never an empty-state claim
+  // — must cover that whole wait rather than the page appearing hung.
+  if (error && !data) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
+  if (!data) return html`
+    <div class="page-title">Context audit</div>
+    <div style="color:var(--text-dim);font-size:13px;margin-bottom:12px">Scanning ~/.claude and every recently-active project…</div>
+    ${TableRowsSkeleton(['Source', 'What it is', 'Tokens', 'Frequency'], 8)}`;
+
+  const projects = data.projects;
+  const defaultProject = projects.length
+    ? projects.reduce((best, p) => p.class1_total_tokens > best.class1_total_tokens ? p : best)
+    : null;
+  const currentProject = projects.find(p => p.scope === selectedScope) || defaultProject;
+
+  // The headline: the combined floor for a session in `currentProject` —
+  // global and project ARE meant to be summed here, unlike a sum ACROSS two
+  // different projects (which would double-count a floor no single session
+  // ever pays twice). A session in this project genuinely carries both.
+  const globalTokens = data.global.class1_total_tokens;
+  const projectTokens = currentProject ? currentProject.class1_total_tokens : 0;
+  const headlineTokens = globalTokens + projectTokens;
+  const headlineWhere = currentProject ? `in ${shortPath(currentProject.scope)}` : 'in every Claude Code session';
+
+  return html`
+    <div class="page-title">Context audit</div>
+    <div style="color:var(--text-dim);font-size:13px;margin-bottom:14px">
+      Everything that can enter a Claude Code session, and its context cost — classified by
+      how it reaches the model, never by where it sits on disk. An inventory, not a
+      recommendation engine: nothing here is a savings claim, and nothing is flagged for you
+      to cut. ${data.plugins_enabled} plugin(s) enabled, ${data.plugins_disabled} disabled
+      (a disabled plugin's skills/hooks are excluded; its rules files, if any, are counted on
+      their own merit — the harness reads that directory regardless of plugin state).
+    </div>
+
+    <div style="padding:16px;border:1px solid var(--border);border-radius:8px;margin-bottom:4px">
+      <div style="font-size:22px;font-weight:700">~${fmtTokens(headlineTokens)} tokens load into every session ${headlineWhere}</div>
+      <div style="color:var(--text-dim);font-size:12px;margin-top:4px">
+        global: ~${fmtTokens(globalTokens)}${currentProject ? html` · this project: ~${fmtTokens(projectTokens)}` : null}
+      </div>
+    </div>
+    <${ContextAuditProjectPicker} projects=${projects} selected=${currentProject ? currentProject.scope : ''} onSelect=${setSelectedScope} />
+
+    <div style="margin-top:10px">
+      <button class="btn" onClick=${handleRescan} disabled=${refreshing}>${refreshing ? 'Rescanning…' : 'Rescan'}</button>
+      <span style="color:var(--text-dim);font-size:12px;margin-left:8px">Last scanned ${fmtAgo(data.last_scanned_at)}</span>
+    </div>
+    ${error ? html`
+      <div class="band-msg err" style="margin:14px 0">
+        <b>Couldn't refresh the context audit.</b>
+        <p>${error}</p>
+        <p>Showing the last scan that succeeded; everything below is unaffected.</p>
+      </div>` : null}
+
+    <${ContextAuditScope}
+      heading="Global (~/.claude) — loads in every session, on every project"
+      scope=${data.global}
+      onExpandGroup=${onExpandGroup}
+    />
+    ${!currentProject ? html`
+      <div style="margin-top:24px;color:var(--text-dim);font-size:13px">
+        No project roots found yet — a project shows up here once Claude Code has recorded at
+        least one session working in it.
+      </div>
+    ` : html`
+      <${ContextAuditScope}
+        heading=${shortPath(currentProject.scope)}
+        subtotalNote="This project's own floor — never summed with another project's; only ever with the global floor above, since a session here really does carry both."
+        scope=${currentProject}
+        onExpandGroup=${onExpandGroup}
+      />
+    `}
+    <${ContextAuditGroupModal} group=${modalGroup} onClose=${() => setModalGroup(null)} />
+  `;
+}
+
 // ============================
 // Overview + Optimize (issue #114)
 // ============================
@@ -12354,7 +12710,7 @@ function DashboardView({ params }) {
 // existing view still renders, this only decides which nav group frames it.
 const VIEW_LENS = {
   review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
-  faq: 'improve',
+  faq: 'improve', 'context-audit': 'improve',
   traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
   optimize: 'observe', budget: 'observe',
 };
@@ -12373,6 +12729,7 @@ const VIEW_LENS = {
 const PRIMARY_VIEWS = [
   ['dashboard', DashboardView],
   ['review',    ReviewInboxView],
+  ['context-audit', ContextAuditView],
   ['sessions',  StatusView],
   ['traces',    TracesListView],
   ['cost',      CostView],
