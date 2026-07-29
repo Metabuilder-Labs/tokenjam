@@ -5723,6 +5723,20 @@ function dedup(traces) {
 function TraceDetailView({ traceId }) {
   const [spans, setSpans] = useState([]);
   const [selected, setSelected] = useState(null);
+  // Load lifecycle (#653): a large trace used to hang the skeleton forever
+  // because the payload was ~1 GB. The payload is now capped + attribute-free,
+  // but we still guard the fetch with a timeout + error state so the skeleton
+  // ALWAYS clears — on failure we show a clear message + retry, never spin.
+  const [loadState, setLoadState] = useState('loading'); // loading | ready | error
+  const [loadErr, setLoadErr] = useState('');
+  // Truncation disclosure (#653): a very large trace returns its first N spans
+  // (plus the costliest), with the true total so we can say "showing N of M".
+  const [spanCount, setSpanCount] = useState(0);
+  const [truncated, setTruncated] = useState(false);
+  // Lazily-fetched captured content for the SELECTED span (#653). The waterfall
+  // payload is attribute-free; we fetch one span's attributes on expand.
+  const [selAttrs, setSelAttrs] = useState(null);       // {span_id, attributes} | null
+  const [selAttrsState, setSelAttrsState] = useState('idle'); // idle | loading | ready | error
   // Waterfall bar-sizing mode (#244): tokens / duration. Tokens is the
   // default and the only magnitude mode -- this page shows token totals for
   // every account, matching the Traces list's own display convention (a
@@ -5735,18 +5749,70 @@ function TraceDetailView({ traceId }) {
 
   // Poll so a live trace's spans appear without re-navigating. Selection is
   // tracked by span_id, so replacing the spans array preserves it.
-  const load = useCallback(() => {
-    api('/traces/' + traceId)
-      .then(d => { setSpans(d.spans || []); setTopCostSpanIds(d.top_cost_span_ids || []); })
-      .catch(() => {});
+  // `firstLoad`: only the initial fetch drives the skeleton/error UI; later
+  // poll ticks fail silently so a transient blip doesn't blank a rendered trace.
+  const load = useCallback((firstLoad) => {
+    // Timeout guard (#653): the skeleton must ALWAYS clear. If the fetch stalls
+    // (huge payload, dead daemon), race it against a timeout and surface the
+    // error state instead of spinning forever.
+    const TIMEOUT_MS = 20000;
+    const timeout = new Promise((_, rej) =>
+      setTimeout(() => rej(new Error('timeout')), TIMEOUT_MS));
+    Promise.race([api('/traces/' + traceId, {}, { noCache: true }), timeout])
+      .then(d => {
+        setSpans(d.spans || []);
+        setTopCostSpanIds(d.top_cost_span_ids || []);
+        setSpanCount(d.span_count != null ? d.span_count : (d.spans || []).length);
+        setTruncated(!!d.truncated);
+        setLoadState('ready');
+        setLoadErr('');
+      })
+      .catch(err => {
+        if (firstLoad) {
+          setLoadState('error');
+          setLoadErr(err && err.message === 'timeout'
+            ? 'This trace is taking too long to load.'
+            : 'Could not load this trace.');
+        }
+      });
   }, [traceId]);
 
-  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+  useEffect(() => {
+    setLoadState('loading'); setSelected(null); setSelAttrs(null); setSelAttrsState('idle');
+    load(true);
+    const t = setInterval(() => load(false), 10000);
+    return () => clearInterval(t);
+  }, [load]);
+
+  // Lazily fetch the selected span's captured content (#653). Cleared + refetched
+  // whenever the selection changes; the waterfall payload no longer carries it.
+  useEffect(() => {
+    if (!selected) { setSelAttrs(null); setSelAttrsState('idle'); return; }
+    let cancelled = false;
+    setSelAttrs(null); setSelAttrsState('loading');
+    api('/traces/' + traceId + '/spans/' + selected, {}, { noCache: true })
+      .then(d => { if (!cancelled) { setSelAttrs(d); setSelAttrsState('ready'); } })
+      .catch(() => { if (!cancelled) setSelAttrsState('error'); });
+    return () => { cancelled = true; };
+  }, [selected, traceId]);
+
+  // Error state (#653): the skeleton must never spin forever. On a failed /
+  // timed-out load, show a clear message + retry instead of the shimmer.
+  if (loadState === 'error') return html`
+    <div>
+      <button class="btn btn-back" onClick=${() => location.hash = '#/traces'}>← Back to traces</button>
+      <div class="empty-state" style="padding:32px 0">
+        <div style="font-size:14px;margin-bottom:8px">${loadErr || 'Could not load this trace.'}</div>
+        <div class="meta" style="margin-bottom:16px">The trace may be very large, or the server may be busy.</div>
+        <button class="btn" onClick=${() => { setLoadState('loading'); load(true); }}>Retry</button>
+      </div>
+    </div>`;
 
   // Waterfall-shaped: staggered-indent, staggered-width shimmer bars standing
   // in for the span tree rows below, so the real waterfall fills in rather
-  // than replacing a differently-shaped centered line.
-  if (!spans.length) return html`
+  // than replacing a differently-shaped centered line. Only while genuinely
+  // loading -- a ready trace with zero spans falls through to the (empty) tree.
+  if (loadState === 'loading' && !spans.length) return html`
     <div aria-hidden="true" style="padding:8px 0">
       ${[0, 1, 1, 2, 1, 0].map((depth, i) => html`
         <div key=${i} style=${'display:flex;align-items:center;gap:8px;padding:6px 0;padding-left:' + (depth * 22) + 'px'}>
@@ -5782,7 +5848,15 @@ function TraceDetailView({ traceId }) {
     }
     return result;
   }
-  const rows = flatten(roots, 0);
+  const allRows = flatten(roots, 0);
+  // Render cap (#653): even after the server caps the payload at 2000 spans,
+  // rendering thousands of DOM rows at once jankily freezes the tab. Cap the
+  // rendered rows and disclose the remainder honestly (no silent drop) --
+  // between this and the server `truncated` flag the user always knows the true
+  // total (`spanCount`).
+  const RENDER_ROW_CAP = 1000;
+  const rowsHidden = Math.max(0, allRows.length - RENDER_ROW_CAP);
+  const rows = rowsHidden > 0 ? allRows.slice(0, RENDER_ROW_CAP) : allRows;
   const nameW = 220;
 
   // Token-first annotation (#215): the magnitude bar + summary read on TOKEN
@@ -5823,8 +5897,13 @@ function TraceDetailView({ traceId }) {
       <span>Tokens <b>${fmtTokens(wfTotalTokens)}</b></span>
       <span>Duration <b>${fmtDur(traceDur)}</b></span>
       <span>Started <b>${isFinite(traceStart) ? new Date(traceStart).toLocaleString() : '—'}</b></span>
-      <span><b>${spans.length}</b> spans</span>
+      <span><b>${fmtCount(spanCount || spans.length)}</b> spans</span>
     </div>
+    ${(truncated || rowsHidden > 0) ? html`
+      <div class="meta" style="margin:-4px 0 12px;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface-2, rgba(255,255,255,0.03))" role="status">
+        Showing ${fmtCount(rows.length)} of ${fmtCount(spanCount || spans.length)} spans${truncated ? ' (large trace — the costliest spans are always included)' : ''}. Deeper spans are not shown to keep this view responsive.
+      </div>
+    ` : null}
     ${topCostSpanIds.length > 0 ? html`
       <div class="meta" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:-8px 0 12px">
         <span>Costliest spans in this trace:</span>
@@ -5946,8 +6025,15 @@ function TraceDetailView({ traceId }) {
           ${sel.conversation_id ? html`<span class="dk">Conversation</span><span class="dv">${sel.conversation_id}</span>` : null}
           ${sel.session_id ? html`<span class="dk">Session</span><span class="dv">${sel.session_id}</span>` : null}
           <span class="dk">Trace ID</span><span class="dv">${sel.trace_id}</span>
-          ${sel.attributes && Object.keys(sel.attributes).length > 0 ? html`
-            <span class="dk">Attributes</span><span class="dv"><pre style="margin:0;white-space:pre-wrap;font-size:11px">${JSON.stringify(sel.attributes, null, 2)}</pre></span>
+          ${sel.has_attributes ? html`
+            <span class="dk">Attributes</span>
+            <span class="dv">
+              ${selAttrsState === 'loading' ? html`<span class="meta">Loading captured content…</span>` : null}
+              ${selAttrsState === 'error' ? html`<span class="meta" style="color:var(--error)">Could not load captured content for this span.</span>` : null}
+              ${selAttrsState === 'ready' && selAttrs && selAttrs.attributes && Object.keys(selAttrs.attributes).length > 0
+                ? html`<pre style="margin:0;white-space:pre-wrap;font-size:11px">${JSON.stringify(selAttrs.attributes, null, 2)}</pre>`
+                : (selAttrsState === 'ready' ? html`<span class="meta">No captured content.</span>` : null)}
+            </span>
           ` : null}
         </div>
       </div>
