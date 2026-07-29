@@ -21,7 +21,7 @@ def _config(agent_ids=()):
 
 
 def test_detects_claude_code_from_agent_id():
-    assert _detect_onboarded_persona(_config(["claude-code-myproj"])) == "claude_code"
+    assert _detect_onboarded_persona(_config(["claude-code-myproj"])) == "claude-code"
 
 
 def test_detects_codex_from_agent_id():
@@ -36,7 +36,7 @@ def test_defaults_to_sdk_when_no_runtime_marker(monkeypatch):
 
 def test_detects_claude_code_from_statusline_when_no_agents(monkeypatch):
     monkeypatch.setattr("tokenjam.cli.cmd_doctor._tj_statusline_wired", lambda: True)
-    assert _detect_onboarded_persona(_config([])) == "claude_code"
+    assert _detect_onboarded_persona(_config([])) == "claude-code"
 
 
 # --- the check itself -------------------------------------------------------

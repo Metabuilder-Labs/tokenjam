@@ -130,6 +130,73 @@ async def test_mark_cost_applied_round_trip(app, client):
     assert rev.json()["state"] == "reverted"
 
 
+# --- an applied proposal loses its OFFER and keeps its FIGURE ---------------- #
+
+async def test_an_applied_proposal_is_withdrawn_on_the_PAYLOAD(app, client):
+    """Verified WITHOUT consulting a second endpoint — that is the whole point.
+
+    THE DEFECT. This route computed a filtered ``open_proposals`` for its rollup
+    and then returned the UNFILTERED ``proposals`` list, and the rows carried no
+    ``applied``/``applied_at`` field at all. So an already-applied proposal went
+    out advertising ``apply_capable: true`` with nothing on it to say otherwise.
+    Only the browser was safe, and only because it independently re-fetches
+    ``/relearn/cost-applied`` and filters client-side — meaning the CLI,
+    ``--json``, an export and every future surface saw an offer to re-apply
+    something already done, and had to know to cross-reference a second endpoint
+    to avoid it. Measured on a real corpus: the ONE apply-capable row in the
+    whole inbox was a fix that had already been applied.
+
+    Critical Rule 32: the offer is withdrawn, the figure is kept, and the row
+    stays listed CARRYING an applied state.
+    """
+    token = app.state.relearn_write_token
+    hdr = {"X-TJ-Local-Token": token}
+    await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    before = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = next(p for p in before if p["analyzer"] == "cache")
+    assert prop["applied"] is False, "every row carries the field, open ones included"
+    assert prop["applied_at"] is None
+
+    applied = await client.post(
+        "/api/v1/relearn/cost-proposals/apply",
+        json={"proposal_id": prop["proposal_id"]}, headers=hdr,
+    )
+    assert applied.status_code == 200
+
+    after = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    row = next(p for p in after if p["signature"] == prop["signature"])
+    assert row["applied"] is True
+    assert row["applied_at"], "an applied row must carry WHEN"
+    assert row.get("apply_capable") is not True, (
+        "an applied fix is still being offered for application"
+    )
+    # The figure is what the behaviour ALREADY cost. Applying the fix afterwards
+    # does not un-spend the money, and a gate that edits a past figure is the
+    # "this was free" conflation Critical Rule 32 exists to stop.
+    assert row["past_overspend_usd"] == prop["past_overspend_usd"]
+
+
+async def test_a_reverted_proposal_is_offered_again_on_the_payload(app, client):
+    """A revert is the user saying the fix is no longer in place."""
+    token = app.state.relearn_write_token
+    hdr = {"X-TJ-Local-Token": token}
+    await client.post("/api/v1/relearn/cost-proposals/refresh", headers=hdr)
+    proposals = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    prop = next(p for p in proposals if p["analyzer"] == "cache")
+    rec = (await client.post(
+        "/api/v1/relearn/cost-proposals/apply",
+        json={"proposal_id": prop["proposal_id"]}, headers=hdr,
+    )).json()
+    await client.post(
+        f"/api/v1/relearn/cost-applied/{rec['id']}/revert", headers=hdr,
+    )
+
+    after = (await client.get("/api/v1/relearn/cost-proposals")).json()["proposals"]
+    row = next(p for p in after if p["signature"] == prop["signature"])
+    assert row["applied"] is False
+    assert row["applied_at"] is None
+
+
 # --- the marker's numbers come from the STORE, never from the caller -------- #
 
 async def test_mark_applied_refuses_a_caller_supplied_estimate(app, client, config):

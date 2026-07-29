@@ -101,10 +101,10 @@ def poll_for_first_span(
 def not_confirmed_cause(persona: str) -> str:
     """Return the most likely reason no span arrived, phrased for the persona.
 
-    ``persona`` is one of ``"sdk"``, ``"claude_code"``, ``"codex"``; anything
+    ``persona`` is one of ``"sdk"``, ``"claude-code"``, ``"codex"``; anything
     else falls back to a generic message that covers both failure modes.
     """
-    if persona == "claude_code":
+    if persona == "claude-code":
         return (
             "Claude Code only sends telemetry after a restart, and backfilled "
             "history doesn't count as live — this waits for a new span. Restart "

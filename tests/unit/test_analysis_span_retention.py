@@ -292,27 +292,45 @@ def test_the_deletion_no_longer_skews_the_span_it_leaves_behind(store):
 # --- the past-overspend basis ----------------------------------------------
 
 
-def test_the_cost_window_follows_the_chosen_span_not_a_fixed_month(store):
-    """A rolling 30 days was the whole look-back, and it is not history.
+def test_the_chosen_span_bounds_the_cost_window_but_does_not_widen_it(store):
+    """The span says what MAY be claimed; the scan knob says what IS claimed.
 
-    A dead MCP server injected into hundreds of sessions with zero invocations
-    did not begin costing money 30 days ago; pricing it on a fixed month
-    understates a PAST-tense figure by however long the behaviour actually ran.
+    This test used to assert the opposite — that a 90-day span over an 80-day
+    store produced a 76-day cost window, on the argument that a dead MCP server
+    did not begin costing money 30 days ago. The argument is sound about the
+    behaviour and was wrong about the seam. The cost window fed only the Review
+    inbox headline, which exposes no window picker, while the Dashboard's waste
+    tiles came off a report scoped to ``[optimize] scan_window_days``. So the
+    same metric was published by two surfaces under two windows (69 and 30 on a
+    real corpus), and a reader summing the six tiles got a total the headline
+    contradicted minutes later.
+
+    Both now resolve through ``core/optimize/report_window``: the knob, bounded
+    by the span and by the history actually held. A user who wants a longer
+    look-back raises the knob, and BOTH surfaces move together.
     """
+    from types import SimpleNamespace
+
     from tokenjam.core.optimize.cost_proposals import (
         FALLBACK_COST_WINDOW_DAYS,
         cost_window_days_for,
     )
-    from types import SimpleNamespace
 
     for days_ago in range(0, 80, 5):        # a contiguous ~80-day block
         _seed(store, days_ago=days_ago, session_id=f"s{days_ago}")
 
+    # A 90-day span over an 80-day store no longer reaches past the knob.
     config = SimpleNamespace(storage=StorageConfig(analysis_span="90d"))
-    days = cost_window_days_for(config, store.conn)
+    assert cost_window_days_for(config, store.conn) == FALLBACK_COST_WINDOW_DAYS
 
-    assert days > FALLBACK_COST_WINDOW_DAYS
-    assert days == 76                        # 0..75 days ago inclusive
+    # Raising the knob is what widens it — and it is still bounded by the span
+    # and by the measured history, so it stops at 76 (0..75 days ago inclusive)
+    # rather than at the 120 asked for.
+    wide = SimpleNamespace(
+        storage=StorageConfig(analysis_span="90d"),
+        optimize=SimpleNamespace(scan_window_days=120),
+    )
+    assert cost_window_days_for(wide, store.conn) == 76
 
 
 def test_the_cost_window_cannot_exceed_what_the_store_holds(store):

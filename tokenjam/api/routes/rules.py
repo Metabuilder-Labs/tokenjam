@@ -38,21 +38,40 @@ def _config(request: Request) -> Any:
 
 @router.get("/rules", dependencies=[Depends(require_api_key)])
 def get_rules(request: Request) -> dict[str, Any]:
-    """Every permanent rule on offer, with the files it would be written into.
+    """Every permanent rule worth writing, plus every one already in place.
 
-    Includes rules the write budget deferred, each carrying its reason: a
-    deferral is a different statement from "no finding", and a surface that
-    showed only the offered ones would report the second when the truth is the
-    first.
+    TWO POPULATIONS, AND THE PAYLOAD NAMES BOTH. ``open_count`` is what there is
+    to do; ``in_place_count`` is what is already done — whether tokenjam applied
+    it (an apply ledger) or the user wrote it themselves (``rulewrite/presence``,
+    which asks their local ``claude``, because tokenjam's own markers can only
+    ever find tokenjam's own writes).
+
+    What this no longer returns: rules the write budget declined, each carrying
+    its refusal as prose. The gate moved below this surface
+    (``rulewrite/plan._is_listable``), so a rule not worth writing is absent
+    rather than explained. The money for those rules is untouched and still summed
+    by the Review inbox — a filter on the offer is not a filter on the
+    measurement.
+
+    Counts are computed here, server-side, so the tab labels and the rows cannot
+    disagree about which population a row belongs to.
     """
     from tokenjam.core.rulewrite import list_rule_writes
 
     from tokenjam.core.rulewrite.delivery import DELIVERY_KINDS
 
     rules = [r.to_dict() for r in list_rule_writes(_config(request))]
+    in_place = [
+        r for r in rules if r.get("already_applied") or r.get("already_present")
+    ]
     return {
         "rules": rules,
         "offered_count": sum(1 for r in rules if r["offered"]),
+        # ONE derivation of each tab's population, published rather than left for
+        # the client to re-derive: two surfaces filtering the same list by hand
+        # are free to disagree the moment only one is edited.
+        "open_count": len(rules) - len(in_place),
+        "in_place_count": len(in_place),
         # The mechanisms this build can render, published so the UI labels a
         # rule's delivery from the server's own registry rather than from a
         # second copy of the list in JS — the same single-compute-path rule

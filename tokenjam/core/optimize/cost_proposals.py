@@ -50,8 +50,9 @@ from typing import Any, Callable
 
 from tokenjam.core import fixes
 from tokenjam.core.rulewrite.kinds import DELIVERY_CLAUDE_MD_RULE, DELIVERY_SKILL
-from tokenjam.core.analysis_span import FALLBACK_WINDOW_DAYS as _FALLBACK_WINDOW_DAYS
-from tokenjam.core.analysis_span import window_days_for
+from tokenjam.core.optimize.report_window import (
+    FALLBACK_WINDOW_DAYS as _REPORT_FALLBACK_WINDOW_DAYS,
+)
 
 # House-style label strings. Kept verbatim on every cost proposal so no channel
 # can surface a savings figure without the honesty framing (Rule 14).
@@ -2627,32 +2628,45 @@ def _resend_to_proposals(
 #: run uses"; ``cost_window_days_for`` below is that, and every production
 #: caller goes through it.
 #:
-#: A fixed 30 days was the whole look-back for as long as this was the default,
-#: and a rolling month is not history: a dead MCP server injected into hundreds
-#: of sessions with zero invocations did not begin costing money 30 days ago,
-#: and pricing it as though it did understates a past-tense figure by however
-#: long the behaviour actually ran. The basis is now the span the user chose at
-#: onboarding, bounded by what the store actually holds — the same span
-#: retention is derived from, so the figure can never claim a window whose data
-#: has been deleted.
-FALLBACK_COST_WINDOW_DAYS = _FALLBACK_WINDOW_DAYS
+#: Re-exported from ``core/optimize/report_window`` rather than defined here:
+#: the stored analyzer report falls back to the same number, and two fallbacks
+#: would put the two surfaces back on two windows in exactly the degraded case
+#: where nobody can check. How far back a normal run looks is
+#: ``[optimize] scan_window_days``, bounded by the chosen analysis span and by
+#: the history the store actually holds — see that module.
+FALLBACK_COST_WINDOW_DAYS = _REPORT_FALLBACK_WINDOW_DAYS
+
+
+def _as_anchor(value: Any) -> Any | None:
+    """A caller-supplied window anchor as a usable datetime, or ``None``.
+
+    Defensive because the anchor crosses a thread boundary from the scan cycle:
+    anything that is not a datetime is discarded rather than raised on, so a
+    malformed anchor degrades to "this pass owns its own" instead of sinking a
+    background recompute that would otherwise have succeeded.
+    """
+    from datetime import datetime as _datetime
+
+    return value if isinstance(value, _datetime) else None
 
 
 def cost_window_days_for(config: Any, conn: Any) -> int:
     """The span past-overspend may accumulate over.
 
-    Two independent bounds, and the honest answer is the smaller: the span the
-    user asked for (``storage.analysis_span``) and how far back this store's
-    oldest dated row actually sits. A 90-day choice over a store that has been
-    running a week is answerable for a week, and an "all available" choice is
-    exactly the measured history.
-
-    The arithmetic itself lives in ``core/analysis_span`` so relearn's
-    precomputed window vocabulary resolves the SAME number — the Review inbox
-    publishes one window label across both feeds, and two derivations of it
-    would be free to disagree.
+    Delegated to ``core/optimize/report_window`` — the ONE seam the stored
+    analyzer report resolves its window through too. This function used to call
+    ``analysis_span.window_days_for`` directly, i.e. the chosen span bounded by
+    the measured history, while the Dashboard's tiles came off a report scoped
+    to ``[optimize] scan_window_days``. Both published ``past_overspend_usd``
+    and the two windows were free to disagree; on a real corpus they did (69
+    against 30), so the Review inbox headline and the tile row could not be
+    compared even though they name the same metric. Read that module's
+    docstring before changing what a window means here, and do not restore a
+    second derivation.
     """
-    return window_days_for(getattr(config, "storage", None), conn)
+    from tokenjam.core.optimize.report_window import report_window_days
+
+    return report_window_days(config, conn)
 
 
 #: Mirrors ``relearn_store``'s own ``_LOCK``/``_COMPUTING`` pair, kept local to
@@ -2679,12 +2693,39 @@ def is_computing_cost_proposals() -> bool:
 #: whose fix has no representable inbox card, should one appear.
 
 
+def _adapter_failure_entries(failures: dict[str, str]) -> dict[str, Any]:
+    """``excluded`` entries for analyzers whose adapter raised.
+
+    Same channel the rollup already uses for money a caller deliberately did
+    not sum in — here the money is not withheld but UNKNOWN, so the figure
+    fields are ``None`` rather than ``0``. Absent is never zero: a surface
+    reading this states that the analyzer is missing from the total, which is
+    the one honest thing to say when its contribution could not be built.
+    """
+    return {
+        name: {
+            "past_overspend_usd": None,
+            "past_overspend_tokens": None,
+            "label": name,
+            "note": (
+                f"The {name} analyzer could not be turned into review rows on "
+                f"this refresh, so none of its money is in the total above. "
+                f"The figure is unknown, not zero."
+            ),
+            "error": message,
+        }
+        for name, message in sorted(failures.items())
+    }
+
+
 def recompute_cost_proposals(
     db: Any,
     config: Any,
     *,
     window_days: int | None = None,
     agent_id: str | None = None,
+    until: Any | None = None,
+    report: Any | None = None,
 ) -> list[CostProposal]:
     """Build an ``OptimizeReport`` over the last ``window_days``, adapt the
     cost findings into proposals, and write them into the shared proposal
@@ -2731,7 +2772,13 @@ def recompute_cost_proposals(
                 max(1, window_days) if window_days is not None
                 else cost_window_days_for(config, getattr(db, "conn", None))
             )
-            until = utcnow()
+            # `until` is the anchor the trailing window is subtracted from.
+            # A caller that is refreshing SEVERAL stores in one cycle passes
+            # ONE instant for all of them (`core/optimize/scan_cycle.py`), so
+            # two surfaces publishing the same metric cannot end up covering
+            # windows offset from each other. `None` means this is a lone
+            # refresh and owns its own anchor.
+            until = _as_anchor(until) or utcnow()
             since = until - timedelta(days=effective_window_days)
             conn = getattr(db, "conn", None)
             # Persona decides which cost analyzers are worth running at all —
@@ -2745,24 +2792,54 @@ def recompute_cost_proposals(
                 agent_persona_mix(conn, since, until, agent_id=agent_id) if conn is not None else {},
                 declared_plan=config_declared_plan(config),
             )
-            report = build_report(
-                db, config, since, until, agent_id=agent_id,
-                # `summarize` IS a COST_ANALYZER now and would already
-                # be selected by `cost_analyzers_for_persona`; this is the
-                # PERSONA-SCOPED list, not the raw one — the skip gate still
-                # decides which cost analyzers run for this window.
-                findings=list(cost_analyzers_for_persona(persona)),
-            )
+            # A REPORT THE CALLER ALREADY BUILT, when there is one. This
+            # function used to always build its own, which meant every scan
+            # cycle ran `build_report` TWICE over the same window — so an
+            # analyzer like `subagent` was computed twice, by two separate
+            # scans of a database that ingestion keeps writing to, and the two
+            # results were stored separately and published side by side. Same
+            # window and same anchor could not make them agree, because they
+            # read the corpus at different moments. One pass, two views: the
+            # adapters below are a pure transformation of a report, so reusing
+            # the cycle's report makes the two surfaces identical by
+            # construction rather than by timing.
+            #
+            # The persona gate is NOT lost by reusing it: `build_report` applies
+            # the gate internally (it is the choke point), and the adapters only
+            # read findings they know how to adapt, so an analyzer outside
+            # `COST_ANALYZERS` present on a full report contributes nothing.
+            if report is None:
+                report = build_report(
+                    db, config, since, until, agent_id=agent_id,
+                    # `summarize` IS a COST_ANALYZER now and would already
+                    # be selected by `cost_analyzers_for_persona`; this is the
+                    # PERSONA-SCOPED list, not the raw one — the skip gate still
+                    # decides which cost analyzers run for this window.
+                    findings=list(cost_analyzers_for_persona(persona)),
+                )
             # Same plan-tier -> pricing-mode resolution `tj optimize` uses, so
             # the web Review inbox suppresses the same dollar figures the CLI
             # does (placement's batch-lever dollars, currently the only card
             # this gates — see `_placement_to_proposals`).
             plan_mix = plan_tier_mix(conn, since, until, agent_id) if conn is not None else {}
             pricing_mode = pricing_mode_for(dominant_plan(plan_mix))
+            # An analyzer whose adapter raised contributed NOTHING to the
+            # proposals about to be stored, so the headline summed over them
+            # is short by that analyzer's whole figure. Recorded as an
+            # `excluded` entry with NO number: what it would have contributed
+            # is precisely what could not be computed, and inventing a zero
+            # there would restate the bug as a fact.
+            adapter_failures: dict[str, str] = {}
+
+            def _record_adapter_failure(name: str, exc: BaseException) -> None:
+                adapter_failures[name] = f"{type(exc).__name__}: {exc}"
+
             proposals = cost_proposals_from_report(
                 report, config=config, pricing_mode=pricing_mode,
                 window_days=float(effective_window_days),
+                on_adapter_error=_record_adapter_failure,
             )
+            excluded = _adapter_failure_entries(adapter_failures)
         except Exception as exc:
             try:
                 relearn_store.write_cost_proposals_error(str(exc), config=config)
@@ -2774,6 +2851,12 @@ def recompute_cost_proposals(
             relearn_store.write_cost_proposals(
                 proposals, config=config,
                 window_days=effective_window_days,
+                excluded=excluded or None,
+                # The RESOLVED bounds, not just the length. A day count alone
+                # cannot be compared against the analyzer report's own
+                # scan_since/scan_until, which is what made a per-analyzer
+                # disagreement between the two surfaces undiagnosable.
+                since=since.isoformat(), until=until.isoformat(),
             )
             relearn_store.clear_cost_proposals_error(config=config)
         except Exception:
@@ -2789,6 +2872,8 @@ def trigger_background_cost_recompute(
     *,
     config: Any | None = None,
     window_days: int | None = None,
+    until: Any | None = None,
+    report: Any | None = None,
 ) -> bool:
     """Fire-and-forget a cost-proposals recompute on a daemon thread — the
     Cost-advisories-tab equivalent of ``relearn_store.
@@ -2808,7 +2893,10 @@ def trigger_background_cost_recompute(
         backend = None
         try:
             backend = backend_factory()
-            recompute_cost_proposals(backend, config, window_days=window_days)
+            recompute_cost_proposals(
+                backend, config, window_days=window_days, until=until,
+                report=report,
+            )
         except Exception:
             # Best-effort background job — never crash the scheduler/thread.
             pass
@@ -2848,6 +2936,7 @@ def trigger_background_cost_recompute(
 def cost_proposals_from_report(
     report: Any, config: Any = None, *, pricing_mode: str = "api",
     window_days: float = 30.0,
+    on_adapter_error: Any = None,
 ) -> list[CostProposal]:
     """Every cost proposal derivable from an already-built ``OptimizeReport``.
 
@@ -2858,6 +2947,20 @@ def cost_proposals_from_report(
     findings (analyzer not run, no candidates) contribute nothing. Never
     raises — a malformed finding is skipped so one bad analyzer can't sink
     the inbox.
+
+    **A skipped analyzer is a hole in the headline, so it is never silent.**
+    Swallowing the exception keeps the inbox alive, which is right; swallowing
+    it WITHOUT A TRACE published a smaller total that looked complete, which is
+    the failure this argument exists to end. A whole analyzer once vanished
+    this way — a stored report rehydrated its per-agent rows as plain dicts,
+    every ``row.delta_usd`` raised, and the inbox quietly dropped the entire
+    ``downsize`` contribution while the Dashboard tile went on showing it, so
+    the two surfaces disagreed by that analyzer's full figure with no error
+    anywhere. ``on_adapter_error(analyzer_name, exc)`` is called for each
+    adapter that raises; a caller that persists the result routes those into
+    the ``excluded`` channel so the surface states "this analyzer is missing"
+    rather than implying its money is zero. ``None`` keeps the bare skip, for
+    callers with nowhere to put the disclosure.
 
     ``config`` is optional and used for one thing: looking up the local source
     path a user registered for an agent, which decides whether the downsize card
@@ -2894,7 +2997,7 @@ def cost_proposals_from_report(
     (that helper's conservative default runs the other way — see its own
     docstring) — neither ever assumes ``"claude-code"``.
 
-    ``window_days`` (the resolved analysis span — see ``cost_window_days_for``)
+    ``window_days`` (the shared report window — see ``cost_window_days_for``)
     is used for exactly ONE thing: sizing the
     write budget's per-month standing-cost comparison
     (``_write_budget_basis``). It never rescales a proposal's figure. Every
@@ -2919,30 +3022,38 @@ def cost_proposals_from_report(
     def _pick(name: str) -> Any:
         return None if name in disabled else findings.get(name)
 
+    # NAMED, because the name is what a failure has to be reported AS: an
+    # adapter that raises contributes nothing, and "nothing" is only
+    # distinguishable from "this analyzer found nothing" if the skip can say
+    # which analyzer it was. See `on_adapter_error` in the docstring.
     adapters = (
         (
+            "downsize",
             lambda f: _downsize_to_proposal(f, config, persona=persona),
             getattr(report, "downgrade", None),
         ),
-        (lambda f: _cache_to_proposals(f, persona=persona), _pick("cache")),
-        (lambda f: _cache_uncached_to_proposals(f, persona=persona), _pick("cache")),
-        (lambda f: _cache_thrash_to_proposals(f, persona=persona), _pick("cache")),
-        (lambda f: _cache_lookback_to_proposals(f, persona=persona), _pick("cache")),
+        ("cache", lambda f: _cache_to_proposals(f, persona=persona), _pick("cache")),
+        ("cache", lambda f: _cache_uncached_to_proposals(f, persona=persona), _pick("cache")),
+        ("cache", lambda f: _cache_thrash_to_proposals(f, persona=persona), _pick("cache")),
+        ("cache", lambda f: _cache_lookback_to_proposals(f, persona=persona), _pick("cache")),
         (
+            "cache-recommend",
             lambda f: _cache_recommend_to_proposals(f, _pick("cache"), persona=persona),
             _pick("cache-recommend"),
         ),
-        (_trim_to_proposals, _pick("trim")),
-        (lambda f: _subagent_to_proposals(f, config), _pick("subagent")),
+        ("trim", _trim_to_proposals, _pick("trim")),
+        ("subagent", lambda f: _subagent_to_proposals(f, config), _pick("subagent")),
         (
+            "placement",
             lambda f: _placement_to_proposals(f, pricing_mode=pricing_mode, persona=persona),
             _pick("placement"),
         ),
-        (_deadweight_to_proposals, _pick("deadweight")),
-        (lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
-        (lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
-        (lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),
+        ("deadweight", _deadweight_to_proposals, _pick("deadweight")),
+        ("script", lambda f: _script_to_proposals(f, persona=persona), _pick("script")),
+        ("reuse", lambda f: _reuse_to_proposals(f, persona=persona), _pick("reuse")),
+        ("verbosity", lambda f: _verbosity_to_proposals(f, persona=persona), _pick("verbosity")),
         (
+            "resend",
             # The resend card is compound: it names the concrete over-powered
             # subagent (from the `subagent` finding) that the offload rule
             # should also right-size, so the two levers land as one card rather
@@ -2953,12 +3064,17 @@ def cost_proposals_from_report(
             ),
             _pick("resend"),
         ),
-        (_summarize_to_proposals, _pick("summarize")),
+        ("summarize", _summarize_to_proposals, _pick("summarize")),
     )
-    for adapter, finding in adapters:
+    for name, adapter, finding in adapters:
         try:
             proposals.extend(adapter(finding))
-        except Exception:
+        except Exception as exc:
+            if on_adapter_error is not None:
+                try:
+                    on_adapter_error(name, exc)
+                except Exception:
+                    pass   # a broken reporter must not sink the inbox either
             continue
     proposals = _apply_write_budget(proposals, report, window_days, config)
     # Order matters: the write budget can NET a proposal's figure down against

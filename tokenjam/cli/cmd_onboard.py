@@ -500,7 +500,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
     # so existing automation is byte-for-byte unchanged.
     if not reconfigure and _is_interactive():
         choice = _prompt_usage_path()
-        if choice == "claude_code":
+        if choice == "claude-code":
             _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
                                  project_override, verify=verify,
                                  backfill_days=backfill_days,
@@ -760,7 +760,7 @@ def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> N
     """Run first-signal verification if ``--verify`` was passed, or offer it
     interactively. No-op when neither applies (non-interactive without the flag).
 
-    ``persona`` is one of ``"sdk"``, ``"claude_code"``, ``"codex"`` and drives
+    ``persona`` is one of ``"sdk"``, ``"claude-code"``, ``"codex"`` and drives
     the instruction shown and the not-confirmed cause.
 
     Restart-dependent personas (claude_code / codex) are never OFFERED the
@@ -775,7 +775,7 @@ def _maybe_verify_onboarding(config: object, *, persona: str, verify: bool) -> N
     and the poll copy tells them to restart now).
     """
     if not verify:
-        if persona == "claude_code":
+        if persona == "claude-code":
             return
         if persona == "codex":
             console.print(
@@ -865,7 +865,7 @@ def _run_verify_only(ctx: click.Context, *, claude_code: bool, codex: bool) -> N
 
     if claude_code or codex:
         global_path = Path.home() / ".config" / "tj" / "config.toml"
-        persona = "claude_code" if claude_code else "codex"
+        persona = "claude-code" if claude_code else "codex"
         config_path: Path | None = global_path if global_path.exists() else None
     else:
         found = resolve_config_path((ctx.obj or {}).get("config_path_override"))
@@ -1033,7 +1033,7 @@ def _is_interactive() -> bool:
 
 
 _USAGE_PATH_CHOICES = [
-    ("claude_code", "Claude Code"),
+    ("claude-code", "Claude Code"),
     ("codex",       "Codex"),
     ("sdk",         "Your own agents (Python/TS SDK or API)"),
     ("combination", "A combination of the above"),
@@ -1347,7 +1347,7 @@ def _print_next_steps_nudge(
     tokenmaxx_line = (
         "  [accent]tj tokenmaxx[/accent]   [muted]your shareable efficiency tier[/muted]"
     )
-    if persona == "claude_code":
+    if persona == "claude-code":
         console.print(lens_line)
         console.print(tokenmaxx_line)
     else:
@@ -2114,7 +2114,7 @@ def _onboard_claude_code(
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
     _print_next_steps_nudge(
         has_data=backfill_has_data, days=backfill_span_days,
-        persona="claude_code", daemon_running=want_daemon, port=port,
+        persona="claude-code", daemon_running=want_daemon, port=port,
     )
     # Connection details, demoted to a dim footer: needed for debugging and
     # harness setups, noise for the first-run payoff moment.
@@ -2158,7 +2158,7 @@ def _onboard_claude_code(
         pass
     console.print()
 
-    _maybe_verify_onboarding(config, persona="claude_code", verify=verify)
+    _maybe_verify_onboarding(config, persona="claude-code", verify=verify)
 
     # Shared closing banner (#448): every onboard path ends on the branded home
     # screen + tailored next-best-actions. For Claude Code the success signal is

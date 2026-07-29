@@ -95,60 +95,36 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         minute=0,
     )
 
-    # Self-improve loop: keep the relearn-detector cache warm on a schedule so
-    # the Review inbox never computes its (tens-of-seconds, full-corpus) scan
-    # inline on a request. Own DuckDB connection per run, same reasoning as
-    # the retention job above. A 6h cadence balances freshness against the
-    # distill-pass cost (bounded, but non-zero) of a full recompute.
-    from tokenjam.core.optimize import relearn_store
-    from tokenjam.core.db import DuckDBBackend as _DuckDBBackend
-
-    def _relearn_job() -> None:
-        relearn_store.trigger_background_recompute(
-            lambda: _DuckDBBackend(config.storage), config=config,
-        )
-
-    # The interval trigger's own first fire is ~6h out; the lifespan below
-    # kicks an immediate first pass so a fresh `tj serve` isn't stuck on
-    # "never_run" for up to 6h.
-    scheduler.add_job(_relearn_job, "interval", hours=6)
-
-    # Cost-advisories tab: same reasoning as the relearn job above, but for
-    # `recompute_cost_proposals()` (downsize/cache/trim/subagent/etc adapted
-    # into Review-inbox cards). Before this job existed, that recompute ran
-    # ONLY on the manual "Rescan now" refresh endpoint, so a fresh install's
-    # Cost-advisories tab stayed permanently `never_run` until a human clicked
-    # refresh — this keeps it warm the same way the relearn detector already is.
-    from tokenjam.core.optimize import cost_proposals as cost_proposals_mod
-
-    def _cost_proposals_job() -> None:
-        cost_proposals_mod.trigger_background_cost_recompute(
-            lambda: DuckDBBackend(config.storage), config=config,
-        )
-
-    scheduler.add_job(_cost_proposals_job, "interval", hours=6)
-
-    # Full analyzer report. Same reasoning as the two jobs above, generalised:
-    # NO HTTP request path runs an analyzer any more. `GET /optimize`,
-    # `/reuse/clusters`, `/cost/components` and `/cost/cache` all read the
-    # store this job writes (`core.optimize.report_store`), so the Dashboard's
-    # recoverable-waste panel and Budget-at-risk card paint from a stored
-    # result instead of blocking on a full-corpus dispatch. Ingestion is
-    # untouched and keeps updating traces/spans/sessions continuously.
+    # ONE analyzer scan cycle, for every store the surfaces read.
     #
-    # Three triggers, one mechanism: this interval, the lifespan kick below,
-    # and `POST /api/v1/optimize/rescan`. `scan_enabled = false` is the kill
-    # switch for the two automatic ones; it never re-enables inline compute.
-    from tokenjam.core.optimize import report_store
+    # There used to be three jobs here — relearn 6h, cost proposals 6h, the full
+    # report on `scan_interval_hours` — each with its own startup kick, plus two
+    # on-demand endpoints that each refreshed a DIFFERENT subset. So "Rescan"
+    # meant something different depending on which screen you pressed it from,
+    # and the Dashboard's waste tiles could be hours fresher than the Review
+    # inbox headline they get compared against, with nothing disclosing it.
+    #
+    # `core/optimize/scan_cycle.py` owns the cycle and the reasoning; this is
+    # the schedule and the startup kick for it. `POST /optimize/rescan` fires
+    # the same cycle, so every trigger refreshes the same three stores.
+    from tokenjam.core.db import DuckDBBackend as _DuckDBBackend
+    from tokenjam.core.optimize import scan_cycle
 
-    def _analyzer_scan_job() -> None:
-        report_store.trigger_background_recompute(
-            lambda: DuckDBBackend(config.storage), config,
+    def _scan_cycle_job() -> None:
+        # Resolved through the module (not a from-import) so the scheduled and
+        # startup passes share one patchable seam.
+        scan_cycle.trigger_scan_cycle(
+            lambda: _DuckDBBackend(config.storage), config,
         )
 
-    if config.optimize.scan_enabled:
+    # `scan_enabled = false` is the kill switch for automatic scanning, and it
+    # now gates every store rather than only the report — it is documented as
+    # "keeps the daemon from ever scanning on its own", and relearn and the cost
+    # proposals are scans. An explicit rescan from a surface is a human asking
+    # and stays available; nothing re-enables inline compute on a request.
+    if scan_cycle.scan_enabled(config):
         scheduler.add_job(
-            _analyzer_scan_job, "interval", hours=config.optimize.scan_interval_hours,
+            _scan_cycle_job, "interval", hours=config.optimize.scan_interval_hours,
         )
 
     # Continuous transcript ingestion. Claude Code's OTLP exporter has no retry
@@ -209,20 +185,13 @@ def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
         scheduler.start()
         if proxy_runner is not None:
             proxy_runner.start()
-        # Kick the relearn detector's first pass now (own connection, own
-        # thread — never blocks the bind/startup path) so a fresh `tj serve`
-        # doesn't sit on "never_run" for up to 6h waiting on the interval job.
-        _relearn_job()
-        # Same startup kick for the cost-proposals job (own connection, own
-        # thread via trigger_background_cost_recompute) — a fresh install's
-        # Cost-advisories tab shouldn't sit on "never_run" for up to 6h either.
-        _cost_proposals_job()
-        # Same startup kick for the analyzer report. Without it a fresh install
-        # (or a just-restarted daemon) would serve `never_run` on every
-        # analyzer surface until the first interval fired — the surfaces would
-        # correctly say "not computed yet", but for hours.
-        if config.optimize.scan_enabled:
-            _analyzer_scan_job()
+        # One startup kick for the whole cycle. The interval's own first fire
+        # is hours out, so without this a fresh `tj serve` would serve
+        # "never_run" on every analyzer surface until then — correctly saying
+        # "not computed yet", but for hours. Own connections, own threads: it
+        # never blocks the bind/startup path.
+        if scan_cycle.scan_enabled(config):
+            _scan_cycle_job()
         # Catch up on anything the live path missed while this daemon was down.
         # Wider window than the interval job: a startup pass has to cover
         # however long we were off, not just one interval. Runs on its own

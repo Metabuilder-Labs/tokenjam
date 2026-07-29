@@ -193,6 +193,109 @@ def _bucket(cluster: Mapping[str, Any], label: str) -> Mapping[str, Any] | None:
     return bucket if isinstance(bucket, Mapping) else None
 
 
+def _net_of_reread(bucket: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One bounded bucket's figure MINUS its measured re-read share, or ``None``.
+
+    The netting rule, in exactly one place, because two surfaces publish it: the
+    Review inbox row's contribution to the headline, and the Dashboard's relearn
+    waste tile (via :func:`window_scoped_finding_figure`). Both sit in a set
+    whose other members include the context re-send proposal, which prices
+    re-sent context in full — so both have to subtract the same component or
+    whichever one forgot bills the same tokens twice.
+
+    ``None`` means UNKNOWN. An unpriced bucket cannot be netted, and treating an
+    unknown re-read share as zero would publish a figure that double-counts
+    against resend. Unknown propagates rather than degrading to a number.
+    """
+    gross_usd = bucket.get("past_overspend_usd")
+    reread_usd = bucket.get("past_reread_usd")
+    if gross_usd is None or reread_usd is None:
+        return None
+    gross_tokens = int(bucket.get("past_overspend_tokens") or 0)
+    reread_tokens = int(bucket.get("past_reread_tokens") or 0)
+    return {
+        "usd": round(max(float(gross_usd) - float(reread_usd), 0.0), 6),
+        "tokens": max(gross_tokens - reread_tokens, 0),
+        "gross_usd": float(gross_usd),
+        "reread_usd": float(reread_usd),
+    }
+
+
+def window_scoped_finding_figure(
+    finding: Any, *, days: float | int | None,
+    applied_signatures: Iterable[str] = (),
+) -> dict[str, Any] | None:
+    """Relearn's FINDING-level past overspend, on the window ``days`` names.
+
+    THE DEFECT THIS EXISTS FOR. ``RelearnFinding.past_overspend_usd`` is
+    deliberately UNBOUNDED — relearn's whole signal is recurrence across
+    history, so ``run(ctx)`` does not forward the report's ``since`` and the
+    field covers everything the detector retained. That is correct for the field
+    and wrong for the Dashboard's recoverable-waste row, which rendered it as a
+    peer beside five window-scoped tiles with nothing saying it was on another
+    footing. Measured on a real corpus the tile read $386.64 (all history) while
+    the Review inbox published $260.21 for the same analyzer over the same 30
+    days, and the correctly-bounded figure was already sitting unused on the
+    same payload.
+
+    So this SELECTS the finding's own precomputed bucket for that window and
+    nets it exactly the way an inbox row is netted. Nothing is rescaled, paced
+    or projected — same filter, same price, same subtraction. ``None`` when no
+    bucket EXACTLY matches (see this module's docstring on why there is no
+    nearest-match fallback): a surface must then say it has no figure on this
+    window's basis, never fall back to the unbounded one.
+
+    **SAME POPULATION AS THE INBOX, NOT JUST THE SAME WINDOW.** The
+    finding-level bucket covers EVERY cluster the detector retained, including
+    ones the user has already applied a fix for; the Review inbox sums the
+    OPEN clusters, because a headline answers what is still outstanding. Same
+    window, same netting, different population — so the two disagreed by
+    exactly the applied clusters' worth, and the Dashboard went on claiming
+    money the user had already recovered (apply a fix, watch the tile not
+    move). ``applied_signatures`` closes that: the figure is summed from the
+    open clusters through ``relearn_contribution_rows`` — the inbox's OWN
+    derivation, not a second one that agrees today — so the two surfaces are
+    equal by construction. The bucket still decides whether this window has a
+    basis at all, and still supplies the window labels.
+
+    Passing no signatures keeps the whole-population figure, which is correct
+    for a caller that genuinely wants every cluster (nothing applied is the
+    normal case, and then the two are identical anyway).
+
+    Immutable: reads the finding, returns a new dict, never writes to it.
+    """
+    if not isinstance(finding, Mapping):
+        return None
+    totals = finding.get("past_overspend_windows")
+    if not isinstance(totals, Mapping):
+        return None
+    label = exact_window_label(days, list(totals))
+    if not label:
+        return None
+    bucket = totals.get(label)
+    if not isinstance(bucket, Mapping):
+        return None
+    netted = _net_of_reread(bucket)
+    if netted is None:
+        return None
+    applied = {str(s) for s in applied_signatures}
+    if applied:
+        rows = relearn_contribution_rows(
+            finding, label=label, applied_signatures=applied,
+        )
+        netted = {
+            **netted,
+            "usd": sum((r.get("past_overspend_usd") or 0.0) for r in rows),
+            "tokens": sum((r.get("past_overspend_tokens") or 0) for r in rows),
+        }
+    return {
+        **netted,
+        "window": label,
+        "window_days": bucket.get("window_days"),
+        "basis": RELEARN_CONTRIBUTION_BASIS,
+    }
+
+
 def relearn_contribution(
     cluster: Mapping[str, Any], *, label: str | None,
 ) -> dict[str, Any] | None:
@@ -211,22 +314,13 @@ def relearn_contribution(
     bucket = _bucket(cluster, label)
     if bucket is None:
         return None
-    gross_usd = bucket.get("past_overspend_usd")
-    reread_usd = bucket.get("past_reread_usd")
-    if gross_usd is None or reread_usd is None:
-        # An unpriced bucket cannot be netted, and netting an UNKNOWN re-read
-        # share as zero would publish a figure that double-counts against the
-        # resend proposal. Unknown propagates.
+    netted = _net_of_reread(bucket)
+    if netted is None:
         return None
-    gross_tokens = int(bucket.get("past_overspend_tokens") or 0)
-    reread_tokens = int(bucket.get("past_reread_tokens") or 0)
     return {
-        "usd": round(max(float(gross_usd) - float(reread_usd), 0.0), 6),
-        "tokens": max(gross_tokens - reread_tokens, 0),
+        **netted,
         "window": label,
         "window_days": bucket.get("window_days"),
-        "gross_usd": float(gross_usd),
-        "reread_usd": float(reread_usd),
         "basis": RELEARN_CONTRIBUTION_BASIS,
     }
 

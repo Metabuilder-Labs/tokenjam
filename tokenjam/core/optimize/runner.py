@@ -404,11 +404,60 @@ def hydrate_dataclass(cls: Any, d: Any) -> Any:
     for f in dataclasses.fields(cls):
         if f.name not in d:
             continue   # leave the dataclass default in place
-        kwargs[f.name] = _coerce(hints.get(f.name, f.type), d[f.name], ns)
+        kwargs[f.name] = _coerce(_field_hint(f, hints, d[f.name]), d[f.name], ns)
     # `is_dataclass(cls)` narrows to DataclassInstance for mypy, which it then
     # refuses to call; `cls` here is always the CLASS, never an instance.
     ctor: Any = cls
     return ctor(**kwargs)
+
+
+def _hydrate_target(f: Any) -> Any:
+    """The class named by a field's ``hydrate`` metadata, imported lazily.
+
+    A field whose real element type lives in a module the declaring module
+    must not import (an analyzer row inside ``types``, which is deliberately
+    analyzer-free) has no annotation the hydrator can dispatch on — it is
+    written ``list[Any]``, and `Any` coerces to "leave the dict alone". The
+    dict then travels as a correctly-shaped value with the TYPE missing, and
+    the failure surfaces far away as ``'dict' object has no attribute ...``
+    inside whichever consumer expected the row's attributes. That is the same
+    class of silent loss `hydrate_dataclass` was written to end, one layer
+    over: not a dropped field, a dropped type.
+
+    So the type is declared as data instead of as an import: the field carries
+    ``metadata={"hydrate": "package.module:ClassName"}``, and the class is
+    imported HERE, at hydration time, where importing an analyzer is
+    harmless. Unresolvable (a renamed class, a module that will not import)
+    degrades to the annotation the field already had, which is exactly the
+    old behaviour — this can restore a type, never break a load.
+    """
+    spec = (getattr(f, "metadata", None) or {}).get("hydrate")
+    if not spec:
+        return None
+    module_name, _, qualname = str(spec).partition(":")
+    if not module_name or not qualname:
+        return None
+    try:
+        import importlib
+        return getattr(importlib.import_module(module_name), qualname, None)
+    except Exception:
+        return None
+
+
+def _field_hint(f: Any, hints: dict, value: Any) -> Any:
+    """The type hint to coerce one field against, preferring its ``hydrate``
+    metadata over a loose annotation. Container-shaped values keep their
+    container (``list[Any]`` becomes ``list[Row]``, not ``Row``)."""
+    import dataclasses
+    import typing
+
+    hint = hints.get(f.name, f.type)
+    target = _hydrate_target(f)
+    if target is None or not dataclasses.is_dataclass(target):
+        return hint
+    if typing.get_origin(hint) in (list, tuple) or isinstance(value, list):
+        return list[target]      # type: ignore[valid-type]
+    return target
 
 
 def _resolve(hint: Any, ns: dict) -> Any:

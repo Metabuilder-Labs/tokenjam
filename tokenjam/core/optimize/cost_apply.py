@@ -136,14 +136,109 @@ def signature_is_applied(signature: str, applied_sigs: set[str]) -> bool:
     This resolves that ambiguity toward "still applied" (the same ambiguity
     the old signature already had, just carried forward) rather than
     surprising the user by reopening a fixed card.
+
+    The matching itself lives in :func:`matching_applied_signature`, which
+    answers WHICH ledger signature matched rather than merely whether one did —
+    a payload that has to carry ``applied_at`` needs the record, not the
+    boolean. Two views of one matcher; a second copy of the fallback order is
+    exactly how a card comes back after the ledger settles it.
+    """
+    return matching_applied_signature(signature, applied_sigs) is not None
+
+
+def matching_applied_signature(
+    signature: str, applied_sigs: set[str],
+) -> str | None:
+    """WHICH signature in ``applied_sigs`` makes ``signature`` read as applied.
+
+    ``None`` when none does. Same precedence :func:`signature_is_applied`
+    documents — exact match first, then the legacy agent-only ``downsize``
+    form — because it IS that function's implementation.
     """
     if signature in applied_sigs:
-        return True
+        return signature
     parts = signature.split(":")
     if len(parts) >= 3 and parts[0] == "cost" and parts[1] == "downsize":
         legacy = ":".join(parts[:3])
-        return legacy in applied_sigs
-    return False
+        if legacy in applied_sigs:
+            return legacy
+    return None
+
+
+def stamp_applied_state(
+    proposals: list[dict[str, Any]], *, config: Any,
+) -> list[dict[str, Any]]:
+    """Copy of ``proposals`` with each row carrying its own applied state.
+
+    THE DEFECT THIS EXISTS FOR. A cost proposal the user had already applied
+    came back on the wire with ``apply_capable: true`` and **no applied field of
+    any kind**. The Review-inbox route computed a filtered ``open_proposals``
+    for its rollup and then returned the UNFILTERED list, so the withdrawal of
+    the offer never reached a consumer. Only the browser was safe, and only
+    because it independently re-fetched ``/relearn/cost-applied`` and filtered
+    client-side — meaning the CLI, ``--json``, an export and every future
+    surface saw an offer to re-apply something already done, and had to know to
+    cross-reference a second endpoint to avoid it.
+
+    Critical Rule 32: an applied fix loses its OFFER and keeps its FIGURE, and
+    the row stays listed CARRYING an applied state. So this withdraws
+    ``apply_capable`` and stamps ``applied``/``applied_at``, and deliberately
+    touches nothing else — ``past_overspend_usd``/``_tokens`` and the inbox
+    contribution are what the behaviour ALREADY cost, and the user fixing it
+    afterwards does not un-spend the money. An availability gate that edits a
+    past figure is the "we have no remedy" / "this was free" conflation that
+    rule exists to stop.
+
+    Matching goes through :func:`matching_applied_signature` — the same matcher
+    the rollup's own filter uses — so a row cannot read as open here and applied
+    there.
+
+    Never raises: an unreadable ledger reads as "nothing applied", which leaves
+    the offers standing. That direction wastes a user's attention; the opposite
+    hides a fix they never made.
+    """
+    try:
+        by_sig = applied_records_by_signature(config)
+    except Exception:  # noqa: BLE001 - see docstring
+        by_sig = {}
+    known = set(by_sig)
+    out: list[dict[str, Any]] = []
+    for prop in proposals:
+        matched = matching_applied_signature(str(prop.get("signature") or ""), known)
+        if matched is None:
+            # Absent is not the same as false: a row on a payload that has never
+            # seen the ledger cannot be distinguished from one the ledger says is
+            # open. Every row carries the field, so a reader never has to guess.
+            out.append({**prop, "applied": False, "applied_at": None})
+            continue
+        record = by_sig[matched]
+        out.append({
+            **prop,
+            "applied": True,
+            "applied_at": record.get("applied_at"),
+            # The offer, and only the offer.
+            "apply_capable": False,
+        })
+    return out
+
+
+def applied_records_by_signature(config: Any) -> dict[str, dict]:
+    """Signature → the non-reverted ledger record that applied it.
+
+    The record-carrying counterpart of :func:`applied_signatures`, over the same
+    population and the same reverted-records exclusion (a revert reopens the
+    proposal, so it must not contribute an applied state either). Resolve a
+    proposal against it with :func:`matching_applied_signature`.
+
+    Later records win on a duplicate signature: the ledger is append-only, so
+    the last non-reverted mark is the one in force.
+    """
+    out: dict[str, dict] = {}
+    for rec in list_applied(config):
+        sig = str(rec.get("signature") or "")
+        if sig and rec.get("state") != "reverted":
+            out[sig] = rec
+    return out
 
 
 def get_applied(config: Any, record_id: str) -> dict | None:

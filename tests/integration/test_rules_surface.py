@@ -91,9 +91,20 @@ def test_the_rules_view_never_claims_emptiness_before_its_fetch_resolves():
     html = UI.read_text(encoding="utf-8")
     start = html.index("function RulesView(")
     body = html[start:html.index("function SummarizeView(", start)]
+    # The fetch gate is unchanged: `null` still means not-yet-known for both reads.
     for state in ("rules", "applied"):
         assert f"{state} === null" in body
-        assert f"{state}.length === 0" in body
+    # The EMPTINESS check now runs on the two derived tab populations rather than
+    # on `rules` directly — the page splits into Open / Applied (something to do
+    # versus already in place), so "no rules" is a claim each tab makes about its
+    # own list. Same property, one level down: an empty-state string may only
+    # render off a list that is known, never off `null`.
+    for derived in ("openRules.length === 0", "inPlaceRules.length === 0"):
+        assert derived in body, derived
+    # And the derived lists are built from `rules || []`, so before the fetch
+    # lands they are empty-but-known — which is why the tab counts have their OWN
+    # `rules === null` guard rather than relying on a length of zero.
+    assert "rules || []" in body
     assert "useState(null)" in body
 
 

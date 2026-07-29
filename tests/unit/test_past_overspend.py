@@ -747,8 +747,14 @@ def test_the_observed_figure_renders_from_the_server_block_only(ui):
 def test_ui_labels_are_past_tense_and_carry_no_recovery_vocabulary(ui):
     band = ui[ui.index("function PastOverspendTile"):]
     band = band[:band.index("\n}")]
-    # The headline is the AVOIDABLE amount, and the tile's own label says so.
-    assert "What you could have avoided" in band
+    # The headline is money ALREADY SPENT, and the tile's own label says so in the
+    # past tense. The wording is the founder's ("You Overspent", replacing "What
+    # you could have avoided"); what this pins is the TENSE, not the phrasing —
+    # the tile carries its own tense in a screenshot, so a forward-looking or
+    # conditional label here would make the figure read as a projection.
+    assert "You Overspent" in band
+    for forward in ("you could save", "you will save", "projected", "per month"):
+        assert forward not in band.lower(), forward
     assert "recoverable" not in band
     assert "could save" not in ui
     # No ratio framing ("recovering $X of a $Y problem") anywhere.
