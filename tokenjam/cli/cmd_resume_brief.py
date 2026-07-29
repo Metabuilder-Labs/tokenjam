@@ -176,7 +176,7 @@ def cmd_resume_brief(
     transcript_path: str | None,
     from_hook: bool,
 ) -> None:
-    """Emit a compact resume brief for a session (out-of-band, fail-soft)."""
+    """Recap where a session left off."""
     if not (session_id or last or transcript_path or from_hook):
         raise click.UsageError(
             "Provide --session <id>, --last, --transcript <path>, or --from-hook."

@@ -135,7 +135,7 @@ def stop_tj_serve(*, quiet: bool = False) -> tuple[bool, list[str]]:
 @click.command("stop")
 @click.pass_context
 def cmd_stop(ctx: click.Context) -> None:
-    """Stop the tj serve daemon or background process."""
+    """Stop the tj serve daemon."""
     stop_tj_serve()
 
 

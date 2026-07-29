@@ -46,7 +46,7 @@ def _report_dir() -> Path:
 @click.pass_context
 def cmd_report(ctx: click.Context, trim_agent: str | None,
                reuse_agent: str | None, since: str, no_open: bool) -> None:
-    """Generate detailed HTML reports for analyzer findings."""
+    """Generate HTML reports of findings."""
     if trim_agent is not None and reuse_agent is not None:
         raise click.UsageError("Pass only one of --trim / --reuse.")
     if trim_agent is not None:

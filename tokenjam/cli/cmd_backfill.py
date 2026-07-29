@@ -25,7 +25,7 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 
 @click.group("backfill")
 def cmd_backfill() -> None:
-    """Backfill historical session data from local agent logs."""
+    """Import past sessions from your agents."""
 
 
 @cmd_backfill.command("claude-code")

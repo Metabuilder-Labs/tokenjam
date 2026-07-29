@@ -20,7 +20,7 @@ from tokenjam.utils.time_parse import parse_since, utcnow
 @click.pass_context
 def cmd_cost(ctx: click.Context, agent: str | None, since: str,
              group_by: str, compare: str | None, output_json_flag: bool) -> None:
-    """Show cost breakdown by agent, model, day, or tool."""
+    """Cost breakdown by agent, model, day or tool."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj["db"]
     try:

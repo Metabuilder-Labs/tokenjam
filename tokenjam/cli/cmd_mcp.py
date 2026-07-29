@@ -60,7 +60,7 @@ def _start_and_wait(host: str, port: int, timeout: float = 10.0) -> bool:
 @click.command("mcp")
 @click.pass_context
 def cmd_mcp(ctx: click.Context) -> None:
-    """Start the TokenJam MCP server (stdio transport, for SDK / API users).
+    """Start the MCP server for coding agents.
 
     The MCP puts tj in the request path — the right surface for SDK / API
     integrations. Claude Code / Codex subscription users get tj out-of-band via

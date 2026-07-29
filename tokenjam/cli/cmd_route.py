@@ -36,7 +36,7 @@ def _exports_dir() -> Path:
 
 @click.group("route")
 def cmd_route() -> None:
-    """Compile advisory router configs from TokenJam's downsize findings."""
+    """Advisory model-routing config from your usage."""
 
 
 @cmd_route.command("export")

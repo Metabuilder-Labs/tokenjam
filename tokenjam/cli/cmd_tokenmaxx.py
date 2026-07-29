@@ -82,7 +82,7 @@ def _classify(overhead_share: float) -> Tier:
 @click.pass_context
 def cmd_tokenmaxx(ctx: click.Context, agent: str | None, since: str,
                   weekly: bool, output_json_flag: bool) -> None:
-    """Your quota/efficiency card: how lean is your context? (screenshottable)"""
+    """Your shareable efficiency card."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")

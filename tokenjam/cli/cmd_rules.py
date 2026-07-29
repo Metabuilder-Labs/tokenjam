@@ -59,7 +59,7 @@ def _print_diff(diff: str) -> None:
 
 @click.group("rules", invoke_without_command=False)
 def cmd_rules() -> None:
-    """Permanent CLAUDE.md rules the analyzers propose, and where they go."""
+    """Propose permanent CLAUDE.md rules."""
 
 
 @cmd_rules.command("list")

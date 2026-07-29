@@ -8,7 +8,7 @@ from tokenjam.cli.cmd_onboard import _derive_project_name
 @click.command("otel-resource-attrs")
 @click.pass_context
 def cmd_otel_resource_attrs(ctx: click.Context) -> None:
-    """Print this project's OTel resource attributes on a single line.
+    """Print this project's OTel resource attributes.
 
     Emits e.g. ``service.name=claude-code-myrepo,service.namespace=myproject``.
 

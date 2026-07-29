@@ -137,7 +137,7 @@ def cmd_optimize(
     assume_yes: bool,
     output_json_flag: bool,
 ) -> None:
-    """Analyze recent usage for cost-saving candidates and budget exposure."""
+    """Find cost-saving opportunities."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")

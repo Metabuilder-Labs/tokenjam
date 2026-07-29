@@ -340,8 +340,7 @@ def poll_daemon_version(
 @click.command("upgrade")
 @click.pass_context
 def cmd_upgrade(ctx: click.Context) -> None:
-    """Upgrade the tokenjam package and restart the daemon so the dashboard
-    actually reflects the new version."""
+    """Upgrade tj and restart the daemon."""
     old_version = __version__
 
     plan = detect_upgrade_plan()

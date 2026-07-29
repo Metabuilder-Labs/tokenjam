@@ -104,7 +104,7 @@ def _print_amortization(amort: Amortization) -> None:
 
 @click.group("summarize", invoke_without_command=False)
 def cmd_summarize() -> None:
-    """Structure-aware prompt summarization (advisory preview)."""
+    """Summarize prompts (structure-aware, advisory)."""
 
 
 @cmd_summarize.command("list")

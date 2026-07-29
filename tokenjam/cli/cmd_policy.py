@@ -61,7 +61,7 @@ class PolicyRow:
 
 @click.group("policy", invoke_without_command=False)
 def cmd_policy() -> None:
-    """Unified view of policy-adjacent configuration (read-only preview)."""
+    """View policy-related config in one place."""
 
 
 @cmd_policy.command("list")

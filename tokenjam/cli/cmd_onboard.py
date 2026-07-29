@@ -446,7 +446,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 project_override: str | None,
                 backfill_days: int | None, backfill_all: bool,
                 verify: bool, verify_only: bool, add_project: bool) -> None:
-    """Interactive setup wizard for tj."""
+    """Set up tj (interactive)."""
     # --add-project is the lightweight "register another repo" path: a fresh
     # onboard run per repo re-prompts plan/budget/backfill scope and re-scans
     # the entire Claude Code history just to set one config key

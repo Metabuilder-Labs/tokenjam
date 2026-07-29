@@ -277,7 +277,7 @@ def render_line(data: dict) -> str:
 
 @click.command("statusline")
 def cmd_statusline() -> None:
-    """Print a zero-token Claude Code status line (reads payload JSON on stdin).
+    """Print the zero-token Claude Code statusline.
 
     Wire it into ``~/.claude/settings.json`` as::
 

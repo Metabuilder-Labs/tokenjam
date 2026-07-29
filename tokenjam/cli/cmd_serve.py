@@ -47,7 +47,7 @@ def _port_in_use(host: str, port: int) -> bool:
 @click.pass_context
 def cmd_serve(ctx: click.Context, host: str | None, port: int | None,
               reload: bool) -> None:
-    """Start the tj API server."""
+    """Run the local web UI (Lens)."""
     config = ctx.obj["config"]
     bind_host = host or config.api.host
     bind_port = port or config.api.port

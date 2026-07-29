@@ -72,7 +72,7 @@ class _ProofExporter:
 @json_option
 @click.pass_context
 def cmd_ping(ctx: click.Context, agent_id: str, output_json_flag: bool) -> None:
-    """Emit a labeled test span to prove SDK instrumentation is wired up.
+    """Send a test span to verify the SDK.
 
     Exits 0 only once delivery is *confirmed* — HTTP mode polls the daemon's
     read API for the span before exiting; exit 0 in HTTP mode never means

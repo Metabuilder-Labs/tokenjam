@@ -60,7 +60,7 @@ _INCLUSION_LABELS = {
 @click.pass_context
 def cmd_context(ctx: click.Context, agent: str | None, since: str,
                 output_json_flag: bool) -> None:
-    """Diagnose where your Claude Code quota goes: re-reading vs. real work."""
+    """See where your Claude Code quota goes."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")

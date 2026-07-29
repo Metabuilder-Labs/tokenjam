@@ -41,7 +41,7 @@ def cmd_budget(
     session_usd: float | None,
     output_json_flag: bool,
 ) -> None:
-    """View or set cost budgets for agents."""
+    """View or set spend budgets."""
     output_json = resolve_output_json(ctx, output_json_flag)
     config = ctx.obj["config"]
     writing = daily_usd is not None or session_usd is not None

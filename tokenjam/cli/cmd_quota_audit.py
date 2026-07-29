@@ -57,7 +57,7 @@ from tokenjam.utils.time_parse import parse_since
 @click.pass_context
 def cmd_quota_audit(ctx: click.Context, agent: str | None, since: str,
                     export_target: str | None, output_json_flag: bool) -> None:
-    """Audit your Opus quota: which past Opus sessions were Sonnet-shaped?"""
+    """Audit which sessions used Opus quota."""
     output_json = resolve_output_json(ctx, output_json_flag)
     db = ctx.obj.get("db")
     config = ctx.obj.get("config")

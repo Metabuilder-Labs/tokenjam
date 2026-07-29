@@ -24,7 +24,7 @@ from tokenjam.utils.formatting import console, display_path
 )
 @click.pass_context
 def cmd_doctor(ctx: click.Context, output_json_flag: bool, repair: bool) -> None:
-    """Run health checks on tj configuration and environment."""
+    """Health-check your tj setup."""
     output_json = resolve_output_json(ctx, output_json_flag)
     config = ctx.obj["config"]
     checks: list[dict] = []

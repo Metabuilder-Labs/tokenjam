@@ -9,7 +9,7 @@ from tokenjam.utils.formatting import console
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
 def cmd_reset(ctx: click.Context, yes: bool) -> None:
-    """Wipe TokenJam's config/daemon/wiring — keeps the tokenjam package installed.
+    """Reset tj config/daemon (keeps the package).
 
     The config-only counterpart to `tj uninstall` (which also removes the
     package itself): use `tj reset` to reconfigure or pause TokenJam without

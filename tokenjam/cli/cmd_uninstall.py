@@ -292,7 +292,7 @@ def _uninstall_confirm_prompt(installs: list[PersistentInstall]) -> str:
 @click.option("--yes", is_flag=True, help="Skip confirmation prompt")
 @click.pass_context
 def cmd_uninstall(ctx: click.Context, yes: bool) -> None:
-    """Remove TokenJam entirely: config/daemon/wiring AND the tokenjam package.
+    """Remove tj entirely (config + package).
 
     The full symmetric counterpart to `tj onboard`. For a config-only reset
     that leaves the tokenjam CLI installed (e.g. to reconfigure or pause),

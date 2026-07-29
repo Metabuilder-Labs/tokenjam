@@ -78,7 +78,7 @@ _KIND_STYLE = {
 @click.pass_context
 def cmd_session_story(ctx: click.Context, session_id: str | None,
                       last: bool, output_json_flag: bool) -> None:
-    """Show turn-by-turn HOW a Claude Code session attempted its task.
+    """Replay a Claude Code session turn-by-turn.
 
     Reconstructs the session's method — its ordered moves and, for each
     delegation, the subagent's mandate + what it did — from the on-disk
