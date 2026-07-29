@@ -12330,7 +12330,39 @@ function windowOptionsWithCurrent(availableDays, since) {
     : options.concat([{ value: since, label: `Last ${since}` }]);
 }
 
-function DashboardView({ params }) {
+/** Shown when the reader has switched to a persona this machine has no data for.
+ *
+ * The distinction this exists to protect: "you have no SDK workflows here" and
+ * "your SDK workflows cost nothing" are different statements, and every tile on
+ * this page would otherwise render the second while the truth is the first. It
+ * renders only once the persona read has ANSWERED (`known`) and reports a hard
+ * zero; an unanswered or failed read says nothing at all, because a zero we do
+ * not have is not a measurement.
+ */
+function PersonaNoDataNotice({ persona }) {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    api('/persona').then(d => { if (!cancelled) setInfo(d); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  if (!info || !info.known || !info.counts) return null;
+  if ((info.counts[persona] || 0) > 0) return null;
+  const label = persona === 'sdk' ? 'SDK workflows' : 'Claude Code sessions';
+  const other = persona === 'sdk' ? 'Claude Code' : 'SDK workflows';
+  return html`
+    <div class="band-msg" style="margin:0 0 18px">
+      <b>No ${label} on this machine.</b>
+      <p>
+        Nothing has been ingested for this persona, so the figures below are not
+        small: they are empty. Switch back to ${other} to see what this machine
+        actually has, or point an SDK workload at the collector and it will show
+        up here.
+      </p>
+    </div>`;
+}
+
+function DashboardView({ params, persona }) {
   const since = readParam(params, 'since', '30d', validSince);
   // Preserve the explorer's params (metric/group_by/stack/chart/filters) when
   // only the window changes, so the hero keeps its slice across window switches.
@@ -12595,6 +12627,7 @@ function DashboardView({ params }) {
     : null;
 
   return html`
+    <${PersonaNoDataNotice} persona=${persona} />
     <div class="ov-head">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div class="page-title" style="margin:0">Dashboard</div>
@@ -13057,7 +13090,11 @@ function App() {
       if (!mounted.has(key)) return null;
       const isActive = !detail && key === primaryKey;
       const vp = paramsByView.current[key] || EMPTY_PARAMS;
-      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}><${Comp} params=${vp} /></div>`;
+      // `persona` is passed to every primary view, not just the ones that read
+      // it today: a view needs the SELECTED persona (not the detected one) to
+      // say anything honest about a persona with no data, and re-fetching it
+      // per view would let two surfaces disagree mid-render.
+      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}><${Comp} params=${vp} persona=${persona} /></div>`;
     })}
     ${detail ? html`<div key=${'detail:' + route.view + ':' + route.param} class="view-pane">${detail}</div>` : null}
     ${!detail && !PRIMARY_KEYS.has(primaryKey) ? html`<div class="empty">Page not found.</div>` : null}
