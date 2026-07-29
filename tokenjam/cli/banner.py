@@ -22,15 +22,27 @@ _WORDMARK = r"""
 """
 
 # One-line value prop. Must stay honest (Critical Rule 14) — describes what tj
-# is, never promises a specific saving.
-_TAGLINE = "a cost-saving utility for AI agents · local-first, OTel-native · no signup"
+# is, never promises a specific saving. Trimmed to match the landing page (#643).
+_TAGLINE = "token efficiency for AI agents"
 
 
 def print_welcome_banner() -> None:
-    """Print the wordmark + ``TokenJam vX.Y.Z`` + one-line value prop."""
-    console.print(f"[brand]{_WORDMARK.strip(chr(10))}[/brand]")
-    console.print(
-        f"  [label]TokenJam[/label] [muted]v{__version__}[/muted]"
-    )
-    console.print(f"  [muted]{_TAGLINE}[/muted]")
+    """Print the centered orange wordmark + ``TokenJam vX.Y.Z`` + value prop.
+
+    Shared by the bare-``tj`` home screen and every ``tj onboard`` path so the
+    branded moment is rendered in exactly one place (#643): centered, the
+    wordmark in brand orange, the tagline trimmed to one line.
+    """
+    from rich.align import Align
+    from rich.text import Text
+
+    # Align the whole banner block on the wordmark's own width, not the
+    # terminal's, so the version/tagline sit under the logo rather than being
+    # centered independently across a wide terminal.
+    wordmark = Text(_WORDMARK.strip("\n"), style="brand")
+    console.print(Align.center(wordmark))
+    console.print(Align.center(
+        Text.from_markup(f"[label]TokenJam[/label] [muted]v{__version__}[/muted]")
+    ))
+    console.print(Align.center(Text(_TAGLINE, style="muted")))
     console.print()

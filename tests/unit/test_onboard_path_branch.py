@@ -614,7 +614,9 @@ class TestCombinationBillingHoistedUpFront:
         with runner.isolated_filesystem(temp_dir=tmp_path):
             # path=4 (combination) → Claude yes → Codex yes → SDK no →
             # Claude plan 3 (max_5x) → OpenAI plan 2 (plus) → project name →
-            # backfill scope 1 (recent). Subscription tiers skip ceiling/budget.
+            # analysis span 1 (30d). #643: the separate backfill-scope menu is
+            # gone; the single "how far back" question drives the backfill.
+            # Subscription tiers skip ceiling/budget.
             res = runner.invoke(
                 cmd_onboard, ["--no-daemon"],
                 input="4\ny\ny\nn\n3\n2\nmyproj\n1\n", obj={},
@@ -625,7 +627,7 @@ class TestCombinationBillingHoistedUpFront:
             "How do you pay for Claude?",
             "How do you pay for OpenAI / Codex?",
             "Project name",
-            "Backfill your Claude Code history",
+            "How far back should tj analyze?",
             "::CODEX_LEG_RAN::",
         ]
         indices = [out.index(s) for s in order]

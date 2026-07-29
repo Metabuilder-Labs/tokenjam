@@ -20,8 +20,8 @@ def test_welcome_banner_shows_brand_version_and_value_prop(capsys):
     out = capsys.readouterr().out
     assert "TokenJam" in out
     assert __version__ in out
-    # One-line value prop; honest framing, no promised savings (Rule 14).
-    assert "cost-saving utility for AI agents" in out
+    # Trimmed one-line tagline (#643); honest framing, no promised savings (Rule 14).
+    assert "token efficiency for AI agents" in out
     assert "saves you" not in out.lower()
 
 
@@ -135,9 +135,21 @@ def test_home_when_not_configured_points_at_onboarding(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "TokenJam" in out                     # banner
     assert "Not set up yet" in out
+    # Get Started section (#643): all three onboard variants, each with a
+    # "run this if..." one-liner, plus a Learn more section.
+    assert "Get Started:" in out
     assert "tj onboard" in out
-    # No longer implies `--claude-code` is a separate/recommended setup.
-    assert "tj onboard --claude-code" not in out
+    assert "tj onboard --claude-code" in out
+    assert "tj onboard --codex" in out
+    assert "run this if you only use Claude Code" in out
+    assert "run this if you only use Codex" in out
+    assert "more than one agent client" in out
+    assert "Learn more:" in out
+    assert "tj --help" in out
+    assert "tokenjam.dev/docs" in out
+    # #643: the stale "run it once inside each project" line is gone —
+    # onboarding aggregates all projects automatically.
+    assert "inside each project" not in out
 
 
 def test_home_when_configured_shows_next_best_actions(monkeypatch, capsys, tmp_path):
@@ -212,6 +224,14 @@ def _isolated_claude_code(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "tokenjam.cli.cmd_onboard._try_apply_declared_plans", lambda *a, **k: None,
     )
+    # #643: the restart panel is now conditional on `claude` actually running.
+    # These tests assert panel CONTENT/ORDER, so force it on deterministically
+    # (whether the machine running the suite has a `claude` process is
+    # irrelevant to what the panel says). The conditional behavior itself is
+    # covered by test_restart_panel_conditional_on_claude_running below.
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard._claude_code_is_running", lambda: True,
+    )
 
 
 def _run_claude_code(tmp_path, plan_choice: str):
@@ -244,17 +264,51 @@ def test_claude_code_asks_plan_before_budget(_isolated_claude_code, tmp_path):
 
 def test_claude_code_restart_banner_precedes_nudge(_isolated_claude_code, tmp_path):
     """Founder-review order (2026-07): the one REQUIRED action (restart) is the
-    visually primary element, next steps come after it, connection details
-    are a dim footer at the end."""
+    visually primary element, next steps come after it. #643: connection
+    details moved behind --verbose, so the default screen ends on next steps."""
     res = _run_claude_code(tmp_path, "3")
     assert res.exit_code == 0, res.output
     out = res.output
     assert "Next steps" in out
     assert "Action required" in out
     assert out.index("Action required") < out.index("Next steps"), out
-    assert out.index("Next steps") < out.index("Connection details"), out
+    # #643: connection details are no longer on the default success screen.
+    assert "Connection details" not in out
     # No backfill happened here, so no "already loaded" over-claim.
     assert "already loaded" not in out
+
+
+def test_restart_panel_conditional_on_claude_running(
+    _isolated_claude_code, tmp_path, monkeypatch,
+):
+    """#643: the "Action required: restart Claude Code" panel only shows when a
+    `claude` process is actually running. A fresh terminal with none open needs
+    no restart, so the block is suppressed."""
+    # Force "not running" — the panel must be absent.
+    monkeypatch.setattr(
+        "tokenjam.cli.cmd_onboard._claude_code_is_running", lambda: False,
+    )
+    res = _run_claude_code(tmp_path, "3")
+    assert res.exit_code == 0, res.output
+    assert "Action required" not in res.output
+    # ... but the rest of the success screen is intact.
+    assert "Claude Code observability configured" in res.output
+    assert "Next steps" in res.output
+
+
+def test_verbose_shows_connection_details(_isolated_claude_code, tmp_path):
+    """#643: --verbose restores the connection-details block on the success
+    screen for debugging/harness setups."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        res = runner.invoke(
+            cmd_onboard,
+            ["--claude-code", "--no-daemon", "--project", "testproj", "--verbose"],
+            input="3\n0\n", obj={},
+        )
+    assert res.exit_code == 0, res.output
+    assert "Connection details" in res.output
+    assert "Agent ID:" in res.output
 
 
 def test_claude_code_restart_panel_is_why_first_and_consolidated(

@@ -37,14 +37,21 @@ from rich.theme import Theme
 # which lands close enough that the flow doesn't change character.
 ACCENT = "#8b7fd4"
 
+# Brand orange for the ASCII wordmark only (#643). The banner is a branded
+# moment, not typeable content, so it earns its own colour rather than reusing
+# the periwinkle accent — the accent stays reserved for commands/paths/URLs the
+# user acts on. Rich degrades the truecolor value to the nearest 256-colour slot
+# on terminals without truecolor.
+BRAND_ORANGE = "#e0922f"
+
 TJ_THEME = Theme(
     {
         # the one accent: things you can type or click
         "accent": ACCENT,
         "url": f"underline {ACCENT}",
-        # the wordmark. Same accent as everything else, so a screen never
-        # carries two competing brand colours.
-        "brand": f"bold {ACCENT}",
+        # the wordmark. Brand orange (#643) — the one place a screen carries a
+        # dedicated brand colour, since the banner isn't typeable content.
+        "brand": f"bold {BRAND_ORANGE}",
         # structure
         "label": "bold",
         "heading": "bold",

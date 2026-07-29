@@ -125,20 +125,28 @@ def print_home() -> None:
     print_welcome_banner()
 
     if not _is_set_up():
-        console.print("[heading]Not set up yet.[/heading] Get started:")
+        console.print("[heading]Not set up yet.[/heading]")
         console.print()
-        console.print("  [accent]tj onboard[/accent]   "
-                      "[dim]interactive setup: asks how you use AI agents "
-                      "and wires the right path[/dim]")
+        # Get Started (#643): the three onboard paths, each with a
+        # "run this if..." line so a new user picks the right one without
+        # reading the help. Onboarding aggregates ALL Claude Code projects
+        # automatically (backfill walks ~/.claude/projects/** and derives a
+        # per-project agent_id from each session's cwd), so there is no
+        # "run it once per project" step for basic per-project grouping.
+        console.print("[label]Get Started:[/label]")
         console.print()
-        console.print(
-            "[dim]Run it once inside each project so sessions and "
-            "proposals group per project in the dashboard.[/dim]"
-        )
+        console.print("  [accent]tj onboard[/accent]")
+        console.print("    [muted]run this if you use more than one agent "
+                      "client (e.g. Claude Code and Codex)[/muted]")
+        console.print("  [accent]tj onboard --claude-code[/accent]")
+        console.print("    [muted]run this if you only use Claude Code[/muted]")
+        console.print("  [accent]tj onboard --codex[/accent]")
+        console.print("    [muted]run this if you only use Codex[/muted]")
         console.print()
-        console.print(
-            "[dim]Docs: https://github.com/Metabuilder-Labs/tokenjam[/dim]"
-        )
+        console.print("[label]Learn more:[/label]")
+        console.print()
+        console.print("  [accent]tj --help[/accent]   [muted]all commands[/muted]")
+        console.print("  [muted]Docs[/muted]        [url]https://tokenjam.dev/docs[/url]")
         return
 
     console.print("[ok]\u2713 You're set up.[/ok] Next best actions:")
