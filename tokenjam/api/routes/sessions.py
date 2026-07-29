@@ -192,6 +192,56 @@ async def close_sessions(request: Request) -> JSONResponse:
     return JSONResponse(status_code=200, content={"closed": closed})
 
 
+@router.post("/sessions/ingested-ids", dependencies=[Depends(require_api_key)])
+async def ingested_session_ids(request: Request) -> JSONResponse:
+    """Return the subset of a candidate id list that exists in ``sessions``.
+
+    Body: ``{"session_ids": ["...", ...]}``. Returns
+    ``{"ingested": ["...", ...]}`` — the ids present as rows in the sessions
+    table. Used by ``tj backfill status`` (``reconcile_claude_code``) when the
+    daemon holds the DB write-lock and the CLI is talking to ``tj serve`` over
+    HTTP (``ApiBackend``): the reconciliation anti-joins the on-disk session ids
+    against the DB, and without this route it saw an ``ApiBackend`` with no
+    ``.conn`` and reported ``0 already ingested`` for a fully-ingested install
+    (issue #642). Chunked server-side to stay under DuckDB's bind-parameter
+    ceiling on a large history.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "Invalid JSON body"})
+
+    if not isinstance(body, dict):
+        return JSONResponse(
+            status_code=400, content={"error": "Expected a JSON object"}
+        )
+
+    raw = body.get("session_ids")
+    if not isinstance(raw, list):
+        return JSONResponse(
+            status_code=400, content={"error": "session_ids must be a list"}
+        )
+    session_ids = [str(s) for s in raw if isinstance(s, str) and s]
+
+    db = request.app.state.db
+    conn = getattr(db, "conn", None)
+    if conn is None or not session_ids:
+        return JSONResponse(status_code=200, content={"ingested": []})
+
+    found: set[str] = set()
+    chunk = 5000
+    for start in range(0, len(session_ids), chunk):
+        batch = session_ids[start:start + chunk]
+        placeholders = ",".join(f"${i + 1}" for i in range(len(batch)))
+        rows = conn.execute(
+            f"SELECT session_id FROM sessions WHERE session_id IN ({placeholders})",
+            batch,
+        ).fetchall()
+        found.update(row[0] for row in rows)
+
+    return JSONResponse(status_code=200, content={"ingested": sorted(found)})
+
+
 # Max length of a user-supplied session label; longer input is truncated.
 MAX_SESSION_LABEL_LEN = 120
 

@@ -329,6 +329,93 @@ def test_unbounded_backfill_still_self_heals_stale_scheme_spans(
     ).fetchone()[0] == 0
 
 
+def test_reconcile_counts_ingested_sessions_when_daemon_holds_the_lock(
+    tmp_path: Path,
+) -> None:
+    """Regression for #642: `tj backfill status` reported `0 already ingested`
+    on a fully-ingested install whenever `tj serve` held the DB write-lock.
+
+    The daemon owns the DuckDB connection, so the CLI falls back to the HTTP
+    shim (`ApiBackend`), which has no `.conn`. `reconcile_claude_code` used to
+    read `getattr(db, "conn", None)`, see `None`, and bail with
+    `ingested_sessions == 0` and an empty `missing` list — so the three buckets
+    summed to 0 and it still printed "✓ Every on-disk session is ingested".
+
+    Before the fix `ingested_sessions` is 0 (and disk_sessions == 3), which
+    this asserts against; the fix routes the anti-join through the daemon.
+    """
+    import threading
+    import time
+    from contextlib import contextmanager
+
+    import uvicorn
+
+    from tokenjam.api.app import create_app
+    from tokenjam.core.api_backend import ApiBackend
+    from tokenjam.core.config import (
+        ApiAuthConfig,
+        ApiConfig,
+        SecurityConfig,
+        TjConfig,
+    )
+    from tokenjam.core.ingest import IngestPipeline
+
+    root = tmp_path / "projects"
+    # Three on-disk sessions, all ingested into the DB.
+    for sid in ("sess-a", "sess-b", "sess-c"):
+        _write_session(root, sid)
+
+    db = DuckDBBackend(StorageConfig(path=str(tmp_path / "daemon.duckdb")))
+    ingest_claude_code(db, root=root)
+    assert reconcile_claude_code(db, root=root).ingested_sessions == 3
+
+    config = TjConfig(
+        version="1",
+        security=SecurityConfig(ingest_secret="s"),
+        api=ApiConfig(auth=ApiAuthConfig(enabled=False)),
+    )
+    pipeline = IngestPipeline(db=db, config=config)
+    app = create_app(config=config, db=db, ingest_pipeline=pipeline)
+
+    @contextmanager
+    def _live_server(app):
+        server = uvicorn.Server(uvicorn.Config(
+            app, host="127.0.0.1", port=0, log_level="error",
+        ))
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 10.0
+        while not server.started:
+            if time.monotonic() > deadline:
+                raise RuntimeError("live test server failed to start")
+            time.sleep(0.02)
+        try:
+            port = server.servers[0].sockets[0].getsockname()[1]
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+
+    with _live_server(app) as base_url:
+        shim = ApiBackend(base_url)
+        try:
+            report = reconcile_claude_code(shim, root=root)
+        finally:
+            shim.close()
+
+    # The fix: the ingested count reflects reality through the daemon...
+    assert report.ingested_sessions == 3
+    # ...and the buckets reconcile transparently to the distinct-session count.
+    assert report.disk_sessions == 3
+    assert (
+        report.ingested_sessions
+        + report.missing_count
+        + report.skipped_empty_count
+        == report.disk_sessions
+    )
+    db.close()
+
+
 def test_backfill_status_command_lists_the_missing_session(
     tmp_path: Path, db: DuckDBBackend,
 ) -> None:

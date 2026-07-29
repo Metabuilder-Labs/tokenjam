@@ -327,15 +327,30 @@ def reconcile_claude_code(
     report.files_unreadable = unreadable
     report.disk_sessions = len(sessions)
 
+    disk_ids = sorted(sessions)
     conn = getattr(db, "conn", None)
-    if conn is None:
-        logger.debug("reconcile: backend exposes no connection; nothing to compare")
-        return report
-
-    ingested = _ingested_session_ids(conn, sorted(sessions))
+    if conn is not None:
+        ingested = _ingested_session_ids(conn, disk_ids)
+    else:
+        # `tj serve` holds the DB write-lock, so the CLI got a connection-less
+        # HTTP shim (`ApiBackend`). Route the anti-join through the daemon that
+        # owns the connection rather than bailing to `0 already ingested` on a
+        # fully-ingested install (#642).
+        fetch = getattr(db, "fetch_ingested_session_ids", None)
+        if fetch is None:
+            logger.debug(
+                "reconcile: backend exposes no connection and no HTTP shim; "
+                "nothing to compare"
+            )
+            return report
+        try:
+            ingested = fetch(disk_ids)
+        except Exception:
+            logger.warning("reconcile: daemon ingested-id lookup failed", exc_info=True)
+            return report
     report.ingested_sessions = len(ingested)
 
-    candidates = [sessions[sid] for sid in sorted(sessions) if sid not in ingested]
+    candidates = [sessions[sid] for sid in disk_ids if sid not in ingested]
     if not classify_empty:
         report.missing = candidates
         return report
