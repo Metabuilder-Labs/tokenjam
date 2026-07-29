@@ -76,6 +76,28 @@ class ApiBackend:
         resp.raise_for_status()
         return resp.json()
 
+    def _post(self, path: str, body: dict) -> dict:
+        """POST `body` as JSON to `path` and return the parsed JSON response."""
+        resp = self.client.post(path, json=body)
+        resp.raise_for_status()
+        return resp.json()
+
+    def fetch_ingested_session_ids(self, session_ids: list[str]) -> set[str]:
+        """Subset of `session_ids` present in the daemon's sessions table.
+
+        The serve-mode counterpart to `transcript_sync._ingested_session_ids`'s
+        direct SQL anti-join: when `tj serve` holds the DB write-lock the CLI
+        gets an `ApiBackend` with no `.conn`, so `tj backfill status` reported
+        `0 already ingested` on a fully-ingested install (#642). Routes the same
+        anti-join through the daemon that owns the connection.
+        """
+        if not session_ids:
+            return set()
+        data = self._post(
+            "/api/v1/sessions/ingested-ids", {"session_ids": session_ids}
+        )
+        return {str(s) for s in data.get("ingested", [])}
+
     def get_traces(self, filters: TraceFilters) -> list[TraceRecord]:
         params: dict[str, str | int] = {"limit": filters.limit, "offset": filters.offset}
         if filters.agent_id:

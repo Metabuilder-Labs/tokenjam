@@ -100,6 +100,12 @@ class SyncReport:
     files_unreadable: int = 0
     disk_sessions: int = 0
     ingested_sessions: int = 0
+    #: True once the disk-vs-DB anti-join actually completed. Stays ``False``
+    #: when the ingested-id lookup could not run (e.g. the daemon holds the
+    #: write-lock and its HTTP shim call failed) — the ingested/missing/skipped
+    #: buckets are then meaningless and MUST NOT be rendered as a confident
+    #: "0 ingested · everything is ingested" (issue #642, Greptile P1).
+    verified: bool = True
     #: On disk, not in the DB, and carries at least one billable assistant turn.
     missing: list[DiskSession] = field(default_factory=list)
     #: On disk, not in the DB, but parses to zero spans (no assistant turn) —
@@ -141,6 +147,7 @@ class SyncReport:
             "files_unreadable": self.files_unreadable,
             "disk_sessions": self.disk_sessions,
             "ingested_sessions": self.ingested_sessions,
+            "verified": self.verified,
             "missing_count": self.missing_count,
             "skipped_empty_count": self.skipped_empty_count,
             "days_until_rotation": self.days_until_rotation(),
@@ -327,15 +334,38 @@ def reconcile_claude_code(
     report.files_unreadable = unreadable
     report.disk_sessions = len(sessions)
 
+    disk_ids = sorted(sessions)
     conn = getattr(db, "conn", None)
-    if conn is None:
-        logger.debug("reconcile: backend exposes no connection; nothing to compare")
-        return report
-
-    ingested = _ingested_session_ids(conn, sorted(sessions))
+    if conn is not None:
+        ingested = _ingested_session_ids(conn, disk_ids)
+    else:
+        # `tj serve` holds the DB write-lock, so the CLI got a connection-less
+        # HTTP shim (`ApiBackend`). Route the anti-join through the daemon that
+        # owns the connection rather than bailing to `0 already ingested` on a
+        # fully-ingested install (#642).
+        fetch = getattr(db, "fetch_ingested_session_ids", None)
+        if fetch is None:
+            logger.debug(
+                "reconcile: backend exposes no connection and no HTTP shim; "
+                "nothing to compare"
+            )
+            # Could not verify — do NOT let the empty buckets read as a
+            # confident "0 ingested · everything ingested" (#642 P1).
+            report.verified = False
+            return report
+        try:
+            ingested = fetch(disk_ids)
+        except Exception:
+            # Auth/connectivity/server/decode failure. Returning here with the
+            # buckets left at 0 would reprint the exact misleading status #642
+            # set out to kill, so mark the report unverified and let the caller
+            # surface an honest "couldn't verify" instead (Greptile P1).
+            logger.warning("reconcile: daemon ingested-id lookup failed", exc_info=True)
+            report.verified = False
+            return report
     report.ingested_sessions = len(ingested)
 
-    candidates = [sessions[sid] for sid in sorted(sessions) if sid not in ingested]
+    candidates = [sessions[sid] for sid in disk_ids if sid not in ingested]
     if not classify_empty:
         report.missing = candidates
         return report
