@@ -593,9 +593,9 @@ def _global_paths() -> list[Path]:
     for raw in load_catalog().global_paths:
         expanded = str(Path(raw).expanduser())
         if any(ch in expanded for ch in "*?["):
-            found = (Path(x) for x in sorted(_glob.glob(expanded, recursive=True)))
+            found = [Path(x) for x in sorted(_glob.glob(expanded, recursive=True))]
         else:
-            found = iter([Path(expanded)])
+            found = [Path(expanded)]
         for p in found:
             # Catalog globals OVERLAP the same way project globs do (a rules
             # file can match more than one pattern) — dedupe rather than
