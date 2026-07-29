@@ -51,7 +51,7 @@ def test_runner_prints_persona_cause_on_timeout(monkeypatch, capsys):
         "tokenjam.core.onboard_verify.poll_for_first_span",
         lambda *a, **k: VerifyResult(False, 60.0),
     )
-    cmd_onboard._run_onboard_verification(_config(), "claude_code", timeout_s=60.0)
+    cmd_onboard._run_onboard_verification(_config(), "claude-code", timeout_s=60.0)
     out = capsys.readouterr().out
     assert "No telemetry yet" in out
     assert "restart" in out.lower()  # persona-specific cause
@@ -123,7 +123,7 @@ def test_verify_only_claude_code_reads_global_config(monkeypatch, tmp_path):
         lambda config, persona: calls.append(persona),
     )
     cmd_onboard._run_verify_only(_ctx(), claude_code=True, codex=False)
-    assert calls == ["claude_code"]
+    assert calls == ["claude-code"]
 
 
 def test_verify_only_errors_cleanly_when_no_config(monkeypatch, capsys):

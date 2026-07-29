@@ -85,7 +85,7 @@ def test_prose_carries_no_incidental_styling(prose):
 
 
 def test_accent_is_the_only_hue_in_the_next_steps_list(capsys):
-    _print_next_steps_nudge(has_data=False, persona="claude_code", port=7391)
+    _print_next_steps_nudge(has_data=False, persona="claude-code", port=7391)
     out = capsys.readouterr().out
     # commands and the URL are the actionable content of this screen
     assert "tj serve" in out

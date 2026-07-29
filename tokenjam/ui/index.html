@@ -64,6 +64,23 @@
   --chart-10: #fb923c;
   --chart-11: #e879f9;
   --chart-12: #38bdf8;
+
+  /* ---- Spacing scale (#437) ----------------------------------------------
+     Every surface in this app is one of four shapes: a card/section body, a
+     row inside one, a head strip above one, and a table cell. Before these
+     tokens each shape had been re-guessed per page — horizontal insets ran
+     9/12/14/16/18px and stacked containers sometimes touched — so a table
+     inside a panel did not line up with the panel's own head, and the same
+     component read differently on two pages. One horizontal inset for all
+     four shapes is what makes a page read as one surface; the VERTICAL value
+     still varies by density, which is legitimate (a table row is denser than
+     a card body) and is why these are four tokens rather than one.
+     Use the tokens, not literals, for any new container. */
+  --inset-x: 16px;      /* the single horizontal inset — cards, rows, heads, cells */
+  --pad-card-y: 16px;   /* vertical padding of a card / section body */
+  --pad-row-y: 11px;    /* vertical padding of a list or table body row */
+  --pad-head-y: 10px;   /* vertical padding of a head strip / table header */
+  --stack-gap: 16px;    /* vertical gap between two stacked cards or panels */
 }
 [data-theme="light"] {
   --bg: #fff;
@@ -159,6 +176,62 @@ code, .mono {
 .lens-btn.active { background: rgba(var(--accent-rgb),0.16); color: var(--accent); }
 .sidebar[data-lens="improve"] a.nav-link[data-lens="observe"] { display: none; }
 .sidebar[data-lens="observe"] a.nav-link[data-lens="improve"] { display: none; }
+/* Persona gating. A coding-agent user has no Observe lens at all, so the
+   lens switcher is hidden rather than left as a control with one option:
+   showing a toggle that cannot toggle reads as a broken affordance. An SDK
+   user keeps both lenses and loses only the two Claude-Code-specific pages.
+   `!important` because the route effect writes an inline `display` on
+   nav-children, which would otherwise win over these rules. */
+.sidebar[data-persona="claude-code"] a.nav-link[data-lens="observe"] { display: none !important; }
+.sidebar[data-persona="claude-code"] .lens-switch { display: none; }
+.sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"] { display: none !important; }
+/* The Dashboard's health band is Observe-shaped: unread alerts, agents
+   drifting, budgets at risk. A coding-agent user has no Observe lens, so the
+   band summarises pages they cannot open. Hidden for that persona rather than
+   left pointing at nothing. */
+body[data-persona="claude-code"] .health-glance { display: none; }
+/* Pinned above every page: the persona decides which pages exist, so it
+   cannot live inside one of them. */
+/* Floated rather than a block of its own: App() renders this once, above every
+   view, but each view renders its own <h1>. A block here would always sit on a
+   separate line above the heading. Floating it lets the heading that follows
+   share the line, without every page having to render the switcher itself (and
+   without the switcher's position depending on each page's own header markup,
+   which differs: some carry a plan badge, a range picker and a Rescan button,
+   some carry nothing). Headings that are flex rows establish their own
+   formatting context and sit beside the float rather than under it. */
+/* Floated RIGHT, so it lands at the far end of whatever heading row follows
+   it. App() renders this once, above every view, but each view renders its own
+   <h1>; a block here would always take a line of its own above the heading.
+   Floating lets the heading share the line without every page having to render
+   the switcher itself, and without its position depending on each page's own
+   header markup (some carry a plan badge, a range picker and a Rescan button,
+   some carry nothing). Headings that are flex rows establish their own
+   formatting context and shrink to sit beside the float rather than run under
+   it, which is why a page's own right-aligned controls land just inside this
+   rather than overlapping it. It floats right rather than left because as a
+   left float it sat BEFORE the page title, so the reader met a global control
+   before learning which page they were on, and any prose paragraph following
+   the heading wrapped its first line around it. */
+.persona-bar { float: right; margin: 0 0 10px 18px; }
+.persona-pick { display: inline-flex; align-items: center; gap: 8px; }
+.persona-bar-label { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-dim); }
+.persona-bar-note { font-size: 12px; color: var(--text-faint); }
+/* A native <select>: two mutually exclusive views of the same data is what a
+   dropdown is for, and it matches the range/metric pickers the analytics
+   header already uses, so the page has one control idiom instead of two.
+   Styled off `.filters select` so they cannot drift apart. */
+.persona-select {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-family: 'Geist Mono', monospace;
+  font-size: 12px;
+  cursor: pointer;
+}
+.persona-select:focus { outline: none; border-color: var(--accent); }
 .sidebar-footer {
   margin-top: auto;
   border-top: 1px solid var(--border);
@@ -219,12 +292,12 @@ code, .mono {
 }
 
 /* Cards */
-.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--stack-gap); margin-bottom: 24px; }
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 16px;
+  padding: var(--pad-card-y) var(--inset-x);
 }
 .card.clickable { cursor: pointer; transition: border-color 0.15s; }
 .card.clickable:hover { border-color: var(--accent); }
@@ -263,6 +336,17 @@ code, .mono {
   max-width: 220px;
 }
 .rename-input:focus { outline: none; border-color: var(--brand); }
+/* The action row inside a card's apply box: a target-path input and its
+   buttons. Every other card kind right-aligns its actions
+   (`justify-content:flex-end`), but these rows reuse `.rename-input`, whose
+   `max-width` exists for the narrow session-rename affordance above. Capped at
+   that width the input could not grow, so the buttons hugged it on the left and
+   the row sat visibly out of line with every neighbouring card. Letting the
+   input fill the row fixes the alignment and, on the same edit, stops
+   truncating the path: these cards ask the reader to "confirm the target
+   first", which they could not do on a path cut off mid-string. */
+.fix-action-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.fix-action-row .rename-input { flex: 1 1 280px; max-width: none; }
 .status-dot {
   width: 8px; height: 8px; border-radius: 50%;
   display: inline-block;
@@ -335,7 +419,7 @@ table {
 }
 th {
   text-align: left;
-  padding: 8px 12px;
+  padding: var(--pad-head-y) var(--inset-x);
   color: var(--text-dim);
   font-weight: 500;
   font-size: 11px;
@@ -345,7 +429,7 @@ th {
   white-space: nowrap;
 }
 td {
-  padding: 8px 12px;
+  padding: var(--pad-row-y) var(--inset-x);
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
@@ -391,7 +475,7 @@ tr.clickable:hover td.chevron { color: var(--accent); }
 
 /* Collapsible archive / inactive block */
 details.archive-block { margin-top: 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
-details.archive-block > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+details.archive-block > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: var(--pad-head-y) var(--inset-x); background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
 details.archive-block > summary::-webkit-details-marker { display: none; }
 details.archive-block > summary .tw { color: var(--text-faint); font-size: 9px; transition: transform 0.15s; display: inline-block; }
 details.archive-block[open] > summary .tw { transform: rotate(90deg); }
@@ -399,19 +483,35 @@ details.archive-block > summary .a-count { color: var(--text-faint); }
 details.archive-block > summary .a-hint { margin-left: auto; text-transform: none; letter-spacing: 0; color: var(--text-faint); }
 details.archive-block .table-wrap { border-top: 1px solid var(--border); }
 table.archive-list { width: 100%; border-collapse: collapse; font-family: 'Geist Mono', monospace; font-size: 13px; min-width: 820px; }
-table.archive-list th { text-align: left; padding: 9px 14px; color: var(--text-faint); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-table.archive-list td { padding: 11px 14px; border-bottom: 1px solid var(--border); white-space: nowrap; color: var(--text-dim); }
+table.archive-list th { text-align: left; padding: var(--pad-head-y) var(--inset-x); color: var(--text-faint); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+table.archive-list td { padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); white-space: nowrap; color: var(--text-dim); }
 table.archive-list tr:last-child td { border-bottom: none; }
 table.archive-list tr.clickable:hover td { background: rgba(var(--accent-rgb),0.04); }
 table.archive-list .a-id { color: var(--text); }
 
 /* SDK services panel (Prometheus-style rows) */
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
-.panel-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+/* Two stacked panels used to sit flush against each other, reading as one
+   container with a stray divider through it. Adjacent-sibling rather than a
+   blanket margin-bottom, so a panel that is the last thing on a page adds no
+   trailing space and a panel inside a grid still spaces via the grid's gap. */
+.panel + .panel, .panel + .card, .card + .panel { margin-top: var(--stack-gap); }
+.panel-head { display: flex; align-items: center; gap: 10px; padding: var(--pad-head-y) var(--inset-x); border-bottom: 1px solid var(--border); background: var(--surface2); font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+/* The two shapes a panel's contents take. `.panel` itself is padding-free so
+   it can hold a full-bleed table or head strip, which is exactly why its
+   direct children kept being written with a hand-picked inline padding (or,
+   on the Rules page, none at all — content ran flush to the border while the
+   head above it was inset). These are the shared alternative: `.panel-body`
+   for one block of prose or controls, `.panel-row` for a repeated row in a
+   list. Both take the same horizontal inset as `.panel-head` and as a table
+   cell, so every edge down a panel lines up. */
+.panel-body { padding: var(--pad-card-y) var(--inset-x); }
+.panel-row { padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); }
+.panel-row:last-child { border-bottom: none; }
 .panel-head .grip { color: var(--text-faint); }
 .panel-head .range { margin-left: auto; text-transform: none; letter-spacing: 0; }
 .panel-head .range-tag { padding: 2px 7px; border: 1px solid var(--border); border-radius: 5px; color: var(--text-dim); }
-.svc-row { display: grid; grid-template-columns: 200px 82px 1fr 90px 120px; align-items: center; gap: 16px; padding: 12px 14px; border-bottom: 1px solid var(--border); transition: background 0.12s; }
+.svc-row { display: grid; grid-template-columns: 200px 82px 1fr 90px 120px; align-items: center; gap: 16px; padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); transition: background 0.12s; }
 .svc-row:last-child { border-bottom: none; }
 .svc-row.clickable { cursor: pointer; }
 .svc-row.clickable:hover { background: rgba(var(--accent-rgb),0.03); }
@@ -425,11 +525,11 @@ table.archive-list .a-id { color: var(--text); }
 .err-good { color: var(--success); }
 .err-warn { color: var(--warn); }
 .err-bad { color: var(--error); }
-.svc-empty { padding: 16px 14px; font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); }
+.svc-empty { padding: var(--pad-card-y) var(--inset-x); font-family: 'Geist Mono', monospace; font-size: 12px; color: var(--text-dim); }
 
 /* Inactive services list */
 .inactive-list { border-top: 1px solid var(--border); }
-.inact-row { display: grid; grid-template-columns: 220px 150px 1fr 176px auto; align-items: center; gap: 16px; padding: 13px 14px; border-bottom: 1px solid var(--border); transition: background 0.12s; }
+.inact-row { display: grid; grid-template-columns: 220px 150px 1fr 176px auto; align-items: center; gap: 16px; padding: var(--pad-row-y) var(--inset-x); border-bottom: 1px solid var(--border); transition: background 0.12s; }
 .inact-row:last-child { border-bottom: none; }
 .inact-row.clickable { cursor: pointer; }
 .inact-row.clickable:hover { background: rgba(var(--accent-rgb),0.03); }
@@ -483,7 +583,7 @@ table.archive-list .a-id { color: var(--text); }
 .preset-row { margin-top: -6px; }
 .preset-btn { font-size: 11px; padding: 4px 9px; }
 .kpi-row { display: flex; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
-.kpi-tile { flex: 1 1 140px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+.kpi-tile { flex: 1 1 140px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px var(--inset-x); }
 .kpi-tile.kpi-active { border-color: var(--accent); }
 .kpi-tile.kpi-clickable { cursor: pointer; }
 .kpi-tile.kpi-clickable:hover { border-color: var(--accent); }
@@ -558,6 +658,14 @@ table.archive-list .a-id { color: var(--text); }
 .scan-provenance { font-size: 11px; color: var(--text-dim); font-family: 'Geist Mono', monospace; white-space: nowrap; }
 .scan-error { font-size: 11px; color: var(--error); }
 .scan-degraded { font-size: 11px; color: var(--warn); }
+/* The freshness claim is no longer sufficient on its own: these figures were
+   produced by a build other than the one serving them (or by one that did not
+   stamp itself). Warn-toned, not error-toned — the timestamp is still true and
+   the figures are still the last good ones; what is missing is the vouch. */
+.scan-stale-build { font-size: 11px; color: var(--warn); white-space: nowrap; }
+/* The server answered 200 saying it did NOT start a pass. Neither a success nor
+   a failure, so neither the provenance colour nor the error colour. */
+.scan-declined { font-size: 11px; color: var(--warn); }
 .btn-restore { padding: 3px 8px; font-size: 11px; white-space: nowrap; position: relative; display: inline-flex; align-items: center; gap: 5px; }
 .btn-restore.copied { border-color: var(--success); color: var(--success); }
 .btn-restore svg { width: 12px; height: 12px; flex-shrink: 0; }
@@ -787,19 +895,39 @@ table.archive-list .a-id { color: var(--text); }
 }
 .drift-empty-why div + div { margin-top: 8px; }
 
-/* Empty state */
+/* Empty state.
+   `.empty` is the whole-page shape: nothing on this route, so it gets the
+   room to say so. `.empty.compact` is the same voice inside a panel, a chart
+   card or a tab body, where 48px of air would push the surrounding chrome
+   apart. `.empty.err` is the failed-read case, which must never be worded or
+   coloured as "there is nothing here" (root anti-pattern 22 — a surface
+   asserting more than its data supports). These three modifiers exist so a
+   page never re-guesses the padding inline; every ad-hoc
+   `class="dim" style="padding:32px 16px;text-align:center"` was a hand-rolled
+   copy of one of them. */
 .empty {
   text-align: center;
   padding: 48px 24px;
   color: var(--text-dim);
   font-size: 14px;
 }
+.empty.compact { padding: 28px var(--inset-x); }
+.empty.err { color: var(--error); }
 .empty code {
   display: block;
   margin-top: 12px;
   color: var(--accent);
   font-size: 13px;
 }
+/* The same state as a full-width row inside a table, so the message sits in
+   the body rather than under it and the table keeps its own borders. */
+td.empty-cell {
+  text-align: center;
+  padding: 28px var(--inset-x);
+  color: var(--text-dim);
+  white-space: normal;
+}
+td.empty-cell.err { color: var(--error); }
 
 /* Expand toggle */
 .expand-toggle { display: inline-block; width: 16px; font-size: 10px; color: var(--text-dim); transition: transform 0.15s; }
@@ -835,8 +963,8 @@ table.archive-list .a-id { color: var(--text); }
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 14px 16px;
-  margin-bottom: 16px;
+  padding: var(--pad-card-y) var(--inset-x);
+  margin-bottom: var(--stack-gap);
 }
 .chart-title {
   font-family: 'Geist Mono', monospace;
@@ -955,7 +1083,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
-/* Distinct from .estimated-tag (amber, "estimated recoverable") on purpose —
+/* Distinct from .estimated-tag (amber) on purpose:
    budget-projection is a forecast of exposure against a ceiling, never a
    recoverable-waste estimate, and the two must never read as the same kind
    of number (see budget-projection framing). */
@@ -967,7 +1095,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 /* Distinct from .estimated-tag on purpose (CLAUDE.md anti-pattern #22, trap
    (a)): `placement`'s dollar figure is a PRICE difference on the same
    tokens (batch bills the same work at half rate), never tokens freed, so it
-   must never read as "estimated recoverable" like its siblings. */
+   must never read as a plain past-overspend figure like its siblings. */
 .price-diff-tag {
   font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--info); border: 1px solid var(--info);
@@ -984,9 +1112,9 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 .po-amount { font-family: 'Geist Mono', monospace; font-size: 14px; font-weight: 600; color: var(--text); }
 /* A `.po-observed-tag` rule lived here, styling an "OBSERVED" chip beside the
    avoided-tile's label. Element and rule are both GONE, on founder call: the
-   tile's own title is already past tense ("What you could have avoided") and its
-   caption already names the window and the population ("over the last 30 days ·
-   ~22.2B tok · 13 causes"), so the chip restated what the surrounding copy says.
+   tile's own title is already past tense ("You Overspent") and its caption
+   already names the window and the population ("over the last 30 days · ~22.2B
+   tok · 13 causes"), so the chip restated what the surrounding copy says.
    Nothing else used the class.
    The tense now rests entirely on that title and that caption, which is why
    neither may be reworded forward-looking or shortened. */
@@ -1056,7 +1184,29 @@ a.health-tile.attn { border-color: var(--warn); }
    rule (the Dashboard and the Review inbox reached for it independently); the
    duplicate is gone rather than kept, because two rules for one primitive is
    exactly the drift that lets two screens' skeletons diverge. */
-.opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 18px; margin-bottom: 14px; }
+.opt-section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: var(--pad-card-y) var(--inset-x); margin-bottom: var(--stack-gap); }
+/* An `.opt-section` used as one column of a flex row of equal tiles rather
+   than as a full-width panel. Three sites rendered this shape with the same
+   inline `flex:1;min-width:260px` plus a re-declared border and radius; the
+   flex behaviour is the only thing that actually differs from the base class,
+   so that is all this modifier carries. */
+.opt-tile { flex: 1; min-width: 260px; }
+/* A zone heading above a list of cards. Rules used to wrap its offers in one
+   `.panel` with a `.panel-head`, while the Review inbox lists the same KIND of
+   thing (one proposal, its evidence, its actions) as separate bordered cards.
+   Same content shape, two containers, so the two screens read as unrelated.
+   Rules now uses the inbox's card, and this is the heading that replaces the
+   panel head it lost. */
+.rules-zone { margin: 22px 0 10px; font-family: 'Geist Mono', monospace; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
+/* A zone heading above a list of cards. Rules listed its offers as rows inside
+   one panel while the Review inbox lists the same SHAPE of thing (one
+   proposal, its evidence, its actions) as separate bordered cards; the two
+   read as different kinds of surface for no reason. Rules now uses the same
+   cards, so what was a `.panel-head` strip becomes a standalone label above
+   them, matching the uppercase zone labels the Dashboard already uses. */
+.rules-zone { margin: 22px 0 10px; font-family: 'Geist Mono', monospace; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 /* Deep-link highlight for a Review-inbox cost advisory (card → apply hop).
    The card's own inline `border` wins over a plain class rule, so this needs
@@ -1258,14 +1408,14 @@ a.health-tile.attn { border-color: var(--warn); }
 .wm-legend { display: flex; gap: 14px; font-family: 'Geist Mono', monospace; font-size: 11px; color: var(--text-dim); margin: -6px 0 12px; flex-wrap: wrap; }
 /* Summary band: the 5-second read above the asks list — totals + biggest
    fan-outs. Subtle bordered panel, mono/dim like the other wm-* meta. */
-.wm-summary-band { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
+.wm-summary-band { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); padding: var(--pad-row-y) var(--inset-x); margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
 .wm-summary-stats { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12px; color: var(--text); }
 .wm-summary-stats span { color: var(--text-dim); }
 .wm-summary-fanouts { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 3px; }
 .wm-summary-fanout { font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Launcher -> run card: when a session spawned (or belongs to) a multi-session
    run, surface a breadcrumb to the run + its worker sessions. */
-.wm-run-card { border: 1px solid var(--brand); border-radius: 8px; background: var(--surface); padding: 10px 12px; margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
+.wm-run-card { border: 1px solid var(--brand); border-radius: 8px; background: var(--surface); padding: var(--pad-row-y) var(--inset-x); margin-bottom: 12px; font-family: 'Geist Mono', monospace; }
 .wm-run-card.inferred { border-style: dashed; }
 .wm-run-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
 .wm-run-title { font-size: 13px; color: var(--text); }
@@ -1603,6 +1753,17 @@ code.md-code {
    components, so they inherit this without a second rule. The relearn Approve
    MODAL is deliberately not covered: it renders outside the card and is a reading
    surface, so 74ch is still correct there. */
+/* The row's own box. This was written inline on all four components that
+   render one (the real row, the group row, the proposal row and the loading
+   skeleton), each repeating a border and radius `.opt-section` already
+   declares and each overriding its padding to a different value — so a
+   skeleton and the row it stood in for could disagree, and the inbox sat on a
+   different inset from every other list in the app. Declared once here, with
+   the shared row padding; `.opt-section.inbox-row` rather than `.inbox-row`
+   alone so it beats `.opt-section` on specificity rather than on source
+   order. The tighter bottom margin is the one intentional difference: these
+   stack as a dense list, not as standalone panels. */
+.opt-section.inbox-row { padding: var(--pad-row-y) var(--inset-x); margin: 0 0 10px; }
 .inbox-row .sz-note, .inbox-row .sz-copybox { max-width: none; }
 /* A snippet is the row's payload and stays visible, but it must not decide the
    row's height: a six-line downsize fix made that row 2.5x a relearn row. Capped
@@ -1701,7 +1862,7 @@ code.md-code {
 .cur-btn.primary { background:var(--brand); border-color:var(--brand); color:#fff; }
 .cur-btn.primary:hover:not(:disabled) { background:#2f7ae8; border-color:#2f7ae8; }
 .cur-btn:disabled { opacity:.4; cursor:not-allowed; }
-.cur-tally { border:1px solid var(--border); border-radius:9px; background:var(--surface); padding:16px 18px; margin:0; cursor:pointer; transition:border-color .15s; }
+.cur-tally { border:1px solid var(--border); border-radius:9px; background:var(--surface); padding:var(--pad-card-y) var(--inset-x); margin:0; cursor:pointer; transition:border-color .15s; }
 .cur-tally.empty { cursor:default; }
 .cur-tally:not(.empty):hover { border-color:rgba(var(--accent-rgb),0.5); }
 .cur-tally-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; }
@@ -1713,11 +1874,11 @@ code.md-code {
 .cur-chip.more { background:transparent; border-color:var(--border); color:var(--text-faint); }
 .cur-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.62); display:flex; align-items:center; justify-content:center; z-index:60; padding:24px; }
 .cur-modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; width:min(760px,100%); max-height:84vh; display:flex; flex-direction:column; overflow:hidden; box-shadow:0 20px 60px rgba(0,0,0,.55); }
-.cur-modal-head { display:flex; align-items:center; gap:10px; padding:16px 18px; border-bottom:1px solid var(--border); }
+.cur-modal-head { display:flex; align-items:center; gap:10px; padding:var(--pad-card-y) var(--inset-x); border-bottom:1px solid var(--border); }
 .cur-modal-title { font-size:15px; font-weight:600; }
 .cur-modal-x { margin-left:auto; background:none; border:none; color:var(--text-dim); font-size:18px; cursor:pointer; line-height:1; }
-.cur-modal-body { padding:16px 18px; overflow-y:auto; }
-.cur-modal-foot { padding:14px 18px; border-top:1px solid var(--border); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.cur-modal-body { padding:var(--pad-card-y) var(--inset-x); overflow-y:auto; }
+.cur-modal-foot { padding:var(--pad-card-y) var(--inset-x); border-top:1px solid var(--border); display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
 .cur-mrow { display:flex; align-items:center; gap:12px; padding:9px 0; border-bottom:1px solid var(--border); font-size:13px; }
 .cur-mrow .path { font-family:'Geist Mono',monospace; flex:1; word-break:break-all; }
 .cur-mrow .rm { background:none; border:1px solid var(--border); color:var(--error); border-radius:4px; width:24px; height:24px; cursor:pointer; line-height:1; flex:0 0 auto; }
@@ -1739,16 +1900,16 @@ code.md-code {
 /* Run progress + manual copy block */
 .sz-prog { height:8px; border-radius:4px; background:var(--surface3); overflow:hidden; margin:0; }
 .sz-prog > div { height:100%; background:var(--brand); transition:width .2s; }
-.sz-runrow { display:flex; align-items:center; gap:12px; font-size:13px; padding:9px 4px; border-bottom:1px solid var(--border); font-family:'Geist Mono',monospace; }
+.sz-runrow { display:flex; align-items:center; gap:12px; font-size:13px; padding:var(--pad-row-y) var(--inset-x); border-bottom:1px solid var(--border); font-family:'Geist Mono',monospace; }
 .sz-spin { display:inline-block; color:var(--brand); animation:sz-spin 1s linear infinite; }
 @keyframes sz-spin { to { transform:rotate(360deg); } }
 /* Optimize ▸ Summarize cost box (Track A tiles) */
 .sz-tiles { display:flex; gap:16px; flex-wrap:wrap; margin:6px 0; }
-.sz-tile { flex:1 1 150px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:16px 18px; }
+.sz-tile { flex:1 1 150px; background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:var(--pad-card-y) var(--inset-x); }
 .sz-tile-v { font-family:'Geist Mono',monospace; font-size:26px; font-weight:700; color:var(--accent); }
 .sz-tile-l { font-size:12.5px; color:var(--text-dim); margin-top:5px; }
-.sz-copybox { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:14px 16px; max-height:320px; overflow:auto; font-family:'Geist Mono',monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
-.sz-ta { width:100%; min-height:130px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:12px 14px; font-family:'Geist Mono',monospace; font-size:13px; resize:vertical; }
+.sz-copybox { background:var(--surface2); border:1px solid var(--border); border-radius:8px; padding:var(--pad-card-y) var(--inset-x); max-height:320px; overflow:auto; font-family:'Geist Mono',monospace; font-size:12px; line-height:1.5; white-space:pre-wrap; word-break:break-word; }
+.sz-ta { width:100%; min-height:130px; background:var(--surface); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:var(--pad-row-y) var(--inset-x); font-family:'Geist Mono',monospace; font-size:13px; resize:vertical; }
 
 </style>
 <script>
@@ -1778,6 +1939,15 @@ code.md-code {
        keys on data-view === route.view, so only data-view="sessions" lights up
        while a session detail is open. #/status survives as a silent route alias
        for old bookmarks. -->
+  <!-- Optimize sits in Improve, not Observe: its most-populated analyzers end
+       in a concrete edit the user makes, which is what this lens is for. Its
+       two children carry the SAME lens for the reason the old comment gave in
+       reverse: `data-lens` decides which sidebar GROUP a link sits in, so a
+       child in a different group than its parent is orphaned. All three stay
+       above Sessions and well above the FAQ, which is pinned last here. -->
+  <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="improve"><span class="icon">&#9889;</span> Optimize</a>
+  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="improve"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
+  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-lens="improve"><span class="icon">&#8627;</span> Rules <span class="nav-badge">new</span></a>
   <a href="#/sessions" class="nav-link" data-view="sessions" data-lens="improve"><span class="icon">&#9707;</span> Sessions</a>
   <!-- TOP-LEVEL, never a nav-child. A nav-child is display:none unless its
        parent section is the active view (see App()'s route effect), so as a
@@ -1795,13 +1965,6 @@ code.md-code {
   <a href="#/cost" class="nav-link" data-view="cost" data-lens="observe"><span class="icon">$</span> Cost</a>
   <a href="#/alerts" class="nav-link" data-view="alerts" data-lens="observe"><span class="icon">!</span> Alerts</a>
   <a href="#/drift" class="nav-link" data-view="drift" data-lens="observe"><span class="icon">~</span> Drift</a>
-  <a href="#/optimize" class="nav-link" data-view="optimize" data-lens="observe"><span class="icon">&#9889;</span> Optimize</a>
-  <a href="#/optimize/summarize" class="nav-link nav-child" data-view="optimize" data-param="summarize" data-lens="observe"><span class="icon">&#8627;</span> Summarize <span class="nav-badge">new</span></a>
-  <!-- Same lens as its Summarize sibling: `data-lens` decides which sidebar
-       GROUP a link sits in, not what the screen does, and both of these are
-       children of Optimize. Marking this one "improve" would put it after the
-       FAQ, which is pinned last in that group. -->
-  <a href="#/optimize/rules" class="nav-link nav-child" data-view="optimize" data-param="rules" data-lens="observe"><span class="icon">&#8627;</span> Rules <span class="nav-badge">new</span></a>
   <a href="#/budget" class="nav-link" data-view="budget" data-lens="observe"><span class="icon">$</span> Budget</a>
   <div class="sidebar-footer">
     <a href="/docs" target="_blank" class="footer-link"><span class="icon">&#x2737;</span> API docs</a>
@@ -1818,8 +1981,8 @@ code.md-code {
 // Source code is unchanged from when it was loaded from esm.sh — the
 // importmap just redirects the bare specifiers to vendored local files
 // under /ui/vendor/ so the dashboard works fully offline. (Issue #87.)
-import { h, render, Component, Fragment } from 'preact';
-import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'preact/hooks';
+import { h, render, Component, Fragment, createContext } from 'preact';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect, useContext } from 'preact/hooks';
 import htm from 'htm';
 
 const html = htm.bind(h);
@@ -2579,7 +2742,7 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
     const grid = cssVar('--border') || '#1f1f1f';
     const tick = cssVar('--text-dim') || '#a1a1a1';
     const width = ref.current.clientWidth || 600;
-    const xs = [0, 1];                          // Cost | Recoverable (est.)
+    const xs = [0, 1];                          // Spend | Overspend
     // Drop ZERO-value segments before building the cumulative bars (#251). The
     // back-to-front stacking trick plots each segment's CUMULATIVE total as a
     // full bar; a zero-value segment carries the running cumulative (unchanged
@@ -2626,7 +2789,7 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
       scales: { x: { time: false, range: [-0.5, 1.5] } },
       axes: [
         { stroke: tick, grid: { show: false }, ticks: { stroke: grid },
-          splits: [0, 1], values: () => ['Cost', 'Recoverable (est.)'] },
+          splits: [0, 1], values: () => ['Spend', 'Overspend'] },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
           size: 60, values: (u, vals) => vals.map(v => fmtY(v)) },
       ],
@@ -2654,7 +2817,7 @@ function componentWasteTooltip(meta, fmtFn) {
       const idx = u.cursor.idx;
       if (idx == null) { tip.style.display = 'none'; return; }
       const col = u.data[0][idx];               // 0 = Cost, 1 = Recoverable
-      const title = col === 0 ? 'Cost by component' : 'Estimated recoverable';
+      const title = col === 0 ? 'Spend by component' : 'Overspend by analyzer';
       let rows = '';
       meta.forEach(m => {
         if (m.col !== col || !m.raw) return;
@@ -2672,7 +2835,7 @@ function componentWasteTooltip(meta, fmtFn) {
 // display text). `placement` is the one entry today (CLAUDE.md anti-pattern
 // #22): its `past_overspend_usd`/`_tokens` is a PRICE difference on
 // the SAME tokens (the Batch API bills the same work at half rate, freeing
-// nothing), so its legend row must never wear the "estimated recoverable"
+// nothing), so its legend row must never wear the plain past-overspend
 // wording/tag every sibling analyzer shares here — this mirrors the wording
 // already used on its own card in `OptimizeFinding`. `apiOnly: true` also
 // drops the segment from this overlay entirely off api pricing, matching
@@ -2783,7 +2946,7 @@ function SdkServicesPanel({ services, framing }) {
     const seen = (quiet ? 'went quiet ' : 'last seen ') + fmtAgo(s.last_seen);
     return html`
       <div class=${'inact-row clickable ' + (quiet ? 'quiet' : 'dormant')}
-           title=${quiet ? 'Was steady and just stopped — check for an incident' : 'Long silent — likely decommissioned'}
+           title=${quiet ? 'Was steady and just stopped; check for an incident' : 'Long silent; likely decommissioned'}
            onClick=${() => openTraces(s.agent_id)}>
         <div class="inact-name"><span class="status-dot ${dotCls}"></span>${s.agent_id}</div>
         <div><span class=${'inact-tag ' + tagCls}>${tag}</span></div>
@@ -2932,7 +3095,7 @@ function TableRowsSkeleton(headers, rowCount) {
 // ============================
 // Status View
 // ============================
-function StatusView({ params }) {
+function StatusView({ params, persona }) {
   // Optional single-agent filter via URL (#112), filtered client-side.
   // The Status screen is two content-defined zones (#306): coding sessions
   // (bounded work → archived list) and SDK services (unbounded telemetry →
@@ -2968,6 +3131,13 @@ function StatusView({ params }) {
 
   if (!data) return html`<div class="page-title">Sessions</div>${CardGridSkeleton(6)}`;
   const sdkServices = data.sdk_services || [];
+  // Persona decides which zones this page HAS, so the heading below must be
+  // derived from it too: a page showing one zone must not open by promising
+  // two. Alerts reuse `personaHides` rather than a second persona literal, so
+  // this page and the nav can never disagree about whether alerts exist for
+  // the reader.
+  const showSdkZone = persona !== 'claude-code';
+  const showAlerts = !personaHides(persona, 'alerts');
   if (!data.agents.length && !(data.archived || []).length && !sdkServices.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
   const agents = agentId ? data.agents.filter(a => a.agent_id === agentId) : data.agents;
@@ -3044,10 +3214,10 @@ function StatusView({ params }) {
           <div class="card-row"><span class="label">Cost today <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></span><span class="value">${fmtPerItemCost(a.cost_today, _costVal(a, true), data.framing)}</span></div>
           <div class="card-row"><span class="label">Tokens</span><span class="value">${fmtTokens(a.input_tokens)} in / ${fmtTokens(a.output_tokens)} out</span></div>
           <div class="card-row"><span class="label">Tool calls</span><span class="value">${a.tool_call_count}${a.error_count ? ' (' + a.error_count + ' failed)' : ''}</span></div>
-          ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time — the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
+          ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time: the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
-          ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
+          ${a.active_alerts > 0 && showAlerts ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
           <div class="card-foot">→ Map / Approach / Timeline</div>
         </div>`;
   };
@@ -3083,7 +3253,9 @@ function StatusView({ params }) {
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 18px;font-family:'Geist Mono',monospace">
       ${agentId
         ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a>`
-        : 'Two zones — coding sessions (bounded work) and SDK services (unbounded telemetry).'}
+        : (showSdkZone
+            ? 'Two zones: coding sessions (bounded work) and SDK services (unbounded telemetry).'
+            : 'Coding sessions: bounded work, active to idle to stale to closed.')}
     </div>
 
     ${(codingAgents.length || codingArchived.length) ? html`
@@ -3121,12 +3293,12 @@ function StatusView({ params }) {
         </details>` : null}
     ` : null}
 
-    ${sdkServices.length ? html`
+    ${sdkServices.length && showSdkZone ? html`
       <div class="section-gap"></div>
       <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />
     ` : null}
 
-    ${alerts.length > 0 ? html`
+    ${alerts.length > 0 && showAlerts ? html`
       <div class="section-gap"></div>
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>
@@ -3317,7 +3489,7 @@ function StorySection({ sessionId }) {
   if (!story.available) {
     return html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
-      <div class="story-unavailable">No transcript on disk — Timeline is available for Claude Code sessions.</div>
+      <div class="story-unavailable">No transcript on disk. Timeline is available for Claude Code sessions.</div>
     `;
   }
 
@@ -3328,7 +3500,7 @@ function StorySection({ sessionId }) {
   // newest ask on top; within each ask the steps read in order (prompt first).
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Timeline</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest ask first — each reads in order${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">The agent's own narration + tool calls, newest ask first; each reads in order${story.step_count ? ' · ' + story.step_count + ' step' + (story.step_count === 1 ? '' : 's') : ''}</div>
 
     ${steps.length === 0
       ? html`<div class="story-unavailable">Transcript found but no narrated steps.</div>`
@@ -3434,7 +3606,7 @@ function WorkMapAsk({ ask, sessionSubs, distilled }) {
       <div class="wm-milestone idle">
         <span class="wm-dot-spine idle">·</span>
         <div class="wm-milestone-head ${hasDetail ? 'clickable' : ''}" onClick=${hasDetail ? (() => setOpen(o => !o)) : null}>
-          <span class="wm-chat" title=${prompt}>you: ${promptShort}${headline ? ' — ' + headline : ''}</span>
+          <span class="wm-chat" title=${prompt}>you: ${promptShort}${headline ? ' · ' + headline : ''}</span>
           <span class="wm-ask-meta">${tokenTag}</span>
         </div>
         ${open && hasDetail ? html`<div class="wm-ask-body"><div class="wm-detail"><span class="k">full</span>${ask.outcome}</div></div>` : null}
@@ -3442,7 +3614,7 @@ function WorkMapAsk({ ask, sessionSubs, distilled }) {
     `;
   }
 
-  const outcomeShort = headline || '(did work — no narration)';
+  const outcomeShort = headline || '(did work, no narration)';
   return html`
     <div class="wm-milestone ${cls}">
       <span class="wm-dot-spine ${cls}">${icon}</span>
@@ -3549,7 +3721,7 @@ function WorkMapRunCard({ run }) {
   return html`
     <div class="wm-run-card ${inferred ? 'inferred' : ''}">
       <div class="wm-run-head">
-        <div class="wm-run-title">↳ Launched run <span class="wm-run-id">${run.run_id}</span>${inferred ? html`<span class="wm-run-src" title="Scraped from this session's transcript and matched to a real run — best-effort, not declared by the harness.">inferred</span>` : null}</div>
+        <div class="wm-run-title">↳ Launched run <span class="wm-run-id">${run.run_id}</span>${inferred ? html`<span class="wm-run-src" title="Scraped from this session's transcript and matched to a real run; best-effort, not declared by the harness.">inferred</span>` : null}</div>
         <span class="wm-run-view" onClick=${goRun}>View run →</span>
       </div>
       <div class="wm-run-meta">${count} worker${count === 1 ? '' : 's'} · ${fmtCost(run.total_cost_usd)} · ${run.tool_call_count || 0} tool calls</div>
@@ -3623,7 +3795,7 @@ function WorkMapSection({ sessionId }) {
   if (!map.available) {
     return html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
-      <div class="story-unavailable">No transcript on disk — the work map is available for Claude Code sessions.</div>
+      <div class="story-unavailable">No transcript on disk. The work map is available for Claude Code sessions.</div>
     `;
   }
 
@@ -3650,8 +3822,8 @@ function WorkMapSection({ sessionId }) {
   const distillNote =
     distillState === 'running' ? html`<span class="wm-distill-note">✨ distilling with your local Claude… (~10s)</span>`
     : distillState === 'applied' ? html`<span class="wm-distill-note">titles distilled by your local Claude · haiku · cached</span>`
-    : distillState === 'nothing' ? html`<span class="wm-distill-note">titles already concise — nothing to distill</span>`
-    : distillState === 'failed' ? html`<span class="wm-distill-note">couldn't reach your local claude — showing raw titles</span>`
+    : distillState === 'nothing' ? html`<span class="wm-distill-note">titles already concise; nothing to distill</span>`
+    : distillState === 'failed' ? html`<span class="wm-distill-note">couldn't reach your local claude; showing raw titles</span>`
     : null;
   const distillBusy = distillState === 'running';
   const distillBtnLabel = distillBusy ? '✨ Distilling…'
@@ -3664,7 +3836,7 @@ function WorkMapSection({ sessionId }) {
         ${distillBtnLabel}
       </button>
     </div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first) — bold line is what the agent did, dim line is your prompt. ${meta}.${distillNote ? html` ${distillNote}` : null}</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">What happened, ask by ask (oldest first). Bold line is what the agent did, dim line is your prompt. ${meta}.${distillNote ? html` ${distillNote}` : null}</div>
     ${map.launched_run ? html`<${WorkMapRunCard} run=${map.launched_run} />` : null}
     ${asks.length === 0 ? null : html`
       <div class="wm-summary-band">
@@ -3675,7 +3847,7 @@ function WorkMapSection({ sessionId }) {
           <span>${flagged} flagged</span>
         </div>
         ${topFanouts.length ? html`<div class="wm-summary-fanouts">
-          ${topFanouts.map(a => html`<div class="wm-summary-fanout" title=${a.outcome || ''}>${Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)}×: ${firstSentence(a.outcome || a.summary || '') || '(did work — no narration)'}</div>`)}
+          ${topFanouts.map(a => html`<div class="wm-summary-fanout" title=${a.outcome || ''}>${Math.min(askStatus(a).subCount, sub || askStatus(a).subCount)}×: ${firstSentence(a.outcome || a.summary || '') || '(did work, no narration)'}</div>`)}
         </div>` : null}
       </div>
     `}
@@ -3686,7 +3858,7 @@ function WorkMapSection({ sessionId }) {
           ? html`<${WorkMapChatRun} asks=${seg.asks} sessionSubs=${sub} distilled=${distilled} />`
           : html`<${WorkMapAsk} ask=${seg.ask} sessionSubs=${sub} distilled=${distilled} />`)}</div>`}
     ${map.unmapped_count ? html`<div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">+ ${map.unmapped_count} more subagent${map.unmapped_count === 1 ? '' : 's'} with recorded usage not attributed to an ask (deep/budget-capped)${map.unmapped_tokens ? ' · ' + fmtTokens(map.unmapped_tokens) + ' tok' : ''}.</div>` : null}
-    <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Each ask is one thing you asked; structure + activity from the transcript, tokens from spans. Descriptive only — tj reports what happened, you judge the approach.</div>
+    <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Each ask is one thing you asked; structure + activity from the transcript, tokens from spans. Descriptive only: tj reports what happened, you judge the approach.</div>
   `;
 }
 
@@ -3922,7 +4094,7 @@ function ApproachDelegation({ deleg }) {
         <span class="ap-caret">▶</span>
         <div class="ap-deleg-main">
           <div class="ap-deleg-name">↳ ${deleg.name} <span class="ap-depthtag">depth ${deleg.depth}</span>${verifyChip}</div>
-          <div class="ap-deleg-note">not expanded — ${capped}</div>
+          <div class="ap-deleg-note">not expanded: ${capped}</div>
         </div>
       </div>`;
   }
@@ -4015,7 +4187,7 @@ function ApproachRail({ agents }) {
             </div>
           </div>`;
       })}
-      <div class="ap-railcap">Nodes below main were <b>killed</b> when done — their context is gone, so tokenjam rebuilds <b>how each one solved its piece</b> from the captured transcript. The badge never claims more than tokenjam actually has.</div>
+      <div class="ap-railcap">Nodes below main were <b>killed</b> when done; their context is gone, so tokenjam rebuilds <b>how each one solved its piece</b> from the captured transcript. The badge never claims more than tokenjam actually has.</div>
     </div>
   `;
 }
@@ -4040,7 +4212,7 @@ function ApproachSection({ sessionId }) {
   if (!data.available) {
     return html`
       <div class="page-title" style="font-size:14px;margin-top:24px">Approach</div>
-      <div class="story-unavailable">${data.reason || 'No transcript or snapshot for this session — Approach is available for Claude Code sessions.'}</div>
+      <div class="story-unavailable">${data.reason || 'No transcript or snapshot for this session. Approach is available for Claude Code sessions.'}</div>
     `;
   }
 
@@ -4061,7 +4233,7 @@ function ApproachSection({ sessionId }) {
     + ' · ' + (meta.tokens != null ? fmtTokens(meta.tokens) : '-') + ' tok';
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Approach</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How the agent attempted it — the method spine, rebuilt for every agent and kept after each is killed; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 12px;font-family:'Geist Mono',monospace">How the agent attempted it: the method spine, rebuilt for every agent and kept after each is killed; expand any delegation to recurse into the child's own method${data.from_snapshot ? ' · from snapshot' : ''}.</div>
     <div class="ap-grid">
       <${ApproachRail} agents=${agents} />
       <div class="ap-panel">
@@ -4642,7 +4814,7 @@ function MapBoardSection({ sessionId }) {
     }
     if (territory) {
       const editedCount = territory.dirs.reduce((s, d) => s + d.files.filter((f) => f.edited).length, 0);
-      if (editedCount) insights.push({ k: 'edits landed in', v: editedCount + ' file' + (editedCount === 1 ? '' : 's'), title: 'distinct files edited — see "Where the work landed" below' });
+      if (editedCount) insights.push({ k: 'edits landed in', v: editedCount + ' file' + (editedCount === 1 ? '' : 's'), title: 'distinct files edited; see "Where the work landed" below' });
     }
   }
 
@@ -4670,7 +4842,7 @@ function MapBoardSection({ sessionId }) {
 
   return html`
     <div class="page-title" style="font-size:14px;margin-top:24px">Map</div>
-    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 0;font-family:'Geist Mono',monospace">Where this run's time and money went — phases, tool activity, sub-agents, per-call context size and cost burn on one shared axis. Toggle time⇄step to re-space every lane; hover any point for details.</div>
+    <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 0;font-family:'Geist Mono',monospace">Where this run's time and money went: phases, tool activity, sub-agents, per-call context size and cost burn on one shared axis. Toggle time⇄step to re-space every lane; hover any point for details.</div>
     <div class="mb-head">
       <div class="mb-chips">
         <span class="mb-chip">${mbFmtTime(duration)}</span>
@@ -4852,10 +5024,10 @@ function MapBoardSection({ sessionId }) {
             ${territory.scratch ? html`
               <div class="mb-dir mb-scratch" title=${territory.scratch.title}>
                 <div class="mb-dh"><span class="mb-dh-nm">temp / scratch</span> <span class="mb-meta">demoted</span></div>
-                <div class="mb-meta">${territory.scratch.count} file${territory.scratch.count === 1 ? '' : 's'} · ${territory.scratch.reads} read${territory.scratch.reads === 1 ? '' : 's'}${territory.scratch.edits ? ' · ' + territory.scratch.edits + ' edit' + (territory.scratch.edits === 1 ? '' : 's') : ''} — hover for paths</div>
+                <div class="mb-meta">${territory.scratch.count} file${territory.scratch.count === 1 ? '' : 's'} · ${territory.scratch.reads} read${territory.scratch.reads === 1 ? '' : 's'}${territory.scratch.edits ? ' · ' + territory.scratch.edits + ' edit' + (territory.scratch.edits === 1 ? '' : 's') : ''} · hover for paths</div>
               </div>` : null}
           </div>
-          <div class="mb-tcap">Cards are sized by edits over reads — edits (green, ✎) are where the work landed; reads sweep wide. Order badges show first-touch sequence; temp/scratch reads collapse into one muted card. Descriptive only — tj reports what happened, you judge the approach.</div>
+          <div class="mb-tcap">Cards are sized by edits over reads: edits (green, ✎) are where the work landed; reads sweep wide. Order badges show first-touch sequence; temp/scratch reads collapse into one muted card. Descriptive only: tj reports what happened, you judge the approach.</div>
         </div>
       </div>
     ` : null}
@@ -4973,7 +5145,7 @@ function SessionDetailView({ sessionId }) {
       <div class="card">
         <div class="card-header">Cost & Tokens</div>
         ${isLocal
-          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
+          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model, no API cost</span></div>`
           : html`<div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></span><span class="value">${fmtFramedDollar(s.total_cost_usd, framing)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(s.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(s.output_tokens)}</span></div>
@@ -5076,7 +5248,7 @@ function SessionDetailView({ sessionId }) {
           `)}
         </tbody>
       </table></div>
-      <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Candidate-flagging heuristic, not a quality judgment — review before changing how subagents are dispatched.</div>
+      <div style="font-size:11px;color:var(--text-dim);margin-top:8px;font-family:'Geist Mono',monospace">Candidate-flagging heuristic, not a quality judgment; review before changing how subagents are dispatched.</div>
     ` : html`<div class="empty">No subagents in this session.</div>`}
     ` : null}
 
@@ -5382,7 +5554,7 @@ function RunDetailView({ runId }) {
       <div class="card">
         <div class="card-header">Cost & Tokens</div>
         ${isLocal
-          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model — no API cost</span></div>`
+          ? html`<div class="card-row"><span class="label">Cost</span><span class="value">Local model, no API cost</span></div>`
           : html`<div class="card-row"><span class="label">Cost <span class="info-btn">i<span class="info-tip">${costTip}</span></span></span><span class="value">${fmtCost(r.total_cost_usd)}</span></div>`}
         <div class="card-row"><span class="label">Input tokens</span><span class="value">${fmtTokens(r.input_tokens)}</span></div>
         <div class="card-row"><span class="label">Output tokens</span><span class="value">${fmtTokens(r.output_tokens)}</span></div>
@@ -5676,7 +5848,7 @@ function TraceDetailView({ traceId }) {
       </div>
       <div class="view-toggle">
         <button class=${wfMode2 === 'tokens' ? 'active' : ''} onClick=${() => setWfMode('tokens')}>By tokens</button>
-        <button class=${wfMode2 === 'duration' ? 'active' : ''} onClick=${() => setWfMode('duration')} title=${wfHasDuration ? '' : 'Backfilled spans have no latency — bars will be flat'}>By duration</button>
+        <button class=${wfMode2 === 'duration' ? 'active' : ''} onClick=${() => setWfMode('duration')} title=${wfHasDuration ? '' : 'Backfilled spans have no latency; bars will be flat'}>By duration</button>
       </div>
     </div>
     <div class="wf-head">
@@ -6333,7 +6505,7 @@ function CostView({ params }) {
       <div class="chart-card">
         <div class="chart-head">
           <div class="chart-title">Spend over time ${groupBy === 'model' ? 'by model' : groupBy === 'agent' ? 'by agent' : ''} ${useTokens ? '(tokens)' : ''}</div>
-          ${isAttributionDim ? html`<div class="chart-meta"><span class="dim">Shown as a single total line — the chart doesn't yet split by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}; the table below does.</span></div>` : null}
+          ${isAttributionDim ? html`<div class="chart-meta"><span class="dim">Shown as a single total line; the chart doesn't yet split by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}; the table below does.</span></div>` : null}
           <div class="chart-meta">
             <span class="chart-total">${hasCostData ? totalDisplay : html`<span class="shimmer" style="display:inline-block;width:140px;height:15px;vertical-align:middle"></span>`}</span>
             ${hasCostData ? html`<${TrendChip} pct=${trendPct} prevThin=${trendPrevThin} />` : null}
@@ -6345,12 +6517,12 @@ function CostView({ params }) {
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} runRate=${runRate}
               showLegend=${false} bucket=${series.bucket} />
             ${projection ? html`<div class="chart-foot">At this pace, ~${projection} by ${cyc.label} <span class="dim">(linear run-rate, not a forecast)</span></div>` : null}
-            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets; this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
           ` : html`
             <${StackedBarChart} data=${series.data} labels=${series.labels} height=${200}
               fmtY=${fmtY} axisFmtY=${useTokens ? fmtTokens : fmtAxisUsd} bucket=${series.bucket} />
-            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
-          `) : html`<div class="empty" style="padding:32px 0">No spend in this window.</div>`}
+            ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets; this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+          `) : html`<div class="empty compact">No spend in this window.</div>`}
       </div>
     ` : null}
 
@@ -6374,7 +6546,7 @@ function CostView({ params }) {
             fmtY=${useTokens ? fmtTokens : fmtCost} axisFmtY=${useTokens ? fmtTokens : fmtCost}
             bucket=${cacheSeries.bucket} />
           <div class="chart-foot">
-            <span class="dim">Per-${cacheSeries.bucket === 'hour' ? 'hour' : 'day'} ${useTokens ? 'cached-token volume' : 'savings'}. Cached input bills at roughly a tenth of the normal input rate — you read these tokens at that discount, ${useTokens ? 'sparing your token budget' : 'saving the difference vs paying full price'}.</span>
+            <span class="dim">Per-${cacheSeries.bucket === 'hour' ? 'hour' : 'day'} ${useTokens ? 'cached-token volume' : 'savings'}. Cached input bills at roughly a tenth of the normal input rate; you read these tokens at that discount, ${useTokens ? 'sparing your token budget' : 'saving the difference vs paying full price'}.</span>
             ${cacheSeries.coarsened ? html` <span class="dim">Showing ${cacheSeries.bucket} buckets.</span>` : null}
           </div>
         `}
@@ -6383,7 +6555,7 @@ function CostView({ params }) {
 
     ${!error && !loading && isAttributionDim && rows.length === 0 ? html`
       <div class="chart-card">
-        <div class="empty" style="padding:24px 0">
+        <div class="empty compact">
           No ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()} data in this window.
           ${costResp && costResp.attribution_coverage && !costResp.attribution_coverage[groupBy].has_data
             ? html`Set <code class="mono">${costResp.attribution_coverage[groupBy].attribute}</code> at the call site (an OTel span or resource attribute) to see spend broken down by ${COST_GROUP_BY_LABELS[groupBy].toLowerCase()}.`
@@ -6398,7 +6570,7 @@ function CostView({ params }) {
           <th>${COST_GROUP_BY_LABELS[tableMode] || 'Group'}</th>
           ${tableMode !== 'agent' ? html`<th>Agent</th>` : null}
           ${tableMode !== 'model' ? html`<th>Model</th>` : null}
-          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens — often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th>
+          <th>Input</th><th>Output</th><th>Cache R <span class="info-btn">i<span class="info-tip">Cache-read tokens (billed at the discounted cache-read rate).</span></span></th><th>Cache W <span class="info-btn">i<span class="info-tip">Cache-write (creation) tokens: often the dominant cost driver on cache-heavy workloads.</span></span></th><th>Cost ${useTokens ? '(tokens) ' : ''}<span class="info-btn">i<span class="info-tip">Estimated from token usage at API list rates.</span></span></th>
         </tr></thead>
         <tbody>
           ${rows.map(r => html`
@@ -6441,7 +6613,7 @@ function TopTenantsPanel({ tenants, framing }) {
         <div class="chart-title">Top tenants by spend</div>
       </div>
       ${loading ? html`<div class="shimmer" style="height:120px"></div>` : (!data || !data.has_data) ? html`
-        <div class="empty" style="padding:24px 0">
+        <div class="empty compact">
           No tenant data in this window. Set <code class="mono">${(data && data.attribute) || 'tokenjam.tenant_id'}</code>
           at the call site (an OTel span attribute, or via <code class="mono">tokenjam.sdk.attribution.attribution(tenant_id=...)</code>
           for auto-instrumented calls) to see spend concentration by customer/tenant.
@@ -6840,7 +7012,7 @@ function BudgetView({ params }) {
   // refresh (this view polls every 10s) must not throw away the last good
   // data still on screen -- it renders as a scoped banner above the content
   // instead, same pattern the Dashboard uses for its own /cost failures.
-  if (error && !data) return html`<div class="empty" style="color:var(--error)">${error}</div>`;
+  if (error && !data) return html`<div class="empty err">${error}</div>`;
   if (!data) return html`
     <div class="page-title">Budget</div>
     ${TableRowsSkeleton(['Scope', 'Daily (USD)', ''], 6)}`;
@@ -6901,7 +7073,7 @@ function BudgetView({ params }) {
           />
         `)}
         ${codingGroups.length === 0 ? html`
-          <tr><td colspan="3" style="color:var(--text-dim);font-size:13px;padding:12px 0">
+          <tr><td colspan="3" class="empty-cell">
             No coding-tool sessions recorded yet. Run Claude Code or Codex once to register it.
           </td></tr>
         ` : null}
@@ -6936,7 +7108,7 @@ function BudgetView({ params }) {
           />
         `)}
         ${sdkAgents.length === 0 ? html`
-          <tr><td colspan="3" style="color:var(--text-dim);font-size:13px;padding:12px 0">
+          <tr><td colspan="3" class="empty-cell">
             No SDK workflow agents configured yet. Declare one with @watch() and run it once.
           </td></tr>
         ` : null}
@@ -6946,8 +7118,11 @@ function BudgetView({ params }) {
     <div style="font-size:13px;font-weight:600;margin-top:28px;margin-bottom:8px">Provider spend forecast</div>
     <div style="color:var(--text-dim);font-size:12px;margin-bottom:12px">
       A recurring monthly ceiling per provider, scoped to its billing cycle rather than a single
-      agent or day. This is what Optimize's <a class="sz-link" href="#/optimize">Budget projection</a>
-      projects your current run rate against — it is advisory only (a forecast, never an alert).
+      ${/* The space before "projects" is explicit: htm drops the whitespace
+            between a closing tag and the next line's text, so the link ran
+            straight into the word after it ("Budget projectionprojects"). */''}
+      agent or day. This is what Optimize's <a class="sz-link" href="#/optimize">Budget projection</a>${' '}
+      projects your current run rate against; it is advisory only (a forecast, never an alert).
       Clear a field or enter 0 to remove the ceiling.
     </div>
     <div class="table-wrap"><table>
@@ -6964,7 +7139,7 @@ function BudgetView({ params }) {
           />
         `)}
         ${providerNames.length === 0 ? html`
-          <tr><td colspan="4" style="color:var(--text-dim);font-size:13px;padding:12px 0">
+          <tr><td colspan="4" class="empty-cell">
             No provider budgets configured yet.
           </td></tr>
         ` : null}
@@ -7009,6 +7184,7 @@ function BudgetView({ params }) {
       `}
   `;
 }
+
 // ============================
 // Overview + Optimize (issue #114)
 // ============================
@@ -7027,7 +7203,7 @@ const ANALYZER_META = {
   deadweight: { title: 'Deadweight', hint: 'Configured MCP servers whose schemas are injected but never called' },
   resend:     { title: 'Context resend', hint: 'How much of each turn re-sends context already sent in an earlier turn' },
   placement:  { title: 'Batch placement', hint: 'Unattended, cadence-regular workloads that fit the Batch API\'s flat-rate discount' },
-  summarize:  { title: 'Summarize', hint: 'Oversized catalog prompt files — review a compression in the curate/diff surface' },
+  summarize:  { title: 'Summarize', hint: 'Oversized catalog prompt files; review a compression in the curate/diff surface' },
   'cache-recommend': { title: 'Cache recommend', hint: 'Add cache_control breakpoints (Anthropic)' },
   'budget-projection': { title: 'Budget projection', hint: 'Projected cycle spend vs ceiling' },
 };
@@ -7192,14 +7368,37 @@ const CACHE_EFFICACY_CEILING = 0.80;
 //   not_ready   — couldn't run (capture off / missing dep / skipped on fast)
 // Reads richer discriminators from the finding rather than `usd in (None,0)`.
 function classifyFinding(name, fd, skipped) {
-  if (skipped.has(name)) return { state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' };
+  if (skipped.has(name)) return { state: 'not_ready', hint: 'Not run on Overview. Open the Optimize tab.' };
   if (fd && fd.enabled === false) {
     return { state: 'not_ready', hint: fd.hint || (ANALYZER_META[name] || {}).hint };
   }
-  const usd = fd ? fd.past_overspend_usd : null;
-  const tokens = fd ? fd.past_overspend_tokens : null;
+  // WHICH FIGURE A TILE IS ALLOWED TO SHOW. Every tile in this row sits under
+  // ONE window (the stored report's `window_days`), so a tile may only publish a
+  // figure observed over that window. Most analyzers have exactly one figure and
+  // it is already window-scoped. relearn does not: its `past_overspend_usd` is
+  // unbounded by design (its signal is recurrence across all retained history —
+  // core/optimize/analyzers/relearn.py's `run(ctx)` deliberately does not
+  // forward the report window), and rendering it here put an all-history number
+  // beside five 30-day ones with nothing marking it. Measured on a real corpus
+  // that tile said $386.64 while the Review inbox said $260.21 for the same
+  // analyzer over the same days, and a reader summing the row got a total on no
+  // basis at all.
+  //
+  // The server now derives the bounded figure for this report's own window and
+  // publishes it as `window_scoped_past_overspend_usd`, through the same helper
+  // the inbox row uses (core/optimize/inbox_contribution). When that field is
+  // PRESENT it is the only figure this tile may render — including when it is
+  // null, which means "no figure on this window's basis". Falling back to the
+  // unbounded number there is the exact defect this closes, so `not_ready` is
+  // the honest state rather than a bigger, wrong-basis dollar amount.
+  const windowScoped = fd && 'window_scoped_past_overspend_usd' in fd;
+  const usd = fd ? (windowScoped ? fd.window_scoped_past_overspend_usd : fd.past_overspend_usd) : null;
+  const tokens = fd ? (windowScoped ? fd.window_scoped_past_overspend_tokens : fd.past_overspend_tokens) : null;
   if (usd != null && usd > 0) {
-    return { state: 'actionable', usd, tokens, basis: fd.estimate_basis || '' };
+    return { state: 'actionable', usd, tokens, basis: (windowScoped ? fd.window_scoped_basis : fd.estimate_basis) || '' };
+  }
+  if (windowScoped && usd == null) {
+    return { state: 'not_ready', hint: 'No figure on this window’s basis yet; rescan to fold it in.' };
   }
   // Ran, nothing to recover. For cache, distinguish "already at the ceiling"
   // (positive) from "nothing here" so we never tell a user to raise efficacy
@@ -7263,8 +7462,23 @@ function scanState(opt) {
     status: (opt && opt.status) || (fetchFailed ? 'unknown' : 'ready'),
     known, fetchFailed,
     cold: !fetchFailed && !known,
-    computing: !!opt && opt.status === 'computing',
+    // THE CYCLE, NOT THIS STORE. `status === 'computing'` is the report's own
+    // in-flight flag, and one pass writes three stores sequentially on one
+    // thread — report, then relearn, then the cost proposals behind the Review
+    // inbox. So the report's flag drops the moment its leg lands and this
+    // control switched from "Scanning…" to asserting freshness while the most
+    // expensive analyzer in the product was still running. `cycle_computing`
+    // covers the whole pass; the OR is what stays true until the last store
+    // lands, and an older server that sends neither still reads correctly.
+    computing: !!opt && (opt.status === 'computing' || opt.cycle_computing === true),
     computedAt: (opt && opt.computed_at) || null,
+    // The build that PRODUCED the stored figures vs the one SERVING them. Equal
+    // is the ordinary case; different means a card the previous build computed
+    // is being rendered under a fresh timestamp, because these stores are caches
+    // and an upgrade does not invalidate them. `null`/absent is UNKNOWN, which
+    // is not the same as agreement — see ScanBar.
+    computedBuild: (opt && opt.computed_build) || null,
+    build: (opt && opt.build) || null,
     windowDays: (opt && opt.window_days) || null,
     degraded: !!(opt && opt.degraded),
     lastError: (opt && opt.last_error) || null,
@@ -7273,6 +7487,12 @@ function scanState(opt) {
     scanEnabled: !(opt && opt.scan_enabled === false),
   };
 }
+
+// How often a surface re-READS the stored result while a pass is in flight. The
+// stored cadence (`[optimize] scan_ui_poll_seconds`) is sized for idle watching;
+// this one exists so the control stops saying "Scanning…" promptly once the pass
+// lands, since the button stays disabled until it does.
+const SCAN_INFLIGHT_POLL_SECONDS = 5;
 
 // Start a background scan. The server owns the rails — an overlap guard (a
 // second press while one runs is a no-op) and a rate limit — so this is safe
@@ -7293,19 +7513,49 @@ async function rescanAnalyzers() { return apiPostOrDetail('/optimize/rescan', {}
 // rescan link. A real <button>, not a styled span, so it is keyboard-operable
 // and gets a focus ring for free; `disabled` while a scan is in flight is
 // what makes "scanning\u2026" actually true rather than just its label.
-function ScanBar({ scan, busy, error, onRescan }) {
+// WHETHER THE FRESHNESS CLAIM IS STILL SUFFICIENT ON ITS OWN.
+//
+// `computed <age> ago` answers HOW OLD; readers take it for WHICH BUILD. The
+// analyzer stores are caches and an upgrade does not invalidate them, so the
+// next pass after one stamps a fresh timestamp over figures the replaced binary
+// may have produced \u2014 and the audience for that sentence is exactly the user who
+// upgraded to get a fix and will conclude it did not work.
+//
+// Three cases, and the middle one is the trap: SAME build (say nothing \u2014 the
+// timestamp is the whole truth), DIFFERENT build (the figures predate this
+// build; say so), and UNKNOWN (the result predates the stamp, so we cannot
+// vouch either way \u2014 which is NOT agreement and must not render as it).
+// Returns null when there is nothing honest to add.
+function buildQualifier(scan) {
+  if (!scan.computedAt) return null;              // nothing to qualify
+  if (!scan.build) return null;                   // older server: no stance either way
+  if (!scan.computedBuild) return 'producing build unknown';
+  if (scan.computedBuild === scan.build) return null;
+  return 'computed by ' + scan.computedBuild + ', you are on ' + scan.build;
+}
+
+function ScanBar({ scan, busy, error, declined, declinedDetail, onRescan }) {
   const scanning = !!(busy || scan.computing);
   const when = scan.fetchFailed ? 'scan state unavailable'
     : scan.computedAt
       ? 'computed ' + fmtAgo(scan.computedAt) + (scan.windowDays ? ' \u00b7 ' + scan.windowDays + 'd window' : '')
       : (scan.status === 'error' ? 'no scan has succeeded yet' : 'never computed');
+  const qualifier = buildQualifier(scan);
   return html`<span class="rescan-bar">
     <span class="scan-provenance">${when}</span>
+    ${qualifier ? html`<span class="scan-stale-build" title="These figures are a cached result. Rescan to recompute them on this build.">${qualifier}</span>` : null}
     <button type="button" class="rescan-ctl${scanning ? ' scanning' : ''}" onClick=${onRescan} disabled=${scanning}
       aria-label=${scanning ? 'Scanning\u2026' : 'Rescan'}>
       <span aria-hidden="true" class="rescan-ctl-icon">\u27f3</span>${scanning ? 'Scanning\u2026' : 'Rescan'}
     </button>
     ${error ? html`<span class="scan-error">rescan failed: ${error}</span>` : null}
+    ${/* The server answered 200 saying it did NOT start a pass (an overlap guard
+          or the rate limit declined). That used to resolve as an ordinary
+          success: the button spun, re-enabled, reloaded, and showed the same
+          provenance line \u2014 the server said "I did not start" and the control
+          dropped it. Rendered here as its own state, distinct from both a
+          success and a thrown error. */
+      !error && declined ? html`<span class="scan-declined" title=${declinedDetail || ''}>${declined}</span>` : null}
     ${scan.degraded ? html`<span class="scan-degraded" title=${scan.lastError || ''}>last refresh failed</span>` : null}
   </span>`;
 }
@@ -7317,34 +7567,109 @@ function ScanBar({ scan, busy, error, onRescan }) {
 // behaviour even though what they re-run differs. Surfaces the failure: a
 // rescan whose POST was refused reports the server's reason instead of
 // silently looking like a success.
+// A REFUSAL IS NOT AN ERROR AND NOT A SUCCESS.
+//
+// `POST /optimize/rescan` answers HTTP 200 with `started: false` plus a `reason`
+// when a guard declines — a pass is already in flight (including the daemon's
+// own startup kick, which is precisely when an impatient user presses the
+// button), or the rate limit refused. `useRescan` only ever surfaced THROWN
+// errors, so a refusal resolved normally and the press read as a broken button:
+// spinner, re-enable, reload, identical numbers. The server said "I did not
+// start" and the control dropped it.
+//
+// Returns the text to show, or null when the response really was a start.
+// Deliberately requires an EXPLICIT `started === false`: a response that omits
+// the field (an older server, a surface whose action is not this endpoint) is
+// not evidence of a refusal, and inventing one would put a permanent "already
+// running" on a control that works.
+//
+// PAST TENSE, AND CLIENT-OWNED. This notice describes the OUTCOME OF A PRESS,
+// and it stays on screen until the next one. The server's own reason strings are
+// present tense ("a scan is already running"), which stops being true the moment
+// that scan lands — so rendering them verbatim would leave the control asserting
+// a running scan long after it finished, which is the very defect this control is
+// being fixed for. A past-tense statement about a press the user just made cannot
+// go stale. The server's wording is kept as the tooltip, where it is evidence
+// rather than a claim about now.
+function declinedReason(res) {
+  if (!res || res.started !== false) return null;
+  return res.throttled
+    ? 'refresh not started: rescanned too recently'
+    : 'refresh not started: a scan was already in flight';
+}
+
 function useRescan(reload, action = rescanAnalyzers) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [declined, setDeclined] = useState(null);
+  // The server's own words, shown as the notice's tooltip rather than as the
+  // notice — see `declinedReason` on why the visible copy is ours and past tense.
+  const [declinedDetail, setDeclinedDetail] = useState(null);
   const rescan = useCallback(async () => {
     setBusy(true);
     setError(null);
+    setDeclined(null);
+    setDeclinedDetail(null);
     try {
-      await action();
+      const res = await action();
+      setDeclined(declinedReason(res));
+      setDeclinedDetail((res && res.reason) || null);
     } catch (e) {
       setError(e.message || String(e));
     }
-    setTimeout(() => { setBusy(false); reload(); }, 1500);
+    // No fixed timeout. The 1.5s wait was standing in for "is it running yet",
+    // and it answered that question by guessing: it re-enabled the button
+    // whether or not a pass was in flight, and reloaded once whether or not
+    // anything had landed. The cycle's in-flight flag is set before the POST
+    // returns (`scan_cycle._CYCLE_COMPUTING`), so the reload below already sees
+    // it and `scan.computing` — not this hook's `busy` — is what keeps the
+    // control saying "Scanning…" for as long as that is true.
+    setBusy(false);
+    reload();
   }, [reload, action]);
-  return { busy, error, rescan };
+  return { busy, error, declined, declinedDetail, rescan };
 }
 
-// Auto-rescan on the server-published cadence, visibility-gated so a hidden tab
-// never asks the daemon to scan. 0 seconds — or `scan_enabled = false` — turns
-// it off, which is the kill switch from the browser side.
-function useAutoRescan(scan, rescan) {
-  const seconds = scan.scanEnabled ? scan.pollSeconds : 0;
+// Re-READ the stored result on the server-published cadence, visibility-gated so
+// a hidden tab does no work. 0 seconds turns it off entirely.
+//
+// This polls the STORE; it does not ask the daemon to scan. The knob behind it
+// says so in its own definition — `[optimize] scan_ui_poll_seconds`: "how often
+// a UI surface re-reads the stored result (NOT how often the scan runs)" — and
+// this hook used to contradict that by firing a rescan on every tick. At the
+// default cadence that put a full-corpus analyzer pass on a five-minute timer,
+// against passes that take minutes on a real corpus: most of a duty cycle of
+// continuous scanning, driven by nothing but a browser tab being open. The
+// daemon owns WHEN scanning happens (`core/optimize/scan_cycle.py`); a surface
+// owns only how often it looks. An explicit Rescan press still scans.
+//
+// `scanEnabled` is deliberately NOT consulted any more. It is the kill switch
+// for automatic SCANNING, and gating reads on it left a surface that had turned
+// scanning off unable to notice a scan a human had just triggered by hand.
+function useAutoRefresh(scan, reload) {
+  // WHILE A PASS IS IN FLIGHT, LOOK MORE OFTEN. The stored cadence defaults to
+  // five minutes, and the Rescan button is disabled for as long as the surface
+  // believes a scan is running — so a pass that finishes in twenty seconds left
+  // the control disabled and asserting "Scanning…" for the rest of that window,
+  // with no way for the user to act and nothing telling them it had landed. A
+  // control that is wrong AND unpressable is worse than a stale figure.
+  //
+  // This is still only a READ of the stored result; no surface may drive a scan
+  // from a timer (see this hook's note above and `core/optimize/scan_cycle.py`).
+  // The in-flight cadence deliberately overrides a `0` too: zero means "do not
+  // poll", but honouring it here would leave a user who pressed Rescan with a
+  // permanently disabled button and no path out short of reloading the page.
+  const inFlight = !!scan.computing;
+  const seconds = inFlight
+    ? Math.min(scan.pollSeconds || SCAN_INFLIGHT_POLL_SECONDS, SCAN_INFLIGHT_POLL_SECONDS)
+    : scan.pollSeconds;
   useEffect(() => {
     if (!seconds || seconds <= 0) return undefined;
     const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') rescan();
+      if (document.visibilityState === 'visible') reload();
     }, seconds * 1000);
     return () => clearInterval(timer);
-  }, [seconds, rescan]);
+  }, [seconds, reload]);
 }
 
 function recoverableTiles(opt) {
@@ -7367,7 +7692,7 @@ function recoverableTiles(opt) {
   skipped.forEach(k => {
     if (disabled.has(k)) return;
     if (!(k in f) && k !== 'downsize') {
-      out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview — open the Optimize tab.' });
+      out.push({ name: k, state: 'not_ready', hint: 'Not run on Overview. Open the Optimize tab.' });
     }
   });
   return rankTiles(out, opt.finding_rank);
@@ -7481,7 +7806,7 @@ function readStatus(read) {
 // (tests/unit/test_lens_dashboard_states.py, same extraction trick as
 // test_lens_select_all_behaviour.py) rather than only string-matched.
 
-// What the "Recoverable waste" band renders, from its read's outcome.
+// What the "Past overspend" band renders, from its read's outcome.
 //   phase — 'loading' | 'ready' | 'timeout' | 'error' (see DashboardView)
 //   data  — the last COMPLETE /optimize payload we hold, or null for none ever
 // Returns one of:
@@ -7574,7 +7899,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
     if (!dg) {
       return html`<section class="opt-section" id="opt-downsize">
         <div class="opt-title">Downsize</div>
-        <div class="opt-line dim">No downsize candidates in this window — sessions don't match the smaller-model shape (small input/output, few tool calls).</div>
+        <div class="opt-line dim">No downsize candidates in this window; sessions don't match the smaller-model shape (small input/output, few tool calls).</div>
       </section>`;
     }
     body = html`
@@ -7603,7 +7928,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
     // This number is a PRICE difference on the SAME tokens (batch bills the
     // same work at half rate, freeing nothing), never tokens freed — so
     // unlike every sibling card this branch renders its own footer line
-    // below instead of the generic "estimated recoverable" one (see
+    // below instead of the generic past-overspend one (see
     // `recUsd`/`recTok` suppression for this name further down), and gates
     // the dollar figure on `pricing_mode === 'api'` exactly, not just "not
     // suppressed" — the Batch API discount is an api-billed lever a
@@ -7695,7 +8020,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
       // whole, complete answer, not a lesser version of it — so that block
       // renders unconditionally and the provenance line/Summarize pointer
       // render only when `source_path` is actually set.
-      body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled — needs [capture] prompts = true and tokenjam[bloat].'}</div>`
+      body = !fd.enabled ? html`<div class="opt-line dim">${fd.hint || 'Disabled: needs [capture] prompts = true and tokenjam[bloat].'}</div>`
         : (fd.per_prompt || []).length ? html`
           <div class="opt-line">${fd.prompts_scored} prompt(s) scored; ${fd.total_bloat_chars} of ${fd.total_chars} chars flagged.</div>
           ${fd.per_prompt.slice(0, 5).map((p, i) => html`
@@ -7749,7 +8074,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
   // Recoverable estimate line (when present). `placement` is excluded: its
   // figure is a price difference, not recoverable tokens, and its own branch
   // above renders its own footer with the "price difference" label instead
-  // (CLAUDE.md anti-pattern #22 — the generic "estimated recoverable" wording
+  // (root anti-pattern 22: the generic past-overspend wording
   // below would be dishonest for a figure that frees no tokens at all).
   const fd = name === 'downsize' ? opt.downgrade : (opt.findings || {})[name];
   const recUsd = name === 'placement' ? null : (fd ? fd.past_overspend_usd : null);
@@ -7758,7 +8083,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
 
   return html`<section class="opt-section" id=${'opt-' + name}>
     <div class="opt-title">${meta.title}
-      ${rec ? html`<span class="opt-rec">${rec} <span class="estimated-tag" title=${fd && fd.estimate_basis}>estimated recoverable</span></span>` : null}
+      ${rec ? html`<span class="opt-rec" title=${(fd && fd.estimate_basis) || ''}>${rec}</span>` : null}
     </div>
     ${body}
     ${hasProposal ? html`<div class="opt-line" style="margin-top:10px"><a class="sz-link" href=${reviewProposalHref(name)}>A fix for this is ready. Review it in the Review inbox →</a></div>` : null}
@@ -7780,7 +8105,7 @@ function RecommendationsPanel({ rec }) {
     <section class="opt-section" id="opt-recommendations">
       <div class="opt-title"><span>Recommendations acted on <span class="dim" style="font-weight:400;font-size:12px">· measured recovery vs estimate</span></span></div>
       <div class="sz-tiles">
-        <div class="sz-tile"><div class="sz-tile-v" style="color:var(--accent)">~${fmtTokens(estTok)}${estUsd ? ' (~' + fmtCost(estUsd) + ')' : ''}</div><div class="sz-tile-l">estimated recoverable <span class="estimated-tag">estimated</span></div></div>
+        <div class="sz-tile"><div class="sz-tile-v" style="color:var(--accent)">~${fmtTokens(estTok)}${estUsd ? ' (~' + fmtCost(estUsd) + ')' : ''}</div><div class="sz-tile-l">past overspend</div></div>
         <div class="sz-tile"><div class="sz-tile-v" style="color:var(--success)">${fmtTokens(measTok)}${measUsd ? ' (' + fmtCost(measUsd) + ')' : ''}</div><div class="sz-tile-l">measured recovered</div></div>
         <div class="sz-tile"><div class="sz-tile-v">${rec.adopted || 0} / ${rec.ignored || 0}</div><div class="sz-tile-l">adopted / ignored</div></div>
       </div>
@@ -7841,8 +8166,11 @@ function OptimizeView({ params }) {
   // `st.opt` is deliberately kept across a reload (`loading: !s.opt` above), so
   // a rescan in flight keeps the last completed findings on screen.
   const scan = scanState(st.opt);
-  const { busy: rescanning, error: rescanError, rescan: doRescan } = useRescan(load);
-  useAutoRescan(scan, doRescan);
+  const {
+    busy: rescanning, error: rescanError, declined: rescanDeclined,
+    declinedDetail: rescanDeclinedDetail, rescan: doRescan,
+  } = useRescan(load);
+  useAutoRefresh(scan, load);
 
   // Scroll the focused finding into view + highlight it (deep-link from Overview).
   useEffect(() => {
@@ -7895,19 +8223,16 @@ function OptimizeView({ params }) {
   const sfPctApplied = sfTotal > 0 ? Math.round(sfApplied / sfTotal * 100) : 0;
 
   return html`
-    ${/* In-context entry point, rendered UNCONDITIONALLY, outside every data
-          branch — so it is there while the store is cold, while a scan is in
-          flight, and after a failed read, which are the states a reader is most
-          likely to be wondering what these checks are. The sidebar carries the
-          FAQ as a top-level Improve entry (that is what makes it reachable
-          from anywhere at all); this link is the contextual one, offered on the
-          screen whose cards it explains. */ ''}
+    ${/* The contextual "What do these checks mean?" link that used to sit
+          beside this title is gone. The FAQ is still a top-level Improve entry
+          in the sidebar, which is what makes it reachable from anywhere; this
+          second, in-title entry point was noise on the heading. */ ''}
     <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px">
       <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:0">
         Optimize <${PlanBadge} framing=${framing} />
-        <a class="sz-link" href="#/faq" style="font-size:13px;font-weight:400">What do these checks mean? →</a>
       </div>
-      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
+      <${PersonaPicker} />
+      <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
     </div>
     <div class="filters">
       <select value=${since} onChange=${e => setFilter('since', e.target.value)}>
@@ -7945,18 +8270,18 @@ function OptimizeView({ params }) {
       ${waste ? html`
         <div class="chart-card">
           <div class="chart-head">
-            <div class="chart-title">Cost by component + recoverable waste ${useTokens ? '(tokens)' : ''}</div>
+            <div class="chart-title">Spend by component + past overspend ${useTokens ? '(tokens)' : ''}</div>
             <div class="chart-meta">
               <span class="chart-total">${useTokens ? (fmtTokens(st.comp.total_tokens || 0) + ' tokens') : fmtFramedDollar(st.comp.total_cost_usd || 0, compFraming)}</span>
             </div>
           </div>
           <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} height=${220} />
           <div class="chart-foot">
-            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>estimated recoverable</b> waste, stacked by analyzer: a heuristic estimate to review before acting, not a realized cost reduction.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}</span>
+            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>what you already overspent</b>, stacked by analyzer: money the window has already been billed for, not a projection of future savings.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}</span>
           </div>
           ${st.comp && st.comp.largest_recoverable_analyzer ? html`
           <div class="chart-foot" style="margin-top:2px">
-            <span class="dim">Largest single opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
+            <span class="dim">Biggest single cause: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
           </div>` : null}
           ${waste.recSegs.length ? html`
             <div class="waste-list">
@@ -7967,11 +8292,11 @@ function OptimizeView({ params }) {
                   <span class="waste-name">${r.title === 'Summarize'
                     ? html`<a class="sz-link" href="#/optimize/summarize">${r.title}</a>`
                     : r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
-                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)} <span class=${ov ? ov.tagClass : 'estimated-tag'} title=${r.caveat || r.basis}>${ov ? ov.tagText : 'estimated recoverable'}</span>${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
+                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)}${ov ? html` <span class=${ov.tagClass} title=${r.caveat || r.basis}>${ov.tagText}</span>` : null}${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
               `;})}
-            </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window — no estimated waste from any analyzer.</div>`}
+            </div>` : html`<div class="waste-none"><span class="check">✓</span> No overspend found in this window by any analyzer.</div>`}
           ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
         </div>` : null}
 
@@ -8001,7 +8326,7 @@ function OptimizeView({ params }) {
             </div>
             ${sfApplied > 0 ? html`<div style="margin:14px 0 2px">
               <div class="sz-prog" style="height:10px"><div style=${'width:' + sfPctApplied + '%;background:var(--success)'}></div></div>
-              <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b> — ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
+              <div class="sz-note" style="font-size:12px;margin-top:6px"><b>${sfPctApplied}% applied</b>: ~${fmtTokens(sfApplied)} tok/call recovered across ${sfAppliedN} file(s); ~${fmtTokens(sfTok)} still recoverable here. <span class="dim">Applied counts every run; still-recoverable is this scan.</span></div>
             </div>` : null}
             <table class="opt-table" style="margin-top:12px">
               <thead><tr><th>File</th><th>Scope</th><th>Loads</th><th style="text-align:right">~tok/call</th><th style="text-align:right">reduction</th></tr></thead>
@@ -8025,17 +8350,17 @@ function OptimizeView({ params }) {
         <div class="opt-line">Cost ${st.cmp.cost_delta_usd >= 0 ? '▲' : '▼'} ${fmtFramedDollar(Math.abs(st.cmp.cost_delta_usd), framing)} ${st.cmp.cost_delta_pct != null ? '(' + st.cmp.cost_delta_pct.toFixed(1) + '%)' : ''} · Tokens ${st.cmp.tokens_delta >= 0 ? '▲' : '▼'} ${fmtTokens(Math.abs(st.cmp.tokens_delta))}</div></div>` : null}
       ${order.map(n => html`<${OptimizeFinding} name=${n} opt=${st.opt} framing=${framing} hasProposal=${st.proposalAnalyzers.has(n)} />`)}
       ${(st.opt.budgets || []).length ? html`<section class="opt-section" id="opt-budget-projection">
-        <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling — not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
+        <div class="opt-title"><span>Budget projection <span class="forecast-tag" title="A forecast of spend against your configured ceiling, not a measurement of waste. There is nothing here to apply.">forecast</span></span></div>
         ${st.opt.budgets.map(b => html`<div class="opt-line">
           <a class="sz-link" href=${'#/budget?provider=' + encodeURIComponent(b.provider)} title="Edit this provider's monthly ceiling on the Budget screen">${b.provider}</a>:
           run rate ${fmtFramedDollar(b.monthly_run_rate_usd, framing)}/mo vs
           ${fmtFramedDollar(b.budget_usd, framing)}/cycle ceiling
           (<a class="sz-link" href=${'#/budget?provider=' + encodeURIComponent(b.provider)}>configured for ${b.provider}</a>, cycle resets day ${b.cycle_start_day})
-          ${b.over_budget ? html`<span style="color:var(--error)">— projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">— projected within ceiling</span>`}
+          ${b.over_budget ? html`<span style="color:var(--error)">· projected ${fmtFramedDollar(b.projected_overage_usd, framing)} over ceiling</span>` : html`<span style="color:var(--text-dim)">· projected within ceiling</span>`}
         </div>`)}
-        <div class="opt-caveat">! This projects your current run rate forward against the ceiling you set for that provider on the <a class="sz-link" href="#/budget">Budget screen</a> — not the per-agent daily/session caps shown there. It identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the ceiling.</div>
+        <div class="opt-caveat">! This projects your current run rate forward against the ceiling you set for that provider on the <a class="sz-link" href="#/budget">Budget screen</a>, not the per-agent daily/session caps shown there. It identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the ceiling.</div>
         ${st.opt.budgets.some(b => b.over_budget) && st.comp && st.comp.largest_recoverable_analyzer ? html`
-        <div class="opt-line" style="margin-top:6px">Biggest recoverable opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a> — the fastest way to bring the projection back under ceiling.</div>` : null}
+        <div class="opt-line" style="margin-top:6px">Biggest single cause: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>. The fastest way to bring the projection back under ceiling.</div>` : null}
       </section>` : null}
     ` : null}
   `;
@@ -8308,6 +8633,7 @@ function RulesView() {
   const [msg, setMsg] = useState(null);
   const [open, setOpen] = useState(null);         // signature whose detail is expanded
   const [preview, setPreview] = useState(null);   // { signature, applied, skipped }
+  const [tab, setTab] = useState('open');         // 'open' | 'applied'
 
   // Each panel gates on ITS OWN fetch. `null` is "not yet known" and renders a
   // skeleton; `[]` is "known and empty" and is the only state allowed to say
@@ -8332,6 +8658,16 @@ function RulesView() {
   (staged || []).forEach(s => {
     (stagedBySig[s.signature] = stagedBySig[s.signature] || []).push(s);
   });
+
+  // The two tab populations, split ONCE. "In place" is either route to done:
+  // tokenjam applied it (a ledger knows, exactly) or the user already had it
+  // (`already_present`, resolved by the model on the analyzer pass). Everything
+  // else is open. Split here rather than filtered inline at each render site, so
+  // the counts on the tabs and the rows inside them cannot disagree — and the
+  // predicate matches the server's own `open_count`/`in_place_count` derivation.
+  const allRules = rules || [];
+  const inPlaceRules = allRules.filter(r => r.already_applied || r.already_present);
+  const openRules = allRules.filter(r => !r.already_applied && !r.already_present);
 
   const doStage = async (sig) => {
     setBusy(true); setMsg(null);
@@ -8386,24 +8722,58 @@ function RulesView() {
   return html`
     <div class="view">
       <div class="page-title">Rules</div>
+      ${/* No "back to Optimize" link: Rules is a nav-child of Optimize, so the
+            sidebar already shows its parent one line above it whenever this
+            page is open. A second route back was noise trailing the
+            description. */ ''}
       <div class="opt-line dim">
         Permanent CLAUDE.md rules the analyzers propose, and the project files
         each one would be written into.
-        <a class="sz-link" href="#/optimize">← back to Optimize</a>
       </div>
-      ${err ? html`<div class="panel"><div class="opt-line" style="color:var(--error)">${err}</div></div>` : null}
-      ${msg ? html`<div class="panel"><div class="opt-line">${msg}</div></div>` : null}
+      ${err ? html`<div class="panel"><div class="panel-body opt-line" style="color:var(--error)">${err}</div></div>` : null}
+      ${msg ? html`<div class="panel"><div class="panel-body opt-line">${msg}</div></div>` : null}
 
-      <div class="panel">
-        <div class="panel-head"><h2>On offer</h2></div>
-        ${rules === null
+      ${/* TWO POPULATIONS, TWO TABS. This page used to be one "On offer" zone
+            listing every rule, including the ones the write budget refused, each
+            explaining its refusal: "below the $5 floor", "would cost more to keep
+            than it recovers", "your instruction files already carry more standing
+            context than the budget allows to grow". Individually honest;
+            collectively a page of things the product declined to do, shown to a
+            user who came looking for something to apply.
+
+            The gate moved below this surface, so there is no refusal prose left
+            to render. What remains splits cleanly: something to do, or something
+            already done. Counts come from the server (`open_count` /
+            `in_place_count`) rather than being re-derived here, and they are held
+            back until the fetch resolves — a "(0)" painted mid-flight reads as a
+            settled "you have nothing", which is the worst thing this page can
+            say wrongly (root anti-pattern 22). */ ''}
+      <div class="tabs" role="tablist">
+        <button class="tab ${tab === 'open' ? 'active' : ''}" role="tab" aria-selected=${tab === 'open'} onClick=${() => setTab('open')}>
+          Open ${rules === null
+            ? html`<span class="shimmer" style="display:inline-block;width:20px;height:9px;vertical-align:middle;border-radius:3px"></span>`
+            : html`(${openRules.length})`}
+        </button>
+        <button class="tab ${tab === 'applied' ? 'active' : ''}" role="tab" aria-selected=${tab === 'applied'} onClick=${() => setTab('applied')}>
+          Applied ${rules === null
+            ? html`<span class="shimmer" style="display:inline-block;width:20px;height:9px;vertical-align:middle;border-radius:3px"></span>`
+            : html`(${inPlaceRules.length})`}
+        </button>
+      </div>
+
+      ${tab === 'open' ? html`
+      ${rules === null
           ? html`<div class="opt-line dim">Loading…</div>`
-          : rules.length === 0
-            ? html`<div class="opt-line dim">No permanent rules on offer. Run an optimize pass, then reload.</div>`
-            : rules.map(r => {
+          : openRules.length === 0
+            ? html`<div class="empty compact">${
+                inPlaceRules.length > 0
+                  ? 'Nothing left to write. Every rule the analyzers derived is already in your files.'
+                  : 'No permanent rules to write. Run an optimize pass, then reload.'
+              }</div>`
+            : openRules.map(r => {
                 const dests = r.destinations || [];
                 const st = stagedBySig[r.signature] || [];
-                return html`<div key=${r.signature} style="display:block;padding:12px 0;border-bottom:1px solid var(--border)">
+                return html`<div key=${r.signature} class="opt-section inbox-row" style="display:block">
                   <div style="display:flex;align-items:center;gap:10px">
                     <b>${r.title || r.signature}</b>
                     <span class="dim" style="font-size:12px">${r.analyzer} · ${
@@ -8417,7 +8787,7 @@ function RulesView() {
                   </div>
                   <div class="opt-line dim">
                     ${dests.length === 0
-                      ? 'No destination resolved — no session it was derived from recorded a working directory that still exists.'
+                      ? 'No destination resolved: no session it was derived from recorded a working directory that still exists.'
                       : dests.length === 1
                         ? html`Writes into <span class="mono" title=${dests[0].path}>${shortPath(dests[0].path)}</span> <span class="dim">(${dests[0].scope})</span>`
                         : html`Writes into ${dests.length} project files`}
@@ -8427,20 +8797,22 @@ function RulesView() {
                   </div>` : null}
                   ${r.placement_basis ? html`<div class="opt-line dim">${r.placement_basis}</div>` : null}
                   ${r.placement_coverage_note ? html`<div class="opt-line dim">${r.placement_coverage_note}</div>` : null}
-                  ${r.already_applied
-                    ? html`<div class="opt-line"><b>✓ Already applied.</b> <span class="dim">${r.blocked_reason}</span></div>`
-                    : r.dismissed
-                      ? html`<div class="opt-line dim"><b>Dismissed.</b> ${r.blocked_reason}</div>`
-                      : (!r.offered ? html`<div class="opt-line" style="color:var(--warn)">Not on offer: ${r.blocked_reason}</div>` : null)}
+                  ${/* No "Not on offer: <reason>" line any more. A rule the budget
+                        declined is not in this list at all — the gate sits below
+                        the surface now — so the only state worth stating here is
+                        the user's own: they dismissed it. */ ''}
+                  ${r.dismissed
+                    ? html`<div class="opt-line dim"><b>Dismissed.</b> ${r.blocked_reason}</div>`
+                    : null}
                   <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
                     <button class="cur-btn" onClick=${() => setOpen(open === r.signature ? null : r.signature)}>
                       ${open === r.signature ? 'Hide rule text' : 'Show rule text'}
                     </button>
-                    ${r.offered && !r.already_applied && !r.dismissed && dests.length ? html`
+                    ${r.offered && !r.dismissed && dests.length ? html`
                       <button class="cur-btn" disabled=${busy} onClick=${() => doStage(r.signature)}>Stage diffs</button>` : null}
                     ${r.dismissed
                       ? html`<button class="cur-btn" disabled=${busy} onClick=${() => doDismiss(r.signature, true)}>Bring back</button>`
-                      : (!r.already_applied ? html`<button class="cur-btn" disabled=${busy} onClick=${() => doDismiss(r.signature, false)}>Dismiss</button>` : null)}
+                      : html`<button class="cur-btn" disabled=${busy} onClick=${() => doDismiss(r.signature, false)}>Dismiss</button>`}
                     ${st.length ? html`
                       <button class="cur-btn" disabled=${busy} onClick=${() => doPreview(r.signature)}>Preview (${st.length})</button>
                       <button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(r.signature)}>Apply</button>` : null}
@@ -8448,40 +8820,88 @@ function RulesView() {
                   ${open === r.signature ? html`<pre class="sz-copybox" style="margin-top:10px">${r.artifact_text}</pre>` : null}
                   ${st.length ? html`<div class="opt-line dim" style="margin-top:6px">
                     ${st.map(s => html`<div class="mono" title=${s.path}>
-                      ${s.applyable ? '✓' : '!'} ${shortPath(s.path)}${s.applyable ? '' : ` — ${s.reason}`}
+                      ${s.applyable ? '✓' : '!'} ${shortPath(s.path)}${s.applyable ? '' : `: ${s.reason}`}
                     </div>`)}
                   </div>` : null}
                 </div>`;
               })}
-      </div>
 
       ${preview ? html`<div class="panel">
-        <div class="panel-head"><h2>Preview — nothing written</h2></div>
-        ${(preview.applied || []).map(a => html`<div class="sz-diffblock" key=${a.path}>
-          <div class="sz-diffblock-h">${a.path}${a.created_file ? ' (new file)' : ''}</div>
-          <div class="rev-diff">${a.diff}</div>
-        </div>`)}
-        ${(preview.skipped || []).map(s => html`<div class="opt-line" style="color:var(--warn)" key=${s.path}>${s.path} — ${s.reason}</div>`)}
-        <div style="margin-top:8px;display:flex;gap:8px">
-          <button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(preview.signature)}>Write these</button>
-          <button class="cur-btn" onClick=${() => setPreview(null)}>Close</button>
+        <div class="panel-head"><h2>Preview: nothing written</h2></div>
+        <div class="panel-body">
+          ${(preview.applied || []).map(a => html`<div class="sz-diffblock" key=${a.path}>
+            <div class="sz-diffblock-h">${a.path}${a.created_file ? ' (new file)' : ''}</div>
+            <div class="rev-diff">${a.diff}</div>
+          </div>`)}
+          ${(preview.skipped || []).map(s => html`<div class="opt-line" style="color:var(--warn)" key=${s.path}>${s.path}: ${s.reason}</div>`)}
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button class="cur-btn primary" disabled=${busy} onClick=${() => doApply(preview.signature)}>Write these</button>
+            <button class="cur-btn" onClick=${() => setPreview(null)}>Close</button>
+          </div>
         </div>
       </div>` : null}
+      ` : null}
 
-      <div class="panel">
-        <div class="panel-head"><h2>Applied</h2></div>
-        ${applied === null
+      ${tab === 'applied' ? html`
+      ${/* IN PLACE, BY EITHER ROUTE. Two ways a rule ends up here and the row
+            says which: tokenjam wrote it (an apply ledger knows, exactly), or the
+            user already had it (the model read their file and quoted back the
+            words that cover it). The second is the one that was missing, and it
+            is the reason a machine whose instruction files are full of these
+            rules used to see a page of refusals instead of a page of checkmarks.
+
+            Both keep their figure. What the recurrence cost before it was fixed
+            is what it cost (Critical Rule 32) — being fixed now does not un-spend
+            it, and for an already-present rule that still recurs the figure is
+            the interesting part, since it says the wording is not working. */ ''}
+      ${rules === null
           ? html`<div class="opt-line dim">Loading…</div>`
+          : inPlaceRules.length === 0
+            ? html`<div class="empty compact">No rules are in place yet. Nothing here has been written, and nothing matching was found in your instruction files.</div>`
+            : inPlaceRules.map(r => html`
+                <div key=${r.signature} class="opt-section inbox-row" style="display:block">
+                  <div style="display:flex;align-items:center;gap:10px">
+                    <b>${r.title || r.signature}</b>
+                    <span class="dim" style="font-size:12px">${r.analyzer}</span>
+                    <span style="margin-left:auto">
+                      ${r.past_overspend_usd == null
+                        ? html`<span class="dim">—</span>`
+                        : html`<span>${fmtUsd(r.past_overspend_usd)}</span>`}
+                    </span>
+                  </div>
+                  ${r.already_applied
+                    ? html`<div class="opt-line" style="color:var(--success)">✓ Applied by tokenjam.</div>`
+                    : html`<div class="opt-line" style="color:var(--success)">
+                        ✓ Already in your instruction files${r.presence_path ? html` · <span class="mono" title=${r.presence_path}>${shortPath(r.presence_path)}</span>` : null}
+                      </div>
+                      ${/* The model's own evidence, shown rather than summarised:
+                            this verdict is an inference, and a reader who did not
+                            make it needs the file's words to check it against. */ ''}
+                      ${r.presence_evidence ? html`<div class="opt-line dim">Found: ${r.presence_evidence}</div>` : null}`}
+                  <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">
+                    <button class="cur-btn" onClick=${() => setOpen(open === r.signature ? null : r.signature)}>
+                      ${open === r.signature ? 'Hide rule text' : 'Show rule text'}
+                    </button>
+                  </div>
+                  ${open === r.signature ? html`<pre class="sz-copybox" style="margin-top:10px">${r.artifact_text}</pre>` : null}
+                </div>`)}
+
+      ${/* The file-level undo surface, kept beneath the rows. It answers a
+            different question — which FILES tokenjam has written into and can
+            still restore — so it is not merged with the rule rows above. */ ''}
+      ${applied === null
+          ? null
           : applied.length === 0
-            ? html`<div class="opt-line dim">Nothing applied yet.</div>`
-            : applied.map(a => html`<div class="opt-line" key=${a.source_path + a.signature}>
+            ? null
+            : html`<div class="rules-zone">Written by tokenjam · undo</div>
+              ${applied.map(a => html`<div class="opt-section inbox-row opt-line" key=${a.source_path + a.signature}>
                 <span class="mono" title=${a.source_path}>${shortPath(a.source_path)}</span>
                 <span class="dim"> · ${a.applied_at}</span>
                 ${a.undoable
                   ? html` <button class="cur-btn" disabled=${busy} onClick=${() => doUndo(a.signature, a.source_path)}>Undo</button>`
                   : html` <span class="dim">(${a.reason})</span>`}
-              </div>`)}
-      </div>
+              </div>`)}`}
+      ` : null}
     </div>`;
 }
 
@@ -8747,7 +9167,7 @@ function SummarizeView({ params }) {
     setRevChecked(new Set()); setBusy(false);
     const okN = results.filter(r => r.ok).length;
     const fails = results.filter(r => !r.ok);
-    setMsg('Applied ' + okN + ' file(s).' + (fails.length ? ' ' + fails.length + ' skipped — ' + fails.map(f => shortP(f.path) + ' (' + f.reason + ')').join('; ') : ''), fails.length ? 'warn' : 'ok');
+    setMsg('Applied ' + okN + ' file(s).' + (fails.length ? ' ' + fails.length + ' skipped: ' + fails.map(f => shortP(f.path) + ' (' + f.reason + ')').join('; ') : ''), fails.length ? 'warn' : 'ok');
     loadBackups();   // newly-applied files now have a backup → surface them as undoable
   };
   const applyChecked = () => applyPaths(rvCheckedStaged);
@@ -8765,8 +9185,8 @@ function SummarizeView({ params }) {
       await apiPostOrDetail('/summarize/undo', { path, go: true });
       setFileStates(s => ({ ...s, [path]: 'reverted' }));
       setBackups(bs => bs.filter(b => b.source_path !== path));   // no longer undoable (now == original)
-      setMsg('Reverted ' + shortP(path) + ' — restored from backup.', 'ok');
-    } catch (e) { setMsg('Undo failed for ' + shortP(path) + ' — ' + (e.message || String(e)), 'warn'); }
+      setMsg('Reverted ' + shortP(path) + '. Restored from backup.', 'ok');
+    } catch (e) { setMsg('Undo failed for ' + shortP(path) + ': ' + (e.message || String(e)), 'warn'); }
     setBusy(false);
   };
   const reRun = async path => {
@@ -8779,7 +9199,7 @@ function SummarizeView({ params }) {
         setStaged(prev => prev.map(s => s.path === path ? one.staged[0] : s));
         setFileStates(s => { const n = { ...s }; delete n[path]; return n; });
       }
-    } catch (e) { setMsg('Re-run failed for ' + shortP(path) + ' — ' + (e.message || String(e)), 'warn'); }
+    } catch (e) { setMsg('Re-run failed for ' + shortP(path) + ': ' + (e.message || String(e)), 'warn'); }
     setBusy(false);
   };
 
@@ -8791,7 +9211,7 @@ function SummarizeView({ params }) {
     const elapsed = rs.curStart ? Math.max(0, Math.round((Date.now() - rs.curStart) / 1000)) : 0;
     return html`
       <div class="page-title">Summarize <span class="sz-sub">· running via ${engine}</span></div>
-      <div class="sz-note">Summarizing ${rs.total} file(s), one at a time${engine === 'claude-p' ? ' — ~30–90s each via claude-p' : ''}. Results are staged; <b>nothing is written yet</b>.</div>
+      <div class="sz-note">Summarizing ${rs.total} file(s), one at a time${engine === 'claude-p' ? ' (~30-90s each via claude-p)' : ''}. Results are staged; <b>nothing is written yet</b>.</div>
       <div class="sz-prog"><div style=${'width:' + pct + '%'}></div></div>
       <div class="dim" style="font-size:12px;margin-bottom:10px">${rs.done} / ${rs.total} done${rs.running && rs.current ? ' · running ' + shortP(rs.current) + ' (' + elapsed + 's)' : (rs.running ? '' : ' · complete')}</div>
       <div class="cur-listbox" style="max-height:360px">
@@ -8807,7 +9227,7 @@ function SummarizeView({ params }) {
           <span style="flex:1;word-break:break-all">${rs.current}</span>
           <span class="dim">summarizing${'.'.repeat((tick % 3) + 1)} · ${elapsed}s</span>
         </div>` : null}
-        ${rs.results.length === 0 && !(rs.running && rs.current) ? html`<div class="dim" style="padding:16px;text-align:center">Starting…</div>` : null}
+        ${rs.results.length === 0 && !(rs.running && rs.current) ? html`<div class="empty compact">Starting…</div>` : null}
       </div>
       <div class="cur-addbar">
         <button class="cur-btn primary" disabled=${rs.running} onClick=${() => setPhase('review')}>Review ${okN} staged →</button>
@@ -8822,7 +9242,7 @@ function SummarizeView({ params }) {
     const belowGate = manPrep && !manPrep.error && !manPrep.wrapped_prompt;
     const full = manPrep ? (manPrep.system_rules ? manPrep.system_rules + '\n\n' : '') + manPrep.wrapped_prompt : '';
     return html`
-      <div class="page-title">Summarize <span class="sz-sub">· manual — file ${Math.min(manIdx + 1, total)} of ${total}</span></div>
+      <div class="page-title">Summarize <span class="sz-sub">· manual · file ${Math.min(manIdx + 1, total)} of ${total}</span></div>
       <div class="dim" style="font-size:12.5px;margin-bottom:10px;font-family:'Geist Mono',monospace">${path}</div>
       ${manBusy ? html`<div class="shimmer" style="height:120px"></div>` : null}
       ${manErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">${manErr}</div></div>` : null}
@@ -8839,7 +9259,7 @@ function SummarizeView({ params }) {
         </div>
       ` : null}
       ${!manBusy && belowGate ? html`
-        <div class="opt-caveat">${manPrep.note || 'Below the prose gate — not worth summarizing.'}</div>
+        <div class="opt-caveat">${manPrep.note || 'Below the prose gate; not worth summarizing.'}</div>
         <div class="cur-addbar"><button class="cur-btn primary" onClick=${manNext}>Skip →</button><button class="cur-btn" onClick=${() => setPhase('curate')}>← back to curator</button></div>
       ` : null}
     `;
@@ -8852,7 +9272,7 @@ function SummarizeView({ params }) {
     return html`
       <div style="margin:0 0 4px"><span class="sz-link" onClick=${() => setPhase('curate')}>← back to curator</span></div>
       <div class="page-title">Summarize <span class="sz-sub">· review & apply</span></div>
-      <div class="sz-note rev-note">${revRows.length} staged. Structure is guaranteed; <b>meaning may change</b> — click a row for its diff. <b>Apply</b> writes the file (backs up first); <b>Reject</b> dismisses it here.</div>
+      <div class="sz-note rev-note">${revRows.length} staged. Structure is guaranteed; <b>meaning may change</b>. Click a row for its diff. <b>Apply</b> writes the file (backs up first); <b>Reject</b> dismisses it here.</div>
       ${dataErr ? html`<div class="chart-card" style="border-color:var(--error)"><div style="color:var(--error);font-size:13px">${dataErr}</div></div>` : null}
       ${applyMsg ? html`<div class="opt-caveat" style=${'font-style:normal;color:' + (applyMsg.tone === 'warn' ? 'var(--warn)' : 'var(--success)')}>${applyMsg.text}</div>` : null}
       <div class="cur-filters">
@@ -8883,7 +9303,7 @@ function SummarizeView({ params }) {
                 <td><span class=${'rev-state ' + st}>${st}</span>${st === 'applied' ? html` <span class="sz-link" style="font-size:11px" title="restore this file from its backup" onClick=${() => undoPath(r.path)}>undo</span>` : null}</td>
               </tr>`;
             })}
-            ${rvVisible.length === 0 ? html`<tr><td colspan="7" class="dim" style="padding:16px;text-align:center">${revRows.length === 0 ? 'Nothing staged. Run the summarizer from the curator.' : 'No files match these filters.'}</td></tr>` : null}
+            ${rvVisible.length === 0 ? html`<tr><td colspan="7" class="empty-cell">${revRows.length === 0 ? 'Nothing staged. Run the summarizer from the curator.' : 'No files match these filters.'}</td></tr>` : null}
           </tbody>
         </table>
       </div>
@@ -8893,10 +9313,10 @@ function SummarizeView({ params }) {
         <span class="dim" style="font-size:12px">Click a row for its diff.</span>
         <a class="cur-btn" style="margin-left:auto;text-decoration:none" href="#/optimize">Done → Optimize</a>
       </div>
-      ${revRows.length > 0 && stagedCount === 0 ? html`<div class="opt-caveat" style="font-style:normal;color:var(--success);margin-top:12px">✓ All ${revRows.length} rewrite(s) resolved — ${appliedCount} applied, ${rejectedCount} rejected${revertedCount ? ', ' + revertedCount + ' reverted' : ''}.${appliedCount ? ' Applied one you didn\'t want? Undo it below.' : ''} <a class="sz-link" href="#/optimize">Back to Optimize</a> · <span class="sz-link" onClick=${() => setPhase('curate')}>summarize more →</span></div>` : null}
+      ${revRows.length > 0 && stagedCount === 0 ? html`<div class="opt-caveat" style="font-style:normal;color:var(--success);margin-top:12px">✓ All ${revRows.length} rewrite(s) resolved: ${appliedCount} applied, ${rejectedCount} rejected${revertedCount ? ', ' + revertedCount + ' reverted' : ''}.${appliedCount ? ' Applied one you didn\'t want? Undo it below.' : ''} <a class="sz-link" href="#/optimize">Back to Optimize</a> · <span class="sz-link" onClick=${() => setPhase('curate')}>summarize more →</span></div>` : null}
 
       ${backups.length ? html`<div class="opt-section" style="margin:16px 0 4px">
-        <div class="opt-title" style="font-size:14px;margin-bottom:2px">Applied earlier — undo</div>
+        <div class="opt-title" style="font-size:14px;margin-bottom:2px">Applied earlier: undo</div>
         <div style="margin:0 0 4px"><span class="dim" style="font-weight:400;font-size:12px">restores the original from backup</span></div>
         ${backups.map((b, i) => html`<div class="sz-runrow" key=${i}>
           <span style="color:var(--success)">✓</span>
@@ -8904,7 +9324,7 @@ function SummarizeView({ params }) {
           ${b.applied_at ? html`<span class="dim" style="font-size:12px">${b.applied_at.slice(0, 16).replace('T', ' ')}</span>` : null}
           ${b.undoable
             ? html`<button class="cur-btn" disabled=${busy} onClick=${() => undoPath(b.source_path)}>Undo</button>`
-            : html`<span class="dim" style="font-size:12px" title=${b.reason}>can't undo — ${b.reason}</span>`}
+            : html`<span class="dim" style="font-size:12px" title=${b.reason}>can't undo: ${b.reason}</span>`}
         </div>`)}
       </div>` : null}
       ${mf ? html`
@@ -8920,7 +9340,7 @@ function SummarizeView({ params }) {
                 ${mf.structure_ok ? html`<span class="badge badge-ok">structure ok</span>` : html`<span class="badge badge-error">structure fail</span>`}
                 <span class="dim"> ${mf.words_before.toLocaleString()} → ${mf.words_after.toLocaleString()} words · ~${mf.est_tokens_saved} tok/call saved${mf.produced_by ? ' · via ' + mf.produced_by : ''}</span>
               </div>
-              ${(mf.must_keep_removed && mf.must_keep_removed.length) ? html`<div class="opt-caveat" style="margin-top:0">Must-keep phrases changed: ${mf.must_keep_removed.length} removed${mf.must_keep_added && mf.must_keep_added.length ? ', ' + mf.must_keep_added.length + ' added' : ''} — check the diff before applying.</div>` : null}
+              ${(mf.must_keep_removed && mf.must_keep_removed.length) ? html`<div class="opt-caveat" style="margin-top:0">Must-keep phrases changed: ${mf.must_keep_removed.length} removed${mf.must_keep_added && mf.must_keep_added.length ? ', ' + mf.must_keep_added.length + ' added' : ''}. Check the diff before applying.</div>` : null}
               ${mf.note ? html`<div class="dim" style="font-size:12.5px">${mf.note}</div>` : null}
               <div class="sz-note" style="font-size:12px;margin:0 0 10px"><span style="color:var(--error)">−</span> lines removed · <span style="color:var(--success)">+</span> lines added · unchanged lines are kept verbatim (code, tables, ${'<tj-keep>'} blocks). Shown per changed block:</div>
               ${mfBlocks.length ? mfBlocks.map((b, i) => html`<div class="sz-diffblock" key=${i}>
@@ -8960,7 +9380,7 @@ function SummarizeView({ params }) {
       ${addedList.length ? html`<div class="cur-chips">${chipEls}</div>` : null}
     </div>
 
-    ${staged.length ? html`<div class="opt-caveat" style="font-style:normal">${staged.length} file(s) already staged from an earlier run or the <code>tj summarize</code> CLI — <span class="sz-link" onClick=${() => setPhase('review')}>Review & apply →</span></div>` : null}
+    ${staged.length ? html`<div class="opt-caveat" style="font-style:normal">${staged.length} file(s) already staged from an earlier run or the <code>tj summarize</code> CLI. <span class="sz-link" onClick=${() => setPhase('review')}>Review & apply →</span></div>` : null}
     ${backups.filter(b => b.undoable).length ? html`<div class="dim" style="font-size:12px;margin-top:4px">${backups.filter(b => b.undoable).length} applied summary(ies) can be undone: <span class="sz-link" onClick=${() => setPhase('review')}>review & undo →</span></div>` : null}
 
     <div class="cur-filters">
@@ -9006,7 +9426,7 @@ function SummarizeView({ params }) {
               <td class="dim" style="font-size:12px">${st}</td>
             </tr>`;
           })}
-          ${visible.length === 0 ? html`<tr><td colspan="7" class="dim" style="padding:16px;text-align:center">${cands.length === 0 ? 'No summarizable files found. Try recursive / repo, or open a project with prompt files.' : 'No files match these filters.'}</td></tr>` : null}
+          ${visible.length === 0 ? html`<tr><td colspan="7" class="empty-cell">${cands.length === 0 ? 'No summarizable files found. Try recursive / repo, or open a project with prompt files.' : 'No files match these filters.'}</td></tr>` : null}
         </tbody>
       </table>
     </div>
@@ -9017,14 +9437,14 @@ function SummarizeView({ params }) {
     </div>
     ` : null}
 
-    <div class="sz-note" style="font-size:12px;margin-top:14px"><b>Finish → Approve</b> ${engine ? html`runs the summarizer${engine === 'manual' ? ' (you paste each result back)' : ' via ' + engine}` : 'asks which tool to use, then runs the summarizer'} — you review each rewrite before applying.</div>
+    <div class="sz-note" style="font-size:12px;margin-top:14px"><b>Finish → Approve</b> ${engine ? html`runs the summarizer${engine === 'manual' ? ' (you paste each result back)' : ' via ' + engine}` : 'asks which tool to use, then runs the summarizer'}. You review each rewrite before applying.</div>
 
     ${modal ? html`
       <div class="cur-overlay" onClick=${() => setModal(null)}>
         <div class="cur-modal" onClick=${e => e.stopPropagation()}>
           <div class="cur-modal-head">
-            <span class="cur-modal-title">${modal === 'approve' ? (engine ? 'Approve ' + added.size + ' file' + (added.size === 1 ? '' : 's') + ' to summarize?' : 'How should we summarize ' + added.size + ' file' + (added.size === 1 ? '' : 's') + '?') : 'Basket — ' + added.size + ' file' + (added.size === 1 ? '' : 's')}</span>
-            <button class="cur-modal-x" onClick=${() => setModal(null)} title="Close — go back and change">✕</button>
+            <span class="cur-modal-title">${modal === 'approve' ? (engine ? 'Approve ' + added.size + ' file' + (added.size === 1 ? '' : 's') + ' to summarize?' : 'How should we summarize ' + added.size + ' file' + (added.size === 1 ? '' : 's') + '?') : 'Basket · ' + added.size + ' file' + (added.size === 1 ? '' : 's')}</span>
+            <button class="cur-modal-x" onClick=${() => setModal(null)} title="Close: go back and change">✕</button>
           </div>
           <div class="cur-modal-body">
             ${modal === 'approve' && !engine ? html`
@@ -9039,7 +9459,7 @@ function SummarizeView({ params }) {
             ` : html`
               <input class="cur-search" style="width:100%;margin-bottom:10px" placeholder="search basket…" value=${mQuery} onInput=${e => setMQuery(e.target.value)} />
               ${modalList.length === 0
-                ? html`<div class="dim" style="padding:14px;text-align:center">${added.size === 0 ? 'Basket is empty.' : 'No items match.'}</div>`
+                ? html`<div class="empty compact">${added.size === 0 ? 'Basket is empty.' : 'No items match.'}</div>`
                 : modalList.map((c, i) => html`<div class="cur-mrow" key=${i}>
                     <span class="path">${c.path}</span>
                     <span class="dim mono" style="font-size:12px">~${c.est_tokens_saved} tok/call</span>
@@ -9054,7 +9474,7 @@ function SummarizeView({ params }) {
               <button class="cur-btn" disabled=${modalList.length === 0} onClick=${clearShownModal}>Clear shown</button>
               <button class="cur-btn" disabled=${added.size === 0} onClick=${clearAll}>Clear all</button>
               ${modal === 'approve'
-                ? html`<button class="cur-btn primary" style="margin-left:auto" disabled=${added.size === 0} onClick=${approve}>${engine === 'manual' ? 'Approve ' + added.size + ' — prep first →' : 'Approve ' + added.size + ' — run via ' + engine + ' →'}</button>`
+                ? html`<button class="cur-btn primary" style="margin-left:auto" disabled=${added.size === 0} onClick=${approve}>${engine === 'manual' ? 'Approve ' + added.size + ': prep first →' : 'Approve ' + added.size + ': run via ' + engine + ' →'}</button>`
                 : html`<button class="cur-btn primary" style="margin-left:auto" onClick=${() => setModal(null)}>Done</button>`}
             `}
           </div>
@@ -9483,8 +9903,8 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
           <div class="chart-title">${(ANALYTICS_METRICS.find(m => m[0] === metric) || [, metric])[1]} by ${(ANALYTICS_DIMENSIONS.find(d => d[0] === groupBy) || [, groupBy])[1]}${metricSuffix}</div>
         </div>
         ${toolDimNoMetric ? html`
-          <div class="empty" style="padding:32px 16px;text-align:center">
-            <div style="font-size:13px;margin-bottom:12px">Tools don't carry ${metric === 'spend' ? 'cost' : 'tokens'} — those live on the LLM-call spans, not tool spans.</div>
+          <div class="empty compact">
+            <div style="font-size:13px;margin-bottom:12px">Tools don't carry ${metric === 'spend' ? 'cost' : 'tokens'}; those live on the LLM-call spans, not tool spans.</div>
             <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
               <button class="btn" onClick=${() => setFilter('metric', 'events')}>Switch to Events</button>
               <button class="btn" onClick=${() => setFilter('group_by', 'model')}>Group by Model</button>
@@ -9495,8 +9915,8 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
              moves nothing below it. */
           : loading && !resp ? html`<div class="shimmer" style="height:220px"></div>`
           : emptyFromStack ? html`
-            <div class="empty" style="padding:32px 16px;text-align:center">
-              <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these — e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
+            <div class="empty compact">
+              <div style="font-size:13px;margin-bottom:12px">No rows for ${labelOf(groupBy)} × ${labelOf(effStack)}. That breakdown is empty because a span carries only one of these: e.g. an LLM call has a model but no tool, a tool span has a tool but no model.</div>
               <button class="btn" onClick=${() => setFilter('stack', '')}>Clear stack</button>
             </div>`
           : chart === 'hbar'
@@ -9514,14 +9934,14 @@ function AnalyticsView({ params, route = 'analytics', embedded = false, kpiCapti
                   </div>`;
                 })}
               </div>
-              ${boardGap ? html`<div class="chart-foot"><span class="dim">Only ${fmtCount(boardTotal)} of ${fmtCount(kpiCount)} ${countMetric} have a ${dimName} — the rest aren't in this breakdown.</span></div>` : null}
-              ` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)
+              ${boardGap ? html`<div class="chart-foot"><span class="dim">Only ${fmtCount(boardTotal)} of ${fmtCount(kpiCount)} ${countMetric} have a ${dimName}; the rest aren't in this breakdown.</span></div>` : null}
+              ` : html`<div class="empty compact">No data in this window.</div>`)
             : (series ? html`
               ${chart === 'line'
                 ? html`<${SpendChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} showLegend=${series.labels.length > 1} bucket=${series.bucket} />`
                 : html`<${StackedBarChart} data=${series.data} labels=${series.labels} height=${220} fmtY=${fmtV} axisFmtY=${axisFmt} bucket=${series.bucket} />`}
-              ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets — this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
-            ` : html`<div class="empty" style="padding:32px 0">No data in this window.</div>`)}
+              ${series.coarsened ? html`<div class="chart-foot"><span class="dim">Showing ${series.bucket} buckets; this range is too long for ${series.requestedBucket}ly detail.</span></div>` : null}
+            ` : html`<div class="empty compact">No data in this window.</div>`)}
       </div>` : null}
   `;
 }
@@ -9808,7 +10228,7 @@ function BelowFloorNote({ items, label }) {
   if (!items || items.length === 0) return null;
   const usd = items.reduce((s, i) => s + (i.past_overspend_usd || 0), 0);
   return html`
-    <div class="dim" style="font-size:12px;padding:10px 14px;border-top:1px solid var(--border)">
+    <div class="dim" style="font-size:12px;padding:var(--pad-row-y) var(--inset-x);border-top:1px solid var(--border)">
       ${items.length} smaller ${label} under ${fmtUsd(INBOX_MIN_USD)} ${items.length === 1 ? 'is' : 'are'} hidden · ${fmtUsd(usd)} combined, still counted in the total above.
     </div>`;
 }
@@ -9845,7 +10265,7 @@ function splitTopAndTail(sorted, max = INBOX_COLLAPSE_THRESHOLD) {
 // progress bar, which on a scan of unknown length could only fake progress.
 function InboxSkeletonRow() {
   return html`
-    <div class="opt-section inbox-row" aria-hidden="true" style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+    <div class="opt-section inbox-row" aria-hidden="true">
       <div style="display:flex;align-items:center;gap:8px">
         <div class="shimmer" style="height:13px;width:38%"></div>
         <div class="shimmer" style="height:11px;width:64px;flex-shrink:0"></div>
@@ -10122,9 +10542,9 @@ function PastOverspendTile({ block }) {
   // second-population key available to put back.
   const derivation = [block.basis, block.disclosure].filter(Boolean).join('\n\n');
   return html`
-    <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+    <div class="opt-section opt-tile">
       <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em">
-        What you could have avoided
+        You Overspent
       </div>
       ${/* Past tense in the figure's own caption, not only in the label: a
             screenshot of this tile has to carry its own tense. */ ''}
@@ -10184,7 +10604,7 @@ function CollapsedTailRow({ tail, suppressed, summary, onDismissAll, onMarkAllAp
   if (tail.length === 0) return null;
   const label = open ? 'Show less' : ('Show ' + tail.length + ' more');
   return html`
-    <div class="cur-row" style="padding:10px 14px;border-bottom:1px solid var(--border)">
+    <div class="cur-row panel-row">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <span class="sz-link" onClick=${() => setOpen(o => !o)}>
           ${open ? '▾' : '▸'} ${label}${summary ? ' · ' + summary : ''}
@@ -10291,7 +10711,7 @@ function RecurringMistakeRow({ cluster, checked, onToggle, onExpand, onDismiss, 
     ? '~' + fmtTokens(cluster.standing_cost_tokens_per_session) + ' tokens would ride into every future session, forever; modelled payback ' + cluster.payback_ratio.toFixed(2) + '×.'
     : null;
   return html`
-    <div class="opt-section inbox-row" data-mechanism=${inboxMechanismTag(cluster)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${cluster.signature}>
+    <div class="opt-section inbox-row" data-mechanism=${inboxMechanismTag(cluster)} key=${cluster.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         ${/* Only where a bulk action can genuinely reach this row. */ ''}
         ${canApply ? html`<input type="checkbox" checked=${checked} onChange=${onToggle} />` : null}
@@ -10477,7 +10897,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
                       that follows it, so without it this reads "tokensover". */ ''}
                 ${cluster.past_overspend_usd != null && cluster.past_overspend_tokens ? ' · ~' + fmtTokens(cluster.past_overspend_tokens) + ' tokens ' : ' '}
                 over the scanned corpus, priced at the rates these sessions were billed at. Observed, not projected, and not netted against any fix's cost.
-                ${cluster.past_reread_usd != null ? html`<div style="margin-top:4px">Of that, ${fmtUsd(cluster.past_reread_usd)} is the re-read tail — the failure text still being carried on later calls. That share is re-sent context the Resend card prices in full, so the two overlap and must never be added together.</div>` : null}
+                ${cluster.past_reread_usd != null ? html`<div style="margin-top:4px">Of that, ${fmtUsd(cluster.past_reread_usd)} is the re-read tail: the failure text still being carried on later calls. That share is re-sent context the Resend card prices in full, so the two overlap and must never be added together.</div>` : null}
               </div>
             </div>` : null}
           <div class="opt-section" style="margin:0 0 14px">
@@ -10485,7 +10905,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
             <div class="sz-note" style="margin-top:4px">${cluster.proposed_fix}</div>
           </div>
           <div class="opt-section" style="margin:0 0 6px">
-            <div class="opt-title" style="font-size:13px">Evidence — repro sessions</div>
+            <div class="opt-title" style="font-size:13px">Evidence: repro sessions</div>
             ${(cluster.examples || []).map((ex, i) => html`
               <div class="sz-runrow" key=${i} style="align-items:flex-start">
                 ${ex.session_resolvable
@@ -10511,7 +10931,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
               ${(cluster.payback_ratio != null && cluster.standing_cost_tokens_per_session) ? html`
                 <div class="sz-note" style="margin-top:8px">
                   A permanent rule for this would carry ~${fmtTokens(cluster.standing_cost_tokens_per_session)} tokens into every future session, forever.
-                  Against what the fix is modelled to recover that is a payback of ${cluster.payback_ratio.toFixed(2)}×${cluster.payback_ratio < 1 ? ' — under 1.0, so on the quantities we can count it costs more to keep than it returns' : ''}.
+                  Against what the fix is modelled to recover that is a payback of ${cluster.payback_ratio.toFixed(2)}×${cluster.payback_ratio < 1 ? '; under 1.0, so on the quantities we can count it costs more to keep than it returns' : ''}.
                   <div style="margin-top:4px" class="dim">This is a modelled comparison, not an observed one. It does not count what the rule might save by preventing the failure in the first place; the measurement that would settle that returned no usable signal.</div>
                 </div>` : null}
             </div>
@@ -10528,7 +10948,7 @@ function RelearnApplyModal({ cluster, onClose, onApplied, queuePos, onNext }) {
                   placeholder="/absolute/path/to/target"
                   onInput=${e => setTarget(e.target.value)} />
               </div>
-              ${ENFORCEMENT_DELIVERIES.has(cluster.delivery) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">This writes a hook, DISABLED by default — it will not run until you separately confirm "Enable enforcement".</div>` : null}
+              ${ENFORCEMENT_DELIVERIES.has(cluster.delivery) ? html`<div class="sz-note" style="margin-top:8px;color:var(--warn)">This writes a hook, DISABLED by default; it will not run until you separately confirm "Enable enforcement".</div>` : null}
             </div>
           ` : html`
             <div class="opt-section" style="margin:0 0 6px">
@@ -10621,7 +11041,7 @@ function appliedEstimate(rec) {
 // it stands in for causes exactly the layout jump it exists to prevent.
 function AppliedSkeletonRow() {
   return html`
-    <div class="sz-runrow" aria-hidden="true" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 14px;border-bottom:1px solid var(--border)">
+    <div class="sz-runrow" aria-hidden="true" style="align-items:flex-start;flex-direction:column;gap:6px">
       <div style="display:flex;align-items:center;gap:8px;width:100%">
         <div class="shimmer" style="height:13px;width:38%"></div>
         <div class="shimmer" style="height:13px;width:60px;margin-left:auto"></div>
@@ -10661,7 +11081,7 @@ function AppliedItemRow({ rec, onChanged, suppressed }) {
   return html`
     ${/* Horizontal padding matches the cost cards' 14px so the row's text and
           its right-aligned state chip never sit flush against the panel edge. */ ''}
-    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px;padding:10px 14px;border-bottom:1px solid var(--border)">
+    <div class="sz-runrow" style="align-items:flex-start;flex-direction:column;gap:6px">
       <div style="display:flex;align-items:center;gap:8px;width:100%;flex-wrap:wrap">
         <span style="font-weight:500">${rec.title}</span>
         ${!isRelearn ? html`<span class="badge badge-info">${(COST_BADGE_BY_ANALYZER[rec.analyzer] || rec.analyzer || '').toUpperCase()}</span>` : null}
@@ -10932,7 +11352,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
   // Mark applied / Dismiss actions. The fix modality is legible from the
   // fix block itself, so it no longer gets its own sub-label.
   return html`
-    <div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} style="margin:0 0 10px;padding:12px 14px;border:1px solid var(--border);border-radius:8px" key=${prop.signature}>
+    <div class=${'opt-section inbox-row' + (focused ? ' rev-focus' : '')} data-analyzer=${prop.analyzer} data-mechanism=${inboxMechanismTag(prop)} key=${prop.signature}>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
         <span style="font-weight:500">${prop.title}</span>
         <span class="badge badge-info">${COST_BADGE_BY_ANALYZER[prop.analyzer] || (prop.analyzer || '').toUpperCase()}</span>
@@ -11051,8 +11471,8 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
                 model is as good", not harder (Critical Rule 14). */ ''}
           ${prop.apply_caveat ? html`
             <div class="opt-caveat" style="margin-top:6px">${prop.apply_caveat}</div>` : null}
-          <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;align-items:center">
-            <input class="rename-input" style="flex:1;min-width:280px" value=${spTarget}
+          <div class="fix-action-row" style="margin-top:6px">
+            <input class="rename-input" value=${spTarget}
               placeholder="/absolute/path/to/the/agent/checkout" onInput=${e => setSpTarget(e.target.value)} />
             <button class="cur-btn" disabled=${spBusy || !spTarget.trim()} onClick=${() => registerSourcePath(false)}>${spBusy ? 'working…' : 'Preview'}</button>
             <button class="cur-btn primary" disabled=${spBusy || !spTarget.trim()} onClick=${() => registerSourcePath(true)}>Apply swap →</button>
@@ -11070,8 +11490,8 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
         <div class="opt-section" style="margin:10px 0 0">
           <div class="opt-title" style="font-size:12.5px;margin-bottom:2px">${akCopy.title}</div>
           <div style="font-size:12.5px;margin:0 0 4px"><span class="dim" style="font-weight:400">${akCopy.hint}</span></div>
-          <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap;align-items:center">
-            <input class="rename-input" style="flex:1;min-width:280px" value=${akTarget}
+          <div class="fix-action-row">
+            <input class="rename-input" value=${akTarget}
               placeholder="/absolute/path/to/target" onInput=${e => setAkTarget(e.target.value)} />
             <button class="cur-btn" disabled=${akBusy} onClick=${() => applyKindFix(false)}>${akBusy ? 'working…' : 'Preview'}</button>
             <button class="cur-btn primary" disabled=${akBusy} onClick=${() => applyKindFix(true)}>${akCopy.button} →</button>
@@ -11103,8 +11523,8 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
             <span class="dim" style="font-weight:400">writes a reversible note to the project ${prop.target_path ? 'below' : html`<code>CLAUDE.md</code> you paste below, or register it once with <code>tj onboard --add-project</code>`}</span>
             ${!prop.target_path ? html`<${CopySnippetButton} text="tj onboard --add-project" />` : null}
           </div>
-          <div style="display:flex;gap:8px;margin-top:0;flex-wrap:wrap;align-items:center">
-            <input class="rename-input" style="flex:1;min-width:280px" value=${target}
+          <div class="fix-action-row">
+            <input class="rename-input" value=${target}
               placeholder="/absolute/path/to/project/CLAUDE.md" onInput=${e => setTarget(e.target.value)} />
             <button class="cur-btn" disabled=${wbusy || !target.trim()} onClick=${() => applyWorkspace(false)}>${wbusy ? 'working…' : 'Preview note'}</button>
             <button class="cur-btn primary" disabled=${wbusy || !target.trim()} onClick=${() => applyWorkspace(true)}>Apply note →</button>
@@ -11158,7 +11578,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
 
 // The headline band + the FIXES APPLIED tile.
 //
-// The headline used to be an "estimated recoverable / mo" tile summed in JS
+// The headline used to be an estimated-recoverable-per-month tile summed in JS
 // across both open tabs. It is now the server's own past-overspend block
 // (`PastOverspendTile`), for two reasons that are not stylistic:
 //   * TENSE. What the product leads with is now what the flagged behaviours
@@ -11220,17 +11640,28 @@ function ExcludedWasteNote({ excluded }) {
 // then printed "0" and "most recent unknown" for the next minute, which is a
 // settled claim of absence made before its own data existed. Absence is the most
 // dangerous thing to guess wrong, because it reads as reassurance.
-function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnown, lastAppliedAt, suppressed, excluded, pastOverspend, loading }) {
-  const appliedPriceable = appliedEstimates.filter(i => i.usd != null);
-  const appliedLeadWithUsd = !suppressed && appliedEstimates.length > 0 && appliedPriceable.length * 2 >= appliedEstimates.length;
-  const appliedUsdSum = appliedPriceable.reduce((s, i) => s + i.usd, 0);
-  const appliedTokSum = appliedEstimates.reduce((s, i) => s + (i.tokens || 0), 0);
-  // Falls back to the bare count when nothing applied carries an estimate —
-  // never a fabricated "$0"/"0 tok" standing in for "no data".
-  const appliedBig = appliedLeadWithUsd ? fmtUsd(appliedUsdSum)
-    : appliedTokSum > 0 ? '~' + fmtTokens(appliedTokSum) + ' tok'
-    : String(appliedCount);
+// The applied estimate, demoted to the count tile's tooltip. It was the tile's
+// hero figure; the count replaced it there (see the note at the render site), and
+// this keeps the number reachable instead of deleting it. Returns '' when nothing
+// applied carries an estimate — never a fabricated "$0"/"0 tok" standing in for
+// "no data", which is the whole reason this is a hint and not a headline.
+// `suppressed` is load-bearing, not cosmetic: under local framing there is no
+// marginal cost to price, so a dollar figure must not appear even in a tooltip.
+// The old hero-figure derivation honoured it and this has to as well.
+function appliedEstimateHint(appliedEstimates, suppressed) {
+  const estimates = appliedEstimates || [];
+  const priceable = estimates.filter(i => i.usd != null);
+  const usd = priceable.reduce((s, i) => s + i.usd, 0);
+  const toks = estimates.reduce((s, i) => s + (i.tokens || 0), 0);
+  const figure = !suppressed && priceable.length > 0 && priceable.length * 2 >= estimates.length
+    ? fmtUsd(usd)
+    : toks > 0 ? '~' + fmtTokens(toks) + ' tok' : null;
+  if (!figure) return '';
+  return figure + ' estimated across these fixes — each one\'s own estimate at the '
+    + 'moment it was applied, never re-measured afterward';
+}
 
+function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnown, lastAppliedAt, suppressed, excluded, pastOverspend, loading }) {
   const hasExcluded = Object.keys(excluded || {}).length > 0;
   // Whether the server's block actually has something to state. Checked here
   // rather than inside the band so the excluded-waste note has a home when it
@@ -11246,7 +11677,7 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnow
     return html`
       <div style="margin:10px 0 18px;display:flex;gap:14px;flex-wrap:wrap" aria-hidden="true">
         ${[0, 1].map(i => html`
-          <div key=${i} class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
+          <div key=${i} class="opt-section opt-tile">
             <div class="shimmer" style="height:11px;width:44%"></div>
             <div class="shimmer" style="height:24px;width:38%;margin-top:6px"></div>
             <div class="shimmer" style="height:12px;width:66%;margin-top:6px"></div>
@@ -11264,15 +11695,25 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnow
           invites adding them together. */ ''}
     <div style="display:flex;gap:14px;flex-wrap:wrap">
       ${hasOpenOverspend ? html`<${PastOverspendTile} block=${pastOverspend} />` : null}
-      <div class="opt-section" style="flex:1;min-width:260px;padding:12px 14px;border:1px solid var(--border);border-radius:8px">
-        <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--success)">Fixes applied</div>
+      <div class="opt-section opt-tile">
+        <div class="dim" style="font-size:11px;text-transform:uppercase;letter-spacing:.03em;color:var(--success)">Fixes</div>
         ${/* The green belongs to the label, not the figure: the number reads as
               a plain fact, matching the blue tile where the figure is also
               body-coloured rather than tinted. */ ''}
         ${/* Skeleton, never a zero. Same geometry as the real figure so the tile
               does not resize when the read lands. */ ''}
+        ${/* THE COUNT IS THE FIGURE. It used to be a token/dollar estimate
+              (`appliedBig`), which put an estimated quantity in the hero slot of a
+              tile whose subject is "how many fixes are in place" — two different
+              claims, and the estimate is the weaker one (each figure is a
+              point-in-time snapshot taken at apply and never re-measured). The
+              count is a fact the ledger knows exactly. Founder call.
+
+              Still gated: a skeleton, never a zero. `appliedCount` excludes
+              reverted records, which is what lets the caption below say
+              "successfully" without overclaiming. */ ''}
         ${appliedKnown
-          ? html`<div style="font-size:24px;font-weight:600;margin-top:4px" title="each fix's own estimate at the moment it was applied — never re-measured afterward">${appliedBig}</div>`
+          ? html`<div style="font-size:24px;font-weight:600;margin-top:4px" title=${appliedEstimateHint(appliedEstimates, suppressed)}>${appliedCount}</div>`
           : html`<div class="shimmer" style="height:24px;width:38%;margin-top:6px"></div>`}
         ${/* The sub-line never restates the number above it. When the big
               figure is an estimate, the line dates it to apply time (the same
@@ -11283,10 +11724,13 @@ function InboxStatTiles({ openItems, appliedEstimates, appliedCount, appliedKnow
         ${/* "most recent unknown" is a settled value too, and it was rendering
               before the read that would have supplied the date. Held back with
               the figure. */ ''}
+        ${/* Lowercase on purpose (founder call) — the uppercase label above it is
+              the tile's name, this is its sentence. It states what the number
+              MEANS rather than restating the number, and it carries the recency
+              the old estimate caption did. */ ''}
         ${appliedKnown
-          ? html`<div class="dim" style="font-size:12px;margin-top:2px">${appliedBig === String(appliedCount)
-              ? html`most recent ${daysAgoLabel(lastAppliedAt) || 'unknown'}`
-              : html`across ${appliedCount} applied fix${appliedCount === 1 ? '' : 'es'} · estimated when applied`}</div>`
+          ? html`<div class="dim" style="font-size:12px;margin-top:2px">successfully applied${
+              daysAgoLabel(lastAppliedAt) ? ' · most recent ' + daysAgoLabel(lastAppliedAt) : ''}</div>`
           : html`<div class="shimmer" style="height:12px;width:66%;margin-top:6px"></div>`}
       </div>
     </div>
@@ -11328,8 +11772,6 @@ function ReviewInboxView({ params }) {
   const [modalSig, setModalSig] = useState(null);
   const [reviewQueue, setReviewQueue] = useState([]);
   const [reviewTotal, setReviewTotal] = useState(0);
-  const [refreshing, setRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState(null); // a rescan POST that was refused, honestly surfaced
   const [applied, setApplied] = useState([]);
   const [appliedSigs, setAppliedSigs] = useState(() => new Set());   // hide from pending immediately
   const [costProps, setCostProps] = useState([]);          // advise-only cost proposals
@@ -11359,6 +11801,11 @@ function ReviewInboxView({ params }) {
       const f = r.finding || {};
       setD({
         loading: false, error: null, status: r.status, computedAt: r.computed_at,
+        // Cycle-wide in-flight + build provenance, carried through to the
+        // header's ScanBar. `status` above is this store's own leg of the pass.
+        cycleComputing: r.cycle_computing === true,
+        computedBuild: r.computed_build || null,
+        build: r.build || null,
         clusters: f.clusters || [], sessionsScanned: f.sessions_scanned,
         failuresExamined: f.failures_examined,
         // Kept on the finding state even though the per-row span caption was
@@ -11421,24 +11868,28 @@ function ReviewInboxView({ params }) {
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [analyzerFocus, costProps]);
 
-  // Two stores, one rescan press: relearn's own cache and the cost-advisory
-  // cache recompute on the same cadence, so one control re-runs both. Unlike
-  // the old fire-and-forget version, a refused POST is not swallowed — the
-  // shared ScanBar control needs an honest error to show (Critical Rule: a
-  // rescan that failed must not look like one that succeeded).
-  const doRefresh = useCallback(async () => {
-    setRefreshing(true);
-    setRefreshError(null);
-    const results = await Promise.allSettled([
-      apiPostOrDetail('/relearn/refresh', {}),
-      apiPostOrDetail('/relearn/cost-proposals/refresh', {}),
-    ]);
-    const failed = results.filter(r => r.status === 'rejected');
-    if (failed.length) {
-      setRefreshError(failed.map(r => (r.reason && (r.reason.message || String(r.reason))) || 'unknown error').join('; '));
-    }
-    setTimeout(() => { setRefreshing(false); load(); loadCost(); }, 1500);
-  }, [load, loadCost]);
+  // ONE rescan press, every analyzer store — the same endpoint the Dashboard's
+  // and Optimize's Rescan press. This used to POST relearn's and the
+  // cost-advisory's own refresh endpoints (two of the three stores), while
+  // `/optimize/rescan` refreshed the report (the third). So "Rescan" meant a
+  // different thing on each screen, and the figures those stores feed could
+  // age apart with nothing disclosing it. The server side now fans one request
+  // out to all three (`core/optimize/scan_cycle.py`).
+  //
+  // A refused POST is still not swallowed — the shared ScanBar control needs an
+  // honest error to show (Critical Rule: a rescan that failed must not look
+  // like one that succeeded).
+  //
+  // Through `useRescan` like the other two surfaces, rather than a second
+  // hand-rolled copy of the same busy/error/timing behaviour. It already POSTs
+  // the same endpoint they do; keeping a private copy meant the declined-rescan
+  // and in-flight handling had to be fixed here a second time, and two copies
+  // of one derivation are free to disagree the moment only one is touched.
+  const reloadInbox = useCallback(() => { load(); loadCost(); }, [load, loadCost]);
+  const {
+    busy: refreshing, error: refreshError, declined: refreshDeclined,
+    declinedDetail: refreshDeclinedDetail, rescan: doRefresh,
+  } = useRescan(reloadInbox);
 
   // A scan-state shape ScanBar can render, built from the inbox's own two
   // reads rather than from `/optimize` — same control, different store. The
@@ -11450,7 +11901,15 @@ function ReviewInboxView({ params }) {
     fetchFailed: false,
     computedAt: d.computedAt,
     windowDays: null,
-    computing: d.status === 'computing' || costStatus === 'computing',
+    // Both stores' own flags OR the cycle's. The two `status` fields drop as
+    // each store's leg of the pass lands, and the report's leg — which neither
+    // of them covers — runs first, so on its own this went quiet while the rows
+    // below were still the previous pass's. `cycleComputing` is the pass.
+    computing: d.status === 'computing' || costStatus === 'computing' || d.cycleComputing === true,
+    // The relearn cache's build, since its `computed_at` is this header's
+    // provenance. Same three cases ScanBar's `buildQualifier` resolves.
+    computedBuild: d.computedBuild,
+    build: d.build,
     degraded: costDegraded,
     lastError: costLastError,
     status: (d.status === 'never_run' && costStatus === 'never_run')
@@ -11667,7 +12126,8 @@ function ReviewInboxView({ params }) {
             screens) is already the one place that reports scan state. */ ''}
       <span style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">
         ${d.sessionsScanned != null ? html`<span class="scan-provenance">${d.sessionsScanned} sessions scanned</span>` : null}
-        <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} onRescan=${doRefresh} />
+        <${PersonaPicker} />
+      <${ScanBar} scan=${inboxScan} busy=${refreshing} error=${refreshError} declined=${refreshDeclined} declinedDetail=${refreshDeclinedDetail} onRescan=${doRefresh} />
       </span>
     </div>
     <div class="sz-note">Waste you're paying for more than once: mistakes your agents keep repeating, and cost fixes ready to apply.</div>
@@ -11731,18 +12191,18 @@ function ReviewInboxView({ params }) {
               completed-but-empty result. */ ''}
         ${openItems.length === 0 ? (
           d.error && costStatus === 'error'
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load the inbox: ${d.error}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
+            ? html`<div class="empty compact err">Couldn't load the inbox: ${d.error}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
           : d.error
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">Couldn't load proposals: ${d.error}</div>`
+            ? html`<div class="empty compact err">Couldn't load proposals: ${d.error}</div>`
           : showSkeleton
             ? html`
                 <${InboxLoadingNote} scanning=${!firstLoad && scanning} sessionsScanned=${d.sessionsScanned} />
                 ${[0, 1, 2, 3].map(i => html`<${InboxSkeletonRow} key=${i} />`)}`
           : costStatus === 'error'
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center;color:var(--error)">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
+            ? html`<div class="empty compact err">The last scan failed${costLastError ? ': ' + costLastError : ''}. <span class="sz-link" onClick=${doRefresh}>Try again</span>.</div>`
           : d.status === 'never_run' && costStatus === 'never_run'
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>`
-            : html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing open. The last scan found nothing worth a row (or you've dismissed or applied everything).</div>`
+            ? html`<div class="empty compact">No scan has run yet. Click <span class="sz-link" onClick=${doRefresh}>Rescan now</span> to kick one off.</div>`
+            : html`<div class="empty compact">Nothing open. The last scan found nothing worth a row (or you've dismissed or applied everything).</div>`
         ) : null}
         ${topOpen.map(renderRow)}
         ${/* The tail's own line is stated in the same tense as the rows it
@@ -11818,7 +12278,7 @@ function ReviewInboxView({ params }) {
         ${!appliedCountKnown
           ? html`${[0, 1, 2].map(i => html`<${AppliedSkeletonRow} key=${i} />`)}`
           : combinedApplied.length === 0
-            ? html`<div class="dim" style="padding:32px 16px;text-align:center">Nothing applied yet.</div>`
+            ? html`<div class="empty compact">Nothing applied yet.</div>`
             : combinedApplied.map(rec => html`<${AppliedItemRow} key=${rec.kind + ':' + rec.id} rec=${rec} suppressed=${suppressed} onChanged=${() => { loadApplied(); loadCost(); }} />`)}
       </div>
     ` : null}
@@ -11916,7 +12376,39 @@ function windowOptionsWithCurrent(availableDays, since) {
     : options.concat([{ value: since, label: `Last ${since}` }]);
 }
 
-function DashboardView({ params }) {
+/** Shown when the reader has switched to a persona this machine has no data for.
+ *
+ * The distinction this exists to protect: "you have no SDK workflows here" and
+ * "your SDK workflows cost nothing" are different statements, and every tile on
+ * this page would otherwise render the second while the truth is the first. It
+ * renders only once the persona read has ANSWERED (`known`) and reports a hard
+ * zero; an unanswered or failed read says nothing at all, because a zero we do
+ * not have is not a measurement.
+ */
+function PersonaNoDataNotice({ persona }) {
+  const [info, setInfo] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    api('/persona').then(d => { if (!cancelled) setInfo(d); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+  if (!info || !info.known || !info.counts) return null;
+  if ((info.counts[persona] || 0) > 0) return null;
+  const label = persona === 'sdk' ? 'SDK workflows' : 'Claude Code sessions';
+  const other = persona === 'sdk' ? 'Claude Code' : 'SDK workflows';
+  return html`
+    <div class="band-msg" style="margin:0 0 18px">
+      <b>No ${label} on this machine.</b>
+      <p>
+        Nothing has been ingested for this persona, so the figures below are not
+        small: they are empty. Switch back to ${other} to see what this machine
+        actually has, or point an SDK workload at the collector and it will show
+        up here.
+      </p>
+    </div>`;
+}
+
+function DashboardView({ params, persona }) {
   const since = readParam(params, 'since', '30d', validSince);
   // Preserve the explorer's params (metric/group_by/stack/chart/filters) when
   // only the window changes, so the hero keeps its slice across window switches.
@@ -12143,8 +12635,11 @@ function DashboardView({ params }) {
   // below cannot disagree about how fresh their figures are or whether anything
   // has been computed at all.
   const scan = scanState(optData);
-  const { busy: rescanning, error: rescanError, rescan: doRescan } = useRescan(loadOptimize);
-  useAutoRescan(scan, doRescan);
+  const {
+    busy: rescanning, error: rescanError, declined: rescanDeclined,
+    declinedDetail: rescanDeclinedDetail, rescan: doRescan,
+  } = useRescan(loadOptimize);
+  useAutoRefresh(scan, loadOptimize);
 
   // Budgets ride on the same /optimize payload, so the "Budgets at risk" tile
   // inherits that read's outcome: 0 with the caption "none configured" is a
@@ -12177,18 +12672,20 @@ function DashboardView({ params }) {
   // api/subscription/unknown. Requires `projection`, which requires
   // `costData`, so this caption cannot be built from an unanswered read.
   const kpiCaption = (projection && projection !== '—')
-    ? ('At this pace, ~' + projection + ' by ' + cyc.label + ' — linear run-rate, not a forecast')
+    ? ('At this pace, ~' + projection + ' by ' + cyc.label + '; linear run-rate, not a forecast')
     : null;
 
   return html`
+    <${PersonaNoDataNotice} persona=${persona} />
     <div class="ov-head">
       <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <div class="page-title" style="margin:0">Dashboard</div>
         <${PlanBadge} framing=${framing} />
       </div>
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+        <${PersonaPicker} />
         <div class="filters" style="margin:0">${winPicker}</div>
-        <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
+        <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} declined=${rescanDeclined} declinedDetail=${rescanDeclinedDetail} onRescan=${doRescan} />
       </div>
     </div>
     ${/* A past-overspend hero band rendered here once. Removed: it read as heavy
@@ -12238,7 +12735,17 @@ function DashboardView({ params }) {
         ${html`
             <div class="dash-triage">
               <div class="dash-col">
-                <div class="band-label">Recoverable waste</div>
+                ${/* The band states its OWN window, beside the figures rather
+                      than only in the provenance bar at the top of the page.
+                      These tiles come from a stored analyzer pass, so the
+                      window is the one that pass ran at — NOT the `since` the
+                      page's own picker is set to, which re-scopes the live
+                      spend chart below and nothing here. Two surfaces published
+                      this metric under two windows and neither said so; the
+                      windows are one seam now (core/optimize/report_window.py)
+                      and each surface still names it, because a figure whose
+                      window the reader cannot see is not auditable. */ ''}
+                <div class="band-label">Past overspend${scan.windowDays ? html`<span class="band-window">· over the last ${scan.windowDays} days</span>` : null}</div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
@@ -12257,7 +12764,7 @@ function DashboardView({ params }) {
                         <div class="shimmer" style="height:10px;width:78%;margin-top:4px"></div>
                       </div>`)}
                   </div>
-                  <div class="band-note">Scanning your history for recoverable waste. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
+                  <div class="band-note">Scanning your history for past overspend. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
                 ${bandState === 'cold' ? html`
                   <div class="band-msg">
                     <b>No scan has run yet.</b>
@@ -12268,14 +12775,14 @@ function DashboardView({ params }) {
                 ${bandState === 'timeout' ? html`
                   <div class="band-msg warn">
                     <b>Still scanning after ${OPTIMIZE_WAIT_MIN} minutes.</b>
-                    <p>We don't know yet whether there is recoverable waste in this window. The scan hasn't answered; that is not the same as an all-clear, so this band is showing you nothing rather than a zero.</p>
+                    <p>We don't know yet whether there is overspend in this window. The scan hasn't answered; that is not the same as an all-clear, so this band is showing you nothing rather than a zero.</p>
                     <button class="btn" onClick=${retryOptimize}>Keep waiting</button>
                   </div>` : null}
                 ${bandState === 'failed' ? html`
                   <div class="band-msg err">
-                    <b>Couldn't scan for recoverable waste.</b>
+                    <b>Couldn't scan for past overspend.</b>
                     <p>${optState.error || 'The request failed.'}</p>
-                    <p>Until this succeeds there is no basis for saying whether recoverable waste exists here, so no figure is shown.</p>
+                    <p>Until this succeeds there is no basis for saying whether overspend exists here, so no figure is shown.</p>
                     <button class="btn" onClick=${retryOptimize}>Try again</button>
                   </div>` : null}
                 ${bandState === 'stale' ? html`
@@ -12285,7 +12792,7 @@ function DashboardView({ params }) {
                   </div>` : null}
                 ${bandState === 'tiles' || bandState === 'none' || bandState === 'stale' ? html`
                 <div class="tile-grid compact">
-                  ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
+                  ${tiles.length === 0 ? html`<div class="empty">No overspend found.</div>`
                     : tiles.map(t => {
                       const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
                       // Route straight to the analyzer's own detail card on
@@ -12311,7 +12818,7 @@ function DashboardView({ params }) {
                     })}
                 </div>` : null}
               </div>
-              <div class="dash-col">
+              <div class="dash-col health-glance">
                 <div class="band-label">Health at a glance</div>
                 ${/* Every tile below carries the status of the read it is derived
                       from. Each one used to take its figure from a `.catch(() =>
@@ -12352,11 +12859,16 @@ function DashboardView({ params }) {
 // Claude-Code wedge (review inbox, dashboard, session monitoring), Observe is
 // the SDK/observability suite. Views not listed default to 'improve' — every
 // existing view still renders, this only decides which nav group frames it.
+// Lens membership lives in TWO places that must agree: each nav anchor's own
+// `data-lens` attribute (pure CSS decides which group renders) and this map
+// (which lens a ROUTE belongs to, used to flip the active lens on a deep-link
+// or a back-nav). Changing one without the other desyncs the sidebar from the
+// URL: the link sits in one group while landing on it activates the other.
 const VIEW_LENS = {
   review: 'improve', dashboard: 'improve', status: 'improve', sessions: 'improve', runs: 'improve',
-  faq: 'improve',
+  faq: 'improve', optimize: 'improve',
   traces: 'observe', cost: 'observe', alerts: 'observe', drift: 'observe',
-  optimize: 'observe', budget: 'observe',
+  budget: 'observe',
 };
 
 // ============================
@@ -12430,8 +12942,104 @@ function detailNodeFor(route) {
   return null;
 }
 
+// Which views each persona is offered. A coding-agent user (Claude Code, and
+// Codex once it is supported) is not shown the Observe lens at all: it is the
+// SDK/observability suite and none of it ends in an edit they can make. An SDK
+// user gets both lenses, minus the two surfaces that only exist because a
+// coding agent leaves transcripts on disk.
+//
+// This is a VIEW filter over one dataset, never a claim about the data. It
+// hides pages; it never changes a number, and it never implies the hidden
+// pages found nothing.
+// (Plain arrays, not Sets keyed by persona: a persona-keyed `new Set(...)`
+// literal is the shape the analyzer gate map would take if someone ever
+// duplicated it into JS, and a regression test forbids that shape outright.
+// These are VIEW names, an entirely different concern from the analyzer gate,
+// but the guard is worth keeping blunt.)
+const PERSONA_HIDDEN_VIEWS = {
+  'claude-code': ['traces', 'cost', 'alerts', 'drift', 'budget'],
+  'sdk': ['sessions'],
+};
+
+function personaHides(persona, view) {
+  const hidden = PERSONA_HIDDEN_VIEWS[persona];
+  return !!(hidden && hidden.indexOf(view) !== -1);
+}
+
+/** The persona switcher, pinned above every page.
+ *
+ * View-only by design: it defaults to whatever the corpus looks like and
+ * resets on reload, so it can never drift out of sync with the ingested data
+ * the way a stored preference would. Both personas are always offered, even
+ * one with no data — someone evaluating the SDK view should be told plainly
+ * that this machine has no SDK workflows rather than find the option missing
+ * and be left guessing whether it is supported.
+ */
+const PersonaCtx = createContext(null);
+
+// The switcher itself, position-free. Rendered by whichever container owns the
+// spot: a page's own header-right group when it has one, otherwise the floated
+// fallback below. Reads context rather than props so a page can place it
+// without every view having to thread persona state down to its header.
+function PersonaPicker() {
+  const ctx = useContext(PersonaCtx);
+  if (!ctx) return null;
+  const { persona, detected, known, counts, onChange } = ctx;
+  const opts = [['claude-code', 'Claude Code'], ['sdk', 'SDK workflows']];
+  return html`
+    <span class="persona-pick">
+      ${/* No id + for pairing here. App keeps every visited primary view
+            MOUNTED (hidden with display:none), so several of them render their
+            own picker at once and a fixed id would be duplicated across the
+            document. The label wraps its control instead, which associates the
+            two without needing a global identifier. */''}
+      <label class="persona-bar-label">Viewing as
+        <select class="persona-select" aria-label="Persona"
+                value=${persona} onChange=${(e) => onChange(e.currentTarget.value)}>
+          ${opts.map(([value, label]) => html`
+            <option key=${value} value=${value} selected=${persona === value}>${label}</option>`)}
+        </select>
+      </label>
+      ${known && detected && persona !== detected ? html`
+        <span class="persona-bar-note">Detected: ${detected === 'claude-code' ? 'Claude Code' : detected}</span>` : null}
+      ${known && counts && counts[persona] === 0 ? html`
+        <span class="persona-bar-note">No ${persona === 'sdk' ? 'SDK' : 'Claude Code'} sessions on this machine</span>` : null}
+    </span>`;
+}
+
+// Views that render `PersonaPicker` themselves, as the FIRST item of their own
+// header-right group so it reads before the controls that scope the page (the
+// window picker, then Rescan). App() must not also float the fallback for
+// these, or the switcher appears twice. Anything not listed here has no
+// header-right group of its own and gets the floated fallback instead.
+const VIEWS_WITH_PERSONA_SLOT = new Set(['dashboard', 'optimize', 'review']);
+
+// The fallback for every page with no header-right group of its own. Floated
+// so it shares the line with a heading that follows it in source, rather than
+// taking a row above every such page.
+function PersonaBar() {
+  return html`<div class="persona-bar"><${PersonaPicker} /></div>`;
+}
+
 function App() {
   const [route, setRoute] = useState(getRoute());
+
+  // Persona: detected from the corpus, overridable for the session only.
+  // `known:false` until the read lands, so nothing downstream renders a count
+  // or a "you have none of these" claim off an unanswered fetch.
+  const [personaInfo, setPersonaInfo] = useState({ known: false, detected: 'unknown', counts: null });
+  const [personaOverride, setPersonaOverride] = useState(null);
+  const persona = personaOverride
+    || (personaInfo.known && PERSONA_HIDDEN_VIEWS[personaInfo.detected] ? personaInfo.detected : 'claude-code');
+  const setPersona = (p) => setPersonaOverride(p);
+
+  useEffect(() => {
+    let cancelled = false;
+    api('/persona')
+      .then(d => { if (!cancelled && d) setPersonaInfo(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     const handler = () => setRoute(getRoute());
@@ -12464,6 +13072,18 @@ function App() {
     }
   }, [route.view, route.param]);
 
+  // Landing on a view this persona does not show (a deep link, a bookmark, or
+  // switching persona while standing on one) leaves the reader on a page with
+  // no nav entry pointing at it. Send them to the Dashboard instead of
+  // rendering an orphan. replaceState so Back does not bounce them straight
+  // into the same hidden view again.
+  useEffect(() => {
+    if (personaHides(persona, route.view)) {
+      history.replaceState(null, '', '#/dashboard');
+      setRoute(getRoute());
+    }
+  }, [persona, route.view]);
+
   // Update active nav link + reveal nested children of the active section +
   // keep the Improve/Observe lens pill in sync with the current route (self-
   // improve-loop SPEC.md §12 — two lenses, one router; a direct link or
@@ -12472,6 +13092,13 @@ function App() {
     const view = route.view, param = route.param || '';
     const lens = VIEW_LENS[view] || 'improve';
     const sidebar = document.querySelector('.sidebar');
+    // `data-persona` drives the nav gating in CSS, alongside `data-lens`.
+    // Written in this same pass so the two can never disagree for a frame;
+    // `persona` is therefore in this effect's dependency list. It is also
+    // mirrored onto <body>, because persona gates content INSIDE views too
+    // (the Dashboard's health band), which the sidebar attribute cannot reach.
+    if (sidebar) sidebar.dataset.persona = persona;
+    document.body.dataset.persona = persona;
     if (sidebar) sidebar.dataset.lens = lens;
     document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
     document.querySelectorAll('.nav-link').forEach(el => {
@@ -12487,7 +13114,11 @@ function App() {
         el.classList.toggle('active', v === view && !childActive);
       }
     });
-  }, [route.view, route.param]);
+    // `persona` is a dependency because this effect writes `data-persona`, which
+    // drives the nav gating. Without it the attribute is only refreshed when the
+    // ROUTE changes, so switching persona while standing still leaves the
+    // sidebar showing the previous persona's pages.
+  }, [route.view, route.param, persona]);
 
   const primaryKey = primaryKeyFor(route);
   const detail = detailNodeFor(route);
@@ -12538,15 +13169,28 @@ function App() {
   // Keep-alive stack: every mounted primary view renders, but only the active
   // one is visible; the rest are display:none (kept mounted, state intact). A
   // detail drill-in (mounted fresh, keyed by id) overlays the hidden stack.
+  const personaCtx = { persona, detected: personaInfo.detected, known: personaInfo.known,
+                       counts: personaInfo.counts, onChange: setPersona };
+  // The floated fallback is suppressed for views that render the picker inside
+  // their own header-right group; a detail drill-in never has one, so it always
+  // takes the fallback regardless of which primary view is behind it.
+  const ownsPersonaSlot = !detail && VIEWS_WITH_PERSONA_SLOT.has(primaryKey);
   return html`
+    <${PersonaCtx.Provider} value=${personaCtx}>
+    ${ownsPersonaSlot ? null : html`<${PersonaBar} />`}
     ${PRIMARY_VIEWS.map(([key, Comp]) => {
       if (!mounted.has(key)) return null;
       const isActive = !detail && key === primaryKey;
       const vp = paramsByView.current[key] || EMPTY_PARAMS;
-      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}><${Comp} params=${vp} /></div>`;
+      // `persona` is passed to every primary view, not just the ones that read
+      // it today: a view needs the SELECTED persona (not the detected one) to
+      // say anything honest about a persona with no data, and re-fetching it
+      // per view would let two surfaces disagree mid-render.
+      return html`<div key=${key} class="view-pane" style=${isActive ? '' : 'display:none'}><${Comp} params=${vp} persona=${persona} /></div>`;
     })}
     ${detail ? html`<div key=${'detail:' + route.view + ':' + route.param} class="view-pane">${detail}</div>` : null}
     ${!detail && !PRIMARY_KEYS.has(primaryKey) ? html`<div class="empty">Page not found.</div>` : null}
+    <//>
   `;
 }
 

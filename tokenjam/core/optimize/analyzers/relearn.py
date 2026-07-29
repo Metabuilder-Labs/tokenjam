@@ -71,7 +71,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from tokenjam.core.analysis_span import retention_days_for, window_label_for
+from tokenjam.core.analysis_span import retention_days_for
 from tokenjam.core import distill as distill_mod
 from tokenjam.core.method_spine import build_method_spine
 from tokenjam.core.optimize.clustering import group_by_key, mask_variables, recurring
@@ -2576,7 +2576,8 @@ def run(ctx: AnalyzerContext) -> None:
     ``storage.retention_days`` — what tokenjam actually kept — which is the
     point of keeping it.
     """
-    from tokenjam.core.optimize.scope import resolve_analyzer_scope
+    from tokenjam.core.optimize.report_window import report_window_label
+    from tokenjam.core.optimize.scope import resolve_analyzer_scope, resolve_write_scope
     from tokenjam.core.transcript_cache import default_cache_dir
 
     scope = ctx.scope if ctx.scope is not None else resolve_analyzer_scope(ctx.config)
@@ -2614,12 +2615,24 @@ def run(ctx: AnalyzerContext) -> None:
     ctx.report.findings["relearn"] = compute_relearn_finding(
         ctx.conn, min_sessions=min_sessions,
         retention_days=retention_days,
-        # So the inbox's one window label always has a bucket on this side too.
+        # So the inbox's one window label always has a bucket on this side
+        # too. Resolved through `core/optimize/report_window`, the seam the
+        # cost side and the stored report both take their window from — the
+        # inbox matches this vocabulary EXACTLY, so a label derived any other
+        # way here drops every cluster out of the headline.
         window_labels=window_labels_including(
-            window_label_for(storage_cfg, ctx.conn)
+            report_window_label(ctx.config, ctx.conn)
         ),
         projects_root=scope.projects_root,
-        claude_home=scope.claude_home,
+        # THE APPLY TARGET AND THE WRITE GUARD MUST COME FROM ONE PLACE. This
+        # passed `scope.claude_home` directly while `relearn_store` passed
+        # `resolve_write_scope(scope=scope).suggest_root` for the same purpose,
+        # and that store carries a comment recording what independent
+        # derivation cost last time: the API's write guard authorizes against
+        # the OTHER half of this same type, so a card whose evidence is scoped
+        # one way and whose write target is scoped another describes two
+        # different machines. Both callers now resolve it here.
+        claude_home=resolve_write_scope(scope=scope).suggest_root,
         distill_cache_dir=_distill_cache_dir(ctx.config),
         transcript_cache_dir=default_cache_dir(ctx.config),
         persona=ctx.persona,

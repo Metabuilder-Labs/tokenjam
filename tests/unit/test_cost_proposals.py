@@ -1672,3 +1672,65 @@ def test_an_entry_with_no_dollar_dimension_never_gets_one_fabricated():
     out = backfill_legacy_past_overspend_fields({"signature": "cost:subagent:bar"})
     assert out["past_overspend_usd"] is None
     assert out["past_overspend_tokens"] is None
+
+
+def _untyped_per_agent_downgrade():
+    """A `downgrade` finding whose `per_agent` rows are plain dicts — exactly
+    what `report_from_dict` produced before the row type was declared. Every
+    `row.delta_usd` inside the adapter then raises."""
+    from tokenjam.core.optimize.analyzers.model_downgrade import DowngradeFinding
+
+    return DowngradeFinding(
+        candidate_sessions=5, total_sessions=50,
+        actual_cost_usd=10.0, alternative_cost_usd=4.0,
+        monthly_savings_usd=6.0, percent_of_sessions=10.0,
+        examples=[], suggestions={"claude-opus-5": "claude-sonnet-5"},
+        past_overspend_usd=6.0,
+        per_agent=[{"agent_id": "a", "delta_usd": 6.0, "provider": "anthropic"}],
+    )
+
+
+# --- a skipped analyzer is a hole in the headline, never a silent one ------- #
+
+def test_an_adapter_that_raises_is_reported_rather_than_silently_dropped():
+    """The inbox surviving one bad analyzer is right; surviving it INVISIBLY is
+    what let a whole analyzer's figure disappear from the headline while the
+    Dashboard tile went on publishing it.
+
+    The concrete incident: a stored report rehydrated `downgrade.per_agent` as
+    plain dicts, `row.delta_usd` raised, and the broad `except` around each
+    adapter dropped every downsize row. The total came out smaller and looked
+    complete — no error, no empty state, nothing to notice.
+    """
+    from tokenjam.core.optimize.cost_proposals import (
+        _adapter_failure_entries,
+        cost_proposals_from_report,
+    )
+
+    report = _report()
+    report.downgrade = _untyped_per_agent_downgrade()
+
+    seen: dict[str, str] = {}
+    proposals = cost_proposals_from_report(
+        report, on_adapter_error=lambda n, e: seen.__setitem__(n, f"{type(e).__name__}: {e}"),
+    )
+
+    assert "downsize" in seen, (
+        "an adapter raised and nothing recorded which analyzer it was"
+    )
+    assert not [p for p in proposals if p.analyzer == "downsize"]
+    # ...and the failure becomes a disclosure with NO figure: what it would
+    # have contributed is exactly what could not be computed.
+    entry = _adapter_failure_entries(seen)["downsize"]
+    assert entry["past_overspend_usd"] is None
+    assert "unknown, not zero" in entry["note"]
+
+
+def test_the_bare_skip_still_works_for_a_caller_with_nowhere_to_report():
+    """`on_adapter_error` is optional: a caller that cannot disclose anything
+    still gets a live inbox rather than an exception."""
+    from tokenjam.core.optimize.cost_proposals import cost_proposals_from_report
+
+    report = _report()
+    report.downgrade = _untyped_per_agent_downgrade()
+    assert not [p for p in cost_proposals_from_report(report) if p.analyzer == "downsize"]

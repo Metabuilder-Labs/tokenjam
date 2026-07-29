@@ -185,6 +185,25 @@ def _invoke_claude(prompt: str, *, model: str, timeout: int) -> str | None:
     return result if isinstance(result, str) else None
 
 
+def invoke_claude(prompt: str, *, model: str, timeout: int) -> str | None:
+    """The pinned invocation, under a public name.
+
+    ``_invoke_claude``'s docstring already declares itself shared by every
+    distill entry point; this makes that contract importable, so a caller outside
+    this module (``rulewrite/presence``, asking whether a rule is already in an
+    instruction file) reuses the one recipe — cheapest model path, neutral cwd,
+    stdin-not-argv prompt, never raises — instead of growing a second subprocess
+    call with its own subtly different flags.
+
+    A function rather than ``invoke_claude = _invoke_claude``: an alias binds at
+    import time, so a test patching ``distill._invoke_claude`` would leave this
+    name pointing at the real subprocess and shell out for real. Delegating on
+    each call keeps both names patchable, which is the difference between a test
+    that stubs the model and a test that quietly spends the user's quota.
+    """
+    return _invoke_claude(prompt, model=model, timeout=timeout)
+
+
 def distill_titles(
     asks: list[dict],
     *,

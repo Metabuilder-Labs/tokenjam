@@ -65,7 +65,7 @@ def test_nudge_claude_code_persona_is_exactly_two_entries(capsys):
     dashboard is where that diagnosis is read. tjb is an SDK workflow and must
     not appear here either."""
     _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=True,
+        has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     out = capsys.readouterr().out
     assert "web dashboard" in out
@@ -93,11 +93,11 @@ def test_nudge_claude_code_persona_is_exactly_two_entries(capsys):
 def test_nudge_claude_code_never_says_lens(capsys):
     """The web UI entry is named "web dashboard" on this list, not "Lens"."""
     _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=True,
+        has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     assert "Lens" not in capsys.readouterr().out
     _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=False,
+        has_data=True, days=30, persona="claude-code", daemon_running=False,
     )
     assert "Lens" not in capsys.readouterr().out
 
@@ -106,7 +106,7 @@ def test_nudge_daemon_running_never_suggests_tj_serve(capsys):
     """Onboarding just installed the daemon — the dashboard is already up;
     suggesting `tj serve` invites a port conflict."""
     _print_next_steps_nudge(
-        has_data=True, days=30, persona="claude_code", daemon_running=True,
+        has_data=True, days=30, persona="claude-code", daemon_running=True,
     )
     out = capsys.readouterr().out
     assert "tj serve" not in out
@@ -116,7 +116,7 @@ def test_nudge_daemon_running_never_suggests_tj_serve(capsys):
 
 def test_nudge_no_daemon_still_points_at_tj_serve(capsys):
     _print_next_steps_nudge(
-        has_data=False, persona="claude_code", daemon_running=False,
+        has_data=False, persona="claude-code", daemon_running=False,
     )
     out = capsys.readouterr().out
     assert "tj serve" in out

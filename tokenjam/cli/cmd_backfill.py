@@ -196,6 +196,24 @@ def status(ctx: click.Context, root_path: str | None, since_value: str | None,
         f"{'s' if report.disk_sessions != 1 else ''} "
         f"([dim]deduped on internal sessionId[/dim])."
     )
+
+    if not report.verified:
+        # The disk-vs-DB anti-join never ran (the daemon holds the write-lock
+        # and its HTTP shim lookup failed). The ingested/missing/skipped buckets
+        # are all 0 by default here — printing them would falsely claim
+        # "everything is ingested" (#642). Be honest instead.
+        console.print(
+            f"  [yellow]![/yellow] Couldn't verify ingestion status — "
+            f"found [bold]{report.disk_sessions}[/bold] on-disk session"
+            f"{'s' if report.disk_sessions != 1 else ''} but the tj daemon was "
+            f"unreachable, so the DB comparison could not run."
+        )
+        console.print(
+            "  [dim]Try `tj stop` then re-run `tj backfill status`, or check "
+            "that `tj serve` is healthy.[/dim]"
+        )
+        return
+
     console.print(
         f"  [bold]{report.ingested_sessions}[/bold] already ingested · "
         f"[bold]{report.missing_count}[/bold] missing · "

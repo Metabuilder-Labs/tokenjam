@@ -108,8 +108,18 @@ def cmd_rules_list(ctx: click.Context, output_json_flag: bool) -> None:
         # An applied rule keeps its row and its figure and says so. A row that
         # simply vanished would leave a user who just applied it unable to tell
         # "done" from "broken".
+        # "in your files" is a THIRD way to be done, and the one no ledger knew
+        # about: the user wrote this rule themselves. Without it such a rule read
+        # as "deferred", i.e. as something tokenjam declined — the inversion the
+        # presence check exists to fix.
+        #
+        # "deferred" survives as a fallback only. The write budget's refusals no
+        # longer reach this list at all (`rulewrite/plan._is_listable`), so a row
+        # showing it means something new is gating the offer and should be looked
+        # at rather than quietly labelled.
         state = (
             "applied" if rule.already_applied
+            else "in your files" if rule.already_present
             else "dismissed" if rule.dismissed
             else ("on offer" if rule.offered else "deferred")
         )
@@ -123,13 +133,22 @@ def cmd_rules_list(ctx: click.Context, output_json_flag: bool) -> None:
         )
     console.print(table)
     console.print()
-    for rule in rules:
-        if rule.offered or rule.already_applied or rule.dismissed:
-            continue
-        console.print(
-            f"[muted]{escape(rule.signature)} — not on offer: "
-            f"{escape(rule.blocked_reason)}[/muted]",
-        )
+    # The per-rule "not on offer: <reason>" trailer is GONE. It existed because
+    # every declined rule was listed and had to explain itself; the gate now sits
+    # below this surface, so there is nothing in `rules` left to explain. What
+    # replaces it is a count of the rules that are already in place, since a list
+    # that is short because the work is done reads identically to one that is
+    # short because nothing was found.
+    in_place = [r for r in rules if r.already_applied or r.already_present]
+    if in_place:
+        by_us = sum(1 for r in in_place if r.already_applied)
+        by_you = len(in_place) - by_us
+        parts = []
+        if by_us:
+            parts.append(f"{by_us} applied by tokenjam")
+        if by_you:
+            parts.append(f"{by_you} already in your instruction files")
+        console.print(f"[muted]In place: {escape(', '.join(parts))}.[/muted]")
     console.print(f"[muted]{escape(RULES_NOTE)}[/muted]")
     console.print(
         "[muted]stage one with [accent]tj rules stage <signature>[/accent], "
@@ -178,6 +197,18 @@ def cmd_rules_show(
     if rule.already_applied:
         console.print()
         console.print(f"[ok]✓[/ok] Already applied. {escape(rule.blocked_reason)}")
+    elif rule.already_present:
+        console.print()
+        console.print(
+            f"[ok]✓[/ok] Already in your instruction files. "
+            f"{escape(rule.blocked_reason)}",
+        )
+        if rule.presence_path:
+            console.print(f"[muted]found in {escape(rule.presence_path)}[/muted]")
+        # The model's own evidence, printed rather than summarised: this verdict is
+        # an inference, so a reader needs the file's words to check it against.
+        if rule.presence_evidence:
+            console.print(f"[muted]{escape(rule.presence_evidence)}[/muted]")
     elif rule.dismissed:
         console.print()
         console.print(f"[muted]Dismissed.[/muted] {escape(rule.blocked_reason)}")
