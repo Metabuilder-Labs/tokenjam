@@ -459,6 +459,12 @@ body[data-persona="claude-code"] .health-glance { display: none; }
    so the three read as one inventory rather than three tables that happen to
    share a page. */
 .ctx-audit-trigger { white-space: normal; max-width: 240px; }
+/* The size column is a number, nothing else. It carried a proportional bar
+   beside the figure; the bar encoded no fact the number did not already give,
+   and on an inventory whose whole point is "here is what loads and how big it
+   is" a second, coarser encoding of the same quantity just widened the column
+   and pushed the columns that DO carry independent facts off the edge. */
+.ctx-audit-size { font-variant-numeric: tabular-nums; }
 .ctx-audit-expand-btn, .ctx-audit-src-plain {
   flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: normal; text-align: left;
 }
@@ -1150,7 +1156,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
   letter-spacing: 0.04em; color: var(--warn); border: 1px solid var(--warn);
   border-radius: 3px; padding: 1px 4px; cursor: help; white-space: nowrap;
 }
-/* Distinct from .estimated-tag (amber, "estimated recoverable") on purpose —
+/* Distinct from .estimated-tag (amber) on purpose:
    budget-projection is a forecast of exposure against a ceiling, never a
    recoverable-waste estimate, and the two must never read as the same kind
    of number (see budget-projection framing). */
@@ -1162,7 +1168,7 @@ a.rec-tile.ok:hover { border-color: var(--success); }
 /* Distinct from .estimated-tag on purpose (CLAUDE.md anti-pattern #22, trap
    (a)): `placement`'s dollar figure is a PRICE difference on the same
    tokens (batch bills the same work at half rate), never tokens freed, so it
-   must never read as "estimated recoverable" like its siblings. */
+   must never read as a plain past-overspend figure like its siblings. */
 .price-diff-tag {
   font-family: 'Geist Mono', monospace; font-size: 9px; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--info); border: 1px solid var(--info);
@@ -1258,6 +1264,22 @@ a.health-tile.attn { border-color: var(--warn); }
    flex behaviour is the only thing that actually differs from the base class,
    so that is all this modifier carries. */
 .opt-tile { flex: 1; min-width: 260px; }
+/* A zone heading above a list of cards. Rules used to wrap its offers in one
+   `.panel` with a `.panel-head`, while the Review inbox lists the same KIND of
+   thing (one proposal, its evidence, its actions) as separate bordered cards.
+   Same content shape, two containers, so the two screens read as unrelated.
+   Rules now uses the inbox's card, and this is the heading that replaces the
+   panel head it lost. */
+.rules-zone { margin: 22px 0 10px; font-family: 'Geist Mono', monospace; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
+/* A zone heading above a list of cards. Rules listed its offers as rows inside
+   one panel while the Review inbox lists the same SHAPE of thing (one
+   proposal, its evidence, its actions) as separate bordered cards; the two
+   read as different kinds of surface for no reason. Rules now uses the same
+   cards, so what was a `.panel-head` strip becomes a standalone label above
+   them, matching the uppercase zone labels the Dashboard already uses. */
+.rules-zone { margin: 22px 0 10px; font-family: 'Geist Mono', monospace; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-dim); }
 .opt-section.opt-focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 /* Deep-link highlight for a Review-inbox cost advisory (card → apply hop).
    The card's own inline `border` wins over a plain class rule, so this needs
@@ -2794,7 +2816,7 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
     const grid = cssVar('--border') || '#1f1f1f';
     const tick = cssVar('--text-dim') || '#a1a1a1';
     const width = ref.current.clientWidth || 600;
-    const xs = [0, 1];                          // Cost | Recoverable (est.)
+    const xs = [0, 1];                          // Spend | Overspend
     // Drop ZERO-value segments before building the cumulative bars (#251). The
     // back-to-front stacking trick plots each segment's CUMULATIVE total as a
     // full bar; a zero-value segment carries the running cumulative (unchanged
@@ -2841,7 +2863,7 @@ function ComponentWasteChart({ costSegs, recSegs, fmtY = fmtCost, height = 220 }
       scales: { x: { time: false, range: [-0.5, 1.5] } },
       axes: [
         { stroke: tick, grid: { show: false }, ticks: { stroke: grid },
-          splits: [0, 1], values: () => ['Cost', 'Recoverable (est.)'] },
+          splits: [0, 1], values: () => ['Spend', 'Overspend'] },
         { stroke: tick, grid: { stroke: grid, width: 1 }, ticks: { stroke: grid },
           size: 60, values: (u, vals) => vals.map(v => fmtY(v)) },
       ],
@@ -2869,7 +2891,7 @@ function componentWasteTooltip(meta, fmtFn) {
       const idx = u.cursor.idx;
       if (idx == null) { tip.style.display = 'none'; return; }
       const col = u.data[0][idx];               // 0 = Cost, 1 = Recoverable
-      const title = col === 0 ? 'Cost by component' : 'Estimated recoverable';
+      const title = col === 0 ? 'Spend by component' : 'Overspend by analyzer';
       let rows = '';
       meta.forEach(m => {
         if (m.col !== col || !m.raw) return;
@@ -2887,7 +2909,7 @@ function componentWasteTooltip(meta, fmtFn) {
 // display text). `placement` is the one entry today (CLAUDE.md anti-pattern
 // #22): its `past_overspend_usd`/`_tokens` is a PRICE difference on
 // the SAME tokens (the Batch API bills the same work at half rate, freeing
-// nothing), so its legend row must never wear the "estimated recoverable"
+// nothing), so its legend row must never wear the plain past-overspend
 // wording/tag every sibling analyzer shares here — this mirrors the wording
 // already used on its own card in `OptimizeFinding`. `apiOnly: true` also
 // drops the segment from this overlay entirely off api pricing, matching
@@ -3147,7 +3169,7 @@ function TableRowsSkeleton(headers, rowCount) {
 // ============================
 // Status View
 // ============================
-function StatusView({ params }) {
+function StatusView({ params, persona }) {
   // Optional single-agent filter via URL (#112), filtered client-side.
   // The Status screen is two content-defined zones (#306): coding sessions
   // (bounded work → archived list) and SDK services (unbounded telemetry →
@@ -3183,6 +3205,13 @@ function StatusView({ params }) {
 
   if (!data) return html`<div class="page-title">Sessions</div>${CardGridSkeleton(6)}`;
   const sdkServices = data.sdk_services || [];
+  // Persona decides which zones this page HAS, so the heading below must be
+  // derived from it too: a page showing one zone must not open by promising
+  // two. Alerts reuse `personaHides` rather than a second persona literal, so
+  // this page and the nav can never disagree about whether alerts exist for
+  // the reader.
+  const showSdkZone = persona !== 'claude-code';
+  const showAlerts = !personaHides(persona, 'alerts');
   if (!data.agents.length && !(data.archived || []).length && !sdkServices.length) return html`<div class="empty">No agents found. Run an agent with ${'`@watch()`'} to start recording.<code>pip install tokenjam && tj onboard</code></div>`;
 
   const agents = agentId ? data.agents.filter(a => a.agent_id === agentId) : data.agents;
@@ -3262,7 +3291,7 @@ function StatusView({ params }) {
           ${a.active_seconds != null ? html`<div class="card-row"><span class="label">Active <span class="info-btn">i<span class="info-tip">Compute time: the sum of this session's span durations. The work actually done.</span></span></span><span class="value">${fmtDur(a.active_seconds * 1000)}</span></div>` : null}
           ${a.duration_seconds != null ? html`<div class="card-row"><span class="label">Elapsed <span class="info-btn">i<span class="info-tip">Wall-clock from session start to last activity. Resumed Claude Code sessions span days, so this can be far larger than Active time.</span></span></span><span class="value">${fmtDurLong(a.duration_seconds * 1000)}</span></div>` : null}
           ${a.last_span_time ? html`<div class="card-row"><span class="label">Last seen</span><span class="value">${fmtAgo(a.last_span_time)}</span></div>` : null}
-          ${a.active_alerts > 0 ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
+          ${a.active_alerts > 0 && showAlerts ? html`<div class="card-row"><span class="label">Alerts</span><span class="value" style="color:var(--error)">${a.active_alerts} active</span></div>` : null}
           <div class="card-foot">→ Map / Approach / Timeline</div>
         </div>`;
   };
@@ -3298,7 +3327,9 @@ function StatusView({ params }) {
     <div style="font-size:12px;color:var(--text-dim);margin:-14px 0 18px;font-family:'Geist Mono',monospace">
       ${agentId
         ? html`Filtered to <span class="mono">${agentId}</span> · <a href="#/sessions" style="color:var(--brand)">show all</a>`
-        : 'Two zones: coding sessions (bounded work) and SDK services (unbounded telemetry).'}
+        : (showSdkZone
+            ? 'Two zones: coding sessions (bounded work) and SDK services (unbounded telemetry).'
+            : 'Coding sessions: bounded work, active to idle to stale to closed.')}
     </div>
 
     ${(codingAgents.length || codingArchived.length) ? html`
@@ -3336,12 +3367,12 @@ function StatusView({ params }) {
         </details>` : null}
     ` : null}
 
-    ${sdkServices.length ? html`
+    ${sdkServices.length && showSdkZone ? html`
       <div class="section-gap"></div>
       <${SdkServicesPanel} services=${sdkServices} framing=${data.framing} />
     ` : null}
 
-    ${alerts.length > 0 ? html`
+    ${alerts.length > 0 && showAlerts ? html`
       <div class="section-gap"></div>
       <div class="page-title" style="font-size:14px;margin-top:8px">Recent Alerts</div>
       <div class="table-wrap"><table>
@@ -7262,17 +7293,10 @@ const CTX_AUDIT_CLASS_MEANING = {
 // One size cell, rendered in whichever unit the table is currently showing.
 // The bar is proportional within the SAME unit, so switching units re-scales
 // against that unit's own maximum and the bars never mix bases.
-function ctxAuditSizeCell(row, unit, max) {
+function ctxAuditSizeCell(row, unit) {
   const value = unit === 'chars' ? row.chars : row.tokens;
   const label = unit === 'chars' ? value.toLocaleString('en-US') : fmtTokens(value);
-  const pct = max > 0 ? Math.max(3, Math.round((value / max) * 100)) : 0;
-  return html`
-    <div style="display:flex;align-items:center;gap:8px;min-width:150px">
-      <span style="min-width:62px;text-align:right;font-variant-numeric:tabular-nums">${label}</span>
-      <div style="flex:1;max-width:100px;height:6px;border-radius:3px;background:var(--border);overflow:hidden">
-        <div style="width:${pct}%;height:100%;background:var(--brand)"></div>
-      </div>
-    </div>`;
+  return html`<span class="ctx-audit-size">${label}</span>`;
 }
 
 // A small dim badge naming which scope a row came from, now that Class
@@ -7290,7 +7314,7 @@ function ctxAuditScopeTag(scopeLabel) {
 // the shared description column means for THIS class ("what it puts in
 // context" for Class 1, "what fires" for Class 2/3); the underlying field is
 // the same evidence-derived text either way.
-function ContextAuditRow({ row, unit, max, onExpandGroup }) {
+function ContextAuditRow({ row, unit, onExpandGroup }) {
   const isGroup = row.kind === 'group' && row.members.length > 0;
   return html`
     <tr>
@@ -7303,7 +7327,7 @@ function ContextAuditRow({ row, unit, max, onExpandGroup }) {
         ` : html`<span class="ctx-audit-src-plain" title=${row.label}>${shortPath(row.label)}</span>`}
       </td>
       <td class="ctx-audit-trigger" style="color:var(--text-dim);font-size:12px">${row.trigger}</td>
-      <td>${ctxAuditSizeCell(row, unit, max)}</td>
+      <td>${ctxAuditSizeCell(row, unit)}</td>
       <td class="ctx-audit-desc" style="color:var(--text-dim);font-size:12px"><span title=${row.description || ''}>${row.description || '-'}</span></td>
       <td style="color:var(--text-dim);font-size:12px">${row.frequency}</td>
     </tr>
@@ -7331,16 +7355,13 @@ function ContextAuditTable({ rows, descLabel, onExpandGroup }) {
               onClick=${() => setUnit(isChars ? 'tokens' : 'chars')}>${isChars ? 'tokens' : 'chars'}</button>
     </span>`;
   const headers = ['Source', 'Trigger', sizeHeader, descLabel, 'Frequency'];
-  const maxTokens = rows.reduce((m, r) => Math.max(m, r.tokens), 0);
-  const maxChars = rows.reduce((m, r) => Math.max(m, r.chars), 0);
   return html`
     <div class="table-wrap"><table>
       <thead><tr>${headers.map((h, i) => html`<th key=${i}>${h}</th>`)}</tr></thead>
       <tbody>
         ${rows.length === 0 ? html`
           <tr><td colspan=${headers.length} class="empty-cell">None found.</td></tr>
-        ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} unit=${unit}
-                                       max=${isChars ? maxChars : maxTokens} onExpandGroup=${onExpandGroup} />`)}
+        ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} unit=${unit} onExpandGroup=${onExpandGroup} />`)}
       </tbody>
     </table></div>`;
 }
@@ -8152,7 +8173,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
     // This number is a PRICE difference on the SAME tokens (batch bills the
     // same work at half rate, freeing nothing), never tokens freed — so
     // unlike every sibling card this branch renders its own footer line
-    // below instead of the generic "estimated recoverable" one (see
+    // below instead of the generic past-overspend one (see
     // `recUsd`/`recTok` suppression for this name further down), and gates
     // the dollar figure on `pricing_mode === 'api'` exactly, not just "not
     // suppressed" — the Batch API discount is an api-billed lever a
@@ -8298,7 +8319,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
   // Recoverable estimate line (when present). `placement` is excluded: its
   // figure is a price difference, not recoverable tokens, and its own branch
   // above renders its own footer with the "price difference" label instead
-  // (CLAUDE.md anti-pattern #22 — the generic "estimated recoverable" wording
+  // (root anti-pattern 22: the generic past-overspend wording
   // below would be dishonest for a figure that frees no tokens at all).
   const fd = name === 'downsize' ? opt.downgrade : (opt.findings || {})[name];
   const recUsd = name === 'placement' ? null : (fd ? fd.past_overspend_usd : null);
@@ -8307,7 +8328,7 @@ function OptimizeFinding({ name, opt, framing, hasProposal }) {
 
   return html`<section class="opt-section" id=${'opt-' + name}>
     <div class="opt-title">${meta.title}
-      ${rec ? html`<span class="opt-rec">${rec} <span class="estimated-tag" title=${fd && fd.estimate_basis}>estimated recoverable</span></span>` : null}
+      ${rec ? html`<span class="opt-rec" title=${(fd && fd.estimate_basis) || ''}>${rec}</span>` : null}
     </div>
     ${body}
     ${hasProposal ? html`<div class="opt-line" style="margin-top:10px"><a class="sz-link" href=${reviewProposalHref(name)}>A fix for this is ready. Review it in the Review inbox →</a></div>` : null}
@@ -8329,7 +8350,7 @@ function RecommendationsPanel({ rec }) {
     <section class="opt-section" id="opt-recommendations">
       <div class="opt-title"><span>Recommendations acted on <span class="dim" style="font-weight:400;font-size:12px">· measured recovery vs estimate</span></span></div>
       <div class="sz-tiles">
-        <div class="sz-tile"><div class="sz-tile-v" style="color:var(--accent)">~${fmtTokens(estTok)}${estUsd ? ' (~' + fmtCost(estUsd) + ')' : ''}</div><div class="sz-tile-l">estimated recoverable <span class="estimated-tag">estimated</span></div></div>
+        <div class="sz-tile"><div class="sz-tile-v" style="color:var(--accent)">~${fmtTokens(estTok)}${estUsd ? ' (~' + fmtCost(estUsd) + ')' : ''}</div><div class="sz-tile-l">past overspend</div></div>
         <div class="sz-tile"><div class="sz-tile-v" style="color:var(--success)">${fmtTokens(measTok)}${measUsd ? ' (' + fmtCost(measUsd) + ')' : ''}</div><div class="sz-tile-l">measured recovered</div></div>
         <div class="sz-tile"><div class="sz-tile-v">${rec.adopted || 0} / ${rec.ignored || 0}</div><div class="sz-tile-l">adopted / ignored</div></div>
       </div>
@@ -8491,18 +8512,18 @@ function OptimizeView({ params }) {
       ${waste ? html`
         <div class="chart-card">
           <div class="chart-head">
-            <div class="chart-title">Cost by component + recoverable waste ${useTokens ? '(tokens)' : ''}</div>
+            <div class="chart-title">Spend by component + past overspend ${useTokens ? '(tokens)' : ''}</div>
             <div class="chart-meta">
               <span class="chart-total">${useTokens ? (fmtTokens(st.comp.total_tokens || 0) + ' tokens') : fmtFramedDollar(st.comp.total_cost_usd || 0, compFraming)}</span>
             </div>
           </div>
           <${ComponentWasteChart} costSegs=${waste.costSegs} recSegs=${waste.recSegs} fmtY=${wasteFmtY} height=${220} />
           <div class="chart-foot">
-            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>estimated recoverable</b> waste, stacked by analyzer: a heuristic estimate to review before acting, not a realized cost reduction.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}</span>
+            <span class="dim">Left bar = measured spend split by token component. Right bar = <b>what you already overspent</b>, stacked by analyzer: money the window has already been billed for, not a projection of future savings.${st.comp && st.comp.recoverable_overlap_note ? ' ' + st.comp.recoverable_overlap_note : ''}</span>
           </div>
           ${st.comp && st.comp.largest_recoverable_analyzer ? html`
           <div class="chart-foot" style="margin-top:2px">
-            <span class="dim">Largest single opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
+            <span class="dim">Biggest single cause: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> (<a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>). It isn't a sum of anything else on this list, so it's the safest number to act on first.</span>
           </div>` : null}
           ${waste.recSegs.length ? html`
             <div class="waste-list">
@@ -8513,11 +8534,11 @@ function OptimizeView({ params }) {
                   <span class="waste-name">${r.title === 'Summarize'
                     ? html`<a class="sz-link" href="#/optimize/summarize">${r.title}</a>`
                     : r.title} <span class="dim">→ ${r.component === 'call' ? 'whole-call' : r.component.replace('_', '-')}</span></span>
-                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)} <span class=${ov ? ov.tagClass : 'estimated-tag'} title=${r.caveat || r.basis}>${ov ? ov.tagText : 'estimated recoverable'}</span>${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
+                  <span class="waste-rec">${fmtFramedSavings(r.usd, r.tokens, compFraming)}${ov ? html` <span class=${ov.tagClass} title=${r.caveat || r.basis}>${ov.tagText}</span>` : null}${r.title === 'Summarize' ? html` <a class="sz-link" href="#/optimize/summarize" style="font-weight:400;font-size:11px;border:1px solid rgba(var(--accent-rgb),0.4);border-radius:4px;padding:1px 7px">Review →</a>` : null}</span>
                 </div>
                 ${(r.caveat || r.basis) ? html`<div class="waste-caveat dim">${r.caveat || r.basis}</div>` : null}
               `;})}
-            </div>` : html`<div class="waste-none"><span class="check">✓</span> Nothing recoverable in this window; no estimated waste from any analyzer.</div>`}
+            </div>` : html`<div class="waste-none"><span class="check">✓</span> No overspend found in this window by any analyzer.</div>`}
           ${wasteDominant ? html`<div class="waste-split">${wasteDominant.label} is ${wasteDominant.pct}% of measured ${useTokens ? 'tokens' : 'spend'} this window.</div>` : null}
         </div>` : null}
 
@@ -8581,7 +8602,7 @@ function OptimizeView({ params }) {
         </div>`)}
         <div class="opt-caveat">! This projects your current run rate forward against the ceiling you set for that provider on the <a class="sz-link" href="#/budget">Budget screen</a>, not the per-agent daily/session caps shown there. It identifies exposure, not recoverable spend. There is nothing to apply here; the fix is to spend less or raise the ceiling.</div>
         ${st.opt.budgets.some(b => b.over_budget) && st.comp && st.comp.largest_recoverable_analyzer ? html`
-        <div class="opt-line" style="margin-top:6px">Biggest recoverable opportunity: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>. The fastest way to bring the projection back under ceiling.</div>` : null}
+        <div class="opt-line" style="margin-top:6px">Biggest single cause: <b>${fmtFramedSavings(st.comp.largest_recoverable_usd, st.comp.largest_recoverable_tokens, compFraming)}</b> via <a class="sz-link" href=${optimizeFindingHref(st.comp.largest_recoverable_analyzer, since)}>${(ANALYZER_META[st.comp.largest_recoverable_analyzer] && ANALYZER_META[st.comp.largest_recoverable_analyzer].title) || capitalize(st.comp.largest_recoverable_analyzer)}</a>. The fastest way to bring the projection back under ceiling.</div>` : null}
       </section>` : null}
     ` : null}
   `;
@@ -8943,16 +8964,15 @@ function RulesView() {
       ${err ? html`<div class="panel"><div class="panel-body opt-line" style="color:var(--error)">${err}</div></div>` : null}
       ${msg ? html`<div class="panel"><div class="panel-body opt-line">${msg}</div></div>` : null}
 
-      <div class="panel">
-        <div class="panel-head"><h2>On offer</h2></div>
-        ${rules === null
-          ? html`<div class="panel-body opt-line dim">Loading…</div>`
+      <div class="rules-zone">On offer</div>
+      ${rules === null
+          ? html`<div class="opt-line dim">Loading…</div>`
           : rules.length === 0
             ? html`<div class="empty compact">No permanent rules on offer. Run an optimize pass, then reload.</div>`
             : rules.map(r => {
                 const dests = r.destinations || [];
                 const st = stagedBySig[r.signature] || [];
-                return html`<div key=${r.signature} class="panel-row" style="display:block">
+                return html`<div key=${r.signature} class="opt-section inbox-row" style="display:block">
                   <div style="display:flex;align-items:center;gap:10px">
                     <b>${r.title || r.signature}</b>
                     <span class="dim" style="font-size:12px">${r.analyzer} · ${
@@ -9002,7 +9022,6 @@ function RulesView() {
                   </div>` : null}
                 </div>`;
               })}
-      </div>
 
       ${preview ? html`<div class="panel">
         <div class="panel-head"><h2>Preview: nothing written</h2></div>
@@ -9019,20 +9038,18 @@ function RulesView() {
         </div>
       </div>` : null}
 
-      <div class="panel">
-        <div class="panel-head"><h2>Applied</h2></div>
-        ${applied === null
-          ? html`<div class="panel-body opt-line dim">Loading…</div>`
+      <div class="rules-zone">Applied</div>
+      ${applied === null
+          ? html`<div class="opt-line dim">Loading…</div>`
           : applied.length === 0
             ? html`<div class="empty compact">Nothing applied yet.</div>`
-            : applied.map(a => html`<div class="panel-row opt-line" key=${a.source_path + a.signature}>
+            : applied.map(a => html`<div class="opt-section inbox-row opt-line" key=${a.source_path + a.signature}>
                 <span class="mono" title=${a.source_path}>${shortPath(a.source_path)}</span>
                 <span class="dim"> · ${a.applied_at}</span>
                 ${a.undoable
                   ? html` <button class="cur-btn" disabled=${busy} onClick=${() => doUndo(a.signature, a.source_path)}>Undo</button>`
                   : html` <span class="dim">(${a.reason})</span>`}
               </div>`)}
-      </div>
     </div>`;
 }
 
@@ -11709,7 +11726,7 @@ function CostProposalCard({ prop, mechanism, busy, focused, onMark, onDismiss, o
 
 // The headline band + the FIXES APPLIED tile.
 //
-// The headline used to be an "estimated recoverable / mo" tile summed in JS
+// The headline used to be an estimated-recoverable-per-month tile summed in JS
 // across both open tabs. It is now the server's own past-overspend block
 // (`PastOverspendTile`), for two reasons that are not stylistic:
 //   * TENSE. What the product leads with is now what the flagged behaviours
@@ -12824,7 +12841,7 @@ function DashboardView({ params, persona }) {
         ${html`
             <div class="dash-triage">
               <div class="dash-col">
-                <div class="band-label">Recoverable waste</div>
+                <div class="band-label">Past overspend</div>
                 ${/* recoverableBandState() decided which of the six states this
                       is; the branches below only render. The ONE branch allowed
                       to say there is nothing recoverable is 'none', which
@@ -12843,7 +12860,7 @@ function DashboardView({ params, persona }) {
                         <div class="shimmer" style="height:10px;width:78%;margin-top:4px"></div>
                       </div>`)}
                   </div>
-                  <div class="band-note">Scanning your history for recoverable waste. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
+                  <div class="band-note">Scanning your history for past overspend. On a large history this can take several minutes; the tiles fill in as soon as the scan answers.</div>` : null}
                 ${bandState === 'cold' ? html`
                   <div class="band-msg">
                     <b>No scan has run yet.</b>
@@ -12854,14 +12871,14 @@ function DashboardView({ params, persona }) {
                 ${bandState === 'timeout' ? html`
                   <div class="band-msg warn">
                     <b>Still scanning after ${OPTIMIZE_WAIT_MIN} minutes.</b>
-                    <p>We don't know yet whether there is recoverable waste in this window. The scan hasn't answered; that is not the same as an all-clear, so this band is showing you nothing rather than a zero.</p>
+                    <p>We don't know yet whether there is overspend in this window. The scan hasn't answered; that is not the same as an all-clear, so this band is showing you nothing rather than a zero.</p>
                     <button class="btn" onClick=${retryOptimize}>Keep waiting</button>
                   </div>` : null}
                 ${bandState === 'failed' ? html`
                   <div class="band-msg err">
-                    <b>Couldn't scan for recoverable waste.</b>
+                    <b>Couldn't scan for past overspend.</b>
                     <p>${optState.error || 'The request failed.'}</p>
-                    <p>Until this succeeds there is no basis for saying whether recoverable waste exists here, so no figure is shown.</p>
+                    <p>Until this succeeds there is no basis for saying whether overspend exists here, so no figure is shown.</p>
                     <button class="btn" onClick=${retryOptimize}>Try again</button>
                   </div>` : null}
                 ${bandState === 'stale' ? html`
@@ -12871,7 +12888,7 @@ function DashboardView({ params, persona }) {
                   </div>` : null}
                 ${bandState === 'tiles' || bandState === 'none' || bandState === 'stale' ? html`
                 <div class="tile-grid compact">
-                  ${tiles.length === 0 ? html`<div class="empty">No recoverable candidates.</div>`
+                  ${tiles.length === 0 ? html`<div class="empty">No overspend found.</div>`
                     : tiles.map(t => {
                       const meta = ANALYZER_META[t.name] || { title: capitalize(t.name), hint: '' };
                       // Route straight to the analyzer's own detail card on

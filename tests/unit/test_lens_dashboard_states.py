@@ -252,7 +252,7 @@ def test_the_timeout_state_says_it_timed_out_and_offers_a_way_forward(html):
 
 
 def test_the_failure_state_says_it_failed_and_offers_a_retry(html):
-    assert "Couldn't scan for recoverable waste." in html
+    assert "Couldn't scan for past overspend." in html
     assert "Try again" in html
 
 
@@ -366,23 +366,6 @@ def test_the_pricing_qualifier_banner_is_gone(html):
     # there is no slot left to hold and no skeleton left to render.
     assert 'class="qualifier qualifier-skel"' not in html
     assert 'class="qualifier"' not in html
-
-
-def test_the_recoverable_waste_heading_has_no_estimated_badge(html):
-    # The amber "estimated" pill beside the "Recoverable waste" band heading
-    # was removed by product decision; the heading text itself is unchanged.
-    # The .estimated-tag CLASS survives (Optimize/Summarize still use it on
-    # their own per-analyzer tiles), so this pins the Dashboard heading's
-    # markup specifically rather than banning the class outright.
-    # The heading now also carries the scan's provenance + rescan control, so it
-    # spans several lines; the property being pinned is that no "estimated" pill
-    # sits beside the heading TEXT, not the exact one-line markup it used to have.
-    idx = html.index(">Recoverable waste<")
-    heading = html[idx - 400:idx + 400]
-    assert "band-label" in heading
-    assert "estimated-tag" not in heading
-    assert 'Recoverable waste <span class="estimated-tag"' not in html
-    assert "estimated-tag" in html  # still used elsewhere (Optimize/Summarize)
 
 
 def test_no_panel_is_gated_on_a_page_wide_load_flag(html):
