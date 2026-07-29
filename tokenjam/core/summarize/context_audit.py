@@ -209,6 +209,56 @@ def _group_label(family_kind: str, qualifier: str, n: int) -> str:
     return f"{qualifier} {n} {noun}".strip() if qualifier else f"{n} {noun}"
 
 
+#: How many member names a group's derived description names before falling
+#: back to "+N more" — long enough to be useful, short enough to stay a
+#: one-line "what it is" cell rather than a second member table.
+_GROUP_DESCRIPTION_NAME_CAP = 6
+
+
+def _short_member_name(row: Row) -> str:
+    """The short, honest name one member contributes to a group's derived
+    description — never invented, always something already on the row:
+
+    * a rule file -> its filename stem (``coding-style.md`` -> ``coding-style``)
+    * a hook -> the event it fires on (``PreToolUse``, not the shell command)
+    * a skill/command/agent description or body -> its invocation slug
+      (``load_semantics.invocation_key``, the same name an invocation is
+      recorded under), falling back to the filename stem if that's empty.
+    """
+    if row.family_kind == "rule_dir":
+        return Path(row.source).stem
+    if row.family_kind == "hook":
+        return row.trigger.split(" (matcher:", 1)[0].strip()
+    key = load_semantics.invocation_key(row.source)
+    return key or Path(row.source).stem
+
+
+def _group_description(members: Sequence[Row]) -> str:
+    """The group's own "what it is" column: a shared description when every
+    member happens to carry the identical one (rare), otherwise a
+    comma-joined, capped list of member names — e.g. a rules directory's
+    description becomes its own file stems ("coding-style, git-workflow,
+    testing, ..., +4 more"), so the column is populated from evidence already
+    on hand rather than left blank just because the members disagree.
+    """
+    descriptions = {m.description for m in members if m.description}
+    if len(descriptions) == 1:
+        return next(iter(descriptions))
+    names: list[str] = []
+    seen: set[str] = set()
+    for m in members:
+        name = _short_member_name(m)
+        if name and name not in seen:
+            seen.add(name)
+            names.append(name)
+    if not names:
+        return ""
+    if len(names) > _GROUP_DESCRIPTION_NAME_CAP:
+        shown = names[:_GROUP_DESCRIPTION_NAME_CAP]
+        return ", ".join(shown) + f", +{len(names) - _GROUP_DESCRIPTION_NAME_CAP} more"
+    return ", ".join(names)
+
+
 def rows_for_display(rows: Sequence[Row]) -> list[dict[str, Any]]:
     """Group ``rows`` by family (``(family_kind, family_qualifier)``) into the
     page's display shape, sorted by tokens descending (biggest cost first —
@@ -243,9 +293,8 @@ def rows_for_display(rows: Sequence[Row]) -> list[dict[str, Any]]:
         family_kind, qualifier = key
         chars = sum(m.chars for m in members)
         tokens = sum(m.tokens for m in members)
-        descriptions = {m.description for m in members if m.description}
-        description = next(iter(descriptions)) if len(descriptions) == 1 else ""
         ranked = sorted(members, key=lambda m: -m.tokens)
+        description = _group_description(ranked)
         display.append({
             "kind": "group",
             "label": _group_label(family_kind, qualifier, len(members)),

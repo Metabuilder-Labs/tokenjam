@@ -320,16 +320,19 @@ def test_rows_for_display_sorts_by_tokens_descending():
     assert display[0]["label"] == "/big.md"  # the single biggest row leads
 
 
-def test_rows_for_display_never_invents_a_description_across_disagreeing_members():
+def test_rows_for_display_derives_a_names_list_when_members_disagree_on_description():
     """If a group's members don't share one description, the group's
-    description is blank rather than a guess — 'leave it blank rather than
-    inventing one'."""
+    description falls back to a comma-joined list of the members' own short
+    names (never a guessed sentence) — evidence already on hand, not an
+    invention. Supersedes the earlier version of this test, which pinned the
+    old blank-on-disagreement behavior; leaving a bare '—' on most of the
+    Class 1 table was itself the defect (product feedback)."""
     rows = [
-        _row("/plugins/x/skills/a/SKILL.md", 100, "skill_desc", "acme", "Does A."),
-        _row("/plugins/x/skills/b/SKILL.md", 100, "skill_desc", "acme", "Does B."),
+        _row("/plugins/x/skills/alpha/SKILL.md", 200, "skill_desc", "acme", "Does A."),
+        _row("/plugins/x/skills/beta/SKILL.md", 100, "skill_desc", "acme", "Does B."),
     ]
     display = ca.rows_for_display(rows)
-    assert display[0]["description"] == ""
+    assert display[0]["description"] == "alpha, beta"
 
 
 def test_skill_frontmatter_description_flows_through_as_the_plain_english_column(tmp_path):

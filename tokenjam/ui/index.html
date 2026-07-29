@@ -7127,7 +7127,10 @@ function ContextAuditClassDetails({ classKey, rows, count, deemphasise, onExpand
   return html`
     <details style="margin-top:16px">
       <summary style="cursor:pointer;font-size:13px;${deemphasise ? 'color:var(--text-dim)' : ''}">
-        <b>${label}</b> — ${CTX_AUDIT_CLASS_MEANING[classKey]}
+        ${/* htm drops the whitespace-only text node between two adjacent
+              interpolations, so without an explicit trailing space here this
+              read "...without you asking.46 item(s)" with no separator. */ ''}
+        <b>${label}</b> — ${CTX_AUDIT_CLASS_MEANING[classKey] + ' '}
         ${count} item(s), ~${fmtTokens(totalTokens)} tokens${notResident}.
       </summary>
       <div style="margin-top:8px"><table>
@@ -7245,18 +7248,38 @@ function ContextAuditScope({ heading, subtotalNote, scope, onExpandGroup }) {
 // currently-displayed one. Never renders every project's full section at
 // once (the "26 tables stacked vertically" bug this exists to fix) — only
 // the selected project's ContextAuditScope mounts below.
+// How many ranked projects show before the rest fold behind a collapsed
+// "+N more" line — a proper one-per-line list, not the wrapped run-on
+// paragraph the first pass rendered.
+const CTX_AUDIT_PICKER_VISIBLE = 8;
+
+function ContextAuditProjectRow({ p, selected, onSelect }) {
+  return html`
+    <div
+      class="clickable"
+      style="padding:3px 0;${p.scope === selected ? 'color:var(--text);font-weight:600' : ''}"
+      onClick=${() => onSelect(p.scope)}
+    >${shortPath(p.scope)} — ${fmtTokens(p.class1_total_tokens)}</div>`;
+}
+
+// `projects` here is ALREADY filtered to real project roots (Class 1 tokens
+// > 0) by the caller — a recorded working directory with nothing loading in
+// it (a scratch dir, a temp path a session happened to run in) is not a
+// project worth listing, per product feedback on the first pass.
 function ContextAuditProjectPicker({ projects, selected, onSelect }) {
   if (projects.length <= 1) return null;
   const ranked = [...projects].sort((a, b) => b.class1_total_tokens - a.class1_total_tokens);
+  const visible = ranked.slice(0, CTX_AUDIT_PICKER_VISIBLE);
+  const rest = ranked.slice(CTX_AUDIT_PICKER_VISIBLE);
   return html`
     <div style="margin-top:10px;font-size:12px;color:var(--text-dim)">
-      ${ranked.map((p, i) => html`
-        <span key=${i}
-          class="clickable"
-          style="margin-right:14px;${p.scope === selected ? 'color:var(--text);font-weight:600' : ''}"
-          onClick=${() => onSelect(p.scope)}
-        >${shortPath(p.scope)} — ${fmtTokens(p.class1_total_tokens)}</span>
-      `)}
+      ${visible.map((p, i) => html`<${ContextAuditProjectRow} key=${i} p=${p} selected=${selected} onSelect=${onSelect} />`)}
+      ${rest.length > 0 ? html`
+        <details>
+          <summary style="cursor:pointer">+${rest.length} more</summary>
+          ${rest.map((p, i) => html`<${ContextAuditProjectRow} key=${i} p=${p} selected=${selected} onSelect=${onSelect} />`)}
+        </details>
+      ` : null}
     </div>`;
 }
 
@@ -7298,7 +7321,13 @@ function ContextAuditView() {
     <div style="color:var(--text-dim);font-size:13px;margin-bottom:12px">Scanning ~/.claude and every recently-active project…</div>
     ${TableRowsSkeleton(['Source', 'What it is', 'Tokens', 'Frequency'], 8)}`;
 
-  const projects = data.projects;
+  // A recorded working directory that loads NOTHING (a scratch/temp path a
+  // session happened to run in, not a real project) is not worth listing —
+  // it would otherwise show up as a 0-token entry cluttering the ranked
+  // picker with paths like /private/tmp or a session-runner temp dir.
+  const allProjects = data.projects;
+  const projects = allProjects.filter(p => p.class1_total_tokens > 0);
+  const excludedProjectCount = allProjects.length - projects.length;
   const defaultProject = projects.length
     ? projects.reduce((best, p) => p.class1_total_tokens > best.class1_total_tokens ? p : best)
     : null;
@@ -7331,6 +7360,11 @@ function ContextAuditView() {
       </div>
     </div>
     <${ContextAuditProjectPicker} projects=${projects} selected=${currentProject ? currentProject.scope : ''} onSelect=${setSelectedScope} />
+    ${excludedProjectCount > 0 ? html`
+      <div style="font-size:11px;color:var(--text-dim);margin-top:2px">
+        +${excludedProjectCount} recorded working director${excludedProjectCount === 1 ? 'y' : 'ies'} with no project config, not shown
+      </div>
+    ` : null}
 
     <div style="margin-top:10px">
       <button class="btn" onClick=${handleRescan} disabled=${refreshing}>${refreshing ? 'Rescanning…' : 'Rescan'}</button>
