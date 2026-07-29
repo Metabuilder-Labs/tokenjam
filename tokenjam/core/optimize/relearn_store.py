@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from tokenjam.core.analysis_span import retention_days_for
+from tokenjam.core.optimize.build_stamp import tj_build
 from tokenjam.core.optimize.analyzers.relearn import RelearnFinding, compute_relearn_finding
 
 if TYPE_CHECKING:
@@ -99,6 +100,10 @@ def write_cache(
     payload: dict[str, Any] = {
         "computed_at": datetime.now(timezone.utc).isoformat(),
         "finding": stamp_proposal_ids(asdict(finding)),
+        # The build that produced these clusters — see `report_store.write_report`
+        # on why a timestamp alone lets a previous build's figures read as merely
+        # recent across an upgrade.
+        "tj_version": tj_build(),
     }
     if "cost_proposals" in existing:
         payload["cost_proposals"] = existing["cost_proposals"]
@@ -114,10 +119,20 @@ def write_cache(
         # every route falls back to the same default, but round-tripping both
         # keys here means a variable window survives regardless of which
         # producer wrote the cache last.
-        if "cost_window_days" in existing:
-            payload["cost_window_days"] = existing["cost_window_days"]
-        if "cost_excluded" in existing:
-            payload["cost_excluded"] = existing["cost_excluded"]
+        #
+        # THE WHITELIST IS THE TRAP. Every `cost_*` key a cost write produces has
+        # to be named here or this write silently drops it, and the symptom is
+        # never an error — it is a field that reads as "never stamped". Caught
+        # live: `cost_tj_version` was added to `write_cost_proposals` and omitted
+        # here, so a freshly-booted daemon served a cost payload claiming an
+        # unknown producing build, because the pass writes the cost proposals and
+        # then the relearn cache over the top of them.
+        for key in (
+            "cost_window_days", "cost_since", "cost_until", "cost_excluded",
+            "cost_tj_version",
+        ):
+            if key in existing:
+                payload[key] = existing[key]
     _atomic_write(p, payload)
     return payload
 
@@ -172,7 +187,21 @@ def read_cost_proposals(
         "cost_proposals_error": raw.get("cost_proposals_error"),
         "cost_proposals_error_at": raw.get("cost_proposals_error_at"),
         "cost_window_days": raw.get("cost_window_days") or 0,
+        # The bounds the recompute ran over. `None` on a cache written before
+        # they were recorded — absent, never guessed from the day count, since
+        # deriving them would invent the very provenance this exists to supply.
+        "cost_since": raw.get("cost_since"),
+        "cost_until": raw.get("cost_until"),
         "cost_excluded": raw.get("cost_excluded") or {},
+        # The build that computed these proposals. `None` on a cache written
+        # before the stamp existed — absent, never the running build, which
+        # would assert agreement about figures we cannot vouch for.
+        #
+        # This is the SECOND whitelist a `cost_*` key has to be named in (the
+        # first is the round-trip list in `write_cache`). Both drop an unnamed
+        # key silently, and the symptom is a field that reads as "never
+        # stamped" rather than an error.
+        "cost_tj_version": raw.get("cost_tj_version"),
     }
 
 
@@ -215,6 +244,7 @@ def clear_cost_proposals_error(
 def write_cost_proposals(
     proposals: list[Any], path: Path | None = None, *, config: TjConfig | None = None,
     window_days: int | None = None, excluded: dict[str, Any] | None = None,
+    since: str | None = None, until: str | None = None,
 ) -> dict[str, Any]:
     """Write the cost proposals into the SAME cache file the relearn finding
     lives in, under a separate ``cost_proposals`` key, preserving the relearn
@@ -228,6 +258,16 @@ def write_cost_proposals(
     doesn't track it yet (a legacy call site) doesn't silently zero out a real
     prior value. It is a LABEL, never a divisor: nothing rescales a stored
     figure by it.
+
+    ``since``/``until`` are the RESOLVED BOUNDS that recompute actually ran
+    over, stored beside the length. A length alone is not provenance: the
+    stored analyzer report records ``scan_since``/``scan_until``, and while
+    this store recorded only a day count the two surfaces' windows could not
+    be compared from the artifacts at all — so a per-analyzer disagreement
+    between them was undiagnosable without instrumenting a live daemon, and
+    two successive explanations for one were asserted on that missing evidence
+    and were wrong. Same "leave untouched when ``None``" rule as
+    ``window_days``, for the same legacy-call-site reason.
 
     ``excluded`` is the rollup's cross-reference block for waste a caller
     deliberately did not fold in as a peer card — generic infrastructure with
@@ -251,8 +291,13 @@ def write_cost_proposals(
     payload = dict(existing)
     payload["cost_proposals"] = serialised
     payload["cost_computed_at"] = datetime.now(timezone.utc).isoformat()
+    payload["cost_tj_version"] = tj_build()
     if window_days is not None:
         payload["cost_window_days"] = window_days
+    if since is not None:
+        payload["cost_since"] = since
+    if until is not None:
+        payload["cost_until"] = until
     payload["cost_excluded"] = excluded or {}
     _atomic_write(p, payload)
     return payload
@@ -313,11 +358,23 @@ def recompute_now(
                 transcript_cache_dir = default_cache_dir(config)
             except Exception:
                 transcript_cache_dir = None
-        # Full-corpus persona classification (relearn scans unbounded history
-        # like the finding itself, not a window) — same functions
-        # `runner.build_report` uses for `AnalyzerContext.persona`/
-        # `OptimizeReport.persona`, so the daemon's relearn cache gates its
-        # workspace write by the same rule the rest of the product does.
+        # WINDOW-SCOPED persona, matching `runner.build_report`. This used to
+        # classify over the full corpus, on the argument that relearn's own
+        # evidence is unbounded — a defensible reading in isolation, and a bug
+        # across surfaces. Persona gates WHICH ANALYZERS RUN
+        # (`PERSONA_DISABLED_ANALYZERS`) and whether relearn may offer a
+        # workspace write, so a corpus whose recent window is claude-code
+        # dominant but whose full history is mixed (or the reverse) resolved a
+        # DIFFERENT gate here than on the report the Dashboard reads. That is
+        # two surfaces disagreeing about which findings exist, not about a
+        # figure's size. One derivation, over the window every other figure is
+        # published on (`core/optimize/report_window.py`).
+        #
+        # In the daemon's normal path this branch is not even reached: the scan
+        # cycle writes this cache from the report pass's own relearn finding,
+        # which already carries the report's persona. It stands for a STANDALONE
+        # recompute, and it has to agree with the cycle rather than diverge the
+        # moment someone calls it directly.
         persona = "unknown"
         if conn is not None:
             try:
@@ -327,8 +384,16 @@ def recompute_now(
                     dominant_persona,
                 )
 
+                from datetime import timedelta
+
+                from tokenjam.core.optimize.report_window import report_window_days
+                from tokenjam.utils.time_parse import utcnow
+
+                until = utcnow()
+                since = until - timedelta(days=report_window_days(config, conn))
                 persona = dominant_persona(
-                    agent_persona_mix(conn), declared_plan=config_declared_plan(config),
+                    agent_persona_mix(conn, since, until),
+                    declared_plan=config_declared_plan(config),
                 )
             except Exception:
                 persona = "unknown"

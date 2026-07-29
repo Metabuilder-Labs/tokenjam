@@ -119,6 +119,9 @@ def get_optimize(
     payload: dict[str, Any] = dict(body)
     payload.update(envelope)
     payload["report_available"] = True
+    payload["findings"] = _with_window_scoped_relearn(
+        payload.get("findings"), envelope.get("window_days"), config=config,
+    )
 
     report = report_store.stored_report(config)
     if report is None:
@@ -210,6 +213,86 @@ def get_optimize_analyzers() -> dict[str, Any]:
     return {"registered": registered, "personas": personas}
 
 
+#: The tile-level fields a window-scoped finding publishes. Present on relearn
+#: whenever a bucket for the report's own window exists; the surface renders
+#: THESE, never the unbounded `past_overspend_usd` beside them.
+WINDOW_SCOPED_USD = "window_scoped_past_overspend_usd"
+WINDOW_SCOPED_TOKENS = "window_scoped_past_overspend_tokens"
+WINDOW_SCOPED_WINDOW = "window_scoped_window"
+WINDOW_SCOPED_BASIS = "window_scoped_basis"
+
+#: Why a finding that HAS a window vocabulary published no figure for this
+#: report's window. A surface may not fall back to the unbounded figure on
+#: seeing this — that fallback is the defect this whole field exists to close.
+WINDOW_SCOPED_UNAVAILABLE_BASIS = (
+    "unknown, not zero, and emphatically not the unbounded figure beside it. "
+    "This analyzer measures over all retained history and publishes bounded "
+    "buckets for a fixed vocabulary of windows; none of them equals the window "
+    "this report was computed over, so it has no figure that can sit beside "
+    "this report's other findings. Refresh the analyzer pass to fold this in"
+)
+
+
+def _with_window_scoped_relearn(
+    findings: Any, window_days: Any, *, config: Any = None,
+) -> Any:
+    """``findings`` with relearn carrying a figure on THIS report's window.
+
+    Relearn is the one analyzer whose ``past_overspend_usd`` is unbounded by
+    design — its signal is recurrence across history, so ``run(ctx)``
+    deliberately does not forward the report's ``since``. Every other finding on
+    this payload is scoped to ``window_days``. The Dashboard's recoverable-waste
+    row rendered all of them as peers, so relearn's all-history figure sat
+    unmarked beside five window-scoped ones and a reader summing the row got a
+    total on no basis at all.
+
+    The bounded figure already existed: the detector precomputes a windowed
+    bucket vocabulary while it still holds the per-occurrence dates
+    (``core/optimize/relearn_window``). This selects the one matching this
+    report's own window and nets it through the SAME helper the Review inbox
+    row uses, so the two surfaces publish one relearn number per window from
+    one code path rather than two that happen to agree.
+
+    Derived on read, not stored: the stored dict stays exactly what the
+    analyzers wrote (the unbounded fields feed the write budget's pre-net gross
+    and must not be shrunk in place — see ``core/optimize/write_budget``).
+
+    Immutable: returns new dicts, never writes into the stored body.
+    """
+    from tokenjam.core.optimize.inbox_contribution import window_scoped_finding_figure
+
+    if not isinstance(findings, dict):
+        return findings
+    relearn = findings.get("relearn")
+    if not isinstance(relearn, dict):
+        return findings
+    # The clusters the user has ALREADY fixed, excluded here for the same
+    # reason the Review inbox excludes them: a headline states what is still
+    # outstanding. Without this the tile kept counting recovered money, so
+    # applying a fix moved the inbox and left the Dashboard unchanged. Failing
+    # to resolve them degrades toward the whole-population figure, which is
+    # the old behaviour rather than a new wrong one.
+    applied: set[str] = set()
+    try:
+        from tokenjam.core.optimize import relearn_apply
+
+        applied = set(relearn_apply.applied_signatures(config))
+    except Exception:
+        applied = set()
+    figure = window_scoped_finding_figure(
+        relearn, days=window_days, applied_signatures=applied,
+    )
+    scoped = {
+        WINDOW_SCOPED_USD: None if figure is None else figure["usd"],
+        WINDOW_SCOPED_TOKENS: None if figure is None else figure["tokens"],
+        WINDOW_SCOPED_WINDOW: None if figure is None else figure["window"],
+        WINDOW_SCOPED_BASIS: (
+            WINDOW_SCOPED_UNAVAILABLE_BASIS if figure is None else figure["basis"]
+        ),
+    }
+    return {**findings, "relearn": {**relearn, **scoped}}
+
+
 def _mix(fn: Any, conn: Any, since_dt: Any, until_dt: Any, agent_id: str | None) -> dict:
     """Best-effort mix query; `{}` when the storage layer exposes no connection
     (e.g. a proxy backend) rather than failing the whole read."""
@@ -251,8 +334,31 @@ def rescan_optimize(request: Request) -> dict[str, Any]:
                 "reason": "rescanned too recently; showing the stored result"}
 
     from tokenjam.core.db import DuckDBBackend
+    from tokenjam.core.optimize.scan_cycle import trigger_scan_cycle
 
-    started = report_store.trigger_background_recompute(
-        lambda: DuckDBBackend(config.storage), config,
-    )
-    return {**report_store.stored_report_block(config), "started": started}
+    # EVERY analyzer store, not just the report. This endpoint used to refresh
+    # the report alone while the Review inbox's own Refresh refreshed the other
+    # two, so "Rescan" meant something different depending on which screen you
+    # pressed it from — and the Dashboard's tiles could end up hours fresher
+    # than the inbox headline they are naturally compared against. One cycle,
+    # one meaning: see `core/optimize/scan_cycle.py`.
+    started = trigger_scan_cycle(lambda: DuckDBBackend(config.storage), config)
+    any_started = any(started.values())
+    return {
+        **report_store.stored_report_block(config),
+        # True when ANY pass started. A `False` per store is its own overlap
+        # guard declining because a pass is already in flight — a no-op, not a
+        # failure — so the per-store detail travels alongside rather than
+        # collapsing into a single misleading `false`.
+        "started": any_started,
+        "started_by_store": started,
+        # EVERY `started: false` carries a reason, on this path too. The two
+        # early returns above have said why since they were written; this one
+        # answered 200 with a bare `false` and nothing to render, so a refusal
+        # arrived at the client indistinguishable from a successful start. It
+        # fires when the cycle's own in-flight guard declines — a pass launched
+        # by the daemon's startup kick, or one whose report leg has landed while
+        # relearn and the cost proposals are still being built (exactly when an
+        # impatient user presses the button).
+        **({} if any_started else {"reason": "a scan is already running"}),
+    }

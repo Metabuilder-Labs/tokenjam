@@ -163,8 +163,20 @@ class DowngradeFinding:
     # candidate sessions): exact per-type tokens at the current model's rates
     # versus the proposed model's, over the window and projected to 30 days.
     # Typed loosely to keep `types` free of an analyzer import; empty when no
-    # candidate group had pricing data for both sides.
-    per_agent:                    list[Any]    = field(default_factory=list)
+    # candidate group had pricing data for both sides. `list[Any]` costs the
+    # round trip its TYPE, though: `hydrate_dataclass` has nothing to dispatch
+    # on, so a stored report came back with plain dicts here and every
+    # consumer reading `row.delta_usd` raised — silently, wherever an adapter
+    # caught broadly. The element type is therefore declared as DATA, resolved
+    # lazily at hydration time (see `runner._hydrate_target`), which keeps this
+    # module analyzer-free while making the round trip lossless in type as
+    # well as in value.
+    per_agent:                    list[Any]    = field(
+        default_factory=list,
+        metadata={
+            "hydrate": "tokenjam.core.optimize.analyzers.downsize_agents:AgentPriceRow",
+        },
+    )
     # --- The PRIMARY case: a premium model in the driver role ---------------
     # Sessions where a premium-tier model drove long, undelegated, tool-heavy
     # work inline instead of routing it to cheap workers. Every field here

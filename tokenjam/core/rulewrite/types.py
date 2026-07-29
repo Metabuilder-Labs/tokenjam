@@ -109,6 +109,29 @@ class RuleWrite:
     #: there is something to un-dismiss. A durable dismissal with no way back
     #: is worse than the browser-local one it replaces.
     dismissed: bool = False
+    #: The guidance is ALREADY in the user's instruction file — but written by
+    #: them (or their own harness), not by tokenjam, so no apply ledger knows
+    #: about it. Resolved by ``core/rulewrite/presence``, which asks the user's
+    #: local ``claude`` because this is a semantic question: a human writes the
+    #: same rule in their own words, and tokenjam's own markers only ever find
+    #: tokenjam's own writes.
+    #:
+    #: Same discipline as ``already_applied``, and for the same reason (Critical
+    #: Rule 32): it withdraws the OFFER and leaves ``past_overspend_*`` exactly
+    #: as measured. The recurrence happened and cost what it cost; the guidance
+    #: having been present the whole time does not un-spend it, and may say
+    #: something about the rule's wording rather than about the money.
+    #:
+    #: Why this is the field that mattered most: without it, a rule already
+    #: present is reported as too EXPENSIVE to write, because the same files that
+    #: contain it are what saturate the write budget. The user reads a refusal
+    #: where the honest answer is a checkmark.
+    already_present: bool = False
+    #: The file's own words that covered it, as quoted back by the model, and
+    #: which file they were found in. Evidence, not a claim — it is what lets a
+    #: reader check a verdict they did not make themselves.
+    presence_evidence: str = ""
+    presence_path: str = ""
     #: Why the rule is going where it is going, and what the placement could not
     #: cover. Carried verbatim from ``core/optimize/rule_placement``; never
     #: re-derived here, so the CLI, the UI and the payload cannot disagree.
@@ -131,6 +154,9 @@ class RuleWrite:
             "blocked_reason": self.blocked_reason,
             "already_applied": self.already_applied,
             "dismissed": self.dismissed,
+            "already_present": self.already_present,
+            "presence_evidence": self.presence_evidence,
+            "presence_path": self.presence_path,
             "placement_basis": self.placement_basis,
             "placement_coverage_note": self.placement_coverage_note,
             "past_overspend_tokens": self.past_overspend_tokens,
@@ -160,6 +186,9 @@ class RuleWrite:
             blocked_reason=str(raw.get("blocked_reason", "") or ""),
             already_applied=bool(raw.get("already_applied", False)),
             dismissed=bool(raw.get("dismissed", False)),
+            already_present=bool(raw.get("already_present", False)),
+            presence_evidence=str(raw.get("presence_evidence", "") or ""),
+            presence_path=str(raw.get("presence_path", "") or ""),
             placement_basis=str(raw.get("placement_basis", "") or ""),
             placement_coverage_note=str(raw.get("placement_coverage_note", "") or ""),
             past_overspend_tokens=None if tokens is None else int(tokens),

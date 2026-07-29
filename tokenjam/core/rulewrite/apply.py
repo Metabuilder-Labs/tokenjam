@@ -71,6 +71,18 @@ def stage_rule(config: TjConfig, rule: RuleWrite) -> list[StagedRuleWrite]:
             "this change. Revert it first if you want to write it again. What "
             "it cost before you applied it is still reported in full.",
         )
+    # Same shape as the applied check above, and for the same reason: the message
+    # has to name the real state. Writing this rule would append guidance the file
+    # already carries, which is the duplication the presence check exists to stop —
+    # and on a corpus whose instruction files are already at the write budget's
+    # ceiling, a duplicate block is not free.
+    if rule.already_present:
+        raise RuleWriteRefused(
+            f"{rule.signature} is already in your instruction files"
+            + (f" ({rule.presence_path})" if rule.presence_path else "")
+            + " — writing it would duplicate guidance you already have. What the "
+            "recurrence cost before is still reported in full.",
+        )
     if not rule.offered:
         raise RuleWriteRefused(
             f"{rule.signature} is not on offer: "

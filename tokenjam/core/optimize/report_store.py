@@ -46,6 +46,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from tokenjam.core.optimize.build_stamp import tj_build
+
 if TYPE_CHECKING:
     from tokenjam.core.config import TjConfig
 
@@ -136,6 +138,15 @@ def write_report(
         "window_days": window_days,
         "since": since,
         "until": until,
+        # WHICH BUILD PRODUCED THIS, not just when. `computed_at` answers HOW
+        # OLD and readers take it for WHICH VERSION. These stores are caches
+        # with no build identity and nothing invalidates them on upgrade, so
+        # after upgrading tokenjam the next pass stamps a fresh timestamp over
+        # figures the replaced binary may have produced — and the audience for
+        # that is precisely the user who upgraded to get a fix and will
+        # conclude it did not work. A surface can only qualify the freshness
+        # claim if the producing build travels with the result.
+        "tj_version": tj_build(),
     }
     _atomic_write(p, payload)
     return payload
@@ -196,6 +207,8 @@ def stored_report_block(
     One shape, computed in one place, so two surfaces reading the same store
     can never disagree about whether it is cold, stale or degraded.
     """
+    from tokenjam.core.optimize import scan_cycle
+
     stored = read_report(path, config=config)
     computing = is_computing()
     status = report_status(stored, computing=computing)
@@ -207,6 +220,20 @@ def stored_report_block(
         "scan_since": (stored or {}).get("since"),
         "scan_until": (stored or {}).get("until"),
         "computing": computing,
+        # THE CYCLE, not this store. `computing` above goes false the instant
+        # the report lands, while the relearn cache and the cost proposals the
+        # same pass feeds are still being built — so a surface reading only it
+        # asserts freshness over figures that are still the previous pass's.
+        # `scan_cycle.is_cycle_computing` covers the whole pass; a surface's
+        # "scanning" state is the OR of the two, never either alone.
+        "cycle_computing": scan_cycle.is_cycle_computing(),
+        # Build provenance. `computed_build` is the build that PRODUCED the
+        # stored figures (absent on anything written before this stamp existed);
+        # `build` is the one serving them. When they differ, the timestamp is
+        # still honest about age and no longer sufficient on its own — see
+        # `write_report`.
+        "computed_build": (stored or {}).get("tj_version"),
+        "build": tj_build(),
         # `degraded` is for the case a LATER scan failed after an earlier one
         # succeeded: the surface still renders the last good result, with the
         # failure disclosed beside it rather than silently pretending the last
@@ -301,13 +328,18 @@ def _min_rescan_seconds(config: TjConfig | None) -> int:
         return 60
 
 
-def _window_days(config: TjConfig | None) -> int:
-    opt = getattr(config, "optimize", None)
-    try:
-        days = int(getattr(opt, "scan_window_days", 30))
-    except (TypeError, ValueError):
-        days = 30
-    return days if days > 0 else 30
+def _window_days(config: TjConfig | None, conn: Any = None) -> int:
+    """The window this scan observes over — the SAME seam the Review inbox's
+    cost-proposal recompute resolves through (``core/optimize/report_window``).
+
+    It used to read ``scan_window_days`` alone while the cost side read the
+    resolved analysis span, so the two surfaces published one metric under two
+    windows and neither said which. See that module's docstring; do not
+    reintroduce a local derivation here.
+    """
+    from tokenjam.core.optimize.report_window import report_window_days
+
+    return report_window_days(config, conn)
 
 
 def recompute_now(
@@ -316,6 +348,7 @@ def recompute_now(
     *,
     path: Path | None = None,
     window_days: int | None = None,
+    until: Any | None = None,
 ) -> dict[str, Any] | None:
     """Run every analyzer and store the result, on the CALLING thread.
 
@@ -339,8 +372,19 @@ def recompute_now(
         from tokenjam.core.optimize import build_report, report_to_dict
         from tokenjam.utils.time_parse import utcnow
 
-        days = window_days if window_days is not None else _window_days(config)
-        until = utcnow()
+        days = (
+            window_days if window_days is not None
+            else _window_days(config, getattr(db, "conn", None))
+        )
+        # ONE anchor across a scan cycle. When several stores are refreshed
+        # together (`core/optimize/scan_cycle.py`) they subtract their window
+        # from the SAME instant, so two surfaces publishing one metric cannot
+        # cover windows offset from each other. `None` means a lone refresh,
+        # which owns its own anchor. Anything that is not a datetime is
+        # discarded rather than raised on: the anchor crosses a thread
+        # boundary, and a malformed one must not sink a pass that would
+        # otherwise have succeeded.
+        until = until if isinstance(until, datetime) else utcnow()
         since = until - timedelta(days=days)
         try:
             report = build_report(db=db, config=config, since=since, until=until)
@@ -365,6 +409,7 @@ def trigger_background_recompute(
     *,
     path: Path | None = None,
     window_days: int | None = None,
+    until: Any | None = None,
 ) -> bool:
     """Fire-and-forget a scan on a daemon thread. Returns ``False`` when one is
     already running (the overlap guard — nothing is started, nothing stacks).
@@ -380,7 +425,9 @@ def trigger_background_recompute(
         backend = None
         try:
             backend = backend_factory()
-            recompute_now(backend, config, path=path, window_days=window_days)
+            recompute_now(
+                backend, config, path=path, window_days=window_days, until=until,
+            )
         except Exception as exc:   # noqa: BLE001
             # Never crash the scheduler thread — but never swallow the failure
             # either. `relearn_store`'s equivalent job discards its exception

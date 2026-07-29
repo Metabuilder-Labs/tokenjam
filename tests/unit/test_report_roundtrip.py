@@ -319,3 +319,72 @@ def test_the_specific_shape_that_broke_python_310():
     )
     # The attribute access that actually failed in CI.
     assert back.uncached_agents[0].agent_id == "sentinel-agent_id"
+
+
+def test_a_loosely_typed_row_list_survives_with_its_type():
+    """`list[Any]` costs the round trip its TYPE, and the metadata hook is what
+    buys it back.
+
+    `DowngradeFinding.per_agent` is declared `list[Any]` on purpose, so that
+    `core.optimize.types` stays free of an analyzer import. The value survived
+    the trip — the right rows, the right numbers — but came back as plain
+    dicts, because `Any` gives the hydrator nothing to dispatch on. Every
+    consumer reading `row.delta_usd` then raised `AttributeError`, and the one
+    that mattered caught broadly: the cost adapter dropped the ENTIRE downsize
+    contribution, so the Review inbox's headline lost that analyzer's whole
+    figure while the Dashboard tile — reading the finding directly, never
+    round-tripped — went on showing it. Two surfaces, one analyzer, a
+    several-hundred-dollar disagreement, and no error anywhere.
+
+    So the element type is declared as data (`metadata={"hydrate": ...}`) and
+    resolved at hydration time. This pins that it keeps working; the sibling
+    test above pins the quoted-forward-ref shape, which is the same failure
+    reached by a different route.
+    """
+    from tokenjam.core.optimize.analyzers.downsize_agents import AgentPriceRow
+    from tokenjam.core.optimize.analyzers.model_downgrade import DowngradeFinding
+
+    finding = dataclasses.replace(
+        _populate(DowngradeFinding), per_agent=[_populate(AgentPriceRow)],
+    )
+    back = hydrate_dataclass(DowngradeFinding, report_to_dict(finding))
+
+    assert back.per_agent, "the fixture must actually populate the list"
+    assert isinstance(back.per_agent[0], AgentPriceRow), (
+        f"got {type(back.per_agent[0]).__name__}; a `list[Any]` row list lost "
+        f"its type on the way back, which is what silently deleted a whole "
+        f"analyzer from the Review inbox"
+    )
+    # The attribute access that actually failed, and the property that only
+    # exists on the real class.
+    assert back.per_agent[0].delta_usd == finding.per_agent[0].delta_usd
+    assert back.per_agent[0].total_tokens == finding.per_agent[0].total_tokens
+
+
+def test_every_loosely_typed_dataclass_list_declares_how_to_hydrate_it():
+    """The rule, not the instance: a `list[Any]` field that is really a list of
+    dataclasses must carry `hydrate` metadata, or it will lose its type exactly
+    the way `per_agent` did — silently, and far from where it breaks.
+
+    Fields genuinely holding heterogeneous values are unaffected: this only
+    fires on a field whose stored rows are dataclass-shaped.
+    """
+    import tokenjam.core.optimize.types as types_mod
+
+    offenders = []
+    for name in dir(types_mod):
+        cls = getattr(types_mod, name)
+        if not (isinstance(cls, type) and dataclasses.is_dataclass(cls)):
+            continue
+        for f in dataclasses.fields(cls):
+            annotation = str(f.type)
+            if "list[Any]" not in annotation:
+                continue
+            if (f.metadata or {}).get("hydrate"):
+                continue
+            offenders.append(f"{name}.{f.name}")
+    assert not offenders, (
+        "these `list[Any]` fields declare no `hydrate` metadata; if any of them "
+        "holds dataclass rows it comes back as raw dicts and the failure "
+        f"surfaces somewhere else entirely: {offenders}"
+    )

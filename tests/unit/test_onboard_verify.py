@@ -91,8 +91,8 @@ def test_agent_id_is_passed_through_to_the_filter():
 
 
 def test_cause_is_persona_specific():
-    assert "restart" in not_confirmed_cause("claude_code").lower()
-    assert "Claude Code" in not_confirmed_cause("claude_code")
+    assert "restart" in not_confirmed_cause("claude-code").lower()
+    assert "Claude Code" in not_confirmed_cause("claude-code")
     assert "Codex" in not_confirmed_cause("codex")
     assert "tj ping" in not_confirmed_cause("sdk")
     # Unknown persona covers both failure modes.
@@ -104,7 +104,7 @@ def test_restart_causes_explain_backfill_is_not_live():
     # The pointer at doctor no longer falsely reassures (doctor now separates
     # live from backfilled), but the message must say why verify can report "no
     # telemetry" while backfilled data sits on disk (#102).
-    for persona in ("claude_code", "codex"):
+    for persona in ("claude-code", "codex"):
         cause = not_confirmed_cause(persona).lower()
         assert "backfilled" in cause
         assert "live" in cause

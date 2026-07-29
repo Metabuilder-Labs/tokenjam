@@ -1194,11 +1194,11 @@ def _detect_onboarded_persona(config: object) -> str:
     """
     agent_ids = list(getattr(config, "agents", {}) or {})
     if any(a.startswith("claude-code-") for a in agent_ids):
-        return "claude_code"
+        return "claude-code"
     if "codex_exec" in agent_ids:
         return "codex"
     if _tj_statusline_wired():
-        return "claude_code"
+        return "claude-code"
     return "sdk"
 
 

@@ -27,6 +27,7 @@ from tokenjam.core.rulewrite.delivery import (
 from tokenjam.core.rulewrite.plan import (
     RULE_WRITING_ANALYZERS,
     find_rule,
+    all_rule_writes,
     list_rule_writes,
 )
 from tokenjam.core.rulewrite.types import (
@@ -49,6 +50,7 @@ __all__ = [
     "apply_staged",
     "check_staged",
     "find_rule",
+    "all_rule_writes",
     "list_rule_writes",
     "resolve_delivery",
     "stage_rule",
