@@ -169,9 +169,22 @@ code, .mono {
 .sidebar[data-persona="claude-code"] .lens-switch { display: none; }
 .sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"],
 .sidebar[data-persona="sdk"] a.nav-link[data-view="context-audit"] { display: none !important; }
+/* The Dashboard's health band is Observe-shaped: unread alerts, agents
+   drifting, budgets at risk. A coding-agent user has no Observe lens, so the
+   band summarises pages they cannot open. Hidden for that persona rather than
+   left pointing at nothing. */
+body[data-persona="claude-code"] .health-glance { display: none; }
 /* Pinned above every page: the persona decides which pages exist, so it
    cannot live inside one of them. */
-.persona-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 18px; }
+/* Floated rather than a block of its own: App() renders this once, above every
+   view, but each view renders its own <h1>. A block here would always sit on a
+   separate line above the heading. Floating it lets the heading that follows
+   share the line, without every page having to render the switcher itself (and
+   without the switcher's position depending on each page's own header markup,
+   which differs: some carry a plan badge, a range picker and a Rescan button,
+   some carry nothing). Headings that are flex rows establish their own
+   formatting context and sit beside the float rather than under it. */
+.persona-bar { float: left; display: flex; align-items: center; gap: 8px; margin: 2px 18px 10px 0; }
 .persona-bar-label { font-size: 12px; color: var(--text-dim); }
 .persona-bar-note { font-size: 12px; color: var(--text-faint); }
 .persona-switch { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
@@ -385,6 +398,14 @@ code, .mono {
 /* Per-row scope badge, now that Class 1/2/3 are ONE combined table spanning
    both the global scope and the current project rather than one table per
    scope. */
+/* The chars/tokens unit toggle in the size column's header. Deliberately quiet:
+   it is a unit switch, not an action, and must not compete with the data. */
+.ctx-audit-unit-btn {
+  background: none; border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 5px; font: inherit; font-size: 10px; text-transform: lowercase;
+  letter-spacing: 0; color: var(--text-dim); cursor: pointer;
+}
+.ctx-audit-unit-btn:hover, .ctx-audit-unit-btn:focus-visible { color: var(--text); }
 .ctx-audit-scope-tag {
   /* flex:0 0 auto so the badge keeps its natural width and only the label
      shrinks; the row's `gap` supplies the spacing that margin-right used to. */
@@ -7110,11 +7131,16 @@ const CTX_AUDIT_CLASS_MEANING = {
 // as visually dominant at a glance rather than requiring a column-scan.
 // `max` is the table's own largest token value (never a cross-table figure;
 // a bar's meaning is "relative to its neighbors").
-function ctxAuditTokenCell(tokens, max) {
-  const pct = max > 0 ? Math.max(3, Math.round((tokens / max) * 100)) : 0;
+// One size cell, rendered in whichever unit the table is currently showing.
+// The bar is proportional within the SAME unit, so switching units re-scales
+// against that unit's own maximum and the bars never mix bases.
+function ctxAuditSizeCell(row, unit, max) {
+  const value = unit === 'chars' ? row.chars : row.tokens;
+  const label = unit === 'chars' ? value.toLocaleString('en-US') : fmtTokens(value);
+  const pct = max > 0 ? Math.max(3, Math.round((value / max) * 100)) : 0;
   return html`
-    <div style="display:flex;align-items:center;gap:8px;min-width:140px">
-      <span style="min-width:52px;text-align:right;font-variant-numeric:tabular-nums">${fmtTokens(tokens)}</span>
+    <div style="display:flex;align-items:center;gap:8px;min-width:150px">
+      <span style="min-width:62px;text-align:right;font-variant-numeric:tabular-nums">${label}</span>
       <div style="flex:1;max-width:100px;height:6px;border-radius:3px;background:var(--border);overflow:hidden">
         <div style="width:${pct}%;height:100%;background:var(--brand)"></div>
       </div>
@@ -7136,7 +7162,7 @@ function ctxAuditScopeTag(scopeLabel) {
 // the shared description column means for THIS class ("what it puts in
 // context" for Class 1, "what fires" for Class 2/3); the underlying field is
 // the same evidence-derived text either way.
-function ContextAuditRow({ row, maxTokens, onExpandGroup }) {
+function ContextAuditRow({ row, unit, max, onExpandGroup }) {
   const isGroup = row.kind === 'group' && row.members.length > 0;
   return html`
     <tr>
@@ -7149,8 +7175,7 @@ function ContextAuditRow({ row, maxTokens, onExpandGroup }) {
         ` : html`<span class="ctx-audit-src-plain" title=${row.label}>${shortPath(row.label)}</span>`}
       </td>
       <td style="color:var(--text-dim);font-size:12px">${row.trigger}</td>
-      <td style="font-variant-numeric:tabular-nums">${row.chars.toLocaleString('en-US')}</td>
-      <td>${ctxAuditTokenCell(row.tokens, maxTokens)}</td>
+      <td>${ctxAuditSizeCell(row, unit, max)}</td>
       <td class="ctx-audit-desc" style="color:var(--text-dim);font-size:12px"><span title=${row.description || ''}>${row.description || '-'}</span></td>
       <td style="color:var(--text-dim);font-size:12px">${row.frequency}</td>
     </tr>
@@ -7161,15 +7186,33 @@ function ContextAuditRow({ row, maxTokens, onExpandGroup }) {
 // class per the CLI's own column framing (content for Class 1, action for
 // Class 2/3), the last four are otherwise identical.
 function ContextAuditTable({ rows, descLabel, onExpandGroup }) {
-  const headers = ['Source', 'Trigger', 'Chars', 'Tokens', descLabel, 'Frequency'];
+  // Chars and tokens are two units for ONE quantity (how much of this reaches
+  // the model), so they share a column rather than competing for width. Chars
+  // is the default because it is the measured value; tokens is an estimate
+  // derived from it. The unit is per-table state: a reader comparing rows
+  // wants them all in the same unit, and nothing outside this table depends
+  // on the choice.
+  const [unit, setUnit] = useState('chars');
+  const isChars = unit === 'chars';
+  const sizeHeader = html`
+    <span style="display:inline-flex;align-items:center;gap:6px">
+      ${isChars ? 'Chars' : 'Tokens'}
+      <button type="button" class="ctx-audit-unit-btn"
+              title=${isChars ? 'Show tokens instead' : 'Show characters instead'}
+              aria-label=${isChars ? 'Show tokens instead' : 'Show characters instead'}
+              onClick=${() => setUnit(isChars ? 'tokens' : 'chars')}>${isChars ? 'tokens' : 'chars'}</button>
+    </span>`;
+  const headers = ['Source', 'Trigger', sizeHeader, descLabel, 'Frequency'];
   const maxTokens = rows.reduce((m, r) => Math.max(m, r.tokens), 0);
+  const maxChars = rows.reduce((m, r) => Math.max(m, r.chars), 0);
   return html`
     <div class="table-wrap"><table>
-      <thead><tr>${headers.map(h => html`<th key=${h}>${h}</th>`)}</tr></thead>
+      <thead><tr>${headers.map((h, i) => html`<th key=${i}>${h}</th>`)}</tr></thead>
       <tbody>
         ${rows.length === 0 ? html`
           <tr><td colspan=${headers.length} style="color:var(--text-dim);font-size:13px;padding:12px 0">None found.</td></tr>
-        ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} maxTokens=${maxTokens} onExpandGroup=${onExpandGroup} />`)}
+        ` : rows.map((r, i) => html`<${ContextAuditRow} key=${i} row=${r} unit=${unit}
+                                       max=${isChars ? maxChars : maxTokens} onExpandGroup=${onExpandGroup} />`)}
       </tbody>
     </table></div>`;
 }
@@ -7180,26 +7223,25 @@ function ContextAuditClass1Table({ rows, onExpandGroup }) {
   return html`<${ContextAuditTable} rows=${rows} descLabel="What it puts in context" onExpandGroup=${onExpandGroup} />`;
 }
 
-// Class 2/3: collapsed behind one summary line by default; expanding shows
-// the same combined table Class 1 uses. Class 3's summary is visually
-// de-emphasised (dimmed, explicitly labelled NOT resident) so its raw token
-// count, which can be LARGER than Class 1's since it sums every on-demand
-// body regardless of whether it's ever invoked, never reads as a bigger cost
-// than the always-resident floor above it.
-function ContextAuditClassDetails({ classKey, rows, count, deemphasise, onExpandGroup }) {
+// Class 2/3: always rendered open, exactly like Class 1. There is deliberately
+// no collapse control: all three classes are the page's content, and hiding two
+// of them behind a disclosure made the page look emptier than the inventory
+// actually is. Class 3's heading stays visually de-emphasised and explicitly
+// labelled NOT resident, because its raw token count can exceed Class 1's (it
+// sums every on-demand body whether or not it is ever invoked) and must never
+// read as a bigger cost than the always-resident floor above it.
+function ContextAuditClassSection({ classKey, rows, count, deemphasise, onExpandGroup }) {
   const totalTokens = rows.reduce((s, r) => s + r.tokens, 0);
   const label = classKey === 'class2' ? 'Class 2' : 'Class 3';
   const notResident = classKey === 'class3' ? ' (NOT resident: costs nothing until invoked)' : '';
   return html`
-    <details style="margin-top:28px">
-      <summary style="cursor:pointer;font-size:13px;${deemphasise ? 'color:var(--text-dim)' : ''}">
+    <section style="margin-top:32px">
+      <div style="font-size:13px;margin-bottom:8px;${deemphasise ? 'color:var(--text-dim)' : ''}">
         <b>${label}</b>: ${CTX_AUDIT_CLASS_MEANING[classKey] + ' '}
         ${count} item(s), ~${fmtTokens(totalTokens)} tokens${notResident}.
-      </summary>
-      <div style="margin-top:8px">
-        <${ContextAuditTable} rows=${rows} descLabel="What fires" onExpandGroup=${onExpandGroup} />
       </div>
-    </details>`;
+      <${ContextAuditTable} rows=${rows} descLabel="What fires" onExpandGroup=${onExpandGroup} />
+    </section>`;
 }
 
 // The group-detail popup: a centered modal, not inline expansion (the main
@@ -7341,10 +7383,6 @@ function ContextAuditView() {
   // Global and project ARE meant to be summed here, unlike a sum ACROSS two
   // different projects (which would double-count a floor no single session
   // ever pays twice) - a session in this project genuinely carries both.
-  const globalTokens = data.global.class1_total_tokens;
-  const projectTokens = currentProject ? currentProject.class1_total_tokens : 0;
-  const headlineTokens = globalTokens + projectTokens;
-  const headlineWhere = currentProject ? `in ${shortPath(currentProject.scope)}` : 'in every Claude Code session';
 
   const combinedClass1 = ctxAuditCombine(data.global.class1, currentProject ? currentProject.class1 : []);
   const combinedClass2 = ctxAuditCombine(data.global.class2, currentProject ? currentProject.class2 : []);
@@ -7364,19 +7402,6 @@ function ContextAuditView() {
       (a disabled plugin's skills/hooks are excluded; its rules files, if any, are counted on
       their own merit; the harness reads that directory regardless of plugin state).
     </div>
-
-    <div style="padding:16px;border:1px solid var(--border);border-radius:8px;margin-bottom:20px">
-      <div style="font-size:22px;font-weight:700">~${fmtTokens(headlineTokens)} tokens load into every session ${headlineWhere}</div>
-      <div style="color:var(--text-dim);font-size:12px;margin-top:4px">
-        global: ~${fmtTokens(globalTokens)}${currentProject ? html` · this project: ~${fmtTokens(projectTokens)}` : null}
-      </div>
-      ${currentProject ? html`
-        <div style="color:var(--text-dim);font-size:11px;margin-top:6px">
-          Global and this project are added together above since a session here carries both;
-          a different project's floor would replace this one, never add on top of it.
-        </div>
-      ` : null}
-    </div>
     ${error ? html`
       <div class="band-msg err" style="margin:14px 0">
         <b>Couldn't refresh the context audit.</b>
@@ -7392,8 +7417,8 @@ function ContextAuditView() {
     ` : null}
 
     <${ContextAuditClass1Table} rows=${combinedClass1} onExpandGroup=${onExpandGroup} />
-    <${ContextAuditClassDetails} classKey="class2" rows=${combinedClass2} count=${combinedClass2Count} deemphasise=${false} onExpandGroup=${onExpandGroup} />
-    <${ContextAuditClassDetails} classKey="class3" rows=${combinedClass3} count=${combinedClass3Count} deemphasise=${true} onExpandGroup=${onExpandGroup} />
+    <${ContextAuditClassSection} classKey="class2" rows=${combinedClass2} count=${combinedClass2Count} deemphasise=${false} onExpandGroup=${onExpandGroup} />
+    <${ContextAuditClassSection} classKey="class3" rows=${combinedClass3} count=${combinedClass3Count} deemphasise=${true} onExpandGroup=${onExpandGroup} />
     <${ContextAuditUnloaded} rows=${combinedUnloaded} count=${combinedUnloadedCount} />
     <${ContextAuditGroupModal} group=${modalGroup} onClose=${() => setModalGroup(null)} />
   `;
@@ -8772,10 +8797,13 @@ function RulesView() {
   return html`
     <div class="view">
       <div class="page-title">Rules</div>
+      ${/* No "back to Optimize" link: Rules is a nav-child of Optimize, so the
+            sidebar already shows its parent one line above it whenever this
+            page is open. A second route back was noise trailing the
+            description. */ ''}
       <div class="opt-line dim">
         Permanent CLAUDE.md rules the analyzers propose, and the project files
         each one would be written into.
-        <a class="sz-link" href="#/optimize">← back to Optimize</a>
       </div>
       ${err ? html`<div class="panel"><div class="opt-line" style="color:var(--error)">${err}</div></div>` : null}
       ${msg ? html`<div class="panel"><div class="opt-line">${msg}</div></div>` : null}
@@ -8789,7 +8817,7 @@ function RulesView() {
             : rules.map(r => {
                 const dests = r.destinations || [];
                 const st = stagedBySig[r.signature] || [];
-                return html`<div key=${r.signature} style="display:block;padding:12px 0;border-bottom:1px solid var(--border)">
+                return html`<div key=${r.signature} style="display:block;padding:14px 16px;border-bottom:1px solid var(--border)">
                   <div style="display:flex;align-items:center;gap:10px">
                     <b>${r.title || r.signature}</b>
                     <span class="dim" style="font-size:12px">${r.analyzer} · ${
@@ -8841,7 +8869,7 @@ function RulesView() {
               })}
       </div>
 
-      ${preview ? html`<div class="panel">
+      ${preview ? html`<div class="panel" style="margin-top:18px">
         <div class="panel-head"><h2>Preview — nothing written</h2></div>
         ${(preview.applied || []).map(a => html`<div class="sz-diffblock" key=${a.path}>
           <div class="sz-diffblock-h">${a.path}${a.created_file ? ' (new file)' : ''}</div>
@@ -8854,7 +8882,7 @@ function RulesView() {
         </div>
       </div>` : null}
 
-      <div class="panel">
+      <div class="panel" style="margin-top:18px">
         <div class="panel-head"><h2>Applied</h2></div>
         ${applied === null
           ? html`<div class="opt-line dim">Loading…</div>`
@@ -12697,7 +12725,7 @@ function DashboardView({ params }) {
                     })}
                 </div>` : null}
               </div>
-              <div class="dash-col">
+              <div class="dash-col health-glance">
                 <div class="band-label">Health at a glance</div>
                 ${/* Every tile below carries the status of the read it is derived
                       from. Each one used to take its figure from a `.catch(() =>
@@ -12946,8 +12974,11 @@ function App() {
     const sidebar = document.querySelector('.sidebar');
     // `data-persona` drives the nav gating in CSS, alongside `data-lens`.
     // Written in this same pass so the two can never disagree for a frame;
-    // `persona` is therefore in this effect's dependency list.
+    // `persona` is therefore in this effect's dependency list. It is also
+    // mirrored onto <body>, because persona gates content INSIDE views too
+    // (the Dashboard's health band), which the sidebar attribute cannot reach.
     if (sidebar) sidebar.dataset.persona = persona;
+    document.body.dataset.persona = persona;
     if (sidebar) sidebar.dataset.lens = lens;
     document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
     document.querySelectorAll('.nav-link').forEach(el => {
