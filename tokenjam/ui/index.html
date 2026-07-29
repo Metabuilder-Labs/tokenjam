@@ -8266,17 +8266,13 @@ function OptimizeView({ params }) {
   const sfPctApplied = sfTotal > 0 ? Math.round(sfApplied / sfTotal * 100) : 0;
 
   return html`
-    ${/* In-context entry point, rendered UNCONDITIONALLY, outside every data
-          branch — so it is there while the store is cold, while a scan is in
-          flight, and after a failed read, which are the states a reader is most
-          likely to be wondering what these checks are. The sidebar carries the
-          FAQ as a top-level Improve entry (that is what makes it reachable
-          from anywhere at all); this link is the contextual one, offered on the
-          screen whose cards it explains. */ ''}
+    ${/* The contextual "What do these checks mean?" link that used to sit
+          beside this title is gone. The FAQ is still a top-level Improve entry
+          in the sidebar, which is what makes it reachable from anywhere; this
+          second, in-title entry point was noise on the heading. */ ''}
     <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:20px">
       <div class="page-title" style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:0">
         Optimize <${PlanBadge} framing=${framing} />
-        <a class="sz-link" href="#/faq" style="font-size:13px;font-weight:400">What do these checks mean? →</a>
       </div>
       <${ScanBar} scan=${scan} busy=${rescanning} error=${rescanError} onRescan=${doRescan} />
     </div>

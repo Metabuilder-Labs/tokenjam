@@ -5074,17 +5074,10 @@ def test_faq_nav_entry_is_last_in_improve_and_absent_from_observe(html):
     assert not any('href="#/guide"' in ln for ln in observe_lines)
 
 
-def test_analyzer_guide_is_reachable_from_the_optimize_screen(html):
-    """The contextual entry point, on the screen whose cards it explains. It
-    renders before any `st.opt` / `scan.known` guard, so a cold or failed store
-    still offers the way in."""
-    fn_start = html.index("function OptimizeView({ params })")
-    fn_end = html.index("// FAQ (formerly Optimize \u25b8 Guide)", fn_start)
-    fn = html[fn_start:fn_end]
-    assert 'href="#/faq"' in fn
-    title_at = fn.index("Optimize <${PlanBadge}")
-    link_at = fn.index('href="#/faq"')
-    assert link_at - title_at < 600, "FAQ link drifted out of the always-rendered title block"
+# NOTE: test_analyzer_guide_is_reachable_from_the_optimize_screen was deleted
+# with the in-title "What do these checks mean?" link it existed to pin. The
+# FAQ remains reachable as a top-level Improve nav entry, which the test above
+# covers.
 
 
 def test_analyzer_guide_heading_has_no_optimize_backlink(html):
