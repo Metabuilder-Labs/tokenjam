@@ -96,6 +96,7 @@ def create_app(
     from tokenjam.api.routes.relearn import router as relearn_router
     from tokenjam.api.routes.recommendations import router as recommendations_router
     from tokenjam.api.routes.context_audit import router as context_audit_router
+    from tokenjam.api.routes.persona import router as persona_router
 
     app.include_router(spans_router, prefix="/api/v1")
     app.include_router(traces_router, prefix="/api/v1")
@@ -123,6 +124,7 @@ def create_app(
     app.include_router(relearn_router, prefix="/api/v1")  # /relearn/{proposals,refresh} — self-improve loop Review inbox
     app.include_router(recommendations_router, prefix="/api/v1")  # /recommendations outcome ledger
     app.include_router(context_audit_router, prefix="/api/v1")  # /context-audit — Lens context-load inventory
+    app.include_router(persona_router, prefix="/api/v1")  # /persona — detected persona + per-persona session counts
     app.include_router(health_router)  # /health — no prefix, for uptime probes
     app.include_router(metrics_router)  # /metrics — no prefix
     app.include_router(otlp_router)  # /v1/traces, /v1/metrics, /v1/logs — no prefix

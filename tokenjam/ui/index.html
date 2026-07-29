@@ -159,6 +159,25 @@ code, .mono {
 .lens-btn.active { background: rgba(var(--accent-rgb),0.16); color: var(--accent); }
 .sidebar[data-lens="improve"] a.nav-link[data-lens="observe"] { display: none; }
 .sidebar[data-lens="observe"] a.nav-link[data-lens="improve"] { display: none; }
+/* Persona gating. A coding-agent user has no Observe lens at all, so the
+   lens switcher is hidden rather than left as a control with one option:
+   showing a toggle that cannot toggle reads as a broken affordance. An SDK
+   user keeps both lenses and loses only the two Claude-Code-specific pages.
+   `!important` because the route effect writes an inline `display` on
+   nav-children, which would otherwise win over these rules. */
+.sidebar[data-persona="claude-code"] a.nav-link[data-lens="observe"] { display: none !important; }
+.sidebar[data-persona="claude-code"] .lens-switch { display: none; }
+.sidebar[data-persona="sdk"] a.nav-link[data-view="sessions"],
+.sidebar[data-persona="sdk"] a.nav-link[data-view="context-audit"] { display: none !important; }
+/* Pinned above every page: the persona decides which pages exist, so it
+   cannot live inside one of them. */
+.persona-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 18px; }
+.persona-bar-label { font-size: 12px; color: var(--text-dim); }
+.persona-bar-note { font-size: 12px; color: var(--text-faint); }
+.persona-switch { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+.persona-btn { background: none; border: none; border-radius: 6px; padding: 4px 12px; font: inherit; font-size: 12.5px; color: var(--text-dim); cursor: pointer; }
+.persona-btn:hover { color: var(--text); }
+.persona-btn.active { background: rgba(var(--accent-rgb),0.16); color: var(--accent); }
 .sidebar-footer {
   margin-top: auto;
   border-top: 1px solid var(--border);
@@ -12803,8 +12822,76 @@ function detailNodeFor(route) {
   return null;
 }
 
+// Which views each persona is offered. A coding-agent user (Claude Code, and
+// Codex once it is supported) is not shown the Observe lens at all: it is the
+// SDK/observability suite and none of it ends in an edit they can make. An SDK
+// user gets both lenses, minus the two surfaces that only exist because a
+// coding agent leaves transcripts on disk.
+//
+// This is a VIEW filter over one dataset, never a claim about the data. It
+// hides pages; it never changes a number, and it never implies the hidden
+// pages found nothing.
+// (Plain arrays, not Sets keyed by persona: a persona-keyed `new Set(...)`
+// literal is the shape the analyzer gate map would take if someone ever
+// duplicated it into JS, and a regression test forbids that shape outright.
+// These are VIEW names, an entirely different concern from the analyzer gate,
+// but the guard is worth keeping blunt.)
+const PERSONA_HIDDEN_VIEWS = {
+  'claude-code': ['traces', 'cost', 'alerts', 'drift', 'budget'],
+  'sdk': ['sessions', 'context-audit'],
+};
+
+function personaHides(persona, view) {
+  const hidden = PERSONA_HIDDEN_VIEWS[persona];
+  return !!(hidden && hidden.indexOf(view) !== -1);
+}
+
+/** The persona switcher, pinned above every page.
+ *
+ * View-only by design: it defaults to whatever the corpus looks like and
+ * resets on reload, so it can never drift out of sync with the ingested data
+ * the way a stored preference would. Both personas are always offered, even
+ * one with no data — someone evaluating the SDK view should be told plainly
+ * that this machine has no SDK workflows rather than find the option missing
+ * and be left guessing whether it is supported.
+ */
+function PersonaBar({ persona, detected, known, counts, onChange }) {
+  const opts = [['claude-code', 'Claude Code'], ['sdk', 'SDK workflows']];
+  return html`
+    <div class="persona-bar">
+      <span class="persona-bar-label">Viewing as</span>
+      <div class="persona-switch" role="tablist" aria-label="Persona">
+        ${opts.map(([value, label]) => html`
+          <button type="button" role="tab" aria-selected=${persona === value}
+                  class=${'persona-btn' + (persona === value ? ' active' : '')}
+                  onClick=${() => onChange(value)}>${label}</button>`)}
+      </div>
+      ${known && detected && persona !== detected ? html`
+        <span class="persona-bar-note">Detected: ${detected === 'claude-code' ? 'Claude Code' : detected}</span>` : null}
+      ${known && counts && counts[persona] === 0 ? html`
+        <span class="persona-bar-note">No ${persona === 'sdk' ? 'SDK' : 'Claude Code'} sessions on this machine</span>` : null}
+    </div>`;
+}
+
 function App() {
   const [route, setRoute] = useState(getRoute());
+
+  // Persona: detected from the corpus, overridable for the session only.
+  // `known:false` until the read lands, so nothing downstream renders a count
+  // or a "you have none of these" claim off an unanswered fetch.
+  const [personaInfo, setPersonaInfo] = useState({ known: false, detected: 'unknown', counts: null });
+  const [personaOverride, setPersonaOverride] = useState(null);
+  const persona = personaOverride
+    || (personaInfo.known && PERSONA_HIDDEN_VIEWS[personaInfo.detected] ? personaInfo.detected : 'claude-code');
+  const setPersona = (p) => setPersonaOverride(p);
+
+  useEffect(() => {
+    let cancelled = false;
+    api('/persona')
+      .then(d => { if (!cancelled && d) setPersonaInfo(d); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     const handler = () => setRoute(getRoute());
@@ -12837,6 +12924,18 @@ function App() {
     }
   }, [route.view, route.param]);
 
+  // Landing on a view this persona does not show (a deep link, a bookmark, or
+  // switching persona while standing on one) leaves the reader on a page with
+  // no nav entry pointing at it. Send them to the Dashboard instead of
+  // rendering an orphan. replaceState so Back does not bounce them straight
+  // into the same hidden view again.
+  useEffect(() => {
+    if (personaHides(persona, route.view)) {
+      history.replaceState(null, '', '#/dashboard');
+      setRoute(getRoute());
+    }
+  }, [persona, route.view]);
+
   // Update active nav link + reveal nested children of the active section +
   // keep the Improve/Observe lens pill in sync with the current route (self-
   // improve-loop SPEC.md §12 — two lenses, one router; a direct link or
@@ -12845,6 +12944,10 @@ function App() {
     const view = route.view, param = route.param || '';
     const lens = VIEW_LENS[view] || 'improve';
     const sidebar = document.querySelector('.sidebar');
+    // `data-persona` drives the nav gating in CSS, alongside `data-lens`.
+    // Written in this same pass so the two can never disagree for a frame;
+    // `persona` is therefore in this effect's dependency list.
+    if (sidebar) sidebar.dataset.persona = persona;
     if (sidebar) sidebar.dataset.lens = lens;
     document.querySelectorAll('.lens-btn').forEach(b => b.classList.toggle('active', b.dataset.lens === lens));
     document.querySelectorAll('.nav-link').forEach(el => {
@@ -12860,7 +12963,11 @@ function App() {
         el.classList.toggle('active', v === view && !childActive);
       }
     });
-  }, [route.view, route.param]);
+    // `persona` is a dependency because this effect writes `data-persona`, which
+    // drives the nav gating. Without it the attribute is only refreshed when the
+    // ROUTE changes, so switching persona while standing still leaves the
+    // sidebar showing the previous persona's pages.
+  }, [route.view, route.param, persona]);
 
   const primaryKey = primaryKeyFor(route);
   const detail = detailNodeFor(route);
@@ -12912,6 +13019,9 @@ function App() {
   // one is visible; the rest are display:none (kept mounted, state intact). A
   // detail drill-in (mounted fresh, keyed by id) overlays the hidden stack.
   return html`
+    <${PersonaBar} persona=${persona} detected=${personaInfo.detected}
+                   known=${personaInfo.known} counts=${personaInfo.counts}
+                   onChange=${setPersona} />
     ${PRIMARY_VIEWS.map(([key, Comp]) => {
       if (!mounted.has(key)) return null;
       const isActive = !detail && key === primaryKey;
