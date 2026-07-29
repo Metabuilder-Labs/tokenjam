@@ -495,7 +495,7 @@ def _catalog_prose_rows(paths: Sequence[Path], scope: str) -> tuple[list[Row], l
                              "on file read", CLASS_2, scope, description,
                              family_kind, family_qualifier))
         else:
-            trigger = "session start" if not is_rule else "session start (unscoped rule)"
+            trigger = "harness auto-load" if not is_rule else "harness auto-load (unscoped rule)"
             rows.append(Row(str(path), trigger, chars, "every turn", CLASS_1, scope,
                              description, family_kind, family_qualifier))
     return rows, unloaded
@@ -530,11 +530,11 @@ def _skill_command_agent_rows(
         if load_class not in load_semantics.ON_DEMAND_CLASSES or load_class == load_semantics.PATH_SCOPED:
             # Shouldn't happen for a skills/commands/agents path, but never
             # misclassify silently — fall back to reading it as always-resident.
-            rows.append(Row(str(path), "session start", len(text), "every turn", CLASS_1, scope, description))
+            rows.append(Row(str(path), "harness auto-load", len(text), "every turn", CLASS_1, scope, description))
             continue
         resident, on_demand = load_semantics.split_always_resident(text, load_class)
         kind = {"skill": "skill", "command": "command", "agent": "agent"}[load_class]
-        rows.append(Row(str(path), f"listed in {kind} roster", len(resident),
+        rows.append(Row(str(path), "tool listing", len(resident),
                          "every turn", CLASS_1, scope, description,
                          f"{kind}_desc", group_qualifier))
         if not on_demand:
@@ -735,7 +735,7 @@ def _hook_rows_from_events(
                 command = str(hook.get("command") or "")
                 if not command:
                     continue
-                trigger = f"{event_name}" + (f" (matcher: {matcher})" if matcher else "")
+                trigger = f"{event_name} hook" + (f" (matcher: {matcher})" if matcher else "")
                 source = f"{source_prefix} {command}".strip() if source_prefix else command
                 # The command STRING is what's on disk/in config; the hook's
                 # actual stdout at runtime (what really lands in context) is
