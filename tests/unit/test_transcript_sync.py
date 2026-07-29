@@ -416,6 +416,73 @@ def test_reconcile_counts_ingested_sessions_when_daemon_holds_the_lock(
     db.close()
 
 
+def test_reconcile_marks_unverified_when_daemon_lookup_fails(
+    tmp_path: Path,
+) -> None:
+    """Greptile P1 / #642: when the daemon ingested-id lookup raises
+    (auth/connectivity/server/decode), `reconcile_claude_code` must NOT return a
+    confident all-zero report — it flags `verified=False` so the caller can be
+    honest instead of reprinting "0 ingested · everything ingested".
+    """
+    root = tmp_path / "projects"
+    for sid in ("sess-a", "sess-b"):
+        _write_session(root, sid)
+
+    class _FailingShim:
+        """No `.conn` (like `ApiBackend`) and a fetch that always raises."""
+
+        def fetch_ingested_session_ids(self, session_ids):
+            raise RuntimeError("daemon unreachable")
+
+    report = reconcile_claude_code(_FailingShim(), root=root)
+
+    assert report.verified is False
+    # Disk scan still worked; only the DB comparison could not run.
+    assert report.disk_sessions == 2
+    assert report.ingested_sessions == 0
+    assert report.missing_count == 0
+    assert report.to_dict()["verified"] is False
+
+
+def test_reconcile_marks_unverified_when_no_conn_and_no_shim(
+    tmp_path: Path,
+) -> None:
+    """A backend with neither `.conn` nor a fetch method cannot verify either."""
+    root = tmp_path / "projects"
+    _write_session(root, "sess-a")
+
+    class _OpaqueBackend:
+        pass
+
+    report = reconcile_claude_code(_OpaqueBackend(), root=root)
+    assert report.verified is False
+
+
+def test_backfill_status_command_reports_could_not_verify(
+    tmp_path: Path,
+) -> None:
+    """The status command must surface an honest "couldn't verify" message on an
+    unverified report — never "0 already ingested" or "Every session ingested".
+    """
+    root = tmp_path / "projects"
+    _write_session(root, "sess-a")
+
+    class _FailingShim:
+        def fetch_ingested_session_ids(self, session_ids):
+            raise RuntimeError("daemon unreachable")
+
+    result = CliRunner().invoke(
+        cmd_backfill_module.cmd_backfill,
+        ["status", "--root", str(root)],
+        obj={"db": _FailingShim(), "config": None},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Couldn't verify" in result.output
+    assert "already ingested" not in result.output
+    assert "Every on-disk session" not in result.output
+
+
 def test_backfill_status_command_lists_the_missing_session(
     tmp_path: Path, db: DuckDBBackend,
 ) -> None:

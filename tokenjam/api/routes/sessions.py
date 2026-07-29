@@ -60,6 +60,13 @@ from tokenjam.otel.semconv import GenAIAttributes
 
 router = APIRouter()
 
+# Upper bound on the candidate id list POSTed to /sessions/ingested-ids.
+# Auth is off by default on the local daemon, so an unbounded list would let a
+# client exhaust daemon memory and block the event loop (Greptile P2 / #642).
+# A real Claude Code history is thousands of sessions; 50k is comfortably above
+# any genuine on-disk count while keeping the request bounded.
+MAX_INGESTED_ID_CANDIDATES = 50_000
+
 # Max tools to surface in the per-session breakdown (most-called first).
 MAX_SESSION_TOOLS = 15
 # Max alerts to surface for the session.
@@ -220,6 +227,19 @@ async def ingested_session_ids(request: Request) -> JSONResponse:
     if not isinstance(raw, list):
         return JSONResponse(
             status_code=400, content={"error": "session_ids must be a list"}
+        )
+    if len(raw) > MAX_INGESTED_ID_CANDIDATES:
+        # Reject rather than clamp: silently truncating would under-report the
+        # ingested set and reintroduce a wrong count. Guards against an
+        # unbounded list exhausting daemon memory (Greptile P2).
+        return JSONResponse(
+            status_code=413,
+            content={
+                "error": (
+                    f"session_ids exceeds the maximum of "
+                    f"{MAX_INGESTED_ID_CANDIDATES} candidates"
+                )
+            },
         )
     session_ids = [str(s) for s in raw if isinstance(s, str) and s]
 

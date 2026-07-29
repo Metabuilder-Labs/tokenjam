@@ -100,6 +100,12 @@ class SyncReport:
     files_unreadable: int = 0
     disk_sessions: int = 0
     ingested_sessions: int = 0
+    #: True once the disk-vs-DB anti-join actually completed. Stays ``False``
+    #: when the ingested-id lookup could not run (e.g. the daemon holds the
+    #: write-lock and its HTTP shim call failed) — the ingested/missing/skipped
+    #: buckets are then meaningless and MUST NOT be rendered as a confident
+    #: "0 ingested · everything is ingested" (issue #642, Greptile P1).
+    verified: bool = True
     #: On disk, not in the DB, and carries at least one billable assistant turn.
     missing: list[DiskSession] = field(default_factory=list)
     #: On disk, not in the DB, but parses to zero spans (no assistant turn) —
@@ -141,6 +147,7 @@ class SyncReport:
             "files_unreadable": self.files_unreadable,
             "disk_sessions": self.disk_sessions,
             "ingested_sessions": self.ingested_sessions,
+            "verified": self.verified,
             "missing_count": self.missing_count,
             "skipped_empty_count": self.skipped_empty_count,
             "days_until_rotation": self.days_until_rotation(),
@@ -342,11 +349,19 @@ def reconcile_claude_code(
                 "reconcile: backend exposes no connection and no HTTP shim; "
                 "nothing to compare"
             )
+            # Could not verify — do NOT let the empty buckets read as a
+            # confident "0 ingested · everything ingested" (#642 P1).
+            report.verified = False
             return report
         try:
             ingested = fetch(disk_ids)
         except Exception:
+            # Auth/connectivity/server/decode failure. Returning here with the
+            # buckets left at 0 would reprint the exact misleading status #642
+            # set out to kill, so mark the report unverified and let the caller
+            # surface an honest "couldn't verify" instead (Greptile P1).
             logger.warning("reconcile: daemon ingested-id lookup failed", exc_info=True)
+            report.verified = False
             return report
     report.ingested_sessions = len(ingested)
 
