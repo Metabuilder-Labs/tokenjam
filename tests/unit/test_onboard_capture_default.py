@@ -52,9 +52,9 @@ def test_plain_onboard_writes_prompts_true(tmp_path):
 def test_plain_onboard_prints_capture_disclosure(tmp_path):
     res, _ = _run_plain(tmp_path)
     assert res.exit_code == 0, res.output
-    assert "Prompt capture" in res.output
-    assert "locally" in res.output
-    assert "capture.prompts = false" in res.output  # the opt-out instruction
+    assert "captured and stored only on this machine" in res.output
+    assert "nothing is ever uploaded" in res.output
+    assert "capture.tool_inputs = false" in res.output  # the opt-out instruction
 
 
 # --- --claude-code / --codex fresh onboard: dataclass default ----------
@@ -101,7 +101,7 @@ def test_claude_code_fresh_onboard_captures_prompts_by_default(_isolated_home, t
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.prompts is True
-    assert "Prompt capture" in res.output
+    assert "captured and stored only on this machine" in res.output
 
 
 def test_codex_fresh_onboard_captures_prompts_by_default(_isolated_home, tmp_path):
@@ -109,7 +109,7 @@ def test_codex_fresh_onboard_captures_prompts_by_default(_isolated_home, tmp_pat
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.prompts is True
-    assert "Prompt capture" in res.output
+    assert "captured and stored only on this machine" in res.output
 
 
 # --- Migration: re-onboarding over a pre-existing stale config ---------
@@ -135,7 +135,7 @@ def test_claude_code_reconfigure_upgrades_stale_prompts_false(_isolated_home, tm
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.prompts is True
-    assert "Prompt capture" in res.output
+    assert "captured and stored only on this machine" in res.output
 
 
 def test_codex_reconfigure_upgrades_stale_prompts_false(_isolated_home, tmp_path):
@@ -144,7 +144,7 @@ def test_codex_reconfigure_upgrades_stale_prompts_false(_isolated_home, tmp_path
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.prompts is True
-    assert "Prompt capture" in res.output
+    assert "captured and stored only on this machine" in res.output
 
 
 def test_claude_code_plain_rerun_leaves_explicit_false_alone(_isolated_home, tmp_path):
@@ -157,4 +157,7 @@ def test_claude_code_plain_rerun_leaves_explicit_false_alone(_isolated_home, tmp
     assert res.exit_code == 0, res.output
     config = load_config(str(cfg_path))
     assert config.capture.prompts is False
-    assert "Prompt capture" not in res.output
+    # prompts stays off, but the seeded tool_inputs=true still discloses tool inputs
+    assert "Your tool inputs are captured" in res.output
+    assert "Your prompts are captured" not in res.output
+    assert "Your prompts and tool inputs are captured" not in res.output

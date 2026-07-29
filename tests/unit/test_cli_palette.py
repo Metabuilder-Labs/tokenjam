@@ -118,10 +118,20 @@ def test_plan_menu_accents_only_the_choice_key(capsys):
 
 def test_accent_is_a_single_defined_hue():
     assert ACCENT.startswith("#")
-    # brand and url are the same hue as accent, so no screen carries two
-    # competing accents (the cyan-banner-vs-violet-body problem).
-    for role in ("brand", "url"):
-        assert ACCENT in str(TJ_THEME.styles[role]), role
+    # `url` is the same hue as accent, so typeable/clickable content never
+    # carries two competing accents in the body of a screen.
+    assert ACCENT in str(TJ_THEME.styles["url"])
+
+
+def test_brand_is_the_dedicated_orange_wordmark_colour():
+    # #643: the ASCII wordmark gets its OWN brand colour (orange), distinct from
+    # the periwinkle accent — the banner is a branded moment, not typeable
+    # content, so it earns its own hue. The accent stays reserved for the body.
+    from tokenjam.utils.theme import BRAND_ORANGE
+
+    assert BRAND_ORANGE == "#e0922f"
+    assert BRAND_ORANGE in str(TJ_THEME.styles["brand"])
+    assert ACCENT not in str(TJ_THEME.styles["brand"])
 
 
 # --- colour past the accent is reserved for genuine state -------------------

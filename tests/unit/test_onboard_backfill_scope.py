@@ -99,49 +99,56 @@ def _run_claude_code(tmp_path, *extra_args, input_str="3\n0\n"):
 # --- Non-interactive default (no TTY, no explicit flag) ----------------------
 
 
-def test_non_interactive_takes_default_window_and_notes_it(
+def test_non_interactive_derives_backfill_from_default_span(
     _isolated_claude_code_with_history, tmp_path,
 ):
     # CliRunner's stdin is never a tty, and `_is_interactive()` isn't patched
-    # here — so this exercises the real non-interactive path.
+    # here — so this exercises the real non-interactive path. #643: the backfill
+    # window is now DERIVED from the analysis span (the single "how far back"
+    # question). The non-interactive default span is 90d, so backfill takes 90.
     res = _run_claude_code(tmp_path)
     assert res.exit_code == 0, res.output
     flat = _flat(res.output)
-    assert (
-        f"Non-interactive: backfilling the last {DEFAULT_BACKFILL_DAYS} days" in flat
-    )
-    assert "by default" in flat
+    # No second "Backfill your Claude Code history" menu — asked once now (#643).
+    assert "Backfill your Claude Code history:" not in flat
+    assert "Backfilling the last 90 days" in flat
     assert "tj backfill claude-code" in flat
-    # The old session (2020) is outside the 30-day default window, only the
-    # recent one should have been counted as "in scope".
+    # The old session (2020) is outside the 90-day span, only the recent one.
     assert "1 new" in res.output or "1 total session" in res.output
 
 
-# --- Interactive prompt (menu) ------------------------------------------------
+# --- Single "how far back" question (#643) ------------------------------------
 
 
-def test_interactive_prompt_shown_and_recent_choice_notes_complete_later(
+def test_no_second_backfill_prompt_span_drives_window(
     _isolated_claude_code_with_history, tmp_path, monkeypatch,
 ):
+    """#643: onboard asks "how far back" ONCE (the analysis-span prompt). There
+    is no separate backfill-scope menu; the chosen span drives the backfill
+    window. Choosing span "1" (30d) backfills the last 30 days."""
     monkeypatch.setattr("tokenjam.cli.cmd_onboard._is_interactive", lambda: True)
-    # Plan "3", budget "0", analysis span "2" (90d), THEN backfill scope "1".
-    res = _run_claude_code(tmp_path, input_str="3\n0\n2\n1\n")
+    # Plan "3", budget "0", analysis span "1" (30d). No fourth answer needed.
+    res = _run_claude_code(tmp_path, input_str="3\n0\n1\n")
     assert res.exit_code == 0, res.output
     flat = _flat(res.output)
-    assert "Backfill your Claude Code history:" in flat
-    assert f"Last {DEFAULT_BACKFILL_DAYS} days" in flat
-    assert "Everything" in flat
+    assert "Backfill your Claude Code history:" not in flat
+    assert "How far back should tj analyze?" in flat
+    assert "Backfilling the last 30 days" in flat
     assert "Run `tj backfill claude-code` afterwards for your full history" in flat
 
 
-def test_interactive_prompt_everything_choice_skips_complete_later_note(
+def test_all_span_backfills_everything_uncapped(
     _isolated_claude_code_with_history, tmp_path, monkeypatch,
 ):
+    """#643: the "all available" analysis span (choice 3) backfills everything
+    with no window — both the recent and the 2020 session land."""
     monkeypatch.setattr("tokenjam.cli.cmd_onboard._is_interactive", lambda: True)
-    res = _run_claude_code(tmp_path, input_str="3\n0\n2\n2\n")
+    # Plan "3", budget "0", analysis span "3" (all).
+    res = _run_claude_code(tmp_path, input_str="3\n0\n3\n")
     assert res.exit_code == 0, res.output
     flat = _flat(res.output)
-    assert "afterwards for your full history" not in flat
+    assert "Backfill your Claude Code history:" not in flat
+    assert "Backfilling all available Claude Code history" in flat
     # Both sessions (recent + old) should be backfilled with no window.
     assert "2 total session" in flat
 

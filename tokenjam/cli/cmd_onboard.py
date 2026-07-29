@@ -326,23 +326,23 @@ def _print_capture_disclosure(prompts_captured: bool, tool_inputs_captured: bool
     """
     if not (prompts_captured or tool_inputs_captured):
         return
-    # escape(): "[capture]" would otherwise be parsed as a Rich markup tag
-    # and silently stripped — same class of bug as issue #157.
-    if prompts_captured:
-        console.print(
-            "  Prompt capture:      [bold]on[/bold], prompt text is stored "
-            "locally in your telemetry DB (needed for trim / cache-recommend / "
-            "reuse). Set [bold]capture.prompts = false[/bold] under "
-            f"{escape('[capture]')} in your config to turn it off."
-        )
-    if tool_inputs_captured:
-        console.print(
-            "  Tool-input capture:  [bold]on[/bold], tool call arguments are "
-            "stored locally in your telemetry DB (needed for script / "
-            "verbosity's argument-shape clustering). Set "
-            "[bold]capture.tool_inputs = false[/bold] under "
-            f"{escape('[capture]')} in your config to turn it off."
-        )
+    # One clear line that leads with local + on-by-default (#643), replacing the
+    # two dense per-toggle paragraphs. The default (both on) uses the exact
+    # approved wording; the subject phrase narrows honestly when only one toggle
+    # is on so the line never claims capture that isn't happening.
+    if prompts_captured and tool_inputs_captured:
+        subject = "Your prompts and tool inputs are captured"
+    elif prompts_captured:
+        subject = "Your prompts are captured"
+    else:
+        subject = "Your tool inputs are captured"
+    console.print(
+        f"\U0001f512 {subject} and stored [bold]only on this machine[/bold] "
+        "(your local telemetry DB — nothing is ever uploaded). That's what "
+        "powers the trim, cache, reuse and script analyzers. On by default — "
+        "turn it off anytime with [accent]capture.prompts[/accent] / "
+        "[accent]capture.tool_inputs = false[/accent] in your config."
+    )
 
 
 def _print_instrument_agent_snippet() -> None:
@@ -429,6 +429,12 @@ def _print_instrument_agent_snippet() -> None:
 @click.option("--backfill-all", "backfill_all", is_flag=True, default=False,
               help="Backfill the entire Claude Code history instead of the "
                    "default recent window. Skips the interactive scope prompt.")
+@click.option("--verbose", "-V", "verbose", is_flag=True, default=False,
+              help="Show the full connection-details block (settings paths, "
+                   "Agent ID, OTLP endpoints, ingest secret, per-terminal "
+                   "tiles) on the success screen. Omitted by default to keep "
+                   "the completion screen lean; the same details are always "
+                   "available via `tj doctor`.")
 @click.option("--verify", is_flag=True, default=False,
               help="After setup, poll for the first span from the newly "
                    "configured source and report whether telemetry is flowing "
@@ -445,7 +451,8 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                 reconfigure: bool, plan: str | None, analysis_span: str | None,
                 project_override: str | None,
                 backfill_days: int | None, backfill_all: bool,
-                verify: bool, verify_only: bool, add_project: bool) -> None:
+                verify: bool, verify_only: bool, add_project: bool,
+                verbose: bool) -> None:
     """Set up tj (interactive)."""
     # --add-project is the lightweight "register another repo" path: a fresh
     # onboard run per repo re-prompts plan/budget/backfill scope and re-scans
@@ -482,7 +489,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
         _onboard_claude_code(ctx, budget, no_daemon, force, reconfigure, plan,
                              project_override, verify=verify,
                              backfill_days=backfill_days, backfill_all=backfill_all,
-                             analysis_span=analysis_span)
+                             analysis_span=analysis_span, verbose=verbose)
         return
     if codex:
         _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
@@ -505,7 +512,7 @@ def cmd_onboard(ctx: click.Context, claude_code: bool, codex: bool, budget: floa
                                  project_override, verify=verify,
                                  backfill_days=backfill_days,
                                  backfill_all=backfill_all,
-                                 analysis_span=analysis_span)
+                                 analysis_span=analysis_span, verbose=verbose)
             return
         if choice == "codex":
             _onboard_codex(ctx, budget, no_daemon, force, reconfigure, plan,
@@ -1219,9 +1226,9 @@ def _prompt_daily_budget(budget: float | None, plan_tier: str | None) -> float:
 
 
 def _resolve_backfill_scope(
-    backfill_days: int | None, backfill_all: bool,
+    backfill_days: int | None, backfill_all: bool, config: object | None = None,
 ):
-    """Resolve the Claude Code backfill window (#443).
+    """Resolve the Claude Code backfill window (#443, #643).
 
     Returns ``(since, is_full, max_sessions)``:
       - ``is_full=True`` (``since``/``max_sessions`` both ``None``) means
@@ -1229,31 +1236,29 @@ def _resolve_backfill_scope(
       - Otherwise ``since`` is the cutoff for `ingest_claude_code`, and
         ``max_sessions`` is an additional cap (or ``None`` for none).
 
-    The "fast" default (interactive choice 1, and the non-interactive
-    fallback) pairs `since` with `max_sessions`. `since` alone measured as
-    NOT reliably bounding the work on an actively-used machine — the mtime
-    pre-filter it relies on barely excludes anything when most session files
-    have recent mtimes regardless of the conversation's actual age, so a
-    "last 30 days" on an old, huge history would still parse nearly
-    everything before the (correct but late) `ended_at` filter drops it.
-    `max_sessions` (mirroring `tj quickstart`'s `DEFAULT_MAX_SESSIONS` cap,
-    #13 — kept as the SAME constant so the two don't drift) guarantees
+    **One "how far back" question (#643).** Onboard used to ask the user twice —
+    once "How far back should tj analyze?" (the analysis span) and again
+    "Backfill your Claude Code history: 1) Last 30 days 2) Everything". Those
+    are the same intent. The backfill window is now DERIVED from the already-
+    resolved analysis span on ``config.storage`` (set by `_apply_analysis_span`
+    just before this runs): a bounded span ("30d"/"90d") backfills that many
+    days; an unbounded span ("all") backfills everything. No second prompt.
+
+    The bounded path still pairs `since` with `max_sessions`: `since` alone
+    doesn't reliably bound the work on an actively-used machine (the mtime
+    pre-filter barely excludes anything when most session files have recent
+    mtimes), so `max_sessions` (mirroring `tj quickstart`'s `DEFAULT_MAX_SESSIONS`
+    cap, #13 — kept as the SAME constant so the two don't drift) guarantees
     bounded work regardless of mtime patterns.
 
     `--backfill-days N` is a scripting flag and means exactly what it says —
     days only, no implicit cap — so automation gets what it asked for.
-    `--backfill-all` means everything, uncapped.
-
-    Precedence, matching the ``--plan``/``--budget`` non-interactive contract:
-    an explicit flag always skips the prompt. Otherwise an interactive
-    terminal gets a two-choice menu (default: fast/recent). A non-interactive
-    terminal (no TTY — CI, piped output, a non-interactive `uvx`/`npx`
-    install) can never answer a prompt, so it silently takes the same fast
-    default and prints one line explaining why, instead of hanging.
+    `--backfill-all` means everything, uncapped. Both still override the span.
     """
     from datetime import timedelta
 
     from tokenjam.cli.cmd_quickstart import DEFAULT_MAX_SESSIONS
+    from tokenjam.core.analysis_span import analysis_span_days
     from tokenjam.utils.time_parse import utcnow
 
     def _print_complete_later_tip(days: int) -> None:
@@ -1262,40 +1267,32 @@ def _resolve_backfill_scope(
             f"`tj backfill claude-code` afterwards for your full history.[/dim]"
         )
 
+    # Explicit scripting flags always win, unchanged from #443.
     if backfill_all:
         return None, True, None
     if backfill_days is not None:
         _print_complete_later_tip(backfill_days)
         return utcnow() - timedelta(days=backfill_days), False, None
 
-    if _is_interactive():
-        console.print()
-        console.print("[bold]Backfill your Claude Code history:[/bold]")
-        console.print(
-            f"  1) Last {DEFAULT_BACKFILL_DAYS} days "
-            f"[dim](most recent {DEFAULT_MAX_SESSIONS} sessions — fast, "
-            f"recommended)[/dim]"
-        )
-        console.print("  2) Everything")
-        choice = click.prompt(
-            "Choose", type=click.IntRange(1, 2), default=1, show_default=True,
-        )
-        if choice == 2:
-            return None, True, None
-        _print_complete_later_tip(DEFAULT_BACKFILL_DAYS)
-        return (
-            utcnow() - timedelta(days=DEFAULT_BACKFILL_DAYS), False,
-            DEFAULT_MAX_SESSIONS,
-        )
+    # Otherwise derive from the analysis span the user already answered.
+    span_days: int | None = DEFAULT_BACKFILL_DAYS
+    if config is not None:
+        try:
+            span_days = analysis_span_days(config.storage)  # type: ignore[attr-defined]
+        except Exception:
+            span_days = DEFAULT_BACKFILL_DAYS
 
-    console.print(
-        f"[dim]Non-interactive: backfilling the last {DEFAULT_BACKFILL_DAYS} "
-        f"days (most recent {DEFAULT_MAX_SESSIONS} sessions) by default. Run "
-        f"`tj backfill claude-code` afterwards for your full history, or pass "
-        f"--backfill-all next time.[/dim]"
-    )
+    if span_days is None:
+        # "all available" span → backfill everything, uncapped.
+        console.print(
+            "[dim]  Backfilling all available Claude Code history "
+            "(matching your analysis span).[/dim]"
+        )
+        return None, True, None
+
+    _print_complete_later_tip(span_days)
     return (
-        utcnow() - timedelta(days=DEFAULT_BACKFILL_DAYS), False, DEFAULT_MAX_SESSIONS,
+        utcnow() - timedelta(days=span_days), False, DEFAULT_MAX_SESSIONS,
     )
 
 
@@ -1680,6 +1677,7 @@ def _onboard_claude_code(
     backfill_all: bool = False,
     plan_usd_override: float | None = None,
     analysis_span: str | None = None,
+    verbose: bool = False,
 ) -> None:
     """Configure Claude Code to send telemetry to tj.
 
@@ -1850,7 +1848,7 @@ def _onboard_claude_code(
             from tokenjam.core.db import open_db
             try:
                 since, _backfill_is_full, max_sessions = _resolve_backfill_scope(
-                    backfill_days, backfill_all,
+                    backfill_days, backfill_all, config,
                 )
                 total_in_scope = count_claude_code_sessions_in_scope(
                     since=since, max_sessions=max_sessions,
@@ -2070,93 +2068,84 @@ def _onboard_claude_code(
     # "after restarting" pointer, and a "verify after restarting" line near
     # Connection details); consolidated back into one panel below.
     console.print()
+    # Lean success screen (#643): one "you're set up" signal, the statusline
+    # note once, the capture note in one line, then the conditional restart
+    # block and the curated next-steps (which surfaces the dashboard URL and
+    # `tj tokenmaxx`). The dashboard URL, the "N sessions" figure, and the
+    # statusline all appeared multiple times before; each is stated once now.
+    # Connection details + internal mechanics are moved behind `--verbose`
+    # (and always available via `tj doctor`).
     console.print("[ok]\u2713 Claude Code observability configured.[/ok]")
     _print_statusline_status(statusline_status)
-    console.print(
-        "  Telemetry:           Claude Code → tj, out-of-band "
-        "(global settings + ~/.zshrc)"
-    )
-    if wrapper_files:
-        console.print(
-            "  claude wrapper:      per-terminal dashboard tiles (~/.zshrc)"
-        )
     if backfill_msg:
         console.print(f"  Backfilled:          {backfill_msg}")
-    if want_daemon:
-        console.print(
-            f"  Lens (web UI):       http://127.0.0.1:{port}/ "
-            "(the daemon keeps it running)"
-        )
     _print_capture_disclosure(config.capture.prompts, config.capture.tool_inputs)
     console.print()
-    # tj is out-of-band for Claude Code: the statusline (zero model tokens),
-    # not an in-loop MCP server. Say so explicitly so users know where tj lives.
-    if statusline_status == "skipped":
-        console.print(
-            "[dim]tj did not touch your existing statusLine. To see tj's "
-            "re-read/quota line, set your Claude Code statusLine command to[/dim]  "
-            "tj statusline"
-        )
-    else:
-        console.print(
-            # `bold` nested inside `dim` renders as bold-dim, which is neither:
-            # it reads as a smudge rather than emphasis. Inside a dim sentence
-            # the only thing that earns a break from dim is the accent, and only
-            # for the thing the user actually types.
-            "[muted]tj is now in your Claude Code statusline (zero token "
-            "cost): it shows this session's re-read share and nudges[/muted] "
-            "[accent]/compact[/accent] [muted]when re-reading eats your "
-            "quota.[/muted]"
-        )
-    console.print()
-    _print_claude_code_restart_panel()
+    # Restart block is CONDITIONAL (#643): running sessions keep exporting to
+    # the pre-onboard endpoint until relaunched, but a fresh terminal with none
+    # open needs no restart, so only show it when `claude` is actually running.
+    if _claude_code_is_running():
+        _print_claude_code_restart_panel()
     if not want_daemon:
         _warn_manual_serve_restart(stopped_for_db=stopped_for_db, no_daemon=True)
     _print_next_steps_nudge(
         has_data=backfill_has_data, days=backfill_span_days,
         persona="claude-code", daemon_running=want_daemon, port=port,
     )
-    # Connection details, demoted to a dim footer: needed for debugging and
-    # harness setups, noise for the first-run payoff moment.
-    console.print("[dim]Connection details[/dim]")
-    console.print(
-        f"[dim]  Global settings:    {display_path(global_settings_path)}[/dim]",
-        soft_wrap=True,
-    )
-    console.print(
-        f"[dim]  Project settings:   {display_path(project_settings_path)}[/dim]",
-        soft_wrap=True,
-    )
-    if removed_resource_attr:
+    # --verbose (#643): the connection-details block + internal mechanics.
+    # Off by default -- this is debug/reference noise on the first-run payoff
+    # moment, and `tj doctor` surfaces the same information on demand.
+    if verbose:
+        console.print("[dim]Connection details[/dim]")
         console.print(
-            # Informational, inside an all-dim details block: this is something
-            # tj did successfully, not something the user must act on.
-            "[muted]  Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from project "
-            "settings (the claude wrapper now sets it per terminal).[/muted]"
+            "  Telemetry:           Claude Code -> tj, out-of-band "
+            "(global settings + ~/.zshrc)"
         )
-    console.print(f"[dim]  Agent ID:           {agent_id}[/dim]")
-    if budget and budget > 0:
-        console.print(f"[dim]  Daily budget:       ${budget:.2f}[/dim]")
-    console.print(
-        f"[dim]  OTLP endpoint:      http://127.0.0.1:{port} (native) · "
-        f"http://host.docker.internal:{port} (harness)[/dim]"
-    )
-    if secret:
-        console.print(f"[dim]  Ingest secret:      {secret[:8]}...[/dim]")
-    # Surface what we wrote for [budget.anthropic]: the user's plan tier, and
-    # the spending ceiling only when one is set (API users may opt in to one).
-    from tokenjam.core.config import load_config as _lc
-    try:
-        _cfg = _lc(str(global_config_path))
-        _ab = _cfg.budgets.get("anthropic")
-        if _ab is not None and _ab.plan:
-            _line = f"[budget.anthropic] plan = \"{_ab.plan}\""
-            if _ab.usd:
-                _line += f", usd = {_ab.usd}"
-            console.print(f"[dim]  Budget projection:  {escape(_line)}[/dim]")
-    except Exception:
-        pass
-    console.print()
+        if wrapper_files:
+            console.print(
+                "  claude wrapper:      per-terminal dashboard tiles "
+                "(~/.zshrc); claude --as <name> labels a terminal"
+            )
+        if statusline_status == "skipped":
+            console.print(
+                "[dim]  Statusline:          left untouched -- set your "
+                "Claude Code statusLine command to[/dim]  tj statusline"
+            )
+        console.print(
+            f"[dim]  Global settings:    {display_path(global_settings_path)}[/dim]",
+            soft_wrap=True,
+        )
+        console.print(
+            f"[dim]  Project settings:   {display_path(project_settings_path)}[/dim]",
+            soft_wrap=True,
+        )
+        if removed_resource_attr:
+            console.print(
+                "[muted]  Removed a hardcoded OTEL_RESOURCE_ATTRIBUTES from "
+                "project settings (the claude wrapper now sets it per "
+                "terminal).[/muted]"
+            )
+        console.print(f"[dim]  Agent ID:           {agent_id}[/dim]")
+        if budget and budget > 0:
+            console.print(f"[dim]  Daily budget:       ${budget:.2f}[/dim]")
+        console.print(
+            f"[dim]  OTLP endpoint:      http://127.0.0.1:{port} (native) . "
+            f"http://host.docker.internal:{port} (harness)[/dim]"
+        )
+        if secret:
+            console.print(f"[dim]  Ingest secret:      {secret[:8]}...[/dim]")
+        from tokenjam.core.config import load_config as _lc
+        try:
+            _cfg = _lc(str(global_config_path))
+            _ab = _cfg.budgets.get("anthropic")
+            if _ab is not None and _ab.plan:
+                _line = f"[budget.anthropic] plan = \"{_ab.plan}\""
+                if _ab.usd:
+                    _line += f", usd = {_ab.usd}"
+                console.print(f"[dim]  Budget projection:  {escape(_line)}[/dim]")
+        except Exception:
+            pass
+        console.print()
 
     _maybe_verify_onboarding(config, persona="claude-code", verify=verify)
 
@@ -2740,6 +2729,37 @@ def _print_restart_banner(app_name: str) -> None:
             padding=(1, 2),
         )
     )
+
+
+def _claude_code_is_running() -> bool:
+    """True when at least one ``claude`` process appears to be running (#643).
+
+    The "restart Claude Code" block only matters for sessions that are ALREADY
+    open — they keep exporting to the pre-onboard endpoint until relaunched. A
+    fresh terminal with nothing open needs no restart, so we suppress the block
+    there. Detected via ``pgrep -f claude``.
+
+    Fail-OPEN: if ``pgrep`` is missing (not on PATH), errors, or times out, we
+    can't prove there are no running sessions, so we return True and show the
+    block rather than risk silently dropping a needed restart instruction.
+    """
+    import shutil
+    import subprocess
+
+    if shutil.which("pgrep") is None:
+        return True
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "claude"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True
+    # pgrep exits 0 when a match is found, 1 when none, >1 on error. Treat any
+    # non-"clean no-match" outcome as "can't be sure" → show the block.
+    if result.returncode == 1:
+        return False
+    return True
 
 
 def _print_claude_code_restart_panel() -> None:
