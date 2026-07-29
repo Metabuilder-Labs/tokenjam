@@ -143,9 +143,34 @@ def _truncate(text: str, limit: int = 90) -> str:
 _HEADING_RE = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 
 
-def _first_heading(text: str) -> str:
+def _first_heading(text: str, path: Path | None = None) -> str:
+    """The file's first heading, as its description.
+
+    Two things are handled rather than surfaced verbatim. Em dashes, because
+    they are banned in this product's user-facing copy and a heading lifted out
+    of someone else's file would smuggle them onto the page. And a heading that
+    merely restates the file's own name (``# CLAUDE.md`` on ``CLAUDE.md``),
+    which fills the description column while telling the reader nothing the
+    Source column has not already said.
+
+    A name-echo heading yields an EMPTY description; it deliberately does not
+    fall through to the file's next heading. A long document can carry several
+    top-level headings, and the second one is a section title, not a summary of
+    the file. Surfacing it would describe a 43k-token CLAUDE.md as, say,
+    "Install in dev mode": a confident claim about the largest row on the page
+    that happens to be false. Blank is the honest answer when the file does not
+    title itself, and the column already renders that case.
+    """
     match = _HEADING_RE.search(text or "")
-    return _truncate(match.group(1)) if match else ""
+    if not match:
+        return ""
+    heading = " ".join(match.group(1).replace("—", ":").replace("–", "-").split())
+    if path is not None and heading.casefold() in {
+        path.name.casefold(),
+        Path(path.name).stem.casefold(),
+    }:
+        return ""
+    return _truncate(heading)
 
 
 def _display_path(path: Path) -> str:
@@ -486,7 +511,7 @@ def _catalog_prose_rows(paths: Sequence[Path], scope: str) -> tuple[list[Row], l
             unloaded.append(UnloadedRow(str(path), 0, "unreadable", scope))
             continue
         chars = len(text)
-        description = _first_heading(text)
+        description = _first_heading(text, path)
         is_rule = _is_rule_path(path)
         family_kind = "rule_dir" if is_rule else ""
         family_qualifier = _display_path(path.parent) if is_rule else ""

@@ -346,25 +346,33 @@ code, .mono {
    look (no button chrome) so it reads like the rest of the mono source
    column, but stays a real <button> for keyboard access and modal focus
    restore on close. */
+/* The Source cell lays its scope badge and its label out as a flex row, so the
+   label is constrained by the CELL's real width rather than by a guessed pixel
+   cap. An earlier fix capped the label at a fixed 300px, which still overflowed:
+   the cell measures ~291px, the badge eats ~47px of it, so any fixed cap large
+   enough to look generous was already wider than the space left over and the
+   label rendered over the Trigger column. `min-width:0` is the load-bearing
+   part; without it a flex item refuses to shrink below its content width and
+   wrapping never engages. */
+.ctx-audit-src { display: flex; align-items: flex-start; gap: 6px; }
+.ctx-audit-expand-btn, .ctx-audit-src-plain {
+  flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: normal; text-align: left;
+}
 .ctx-audit-expand-btn {
   background: none; border: none; padding: 0; margin: 0; font: inherit; color: inherit;
-  cursor: pointer; text-align: left;
-  /* A <button> does not shrink/wrap within its cell by default, so a long
-     group label (e.g. "oh-my-claudecode 41 skill descriptions") rendered
-     past its cell's width instead of wrapping, overlapping the Trigger
-     column next to it. Capping it the same way the cell itself is capped
-     fixes that while keeping it inline next to the scope tag. */
-  display: inline-block; max-width: 300px; white-space: normal; overflow-wrap: anywhere;
-  vertical-align: top;
+  cursor: pointer;
 }
 .ctx-audit-expand-btn:hover, .ctx-audit-expand-btn:focus-visible { text-decoration: underline; }
 /* Per-row scope badge, now that Class 1/2/3 are ONE combined table spanning
    both the global scope and the current project rather than one table per
    scope. */
 .ctx-audit-scope-tag {
+  /* flex:0 0 auto so the badge keeps its natural width and only the label
+     shrinks; the row's `gap` supplies the spacing that margin-right used to. */
+  flex: 0 0 auto;
   display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .02em;
   color: var(--text-dim); border: 1px solid var(--border); border-radius: 3px;
-  padding: 0 4px; margin-right: 6px; vertical-align: middle;
+  padding: 0 4px;
 }
 table {
   width: 100%;
@@ -7111,13 +7119,13 @@ function ContextAuditRow({ row, maxTokens, onExpandGroup }) {
   const isGroup = row.kind === 'group' && row.members.length > 0;
   return html`
     <tr>
-      <td class="mono">
+      <td class="mono ctx-audit-src">
         ${ctxAuditScopeTag(row.scopeLabel)}
         ${isGroup ? html`
           <button type="button" class="ctx-audit-expand-btn" onClick=${(e) => onExpandGroup(row, e.currentTarget)}>
             <span aria-hidden="true" style="display:inline-block;width:14px;color:var(--text-dim)">▸</span>${row.label}
           </button>
-        ` : html`<span style="display:inline-block;max-width:300px;overflow-wrap:anywhere;vertical-align:top" title=${row.label}>${shortPath(row.label)}</span>`}
+        ` : html`<span class="ctx-audit-src-plain" title=${row.label}>${shortPath(row.label)}</span>`}
       </td>
       <td style="color:var(--text-dim);font-size:12px">${row.trigger}</td>
       <td style="font-variant-numeric:tabular-nums">${row.chars.toLocaleString('en-US')}</td>
